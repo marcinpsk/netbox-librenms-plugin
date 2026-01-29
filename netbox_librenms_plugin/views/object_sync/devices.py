@@ -24,6 +24,8 @@ from ..base.interfaces_view import BaseInterfaceTableView
 from ..base.ip_addresses_view import BaseIPAddressTableView
 from ..base.librenms_sync_view import BaseLibreNMSSyncView
 from ..mixins import CacheMixin, LibreNMSPermissionMixin
+from ..base.vlan_table_view import BaseVLANTableView
+from ..mixins import CacheMixin
 
 
 @register_model_view(Device, name="librenms_sync", path="librenms-sync")
@@ -51,6 +53,11 @@ class DeviceLibreNMSSyncView(BaseLibreNMSSyncView):
         ipaddress_table_view = DeviceIPAddressTableView()
         return ipaddress_table_view.get_context_data(request, obj)
 
+    def get_vlan_context(self, request, obj):
+        vlan_table_view = DeviceVLANTableView()
+        vlan_table_view.request = request
+        return vlan_table_view.get_vlan_context(request, obj)
+
 
 class DeviceInterfaceTableView(BaseInterfaceTableView):
     """Interface synchronization table for Devices."""
@@ -67,10 +74,15 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
 
     def get_table(self, data, obj, interface_name_field):
         """Return the appropriate interface table, selecting VC variant if needed."""
+    def get_table(self, data, obj, interface_name_field, vlan_groups=None):
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-            table = VCInterfaceTable(data, device=obj, interface_name_field=interface_name_field)
+            table = VCInterfaceTable(
+                data, device=obj, interface_name_field=interface_name_field, vlan_groups=vlan_groups
+            )
         else:
-            table = LibreNMSInterfaceTable(data, device=obj, interface_name_field=interface_name_field)
+            table = LibreNMSInterfaceTable(
+                data, device=obj, interface_name_field=interface_name_field, vlan_groups=vlan_groups
+            )
         table.htmx_url = f"{self.request.path}?tab=interfaces"
         return table
 
@@ -137,3 +149,16 @@ class DeviceIPAddressTableView(BaseIPAddressTableView):
     """IP address synchronization view for Devices."""
 
     model = Device
+
+
+class DeviceVLANTableView(BaseVLANTableView):
+    """VLAN synchronization table view for Devices."""
+
+    model = Device
+
+    def get_interfaces(self, obj):
+        """Get all interfaces for the device."""
+        return obj.interfaces.all()
+
+    def get_redirect_url(self, obj):
+        return reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": obj.pk}) + "?tab=vlans"
