@@ -1,0 +1,48 @@
+{% load helpers %}
+{% load static %}
+
+<!-- VLAN Sync Header -->
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h2>VLAN Sync</h2>
+    <div class="btn-list d-flex align-items-center gap-2">
+        {% if has_librenms_id %}
+            <!-- Cache Countdown -->
+            {% if vlan_sync.cache_expiry %}
+            <div id="vlan-cache-countdown" class="me-3">
+                Cache expires in: <span id="vlan-countdown-timer"
+                    data-expiry="{{ vlan_sync.cache_expiry|date:'c' }}"></span>
+            </div>
+            {% endif %}
+
+            <!-- Color Key Legend -->
+            <div class="color-key me-3">
+                <span class="badge bg-success text-white">Exists in NetBox</span>
+                <span class="badge bg-warning text-dark">Needs Update</span>
+                <span class="badge bg-danger text-white">Missing</span>
+            </div>
+
+            <!-- Refresh Button -->
+            <form method="post">
+            {% csrf_token %}
+            {% with model_name=object|meta:"model_name" %}
+            {% if model_name == "device" %}
+            <button hx-post="{% url 'plugins:netbox_librenms_plugin:device_vlan_sync' pk=object.pk %}"
+                    hx-target="#vlan-sync-content"
+                    hx-include="[name='interface_name_field']"
+                    class="btn btn-outline-primary">
+                <i class="mdi mdi-refresh"></i> Refresh VLANs
+            </button>
+            {% endif %}
+            {% endwith %}
+            </form>
+        {% else %}
+            <span class="text-muted">LibreNMS ID not set for this device</span>
+        {% endif %}
+    </div>
+</div>
+<!-- End VLAN Sync Header -->
+
+<!-- Container for the VLAN sync content -->
+<div id="vlan-sync-content">
+    {% include 'netbox_librenms_plugin/_vlan_sync_content.html' %}
+</div>

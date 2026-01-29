@@ -1,0 +1,49 @@
+{% load helpers %}
+{% include 'inc/messages.html' %}
+
+{% if vlan_sync.error_message %}
+<!-- Error Message -->
+<div class="alert alert-danger">
+    <i class="mdi mdi-alert-circle"></i> {{ vlan_sync.error_message }}
+</div>
+{% elif not vlan_sync.vlan_table or not vlan_sync.vlan_table.rows %}
+<!-- No VLAN Data -->
+<div class="alert alert-info">
+    <i class="mdi mdi-information"></i> No VLAN data available. Click "Refresh VLANs" to fetch from LibreNMS.
+</div>
+{% else %}
+
+<!-- Device VLANs Section -->
+<div class="card mb-4">
+    <div class="card-header">
+        <h5 class="mb-0">
+            <i class="mdi mdi-lan"></i> Device VLANs
+            <span class="badge bg-primary ms-2">{{ vlan_sync.vlan_table.rows|length }}</span>
+        </h5>
+    </div>
+    <div class="card-body">
+        {% with model_name=vlan_sync.object|meta:"model_name" %}
+        <form method="post"
+              action="{% url 'plugins:netbox_librenms_plugin:sync_selected_vlans' object_type=model_name object_id=vlan_sync.object.pk %}">
+        {% endwith %}
+            {% csrf_token %}
+            <input type="hidden" name="action" value="create_vlans">
+
+            <!-- Submit button for creating VLANs (group selection is per-row in the table) -->
+            <div class="mb-3">
+                <button type="submit" class="btn btn-primary">
+                    <i class="mdi mdi-plus-thick"></i> Create Selected VLANs
+                </button>
+                <small class="text-muted ms-2">
+                    <i class="mdi mdi-information-outline"></i> Select a VLAN Group for each row, or leave empty for global VLANs
+                </small>
+            </div>
+
+            {% include 'netbox_librenms_plugin/inc/paginator.html' with table=vlan_sync.vlan_table %}
+            {% include 'inc/table.html' with table=vlan_sync.vlan_table %}
+            {% include 'netbox_librenms_plugin/inc/paginator.html' with table=vlan_sync.vlan_table %}
+        </form>
+    </div>
+</div>
+
+{% endif %}
