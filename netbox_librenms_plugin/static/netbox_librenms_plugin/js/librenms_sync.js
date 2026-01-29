@@ -195,6 +195,8 @@ function initializeCheckboxes() {
     initializeTableCheckboxes('librenms-cable-table');
     initializeTableCheckboxes('librenms-cable-table-vc');
     initializeTableCheckboxes('librenms-ipaddress-table');
+    initializeTableCheckboxes('librenms-vlan-table');
+    initializeTableCheckboxes('librenms-port-vlan-table');
 }
 
 // ============================================
@@ -881,6 +883,17 @@ function deleteSelectedInterfaces(selectedCheckboxes) {
 }
 
 // ============================================
+// VLAN SYNC FUNCTIONS
+// ============================================
+
+/**
+ * Initialize VLAN countdown timer (separate from interface countdown).
+ */
+function initializeVLANCountdown() {
+    initializeCountdown('vlan-countdown-timer');
+}
+
+// ============================================
 // INITIALIZATION
 // ============================================
 
@@ -894,6 +907,7 @@ function initializeScripts() {
     initializeVRFSelects();
     initializeFilters();
     initializeCountdowns();
+    initializeVLANCountdown();
     initializeCheckboxListeners();
     initializeBulkEditApply();
     updateInterfaceNameField();
@@ -907,6 +921,13 @@ function initializeScripts() {
 document.addEventListener('DOMContentLoaded', function () {
     initializeScripts();
 
+    // Configure HTMX to include CSRF token in all requests
+    document.body.addEventListener('htmx:configRequest', function (event) {
+        const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]');
+        if (csrfToken) {
+            event.detail.headers['X-CSRFToken'] = csrfToken.value;
+        }
+    });
 });
 
 // Initialize scripts after HTMX swaps content

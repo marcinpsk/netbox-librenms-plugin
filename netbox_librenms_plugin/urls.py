@@ -18,6 +18,7 @@ from .views import (
     DeviceStatusListView,
     DeviceValidationDetailsView,
     DeviceVCDetailsView,
+    DeviceVLANTableView,
     InterfaceTypeMappingBulkDeleteView,
     InterfaceTypeMappingBulkImportView,
     InterfaceTypeMappingChangeLogView,
@@ -35,6 +36,7 @@ from .views import (
     SyncInterfacesView,
     SyncIPAddressesView,
     SyncSiteLocationView,
+    SyncVLANsView,
     TestLibreNMSConnectionView,
     UpdateDeviceLocationView,
     UpdateDevicePlatformView,
@@ -124,6 +126,17 @@ urlpatterns = [
         "<str:object_type>/<int:pk>/sync-ip-addresses/",
         SyncIPAddressesView.as_view(),
         name="sync_device_ip_addresses",
+    ),
+    # VLAN sync URLs
+    path(
+        "devices/<int:pk>/vlan-sync/",
+        DeviceVLANTableView.as_view(),
+        name="device_vlan_sync",
+    ),
+    path(
+        "<str:object_type>/<int:object_id>/sync-vlans/",
+        SyncVLANsView.as_view(),
+        name="sync_selected_vlans",
     ),
     # Add Device to LibreNMS URLs
     path(
