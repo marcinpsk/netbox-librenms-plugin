@@ -304,3 +304,349 @@ class CacheMixin:
         """
         model_name = obj._meta.model_name
         return f"librenms_{data_type}_last_fetched_{model_name}_{obj.pk}"
+
+
+class VlanAssignmentMixin:
+    """
+    Mixin providing VLAN assignment utilities for views.
+
+    Provides methods for:
+    - Getting relevant VLAN groups for a device based on scope hierarchy
+    - Building lookup maps for VLAN matching
+    - Selecting the most specific VLAN group based on device context
+    - Finding VLANs by VID within a specific group
+    - Updating interface VLAN assignments
+    """
+
+    def get_vlan_groups_for_device(self, device):
+        """
+        Get all VLAN groups relevant to this device.
+
+        Searches for VLAN groups scoped to:
+        - Site: The device's assigned site
+        - Location: The device's location and all parent locations
+        - Region: The device's site's region and all parent regions
+        - Site Group: The device's site's group and all parent site groups
+        - Rack: The device's rack
+        - Global: VLAN groups with no scope
+
+        Returns:
+            List of VLANGroup objects, deduplicated and sorted by name
+        """
+        from dcim.models import Location, Rack, Region, Site, SiteGroup
+        from ipam.models import VLANGroup
+
+        groups = set()
+
+        # Site-scoped VLAN groups
+        if hasattr(device, "site") and device.site:
+            site_groups = self._get_vlan_groups_for_scope(Site, [device.site])
+            groups.update(site_groups)
+
+            # Region-scoped VLAN groups (site's region and ancestors)
+            if device.site.region:
+                region_ancestors = self._get_ancestors(device.site.region)
+                region_groups = self._get_vlan_groups_for_scope(Region, region_ancestors)
+                groups.update(region_groups)
+
+            # Site Group-scoped VLAN groups (site's group and ancestors)
+            if device.site.group:
+                site_group_ancestors = self._get_ancestors(device.site.group)
+                site_group_groups = self._get_vlan_groups_for_scope(SiteGroup, site_group_ancestors)
+                groups.update(site_group_groups)
+
+        # Location-scoped VLAN groups (device's location and ancestors)
+        if hasattr(device, "location") and device.location:
+            location_ancestors = self._get_ancestors(device.location)
+            location_groups = self._get_vlan_groups_for_scope(Location, location_ancestors)
+            groups.update(location_groups)
+
+        # Rack-scoped VLAN groups
+        if hasattr(device, "rack") and device.rack:
+            rack_groups = self._get_vlan_groups_for_scope(Rack, [device.rack])
+            groups.update(rack_groups)
+
+        # Global VLAN groups (no scope)
+        global_groups = VLANGroup.objects.filter(scope_type__isnull=True)
+        groups.update(global_groups)
+
+        # Return sorted by name for consistent display
+        return sorted(groups, key=lambda g: g.name.lower())
+
+    def _build_vlan_lookup_maps(self, vlan_groups):
+        """
+        Build lookup dictionaries for VLAN matching.
+
+        Returns a dict with:
+        - vid_to_groups: {vid: [vlan_group, ...]} - VID to groups containing that VID
+        - vid_group_to_vlan: {(vid, group_id): vlan} - unique per group lookup
+        - vid_to_vlans: {vid: [vlan, ...]} - all VLANs with that VID
+        - vid_name_to_vlan: {(vid, name): vlan} - VID + name lookup
+        """
+        from ipam.models import VLAN
+
+        vid_to_groups = {}
+        vid_group_to_vlan = {}
+        vid_to_vlans = {}
+        vid_name_to_vlan = {}
+
+        # Get all VLANs from relevant groups and global VLANs
+        group_pks = [g.pk for g in vlan_groups]
+        vlans = VLAN.objects.filter(group__pk__in=group_pks).select_related("group")
+        # Also get global VLANs (no group)
+        global_vlans = VLAN.objects.filter(group__isnull=True)
+
+        for vlan in list(vlans) + list(global_vlans):
+            vid = vlan.vid
+            group = vlan.group
+            group_id = group.pk if group else None
+            name = vlan.name
+
+            # Build VID to groups lookup for ambiguity detection
+            if vid not in vid_to_groups:
+                vid_to_groups[vid] = []
+            if group and group not in vid_to_groups[vid]:
+                vid_to_groups[vid].append(group)
+
+            # Build (vid, group_id) to vlan lookup
+            vid_group_to_vlan[(vid, group_id)] = vlan
+
+            # Build VID to all VLANs list (for dropdown options)
+            if vid not in vid_to_vlans:
+                vid_to_vlans[vid] = []
+            vid_to_vlans[vid].append(vlan)
+
+            # Build (vid, name) to vlan lookup
+            vid_name_to_vlan[(vid, name)] = vlan
+
+        return {
+            "vid_to_groups": vid_to_groups,
+            "vid_group_to_vlan": vid_group_to_vlan,
+            "vid_to_vlans": vid_to_vlans,
+            "vid_name_to_vlan": vid_name_to_vlan,
+        }
+
+    def _select_most_specific_group(self, groups, device):
+        """
+        Select the most specific VLAN group based on device context.
+
+        Priority order (most specific to least specific):
+        1. Rack-scoped (device's rack)
+        2. Location-scoped (device's location, closer ancestors win)
+        3. Site-scoped (device's site)
+        4. Site Group-scoped (device's site's group, closer ancestors win)
+        5. Region-scoped (device's site's region, closer ancestors win)
+        6. Global (no scope)
+
+        Args:
+            groups: List of VLANGroup objects that all contain the same VID
+            device: NetBox Device object
+
+        Returns:
+            VLANGroup or None if no clear winner (e.g., multiple groups at same priority level)
+        """
+        from dcim.models import Location, Rack, Region, Site, SiteGroup
+        from django.contrib.contenttypes.models import ContentType
+
+        if not device or not groups:
+            return None
+
+        # Build scope priority lookup for this device
+        # Lower number = higher priority (more specific)
+        scope_priority = {}
+        priority = 0
+
+        # Priority 1: Rack (most specific)
+        if hasattr(device, "rack") and device.rack:
+            rack_ct = ContentType.objects.get_for_model(Rack)
+            scope_priority[(rack_ct.pk, device.rack.pk)] = priority
+            priority += 1
+
+        # Priority 2: Location hierarchy (device's location first, then ancestors)
+        if hasattr(device, "location") and device.location:
+            location_ct = ContentType.objects.get_for_model(Location)
+            for loc in self._get_ancestors(device.location):
+                scope_priority[(location_ct.pk, loc.pk)] = priority
+                priority += 1
+
+        # Priority 3: Site
+        if hasattr(device, "site") and device.site:
+            site_ct = ContentType.objects.get_for_model(Site)
+            scope_priority[(site_ct.pk, device.site.pk)] = priority
+            priority += 1
+
+            # Priority 4: Site Group hierarchy
+            if device.site.group:
+                site_group_ct = ContentType.objects.get_for_model(SiteGroup)
+                for sg in self._get_ancestors(device.site.group):
+                    scope_priority[(site_group_ct.pk, sg.pk)] = priority
+                    priority += 1
+
+            # Priority 5: Region hierarchy
+            if device.site.region:
+                region_ct = ContentType.objects.get_for_model(Region)
+                for reg in self._get_ancestors(device.site.region):
+                    scope_priority[(region_ct.pk, reg.pk)] = priority
+                    priority += 1
+
+        # Priority 6: Global (no scope) - lowest priority
+        global_priority = priority
+
+        # Find the group with the highest priority (lowest number)
+        best_group = None
+        best_priority = float("inf")
+        same_priority_count = 0
+
+        for group in groups:
+            if group.scope_type is None:
+                # Global scope
+                group_priority = global_priority
+            else:
+                scope_key = (group.scope_type.pk, group.scope_id)
+                group_priority = scope_priority.get(scope_key, float("inf"))
+
+            if group_priority < best_priority:
+                best_priority = group_priority
+                best_group = group
+                same_priority_count = 1
+            elif group_priority == best_priority:
+                same_priority_count += 1
+
+        # Only return a group if there's a single winner at the best priority level
+        if same_priority_count == 1 and best_group is not None:
+            return best_group
+
+        return None
+
+    def _get_ancestors(self, obj):
+        """
+        Get all ancestors of a hierarchical object (location, region, site group).
+        Returns list including the object itself and all parents up to root.
+        """
+        ancestors = []
+        current = obj
+        while current is not None:
+            ancestors.append(current)
+            current = getattr(current, "parent", None)
+        return ancestors
+
+    def _get_vlan_groups_for_scope(self, model_class, objects):
+        """
+        Get VLAN groups scoped to any of the given objects.
+
+        Args:
+            model_class: The Django model class (Site, Location, Region, etc.)
+            objects: List of model instances to check
+
+        Returns:
+            QuerySet of VLANGroup objects
+        """
+        from django.contrib.contenttypes.models import ContentType
+        from ipam.models import VLANGroup
+
+        if not objects:
+            return VLANGroup.objects.none()
+
+        content_type = ContentType.objects.get_for_model(model_class)
+        object_ids = [obj.pk for obj in objects if obj is not None]
+
+        if not object_ids:
+            return VLANGroup.objects.none()
+
+        return VLANGroup.objects.filter(scope_type=content_type, scope_id__in=object_ids)
+
+    def _find_vlan_in_group(self, vid, vlan_group_id, lookup_maps):
+        """
+        Find a VLAN by VID, preferring the specified group.
+
+        Args:
+            vid: VLAN ID (integer)
+            vlan_group_id: Optional VLAN group ID to prefer
+            lookup_maps: Dict from _build_vlan_lookup_maps()
+
+        Returns:
+            VLAN object or None
+        """
+        vid_group_to_vlan = lookup_maps.get("vid_group_to_vlan", {})
+        vid_to_vlans = lookup_maps.get("vid_to_vlans", {})
+
+        # Try specific group first
+        if vlan_group_id:
+            try:
+                vlan = vid_group_to_vlan.get((vid, int(vlan_group_id)))
+                if vlan:
+                    return vlan
+            except (ValueError, TypeError):
+                pass
+
+        # Try global (no group)
+        vlan = vid_group_to_vlan.get((vid, None))
+        if vlan:
+            return vlan
+
+        # Fallback: first matching VLAN
+        vlans = vid_to_vlans.get(vid, [])
+        return vlans[0] if vlans else None
+
+    def _update_interface_vlan_assignment(self, interface, vlan_data, vlan_group_id, lookup_maps):
+        """
+        Update interface VLAN assignments in NetBox (mode, untagged_vlan, tagged_vlans).
+
+        Args:
+            interface: NetBox Interface or VMInterface object
+            vlan_data: Dict with 'untagged_vlan' (int or None) and 'tagged_vlans' (list of ints)
+            vlan_group_id: Optional VLAN group ID to prefer for lookups
+            lookup_maps: Dict from _build_vlan_lookup_maps()
+
+        Returns:
+            Dict with sync results:
+                - mode_set: str or None
+                - untagged_set: VLAN object or None
+                - tagged_set: list of VLAN objects
+                - missing_vlans: list of VIDs not found in NetBox
+        """
+        untagged_vid = vlan_data.get("untagged_vlan")
+        tagged_vids = vlan_data.get("tagged_vlans", [])
+        missing_vlans = []
+
+        # Determine mode
+        if tagged_vids:
+            interface.mode = "tagged"
+        elif untagged_vid:
+            interface.mode = "access"
+        else:
+            # No VLANs - clear mode
+            interface.mode = ""
+
+        # Set untagged VLAN
+        untagged_set = None
+        if untagged_vid:
+            vlan = self._find_vlan_in_group(untagged_vid, vlan_group_id, lookup_maps)
+            if vlan:
+                interface.untagged_vlan = vlan
+                untagged_set = vlan
+            else:
+                missing_vlans.append(untagged_vid)
+                interface.untagged_vlan = None
+        else:
+            interface.untagged_vlan = None
+
+        # Set tagged VLANs
+        tagged_set = []
+        if tagged_vids:
+            for vid in tagged_vids:
+                vlan = self._find_vlan_in_group(vid, vlan_group_id, lookup_maps)
+                if vlan:
+                    tagged_set.append(vlan)
+                else:
+                    missing_vlans.append(vid)
+            interface.tagged_vlans.set(tagged_set)
+        else:
+            interface.tagged_vlans.clear()
+
+        return {
+            "mode_set": interface.mode,
+            "untagged_set": untagged_set,
+            "tagged_set": tagged_set,
+            "missing_vlans": missing_vlans,
+        }
