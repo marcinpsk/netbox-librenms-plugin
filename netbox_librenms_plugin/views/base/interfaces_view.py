@@ -12,8 +12,13 @@ from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin, Li
 
 
 class BaseInterfaceTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
+from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin, VlanAssignmentMixin
+
+
+class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, CacheMixin, View):
     """
     Base view for fetching interface data from LibreNMS and generating table data.
+    Includes VLAN enrichment for interface VLAN sync functionality.
     """
 
     model = None  # To be defined in subclasses
@@ -50,10 +55,16 @@ class BaseInterfaceTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             return "virtual_machine"
         return "device"
 
-    def get_table(self, data, obj, interface_name_field):
+    def get_table(self, data, obj, interface_name_field, vlan_groups=None):
         """
         Returns the table class to use for rendering interface data.
         Can be overridden by subclasses to use different tables.
+
+        Args:
+            data: List of port data dicts
+            obj: Device or VirtualMachine object
+            interface_name_field: Field to use for interface name ('ifName' or 'ifDescr')
+            vlan_groups: List of VLANGroup objects for VLAN group dropdowns
         """
         raise NotImplementedError("Subclasses must implement get_table()")
 
@@ -76,6 +87,11 @@ class BaseInterfaceTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             messages.error(request, librenms_data)
             return redirect(self.get_redirect_url(obj))
 
+        # Enrich ports with VLAN data for trunk ports
+        ports = librenms_data.get("ports", [])
+        enriched_ports = self._enrich_ports_with_vlan_data(ports, interface_name_field)
+        librenms_data["ports"] = enriched_ports
+
         # Store data in cache
         cache.set(
             self.get_cache_key(obj, "ports"),
@@ -97,6 +113,36 @@ class BaseInterfaceTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
 
         return render(request, self.partial_template_name, context)
 
+    def _enrich_ports_with_vlan_data(self, ports, interface_name_field):
+        """
+        Enrich port data with VLAN information from LibreNMS.
+
+        For access ports, parse the basic ifVlan field.
+        For trunk ports (ifTrunk == "dot1Q"), fetch detailed VLAN info.
+
+        Args:
+            ports: List of port dicts from get_ports()
+            interface_name_field: Field to use for interface name
+
+        Returns:
+            List of enriched port dicts with VLAN data
+        """
+        enriched = []
+        for port in ports:
+            # Parse basic VLAN data (access ports)
+            parsed = self.librenms_api.parse_port_vlan_data(port, interface_name_field)
+            port.update(parsed)
+
+            # For trunk ports, fetch detailed VLAN info
+            if port.get("ifTrunk") == "dot1Q" and port.get("port_id"):
+                success, port_detail = self.librenms_api.get_port_vlan_details(port["port_id"])
+                if success:
+                    trunk_parsed = self.librenms_api.parse_port_vlan_data(port_detail, interface_name_field)
+                    port.update(trunk_parsed)
+
+            enriched.append(port)
+        return enriched
+
     def get_context_data(self, request, obj, interface_name_field):
         """Get the context data for the interface sync view."""
         ports_data = []
@@ -108,6 +154,10 @@ class BaseInterfaceTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
 
         cached_data = cache.get(self.get_cache_key(obj, "ports"))
         last_fetched = cache.get(self.get_last_fetched_key(obj), "ports")
+
+        # Get VLAN groups for dropdown
+        vlan_groups = self.get_vlan_groups_for_device(obj)
+        lookup_maps = self._build_vlan_lookup_maps(vlan_groups)
 
         if cached_data:
             ports_data = cached_data.get("ports", [])
@@ -129,7 +179,7 @@ class BaseInterfaceTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             for port in ports_data:
                 port["enabled"] = (
                     True
-                    if port["ifAdminStatus"] is None
+                    if port.get("ifAdminStatus") is None
                     else (
                         port["ifAdminStatus"].lower() == "up"
                         if isinstance(port["ifAdminStatus"], str)
@@ -138,19 +188,25 @@ class BaseInterfaceTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
                 )
 
                 if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-                    chassis_member = get_virtual_chassis_member(obj, port[interface_name_field])
+                    chassis_member = get_virtual_chassis_member(obj, port.get(interface_name_field))
                     device_interfaces = interfaces_by_device.get(chassis_member.id, {})
                 else:
                     device_interfaces = interfaces_by_device[obj.id]
 
-                netbox_interface = device_interfaces.get(port[interface_name_field])
+                netbox_interface = device_interfaces.get(port.get(interface_name_field))
                 port["exists_in_netbox"] = bool(netbox_interface)
                 port["netbox_interface"] = netbox_interface
 
-                if port["ifAlias"] in (port["ifDescr"], port["ifName"]):
+                if port.get("ifAlias") in (port.get("ifDescr"), port.get("ifName")):
                     port["ifAlias"] = ""
 
-            table = self.get_table(ports_data, obj, interface_name_field)
+                # Add VLAN group auto-selection data to port
+                self._add_vlan_group_selection(port, lookup_maps, obj)
+
+                # Add missing VLANs info for warning display
+                self._add_missing_vlans_info(port, lookup_maps)
+
+            table = self.get_table(ports_data, obj, interface_name_field, vlan_groups=vlan_groups)
             table.configure(request)
 
             # Identify NetBox-only interfaces (interfaces in NetBox but not in LibreNMS)
@@ -196,9 +252,64 @@ class BaseInterfaceTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         return {
             "object": obj,
             "table": table,
+            "vlan_groups": vlan_groups,
             "last_fetched": last_fetched,
             "cache_expiry": cache_expiry,
             "virtual_chassis_members": virtual_chassis_members,
             "interface_name_field": interface_name_field,
             "netbox_only_interfaces": netbox_only_interfaces,
         }
+
+    def _add_vlan_group_selection(self, port, lookup_maps, device):
+        """
+        Add VLAN group auto-selection data to port record.
+
+        Sets:
+        - auto_selected_group_id: ID of auto-selected group or None
+        - is_ambiguous: True if VID exists in multiple groups with no clear priority
+        """
+        vid_to_groups = lookup_maps.get("vid_to_groups", {})
+        untagged_vid = port.get("untagged_vlan")
+
+        if not untagged_vid:
+            port["auto_selected_group_id"] = None
+            port["is_ambiguous"] = False
+            return
+
+        groups = vid_to_groups.get(untagged_vid, [])
+        if len(groups) == 1:
+            port["auto_selected_group_id"] = groups[0].pk
+            port["is_ambiguous"] = False
+        elif len(groups) > 1:
+            most_specific = self._select_most_specific_group(groups, device)
+            if most_specific:
+                port["auto_selected_group_id"] = most_specific.pk
+                port["is_ambiguous"] = False
+            else:
+                port["auto_selected_group_id"] = None
+                port["is_ambiguous"] = True
+        else:
+            port["auto_selected_group_id"] = None
+            port["is_ambiguous"] = False
+
+    def _add_missing_vlans_info(self, port, lookup_maps):
+        """
+        Add missing VLANs info to port record for warning display.
+
+        Sets:
+        - missing_vlans: List of VIDs not found in any NetBox VLAN group
+        """
+        vid_to_vlans = lookup_maps.get("vid_to_vlans", {})
+        missing_vlans = []
+
+        untagged_vid = port.get("untagged_vlan")
+        tagged_vids = port.get("tagged_vlans", [])
+
+        if untagged_vid and untagged_vid not in vid_to_vlans:
+            missing_vlans.append(untagged_vid)
+
+        for vid in tagged_vids:
+            if vid not in vid_to_vlans:
+                missing_vlans.append(vid)
+
+        port["missing_vlans"] = missing_vlans

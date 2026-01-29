@@ -14,6 +14,10 @@ from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSPermissionMi
 
 
 class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
+from netbox_librenms_plugin.views.mixins import CacheMixin, VlanAssignmentMixin
+
+
+class SyncInterfacesView(VlanAssignmentMixin, CacheMixin, View):
     """Sync selected interfaces from LibreNMS into NetBox."""
 
     def get_required_permissions_for_object_type(self, object_type):
@@ -42,8 +46,10 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, C
             else "plugins:netbox_librenms_plugin:vm_librenms_sync"
         )
         obj = self.get_object(object_type, object_id)
+        self.object = obj  # Store for use in sync methods
 
         interface_name_field = get_interface_name_field(request)
+        self.interface_name_field = interface_name_field
         selected_interfaces = self.get_selected_interfaces(request, interface_name_field)
         exclude_columns = request.POST.getlist("exclude_columns")
 
@@ -59,6 +65,11 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, C
                 reverse(url_name, kwargs={"pk": object_id})
                 + f"?tab=interfaces&interface_name_field={interface_name_field}"
             )
+
+        # Prepare VLAN lookup maps if VLAN sync is enabled
+        vlan_groups = self.get_vlan_groups_for_device(obj)
+        lookup_maps = self._build_vlan_lookup_maps(vlan_groups)
+        self._lookup_maps = lookup_maps
 
         self.sync_selected_interfaces(obj, selected_interfaces, ports_data, exclude_columns, interface_name_field)
 
@@ -144,13 +155,18 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, C
         if "enabled" not in exclude_columns:
             interface.enabled = (
                 True
-                if librenms_interface["ifAdminStatus"] is None
+                if librenms_interface.get("ifAdminStatus") is None
                 else (
                     librenms_interface["ifAdminStatus"].lower() == "up"
                     if isinstance(librenms_interface["ifAdminStatus"], str)
                     else bool(librenms_interface["ifAdminStatus"])
                 )
             )
+
+        # Sync VLANs if not excluded
+        if "vlans" not in exclude_columns:
+            self._sync_interface_vlans(interface, librenms_interface, interface_name)
+
         interface.save()
 
     def get_netbox_interface_type(self, librenms_interface):
@@ -221,6 +237,29 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, C
         self.handle_mac_address(interface, ifPhysAddress)
 
         interface.save()
+
+    def _sync_interface_vlans(self, interface, librenms_port, interface_name):
+        """
+        Sync VLAN assignments from LibreNMS to NetBox interface.
+        Sets mode, untagged_vlan, and tagged_vlans based on LibreNMS data.
+
+        Args:
+            interface: NetBox Interface or VMInterface object
+            librenms_port: Port data dict from LibreNMS with VLAN info
+            interface_name: Original interface name for form field lookup
+        """
+        # Get VLAN group selection from form (safely handle special chars in name)
+        safe_name = interface_name.replace("/", "_").replace(":", "_")
+        vlan_group_id = self.request.POST.get(f"vlan_group_{safe_name}", "")
+
+        # Build VLAN data from port
+        vlan_data = {
+            "untagged_vlan": librenms_port.get("untagged_vlan"),
+            "tagged_vlans": librenms_port.get("tagged_vlans", []),
+        }
+
+        # Use mixin method to update interface VLAN assignments
+        self._update_interface_vlan_assignment(interface, vlan_data, vlan_group_id, self._lookup_maps)
 
 
 class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):

@@ -28,6 +28,8 @@ class LibreNMSInterfaceTable(tables.Table):
             "name",
             "type",
             "speed",
+            "vlans",
+            "vlan_group_select",
             "mac_address",
             "mtu",
             "enabled",
@@ -41,8 +43,10 @@ class LibreNMSInterfaceTable(tables.Table):
 
     def __init__(self, *args, device=None, interface_name_field=None, **kwargs):
         """Initialize table with device context and interface name field."""
+    def __init__(self, *args, device=None, interface_name_field=None, vlan_groups=None, **kwargs):
         self.device = device
         self.interface_name_field = interface_name_field or get_interface_name_field()
+        self.vlan_groups = vlan_groups or []
 
         # Update column accessors after initialization
         for column in ["selection", "name"]:
@@ -91,6 +95,85 @@ class LibreNMSInterfaceTable(tables.Table):
         verbose_name="LibreNMS ID",
         attrs={"td": {"data-col": "librenms_id"}},
     )
+    vlans = tables.Column(
+        verbose_name="VLANs",
+        empty_values=(),
+        orderable=False,
+        attrs={"td": {"data-col": "vlans"}},
+    )
+    vlan_group_select = tables.Column(
+        verbose_name="VLAN Group",
+        empty_values=(),
+        orderable=False,
+        attrs={"td": {"data-col": "vlan_group_select"}},
+    )
+
+    def render_vlans(self, value, record):
+        """
+        Render VLANs column showing untagged and tagged VLANs.
+        Format: "100(U), 200(T), 300(T)" or "100(U)" for access ports.
+        Shows warning icon for VLANs not found in NetBox.
+        """
+        parts = []
+        untagged = record.get("untagged_vlan")
+        tagged = record.get("tagged_vlans", [])
+        missing_vlans = record.get("missing_vlans", [])
+
+        if untagged:
+            warning = ""
+            css = ""
+            if untagged in missing_vlans:
+                css = "text-warning"
+                warning = ' <i class="mdi mdi-alert text-warning" title="VLAN not in NetBox—use VLAN Sync first"></i>'
+            parts.append(f'<span class="{css}">{untagged}(U){warning}</span>')
+
+        for vid in sorted(tagged):
+            warning = ""
+            css = ""
+            if vid in missing_vlans:
+                css = "text-warning"
+                warning = ' <i class="mdi mdi-alert text-warning" title="VLAN not in NetBox—use VLAN Sync first"></i>'
+            parts.append(f'<span class="{css}">{vid}(T){warning}</span>')
+
+        if not parts:
+            return "—"
+
+        return format_html(mark_safe(", ".join(parts)))
+
+    def render_vlan_group_select(self, value, record):
+        """
+        Render per-row VLAN group dropdown.
+        Auto-selects based on priority; shows warning for ambiguous VIDs.
+        """
+        interface_name = record.get(self.interface_name_field, "")
+        selected_group_id = record.get("auto_selected_group_id")
+        is_ambiguous = record.get("is_ambiguous", False)
+
+        # Build select options
+        options = ['<option value="">-- No Group (Global) --</option>']
+        for group in self.vlan_groups:
+            selected = "selected" if group.pk == selected_group_id else ""
+            scope_info = f" ({group.scope})" if hasattr(group, "scope") and group.scope else ""
+            options.append(f'<option value="{group.pk}" {selected}>{group.name}{scope_info}</option>')
+
+        # Create safe name for form field (escape special chars)
+        safe_name = interface_name.replace("/", "_").replace(":", "_")
+
+        select_html = format_html(
+            '<select name="vlan_group_{}" class="form-select form-select-sm" style="min-width: 150px;">{}</select>',
+            safe_name,
+            mark_safe("".join(options)),
+        )
+
+        # Add warning icon if ambiguous
+        if is_ambiguous:
+            warning_html = format_html(
+                '<i class="mdi mdi-alert text-warning ms-1" '
+                'title="VID exists in multiple groups—please select the target group"></i>'
+            )
+            return format_html("{}{}", select_html, warning_html)
+
+        return select_html
 
     def render_speed(self, value, record):
         """Render interface speed with appropriate styling based on comparison with NetBox"""
@@ -322,6 +405,10 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
     def __init__(self, *args, device=None, interface_name_field=None, **kwargs):
         """Initialize VC interface table with device and name field."""
         super().__init__(*args, device=device, interface_name_field=interface_name_field, **kwargs)
+    def __init__(self, *args, device=None, interface_name_field=None, vlan_groups=None, **kwargs):
+        super().__init__(
+            *args, device=device, interface_name_field=interface_name_field, vlan_groups=vlan_groups, **kwargs
+        )
         # Ensure device_selection column is visible
         if hasattr(self.device, "virtual_chassis") and self.device.virtual_chassis:
             self.columns.show("device_selection")
@@ -374,6 +461,8 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
             "name",
             "type",
             "speed",
+            "vlans",
+            "vlan_group_select",
             "mac_address",
             "mtu",
             "enabled",
@@ -396,6 +485,8 @@ class LibreNMSVMInterfaceTable(LibreNMSInterfaceTable):
         sequence = [
             "selection",
             "name",
+            "vlans",
+            "vlan_group_select",
             "mac_address",
             "mtu",
             "enabled",
