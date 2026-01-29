@@ -336,6 +336,8 @@ class LibreNMSAPI:
         """
         Fetch ports data from LibreNMS for a device using its primary IP.
 
+        Includes VLAN assignment data (ifVlan, ifTrunk) for interface VLAN sync.
+
         Args:
             device_id: LibreNMS device ID
 
@@ -346,7 +348,9 @@ class LibreNMSAPI:
             response = requests.get(
                 f"{self.librenms_url}/api/v0/devices/{device_id}/ports",
                 headers=self.headers,
-                params={"columns": "port_id,ifName,ifType,ifSpeed,ifAdminStatus,ifDescr,ifAlias,ifPhysAddress,ifMtu"},
+                params={
+                    "columns": "port_id,ifName,ifType,ifSpeed,ifAdminStatus,ifDescr,ifAlias,ifPhysAddress,ifMtu,ifVlan,ifTrunk"
+                },
                 timeout=DEFAULT_API_TIMEOUT,
                 verify=self.verify_ssl,
             )
@@ -853,3 +857,172 @@ class LibreNMSAPI:
             return False, []
         except requests.exceptions.RequestException as e:
             return False, str(e)
+
+    # =========================================================================
+    # VLAN Methods
+    # =========================================================================
+
+    def get_device_vlans(self, device_id: int) -> tuple[bool, list | str]:
+        """
+        Fetch all VLANs configured on a device using the resources endpoint.
+
+        This method uses /api/v0/resources/vlans which includes the vlan_id
+        primary key, unlike /api/v0/devices/{device_id}/vlans which omits it.
+
+        Route: /api/v0/resources/vlans
+
+        Args:
+            device_id: LibreNMS device ID
+
+        Returns:
+            tuple: (success: bool, data: list of VLAN dicts or error string)
+
+        Example VLAN:
+            {
+                "vlan_id": 123,
+                "device_id": 1,
+                "vlan_vlan": 50,
+                "vlan_domain": 1,
+                "vlan_name": "ORG_DATA",
+                "vlan_type": "ethernet",
+                "vlan_state": 1
+            }
+        """
+        try:
+            response = requests.get(
+                f"{self.librenms_url}/api/v0/resources/vlans",
+                headers=self.headers,
+                timeout=DEFAULT_API_TIMEOUT,
+                verify=self.verify_ssl,
+            )
+            response.raise_for_status()
+
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("status") == "ok":
+                    # Filter VLANs by device_id since resources endpoint returns all VLANs
+                    all_vlans = result.get("vlans", [])
+                    device_vlans = [v for v in all_vlans if str(v.get("device_id")) == str(device_id)]
+                    return True, device_vlans
+                return False, result.get("message", "Unexpected response format")
+
+            return False, f"HTTP {response.status_code}"
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404:
+                return False, "VLANs resource not found"
+            return False, f"HTTP error: {str(e)}"
+        except requests.exceptions.RequestException as e:
+            return False, f"Error connecting to LibreNMS: {str(e)}"
+
+    def get_port_vlan_details(self, port_id: int) -> tuple[bool, dict | str]:
+        """
+        Fetch detailed VLAN associations for a single port.
+        Required for trunk ports to get the tagged VLANs list.
+
+        Route: /api/v0/ports/{port_id}?with=vlans
+
+        Args:
+            port_id: LibreNMS port ID
+
+        Returns:
+            tuple: (success: bool, data: port dict with vlans array or error string)
+
+        Example port:
+            {
+                "port_id": 227011,
+                "ifName": "Te1/1/1",
+                "ifVlan": "90",
+                "ifTrunk": "dot1Q",
+                "vlans": [
+                    {"vlan": 90, "untagged": 1, "state": "unknown"},
+                    {"vlan": 50, "untagged": 0, "state": "forwarding"}
+                ]
+            }
+        """
+        try:
+            response = requests.get(
+                f"{self.librenms_url}/api/v0/ports/{port_id}",
+                headers=self.headers,
+                params={"with": "vlans"},
+                timeout=DEFAULT_API_TIMEOUT,
+                verify=self.verify_ssl,
+            )
+            response.raise_for_status()
+
+            if response.status_code == 200:
+                result = response.json()
+                port_data = result.get("port", [])
+                if port_data and len(port_data) > 0:
+                    return True, port_data[0]
+                return False, "Port not found"
+
+            return False, f"HTTP {response.status_code}"
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404:
+                return False, "Port not found in LibreNMS"
+            return False, f"HTTP error: {str(e)}"
+        except requests.exceptions.RequestException as e:
+            return False, f"Error connecting to LibreNMS: {str(e)}"
+
+    def parse_port_vlan_data(self, port_data: dict, interface_name_field: str = "ifName") -> dict:
+        """
+        Transform LibreNMS port VLAN data into normalized structure.
+
+        Args:
+            port_data: Raw port dict from LibreNMS API
+            interface_name_field: Field to use for interface name ('ifName' or 'ifDescr')
+
+        Returns:
+            dict: Normalized structure with:
+                - port_id: int
+                - interface_name: str (value from interface_name_field)
+                - ifName: str (always included for reference)
+                - ifDescr: str (always included for reference)
+                - mode: 'access' | 'tagged' | None
+                - untagged_vlan: int | None
+                - tagged_vlans: list[int]
+        """
+        port_id = port_data.get("port_id")
+        if_name = port_data.get("ifName", "")
+        if_descr = port_data.get("ifDescr", "")
+        interface_name = port_data.get(interface_name_field, "") or if_name
+        if_vlan = port_data.get("ifVlan", "")
+        if_trunk = port_data.get("ifTrunk")
+
+        # Determine 802.1Q mode
+        if not if_vlan:
+            mode = None
+        elif if_trunk == "dot1Q":
+            mode = "tagged"
+        else:
+            mode = "access"
+
+        # Parse VLAN assignments from vlans array if present
+        vlans_data = port_data.get("vlans", [])
+        untagged_vlan = None
+        tagged_vlans = []
+
+        if vlans_data:
+            # Parse from detailed vlans array
+            for vlan_entry in vlans_data:
+                vlan_id = vlan_entry.get("vlan")
+                if vlan_entry.get("untagged") == 1:
+                    untagged_vlan = vlan_id
+                else:
+                    tagged_vlans.append(vlan_id)
+        elif if_vlan:
+            # Fallback to ifVlan field for basic port info
+            try:
+                untagged_vlan = int(if_vlan)
+            except (ValueError, TypeError):
+                pass
+
+        return {
+            "port_id": port_id,
+            "interface_name": interface_name,
+            "ifName": if_name,
+            "ifDescr": if_descr,
+            "mode": mode,
+            "untagged_vlan": untagged_vlan,
+            "tagged_vlans": sorted(tagged_vlans),
+        }
