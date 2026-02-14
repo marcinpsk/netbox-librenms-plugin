@@ -285,3 +285,4 @@ cython_debug/
 .devcontainer/config/plugin-config.py
 .devcontainer/config/extra-configuration.py
 .devcontainer/config/extra-plugins.py
+.devcontainer/snmpsim-data/sw2.snmprec

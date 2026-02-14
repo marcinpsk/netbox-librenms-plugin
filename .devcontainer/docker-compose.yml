@@ -55,9 +55,103 @@ services:
       timeout: 10s
       retries: 5
 
+  # --- SNMP Simulator ---
+  snmpsim:
+    image: ghcr.io/lextudio/docker-snmpsim:master
+    volumes:
+      - ./snmpsim-data:/usr/local/snmpsim/data
+    environment:
+      SNMPTRAPD_ENABLED: "0"
+    healthcheck:
+      test: ["CMD", "sh", "-c", "kill -0 $(cat /var/run/snmpsim/snmpsim.pid 2>/dev/null) 2>/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # --- LibreNMS Stack ---
+  librenms_db:
+    image: mariadb:10
+    command:
+      - "mysqld"
+      - "--innodb-file-per-table=1"
+      - "--lower-case-table-names=0"
+      - "--character-set-server=utf8mb4"
+      - "--collation-server=utf8mb4_unicode_ci"
+    environment:
+      MARIADB_RANDOM_ROOT_PASSWORD: "yes"
+      MYSQL_DATABASE: librenms
+      MYSQL_USER: librenms
+      MYSQL_PASSWORD: librenms
+    volumes:
+      - librenms_db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  librenms_redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - librenms_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  librenms:
+    image: librenms/librenms:latest
+    hostname: librenms
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    ports:
+      - "8001:8000"
+    depends_on:
+      librenms_db:
+        condition: service_healthy
+      librenms_redis:
+        condition: service_healthy
+    environment:
+      DB_HOST: librenms_db
+      DB_NAME: librenms
+      DB_USER: librenms
+      DB_PASSWORD: librenms
+      REDIS_HOST: librenms_redis
+      CACHE_DRIVER: redis
+      SESSION_DRIVER: redis
+      LIBRENMS_SNMP_COMMUNITY: public
+    volumes:
+      - librenms_data:/data
+
+  librenms_dispatcher:
+    image: librenms/librenms:latest
+    hostname: librenms-dispatcher
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    depends_on:
+      - librenms
+      - librenms_redis
+    environment:
+      DB_HOST: librenms_db
+      DB_NAME: librenms
+      DB_USER: librenms
+      DB_PASSWORD: librenms
+      REDIS_HOST: librenms_redis
+      DISPATCHER_NODE_ID: dispatcher1
+      SIDECAR_DISPATCHER: 1
+    volumes:
+      - librenms_data:/data
+
 volumes:
   postgres_data:
   redis_data:
   netbox_media:
   netbox_static:
   gh_config:
+  librenms_db:
+  librenms_redis:
+  librenms_data:

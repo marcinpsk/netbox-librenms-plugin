@@ -131,6 +131,14 @@ else
   echo "Plugin configuration may need to be added manually"
 fi
 
+# Generate SNMP simulator data for 2nd simulated device
+echo "🔧 Generating SNMP simulator data..."
+if [ -x "$PLUGIN_WS_DIR/.devcontainer/scripts/generate-snmpsim-data.sh" ]; then
+  bash "$PLUGIN_WS_DIR/.devcontainer/scripts/generate-snmpsim-data.sh"
+else
+  echo "⚠️  generate-snmpsim-data.sh not found or not executable"
+fi
+
 # Run migrations and collectstatic
 cd /opt/netbox/netbox
 
@@ -221,4 +229,15 @@ else
   echo "⚠️  Warning: Plugin may not be properly installed"
 fi
 
+echo ""
+echo "📡 LibreNMS Setup (first time only):"
+echo "   1. Open LibreNMS at http://localhost:8001"
+echo "   2. Create admin user via container CLI:"
+echo "      docker compose exec librenms lnms user:add admin admin admin@example.com --role=admin"
+echo "   3. Log in and create an API token at Settings → API → API Settings"
+echo "   4. Add simulated devices:"
+echo "      docker compose exec librenms lnms device:add --v2c -c public snmpsim"
+echo "      docker compose exec librenms lnms device:add --v2c -c sw2 snmpsim"
+echo "   5. Update .devcontainer/config/plugin-config.py with the API token"
+echo ""
 echo "🚀 NetBox LibreNMS Plugin Dev Environment Ready!"

@@ -17,6 +17,14 @@ PLUGINS = [
 PLUGINS_CONFIG = {
     "netbox_librenms_plugin": {
         "servers": {
+            "local": {
+                "display_name": "Local LibreNMS (DevContainer)",
+                "librenms_url": "http://librenms:8000",
+                "api_token": "configure-after-setup",
+                "cache_timeout": 60,
+                "verify_ssl": False,
+                "interface_name_field": "ifDescr",
+            },
             "production": {
                 "display_name": "Production LibreNMS",
                 "librenms_url": "https://librenms-prod.exampel.com",

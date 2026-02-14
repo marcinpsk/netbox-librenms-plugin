@@ -65,6 +65,29 @@ If you need to test with a LibreNMS instance on a private network (local lab, co
 - **GitHub CLI**: Automatically configured for easy PR submission
 - **Logs**: Use `netbox-logs` to debug issues in real-time
 
+
+### 📡 LibreNMS Setup (first time only)
+
+The dev container includes a local LibreNMS instance with two SNMP-simulated Cisco switches.
+
+1. Open LibreNMS at http://localhost:8001
+2. Create an admin user (from a terminal in the dev container):
+   ```bash
+   docker compose exec librenms lnms user:add admin admin admin@example.com --role=admin
+   ```
+3. Log in and create an API token: **Settings → API → API Settings**
+4. Add the simulated devices:
+   ```bash
+   docker compose exec librenms lnms device:add --v2c -c public snmpsim
+   docker compose exec librenms lnms device:add --v2c -c sw2 snmpsim
+   ```
+5. Copy and configure the plugin config:
+   ```bash
+   cp .devcontainer/config/plugin-config.py.example .devcontainer/config/plugin-config.py
+   ```
+   Edit `.devcontainer/config/plugin-config.py` and set the `api_token` in the `local` server entry.
+6. Restart NetBox: `netbox-restart`
+
 ## Out-of-the-box defaults
 
 Below are the dev container defaults. The field name to change these defaults is listed below each line.
@@ -83,6 +106,18 @@ Below are the dev container defaults. The field name to change these defaults is
    - .env: `SUPERUSER_NAME`, `SUPERUSER_EMAIL`, `SUPERUSER_PASSWORD`, `SKIP_SUPERUSER`
 - Plugin loader: enabled; reads `.devcontainer/config/plugin-config.py` if present
 - If `plugin-config.py` is missing: plugin is enabled with empty config (features won’t work until configured)
+
+### LibreNMS & SNMP Simulator Defaults
+
+- LibreNMS: `librenms/librenms:latest` on port **8001**
+- LibreNMS DB: MariaDB 10 (db: `librenms`, user: `librenms`, password: `librenms`)
+- LibreNMS Redis: 7-alpine (separate from NetBox Redis)
+- SNMP Simulator: `ghcr.io/lextudio/docker-snmpsim:master`
+  - Two simulated Cisco Catalyst 4500 switches:
+    - `sw1.libre` — SNMP community `public`
+    - `sw2.libre` — SNMP community `sw2`
+  - Accessible from LibreNMS at hostname `snmpsim`
+
 
 ## 🔧 Configuration
 
