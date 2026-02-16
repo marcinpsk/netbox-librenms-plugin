@@ -2,10 +2,27 @@ from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.http import HttpResponse
 from django.shortcuts import redirect
+from django.utils.http import url_has_allowed_host_and_scheme
 from utilities.permissions import get_permission_for_model
 
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+
+def _get_safe_redirect_url(request):
+    """Return a validated redirect URL from the HTTP Referer header.
+
+    Validates the Referer against allowed hosts and schemes to prevent
+    open-redirect attacks. Falls back to the current request path or "/".
+    """
+    referrer = request.META.get("HTTP_REFERER")
+    if referrer and url_has_allowed_host_and_scheme(
+        referrer,
+        allowed_hosts={request.get_host()},
+        require_https=request.is_secure(),
+    ):
+        return referrer
+    return getattr(request, "path", "/")
 
 
 class LibreNMSPermissionMixin(PermissionRequiredMixin):
@@ -38,8 +55,7 @@ class LibreNMSPermissionMixin(PermissionRequiredMixin):
             msg = error_message or "You do not have permission to perform this action."
             messages.error(self.request, msg)
 
-            # Get the referrer URL, fallback to a safe default
-            referrer = self.request.META.get("HTTP_REFERER", "/")
+            referrer = _get_safe_redirect_url(self.request)
 
             # Check if this is an HTMX request
             if self.request.headers.get("HX-Request"):
@@ -121,8 +137,7 @@ class NetBoxObjectPermissionMixin:
             msg = f"Missing permissions: {missing_str}"
             messages.error(self.request, msg)
 
-            # Get the referrer URL, fallback to a safe default
-            referrer = self.request.META.get("HTTP_REFERER", "/")
+            referrer = _get_safe_redirect_url(self.request)
 
             # Check if this is an HTMX request
             if self.request.headers.get("HX-Request"):
