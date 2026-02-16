@@ -34,6 +34,8 @@ class VMStatusTable(VirtualMachineTable):
         return mark_safe(f'<a href="{sync_url}">{status}</a>')
 
     class Meta(VirtualMachineTable.Meta):
+        """Meta options for VMStatusTable."""
+
         model = VirtualMachine
         fields = (
             "pk",

@@ -12,9 +12,12 @@ class IPAddressTable(tables.Table):
     """
 
     def __init__(self, *args, **kwargs):
+        """Initialize IP address table."""
         super().__init__(*args, **kwargs)
 
     class Meta:
+        """Meta options for IPAddressTable."""
+
         sequence = [
             "selection",
             "address",

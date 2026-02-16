@@ -159,7 +159,7 @@ You might experience issues with database schemas and migrations when changing N
 
 ### 🌐 Proxy Configuration (MITM Proxies)
 
-If you're behind a corporate proxy or MITM proxy (like Zscaler, BlueCoat, etc.), you need to configure proxy at two levels: the Docker client (for building) and the container runtime (for package installation inside the container).
+If you're behind a corporate proxy or MITM proxy (like Zscaler, BlueCoat, etc.), you need to configure the proxy at two levels: the Docker client (for building) and the container runtime (for package installation inside the container).
 
 **Step 1: Configure Docker client proxy** (`~/.docker/config.json`)
 

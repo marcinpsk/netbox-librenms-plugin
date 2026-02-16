@@ -12,6 +12,7 @@ class SiteLocationFilterSet:
     """
 
     def __init__(self, data, queryset):
+        """Initialize with form data and queryset."""
         self.form_data = data
         self.queryset = queryset
 
@@ -40,6 +41,8 @@ class SiteLocationFilterSet:
 
     @property
     def form(self):
+        """Return a bound filter form instance."""
+
         class FilterForm(forms.Form):
             """
             Form to filter sites and locations by search term.
@@ -77,6 +80,8 @@ class DeviceStatusFilterSet(NetBoxModelFilterSet):
     )
 
     class Meta:
+        """Meta options for DeviceStatusFilterSet."""
+
         model = Device
         fields = ["site", "location", "device_type", "rack", "role"]
         search_fields = ["device", "site", "device_type", "rack", "role"]
@@ -117,6 +122,8 @@ class VMStatusFilterSet(NetBoxModelFilterSet):
     )
 
     class Meta:
+        """Meta options for VMStatusFilterSet."""
+
         model = VirtualMachine
         fields = ["site", "cluster", "platform"]
         search_fields = ["virtualmachine", "site", "cluster", "platform"]

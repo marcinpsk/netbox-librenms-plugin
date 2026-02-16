@@ -25,6 +25,7 @@ class DeviceStatusTable(DeviceTable):
     )
 
     def render_librenms_status(self, value, record):
+        """Render LibreNMS sync status with link to sync page."""
         sync_url = reverse(
             "plugins:netbox_librenms_plugin:device_librenms_sync",
             kwargs={"pk": record.pk},
@@ -52,6 +53,8 @@ class DeviceStatusTable(DeviceTable):
         return mark_safe(f'<a href="{sync_url}">{status}</a>')
 
     class Meta(DeviceTable.Meta):
+        """Meta options for DeviceStatusTable."""
+
         model = Device
         fields = (
             "pk",
@@ -89,7 +92,9 @@ class DeviceImportTable(tables.Table):
     name = "DeviceImportTable"  # Required by NetBox table utilities
 
     def __init__(self, *args, **kwargs):
+        """Initialize table with cached querysets and apply sorting."""
         super().__init__(*args, **kwargs)
+
         # Cache querysets to avoid N queries per render
         from dcim.models import DeviceRole
         from virtualization.models import Cluster
@@ -127,6 +132,7 @@ class DeviceImportTable(tables.Table):
         # Sort the data list in place
         # Handle None values by treating them as empty strings for sorting
         def sort_key(item):
+            """Return lowercase sort value for a data field."""
             value = item.get(data_key, "")
             return (value or "").lower() if isinstance(value, str) else str(value or "")
 
@@ -425,6 +431,7 @@ class DeviceImportTable(tables.Table):
         """
         Render action buttons for import using HTMX.
         Shows Import button if can import, otherwise shows Preview/Configure.
+        Permission checks are handled by backend require_write_permission() which shows toast.
         """
         validation = record.get("_validation", {})
         device_id = record.get("device_id")
@@ -437,7 +444,7 @@ class DeviceImportTable(tables.Table):
         buttons = []
 
         if existing:
-            # Link to existing device/VM in NetBox
+            # Link to existing device/VM in NetBox + details button for conflict resolution
             if isinstance(existing, VirtualMachine):
                 url_name = "virtualization:virtualmachine"
                 title = "View VM in NetBox"
@@ -449,6 +456,44 @@ class DeviceImportTable(tables.Table):
             buttons.append(
                 f'<a href="{device_url}" class="btn btn-sm btn-secondary" '
                 f'title="{title}"><i class="mdi mdi-open-in-new"></i></a>'
+            )
+
+            # Add details/conflict button for conflict resolution actions
+            details_url = self._build_validation_details_url(device_id, validation)
+            match_type = validation.get("existing_match_type", "")
+            serial_action = validation.get("serial_action")
+            has_mismatch = validation.get("device_type_mismatch", False)
+            has_actions = match_type in ("hostname", "serial") and serial_action is not None
+            has_name_sync = validation.get("name_sync_available", False)
+            has_sync_needed = match_type == "librenms_id" and serial_action in ("update_serial", "conflict")
+
+            if has_mismatch:
+                btn_class = "btn-outline-danger"
+                btn_icon = "mdi-alert-circle"
+                btn_label = " Conflict"
+            elif has_actions:
+                btn_class = "btn-outline-warning"
+                btn_icon = "mdi-alert"
+                btn_label = " Conflict"
+            elif has_name_sync or has_sync_needed:
+                btn_class = "btn-outline-warning"
+                btn_icon = "mdi-information-outline"
+                btn_label = " Details"
+            else:
+                btn_class = "btn-outline-info"
+                btn_icon = "mdi-information-outline"
+                btn_label = " Details"
+
+            btn_title = "Resolve conflict" if (has_actions or has_mismatch) else "View details"
+            buttons.append(
+                f'<button type="button" '
+                f'class="btn btn-sm {btn_class}" '
+                f'hx-get="{details_url}" '
+                f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}], [name=rack_{device_id}]" '
+                f'hx-target="#htmx-modal-content" '
+                f'hx-swap="innerHTML" '
+                f'title="{btn_title}">'
+                f'<i class="mdi {btn_icon}"></i>{btn_label}</button>'
             )
         elif is_ready:
             # Ready to import - show Import and Details buttons
@@ -625,6 +670,8 @@ class DeviceImportTable(tables.Table):
         )
 
     class Meta:
+        """Meta options for DeviceImportTable."""
+
         # No model - we're working with LibreNMS API dictionaries, not Django model instances
         # This prevents NetBoxTable from auto-adding custom fields from Device model
 

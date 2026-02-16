@@ -18,6 +18,22 @@
 const TOMSELECT_INIT_DELAY_MS = 100;
 const COUNTDOWN_UPDATE_INTERVAL_MS = 1000;
 
+// Helper to read CSRF token from cookies
+function getCookie(name) {
+    let cookieValue = null;
+    if (document.cookie && document.cookie !== '') {
+        const cookies = document.cookie.split(';');
+        for (let i = 0; i < cookies.length; i++) {
+            const cookie = cookies[i].trim();
+            if (cookie.substring(0, name.length + 1) === (name + '=')) {
+                cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+                break;
+            }
+        }
+    }
+    return cookieValue;
+}
+
 /**
  * Extract device/VM ID and type from current URL pathname.
  * Supports multiple URL patterns:
@@ -640,21 +656,23 @@ function initializeTabs() {
 
 /**
  * Toggle SNMP form visibility based on selected version.
- * Shows either SNMPv2c or SNMPv3 configuration form.
+ * Shows either SNMPv1/v2c or SNMPv3 configuration form.
  */
 function toggleSNMPForms() {
-    const snmpSelect = document.querySelector('#add-device-modal select.form-select');
+    const snmpSelect = document.getElementById('snmp-version-select');
     if (!snmpSelect) return;
     const version = snmpSelect.value;
 
-    const v2Form = document.getElementById('snmpv2-form');
+    const v1v2Form = document.getElementById('snmpv1v2-form');
     const v3Form = document.getElementById('snmpv3-form');
 
-    if (version === 'v2c') {
-        v2Form.style.display = 'block';
+    if (!v1v2Form || !v3Form) return;
+
+    if (version === 'v1v2c') {
+        v1v2Form.style.display = 'block';
         v3Form.style.display = 'none';
-    } else {
-        v2Form.style.display = 'none';
+    } else if (version === 'v3') {
+        v1v2Form.style.display = 'none';
         v3Form.style.display = 'block';
     }
 }
@@ -664,7 +682,7 @@ function toggleSNMPForms() {
  * Sets up version toggle and displays correct form.
  */
 function initializeSNMPModalScripts() {
-    const snmpSelect = document.querySelector('#add-device-modal select.form-select');
+    const snmpSelect = document.getElementById('snmp-version-select');
     if (snmpSelect) {
         snmpSelect.addEventListener('change', toggleSNMPForms);
         // Initial call to set the correct form visibility
@@ -709,11 +727,26 @@ function updateInterfaceNameField() {
             window.history.pushState({}, '', url);
 
             // Set HTMX headers for subsequent requests
-            htmx.config.defaultHeaders['X-Interface-Name-Field'] = this.value;
+            if (typeof htmx !== 'undefined') {
+                htmx.config.defaultHeaders['X-Interface-Name-Field'] = this.value;
+            }
+
+            // Persist to user preferences via API
+            const savePrefUrl = this.closest('[data-save-pref-url]')?.dataset.savePrefUrl;
+            if (savePrefUrl) {
+                const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value || getCookie('csrftoken');
+                if (csrfToken) {
+                    fetch(savePrefUrl, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrfToken},
+                        body: JSON.stringify({key: 'interface_name_field', value: this.value})
+                    }).catch(err => console.debug('Failed to save interface_name_field pref:', err));
+                }
+            }
 
             // Refresh current tab content
             const activeTab = document.querySelector('.tab-pane.active');
-            if (activeTab) {
+            if (activeTab && typeof htmx !== 'undefined') {
                 htmx.trigger(activeTab, 'htmx:refresh');
             }
         });

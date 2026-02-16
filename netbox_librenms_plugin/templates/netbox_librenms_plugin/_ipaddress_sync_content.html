@@ -48,7 +48,7 @@
                     flex-wrap: wrap;
                     align-items: center;
                 }
-                
+
                 /* VRF dropdown styles */
                 td[data-col="vrf"] {
                     width: 250px;
@@ -58,7 +58,7 @@
                     width: 100%;
                     max-width: 100%;
                 }
-                
+
                 /* Ensure select elements in VRF column maintain consistent width */
                 td[data-col="vrf"] select.form-select {
                     width: 100%;
@@ -73,4 +73,11 @@
         </div>
     </div>
 </form>
+{% else %}
+<div class="card">
+    <div class="card-body text-center text-muted py-4">
+        <i class="mdi mdi-sync-off mdi-48px"></i>
+        <p class="mt-2 mb-0">No IP address data loaded. Click <strong>Refresh IP Addresses</strong> to fetch data from LibreNMS.</p>
+    </div>
+</div>
 {% endif %}

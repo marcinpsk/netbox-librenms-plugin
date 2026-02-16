@@ -252,7 +252,7 @@
 
         const manager = new ModalManager(modalElement);
         manager.show();
-        
+
         // Store backdrop reference for legacy compatibility
         if (fallbackBackdropRef && manager.backdropElement) {
             fallbackBackdropRef.element = manager.backdropElement;
@@ -265,6 +265,8 @@
      *
      * @param {HTMLElement} modalElement - The modal element to hide
      * @param {Object} fallbackBackdropRef - Reference object containing fallback backdrop (deprecated)
+     *   WONTFIX: fallbackBackdropRef is unused — _hideManual uses querySelector which is
+     *   correct for this plugin since only one modal is ever open at a time (Tabler, no Bootstrap).
      */
     function hideModal(modalElement, fallbackBackdropRef) {
         if (!modalElement) {
@@ -272,6 +274,14 @@
         }
 
         const manager = new ModalManager(modalElement);
+
+        // Try to recover an existing Bootstrap instance before falling back to manual
+        if (typeof bootstrap !== 'undefined' && bootstrap.Modal) {
+            manager.instance = bootstrap.Modal.getInstance(modalElement);
+        } else if (typeof window.bootstrap !== 'undefined' && window.bootstrap.Modal) {
+            manager.instance = window.bootstrap.Modal.getInstance(modalElement);
+        }
+
         manager.hide();
     }
 
@@ -293,6 +303,7 @@
     function pollJobStatus(jobId, jobPk, pollUrl, baseUrl, originalFilters, deviceCount) {
         const messageEl = document.getElementById('filter-progress-message');
         const cancelBtn = document.getElementById('cancel-filter-btn');
+        const filterModal = document.getElementById('filter-processing-modal');
 
         // Get CSRF token from cookie or form (needed for cancel and status sync)
         let csrfToken = getCookie('csrftoken');
@@ -357,11 +368,8 @@
                                 messageEl.textContent = 'Job already completed, loading results...';
                             }
                             cancelBtn.textContent = 'Completed';
-
-                            const modal = document.getElementById('filter-processing-modal');
-                            if (modal) {
-                                const manager = new ModalManager(modal);
-                                manager.hide();
+                            if (filterModal) {
+                                hideModal(filterModal);
                             }
 
                             setTimeout(() => {
@@ -403,11 +411,8 @@
                                                 messageEl.textContent = 'Job cancelled successfully.';
                                             }
                                             cancelBtn.textContent = 'Cancelled';
-
-                                            const modal = document.getElementById('filter-processing-modal');
-                                            if (modal) {
-                                                const manager = new ModalManager(modal);
-                                                manager.hide();
+                                            if (filterModal) {
+                                                hideModal(filterModal);
                                             }
 
                                             setTimeout(() => {
@@ -424,11 +429,8 @@
                                         messageEl.textContent = 'Job stopped (status sync failed).';
                                     }
                                     cancelBtn.textContent = 'Stopped';
-
-                                    const modal = document.getElementById('filter-processing-modal');
-                                    if (modal) {
-                                        const manager = new ModalManager(modal);
-                                        manager.hide();
+                                    if (filterModal) {
+                                        hideModal(filterModal);
                                     }
 
                                     setTimeout(() => {
@@ -441,11 +443,8 @@
                                     messageEl.textContent = 'Job completed, loading results...';
                                 }
                                 cancelBtn.textContent = 'Completed';
-
-                                const modal = document.getElementById('filter-processing-modal');
-                                if (modal) {
-                                    const manager = new ModalManager(modal);
-                                    manager.hide();
+                                if (filterModal) {
+                                    hideModal(filterModal);
                                 }
 
                                 setTimeout(() => {
@@ -460,11 +459,8 @@
                             }
                             cancelBtn.textContent = 'Close';
                             cancelBtn.disabled = false;
-
-                            const modal = document.getElementById('filter-processing-modal');
-                            if (modal) {
-                                const manager = new ModalManager(modal);
-                                manager.hide();
+                            if (filterModal) {
+                                hideModal(filterModal);
                             }
 
                             setTimeout(() => window.location.href = baseUrl, 1000);
@@ -545,11 +541,8 @@
 
                     if (statusValue === 'completed' || statusValue === 'finished') {
                         pollingStopped = true; // Stop future polls
-
-                        const modal = document.getElementById('filter-processing-modal');
-                        if (modal) {
-                            const manager = new ModalManager(modal);
-                            manager.hide();
+                        if (filterModal) {
+                            hideModal(filterModal);
                         }
 
                         // Small delay to let modal close before redirect
@@ -559,21 +552,15 @@
                         return; // Stop polling
                     } else if (statusValue === 'stopped') {
                         pollingStopped = true;
-
-                        const modal = document.getElementById('filter-processing-modal');
-                        if (modal) {
-                            const manager = new ModalManager(modal);
-                            manager.hide();
+                        if (filterModal) {
+                            hideModal(filterModal);
                         }
 
                         setTimeout(() => window.location.href = baseUrl, 100);
                     } else if (statusValue === 'failed') {
                         pollingStopped = true;
-
-                        const modal = document.getElementById('filter-processing-modal');
-                        if (modal) {
-                            const manager = new ModalManager(modal);
-                            manager.hide();
+                        if (filterModal) {
+                            hideModal(filterModal);
                         }
 
                         const errorMsg = data.data?.error;
@@ -583,11 +570,8 @@
                         setTimeout(() => window.location.href = baseUrl, 100);
                     } else if (statusValue === 'errored') {
                         pollingStopped = true;
-
-                        const modal = document.getElementById('filter-processing-modal');
-                        if (modal) {
-                            const manager = new ModalManager(modal);
-                            manager.hide();
+                        if (filterModal) {
+                            hideModal(filterModal);
                         }
 
                         const errorMsg = data.data?.error || 'Job encountered an error. Please try again.';
@@ -667,7 +651,7 @@
                 });
 
                 if (deviceCount) deviceCount.style.display = 'none';
-                
+
                 if (cancelBtn) {
                     cancelBtn.innerHTML = '<i class="mdi mdi-close"></i> Close';
                     cancelBtn.onclick = function () {
@@ -765,6 +749,10 @@
                 }
             })
                 .then(response => {
+                    // Check for HTTP errors first
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                    }
                     // Check if response is JSON (background job) or HTML (synchronous)
                     const contentType = response.headers.get('content-type');
                     if (contentType && contentType.includes('application/json')) {
@@ -789,15 +777,11 @@
                         } else {
                             // Unexpected JSON response
                             alert('Unexpected response from server. Please try again.');
-                            if (modalInstance) {
-                                modalInstance.hide();
-                            }
+                            filterModalManager.hide();
                         }
                     } else if (result.type === 'html') {
                         // Synchronous response - navigate to the URL to reload with results
-                        if (modalInstance) {
-                            modalInstance.hide();
-                        }
+                        filterModalManager.hide();
                         // Navigate to the results URL, allowing proper browser history
                         window.location.href = finalUrl;
                     }
@@ -813,7 +797,9 @@
                         // Request was cancelled by user - silent
                     } else {
                         console.error('Error fetching filtered results:', error);
-                        alert('Error loading filtered results. Please try again.');
+                        // Show more specific error if available
+                        const errorMsg = error.message || 'Error loading filtered results. Please try again.';
+                        alert(errorMsg);
                     }
 
                     // Hide modal on error
@@ -984,11 +970,8 @@
                 if (failedCount && failedCount.dataset.failedCount === '0') {
                     setTimeout(() => {
                         const resultsModal = document.getElementById('import-results-modal');
-                        if (resultsModal && typeof bootstrap !== 'undefined' && bootstrap.Modal) {
-                            const modalInstance = bootstrap.Modal.getInstance(resultsModal);
-                            if (modalInstance) {
-                                modalInstance.hide();
-                            }
+                        if (resultsModal) {
+                            hideModal(resultsModal);
                         }
                         window.location.reload();
                     }, MODAL_AUTO_CLOSE_MS);
