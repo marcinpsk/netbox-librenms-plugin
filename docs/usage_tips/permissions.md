@@ -26,7 +26,7 @@ A user needs both tiers of permissions to complete an action. For example, to vi
 
 The Plugin also enforces Netbox object permissions so the following permission would also be required:
 
-2. **Tier 2: Object permission**: User needs `dcim.add_device` (to create the device in NetBox)
+1. **Tier 2: Object permission**: User needs `dcim.add_device` (to create the device in NetBox)
 
 If either permission is missing, the operation fails with an appropriate error message.
 

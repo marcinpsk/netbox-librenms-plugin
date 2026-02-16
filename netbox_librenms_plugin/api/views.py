@@ -22,8 +22,8 @@ class LibreNMSPluginPermission(BasePermission):
     """
     Permission class for LibreNMS plugin API endpoints.
 
-    - GET requests require view_librenmssettings
-    - All other requests require change_librenmssettings
+    - Safe requests (GET, HEAD, OPTIONS) require netbox_librenms_plugin.view_librenmssettings
+    - All other requests require netbox_librenms_plugin.change_librenmssettings
     """
 
     def has_permission(self, request, view):
