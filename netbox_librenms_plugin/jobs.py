@@ -34,6 +34,8 @@ class FilterDevicesJob(JobRunner):
     """
 
     class Meta:
+        """Meta options for FilterDevicesJob."""
+
         name = "LibreNMS Device Filter"
 
     def run(
@@ -146,6 +148,8 @@ class ImportDevicesJob(JobRunner):
     """
 
     class Meta:
+        """Meta options for ImportDevicesJob."""
+
         name = "LibreNMS Device Import"
 
     def run(

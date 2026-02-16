@@ -51,8 +51,19 @@ if [ -n "$HTTP_PROXY" ] || [ -n "$HTTPS_PROXY" ]; then
   CA_BUNDLE_SRC="$PLUGIN_WS_DIR_EARLY/ca-bundle.crt"
   if [ -f "$CA_BUNDLE_SRC" ]; then
     echo "🔐 Installing custom CA certificate into system trust store..."
-    mkdir -p /usr/local/share/ca-certificates
-    cp "$CA_BUNDLE_SRC" /usr/local/share/ca-certificates/proxy-ca-bundle.crt
+    mkdir -p /usr/local/share/ca-certificates/proxy
+    # Remove stale split fragments so they don't accumulate across rebuilds
+    find /usr/local/share/ca-certificates/proxy -maxdepth 1 -name 'cert-*' -delete 2>/dev/null || true
+    # Split the bundle into individual certs — update-ca-certificates needs one
+    # cert per file and skips non-CA leaf certs, so extract each PEM block as
+    # a separate .crt file.
+    csplit -z -f /usr/local/share/ca-certificates/proxy/cert- \
+      "$CA_BUNDLE_SRC" '/-----BEGIN CERTIFICATE-----/' '{*}' \
+      >/dev/null 2>&1
+    # Rename split fragments to .crt
+    for f in /usr/local/share/ca-certificates/proxy/cert-*; do
+      mv "$f" "${f}.crt" 2>/dev/null || true
+    done
     update-ca-certificates 2>/dev/null
     echo "  ✓ CA certificate installed into system trust store"
     # Point environment variables to the system bundle
@@ -60,6 +71,9 @@ if [ -n "$HTTP_PROXY" ] || [ -n "$HTTPS_PROXY" ]; then
     export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
     export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
     export GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt
+    # Configure pip globally so isolated virtualenvs (e.g. pre-commit) also
+    # use the system CA bundle instead of their bundled certifi.
+    pip config set global.cert /etc/ssl/certs/ca-certificates.crt 2>/dev/null || true
   else
     echo "  ℹ️  No ca-bundle.crt found at $CA_BUNDLE_SRC, skipping CA install"
     # Only disable git SSL verification if explicitly opted-in via ALLOW_GIT_SSL_DISABLE.

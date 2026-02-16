@@ -15,6 +15,7 @@ from netbox_librenms_plugin.import_utils import (
 )
 from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
+from netbox_librenms_plugin.utils import _get_user_pref
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,7 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
     title = "Import Devices from LibreNMS"
 
     def get_required_permission(self):
+        """Return the permission required to view the import list."""
         from utilities.permissions import get_permission_for_model
 
         return get_permission_for_model(Device, "view")
@@ -305,6 +307,15 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         except Exception:
             settings = None
 
+        # User preference overrides for toggles (persisted per-user)
+        use_sysname = _get_user_pref(request, "plugins.netbox_librenms_plugin.use_sysname")
+        strip_domain = _get_user_pref(request, "plugins.netbox_librenms_plugin.strip_domain")
+        # Fall back to server-level settings
+        if use_sysname is None:
+            use_sysname = getattr(settings, "use_sysname_default", False) if settings else False
+        if strip_domain is None:
+            strip_domain = getattr(settings, "strip_domain_default", False) if settings else False
+
         # Get active cached searches for this server
         cached_searches = get_active_cached_searches(self.librenms_api.server_key)
 
@@ -317,6 +328,8 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             "filters_submitted": filters_submitted,
             "show_filter_warning": bool(filter_warning),
             "settings": settings,
+            "use_sysname": use_sysname,
+            "strip_domain": strip_domain,
             "vc_detection_enabled": getattr(self, "_vc_detection_enabled", False),
             "cache_cleared": getattr(self, "_cache_cleared", False),
             "from_cache": getattr(self, "_from_cache", False),
@@ -330,11 +343,13 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         return render(request, self.template_name, context)
 
     def get_queryset(self, request):  # noqa: D401 - inherited doc
+        """Return an empty Device queryset; actual data is loaded via _get_import_queryset."""
         import_data = self._get_import_queryset()
         self._import_data = import_data
         return Device.objects.none()
 
     def get_table(self, data, request, bulk_actions=True):
+        """Return a DeviceImportTable populated with validated import data."""
         if not hasattr(self, "_import_data"):
             self._import_data = self._get_import_queryset()
 

@@ -156,6 +156,13 @@
         </div>
     </div>
 </form>
+{% else %}
+<div class="card">
+    <div class="card-body text-center text-muted py-4">
+        <i class="mdi mdi-sync-off mdi-48px"></i>
+        <p class="mt-2 mb-0">No interface data loaded. Click <strong>Refresh Interfaces</strong> to fetch data from LibreNMS.</p>
+    </div>
+</div>
 {% endif %} <!-- End if interface_sync.table -->
 
 <!-- Interface Type Help Modal -->

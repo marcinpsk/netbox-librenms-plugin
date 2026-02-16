@@ -18,6 +18,22 @@
 const TOMSELECT_INIT_DELAY_MS = 100;
 const COUNTDOWN_UPDATE_INTERVAL_MS = 1000;
 
+// Helper to read CSRF token from cookies
+function getCookie(name) {
+    let cookieValue = null;
+    if (document.cookie && document.cookie !== '') {
+        const cookies = document.cookie.split(';');
+        for (let i = 0; i < cookies.length; i++) {
+            const cookie = cookies[i].trim();
+            if (cookie.substring(0, name.length + 1) === (name + '=')) {
+                cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+                break;
+            }
+        }
+    }
+    return cookieValue;
+}
+
 /**
  * Extract device/VM ID and type from current URL pathname.
  * Supports multiple URL patterns:
@@ -711,11 +727,26 @@ function updateInterfaceNameField() {
             window.history.pushState({}, '', url);
 
             // Set HTMX headers for subsequent requests
-            htmx.config.defaultHeaders['X-Interface-Name-Field'] = this.value;
+            if (typeof htmx !== 'undefined') {
+                htmx.config.defaultHeaders['X-Interface-Name-Field'] = this.value;
+            }
+
+            // Persist to user preferences via API
+            const savePrefUrl = this.closest('[data-save-pref-url]')?.dataset.savePrefUrl;
+            if (savePrefUrl) {
+                const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value || getCookie('csrftoken');
+                if (csrfToken) {
+                    fetch(savePrefUrl, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrfToken},
+                        body: JSON.stringify({key: 'interface_name_field', value: this.value})
+                    }).catch(err => console.debug('Failed to save interface_name_field pref:', err));
+                }
+            }
 
             // Refresh current tab content
             const activeTab = document.querySelector('.tab-pane.active');
-            if (activeTab) {
+            if (activeTab && typeof htmx !== 'undefined') {
                 htmx.trigger(activeTab, 'htmx:refresh');
             }
         });

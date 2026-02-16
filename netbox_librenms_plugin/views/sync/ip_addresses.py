@@ -23,9 +23,11 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
     }
 
     def get_selected_ips(self, request):
+        """Return selected IP addresses from POST data."""
         return [x for x in request.POST.getlist("select") if x]
 
     def get_vrf_selection(self, request, ip_address):
+        """Return the VRF selected for a given IP address, or None."""
         vrf_id = request.POST.get(f"vrf_{ip_address}")
 
         if vrf_id:
@@ -37,12 +39,14 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         return None
 
     def get_cached_ip_data(self, request, obj):
+        """Return cached LibreNMS IP address data for the given object."""
         cached_data = cache.get(self.get_cache_key(obj, "ip_addresses"))
         if not cached_data:
             return None
         return cached_data.get("ip_addresses", [])
 
     def get_object(self, object_type, pk):
+        """Return the Device or VirtualMachine instance for the given type and pk."""
         if object_type == "device":
             return get_object_or_404(Device, pk=pk)
         if object_type == "virtualmachine":
@@ -50,6 +54,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         raise Http404("Invalid object type.")
 
     def get_ip_tab_url(self, obj):
+        """Return the URL for the IP addresses sync tab."""
         if isinstance(obj, Device):
             url_name = "plugins:netbox_librenms_plugin:device_librenms_sync"
         else:
@@ -57,6 +62,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         return f"{reverse(url_name, args=[obj.pk])}?tab=ipaddresses"
 
     def post(self, request, object_type, pk):
+        """Sync selected IP addresses from LibreNMS into NetBox."""
         # Check both plugin write and NetBox object permissions
         if error := self.require_all_permissions("POST"):
             return error
@@ -80,6 +86,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         return redirect(self.get_ip_tab_url(obj))
 
     def process_ip_sync(self, request, selected_ips, cached_ips, obj, object_type):
+        """Create or update IP addresses in NetBox from cached LibreNMS data."""
         results = {"created": [], "updated": [], "unchanged": [], "failed": []}
 
         with transaction.atomic():
@@ -124,6 +131,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             return results
 
     def display_sync_results(self, request, results):
+        """Display flash messages summarizing the IP sync results."""
         if results["created"]:
             messages.success(request, f"Created IP addresses: {', '.join(results['created'])}")
         if results["updated"]:

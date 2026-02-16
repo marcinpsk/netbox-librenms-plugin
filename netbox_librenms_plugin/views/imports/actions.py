@@ -1,11 +1,12 @@
 """HTMX endpoints and POST handlers for importing LibreNMS devices."""
 
+import json
 import logging
 
 from django.contrib import messages
 from django.core.cache import cache
 from django.core.exceptions import PermissionDenied
-from django.http import HttpResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.views import View
 
@@ -28,6 +29,7 @@ from netbox_librenms_plugin.import_validation_helpers import (
     fetch_model_by_id,
 )
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
+from netbox_librenms_plugin.utils import save_import_toggle_prefs
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 logger = logging.getLogger(__name__)
@@ -209,6 +211,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
     """HTMX view to confirm bulk imports before execution."""
 
     def post(self, request):
+        """Render a confirmation modal for selected devices before bulk import."""
         # Check write permission before showing import confirmation
         if error := self.require_write_permission():
             return error
@@ -219,6 +222,8 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 '<div class="alert alert-warning mb-0">Select at least one device.</div>',
                 status=400,
             )
+
+        save_import_toggle_prefs(request)
 
         use_sysname = request.POST.get("use-sysname-toggle") == "on"
         strip_domain = request.POST.get("strip-domain-toggle") == "on"
@@ -382,6 +387,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         return request.POST.get("use_background_job") == "on"
 
     def post(self, request):  # noqa: PLR0912 - branching keeps responses explicit
+        """Import selected devices from LibreNMS into NetBox."""
         # Check write permission before any import operation
         if error := self.require_write_permission():
             return error
@@ -663,6 +669,7 @@ class DeviceVCDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
     """HTMX view to show virtual chassis details."""
 
     def get(self, request, device_id):
+        """Render virtual chassis details for a LibreNMS device."""
         libre_device = get_librenms_device_by_id(self.librenms_api, device_id)
         if not libre_device:
             return HttpResponse(
@@ -688,6 +695,7 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
     """HTMX view to show detailed validation information."""
 
     def get(self, request, device_id):
+        """Render detailed validation information for a LibreNMS device."""
         libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
 
         if not libre_device:
@@ -701,17 +709,79 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
             "validation": validation,
         }
 
+        # Add sync comparison data for existing devices
+        existing = validation.get("existing_device")
+        if existing:
+            context["sync_info"] = self._build_sync_info(libre_device, existing)
+
         return render(
             request,
             "netbox_librenms_plugin/htmx/device_validation_details.html",
             context,
         )
 
+    @staticmethod
+    def _build_sync_info(libre_device, existing_device):
+        """Build sync comparison data between LibreNMS device and existing NetBox device."""
+        librenms_serial = libre_device.get("serial") or "-"
+        librenms_os = libre_device.get("os") or "-"
+        librenms_hardware = libre_device.get("hardware") or "-"
+
+        # Serial comparison
+        serial_synced = existing_device.serial == librenms_serial or librenms_serial == "-"
+
+        # Platform comparison
+        platform_info = {
+            "netbox_platform": getattr(existing_device, "platform", None),
+            "librenms_os": librenms_os,
+            "platform_exists": False,
+            "matching_platform": None,
+        }
+        if librenms_os and librenms_os != "-":
+            from netbox_librenms_plugin.utils import find_matching_platform
+
+            match_result = find_matching_platform(librenms_os)
+            if match_result["found"]:
+                platform_info["platform_exists"] = True
+                platform_info["matching_platform"] = match_result["platform"]
+
+        netbox_platform = platform_info["netbox_platform"]
+        matching_platform = platform_info["matching_platform"]
+        platform_synced = librenms_os == "-" or (
+            netbox_platform and matching_platform and netbox_platform.pk == matching_platform.pk
+        )
+
+        # Device type comparison
+        device_type_synced = True
+        librenms_device_type = None
+        if librenms_hardware and librenms_hardware != "-":
+            from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
+
+            hw_match = match_librenms_hardware_to_device_type(librenms_hardware)
+            if hw_match.get("matched"):
+                librenms_device_type = hw_match["device_type"]
+                if not existing_device.device_type or existing_device.device_type.pk != librenms_device_type.pk:
+                    device_type_synced = False
+
+        all_synced = serial_synced and platform_synced and device_type_synced
+
+        return {
+            "librenms_serial": librenms_serial,
+            "serial_synced": serial_synced,
+            "platform_info": platform_info,
+            "platform_synced": platform_synced,
+            "librenms_hardware": librenms_hardware,
+            "librenms_device_type": librenms_device_type,
+            "device_type_synced": device_type_synced,
+            "all_synced": all_synced,
+        }
+
 
 class DeviceRoleUpdateView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View):
     """HTMX view to update a table row when a role is selected."""
 
     def post(self, request, device_id):
+        """Update the table row after a device role selection change."""
         libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
 
         if not libre_device:
@@ -724,6 +794,7 @@ class DeviceClusterUpdateView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceI
     """HTMX view to update a table row when a cluster is selected/deselected."""
 
     def post(self, request, device_id):
+        """Update the table row after a cluster selection change."""
         libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
 
         if not libre_device:
@@ -736,9 +807,221 @@ class DeviceRackUpdateView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImpo
     """HTMX view to update a table row when a rack is selected."""
 
     def post(self, request, device_id):
+        """Update the table row after a rack selection change."""
         libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
 
         if not libre_device:
             return HttpResponse("Device not found", status=404)
 
         return self.render_device_row(request, libre_device, validation, selections)
+
+
+class DeviceConflictActionView(LibreNMSAPIMixin, DeviceImportHelperMixin, View):
+    """HTMX view to resolve device conflicts (link, update, update serial)."""
+
+    def post(self, request, device_id):
+        """Resolve a device conflict by linking, updating, or syncing serial."""
+        from dcim.models import Device
+
+        save_import_toggle_prefs(request)
+
+        action = request.POST.get("action")
+        existing_device_id = request.POST.get("existing_device_id")
+
+        if not action or not existing_device_id:
+            return HttpResponse("Missing action or existing_device_id", status=400)
+
+        try:
+            existing_device = Device.objects.get(pk=int(existing_device_id))
+        except (Device.DoesNotExist, ValueError):
+            return HttpResponse("Existing device not found", status=404)
+
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        if not libre_device:
+            return HttpResponse("LibreNMS device not found", status=404)
+
+        # Require force flag when device type mismatches
+        force = request.POST.get("force") == "on"
+        if validation.get("device_type_mismatch") and not force:
+            return HttpResponse(
+                "Device type mismatch detected. Check the force checkbox to proceed.",
+                status=400,
+            )
+
+        # When force is used with device_type_mismatch, update device type to LibreNMS value
+        librenms_device_type = None
+        if validation.get("device_type_mismatch") and force:
+            librenms_device_type = validation.get("device_type", {}).get("device_type")
+
+        librenms_id = libre_device.get("device_id")
+
+        if action == "link":
+            # Link to LibreNMS and update name from LibreNMS data
+            use_sysname = request.POST.get("use-sysname-toggle") == "on"
+            strip_domain = request.POST.get("strip-domain-toggle") == "on"
+            hostname = _determine_device_name(libre_device, use_sysname=use_sysname, strip_domain=strip_domain)
+            existing_device.custom_field_data["librenms_id"] = int(librenms_id)
+            existing_device.name = hostname
+            if librenms_device_type:
+                existing_device.device_type = librenms_device_type
+            existing_device.save()
+            logger.info(f"Linked device '{existing_device.name}' to LibreNMS ID {librenms_id}")
+
+        elif action == "update":
+            # Update hostname, serial, and link to LibreNMS
+            use_sysname = request.POST.get("use-sysname-toggle") == "on"
+            strip_domain = request.POST.get("strip-domain-toggle") == "on"
+            incoming_serial = libre_device.get("serial") or ""
+            hostname = _determine_device_name(libre_device, use_sysname=use_sysname, strip_domain=strip_domain)
+            existing_device.custom_field_data["librenms_id"] = int(librenms_id)
+            if incoming_serial and incoming_serial != "-":
+                conflict_device = Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
+                if conflict_device:
+                    return HttpResponse(
+                        f"Serial conflict: '{incoming_serial}' is already assigned to device "
+                        f"'{conflict_device.name}' (ID: {conflict_device.pk})",
+                        status=409,
+                    )
+                existing_device.serial = incoming_serial
+            existing_device.name = hostname
+            if librenms_device_type:
+                existing_device.device_type = librenms_device_type
+            existing_device.save()
+            logger.info(
+                f"Updated device '{existing_device.name}': serial={incoming_serial}, "
+                f"linked to LibreNMS ID {librenms_id}"
+            )
+
+        elif action == "update_serial":
+            # Update only the serial and link to LibreNMS
+            incoming_serial = libre_device.get("serial") or ""
+            existing_device.custom_field_data["librenms_id"] = int(librenms_id)
+            if incoming_serial and incoming_serial != "-":
+                conflict_device = Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
+                if conflict_device:
+                    return HttpResponse(
+                        f"Serial conflict: '{incoming_serial}' is already assigned to device "
+                        f"'{conflict_device.name}' (ID: {conflict_device.pk})",
+                        status=409,
+                    )
+                existing_device.serial = incoming_serial
+            if librenms_device_type:
+                existing_device.device_type = librenms_device_type
+            existing_device.save()
+            logger.info(
+                f"Updated serial on device '{existing_device.name}' to {incoming_serial}, "
+                f"linked to LibreNMS ID {librenms_id}"
+            )
+
+        elif action == "sync_name":
+            # Sync device name from LibreNMS (e.g., IP → sysName)
+            use_sysname = request.POST.get("use-sysname-toggle") == "on"
+            strip_domain = request.POST.get("strip-domain-toggle") == "on"
+            hostname = _determine_device_name(libre_device, use_sysname=use_sysname, strip_domain=strip_domain)
+            existing_device.name = hostname
+            existing_device.save()
+            logger.info(f"Synced name on device '{existing_device.name}' from LibreNMS")
+
+        elif action == "update_type":
+            # Update device type from LibreNMS (requires force for mismatch)
+            if librenms_device_type:
+                existing_device.device_type = librenms_device_type
+                existing_device.save()
+                logger.info(f"Updated device type on '{existing_device.name}' to {librenms_device_type}")
+            else:
+                return HttpResponse("No LibreNMS device type available to update", status=400)
+
+        elif action == "sync_serial":
+            # Sync serial number from LibreNMS
+            incoming_serial = libre_device.get("serial") or ""
+            if incoming_serial and incoming_serial != "-":
+                # Check for serial ownership conflict
+                conflict_device = Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
+                if conflict_device:
+                    logger.warning(
+                        f"Serial sync blocked: '{incoming_serial}' already assigned to "
+                        f"'{conflict_device.name}' (pk={conflict_device.pk})"
+                    )
+                    return HttpResponse(
+                        f"Serial conflict: '{incoming_serial}' is already assigned to device "
+                        f"'{conflict_device.name}' (ID: {conflict_device.pk})",
+                        status=409,
+                    )
+                existing_device.serial = incoming_serial
+                existing_device.save()
+                logger.info(f"Synced serial on '{existing_device.name}' to {incoming_serial}")
+            else:
+                return HttpResponse("No valid serial from LibreNMS", status=400)
+
+        elif action == "sync_platform":
+            # Sync platform from LibreNMS OS
+            from netbox_librenms_plugin.utils import find_matching_platform
+
+            librenms_os = libre_device.get("os") or ""
+            if librenms_os and librenms_os != "-":
+                match_result = find_matching_platform(librenms_os)
+                if match_result["found"]:
+                    existing_device.platform = match_result["platform"]
+                    existing_device.save()
+                    logger.info(f"Synced platform on '{existing_device.name}' to {match_result['platform']}")
+                else:
+                    return HttpResponse(f"Platform '{librenms_os}' not found in NetBox", status=400)
+            else:
+                return HttpResponse("No OS info from LibreNMS", status=400)
+
+        elif action == "sync_device_type":
+            # Sync device type from LibreNMS hardware (non-mismatch case)
+            from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
+
+            hardware = libre_device.get("hardware") or ""
+            hw_match = match_librenms_hardware_to_device_type(hardware)
+            if hw_match.get("matched"):
+                existing_device.device_type = hw_match["device_type"]
+                existing_device.save()
+                logger.info(f"Synced device type on '{existing_device.name}' to {hw_match['device_type']}")
+            else:
+                return HttpResponse(f"No matching device type for '{hardware}'", status=400)
+
+        else:
+            return HttpResponse(f"Unknown action: {action}", status=400)
+
+        # Clear cached validation so re-validation picks up the changes
+        cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
+        cache.delete(cache_key)
+
+        # Re-validate and render updated row
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        if not libre_device:
+            return HttpResponse("Device not found after action", status=404)
+
+        response = self.render_device_row(request, libre_device, validation, selections)
+        response["HX-Trigger"] = "closeModal"
+        return response
+
+
+class SaveUserPrefView(View):
+    """Save a user preference via POST. Used by JS toggle handlers."""
+
+    ALLOWED_PREFS = {
+        "use_sysname": "plugins.netbox_librenms_plugin.use_sysname",
+        "strip_domain": "plugins.netbox_librenms_plugin.strip_domain",
+        "interface_name_field": "plugins.netbox_librenms_plugin.interface_name_field",
+    }
+
+    def post(self, request):
+        """Persist a user preference toggle value."""
+        from netbox_librenms_plugin.utils import _save_user_pref
+
+        try:
+            data = json.loads(request.body)
+        except (json.JSONDecodeError, ValueError):
+            return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+        key = data.get("key")
+        value = data.get("value")
+
+        if key not in self.ALLOWED_PREFS:
+            return JsonResponse({"error": "Invalid preference key"}, status=400)
+
+        _save_user_pref(request, self.ALLOWED_PREFS[key], value)
+        return JsonResponse({"status": "ok"})

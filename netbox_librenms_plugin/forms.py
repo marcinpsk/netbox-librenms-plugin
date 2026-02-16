@@ -59,12 +59,14 @@ class ServerConfigForm(NetBoxModelForm):
     )
 
     class Meta:
+        """Meta options for ServerConfigForm."""
+
         model = LibreNMSSettings
         fields = ["selected_server"]
 
     def __init__(self, *args, **kwargs):
+        """Initialize form and populate server choices."""
         super().__init__(*args, **kwargs)
-        # Get available servers from configuration
         self.fields["selected_server"].choices = _get_librenms_server_choices()
 
 
@@ -101,6 +103,8 @@ class ImportSettingsForm(NetBoxModelForm):
     )
 
     class Meta:
+        """Meta options for ImportSettingsForm."""
+
         model = LibreNMSSettings
         fields = [
             "vc_member_name_pattern",
@@ -183,6 +187,8 @@ class InterfaceTypeMappingForm(NetBoxModelForm):
     """
 
     class Meta:
+        """Meta options for InterfaceTypeMappingForm."""
+
         model = InterfaceTypeMapping
         fields = ["librenms_type", "librenms_speed", "netbox_type", "description"]
 
@@ -200,6 +206,8 @@ class InterfaceTypeMappingImportForm(NetBoxModelImportForm):
     )
 
     class Meta:
+        """Meta options for InterfaceTypeMappingImportForm."""
+
         model = InterfaceTypeMapping
         fields = ["librenms_type", "librenms_speed", "netbox_type", "description"]
 
@@ -285,6 +293,7 @@ class AddToLIbreSNMPV1V2(forms.Form):
     )
 
     def __init__(self, *args, **kwargs):
+        """Initialize form and populate poller group choices."""
         super().__init__(*args, **kwargs)
         # Populate poller groups from LibreNMS API
         self.fields["poller_group"].choices = self._get_poller_group_choices()
@@ -412,6 +421,7 @@ class AddToLIbreSNMPV3(forms.Form):
     )
 
     def __init__(self, *args, **kwargs):
+        """Initialize form and populate poller group choices."""
         super().__init__(*args, **kwargs)
         # Populate poller groups from LibreNMS API
         self.fields["poller_group"].choices = self._get_poller_group_choices()
@@ -452,6 +462,7 @@ class DeviceStatusFilterForm(NetBoxModelFilterSetForm):
     """
 
     def __init__(self, *args, **kwargs):
+        """Initialize form and remove saved filter field."""
         super().__init__(*args, **kwargs)
         # Remove the saved filter field if it exists
         if "filter_id" in self.fields:

@@ -1102,3 +1102,1074 @@ class TestDeviceValidation:
         assert result["existing_device"] == existing_vm
         assert result["can_import"] is False
         assert result["import_as_vm"] is True
+
+
+class TestSerialNumberMatching:
+    """Test serial number matching in device validation."""
+
+    SERIAL_PATCHES = [
+        "netbox_librenms_plugin.import_utils.Site",
+        "netbox_librenms_plugin.import_utils.Rack",
+        "netbox_librenms_plugin.import_utils.Cluster",
+        "netbox_librenms_plugin.import_utils.DeviceRole",
+        "netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type",
+        "netbox_librenms_plugin.import_utils.find_matching_platform",
+        "netbox_librenms_plugin.import_utils.find_matching_site",
+        "netbox_librenms_plugin.import_utils.Device",
+        "virtualization.models.VirtualMachine",
+    ]
+
+    def _start_patches(self):
+        """Start all common patches and return mocks in standard order."""
+        self._patchers = [patch(p) for p in self.SERIAL_PATCHES]
+        mocks = [p.start() for p in self._patchers]
+        (
+            self.mock_site_model,
+            self.mock_rack,
+            self.mock_cluster,
+            self.mock_role,
+            self.mock_match_type,
+            self.mock_find_platform,
+            self.mock_find_site,
+            self.mock_device,
+            self.mock_vm,
+        ) = mocks
+
+    def _stop_patches(self):
+        """Stop all patches."""
+        for p in self._patchers:
+            p.stop()
+
+    def setup_method(self):
+        """Set up common patches for serial number tests."""
+        self._start_patches()
+
+    def teardown_method(self):
+        """Tear down patches."""
+        self._stop_patches()
+
+    def test_serial_match_blocks_import(self):
+        """Device with matching serial blocks import."""
+        existing = MagicMock()
+        existing.name = "existing-device"
+        existing.serial = "ABC123"
+
+        self.mock_vm.objects.filter.return_value.first.return_value = None
+
+        def device_filter(**kwargs):
+            result = MagicMock()
+            if "serial" in kwargs:
+                result.first.return_value = existing
+            else:
+                result.first.return_value = None
+            return result
+
+        self.mock_device.objects.filter.side_effect = device_filter
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        device_data = {"device_id": 1, "hostname": "new-hostname", "serial": "ABC123"}
+        result = validate_device_for_import(device_data, include_vc_detection=False)
+
+        assert result["can_import"] is False
+        assert result["existing_match_type"] == "serial"
+        assert result["existing_device"] == existing
+
+    def test_serial_match_same_hostname_offers_link(self):
+        """Serial + hostname match offers link action."""
+        existing = MagicMock()
+        existing.name = "switch-01"
+        existing.serial = "ABC123"
+
+        self.mock_vm.objects.filter.return_value.first.return_value = None
+
+        def device_filter(**kwargs):
+            result = MagicMock()
+            if "serial" in kwargs:
+                result.first.return_value = existing
+            else:
+                result.first.return_value = None
+            return result
+
+        self.mock_device.objects.filter.side_effect = device_filter
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        device_data = {"device_id": 1, "hostname": "switch-01", "serial": "ABC123"}
+        result = validate_device_for_import(device_data, include_vc_detection=False)
+
+        assert result["serial_action"] == "link"
+        assert result["existing_match_type"] == "serial"
+        assert "not linked to LibreNMS" in result["warnings"][0]
+
+    def test_serial_match_diff_hostname_offers_hostname_differs(self):
+        """Serial matches but hostname differs offers hostname_differs action."""
+        existing = MagicMock()
+        existing.name = "old-hostname"
+        existing.serial = "ABC123"
+
+        self.mock_vm.objects.filter.return_value.first.return_value = None
+
+        def device_filter(**kwargs):
+            result = MagicMock()
+            if "serial" in kwargs:
+                result.first.return_value = existing
+            else:
+                result.first.return_value = None
+            return result
+
+        self.mock_device.objects.filter.side_effect = device_filter
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        device_data = {"device_id": 1, "hostname": "new-hostname", "serial": "ABC123"}
+        result = validate_device_for_import(device_data, include_vc_detection=False)
+
+        assert result["serial_action"] == "hostname_differs"
+        assert result["existing_match_type"] == "serial"
+        assert "reinstalled" in result["warnings"][0]
+
+    def test_hostname_match_diff_serial_offers_update(self):
+        """Hostname matches but serial differs offers update_serial action."""
+        existing = MagicMock()
+        existing.name = "switch-01"
+        existing.serial = "OLD_SERIAL"
+
+        self.mock_vm.objects.filter.return_value.first.return_value = None
+
+        def device_filter(**kwargs):
+            result = MagicMock()
+            if "name__iexact" in kwargs:
+                result.first.return_value = existing
+            elif "serial" in kwargs:
+                result.first.return_value = None
+                result.exclude.return_value.first.return_value = None
+            else:
+                result.first.return_value = None
+            return result
+
+        self.mock_device.objects.filter.side_effect = device_filter
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        device_data = {"device_id": 1, "hostname": "switch-01", "serial": "NEW_SERIAL"}
+        result = validate_device_for_import(device_data, include_vc_detection=False)
+
+        assert result["serial_action"] == "update_serial"
+        assert result["existing_match_type"] == "hostname"
+        assert "Hardware may have been replaced" in result["warnings"][0]
+
+    def _setup_no_match_mocks(self):
+        """Configure mocks for tests where no device match is expected."""
+        self.mock_vm.objects.filter.return_value.first.return_value = None
+        self.mock_device.objects.filter.return_value.first.return_value = None
+        self.mock_find_site.return_value = {"found": False, "site": None, "match_type": None, "confidence": 0}
+        self.mock_find_platform.return_value = {"found": False, "platform": None, "match_type": None}
+        self.mock_match_type.return_value = {"matched": False, "device_type": None, "match_type": None}
+        self.mock_role.objects.all.return_value = []
+        self.mock_cluster.objects.all.return_value = []
+        self.mock_rack.objects.filter.return_value = []
+        self.mock_site_model.objects.all.return_value = []
+
+    def test_serial_dash_ignored(self):
+        """Serial '-' is not treated as a match."""
+        self._setup_no_match_mocks()
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        device_data = {"device_id": 1, "hostname": "switch-01", "serial": "-"}
+        result = validate_device_for_import(device_data, include_vc_detection=False)
+
+        assert result["existing_match_type"] is None
+        assert result["serial_action"] is None
+
+    def test_serial_empty_ignored(self):
+        """Empty serial skips serial matching."""
+        self._setup_no_match_mocks()
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        device_data = {"device_id": 1, "hostname": "switch-01", "serial": ""}
+        result = validate_device_for_import(device_data, include_vc_detection=False)
+
+        assert result["existing_match_type"] is None
+        assert result["serial_action"] is None
+
+    def test_serial_none_ignored(self):
+        """None serial skips serial matching."""
+        self._setup_no_match_mocks()
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        device_data = {"device_id": 1, "hostname": "switch-01", "serial": None}
+        result = validate_device_for_import(device_data, include_vc_detection=False)
+
+        assert result["existing_match_type"] is None
+        assert result["serial_action"] is None
+
+    def test_hostname_match_serial_conflict_warns(self):
+        """Hostname matches, incoming serial already on another device warns about conflict."""
+        hostname_device = MagicMock()
+        hostname_device.name = "switch-01"
+        hostname_device.serial = "OLD_SERIAL"
+
+        serial_conflict_device = MagicMock()
+        serial_conflict_device.name = "other-device"
+
+        self.mock_vm.objects.filter.return_value.first.return_value = None
+
+        def device_filter(**kwargs):
+            result = MagicMock()
+            if "name__iexact" in kwargs:
+                result.first.return_value = hostname_device
+            elif "serial" in kwargs:
+                result.exclude.return_value.first.return_value = serial_conflict_device
+            else:
+                result.first.return_value = None
+            return result
+
+        self.mock_device.objects.filter.side_effect = device_filter
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        device_data = {"device_id": 1, "hostname": "switch-01", "serial": "CONFLICTING_SERIAL"}
+        result = validate_device_for_import(device_data, include_vc_detection=False)
+
+        assert result["serial_action"] == "conflict"
+        assert result["existing_match_type"] == "hostname"
+        assert "Serial conflict" in result["warnings"][0]
+
+    def test_librenms_id_match_shows_serial_confirmed(self):
+        """librenms_id match with matching serial shows confirmation."""
+        existing = MagicMock()
+        existing.name = "switch-01"
+        existing.serial = "ABC123"
+
+        self.mock_vm.objects.filter.return_value.first.return_value = None
+
+        def device_filter(**kwargs):
+            result = MagicMock()
+            if "custom_field_data__librenms_id" in kwargs:
+                result.first.return_value = existing
+            else:
+                result.first.return_value = None
+            return result
+
+        self.mock_device.objects.filter.side_effect = device_filter
+        self.mock_find_site.return_value = {
+            "found": True,
+            "site": MagicMock(),
+            "match_type": "exact",
+            "confidence": 1.0,
+        }
+        self.mock_find_platform.return_value = {"found": False, "platform": None, "match_type": None}
+        self.mock_match_type.return_value = {"matched": False, "device_type": None, "match_type": None}
+        self.mock_role.objects.all.return_value = []
+        self.mock_cluster.objects.all.return_value = []
+        self.mock_rack.objects.filter.return_value = []
+        self.mock_site_model.objects.all.return_value = []
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        device_data = {"device_id": 1, "hostname": "switch-01", "sysName": "switch-01", "serial": "ABC123"}
+        result = validate_device_for_import(device_data, include_vc_detection=False)
+
+        assert result["existing_match_type"] == "librenms_id"
+        assert result["can_import"] is False
+        assert result["serial_confirmed"] is True
+        assert result["name_matches"] is True
+
+    def test_librenms_id_match_detects_serial_drift(self):
+        """librenms_id match with different serial warns about drift."""
+        existing = MagicMock()
+        existing.name = "switch-01"
+        existing.serial = "OLD_SERIAL"
+
+        self.mock_vm.objects.filter.return_value.first.return_value = None
+
+        def device_filter(**kwargs):
+            result = MagicMock()
+            if "custom_field_data__librenms_id" in kwargs:
+                result.first.return_value = existing
+            elif "serial" in kwargs:
+                result.first.return_value = None
+                result.exclude.return_value.first.return_value = None
+            else:
+                result.first.return_value = None
+            return result
+
+        self.mock_device.objects.filter.side_effect = device_filter
+        self.mock_find_site.return_value = {
+            "found": True,
+            "site": MagicMock(),
+            "match_type": "exact",
+            "confidence": 1.0,
+        }
+        self.mock_find_platform.return_value = {"found": False, "platform": None, "match_type": None}
+        self.mock_match_type.return_value = {"matched": False, "device_type": None, "match_type": None}
+        self.mock_role.objects.all.return_value = []
+        self.mock_cluster.objects.all.return_value = []
+        self.mock_rack.objects.filter.return_value = []
+        self.mock_site_model.objects.all.return_value = []
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        device_data = {"device_id": 1, "hostname": "switch-01", "serial": "NEW_SERIAL"}
+        result = validate_device_for_import(device_data, include_vc_detection=False)
+
+        assert result["existing_match_type"] == "librenms_id"
+        assert result["serial_action"] == "update_serial"
+        assert any("Hardware may have been replaced" in w for w in result["warnings"])
+
+    def test_librenms_id_match_still_validates_site(self):
+        """librenms_id match continues to populate site/type validation."""
+        existing = MagicMock()
+        existing.name = "switch-01"
+        existing.serial = ""
+
+        self.mock_vm.objects.filter.return_value.first.return_value = None
+
+        def device_filter(**kwargs):
+            result = MagicMock()
+            if "custom_field_data__librenms_id" in kwargs:
+                result.first.return_value = existing
+            else:
+                result.first.return_value = None
+            return result
+
+        self.mock_device.objects.filter.side_effect = device_filter
+        mock_site = MagicMock(id=1, name="DC1")
+        self.mock_find_site.return_value = {"found": True, "site": mock_site, "match_type": "exact", "confidence": 1.0}
+        self.mock_find_platform.return_value = {"found": False, "platform": None, "match_type": None}
+        mock_dt = MagicMock()
+        self.mock_match_type.return_value = {"matched": True, "device_type": mock_dt, "match_type": "exact"}
+        self.mock_role.objects.all.return_value = []
+        self.mock_cluster.objects.all.return_value = []
+        self.mock_rack.objects.filter.return_value = []
+        self.mock_site_model.objects.all.return_value = []
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        device_data = {"device_id": 1, "hostname": "switch-01", "location": "DC1", "hardware": "WS-C4900M"}
+        result = validate_device_for_import(device_data, include_vc_detection=False)
+
+        assert result["existing_match_type"] == "librenms_id"
+        assert result["can_import"] is False
+        assert result["is_ready"] is False
+        # Site and device_type should still be populated
+        assert result["site"]["found"] is True
+        assert result["site"]["site"] == mock_site
+        assert result["device_type"]["found"] is True
+
+    def test_existing_device_role_populated(self):
+        """Existing device's role should be shown in validation details."""
+        existing = MagicMock()
+        existing.name = "switch-01"
+        existing.serial = "ABC123"
+        mock_existing_role = MagicMock()
+        mock_existing_role.name = "Access Switch"
+        existing.role = mock_existing_role
+
+        self.mock_vm.objects.filter.return_value.first.return_value = None
+
+        def device_filter(**kwargs):
+            result = MagicMock()
+            if "serial" in kwargs:
+                result.first.return_value = existing
+            else:
+                result.first.return_value = None
+            return result
+
+        self.mock_device.objects.filter.side_effect = device_filter
+        self.mock_find_site.return_value = {"found": False, "site": None, "match_type": None, "confidence": 0}
+        self.mock_find_platform.return_value = {"found": False, "platform": None, "match_type": None}
+        self.mock_match_type.return_value = {"matched": True, "device_type": MagicMock(), "match_type": "exact"}
+        self.mock_role.objects.all.return_value = [mock_existing_role]
+        self.mock_cluster.objects.all.return_value = []
+        self.mock_rack.objects.filter.return_value = []
+        self.mock_site_model.objects.all.return_value = []
+
+        with patch("netbox_librenms_plugin.import_utils.cache") as mock_cache:
+            mock_cache.get.return_value = None
+
+            from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+            device_data = {
+                "device_id": 1,
+                "hostname": "switch-01",
+                "serial": "ABC123",
+                "location": "",
+                "hardware": "",
+            }
+            result = validate_device_for_import(device_data, include_vc_detection=False)
+
+        assert result["existing_device"] == existing
+        assert result["device_role"]["found"] is True
+        assert result["device_role"]["role"] == mock_existing_role
+
+    def test_device_type_mismatch_flagged(self):
+        """Device type mismatch between existing device and LibreNMS should be flagged."""
+        existing = MagicMock()
+        existing.name = "switch-01"
+        existing.serial = "ABC123"
+        existing_device_type = MagicMock()
+        existing_device_type.pk = 1
+        existing_device_type.__str__ = lambda self: "Old Type"
+        existing.device_type = existing_device_type
+        existing.role = MagicMock()
+
+        librenms_device_type = MagicMock()
+        librenms_device_type.pk = 2
+        librenms_device_type.__str__ = lambda self: "New Type"
+
+        self.mock_vm.objects.filter.return_value.first.return_value = None
+
+        def device_filter(**kwargs):
+            result = MagicMock()
+            if "serial" in kwargs:
+                result.first.return_value = existing
+            else:
+                result.first.return_value = None
+            return result
+
+        self.mock_device.objects.filter.side_effect = device_filter
+        self.mock_find_site.return_value = {"found": False, "site": None, "match_type": None, "confidence": 0}
+        self.mock_find_platform.return_value = {"found": False, "platform": None, "match_type": None}
+        self.mock_match_type.return_value = {
+            "matched": True,
+            "device_type": librenms_device_type,
+            "match_type": "exact",
+        }
+        self.mock_role.objects.all.return_value = []
+        self.mock_cluster.objects.all.return_value = []
+        self.mock_rack.objects.filter.return_value = []
+        self.mock_site_model.objects.all.return_value = []
+
+        with patch("netbox_librenms_plugin.import_utils.cache") as mock_cache:
+            mock_cache.get.return_value = None
+
+            from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+            device_data = {
+                "device_id": 1,
+                "hostname": "switch-01",
+                "serial": "ABC123",
+                "location": "",
+                "hardware": "New Type",
+            }
+            result = validate_device_for_import(device_data, include_vc_detection=False)
+
+        assert result["device_type_mismatch"] is True
+        assert any("Device type mismatch" in w for w in result["warnings"])
+
+    def test_no_device_type_mismatch_when_types_match(self):
+        """No mismatch flag when existing device type matches LibreNMS."""
+        existing = MagicMock()
+        existing.name = "switch-01"
+        existing.serial = "ABC123"
+        same_device_type = MagicMock()
+        same_device_type.pk = 1
+        existing.device_type = same_device_type
+        existing.role = MagicMock()
+
+        self.mock_vm.objects.filter.return_value.first.return_value = None
+
+        def device_filter(**kwargs):
+            result = MagicMock()
+            if "serial" in kwargs:
+                result.first.return_value = existing
+            else:
+                result.first.return_value = None
+            return result
+
+        self.mock_device.objects.filter.side_effect = device_filter
+        self.mock_find_site.return_value = {"found": False, "site": None, "match_type": None, "confidence": 0}
+        self.mock_find_platform.return_value = {"found": False, "platform": None, "match_type": None}
+        self.mock_match_type.return_value = {"matched": True, "device_type": same_device_type, "match_type": "exact"}
+        self.mock_role.objects.all.return_value = []
+        self.mock_cluster.objects.all.return_value = []
+        self.mock_rack.objects.filter.return_value = []
+        self.mock_site_model.objects.all.return_value = []
+
+        with patch("netbox_librenms_plugin.import_utils.cache") as mock_cache:
+            mock_cache.get.return_value = None
+
+            from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+            device_data = {
+                "device_id": 1,
+                "hostname": "switch-01",
+                "serial": "ABC123",
+                "location": "",
+                "hardware": "Same Type",
+            }
+            result = validate_device_for_import(device_data, include_vc_detection=False)
+
+        assert result["device_type_mismatch"] is False
+
+
+class TestDeviceConflictActionView:
+    """Test DeviceConflictActionView conflict resolution actions."""
+
+    def _create_view(self):
+        """Create a DeviceConflictActionView instance with mocked dependencies."""
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+        view = object.__new__(DeviceConflictActionView)
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default"
+        return view
+
+    def _create_request(self, action, existing_device_id, use_sysname=False, strip_domain=False):
+        """Create a mock request with POST data."""
+        request = MagicMock()
+        post_data = {"action": action, "existing_device_id": str(existing_device_id)}
+        if use_sysname:
+            post_data["use-sysname-toggle"] = "on"
+        if strip_domain:
+            post_data["strip-domain-toggle"] = "on"
+        request.POST = post_data
+        return request
+
+    @patch("netbox_librenms_plugin.views.imports.actions.cache")
+    @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
+    def test_link_action_sets_librenms_id_and_name(self, mock_cache_key, mock_cache):
+        """Link action should set librenms_id and update name from sysName."""
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+        view = self._create_view()
+        existing_device = MagicMock()
+        existing_device.pk = 42
+        existing_device.custom_field_data = {}
+        existing_device.name = "84.116.251.35"
+
+        libre_device = {
+            "device_id": 10,
+            "hostname": "84.116.251.35",
+            "sysName": "switch-01.example.com",
+            "serial": "ABC123",
+        }
+        validation = {"can_import": False}
+        selections = {}
+
+        request = self._create_request("link", 42, use_sysname=True)
+
+        with (
+            patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
+            patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
+            patch("dcim.models.Device") as mock_device_cls,
+        ):
+            mock_device_cls.objects.get.return_value = existing_device
+            mock_validate.return_value = (libre_device, validation, selections)
+            mock_render.return_value = MagicMock()
+
+            view.post(request, device_id=10)
+
+        assert existing_device.custom_field_data["librenms_id"] == 10
+        assert existing_device.name == "switch-01.example.com"
+        existing_device.save.assert_called_once()
+
+    @patch("netbox_librenms_plugin.views.imports.actions.cache")
+    @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
+    def test_update_action_sets_hostname_serial_and_librenms_id(self, mock_cache_key, mock_cache):
+        """Update action should set hostname, serial, and librenms_id."""
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+        view = self._create_view()
+        existing_device = MagicMock()
+        existing_device.pk = 42
+        existing_device.custom_field_data = {}
+        existing_device.name = "old-name"
+        existing_device.serial = "OLD-SERIAL"
+
+        libre_device = {
+            "device_id": 10,
+            "hostname": "84.116.251.35",
+            "sysName": "new-name.example.com",
+            "serial": "NEW-SERIAL",
+        }
+        validation = {"can_import": False}
+        selections = {}
+
+        request = self._create_request("update", 42, use_sysname=True)
+
+        with (
+            patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
+            patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
+            patch("dcim.models.Device") as mock_device_cls,
+        ):
+            mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+            mock_validate.return_value = (libre_device, validation, selections)
+            mock_render.return_value = MagicMock()
+
+            view.post(request, device_id=10)
+
+        assert existing_device.custom_field_data["librenms_id"] == 10
+        assert existing_device.serial == "NEW-SERIAL"
+        assert existing_device.name == "new-name.example.com"
+        existing_device.save.assert_called_once()
+
+    @patch("netbox_librenms_plugin.views.imports.actions.cache")
+    @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
+    def test_update_serial_action_updates_serial_only(self, mock_cache_key, mock_cache):
+        """Update serial action should update serial and librenms_id but not hostname."""
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+        view = self._create_view()
+        existing_device = MagicMock()
+        existing_device.pk = 42
+        existing_device.custom_field_data = {}
+        existing_device.name = "switch-01"
+        existing_device.serial = "OLD-SERIAL"
+
+        libre_device = {"device_id": 10, "hostname": "switch-01", "serial": "NEW-SERIAL"}
+        validation = {"can_import": False}
+        selections = {}
+
+        request = self._create_request("update_serial", 42)
+
+        with (
+            patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
+            patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
+            patch("dcim.models.Device") as mock_device_cls,
+        ):
+            mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+            mock_validate.return_value = (libre_device, validation, selections)
+            mock_render.return_value = MagicMock()
+
+            view.post(request, device_id=10)
+
+        assert existing_device.custom_field_data["librenms_id"] == 10
+        assert existing_device.serial == "NEW-SERIAL"
+        # Name should NOT be changed by update_serial
+        assert existing_device.name == "switch-01"
+        existing_device.save.assert_called_once()
+
+    @patch("netbox_librenms_plugin.views.imports.actions.cache")
+    @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
+    def test_update_skips_dash_serial(self, mock_cache_key, mock_cache):
+        """Update should not set serial to '-' (LibreNMS placeholder)."""
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+        view = self._create_view()
+        existing_device = MagicMock()
+        existing_device.pk = 42
+        existing_device.custom_field_data = {}
+        existing_device.name = "switch-01"
+        existing_device.serial = "EXISTING"
+
+        libre_device = {"device_id": 10, "hostname": "switch-01", "serial": "-"}
+        validation = {"can_import": False}
+        selections = {}
+
+        request = self._create_request("update_serial", 42)
+
+        with (
+            patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
+            patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
+            patch("dcim.models.Device") as mock_device_cls,
+        ):
+            mock_device_cls.objects.get.return_value = existing_device
+            mock_validate.return_value = (libre_device, validation, selections)
+            mock_render.return_value = MagicMock()
+
+            view.post(request, device_id=10)
+
+        # Serial should NOT be updated to '-'
+        assert existing_device.serial == "EXISTING"
+
+    def test_missing_action_returns_400(self):
+        """Missing action or existing_device_id should return 400."""
+        view = self._create_view()
+        request = MagicMock()
+        request.POST = {}
+
+        response = view.post(request, device_id=10)
+        assert response.status_code == 400
+
+    def test_unknown_action_returns_400(self):
+        """Unknown action should return 400."""
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+        view = self._create_view()
+        request = self._create_request("invalid_action", 42)
+
+        existing_device = MagicMock()
+        libre_device = {"device_id": 10, "hostname": "switch-01", "serial": "ABC"}
+
+        with (
+            patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
+            patch("dcim.models.Device") as mock_device_cls,
+        ):
+            mock_device_cls.objects.get.return_value = existing_device
+            mock_validate.return_value = (libre_device, {}, {})
+
+            response = view.post(request, device_id=10)
+
+        assert response.status_code == 400
+
+    @patch("netbox_librenms_plugin.views.imports.actions.cache")
+    @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
+    def test_sync_name_action_updates_name(self, mock_cache_key, mock_cache):
+        """Sync name action should update device name using sysName."""
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+        view = self._create_view()
+        existing_device = MagicMock()
+        existing_device.pk = 42
+        existing_device.custom_field_data = {"librenms_id": 10}
+        existing_device.name = "84.116.251.35"
+
+        libre_device = {
+            "device_id": 10,
+            "hostname": "84.116.251.35",
+            "sysName": "switch-01.example.com",
+            "serial": "ABC123",
+        }
+        validation = {"can_import": False}
+        selections = {}
+
+        request = self._create_request("sync_name", 42, use_sysname=True)
+
+        with (
+            patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
+            patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
+            patch("dcim.models.Device") as mock_device_cls,
+        ):
+            mock_device_cls.objects.get.return_value = existing_device
+            mock_validate.return_value = (libre_device, validation, selections)
+            mock_render.return_value = MagicMock()
+
+            view.post(request, device_id=10)
+
+        assert existing_device.name == "switch-01.example.com"
+        existing_device.save.assert_called_once()
+
+    @patch("netbox_librenms_plugin.views.imports.actions.cache")
+    @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
+    def test_device_type_mismatch_blocked_without_force(self, mock_cache_key, mock_cache):
+        """Action should be blocked when device_type_mismatch is True and force is not set."""
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+        view = self._create_view()
+        existing_device = MagicMock()
+        existing_device.pk = 42
+        existing_device.custom_field_data = {}
+
+        libre_device = {"device_id": 10, "hostname": "switch-01", "serial": "ABC123"}
+        validation = {"can_import": False, "device_type_mismatch": True}
+        selections = {}
+
+        request = self._create_request("link", 42, use_sysname=True)
+
+        with (
+            patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
+            patch("dcim.models.Device") as mock_device_cls,
+        ):
+            mock_device_cls.objects.get.return_value = existing_device
+            mock_validate.return_value = (libre_device, validation, selections)
+
+            response = view.post(request, device_id=10)
+
+        assert response.status_code == 400
+        existing_device.save.assert_not_called()
+
+    @patch("netbox_librenms_plugin.views.imports.actions.cache")
+    @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
+    def test_device_type_mismatch_allowed_with_force(self, mock_cache_key, mock_cache):
+        """Action should proceed when device_type_mismatch is True and force is set."""
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+        view = self._create_view()
+        existing_device = MagicMock()
+        existing_device.pk = 42
+        existing_device.custom_field_data = {}
+        existing_device.name = "old-name"
+
+        libre_device = {
+            "device_id": 10,
+            "hostname": "switch-01",
+            "sysName": "switch-01.example.com",
+            "serial": "ABC123",
+        }
+        validation = {"can_import": False, "device_type_mismatch": True}
+        selections = {}
+
+        request = self._create_request("link", 42, use_sysname=True)
+        request.POST["force"] = "on"
+
+        with (
+            patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
+            patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
+            patch("dcim.models.Device") as mock_device_cls,
+        ):
+            mock_device_cls.objects.get.return_value = existing_device
+            mock_validate.return_value = (libre_device, validation, selections)
+            mock_render.return_value = MagicMock()
+
+            view.post(request, device_id=10)
+
+        assert existing_device.custom_field_data["librenms_id"] == 10
+        existing_device.save.assert_called_once()
+
+    @patch("netbox_librenms_plugin.views.imports.actions.cache")
+    @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
+    def test_force_with_mismatch_updates_device_type(self, mock_cache_key, mock_cache):
+        """Force with device_type_mismatch should update existing device's device_type."""
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+        view = self._create_view()
+        existing_device = MagicMock()
+        existing_device.pk = 42
+        existing_device.custom_field_data = {}
+        existing_device.name = "old-name"
+
+        librenms_device_type = MagicMock()
+        librenms_device_type.pk = 99
+        libre_device = {
+            "device_id": 10,
+            "hostname": "switch-01",
+            "sysName": "switch-01.example.com",
+            "serial": "ABC123",
+        }
+        validation = {
+            "can_import": False,
+            "device_type_mismatch": True,
+            "device_type": {"device_type": librenms_device_type},
+        }
+        selections = {}
+
+        request = self._create_request("link", 42, use_sysname=True)
+        request.POST["force"] = "on"
+
+        with (
+            patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
+            patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
+            patch("dcim.models.Device") as mock_device_cls,
+        ):
+            mock_device_cls.objects.get.return_value = existing_device
+            mock_validate.return_value = (libre_device, validation, selections)
+            mock_render.return_value = MagicMock()
+
+            view.post(request, device_id=10)
+
+        assert existing_device.device_type == librenms_device_type
+        assert existing_device.custom_field_data["librenms_id"] == 10
+        existing_device.save.assert_called_once()
+
+    @patch("netbox_librenms_plugin.views.imports.actions.cache")
+    @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
+    def test_update_type_action_changes_device_type(self, mock_cache_key, mock_cache):
+        """update_type action should change device type on existing device."""
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+        view = self._create_view()
+        existing_device = MagicMock()
+        existing_device.pk = 42
+        existing_device.custom_field_data = {"librenms_id": 10}
+        existing_device.name = "switch-01"
+        old_device_type = MagicMock()
+        existing_device.device_type = old_device_type
+
+        new_device_type = MagicMock()
+        new_device_type.pk = 99
+        libre_device = {
+            "device_id": 10,
+            "hostname": "switch-01",
+            "serial": "ABC123",
+        }
+        validation = {
+            "can_import": False,
+            "device_type_mismatch": True,
+            "device_type": {"device_type": new_device_type},
+        }
+        selections = {}
+
+        request = self._create_request("update_type", 42)
+        request.POST["force"] = "on"
+
+        with (
+            patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
+            patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
+            patch("dcim.models.Device") as mock_device_cls,
+        ):
+            mock_device_cls.objects.get.return_value = existing_device
+            mock_validate.return_value = (libre_device, validation, selections)
+            mock_render.return_value = MagicMock()
+
+            view.post(request, device_id=10)
+
+        assert existing_device.device_type == new_device_type
+        existing_device.save.assert_called_once()
+
+    @patch("netbox_librenms_plugin.views.imports.actions.cache")
+    @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
+    def test_sync_serial_action(self, mock_cache_key, mock_cache):
+        """sync_serial action should update serial from LibreNMS."""
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+        view = self._create_view()
+        existing_device = MagicMock()
+        existing_device.serial = "OLD123"
+        libre_device = {"device_id": 10, "serial": "NEW456", "sysName": "test"}
+        validation = {"existing_device": existing_device, "device_type_mismatch": False}
+        selections = {}
+
+        request = self._create_request("sync_serial", 42)
+
+        with (
+            patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
+            patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
+            patch("dcim.models.Device") as mock_device_cls,
+        ):
+            mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+            mock_validate.return_value = (libre_device, validation, selections)
+            mock_render.return_value = MagicMock()
+
+            view.post(request, device_id=10)
+
+        assert existing_device.serial == "NEW456"
+        existing_device.save.assert_called_once()
+
+    @patch("netbox_librenms_plugin.views.imports.actions.cache")
+    @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
+    def test_sync_platform_action(self, mock_cache_key, mock_cache):
+        """sync_platform action should update platform from LibreNMS OS."""
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+        view = self._create_view()
+        existing_device = MagicMock()
+        existing_device.platform = None
+        libre_device = {"device_id": 10, "os": "ios", "sysName": "test"}
+        validation = {"existing_device": existing_device, "device_type_mismatch": False}
+        selections = {}
+
+        mock_platform = MagicMock()
+        request = self._create_request("sync_platform", 42)
+
+        with (
+            patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
+            patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
+            patch("dcim.models.Device") as mock_device_cls,
+            patch("dcim.models.Platform") as mock_platform_cls,
+        ):
+            mock_device_cls.objects.get.return_value = existing_device
+            mock_platform_cls.objects.get.return_value = mock_platform
+            mock_validate.return_value = (libre_device, validation, selections)
+            mock_render.return_value = MagicMock()
+
+            view.post(request, device_id=10)
+
+        assert existing_device.platform == mock_platform
+        existing_device.save.assert_called_once()
+
+    @patch("netbox_librenms_plugin.views.imports.actions.cache")
+    @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
+    def test_sync_device_type_action(self, mock_cache_key, mock_cache):
+        """sync_device_type action should update device type from LibreNMS hardware match."""
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+        view = self._create_view()
+        existing_device = MagicMock()
+        new_device_type = MagicMock()
+        libre_device = {"device_id": 10, "hardware": "Catalyst C4900M", "sysName": "test"}
+        validation = {"existing_device": existing_device, "device_type_mismatch": False}
+        selections = {}
+
+        request = self._create_request("sync_device_type", 42)
+
+        with (
+            patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
+            patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
+            patch("dcim.models.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.utils.match_librenms_hardware_to_device_type") as mock_hw_match,
+        ):
+            mock_device_cls.objects.get.return_value = existing_device
+            mock_hw_match.return_value = {"matched": True, "device_type": new_device_type}
+            mock_validate.return_value = (libre_device, validation, selections)
+            mock_render.return_value = MagicMock()
+
+            view.post(request, device_id=10)
+
+        assert existing_device.device_type == new_device_type
+        existing_device.save.assert_called_once()
+
+
+class TestBuildSyncInfo:
+    """Test DeviceValidationDetailsView._build_sync_info method."""
+
+    def test_all_synced(self):
+        """When serial, platform, device type all match, all_synced is True."""
+        from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
+
+        existing = MagicMock()
+        existing.serial = "ABC123"
+        platform = MagicMock()
+        platform.pk = 1
+        existing.platform = platform
+        device_type = MagicMock()
+        device_type.pk = 5
+        existing.device_type = device_type
+
+        libre_device = {"serial": "ABC123", "os": "ios", "hardware": "Catalyst C4900M"}
+
+        with (
+            patch("dcim.models.Platform") as mock_platform_cls,
+            patch("netbox_librenms_plugin.utils.match_librenms_hardware_to_device_type") as mock_hw_match,
+        ):
+            mock_platform_cls.objects.get.return_value = platform
+            mock_hw_match.return_value = {"matched": True, "device_type": device_type}
+
+            result = DeviceValidationDetailsView._build_sync_info(libre_device, existing)
+
+        assert result["all_synced"] is True
+        assert result["serial_synced"] is True
+        assert result["platform_synced"] is True
+        assert result["device_type_synced"] is True
+
+    def test_serial_out_of_sync(self):
+        """When serial differs, serial_synced is False."""
+        from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
+
+        existing = MagicMock()
+        existing.serial = "OLD123"
+        existing.platform = None
+        device_type = MagicMock()
+        device_type.pk = 5
+        existing.device_type = device_type
+
+        libre_device = {"serial": "NEW456", "os": "-", "hardware": "-"}
+
+        result = DeviceValidationDetailsView._build_sync_info(libre_device, existing)
+
+        assert result["serial_synced"] is False
+        assert result["all_synced"] is False
+
+    def test_platform_out_of_sync(self):
+        """When platform differs, platform_synced is False."""
+        from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
+
+        existing = MagicMock()
+        existing.serial = "ABC123"
+        old_platform = MagicMock()
+        old_platform.pk = 1
+        existing.platform = old_platform
+        device_type = MagicMock()
+        device_type.pk = 5
+        existing.device_type = device_type
+
+        new_platform = MagicMock()
+        new_platform.pk = 2
+
+        libre_device = {"serial": "ABC123", "os": "junos", "hardware": "-"}
+
+        with patch("dcim.models.Platform") as mock_platform_cls:
+            mock_platform_cls.objects.get.return_value = new_platform
+
+            result = DeviceValidationDetailsView._build_sync_info(libre_device, existing)
+
+        assert result["platform_synced"] is False
+        assert result["all_synced"] is False

@@ -1,10 +1,59 @@
 from dcim.models import Device, Manufacturer, Platform
 from django.contrib import messages
+from django.core.exceptions import ValidationError
+from django.db import IntegrityError
 from django.shortcuts import get_object_or_404, redirect
 from django.views import View
 
 from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
+
+
+class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
+    """Update NetBox device name from LibreNMS sysName."""
+
+    required_object_permissions = {
+        "POST": [("change", Device)],
+    }
+
+    def post(self, request, pk):
+        """Sync the device name from LibreNMS sysName."""
+        if error := self.require_all_permissions("POST"):
+            return error
+
+        device = get_object_or_404(Device, pk=pk)
+        self.librenms_id = self.librenms_api.get_librenms_id(device)
+
+        if not self.librenms_id:
+            messages.error(request, "Device not found in LibreNMS")
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+
+        success, device_info = self.librenms_api.get_device_info(self.librenms_id)
+
+        if not success or not device_info:
+            messages.error(request, "Failed to retrieve device info from LibreNMS")
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+
+        sys_name = device_info.get("sysName")
+
+        if not sys_name:
+            messages.warning(request, "No sysName available in LibreNMS")
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+
+        old_name = device.name
+        device.name = sys_name
+        try:
+            device.full_clean()
+            device.save()
+        except (ValidationError, IntegrityError) as e:
+            device.name = old_name
+            error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
+            messages.error(request, f"Failed to update device name to '{sys_name}': {error_msg}")
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+
+        messages.success(request, f"Device name updated from '{old_name}' to '{sys_name}'")
+
+        return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
 
 class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
@@ -15,6 +64,7 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
     }
 
     def post(self, request, pk):
+        """Sync the device serial number from LibreNMS."""
         # Check both plugin write and NetBox object permissions
         if error := self.require_all_permissions("POST"):
             return error
@@ -40,7 +90,14 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
 
         old_serial = device.serial
         device.serial = serial
-        device.save()
+        try:
+            device.full_clean()
+            device.save()
+        except (ValidationError, IntegrityError) as e:
+            device.serial = old_serial
+            error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
+            messages.error(request, f"Failed to update serial to '{serial}': {error_msg}")
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         if old_serial:
             messages.success(
@@ -61,6 +118,7 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
     }
 
     def post(self, request, pk):
+        """Sync the device type from LibreNMS hardware info."""
         # Check both plugin write and NetBox object permissions
         if error := self.require_all_permissions("POST"):
             return error
@@ -96,7 +154,14 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         device_type = match_result["device_type"]
         old_device_type = device.device_type
         device.device_type = device_type
-        device.save()
+        try:
+            device.full_clean()
+            device.save()
+        except (ValidationError, IntegrityError) as e:
+            device.device_type = old_device_type
+            error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
+            messages.error(request, f"Failed to update device type to '{device_type}': {error_msg}")
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         messages.success(
             request,
@@ -114,6 +179,7 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
     }
 
     def post(self, request, pk):
+        """Sync the device platform from LibreNMS OS name."""
         # Check both plugin write and NetBox object permissions
         if error := self.require_all_permissions("POST"):
             return error
@@ -152,7 +218,14 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
 
         old_platform = device.platform
         device.platform = platform
-        device.save()
+        try:
+            device.full_clean()
+            device.save()
+        except (ValidationError, IntegrityError) as e:
+            device.platform = old_platform
+            error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
+            messages.error(request, f"Failed to update platform to '{platform}': {error_msg}")
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         if old_platform:
             messages.success(
@@ -176,6 +249,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
     }
 
     def post(self, request, pk):
+        """Create a new platform and assign it to the device."""
         # Check both plugin write and NetBox object permissions
         if error := self.require_all_permissions("POST"):
             return error
@@ -203,13 +277,28 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             except Manufacturer.DoesNotExist:
                 pass
 
-        platform = Platform.objects.create(
-            name=platform_name,
-            manufacturer=manufacturer,
-        )
+        try:
+            platform = Platform.objects.create(
+                name=platform_name,
+                manufacturer=manufacturer,
+            )
+        except IntegrityError:
+            messages.error(
+                request,
+                f"Platform '{platform_name}' could not be created (slug collision). Try a different name.",
+            )
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
+        old_platform = device.platform
         device.platform = platform
-        device.save()
+        try:
+            device.full_clean()
+            device.save()
+        except (ValidationError, IntegrityError) as e:
+            device.platform = old_platform
+            error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
+            messages.error(request, f"Failed to assign platform '{platform}': {error_msg}")
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         messages.success(
             request,
@@ -227,6 +316,7 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
     }
 
     def post(self, request, pk):
+        """Sync serial numbers to virtual chassis member devices."""
         # Check both plugin write and NetBox object permissions
         if error := self.require_all_permissions("POST"):
             return error
@@ -258,7 +348,14 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
                     continue
 
                 member.serial = serial
-                member.save()
+                try:
+                    member.full_clean()
+                    member.save()
+                except (ValidationError, IntegrityError) as e:
+                    error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
+                    errors.append(f"Failed to set serial on {member.name}: {error_msg}")
+                    counter += 1
+                    continue
 
                 assignments_made += 1
 

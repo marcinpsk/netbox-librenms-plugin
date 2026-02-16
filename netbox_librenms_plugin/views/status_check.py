@@ -85,6 +85,7 @@ class VMStatusListView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Object
     title = "Virtual Machine LibreNMS Status"
 
     def get_queryset(self, request):
+        """Return VMs annotated with their LibreNMS status."""
         if self.request.GET:
             queryset = VirtualMachine.objects.select_related("cluster", "site")
 

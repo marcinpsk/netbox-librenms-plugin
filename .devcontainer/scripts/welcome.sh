@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Ensure aliases are available in the postAttach terminal session
+source "$(dirname "$0")/load-aliases.sh" 2>/dev/null
+
 echo ""
 echo "🎯 NetBox LibreNMS Plugin Development Environment"
 
