@@ -46,10 +46,6 @@ class SyncSiteLocationView(LibreNMSPermissionMixin, LibreNMSAPIMixin, SingleTabl
         if self.request.GET and self.filterset:
             return self.filterset(self.request.GET, queryset=sync_data).qs
 
-        if "q" in self.request.GET:
-            query = self.request.GET.get("q", "").lower()
-            sync_data = [item for item in sync_data if query in item.netbox_site.name.lower()]
-
         return sync_data
 
     def get_librenms_locations(self):

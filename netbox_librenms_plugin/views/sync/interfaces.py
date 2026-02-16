@@ -184,6 +184,7 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
         if not vlan_synced:
             interface.save()
 
+
     def get_netbox_interface_type(self, librenms_interface):
         """Return the NetBox interface type mapped from LibreNMS type and speed."""
         speed = convert_speed_to_kbps(librenms_interface.get("ifSpeed"))
@@ -247,6 +248,14 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
 
         if "librenms_id" in interface.cf:
             interface.custom_field_data["librenms_id"] = librenms_interface.get("port_id")
+
+        if "enabled" not in exclude_columns:
+            admin_status = librenms_interface.get("ifAdminStatus")
+            interface.enabled = (
+                True
+                if admin_status is None
+                else (admin_status.lower() == "up" if isinstance(admin_status, str) else bool(admin_status))
+            )
 
         ifPhysAddress = librenms_interface.get("ifPhysAddress")
         self.handle_mac_address(interface, ifPhysAddress)
