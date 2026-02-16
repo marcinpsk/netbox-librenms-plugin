@@ -143,7 +143,11 @@ def get_table_paginate_count(request: HttpRequest, table_prefix: str) -> int:
 
 
 def _get_user_pref(request, path, default=None):
-    """Get a user preference value via request.user.config."""
+    """Get a user preference value via request.user.config.
+
+    Underscore prefix signals package-internal helper, not public plugin API.
+    Cross-module imports within this package are intentional.
+    """
     if hasattr(request, "user") and hasattr(request.user, "config"):
         return request.user.config.get(path, default)
     return default
