@@ -15,7 +15,7 @@ This design ensures the plugin respects your existing NetBox permission structur
 
 ## Two-Tier Permission Model
 
-### How the Tiers Work Together?
+### How Do the Tiers Work Together?
 
 A user needs both tiers of permissions to complete an action. For example, to view the Librenms Import page AND import a device:
 
@@ -90,7 +90,7 @@ Plugins permissions use the **LibreNMS Settings** model permissions:
 | `view_librenmssettings` | LibreNMS Settings → ☑ Can view | Access all plugin pages, view LibreNMS data |
 | `change_librenmssettings` | LibreNMS Settings → ☑ Can change | Import devices, sync data, save settings |
 
-Users without View permission won't see the LibreNMS menu or the LibreNMS Sync tab. Users with **View** but not **Change** can browse all plugin pages but cannot perform import or sync actions that modify Netbox data and Librenms data like Locatons and Adding devices.
+Users without View permission won't see the LibreNMS menu or the LibreNMS Sync tab. Users with **View** but not **Change** can browse all plugin pages but cannot perform import or sync actions that modify Netbox data and Librenms data like Locations and Adding devices.
 
 ### Tier 2: NetBox Object Permissions
 
@@ -148,4 +148,4 @@ The plugin automatically detects whether the current user is a superuser and adj
 : The user has plugin permissions but may be missing NetBox object permissions. Check that they have `dcim.add_device` and related permissions.
 
 **Background jobs show 403 errors in console**
-: This is expected for non-superuser users. The plugin automatically falls back to synchronous mode, so functionality is not affected. The console errors can be ignored.
+: In normal usage, the UI only enables background jobs for users allowed to use them and falls back to synchronous processing otherwise, so 403s from background job APIs should not appear. If you see these errors, it usually means a direct API call or custom integration is hitting background-task endpoints without superuser access; update that integration to use synchronous flows or run it with appropriate permissions.
