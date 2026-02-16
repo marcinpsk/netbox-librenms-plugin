@@ -560,12 +560,12 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         except PermissionDenied as exc:
             # Handle permission errors with a user-friendly message
             logger.warning(f"Permission denied during import: {exc}")
+            messages.error(request, str(exc))
             if request.headers.get("HX-Request"):
                 return HttpResponse(
-                    f'<div class="alert alert-danger"><i class="mdi mdi-alert-circle"></i> {exc}</div>',
-                    status=403,
+                    "",
+                    headers={"HX-Redirect": "/plugins/librenms_plugin/librenms-import/"},
                 )
-            messages.error(request, str(exc))
             return redirect("plugins:netbox_librenms_plugin:librenms_import")
 
         except Exception as exc:  # pragma: no cover - defensive guard
