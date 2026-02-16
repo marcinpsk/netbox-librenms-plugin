@@ -2,13 +2,7 @@ name: Lint and Format
 
 on:
   push:
-    branches:
-      - master
-      - develop
   pull_request:
-    branches:
-      - master
-      - develop
 
 jobs:
   format-and-lint:
