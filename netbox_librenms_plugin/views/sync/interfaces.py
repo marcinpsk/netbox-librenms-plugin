@@ -20,8 +20,10 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, C
         """Return the required permissions based on object type."""
         if object_type == "device":
             return [("add", Interface), ("change", Interface)]
-        else:
+        elif object_type == "virtualmachine":
             return [("add", VMInterface), ("change", VMInterface)]
+        else:
+            raise Http404(f"Invalid object type: {object_type}")
 
     def post(self, request, object_type, object_id):
         # Set permissions dynamically based on object type
@@ -219,8 +221,10 @@ class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermission
         """Return the required permissions based on object type."""
         if object_type == "device":
             return [("delete", Interface)]
-        else:
+        elif object_type == "virtualmachine":
             return [("delete", VMInterface)]
+        else:
+            raise Http404(f"Invalid object type: {object_type}")
 
     def post(self, request, object_type, object_id):
         # Check plugin write permission first

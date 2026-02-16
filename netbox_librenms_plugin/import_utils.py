@@ -1280,7 +1280,11 @@ def bulk_import_devices_shared(
         user = getattr(job.job, "user", None)
 
     # Check permissions at start of bulk operation
-    required_perms = ["dcim.add_device", "dcim.add_interface"]
+    required_perms = [
+        "dcim.add_device",
+        "dcim.add_interface",
+        "dcim.add_virtualchassis",
+    ]
     require_permissions(user, required_perms, "import devices")
 
     total = len(device_ids)
