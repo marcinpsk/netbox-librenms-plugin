@@ -26,7 +26,7 @@ A user needs both tiers of permissions to complete an action. For example, to vi
 
 The Plugin also enforces Netbox object permissions so the following permission would also be required:
 
-2. **Tier 2: Object permission**: User needs `dcim.add_device` (to create the device in NetBox)
+1. **Tier 2: Object permission**: User needs `dcim.add_device` (to create the device in NetBox)
 
 If either permission is missing, the operation fails with an appropriate error message.
 
@@ -58,7 +58,7 @@ NetBox object permissions are created similarly but for different object types (
 The Interface Type Mapping feature uses its own object permissions in addition to the plugin permissions. To manage interface mappings, users need:
 
 - **Plugin permission**: View permission on LibreNMS Settings (to access the page)
-- **Object permissions**: `netbox_librenms_plugin.add_interfacetypemapping`, `change_interfacetypemapping`, or `delete_interfacetypemapping` as needed
+- **Object permissions**: `netbox_librenms_plugin.add_interfacetypemapping`, `netbox_librenms_plugin.change_interfacetypemapping`, or `netbox_librenms_plugin.delete_interfacetypemapping` as needed
 
 These permissions are enforced automatically by NetBox's generic views.
 
@@ -81,6 +81,7 @@ Users have full access to all plugin features and can import devices, sync inter
 
 
 ## Further Details
+
 ### Tier 1: Plugin Permissions
 
 Plugins permissions use the **LibreNMS Settings** model permissions:

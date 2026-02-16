@@ -1,7 +1,7 @@
 from dcim.models import Device, Manufacturer, Platform
 from django.contrib import messages
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.shortcuts import get_object_or_404, redirect
 from django.views import View
 
@@ -278,26 +278,28 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 pass
 
         try:
-            platform = Platform.objects.create(
-                name=platform_name,
-                manufacturer=manufacturer,
-            )
-        except IntegrityError:
-            messages.error(
-                request,
-                f"Platform '{platform_name}' could not be created (slug collision). Try a different name.",
-            )
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            with transaction.atomic():
+                platform = Platform.objects.create(
+                    name=platform_name,
+                    manufacturer=manufacturer,
+                )
 
-        old_platform = device.platform
-        device.platform = platform
-        try:
-            device.full_clean()
-            device.save()
-        except (ValidationError, IntegrityError) as e:
-            device.platform = old_platform
+                device.platform = platform
+                device.full_clean()
+                device.save()
+        except IntegrityError as e:
+            error_str = str(e)
+            if "platform" in error_str.lower() or "slug" in error_str.lower():
+                messages.error(
+                    request,
+                    f"Platform '{platform_name}' could not be created (slug collision). Try a different name.",
+                )
+            else:
+                messages.error(request, f"Failed to assign platform '{platform_name}': {error_str}")
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+        except ValidationError as e:
             error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
-            messages.error(request, f"Failed to assign platform '{platform}': {error_msg}")
+            messages.error(request, f"Failed to assign platform '{platform_name}': {error_msg}")
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         messages.success(
@@ -347,11 +349,13 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
                     counter += 1
                     continue
 
+                old_serial = member.serial
                 member.serial = serial
                 try:
                     member.full_clean()
                     member.save()
                 except (ValidationError, IntegrityError) as e:
+                    member.serial = old_serial
                     error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
                     errors.append(f"Failed to set serial on {member.name}: {error_msg}")
                     counter += 1

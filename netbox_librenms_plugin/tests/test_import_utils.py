@@ -1618,6 +1618,8 @@ class TestDeviceConflictActionView:
         view = object.__new__(DeviceConflictActionView)
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
+        view.request = MagicMock()
+        view.request.user.has_perm.return_value = True
         return view
 
     def _create_request(self, action, existing_device_id, use_sysname=False, strip_domain=False):

@@ -42,15 +42,21 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Cache
         return cached_data.get("links", [])
 
     def create_cable(self, local_interface, remote_interface, request):
-        """Create a cable between local and remote interfaces."""
+        """Create a cable between local and remote interfaces.
+
+        Returns:
+            True on success, False on failure.
+        """
         try:
             Cable.objects.create(
                 a_terminations=[local_interface],
                 b_terminations=[remote_interface],
                 status="connected",
             )
+            return True
         except Exception as exc:  # pragma: no cover - protects UX
             messages.error(request, f"Failed to create cable: {str(exc)}")
+            return False
 
     def check_existing_cable(self, local_interface, remote_interface):
         """Return True if a cable already exists for either interface."""
@@ -79,7 +85,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Cache
             link_data = next(link for link in cached_links if link["local_port"] == interface["interface"])
             return self.handle_cable_creation(link_data, interface)
         except StopIteration:
-            return {"status": "invalid"}
+            return {"status": "invalid", "interface": interface.get("interface", "")}
 
     def verify_cable_creation_requirements(self, link_data):
         """Return True if all required interface IDs are present in link data."""
@@ -103,20 +109,25 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Cache
             if self.check_existing_cable(local_interface, remote_interface):
                 return {"status": "duplicate", "interface": interface["interface"]}
 
-            self.create_cable(local_interface, remote_interface, self.request)
-            return {"status": "valid", "interface": interface["interface"]}
+            if self.create_cable(local_interface, remote_interface, self.request):
+                return {"status": "valid", "interface": interface["interface"]}
+            return {"status": "invalid", "interface": interface["interface"]}  # pragma: no cover
 
         except Interface.DoesNotExist:
             return {"status": "missing_remote", "interface": interface["interface"]}
 
     def process_interface_sync(self, selected_interfaces, cached_links):
-        """Process cable sync for all selected interfaces and return results."""
+        """Process cable sync for all selected interfaces and return results.
+
+        Each interface is processed in its own atomic block so individual
+        failures roll back only that cable without affecting others.
+        """
         results = {"valid": [], "invalid": [], "duplicate": [], "missing_remote": []}
 
-        with transaction.atomic():
-            for interface in selected_interfaces:
+        for interface in selected_interfaces:
+            with transaction.atomic():
                 result = self.process_single_interface(interface, cached_links)
-                results[result["status"]].append(result.get("interface", ""))
+            results[result["status"]].append(result.get("interface", ""))
 
         return results
 

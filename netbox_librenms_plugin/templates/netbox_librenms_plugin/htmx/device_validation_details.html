@@ -165,7 +165,7 @@
                     {% if sync_info and not sync_info.device_type_synced and sync_info.librenms_device_type %}
                       <form style="display:inline" class="ms-1"
                             hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
-                            hx-swap="none"
+                            hx-swap="none">
                         {% csrf_token %}
                         <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
                         <input type="hidden" name="action" value="sync_device_type">
@@ -205,7 +205,7 @@
                       {% else %}
                       <form style="display:inline" class="ms-1"
                             hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
-                            hx-swap="none"
+                            hx-swap="none">
                         {% csrf_token %}
                         <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
                         <input type="hidden" name="action" value="sync_serial">
@@ -258,7 +258,7 @@
                       {% if sync_info.platform_info.platform_exists %}
                         <form style="display:inline" class="ms-1"
                               hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
-                              hx-swap="none"
+                              hx-swap="none">
                           {% csrf_token %}
                           <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
                           <input type="hidden" name="action" value="sync_platform">
@@ -281,7 +281,7 @@
                     {% if validation.existing_device %}
                     <form style="display:inline" class="ms-1"
                           hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
-                          hx-swap="none"
+                          hx-swap="none">
                       {% csrf_token %}
                       <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
                       <input type="hidden" name="action" value="sync_platform">
@@ -545,7 +545,7 @@
         <i class="mdi mdi-open-in-new"></i> View in NetBox
       </a>
       {% if validation.existing_match_type == 'librenms_id' %}
-        <a href="{{ existing_device_url }}librenms-sync/"
+        <a href="{% url 'plugins:netbox_librenms_plugin:device_librenms_sync' pk=validation.existing_device.pk %}"
            class="btn btn-outline-primary btn-sm" target="_blank">
           <i class="mdi mdi-sync"></i> Full Sync Page
         </a>

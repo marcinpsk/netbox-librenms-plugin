@@ -47,6 +47,47 @@ def _get_librenms_server_choices():
     return choices
 
 
+def _get_librenms_poller_group_choices():
+    """
+    Helper function to get poller group choices from LibreNMS API.
+    Shared between AddToLIbreSNMPV1V2 and AddToLIbreSNMPV3 forms.
+    Results are cached to avoid repeated API calls on every form instantiation.
+    """
+    from django.core.cache import cache
+
+    from .librenms_api import LibreNMSAPI
+
+    choices = [("0", "Default (0)")]
+
+    cache_key = "librenms_poller_group_choices"
+    cached_choices = cache.get(cache_key)
+    if cached_choices:
+        return cached_choices
+
+    try:
+        api = LibreNMSAPI()
+        success, poller_groups = api.get_poller_groups()
+
+        if success and poller_groups:
+            for group in poller_groups:
+                group_id = str(group.get("id", ""))
+                group_name = group.get("group_name", "")
+                group_descr = group.get("descr", "")
+
+                if group_id:
+                    if group_descr and group_descr != group_name:
+                        label = f"{group_name} - {group_descr} ({group_id})"
+                    else:
+                        label = f"{group_name} ({group_id})"
+                    choices.append((group_id, label))
+
+            cache.set(cache_key, choices, timeout=api.cache_timeout)
+    except Exception:
+        logger.exception("Failed to load LibreNMS poller groups")
+
+    return choices
+
+
 class ServerConfigForm(NetBoxModelForm):
     """
     Form for selecting the active LibreNMS server from configured servers.
@@ -295,37 +336,7 @@ class AddToLIbreSNMPV1V2(forms.Form):
     def __init__(self, *args, **kwargs):
         """Initialize form and populate poller group choices."""
         super().__init__(*args, **kwargs)
-        # Populate poller groups from LibreNMS API
-        self.fields["poller_group"].choices = self._get_poller_group_choices()
-
-    def _get_poller_group_choices(self):
-        """Get poller group choices from LibreNMS API."""
-        from .librenms_api import LibreNMSAPI
-
-        choices = [("0", "Default (0)")]
-
-        try:
-            api = LibreNMSAPI()
-            success, poller_groups = api.get_poller_groups()
-
-            if success and poller_groups:
-                for group in poller_groups:
-                    group_id = str(group.get("id", ""))
-                    group_name = group.get("group_name", "")
-                    group_descr = group.get("descr", "")
-
-                    if group_id:
-                        # Format: "Group Name (ID)" or "Group Name - Description (ID)"
-                        if group_descr and group_descr != group_name:
-                            label = f"{group_name} - {group_descr} ({group_id})"
-                        else:
-                            label = f"{group_name} ({group_id})"
-                        choices.append((group_id, label))
-        except Exception:
-            # If API call fails, just use default option
-            pass
-
-        return choices
+        self.fields["poller_group"].choices = _get_librenms_poller_group_choices()
 
 
 class AddToLIbreSNMPV3(forms.Form):
@@ -423,37 +434,7 @@ class AddToLIbreSNMPV3(forms.Form):
     def __init__(self, *args, **kwargs):
         """Initialize form and populate poller group choices."""
         super().__init__(*args, **kwargs)
-        # Populate poller groups from LibreNMS API
-        self.fields["poller_group"].choices = self._get_poller_group_choices()
-
-    def _get_poller_group_choices(self):
-        """Get poller group choices from LibreNMS API."""
-        from .librenms_api import LibreNMSAPI
-
-        choices = [("0", "Default (0)")]
-
-        try:
-            api = LibreNMSAPI()
-            success, poller_groups = api.get_poller_groups()
-
-            if success and poller_groups:
-                for group in poller_groups:
-                    group_id = str(group.get("id", ""))
-                    group_name = group.get("group_name", "")
-                    group_descr = group.get("descr", "")
-
-                    if group_id:
-                        # Format: "Group Name (ID)" or "Group Name - Description (ID)"
-                        if group_descr and group_descr != group_name:
-                            label = f"{group_name} - {group_descr} ({group_id})"
-                        else:
-                            label = f"{group_name} ({group_id})"
-                        choices.append((group_id, label))
-        except Exception:
-            # If API call fails, just use default option
-            pass
-
-        return choices
+        self.fields["poller_group"].choices = _get_librenms_poller_group_choices()
 
 
 class DeviceStatusFilterForm(NetBoxModelFilterSetForm):

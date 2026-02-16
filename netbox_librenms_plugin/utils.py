@@ -193,7 +193,9 @@ def get_interface_name_field(request: Optional[HttpRequest] = None) -> str:
         # Explicit override from request params
         param_val = request.GET.get("interface_name_field") or request.POST.get("interface_name_field")
         if param_val:
-            _save_user_pref(request, "plugins.netbox_librenms_plugin.interface_name_field", param_val)
+            existing = _get_user_pref(request, "plugins.netbox_librenms_plugin.interface_name_field")
+            if param_val != existing:
+                _save_user_pref(request, "plugins.netbox_librenms_plugin.interface_name_field", param_val)
             return param_val
 
         # Check user preference

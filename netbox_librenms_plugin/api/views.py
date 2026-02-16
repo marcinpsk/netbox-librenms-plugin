@@ -7,7 +7,7 @@ from django.utils import timezone
 from django_rq import get_queue
 from netbox.api.viewsets import NetBoxModelViewSet
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import BasePermission
+from rest_framework.permissions import BasePermission, SAFE_METHODS
 from rq.job import Job as RQJob
 
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
@@ -22,12 +22,12 @@ class LibreNMSPluginPermission(BasePermission):
     """
     Permission class for LibreNMS plugin API endpoints.
 
-    - GET requests require view_librenmssettings
-    - All other requests require change_librenmssettings
+    - Safe requests (GET, HEAD, OPTIONS) require netbox_librenms_plugin.view_librenmssettings
+    - All other requests require netbox_librenms_plugin.change_librenmssettings
     """
 
     def has_permission(self, request, view):
-        if request.method == "GET":
+        if request.method in SAFE_METHODS:
             return request.user.has_perm(PERM_VIEW_PLUGIN)
         return request.user.has_perm(PERM_CHANGE_PLUGIN)
 

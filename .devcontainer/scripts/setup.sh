@@ -121,7 +121,7 @@ $PIP_CMD install pytest pytest-django ruff pre-commit
 if ! command -v gh >/dev/null 2>&1; then
   echo "🔧 Installing GitHub CLI..."
   (type -p wget >/dev/null || apt-get install -y -qq wget) \
-    && mkdir -p -m 755 /etc/apt/keyrings \
+    && install -d -m 755 /etc/apt/keyrings \
     && out=$(mktemp) \
     && wget -qO "$out" https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     && cat "$out" | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \

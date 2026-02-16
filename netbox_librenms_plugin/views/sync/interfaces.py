@@ -236,17 +236,13 @@ class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermission
 
     def post(self, request, object_type, object_id):
         """Delete selected NetBox-only interfaces not present in LibreNMS."""
-        # Check plugin write permission first
-        if error := self.require_write_permission_json():
-            return error
-
         # Set permissions dynamically based on object type
         self.required_object_permissions = {
             "POST": self.get_required_permissions_for_object_type(object_type),
         }
 
-        # Check NetBox object permissions
-        if error := self.require_object_permissions_json("POST"):
+        # Check both plugin write and NetBox object permissions
+        if error := self.require_all_permissions_json("POST"):
             return error
 
         if object_type == "device":
@@ -268,6 +264,7 @@ class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermission
         try:
             with transaction.atomic():
                 for interface_id in interface_ids:
+                    interface_name = None
                     try:
                         if object_type == "device":
                             interface = Interface.objects.get(id=interface_id)

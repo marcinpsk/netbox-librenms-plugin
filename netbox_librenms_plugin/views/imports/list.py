@@ -312,7 +312,7 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         strip_domain = _get_user_pref(request, "plugins.netbox_librenms_plugin.strip_domain")
         # Fall back to server-level settings
         if use_sysname is None:
-            use_sysname = getattr(settings, "use_sysname_default", False) if settings else False
+            use_sysname = getattr(settings, "use_sysname_default", True) if settings else True
         if strip_domain is None:
             strip_domain = getattr(settings, "strip_domain_default", False) if settings else False
 

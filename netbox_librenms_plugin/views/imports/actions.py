@@ -816,11 +816,14 @@ class DeviceRackUpdateView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImpo
         return self.render_device_row(request, libre_device, validation, selections)
 
 
-class DeviceConflictActionView(LibreNMSAPIMixin, DeviceImportHelperMixin, View):
+class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View):
     """HTMX view to resolve device conflicts (link, update, update serial)."""
 
     def post(self, request, device_id):
         """Resolve a device conflict by linking, updating, or syncing serial."""
+        if error := self.require_write_permission():
+            return error
+
         from dcim.models import Device
 
         save_import_toggle_prefs(request)
