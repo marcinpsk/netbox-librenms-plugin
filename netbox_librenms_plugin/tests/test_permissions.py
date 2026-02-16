@@ -44,6 +44,8 @@ class TestLibreNMSPermissionMixin:
         mixin.request.user.has_perm.return_value = False
         mixin.request.path = "/some/path/"
         mixin.request.META = {"HTTP_REFERER": "/original/page/"}
+        mixin.request.get_host.return_value = "testserver"
+        mixin.request.is_secure.return_value = False
         mixin.request.headers = {}  # Not an HTMX request
 
         with patch("netbox_librenms_plugin.views.mixins.redirect") as mock_redirect:
@@ -62,6 +64,8 @@ class TestLibreNMSPermissionMixin:
         mixin.request.user.has_perm.return_value = False
         mixin.request.path = "/some/path/"
         mixin.request.META = {"HTTP_REFERER": "/original/page/"}
+        mixin.request.get_host.return_value = "testserver"
+        mixin.request.is_secure.return_value = False
         mixin.request.headers = {"HX-Request": "true"}
 
         with patch("netbox_librenms_plugin.views.mixins.messages"):
@@ -396,7 +400,10 @@ class TestNetBoxObjectPermissionMixin:
         mixin = NetBoxObjectPermissionMixin()
         mixin.request = MagicMock()
         mixin.request.user.has_perm.return_value = False
+        mixin.request.path = "/original/page/"
         mixin.request.META = {"HTTP_REFERER": "/original/page/"}
+        mixin.request.get_host.return_value = "testserver"
+        mixin.request.is_secure.return_value = False
         mixin.request.headers = {}  # Not an HTMX request
 
         mock_model = MagicMock()
@@ -425,7 +432,10 @@ class TestNetBoxObjectPermissionMixin:
         mixin = NetBoxObjectPermissionMixin()
         mixin.request = MagicMock()
         mixin.request.user.has_perm.return_value = False
+        mixin.request.path = "/original/page/"
         mixin.request.META = {"HTTP_REFERER": "/original/page/"}
+        mixin.request.get_host.return_value = "testserver"
+        mixin.request.is_secure.return_value = False
         mixin.request.headers = {"HX-Request": "true"}
 
         mock_model = MagicMock()
@@ -522,7 +532,10 @@ class TestNetBoxObjectPermissionMixin:
         mixin = TestView()
         mixin.request = MagicMock()
         mixin.request.user.has_perm.return_value = False
+        mixin.request.path = "/original/page/"
         mixin.request.META = {"HTTP_REFERER": "/original/page/"}
+        mixin.request.get_host.return_value = "testserver"
+        mixin.request.is_secure.return_value = False
         mixin.request.headers = {}
 
         mixin.required_object_permissions = {"POST": []}
@@ -548,7 +561,10 @@ class TestNetBoxObjectPermissionMixin:
         mixin.request = MagicMock()
         # has_write_permission passes, but object perms fail
         mixin.request.user.has_perm.side_effect = lambda p: p == "netbox_librenms_plugin.change_librenmssettings"
+        mixin.request.path = "/original/page/"
         mixin.request.META = {"HTTP_REFERER": "/original/page/"}
+        mixin.request.get_host.return_value = "testserver"
+        mixin.request.is_secure.return_value = False
         mixin.request.headers = {}
 
         mock_model = MagicMock()
@@ -751,3 +767,187 @@ class TestBulkImportPermissionDenied:
                 api=api,
                 user=user,
             )
+
+
+class TestSafeRedirectUrl:
+    """Tests for the _get_safe_redirect_url helper."""
+
+    def test_internal_referrer_is_accepted(self):
+        """Internal referrer URL is returned when host matches."""
+        from netbox_librenms_plugin.views.mixins import _get_safe_redirect_url
+
+        request = MagicMock()
+        request.META = {"HTTP_REFERER": "http://testserver/some/page/"}
+        request.get_host.return_value = "testserver"
+        request.is_secure.return_value = False
+        request.path = "/fallback/"
+
+        result = _get_safe_redirect_url(request)
+        assert result == "http://testserver/some/page/"
+
+    def test_external_referrer_is_rejected(self):
+        """External referrer URL is rejected, falls back to request.path."""
+        from netbox_librenms_plugin.views.mixins import _get_safe_redirect_url
+
+        request = MagicMock()
+        request.META = {"HTTP_REFERER": "http://evil.com/attack"}
+        request.get_host.return_value = "testserver"
+        request.is_secure.return_value = False
+        request.path = "/safe/fallback/"
+
+        result = _get_safe_redirect_url(request)
+        assert result == "/safe/fallback/"
+
+    def test_no_referrer_falls_back_to_path(self):
+        """Missing referrer falls back to request.path."""
+        from netbox_librenms_plugin.views.mixins import _get_safe_redirect_url
+
+        request = MagicMock()
+        request.META = {}
+        request.path = "/current/page/"
+
+        result = _get_safe_redirect_url(request)
+        assert result == "/current/page/"
+
+    def test_no_referrer_no_path_falls_back_to_slash(self):
+        """Missing referrer and no path attribute falls back to '/'."""
+        from netbox_librenms_plugin.views.mixins import _get_safe_redirect_url
+
+        request = MagicMock(spec=[])  # No attributes at all
+        request.META = {}
+
+        result = _get_safe_redirect_url(request)
+        assert result == "/"
+
+    def test_relative_referrer_is_accepted(self):
+        """Relative referrer path is accepted (no host to mismatch)."""
+        from netbox_librenms_plugin.views.mixins import _get_safe_redirect_url
+
+        request = MagicMock()
+        request.META = {"HTTP_REFERER": "/original/page/"}
+        request.get_host.return_value = "testserver"
+        request.is_secure.return_value = False
+        request.path = "/fallback/"
+
+        result = _get_safe_redirect_url(request)
+        assert result == "/original/page/"
+
+    def test_write_permission_denied_rejects_external_referrer(self):
+        """Write permission denial with external referrer falls back to request.path."""
+        from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
+
+        mixin = LibreNMSPermissionMixin()
+        mixin.request = MagicMock()
+        mixin.request.user.has_perm.return_value = False
+        mixin.request.path = "/safe/page/"
+        mixin.request.META = {"HTTP_REFERER": "http://evil.com/steal"}
+        mixin.request.get_host.return_value = "testserver"
+        mixin.request.is_secure.return_value = False
+        mixin.request.headers = {}
+
+        with patch("netbox_librenms_plugin.views.mixins.redirect") as mock_redirect:
+            with patch("netbox_librenms_plugin.views.mixins.messages"):
+                mixin.require_write_permission()
+
+        mock_redirect.assert_called_once_with("/safe/page/")
+
+    def test_htmx_rejects_external_referrer(self):
+        """HTMX request with external referrer uses fallback in HX-Redirect."""
+        from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
+
+        mixin = LibreNMSPermissionMixin()
+        mixin.request = MagicMock()
+        mixin.request.user.has_perm.return_value = False
+        mixin.request.path = "/safe/page/"
+        mixin.request.META = {"HTTP_REFERER": "http://evil.com/steal"}
+        mixin.request.get_host.return_value = "testserver"
+        mixin.request.is_secure.return_value = False
+        mixin.request.headers = {"HX-Request": "true"}
+
+        with patch("netbox_librenms_plugin.views.mixins.messages"):
+            result = mixin.require_write_permission()
+
+        assert result["HX-Redirect"] == "/safe/page/"
+
+
+class TestBulkImportVCPermission:
+    """Tests that bulk import checks virtualchassis permission."""
+
+    @patch("netbox_librenms_plugin.import_utils.require_permissions")
+    @patch("netbox_librenms_plugin.import_utils.LibreNMSAPI")
+    def test_bulk_import_devices_checks_vc_permission(self, mock_api_class, mock_require):
+        """bulk_import_devices_shared includes dcim.add_virtualchassis in required perms."""
+        from netbox_librenms_plugin.import_utils import bulk_import_devices_shared
+
+        user = MagicMock()
+        mock_api = MagicMock()
+        mock_api_class.return_value = mock_api
+        mock_api.get_device_info.return_value = (False, None)
+
+        bulk_import_devices_shared(
+            device_ids=[1],
+            user=user,
+            server_key="default",
+        )
+
+        mock_require.assert_called_once()
+        call_args = mock_require.call_args
+        assert "dcim.add_virtualchassis" in call_args[0][1]
+
+
+class TestObjectTypeValidation:
+    """Tests that get_required_permissions_for_object_type validates object_type."""
+
+    def test_sync_interfaces_device_type(self):
+        """SyncInterfacesView returns correct perms for device type."""
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        view = SyncInterfacesView()
+        perms = view.get_required_permissions_for_object_type("device")
+        assert len(perms) == 2
+
+    def test_sync_interfaces_vm_type(self):
+        """SyncInterfacesView returns correct perms for virtualmachine type."""
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        view = SyncInterfacesView()
+        perms = view.get_required_permissions_for_object_type("virtualmachine")
+        assert len(perms) == 2
+
+    def test_sync_interfaces_invalid_type_raises_404(self):
+        """SyncInterfacesView raises Http404 for invalid object type."""
+        import pytest
+        from django.http import Http404
+
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+
+        view = SyncInterfacesView()
+        with pytest.raises(Http404):
+            view.get_required_permissions_for_object_type("invalid")
+
+    def test_delete_interfaces_device_type(self):
+        """DeleteNetBoxInterfacesView returns correct perms for device type."""
+        from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
+
+        view = DeleteNetBoxInterfacesView()
+        perms = view.get_required_permissions_for_object_type("device")
+        assert len(perms) == 1
+
+    def test_delete_interfaces_vm_type(self):
+        """DeleteNetBoxInterfacesView returns correct perms for virtualmachine type."""
+        from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
+
+        view = DeleteNetBoxInterfacesView()
+        perms = view.get_required_permissions_for_object_type("virtualmachine")
+        assert len(perms) == 1
+
+    def test_delete_interfaces_invalid_type_raises_404(self):
+        """DeleteNetBoxInterfacesView raises Http404 for invalid object type."""
+        import pytest
+        from django.http import Http404
+
+        from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
+
+        view = DeleteNetBoxInterfacesView()
+        with pytest.raises(Http404):
+            view.get_required_permissions_for_object_type("invalid")
