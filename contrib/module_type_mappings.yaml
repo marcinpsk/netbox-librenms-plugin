@@ -59,24 +59,53 @@
   netbox_module_type: "MX480-CHASSIS-BP"
   description: "Juniper MX480 backplane (matched by name)"
 
-# Nokia — SROS uses Nokia part numbers (3HExxxxx) as inventory model names
-# These must be mapped to the SROS board type used in NetBox module types.
-- librenms_model: "3HE12559AARC01"
-  netbox_module_type: "cpm2-s"
-  description: "Nokia CPM2-s control processor module"
+# Nokia 7750 SR-s — LibreNMS reports Nokia part numbers (3HExxxxx) as inventory
+# model names. These must be mapped to the correct SROS board type names.
+#
+# Key corrections from previous versions:
+#   - IOMs are iom-s / iom-s-e (NOT MDA names like s36-400gb-qsfpdd)
+#   - SFMs are SFM-s (NOT xcm-7s-b — XCM is a line card type)
+#   - CMA is CMA2-7s (NOT xcm2-7s — CMA is a physical carrier bracket)
 
+# IOM (Input/Output Module) — line cards
 - librenms_model: "3HE16474AARA01"
-  netbox_module_type: "s36-400gb-qsfpdd:cr4800g"
-  description: "Nokia IOM with 36x400G QSFP-DD, CR4800G forwarding"
+  netbox_module_type: "IOM-s-e"
+  description: "Nokia IOM-s-e (Input/Output Module, enhanced) for SR-7s/14s"
 
 - librenms_model: "3HE16472AARB01"
-  netbox_module_type: "x2-s36-800g-qsfpdd-6.0t:cr6000g+"
-  description: "Nokia extended IOM v2, 36x800G QSFP-DD"
+  netbox_module_type: "IOM-s"
+  description: "Nokia IOM-s (Input/Output Module) for SR-7s/14s"
 
-- librenms_model: "3HE12391AARK01"
-  netbox_module_type: "m36-800g-qsfpdd"
-  description: "Nokia MDA with 36x800G QSFP-DD ports"
+# CPM (Control Processor Module)
+- librenms_model: "3HE12559AARC01"
+  netbox_module_type: "CPM2-s"
+  description: "Nokia CPM2-s control processor module for SR-7s/14s"
 
+# SFM (Switch Fabric Module) — internal switching fabric
 - librenms_model: "3HE16471AARG01"
-  netbox_module_type: "xcm-7s-b"
-  description: "Nokia SFM/fabric module for SR-7s"
+  netbox_module_type: "SFM-s"
+  description: "Nokia SFM-s switch fabric module for SR-7s/14s"
+
+# CMA (Control Mechanical Adapter) — CPM carrier bracket
+- librenms_model: "3HE12560AARA01"
+  netbox_module_type: "CMA2-7s"
+  description: "Nokia CMA2-7s CPM carrier bracket for SR-7s"
+
+# MDA (Media Dependent Adapter) — pluggable interface modules
+- librenms_model: "3HE12391AARK01"
+  netbox_module_type: "s36-100gb-qsfp28"
+  description: "Nokia MDA-s 36x 100GE QSFP28"
+
+# XIOM (eXtended IO Module) — hosts MDA-s sub-modules
+- librenms_model: "3HE18883AARB01"
+  netbox_module_type: "XIOM-s-3.0t"
+  description: "Nokia XIOM-s (eXtended IO Module) for SR-s series"
+
+# Power and cooling
+- librenms_model: "3HE11183AARB01"
+  netbox_module_type: "PS-7750-SR-S-AC"
+  description: "Nokia 6000W AC power module for SR-7s/14s"
+
+- librenms_model: "3HE11312AARB01"
+  netbox_module_type: "FAN-7750-SR-S"
+  description: "Nokia fan tray for SR-7s/14s"
