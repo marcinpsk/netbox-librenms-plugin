@@ -34,6 +34,7 @@ from .object_sync import (
     DeviceInterfaceTableView,
     DeviceIPAddressTableView,
     DeviceLibreNMSSyncView,
+    DeviceModuleTableView,
     DeviceVLANTableView,
     SaveVlanGroupOverridesView,
     SingleInterfaceVerifyView,

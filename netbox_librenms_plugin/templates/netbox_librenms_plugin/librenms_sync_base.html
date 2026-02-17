@@ -535,6 +535,14 @@
         </li>
         {% endif %}
         {% endwith %}
+        {% if module_sync %}
+        <li class="nav-item" role="presentation">
+            <button class="nav-link" id="modules-tab" data-tab="modules" data-bs-toggle="tab"
+                data-bs-target="#modules" type="button" role="tab" aria-controls="modules">
+                Modules
+            </button>
+        </li>
+        {% endif %}
     </ul>
     <div class="btn-group btn-group-sm mt-3" role="group" data-bs-toggle="tooltip" data-bs-placement="top"
         title="Select preferred interface name field"
@@ -563,6 +571,13 @@
         data-tab-id="ipaddresses">
         {% include 'netbox_librenms_plugin/_ipaddress_sync.html' %}
     </div>
+
+    {% if module_sync %}
+    <div class="tab-pane fade" id="modules" role="tabpanel" aria-labelledby="modules-tab"
+        data-tab-id="modules">
+        {% include 'netbox_librenms_plugin/_module_sync.html' %}
+    </div>
+    {% endif %}
 
     {% with model_name=object|meta:"model_name" %}
     {% if model_name == "device" %}

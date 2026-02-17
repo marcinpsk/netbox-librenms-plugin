@@ -17,6 +17,7 @@ from netbox_librenms_plugin.tables.interfaces import (
     LibreNMSInterfaceTable,
     VCInterfaceTable,
 )
+from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
 from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_missing_vlan_warning,
@@ -29,6 +30,7 @@ from ..base.cables_view import BaseCableTableView
 from ..base.interfaces_view import BaseInterfaceTableView
 from ..base.ip_addresses_view import BaseIPAddressTableView
 from ..base.librenms_sync_view import BaseLibreNMSSyncView
+from ..base.modules_view import BaseModuleTableView
 from ..base.vlan_table_view import BaseVLANTableView
 from ..mixins import CacheMixin, LibreNMSPermissionMixin
 
@@ -62,6 +64,12 @@ class DeviceLibreNMSSyncView(BaseLibreNMSSyncView):
         vlan_table_view = DeviceVLANTableView()
         vlan_table_view.request = request
         return vlan_table_view.get_vlan_context(request, obj)
+
+    def get_module_context(self, request, obj):
+        """Return module sync context for the device."""
+        module_table_view = DeviceModuleTableView()
+        module_table_view.request = request
+        return module_table_view.get_context_data(request, obj)
 
 
 class DeviceInterfaceTableView(BaseInterfaceTableView):
@@ -375,3 +383,15 @@ class DeviceVLANTableView(BaseVLANTableView):
     """VLAN synchronization table view for Devices."""
 
     model = Device
+
+
+class DeviceModuleTableView(BaseModuleTableView):
+    """Module/inventory synchronization view for Devices."""
+
+    model = Device
+
+    def get_table(self, data, obj):
+        """Return the module sync table."""
+        table = LibreNMSModuleTable(data, device=obj)
+        table.htmx_url = f"{self.request.path}?tab=modules"
+        return table
