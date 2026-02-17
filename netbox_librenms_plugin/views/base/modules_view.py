@@ -244,6 +244,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
     def _build_row(self, item, index_map, module_bays, module_types, depth=0):
         """Build a single table row from a LibreNMS inventory item."""
+        from netbox_librenms_plugin.utils import module_type_uses_module_path, supports_module_path
+
         model_name = item.get("entPhysicalModelName", "") or ""
         serial = item.get("entPhysicalSerialNum", "") or ""
         phys_class = item.get("entPhysicalClass", "")
@@ -256,8 +258,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Match to NetBox module type
         matched_type = module_types.get(model_name) if model_name else None
 
+        # Check {module_path} compatibility
+        needs_module_path = matched_type and module_type_uses_module_path(matched_type)
+        module_path_blocked = needs_module_path and not supports_module_path()
+
         # Determine status
-        status = self._determine_status(matched_bay, matched_type, serial)
+        status = self._determine_status(matched_bay, matched_type, serial, module_path_blocked)
 
         row = {
             "name": name,
@@ -274,6 +280,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             "module_type_id": matched_type.pk if matched_type else None,
             "depth": depth,
         }
+
+        if module_path_blocked:
+            from netbox_librenms_plugin.utils import MODULE_PATH_MIN_VERSION
+
+            row["row_class"] = "table-warning"
+            row["module_path_warning"] = f"Requires NetBox ≥ {MODULE_PATH_MIN_VERSION}"
 
         # Add URLs for matched objects
         if matched_bay:
@@ -294,7 +306,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     status = "Installed"
                     row["row_class"] = "table-success"
                 row["status"] = status
-            elif matched_type:
+            elif matched_type and not module_path_blocked:
                 # Bay exists, type matched, no module installed → can install
                 row["can_install"] = True
 
@@ -303,8 +315,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         return row
 
-    def _determine_status(self, matched_bay, matched_type, serial):
+    def _determine_status(self, matched_bay, matched_type, serial, module_path_blocked=False):
         """Determine the sync status for an inventory item."""
+        if module_path_blocked:
+            return "Requires Upgrade"
         if matched_bay and matched_type:
             return "Matched"
         if not matched_bay:
@@ -336,6 +350,22 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Vi
 
         module_bay = get_object_or_404(ModuleBay, pk=module_bay_id, device=device)
         module_type = get_object_or_404(ModuleType, pk=module_type_id)
+
+        # Block install if module type uses {module_path} and NetBox doesn't support it
+        from netbox_librenms_plugin.utils import (
+            MODULE_PATH_MIN_VERSION,
+            module_type_uses_module_path,
+            supports_module_path,
+        )
+
+        if module_type_uses_module_path(module_type) and not supports_module_path():
+            messages.error(
+                request,
+                f"Cannot install {module_type.model}: its interface templates use "
+                f"{{module_path}} which requires NetBox ≥ {MODULE_PATH_MIN_VERSION}.",
+            )
+            sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+            return redirect(f"{sync_url}?tab=modules")
 
         # Check if bay already has a module installed
         if hasattr(module_bay, "installed_module") and module_bay.installed_module:
