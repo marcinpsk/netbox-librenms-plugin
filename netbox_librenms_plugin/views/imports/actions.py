@@ -1,11 +1,12 @@
 """HTMX endpoints and POST handlers for importing LibreNMS devices."""
 
+import json
 import logging
 
 from django.contrib import messages
 from django.core.cache import cache
 from django.core.exceptions import PermissionDenied
-from django.http import HttpResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.views import View
 
@@ -28,6 +29,7 @@ from netbox_librenms_plugin.import_validation_helpers import (
     fetch_model_by_id,
 )
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
+from netbox_librenms_plugin.utils import save_import_toggle_prefs
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 logger = logging.getLogger(__name__)
@@ -220,6 +222,8 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 '<div class="alert alert-warning mb-0">Select at least one device.</div>',
                 status=400,
             )
+
+        save_import_toggle_prefs(request)
 
         use_sysname = request.POST.get("use-sysname-toggle") == "on"
         strip_domain = request.POST.get("strip-domain-toggle") == "on"
@@ -749,3 +753,31 @@ class DeviceRackUpdateView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImpo
             return HttpResponse("Device not found", status=404)
 
         return self.render_device_row(request, libre_device, validation, selections)
+
+
+class SaveUserPrefView(View):
+    """Save a user preference via POST. Used by JS toggle handlers."""
+
+    ALLOWED_PREFS = {
+        "use_sysname": "plugins.netbox_librenms_plugin.use_sysname",
+        "strip_domain": "plugins.netbox_librenms_plugin.strip_domain",
+        "interface_name_field": "plugins.netbox_librenms_plugin.interface_name_field",
+    }
+
+    def post(self, request):
+        """Persist a user preference toggle value."""
+        from netbox_librenms_plugin.utils import _save_user_pref
+
+        try:
+            data = json.loads(request.body)
+        except (json.JSONDecodeError, ValueError):
+            return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+        key = data.get("key")
+        value = data.get("value")
+
+        if key not in self.ALLOWED_PREFS:
+            return JsonResponse({"error": "Invalid preference key"}, status=400)
+
+        _save_user_pref(request, self.ALLOWED_PREFS[key], value)
+        return JsonResponse({"status": "ok"})

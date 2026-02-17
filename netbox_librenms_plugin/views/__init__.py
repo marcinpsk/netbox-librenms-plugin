@@ -16,6 +16,7 @@ from .imports import (
     DeviceValidationDetailsView,
     DeviceVCDetailsView,
     LibreNMSImportView,
+    SaveUserPrefView,
 )
 from .mapping_views import (
     InterfaceTypeMappingBulkDeleteView,
