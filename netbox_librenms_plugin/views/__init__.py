@@ -21,6 +21,14 @@ from .imports import (
     SaveUserPrefView,
 )
 from .mapping_views import (
+    DeviceTypeMappingBulkDeleteView,
+    DeviceTypeMappingBulkImportView,
+    DeviceTypeMappingChangeLogView,
+    DeviceTypeMappingCreateView,
+    DeviceTypeMappingDeleteView,
+    DeviceTypeMappingEditView,
+    DeviceTypeMappingListView,
+    DeviceTypeMappingView,
     InterfaceTypeMappingBulkDeleteView,
     InterfaceTypeMappingBulkImportView,
     InterfaceTypeMappingChangeLogView,

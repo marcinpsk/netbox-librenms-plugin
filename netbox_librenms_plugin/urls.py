@@ -1,6 +1,6 @@
 from django.urls import include, path
 
-from .models import InterfaceTypeMapping
+from .models import DeviceTypeMapping, InterfaceTypeMapping
 from .views import (
     AddDeviceToLibreNMSView,
     AssignVCSerialView,
@@ -18,6 +18,14 @@ from .views import (
     DeviceRackUpdateView,
     DeviceRoleUpdateView,
     DeviceStatusListView,
+    DeviceTypeMappingBulkDeleteView,
+    DeviceTypeMappingBulkImportView,
+    DeviceTypeMappingChangeLogView,
+    DeviceTypeMappingCreateView,
+    DeviceTypeMappingDeleteView,
+    DeviceTypeMappingEditView,
+    DeviceTypeMappingListView,
+    DeviceTypeMappingView,
     DeviceValidationDetailsView,
     DeviceVCDetailsView,
     DeviceVLANTableView,
@@ -346,6 +354,48 @@ urlpatterns = [
         "interface-type-mappings/delete/",
         InterfaceTypeMappingBulkDeleteView.as_view(),
         name="interfacetypemapping_bulk_delete",
+    ),
+    # Device type mapping URLs
+    path(
+        "device-type-mappings/",
+        DeviceTypeMappingListView.as_view(),
+        name="devicetypemapping_list",
+    ),
+    path(
+        "device-type-mappings/<int:pk>/",
+        DeviceTypeMappingView.as_view(),
+        name="devicetypemapping_detail",
+    ),
+    path(
+        "device-type-mappings/add/",
+        DeviceTypeMappingCreateView.as_view(),
+        name="devicetypemapping_add",
+    ),
+    path(
+        "device-type-mappings/import/",
+        DeviceTypeMappingBulkImportView.as_view(),
+        name="devicetypemapping_bulk_import",
+    ),
+    path(
+        "device-type-mappings/<int:pk>/delete/",
+        DeviceTypeMappingDeleteView.as_view(),
+        name="devicetypemapping_delete",
+    ),
+    path(
+        "device-type-mappings/<int:pk>/edit/",
+        DeviceTypeMappingEditView.as_view(),
+        name="devicetypemapping_edit",
+    ),
+    path(
+        "device-type-mappings/<int:pk>/changelog/",
+        DeviceTypeMappingChangeLogView.as_view(),
+        name="devicetypemapping_changelog",
+        kwargs={"model": DeviceTypeMapping},
+    ),
+    path(
+        "device-type-mappings/delete/",
+        DeviceTypeMappingBulkDeleteView.as_view(),
+        name="devicetypemapping_bulk_delete",
     ),
     path("api/", include("netbox_librenms_plugin.api.urls")),
 ]

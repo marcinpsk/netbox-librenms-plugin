@@ -193,7 +193,8 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict:
     """
     Match LibreNMS hardware string to a NetBox DeviceType.
 
-    Only performs exact matching on part_number and model fields (case-insensitive).
+    Checks DeviceTypeMapping table first, then falls back to exact matching
+    on part_number and model fields (case-insensitive).
 
     Args:
         hardware_name (str): Hardware string from LibreNMS API (e.g., 'C9200L-48P-4X')
@@ -202,12 +203,26 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict:
         dict: Dictionary containing:
             - matched (bool): Whether a match was found
             - device_type (DeviceType|None): The matched DeviceType object
-            - match_type (str|None): Always 'exact' if found, None otherwise
+            - match_type (str|None): 'mapping' if via DeviceTypeMapping, 'exact' if via
+              part_number/model, None otherwise
     """
     from dcim.models import DeviceType
 
+    from netbox_librenms_plugin.models import DeviceTypeMapping
+
     if not hardware_name or hardware_name == "-":
         return {"matched": False, "device_type": None, "match_type": None}
+
+    # Check DeviceTypeMapping table first
+    try:
+        mapping = DeviceTypeMapping.objects.get(librenms_hardware__iexact=hardware_name)
+        return {
+            "matched": True,
+            "device_type": mapping.netbox_device_type,
+            "match_type": "mapping",
+        }
+    except DeviceTypeMapping.DoesNotExist:
+        pass
 
     # Try part number exact match
     try:
