@@ -36,10 +36,7 @@
     "SUPERUSER_PASSWORD": "${localEnv:SUPERUSER_PASSWORD:admin}",
     "SKIP_SUPERUSER": "${localEnv:SKIP_SUPERUSER:false}"
   },
-  "features": {
-    "ghcr.io/devcontainers/features/git:1": {},
-    "ghcr.io/devcontainers/features/github-cli:1": {}
-  },
+  "features": {},
   "customizations": {
     "vscode": {
       "extensions": [

@@ -65,6 +65,20 @@ If you need to test with a LibreNMS instance on a private network (local lab, co
 - **GitHub CLI**: Automatically configured for easy PR submission
 - **Logs**: Use `netbox-logs` to debug issues in real-time
 
+
+### 📡 LibreNMS Server Configuration
+
+You need a LibreNMS instance to use this plugin. Configure your LibreNMS server(s) in `plugin-config.py`:
+
+1. Copy the example config:
+
+   ```bash
+   cp .devcontainer/config/plugin-config.py.example .devcontainer/config/plugin-config.py
+   ```
+
+2. Edit it with your LibreNMS server URL(s) and API token(s)
+3. Restart NetBox: `netbox-restart`
+
 ## Out-of-the-box defaults
 
 Below are the dev container defaults. The field name to change these defaults is listed below each line.
