@@ -15,7 +15,17 @@ from netbox_librenms_plugin.views.mixins import (
 
 
 # entPhysicalClass values relevant for module sync
-INVENTORY_CLASSES = {"module", "powerSupply", "fan"}
+# Includes vendor-specific classes (Nokia TIMETRA-CHASSIS-MIB uses ioModule, cpmModule, etc.)
+INVENTORY_CLASSES = {
+    "module",
+    "powerSupply",
+    "fan",
+    "ioModule",
+    "cpmModule",
+    "mdaModule",
+    "fabricModule",
+    "xioModule",
+}
 
 
 class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
@@ -91,11 +101,21 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         # Collect top-level items and their sub-components
         # Include synthetic transceiver items (from vendors without ENTITY-MIB SFP data)
-        top_items = [
-            item
-            for item in inventory_data
-            if item.get("entPhysicalClass") in INVENTORY_CLASSES or item.get("_from_transceiver_api")
-        ]
+        # Exclude items whose parent is also an INVENTORY_CLASSES item (they appear as sub-components)
+        top_items = []
+        for item in inventory_data:
+            if item.get("_from_transceiver_api"):
+                top_items.append(item)
+                continue
+            if item.get("entPhysicalClass") not in INVENTORY_CLASSES:
+                continue
+            # Check if parent is also an inventory-class item (skip if so)
+            parent_idx = item.get("entPhysicalContainedIn", 0)
+            if parent_idx and parent_idx in index_map:
+                parent_class = index_map[parent_idx].get("entPhysicalClass", "")
+                if parent_class in INVENTORY_CLASSES:
+                    continue
+            top_items.append(item)
 
         table_data = []
         for item in top_items:
@@ -313,9 +333,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if mapping and mapping.netbox_bay_name in module_bays:
                 return module_bays[mapping.netbox_bay_name]
 
-        # Fallback: exact match on parent container name
+        # Fallback: exact match on parent container name or item name
         if parent_name and parent_name in module_bays:
             return module_bays[parent_name]
+        if item_name and item_name in module_bays:
+            return module_bays[item_name]
 
         return None
 
@@ -788,5 +810,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         # Fallback: exact match on parent container name
         if parent_name and parent_name in module_bays:
             return module_bays[parent_name]
+        if item_name and item_name in module_bays:
+            return module_bays[item_name]
 
         return None
