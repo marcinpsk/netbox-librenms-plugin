@@ -6,7 +6,7 @@ from .base.cables_view import BaseCableTableView, SingleCableVerifyView
 from .base.interfaces_view import BaseInterfaceTableView
 from .base.ip_addresses_view import BaseIPAddressTableView, SingleIPAddressVerifyView
 from .base.librenms_sync_view import BaseLibreNMSSyncView
-from .base.modules_view import InstallModuleView
+from .base.modules_view import InstallBranchView, InstallModuleView
 from .base.vlan_table_view import BaseVLANTableView
 from .imports import (
     BulkImportConfirmView,
@@ -29,6 +29,14 @@ from .mapping_views import (
     DeviceTypeMappingEditView,
     DeviceTypeMappingListView,
     DeviceTypeMappingView,
+    InterfaceNameRuleBulkDeleteView,
+    InterfaceNameRuleBulkImportView,
+    InterfaceNameRuleChangeLogView,
+    InterfaceNameRuleCreateView,
+    InterfaceNameRuleDeleteView,
+    InterfaceNameRuleEditView,
+    InterfaceNameRuleListView,
+    InterfaceNameRuleView,
     InterfaceTypeMappingBulkDeleteView,
     InterfaceTypeMappingBulkImportView,
     InterfaceTypeMappingChangeLogView,

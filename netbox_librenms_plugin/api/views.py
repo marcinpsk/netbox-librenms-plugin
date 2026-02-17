@@ -11,10 +11,17 @@ from rest_framework.permissions import BasePermission, SAFE_METHODS
 from rq.job import Job as RQJob
 
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
-from netbox_librenms_plugin.models import DeviceTypeMapping, InterfaceTypeMapping, ModuleBayMapping, ModuleTypeMapping
+from netbox_librenms_plugin.models import (
+    DeviceTypeMapping,
+    InterfaceNameRule,
+    InterfaceTypeMapping,
+    ModuleBayMapping,
+    ModuleTypeMapping,
+)
 
 from .serializers import (
     DeviceTypeMappingSerializer,
+    InterfaceNameRuleSerializer,
     InterfaceTypeMappingSerializer,
     ModuleBayMappingSerializer,
     ModuleTypeMappingSerializer,
@@ -71,6 +78,15 @@ class ModuleBayMappingViewSet(NetBoxModelViewSet):
 
     queryset = ModuleBayMapping.objects.all()
     serializer_class = ModuleBayMappingSerializer
+
+
+class InterfaceNameRuleViewSet(NetBoxModelViewSet):
+    """API viewset for InterfaceNameRule CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+
+    queryset = InterfaceNameRule.objects.all()
+    serializer_class = InterfaceNameRuleSerializer
 
 
 @api_view(["POST"])

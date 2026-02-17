@@ -1,0 +1,13 @@
+{% extends 'generic/object_list.html' %}
+
+{% block content %}
+    <div class="alert alert-info">
+        <h4>Interface Name Rules</h4>
+        <p>Define post-install interface rename rules for module types where NetBox's
+           position-based naming can't produce the correct interface name.</p>
+        <p>Covers converter offset (e.g., CVR-X2-SFP + GLC-T) and breakout transceivers
+           (e.g., QSFP+ 4x10G with channel numbering).</p>
+        <p>Example: GLC-T in CVR-X2-SFP → <code>GigabitEthernet{slot}/{8 + ({parent_bay_position} - 1) * 2 + {sfp_slot}}</code></p>
+    </div>
+    {{ block.super }}
+{% endblock %}
