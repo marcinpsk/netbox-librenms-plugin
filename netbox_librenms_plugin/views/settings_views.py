@@ -1,6 +1,7 @@
 from django.contrib import messages
 from django.http import HttpResponse
 from django.shortcuts import redirect, render
+from django.utils.html import escape
 from django.views import View
 
 from netbox_librenms_plugin.forms import ImportSettingsForm, ServerConfigForm
@@ -118,9 +119,9 @@ class TestLibreNMSConnectionView(LibreNMSPermissionMixin, View):
             system_info = api_client.test_connection()
 
             if system_info and not system_info.get("error"):
-                version = system_info.get("local_ver", "Unknown")
-                database = system_info.get("database_ver", "Unknown")
-                php_version = system_info.get("php_ver", "Unknown")
+                version = escape(system_info.get("local_ver", "Unknown"))
+                database = escape(system_info.get("database_ver", "Unknown"))
+                php_version = escape(system_info.get("php_ver", "Unknown"))
 
                 return HttpResponse(
                     f'<div class="alert alert-success">'
@@ -132,7 +133,7 @@ class TestLibreNMSConnectionView(LibreNMSPermissionMixin, View):
                     f"</div>"
                 )
             elif system_info and system_info.get("error"):
-                error_msg = system_info.get("message", "Unknown error occurred")
+                error_msg = escape(system_info.get("message", "Unknown error occurred"))
                 return HttpResponse(
                     f'<div class="alert alert-danger">'
                     f'<i class="ti ti-alert-circle me-2"></i>'
@@ -152,13 +153,13 @@ class TestLibreNMSConnectionView(LibreNMSPermissionMixin, View):
             return HttpResponse(
                 f'<div class="alert alert-danger">'
                 f'<i class="ti ti-alert-circle me-2"></i>'
-                f"<strong>Configuration error:</strong><br>{str(e)}"
+                f"<strong>Configuration error:</strong><br>{escape(str(e))}"
                 f"</div>"
             )
         except Exception as e:
             return HttpResponse(
                 f'<div class="alert alert-danger">'
                 f'<i class="ti ti-alert-circle me-2"></i>'
-                f"<strong>Connection failed:</strong><br>{str(e)}"
+                f"<strong>Connection failed:</strong><br>{escape(str(e))}"
                 f"</div>"
             )

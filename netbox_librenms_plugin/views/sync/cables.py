@@ -46,8 +46,10 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Cache
                 b_terminations=[remote_interface],
                 status="connected",
             )
+            return True
         except Exception as exc:  # pragma: no cover - protects UX
             messages.error(request, f"Failed to create cable: {str(exc)}")
+            return False
 
     def check_existing_cable(self, local_interface, remote_interface):
         return Cable.objects.filter(
@@ -95,8 +97,9 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Cache
             if self.check_existing_cable(local_interface, remote_interface):
                 return {"status": "duplicate", "interface": interface["interface"]}
 
-            self.create_cable(local_interface, remote_interface, self.request)
-            return {"status": "valid", "interface": interface["interface"]}
+            if self.create_cable(local_interface, remote_interface, self.request):
+                return {"status": "valid", "interface": interface["interface"]}
+            return {"status": "invalid", "interface": interface["interface"]}  # pragma: no cover
 
         except Interface.DoesNotExist:
             return {"status": "missing_remote", "interface": interface["interface"]}

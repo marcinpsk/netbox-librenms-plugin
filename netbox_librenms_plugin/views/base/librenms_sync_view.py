@@ -203,10 +203,15 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                             found_in_librenms = True
                         else:
                             # Hostnames don't match even after normalization
+                            found_in_librenms = True
                             mismatched_device = True
                     else:
+                        # Device is still found (we have librenms_id), just mismatched
+                        found_in_librenms = True
                         mismatched_device = True
                 else:
+                    # Device is still found (we have librenms_id), just mismatched
+                    found_in_librenms = True
                     mismatched_device = True
 
         return {
