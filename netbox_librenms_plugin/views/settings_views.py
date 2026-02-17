@@ -1,3 +1,5 @@
+import logging
+
 from django.contrib import messages
 from django.http import HttpResponse
 from django.shortcuts import redirect, render
@@ -6,7 +8,10 @@ from django.views import View
 from netbox_librenms_plugin.forms import ImportSettingsForm, ServerConfigForm
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.models import LibreNMSSettings
+from netbox_librenms_plugin.utils import _save_user_pref
 from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
+
+logger = logging.getLogger(__name__)
 
 
 class LibreNMSSettingsView(LibreNMSPermissionMixin, View):
@@ -68,6 +73,20 @@ class LibreNMSSettingsView(LibreNMSPermissionMixin, View):
 
             if import_form.is_valid():
                 import_form.save()
+                # Also update current user's preferences to match new defaults
+                try:
+                    _save_user_pref(
+                        request,
+                        "plugins.netbox_librenms_plugin.use_sysname",
+                        import_form.cleaned_data.get("use_sysname_default", False),
+                    )
+                    _save_user_pref(
+                        request,
+                        "plugins.netbox_librenms_plugin.strip_domain",
+                        import_form.cleaned_data.get("strip_domain_default", False),
+                    )
+                except Exception as e:
+                    logger.warning("Failed to update user preferences: %s (user: %s)", e, request.user)
                 messages.success(
                     request,
                     "Import settings updated successfully.",

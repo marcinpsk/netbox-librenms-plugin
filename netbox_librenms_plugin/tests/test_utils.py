@@ -427,8 +427,40 @@ class TestInterfaceNameField:
         mock_request = MagicMock()
         mock_request.GET = {}
         mock_request.POST = {}
+        mock_request.user.config.get.return_value = None
 
         result = get_interface_name_field(mock_request)
 
         assert result == "ifAlias"
         mock_plugin_config.assert_called_with("netbox_librenms_plugin", "interface_name_field")
+
+    @patch("netbox_librenms_plugin.utils.get_plugin_config")
+    def test_get_interface_name_field_from_user_pref(self, mock_plugin_config):
+        """Falls back to user preference before plugin config."""
+        from netbox_librenms_plugin.utils import get_interface_name_field
+
+        mock_request = MagicMock()
+        mock_request.GET = {}
+        mock_request.POST = {}
+        mock_request.user.config.get.return_value = "ifName"
+
+        result = get_interface_name_field(mock_request)
+
+        assert result == "ifName"
+        mock_plugin_config.assert_not_called()
+
+    @patch("netbox_librenms_plugin.utils.get_plugin_config")
+    def test_get_interface_name_field_persists_to_user_pref(self, mock_plugin_config):
+        """Explicit GET param should be persisted to user preferences."""
+        from netbox_librenms_plugin.utils import get_interface_name_field
+
+        mock_request = MagicMock()
+        mock_request.GET = {"interface_name_field": "ifDescr"}
+        mock_request.POST = {}
+
+        result = get_interface_name_field(mock_request)
+
+        assert result == "ifDescr"
+        mock_request.user.config.set.assert_called_once_with(
+            "plugins.netbox_librenms_plugin.interface_name_field", "ifDescr", commit=True
+        )

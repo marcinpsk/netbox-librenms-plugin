@@ -347,7 +347,7 @@
         <div class="d-flex align-items-center gap-2 border-start ps-2">
             <strong class="small">Settings:</strong>
             <div class="form-check form-switch mb-0">
-                <input class="form-check-input" type="checkbox" id="use-sysname-toggle" name="use-sysname-toggle" {% if settings.use_sysname_default %}checked{% endif %}
+                <input class="form-check-input" type="checkbox" id="use-sysname-toggle" name="use-sysname-toggle" {% if use_sysname %}checked{% endif %}
                        data-bs-toggle="tooltip"
                        title="Use SNMP sysName instead of LibreNMS hostname">
                 <label class="form-check-label small" for="use-sysname-toggle">
@@ -355,7 +355,7 @@
                 </label>
             </div>
             <div class="form-check form-switch mb-0">
-                <input class="form-check-input" type="checkbox" id="strip-domain-toggle" name="strip-domain-toggle" {% if settings.strip_domain_default %}checked{% endif %}
+                <input class="form-check-input" type="checkbox" id="strip-domain-toggle" name="strip-domain-toggle" {% if strip_domain %}checked{% endif %}
                        data-bs-toggle="tooltip"
                        title="Remove domain suffix (e.g., 'switch01.example.com' → 'switch01'). IP addresses preserved.">
                 <label class="form-check-label small" for="strip-domain-toggle">
@@ -432,5 +432,38 @@
       </div>
     </div>
   </div>
+
+  <script>
+    // Persist use-sysname and strip-domain toggles to user preferences
+    document.addEventListener('DOMContentLoaded', function() {
+      function savePref(key, value) {
+        const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value
+          || document.cookie.match(/csrftoken=([^;]+)/)?.[1] || '';
+        if (!csrfToken) {
+          console.debug('savePref: no CSRF token available');
+          return;
+        }
+        fetch('{% url "plugins:netbox_librenms_plugin:save_user_pref" %}', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': csrfToken
+          },
+          body: JSON.stringify({key: key, value: value})
+        }).then(function(response) {
+          if (!response.ok) {
+            console.debug('savePref: server returned', response.status);
+          }
+        }).catch(function(err) {
+          console.debug('savePref: fetch failed:', err.message);
+        });
+      }
+      const sysname = document.getElementById('use-sysname-toggle');
+      const strip = document.getElementById('strip-domain-toggle');
+      if (sysname) sysname.addEventListener('change', function() { savePref('use_sysname', this.checked); });
+      if (strip) strip.addEventListener('change', function() { savePref('strip_domain', this.checked); });
+    });
+  </script>
 
 {% endblock %}
