@@ -33,6 +33,7 @@ from .object_sync import (
     DeviceInterfaceTableView,
     DeviceIPAddressTableView,
     DeviceLibreNMSSyncView,
+    DeviceModuleTableView,
     SingleInterfaceVerifyView,
     VMInterfaceTableView,
     VMIPAddressTableView,

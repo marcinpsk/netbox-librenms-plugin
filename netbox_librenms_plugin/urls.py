@@ -14,6 +14,7 @@ from .views import (
     DeviceInterfaceTableView,
     DeviceIPAddressTableView,
     DeviceLibreNMSSyncView,
+    DeviceModuleTableView,
     DeviceRackUpdateView,
     DeviceRoleUpdateView,
     DeviceStatusListView,
@@ -65,6 +66,11 @@ urlpatterns = [
         "devices/<int:pk>/cable-sync/",
         DeviceCableTableView.as_view(),
         name="device_cable_sync",
+    ),
+    path(
+        "devices/<int:pk>/module-sync/",
+        DeviceModuleTableView.as_view(),
+        name="device_module_sync",
     ),
     path(
         "devices/<int:pk>/ipaddress-sync/",
