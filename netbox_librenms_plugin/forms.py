@@ -15,7 +15,14 @@ from netbox.plugins import get_plugin_config
 from utilities.forms.fields import CSVChoiceField, DynamicModelMultipleChoiceField
 from virtualization.models import Cluster, VirtualMachine
 
-from .models import DeviceTypeMapping, InterfaceTypeMapping, LibreNMSSettings, ModuleBayMapping, ModuleTypeMapping
+from .models import (
+    DeviceTypeMapping,
+    InterfaceNameRule,
+    InterfaceTypeMapping,
+    LibreNMSSettings,
+    ModuleBayMapping,
+    ModuleTypeMapping,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -379,6 +386,49 @@ class ModuleBayMappingFilterForm(NetBoxModelFilterSetForm):
     netbox_bay_name = forms.CharField(required=False, label="NetBox Bay Name")
 
     model = ModuleBayMapping
+
+
+class InterfaceNameRuleForm(NetBoxModelForm):
+    """Form for creating and editing interface name rules."""
+
+    class Meta:
+        """Meta options for InterfaceNameRuleForm."""
+
+        model = InterfaceNameRule
+        fields = [
+            "module_type",
+            "parent_module_type",
+            "name_template",
+            "channel_count",
+            "channel_start",
+            "description",
+        ]
+
+
+class InterfaceNameRuleImportForm(NetBoxModelImportForm):
+    """Form for bulk importing interface name rules."""
+
+    class Meta:
+        """Meta options for InterfaceNameRuleImportForm."""
+
+        model = InterfaceNameRule
+        fields = [
+            "module_type",
+            "parent_module_type",
+            "name_template",
+            "channel_count",
+            "channel_start",
+            "description",
+        ]
+
+
+class InterfaceNameRuleFilterForm(NetBoxModelFilterSetForm):
+    """Form for filtering interface name rules."""
+
+    module_type_id = forms.IntegerField(required=False, label="Module Type ID")
+    parent_module_type_id = forms.IntegerField(required=False, label="Parent Module Type ID")
+
+    model = InterfaceNameRule
 
 
 class AddToLIbreSNMPV1V2(forms.Form):

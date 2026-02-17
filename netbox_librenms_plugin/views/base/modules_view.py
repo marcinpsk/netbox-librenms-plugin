@@ -384,11 +384,117 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Vi
                 )
                 module.full_clean()
                 module.save()
+
+                # Post-install: apply InterfaceNameRule if one exists
+                renamed = self._apply_interface_name_rules(module, module_bay)
+
+            rename_msg = f" ({renamed} interface(s) renamed)" if renamed else ""
             messages.success(
-                request, f"Installed {module_type.model} in {module_bay.name} (serial: {serial or 'N/A'})."
+                request, f"Installed {module_type.model} in {module_bay.name} (serial: {serial or 'N/A'}).{rename_msg}"
             )
         except Exception as e:
             messages.error(request, f"Failed to install module: {e}")
 
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
         return redirect(f"{sync_url}?tab=modules")
+
+    @staticmethod
+    def _apply_interface_name_rules(module, module_bay):
+        """Apply InterfaceNameRule rename after module installation.
+
+        Looks up a matching rule for (module_type, parent_module_type) and
+        renames interfaces created by NetBox's template instantiation.
+
+        Returns:
+            Number of interfaces renamed, or 0 if no rule matched.
+        """
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.models import InterfaceNameRule
+        from netbox_librenms_plugin.utils import evaluate_name_template
+
+        module_type = module.module_type
+
+        # Determine parent module type (if installed inside another module)
+        parent_module_type = None
+        if module_bay.parent:
+            parent_bay = module_bay.parent
+            if hasattr(parent_bay, "installed_module") and parent_bay.installed_module:
+                parent_module_type = parent_bay.installed_module.module_type
+
+        # Look up rule: specific parent first, then generic (null parent)
+        rule = None
+        if parent_module_type:
+            rule = InterfaceNameRule.objects.filter(
+                module_type=module_type,
+                parent_module_type=parent_module_type,
+            ).first()
+        if not rule:
+            rule = InterfaceNameRule.objects.filter(
+                module_type=module_type,
+                parent_module_type__isnull=True,
+            ).first()
+
+        if not rule:
+            return 0
+
+        # Build context variables for template evaluation
+        bay_position = module_bay.position or "0"
+        parent_bay_position = "0"
+        sfp_slot = bay_position
+        slot = bay_position
+
+        if module_bay.parent:
+            parent_bay = module_bay.parent
+            parent_bay_position = parent_bay.position or "0"
+            # slot is typically the top-level module position
+            if parent_bay.parent and hasattr(parent_bay.parent, "installed_module"):
+                grandparent = parent_bay.parent
+                slot = grandparent.position or parent_bay_position
+            else:
+                slot = parent_bay_position
+
+        interfaces = Interface.objects.filter(module=module)
+        renamed = 0
+
+        for iface in interfaces:
+            variables = {
+                "slot": slot,
+                "bay_position": bay_position,
+                "parent_bay_position": parent_bay_position,
+                "sfp_slot": sfp_slot,
+                "base": iface.name,
+            }
+
+            if rule.channel_count > 0:
+                # Breakout: rename base and create additional channel interfaces
+                for ch in range(rule.channel_count):
+                    variables["channel"] = str(rule.channel_start + ch)
+                    new_name = evaluate_name_template(rule.name_template, variables)
+                    if ch == 0:
+                        iface.name = new_name
+                        iface.full_clean()
+                        iface.save()
+                        renamed += 1
+                    else:
+                        # Create additional breakout interfaces
+                        breakout_iface = Interface(
+                            device=module.device,
+                            module=module,
+                            name=new_name,
+                            type=iface.type,
+                            enabled=iface.enabled,
+                        )
+                        breakout_iface.full_clean()
+                        breakout_iface.save()
+                        renamed += 1
+            else:
+                # Simple rename (converter offset, etc.)
+                new_name = evaluate_name_template(rule.name_template, variables)
+                if new_name != iface.name:
+                    iface.name = new_name
+                    iface.full_clean()
+                    iface.save()
+                    renamed += 1
+
+        return renamed
