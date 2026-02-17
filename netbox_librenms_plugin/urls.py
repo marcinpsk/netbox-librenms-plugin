@@ -21,6 +21,7 @@ from .views import (
     DeviceValidationDetailsView,
     DeviceVCDetailsView,
     DeviceVLANTableView,
+    InstallModuleView,
     InterfaceTypeMappingBulkDeleteView,
     InterfaceTypeMappingBulkImportView,
     InterfaceTypeMappingChangeLogView,
@@ -76,6 +77,11 @@ urlpatterns = [
         "devices/<int:pk>/module-sync/",
         DeviceModuleTableView.as_view(),
         name="device_module_sync",
+    ),
+    path(
+        "devices/<int:pk>/install-module/",
+        InstallModuleView.as_view(),
+        name="install_module",
     ),
     path(
         "devices/<int:pk>/ipaddress-sync/",
