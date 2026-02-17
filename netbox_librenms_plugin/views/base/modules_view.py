@@ -171,15 +171,23 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         return {bay.name: bay for bay in bays}
 
     def _get_module_types(self):
-        """Get all module types, indexed by model (part_number)."""
+        """Get all module types, indexed by model (part_number), with ModuleTypeMapping checked first."""
         from dcim.models import ModuleType
 
+        from netbox_librenms_plugin.models import ModuleTypeMapping
+
+        # Build base lookup from NetBox module types
         types = ModuleType.objects.all().select_related("manufacturer")
         result = {}
         for mt in types:
             result[mt.model] = mt
             if mt.part_number and mt.part_number != mt.model:
                 result[mt.part_number] = mt
+
+        # Overlay with explicit ModuleTypeMapping entries (take priority)
+        for mapping in ModuleTypeMapping.objects.select_related("netbox_module_type__manufacturer"):
+            result[mapping.librenms_model] = mapping.netbox_module_type
+
         return result
 
     def _find_parent_container_name(self, item, index_map):

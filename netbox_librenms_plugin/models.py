@@ -1,5 +1,5 @@
 from dcim.choices import InterfaceTypeChoices
-from dcim.models import DeviceType
+from dcim.models import DeviceType, ModuleType
 from django.db import models
 from django.urls import reverse
 from netbox.models import NetBoxModel
@@ -72,6 +72,7 @@ class InterfaceTypeMapping(NetBoxModel):
         """Meta options for InterfaceTypeMapping."""
 
         unique_together = ["librenms_type", "librenms_speed"]
+        ordering = ["librenms_type", "librenms_speed"]
 
     def __str__(self):
         return f"{self.librenms_type} + {self.librenms_speed} -> {self.netbox_type}"
@@ -107,3 +108,35 @@ class DeviceTypeMapping(NetBoxModel):
 
     def __str__(self):
         return f"{self.librenms_hardware} -> {self.netbox_device_type}"
+
+
+class ModuleTypeMapping(NetBoxModel):
+    """Map LibreNMS inventory model names to NetBox ModuleType objects."""
+
+    librenms_model = models.CharField(
+        max_length=255,
+        unique=True,
+        help_text="Model name from LibreNMS inventory (entPhysicalModelName)",
+    )
+    netbox_module_type = models.ForeignKey(
+        ModuleType,
+        on_delete=models.CASCADE,
+        related_name="librenms_mappings",
+        help_text="The NetBox ModuleType this model name maps to",
+    )
+    description = models.TextField(
+        blank=True,
+        help_text="Optional description or notes about this mapping",
+    )
+
+    def get_absolute_url(self):
+        """Return the URL for this mapping's detail page."""
+        return reverse("plugins:netbox_librenms_plugin:moduletypemapping_detail", args=[self.pk])
+
+    class Meta:
+        """Meta options for ModuleTypeMapping."""
+
+        ordering = ["librenms_model"]
+
+    def __str__(self):
+        return f"{self.librenms_model} -> {self.netbox_module_type}"

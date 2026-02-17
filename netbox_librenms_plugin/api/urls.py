@@ -8,6 +8,7 @@ app_name = "netbox_librenms_plugin"
 router = NetBoxRouter()
 router.register("interface-type-mappings", views.InterfaceTypeMappingViewSet)
 router.register("device-type-mappings", views.DeviceTypeMappingViewSet)
+router.register("module-type-mappings", views.ModuleTypeMappingViewSet)
 
 urlpatterns = [
     path("jobs/<int:job_pk>/sync-status/", views.sync_job_status, name="sync_job_status"),

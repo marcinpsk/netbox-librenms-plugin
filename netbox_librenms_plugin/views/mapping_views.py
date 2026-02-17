@@ -1,7 +1,11 @@
 from netbox.views import generic
 from utilities.views import register_model_view
 
-from netbox_librenms_plugin.filters import DeviceTypeMappingFilterSet, InterfaceTypeMappingFilterSet
+from netbox_librenms_plugin.filters import (
+    DeviceTypeMappingFilterSet,
+    InterfaceTypeMappingFilterSet,
+    ModuleTypeMappingFilterSet,
+)
 from netbox_librenms_plugin.forms import (
     DeviceTypeMappingFilterForm,
     DeviceTypeMappingForm,
@@ -9,9 +13,16 @@ from netbox_librenms_plugin.forms import (
     InterfaceTypeMappingFilterForm,
     InterfaceTypeMappingForm,
     InterfaceTypeMappingImportForm,
+    ModuleTypeMappingFilterForm,
+    ModuleTypeMappingForm,
+    ModuleTypeMappingImportForm,
 )
-from netbox_librenms_plugin.models import DeviceTypeMapping, InterfaceTypeMapping
-from netbox_librenms_plugin.tables.mappings import DeviceTypeMappingTable, InterfaceTypeMappingTable
+from netbox_librenms_plugin.models import DeviceTypeMapping, InterfaceTypeMapping, ModuleTypeMapping
+from netbox_librenms_plugin.tables.mappings import (
+    DeviceTypeMappingTable,
+    InterfaceTypeMappingTable,
+    ModuleTypeMappingTable,
+)
 from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
 
 
@@ -147,3 +158,63 @@ class DeviceTypeMappingChangeLogView(LibreNMSPermissionMixin, generic.ObjectChan
     """Provides a view for displaying the change log of a specific DeviceTypeMapping object."""
 
     queryset = DeviceTypeMapping.objects.all()
+
+
+# --- ModuleTypeMapping views ---
+
+
+class ModuleTypeMappingListView(LibreNMSPermissionMixin, generic.ObjectListView):
+    """Provides a view for listing all ModuleTypeMapping objects."""
+
+    queryset = ModuleTypeMapping.objects.all()
+    table = ModuleTypeMappingTable
+    filterset = ModuleTypeMappingFilterSet
+    filterset_form = ModuleTypeMappingFilterForm
+    template_name = "netbox_librenms_plugin/moduletypemapping_list.html"
+
+
+class ModuleTypeMappingCreateView(LibreNMSPermissionMixin, generic.ObjectEditView):
+    """Provides a view for creating a new ModuleTypeMapping object."""
+
+    queryset = ModuleTypeMapping.objects.all()
+    form = ModuleTypeMappingForm
+
+
+@register_model_view(ModuleTypeMapping, "bulk_import", path="import", detail=False)
+class ModuleTypeMappingBulkImportView(LibreNMSPermissionMixin, generic.BulkImportView):
+    """Provides a view for bulk importing ModuleTypeMapping objects."""
+
+    queryset = ModuleTypeMapping.objects.all()
+    model_form = ModuleTypeMappingImportForm
+
+
+class ModuleTypeMappingView(LibreNMSPermissionMixin, generic.ObjectView):
+    """Provides a view for displaying details of a specific ModuleTypeMapping object."""
+
+    queryset = ModuleTypeMapping.objects.all()
+
+
+class ModuleTypeMappingEditView(LibreNMSPermissionMixin, generic.ObjectEditView):
+    """Provides a view for editing a specific ModuleTypeMapping object."""
+
+    queryset = ModuleTypeMapping.objects.all()
+    form = ModuleTypeMappingForm
+
+
+class ModuleTypeMappingDeleteView(LibreNMSPermissionMixin, generic.ObjectDeleteView):
+    """Provides a view for deleting a specific ModuleTypeMapping object."""
+
+    queryset = ModuleTypeMapping.objects.all()
+
+
+class ModuleTypeMappingBulkDeleteView(LibreNMSPermissionMixin, generic.BulkDeleteView):
+    """Provides a view for deleting multiple ModuleTypeMapping objects."""
+
+    queryset = ModuleTypeMapping.objects.all()
+    table = ModuleTypeMappingTable
+
+
+class ModuleTypeMappingChangeLogView(LibreNMSPermissionMixin, generic.ObjectChangeLogView):
+    """Provides a view for displaying the change log of a specific ModuleTypeMapping object."""
+
+    queryset = ModuleTypeMapping.objects.all()

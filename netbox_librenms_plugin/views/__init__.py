@@ -36,6 +36,14 @@ from .mapping_views import (
     InterfaceTypeMappingEditView,
     InterfaceTypeMappingListView,
     InterfaceTypeMappingView,
+    ModuleTypeMappingBulkDeleteView,
+    ModuleTypeMappingBulkImportView,
+    ModuleTypeMappingChangeLogView,
+    ModuleTypeMappingCreateView,
+    ModuleTypeMappingDeleteView,
+    ModuleTypeMappingEditView,
+    ModuleTypeMappingListView,
+    ModuleTypeMappingView,
 )
 from .object_sync import (
     DeviceCableTableView,
