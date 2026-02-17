@@ -117,22 +117,49 @@ class LibreNMSModuleTable(tables.Table):
         return format_html('<span class="badge {}">{}</span>', badge_class, value)
 
     def render_actions(self, value, record):
-        """Render install button for matched modules."""
-        if not record.get("can_install") or not self.device:
+        """Render install button for matched modules and install branch for parents."""
+        if not self.device:
             return ""
-        url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": self.device.pk})
-        return format_html(
-            '<form method="post" action="{}" style="display:inline">'
-            '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
-            '<input type="hidden" name="module_bay_id" value="{}">'
-            '<input type="hidden" name="module_type_id" value="{}">'
-            '<input type="hidden" name="serial" value="{}">'
-            '<button type="submit" class="btn btn-sm btn-success" title="Install module in bay">'
-            '<i class="mdi mdi-download"></i> Install'
-            "</button></form>",
-            url,
-            self.csrf_token,
-            record.get("module_bay_id", ""),
-            record.get("module_type_id", ""),
-            record.get("serial", ""),
-        )
+
+        buttons = []
+
+        # Single install button
+        if record.get("can_install"):
+            url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": self.device.pk})
+            buttons.append(
+                format_html(
+                    '<form method="post" action="{}" style="display:inline">'
+                    '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
+                    '<input type="hidden" name="module_bay_id" value="{}">'
+                    '<input type="hidden" name="module_type_id" value="{}">'
+                    '<input type="hidden" name="serial" value="{}">'
+                    '<button type="submit" class="btn btn-sm btn-success" title="Install module in bay">'
+                    '<i class="mdi mdi-download"></i> Install'
+                    "</button></form>",
+                    url,
+                    self.csrf_token,
+                    record.get("module_bay_id", ""),
+                    record.get("module_type_id", ""),
+                    record.get("serial", ""),
+                )
+            )
+
+        # Install branch button for parents with installable children
+        if record.get("has_installable_children") and record.get("ent_physical_index"):
+            url = reverse("plugins:netbox_librenms_plugin:install_branch", kwargs={"pk": self.device.pk})
+            buttons.append(
+                format_html(
+                    '<form method="post" action="{}" style="display:inline">'
+                    '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
+                    '<input type="hidden" name="parent_index" value="{}">'
+                    '<button type="submit" class="btn btn-sm btn-primary ms-1"'
+                    ' title="Install this module and all installable children">'
+                    '<i class="mdi mdi-file-tree"></i> Install Branch'
+                    "</button></form>",
+                    url,
+                    self.csrf_token,
+                    record.get("ent_physical_index", ""),
+                )
+            )
+
+        return format_html("{}", format_html("".join(str(b) for b in buttons))) if buttons else ""

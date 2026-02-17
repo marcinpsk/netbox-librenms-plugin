@@ -28,6 +28,7 @@ from .views import (
     DeviceTypeMappingView,
     DeviceValidationDetailsView,
     DeviceVCDetailsView,
+    InstallBranchView,
     InstallModuleView,
     InterfaceNameRuleBulkDeleteView,
     InterfaceNameRuleBulkImportView,
@@ -109,6 +110,11 @@ urlpatterns = [
         "devices/<int:pk>/install-module/",
         InstallModuleView.as_view(),
         name="install_module",
+    ),
+    path(
+        "devices/<int:pk>/install-branch/",
+        InstallBranchView.as_view(),
+        name="install_branch",
     ),
     path(
         "devices/<int:pk>/ipaddress-sync/",
@@ -448,7 +454,7 @@ urlpatterns = [
     path(
         "module-bay-mappings/import/",
         ModuleBayMappingBulkImportView.as_view(),
-        name="modulebaymapping_import",
+        name="modulebaymapping_bulk_import",
     ),
     path(
         "module-bay-mappings/<int:pk>/delete/",
@@ -490,7 +496,7 @@ urlpatterns = [
     path(
         "interface-name-rules/import/",
         InterfaceNameRuleBulkImportView.as_view(),
-        name="interfacenamerule_import",
+        name="interfacenamerule_bulk_import",
     ),
     path(
         "interface-name-rules/<int:pk>/delete/",
