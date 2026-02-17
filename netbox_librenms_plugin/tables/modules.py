@@ -1,4 +1,5 @@
 import django_tables2 as tables
+from django.urls import reverse
 from django.utils.html import format_html
 from utilities.paginator import EnhancedPaginator
 
@@ -16,6 +17,9 @@ class LibreNMSModuleTable(tables.Table):
     module_bay = tables.Column(verbose_name="Module Bay", attrs={"td": {"data-col": "module_bay"}})
     module_type = tables.Column(verbose_name="Module Type", attrs={"td": {"data-col": "module_type"}})
     status = tables.Column(verbose_name="Status", attrs={"td": {"data-col": "status"}})
+    actions = tables.Column(
+        verbose_name="Actions", orderable=False, empty_values=(), attrs={"td": {"data-col": "actions"}}
+    )
 
     class Meta:
         attrs = {"class": "table table-hover object-list", "id": "librenms-module-table"}
@@ -24,13 +28,17 @@ class LibreNMSModuleTable(tables.Table):
     def __init__(self, *args, device=None, **kwargs):
         """Initialize table with optional device context."""
         self.device = device
+        self.csrf_token = ""
         super().__init__(*args, **kwargs)
         self.tab = "modules"
         self.htmx_url = None
         self.prefix = "modules_"
 
     def configure(self, request):
-        """Configure pagination settings."""
+        """Configure pagination settings and CSRF token."""
+        from django.middleware.csrf import get_token
+
+        self.csrf_token = get_token(request)
         paginate = {"paginator_class": EnhancedPaginator, "per_page": get_table_paginate_count(request, self.prefix)}
         tables.RequestConfig(request, paginate).configure(self)
 
@@ -96,3 +104,24 @@ class LibreNMSModuleTable(tables.Table):
         }
         badge_class = badge_classes.get(value, "bg-secondary")
         return format_html('<span class="badge {}">{}</span>', badge_class, value)
+
+    def render_actions(self, value, record):
+        """Render install button for matched modules."""
+        if not record.get("can_install") or not self.device:
+            return ""
+        url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": self.device.pk})
+        return format_html(
+            '<form method="post" action="{}" style="display:inline">'
+            '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
+            '<input type="hidden" name="module_bay_id" value="{}">'
+            '<input type="hidden" name="module_type_id" value="{}">'
+            '<input type="hidden" name="serial" value="{}">'
+            '<button type="submit" class="btn btn-sm btn-success" title="Install module in bay">'
+            '<i class="mdi mdi-download"></i> Install'
+            "</button></form>",
+            url,
+            self.csrf_token,
+            record.get("module_bay_id", ""),
+            record.get("module_type_id", ""),
+            record.get("serial", ""),
+        )

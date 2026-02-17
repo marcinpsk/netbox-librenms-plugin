@@ -150,10 +150,14 @@ function initializeCountdowns() {
     if (window.ipCountdownInterval) {
         clearInterval(window.ipCountdownInterval);
     }
+    if (window.moduleCountdownInterval) {
+        clearInterval(window.moduleCountdownInterval);
+    }
 
     window.interfaceCountdownInterval = initializeCountdown("countdown-timer");
     window.cableCountdownInterval = initializeCountdown("cable-countdown-timer");
     window.ipCountdownInterval = initializeCountdown("ip-countdown-timer");
+    window.moduleCountdownInterval = initializeCountdown("module-countdown-timer");
 }
 
 // ============================================

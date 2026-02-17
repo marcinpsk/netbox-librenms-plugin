@@ -1,10 +1,19 @@
+import re
+
 from django.contrib import messages
 from django.core.cache import cache
-from django.shortcuts import get_object_or_404, render
+from django.db import transaction
+from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
 from django.utils import timezone
 from django.views import View
 
-from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin
+from netbox_librenms_plugin.views.mixins import (
+    CacheMixin,
+    LibreNMSAPIMixin,
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+)
 
 
 # entPhysicalClass values relevant for module sync
@@ -166,8 +175,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         # Power supply: "Power Supply 1" ↔ "PS1" or "PSU1"
         if phys_class == "powerSupply":
-            import re
-
             ps_match = re.search(r"(\d+)", libre_name)
             bay_match = re.search(r"(\d+)", bay_name)
             if ps_match and bay_match and ps_match.group(1) == bay_match.group(1):
@@ -176,8 +183,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         # Fan: "FanTray 1" ↔ "Fan 1" or "Fan Bay 1"
         if phys_class == "fan":
-            import re
-
             fan_match = re.search(r"(\d+)", libre_name)
             bay_match = re.search(r"(\d+)", bay_name)
             if fan_match and bay_match and fan_match.group(1) == bay_match.group(1):
@@ -186,8 +191,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         # Slot matching: "Supervisor(slot 1)" or "Linecard(slot 3)" ↔ "Slot 1" / "Slot 3"
         if phys_class == "module":
-            import re
-
             slot_match = re.search(r"slot\s*(\d+)", libre_name, re.IGNORECASE)
             bay_match = re.search(r"slot\s*(\d+)", bay_name, re.IGNORECASE)
             if slot_match and bay_match and slot_match.group(1) == bay_match.group(1):
@@ -222,6 +225,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             "module_type": matched_type.model if matched_type else "-",
             "status": status,
             "row_class": "",
+            "can_install": False,
+            "module_bay_id": matched_bay.pk if matched_bay else None,
+            "module_type_id": matched_type.pk if matched_type else None,
         }
 
         # Add URLs for matched objects
@@ -243,6 +249,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     status = "Installed"
                     row["row_class"] = "table-success"
                 row["status"] = status
+            elif matched_type:
+                # Bay exists, type matched, no module installed → can install
+                row["can_install"] = True
 
         if matched_type:
             row["module_type_url"] = matched_type.get_absolute_url()
@@ -258,3 +267,50 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if not matched_type:
             return "No Type"
         return "Unmatched"
+
+
+class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
+    """Install a NetBox Module into a ModuleBay from LibreNMS inventory data."""
+
+    def post(self, request, pk):
+        from dcim.models import Device, Module, ModuleBay, ModuleType
+
+        self.required_object_permissions = {"POST": [("add", Module)]}
+        if error := self.require_all_permissions_json("POST"):
+            return error
+
+        device = get_object_or_404(Device, pk=pk)
+        module_bay_id = request.POST.get("module_bay_id")
+        module_type_id = request.POST.get("module_type_id")
+        serial = request.POST.get("serial", "").strip()
+
+        if not module_bay_id or not module_type_id:
+            messages.error(request, "Missing module bay or module type.")
+            return redirect(reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk}))
+
+        module_bay = get_object_or_404(ModuleBay, pk=module_bay_id, device=device)
+        module_type = get_object_or_404(ModuleType, pk=module_type_id)
+
+        # Check if bay already has a module installed
+        if hasattr(module_bay, "installed_module") and module_bay.installed_module:
+            messages.warning(request, f"Module bay '{module_bay.name}' already has a module installed.")
+            return redirect(reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk}))
+
+        try:
+            with transaction.atomic():
+                module = Module(
+                    device=device,
+                    module_bay=module_bay,
+                    module_type=module_type,
+                    serial=serial,
+                    status="active",
+                )
+                module.full_clean()
+                module.save()
+            messages.success(
+                request, f"Installed {module_type.model} in {module_bay.name} (serial: {serial or 'N/A'})."
+            )
+        except Exception as e:
+            messages.error(request, f"Failed to install module: {e}")
+
+        return redirect(reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk}))
