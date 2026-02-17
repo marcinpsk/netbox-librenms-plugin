@@ -81,9 +81,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
     def _build_context(self, request, obj, inventory_data):
         """Build context with matched inventory items and table."""
-        # Filter to relevant classes
-        items = [item for item in inventory_data if item.get("entPhysicalClass") in INVENTORY_CLASSES]
-
         # Build a lookup of all inventory items by index for parent resolution
         index_map = {item["entPhysicalIndex"]: item for item in inventory_data}
 
@@ -91,15 +88,22 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         module_bays = self._get_module_bays(obj)
         module_types = self._get_module_types()
 
-        # Build table rows
+        # Collect top-level items and their sub-components
+        top_items = [item for item in inventory_data if item.get("entPhysicalClass") in INVENTORY_CLASSES]
+
         table_data = []
-        for item in items:
-            row = self._build_row(item, index_map, module_bays, module_types)
+        for item in top_items:
+            row = self._build_row(item, index_map, module_bays, module_types, depth=0)
             table_data.append(row)
 
-        # Sort: installed first, then matched, then unmatched
-        status_order = {"Installed": 0, "Serial Mismatch": 1, "Matched": 2, "No Type": 3, "No Bay": 4, "Unmatched": 5}
-        table_data.sort(key=lambda r: status_order.get(r["status"], 99))
+            # Find sub-components with a model name (transceivers, converters, etc.)
+            sub_items = self._get_sub_components(item["entPhysicalIndex"], inventory_data)
+            for depth, sub_item in sub_items:
+                sub_row = self._build_row(sub_item, index_map, module_bays, module_types, depth=depth)
+                table_data.append(sub_row)
+
+        # Sort top-level groups by status, keeping children after their parent
+        table_data = self._sort_with_hierarchy(table_data)
 
         table = self.get_table(table_data, obj)
         table.configure(request)
@@ -112,6 +116,52 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             "object": obj,
             "cache_expiry": cache_expiry,
         }
+
+    def _get_sub_components(self, parent_idx, inventory_data):
+        """Find descendant items with a model name (real hardware, not empty containers).
+
+        Returns list of (depth, item) tuples.
+        """
+        results = []
+        self._collect_descendants(parent_idx, inventory_data, depth=1, results=results)
+        return results
+
+    def _collect_descendants(self, parent_idx, inventory_data, depth, results):
+        """Recursively collect descendant items that have a model name."""
+        children = [i for i in inventory_data if i.get("entPhysicalContainedIn") == parent_idx]
+        for child in children:
+            model = (child.get("entPhysicalModelName") or "").strip()
+            if model:
+                results.append((depth, child))
+                # Continue looking for deeper components (e.g., SFPs inside converters)
+                self._collect_descendants(child["entPhysicalIndex"], inventory_data, depth + 1, results)
+            else:
+                # Skip containers without models, but check their children
+                self._collect_descendants(child["entPhysicalIndex"], inventory_data, depth, results)
+
+    def _sort_with_hierarchy(self, table_data):
+        """Sort table keeping children grouped under their parent."""
+        status_order = {"Installed": 0, "Serial Mismatch": 1, "Matched": 2, "No Type": 3, "No Bay": 4, "Unmatched": 5}
+
+        # Group into top-level items with their children
+        groups = []
+        current_group = None
+        for row in table_data:
+            if row.get("depth", 0) == 0:
+                current_group = {"parent": row, "children": []}
+                groups.append(current_group)
+            elif current_group is not None:
+                current_group["children"].append(row)
+
+        # Sort groups by parent status
+        groups.sort(key=lambda g: status_order.get(g["parent"]["status"], 99))
+
+        # Flatten back
+        result = []
+        for group in groups:
+            result.append(group["parent"])
+            result.extend(group["children"])
+        return result
 
     def _get_module_bays(self, obj):
         """Get module bays for the device, indexed by name."""
@@ -196,9 +246,19 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if slot_match and bay_match and slot_match.group(1) == bay_match.group(1):
                 return True
 
+        # Sub-component port matching: "Converter 3/1" ↔ "X2 Port 1",
+        # "TenGigabitEthernet1/5" ↔ "X2 Port 5", "GigabitEthernet3/9" ↔ "X2 Port 9"
+        if phys_class in ("other", "port"):
+            slot_port = re.search(r"(\d+)/(\d+)", libre_name)
+            # Extract trailing number from bay name (e.g., "X2 Port 1" → 1, "SFP 3" → 3)
+            bay_num = re.search(r"(\d+)\s*$", bay_name)
+            if slot_port and bay_num and slot_port.group(2) == bay_num.group(1):
+                if any(kw in bay_lower for kw in ("port", "sfp", "x2", "xfp", "qsfp")):
+                    return True
+
         return False
 
-    def _build_row(self, item, index_map, module_bays, module_types):
+    def _build_row(self, item, index_map, module_bays, module_types, depth=0):
         """Build a single table row from a LibreNMS inventory item."""
         model_name = item.get("entPhysicalModelName", "") or ""
         serial = item.get("entPhysicalSerialNum", "") or ""
@@ -228,6 +288,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             "can_install": False,
             "module_bay_id": matched_bay.pk if matched_bay else None,
             "module_type_id": matched_type.pk if matched_type else None,
+            "depth": depth,
         }
 
         # Add URLs for matched objects
@@ -286,7 +347,8 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Vi
 
         if not module_bay_id or not module_type_id:
             messages.error(request, "Missing module bay or module type.")
-            return redirect(reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk}))
+            sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+            return redirect(f"{sync_url}?tab=modules")
 
         module_bay = get_object_or_404(ModuleBay, pk=module_bay_id, device=device)
         module_type = get_object_or_404(ModuleType, pk=module_type_id)
@@ -294,7 +356,8 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Vi
         # Check if bay already has a module installed
         if hasattr(module_bay, "installed_module") and module_bay.installed_module:
             messages.warning(request, f"Module bay '{module_bay.name}' already has a module installed.")
-            return redirect(reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk}))
+            sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+            return redirect(f"{sync_url}?tab=modules")
 
         try:
             with transaction.atomic():
@@ -313,4 +376,5 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Vi
         except Exception as e:
             messages.error(request, f"Failed to install module: {e}")
 
-        return redirect(reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk}))
+        sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+        return redirect(f"{sync_url}?tab=modules")

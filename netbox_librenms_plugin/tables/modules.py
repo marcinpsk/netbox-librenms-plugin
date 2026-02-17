@@ -43,8 +43,14 @@ class LibreNMSModuleTable(tables.Table):
         tables.RequestConfig(request, paginate).configure(self)
 
     def render_name(self, value, record):
-        """Render inventory item name."""
-        return value or "-"
+        """Render inventory item name with tree indentation for sub-components."""
+        depth = record.get("depth", 0)
+        if depth == 0:
+            return value or "-"
+        # Build visual tree prefix based on nesting depth
+        padding_px = depth * 20
+        prefix = "└─ "
+        return format_html('<span style="padding-left:{}px">{}{}</span>', padding_px, prefix, value or "-")
 
     def render_model(self, value, record):
         """Render model with link to module type if matched."""
@@ -72,6 +78,8 @@ class LibreNMSModuleTable(tables.Table):
             "module": "mdi-expansion-card",
             "powerSupply": "mdi-power-plug",
             "fan": "mdi-fan",
+            "port": "mdi-ethernet",
+            "other": "mdi-card-outline",
         }
         icon = icons.get(value, "mdi-card-outline")
         return format_html('<i class="mdi {} me-1"></i> {}', icon, value)
