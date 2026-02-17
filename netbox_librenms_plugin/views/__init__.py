@@ -10,6 +10,7 @@ from .imports import (
     BulkImportConfirmView,
     BulkImportDevicesView,
     DeviceClusterUpdateView,
+    DeviceConflictActionView,
     DeviceRackUpdateView,
     DeviceRoleUpdateView,
     DeviceValidationDetailsView,
@@ -42,6 +43,7 @@ from .sync.cables import SyncCablesView
 from .sync.device_fields import (
     AssignVCSerialView,
     CreateAndAssignPlatformView,
+    UpdateDeviceNameView,
     UpdateDevicePlatformView,
     UpdateDeviceSerialView,
     UpdateDeviceTypeView,
