@@ -486,7 +486,7 @@ urlpatterns = [
     path(
         "interface-name-rules/<int:pk>/",
         InterfaceNameRuleView.as_view(),
-        name="interfacenamerule",
+        name="interfacenamerule_detail",
     ),
     path(
         "interface-name-rules/add/",
