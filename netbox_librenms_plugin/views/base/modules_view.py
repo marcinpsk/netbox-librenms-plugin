@@ -96,7 +96,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         index_map = {item["entPhysicalIndex"]: item for item in inventory_data}
 
         # Get NetBox module bays and modules for this device
-        module_bays = self._get_module_bays(obj)
+        device_bays, module_scoped_bays = self._get_module_bays(obj)
         module_types = self._get_module_types()
 
         # Collect top-level items and their sub-components
@@ -119,14 +119,24 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         table_data = []
         for item in top_items:
-            row = self._build_row(item, index_map, module_bays, module_types, depth=0)
+            row = self._build_row(item, index_map, device_bays, module_types, depth=0)
             parent_idx = len(table_data)
             table_data.append(row)
+
+            # Determine which bays sub-components should match against:
+            # If parent matched a bay with an installed module, use that module's child bays
+            parent_module_id = None
+            if row.get("module_bay_id"):
+                matched_bay = device_bays.get(row["module_bay"])
+                if matched_bay and hasattr(matched_bay, "installed_module") and matched_bay.installed_module:
+                    parent_module_id = matched_bay.installed_module.pk
+
+            child_bays = module_scoped_bays.get(parent_module_id, {}) if parent_module_id else device_bays
 
             # Find sub-components with a model name (transceivers, converters, etc.)
             sub_items = self._get_sub_components(item["entPhysicalIndex"], inventory_data)
             for depth, sub_item in sub_items:
-                sub_row = self._build_row(sub_item, index_map, module_bays, module_types, depth=depth)
+                sub_row = self._build_row(sub_item, index_map, child_bays, module_types, depth=depth)
                 table_data.append(sub_row)
                 # Mark parent if any child is installable
                 if sub_row.get("can_install"):
@@ -259,11 +269,24 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         return result
 
     def _get_module_bays(self, obj):
-        """Get module bays for the device, indexed by name."""
+        """Get module bays for the device, organized by scope.
+
+        Returns:
+            tuple: (device_bays, module_bays) where:
+                - device_bays: {name: bay} for device-level bays (module=None)
+                - module_bays: {module_id: {name: bay}} for bays created by installed modules
+        """
         from dcim.models import ModuleBay
 
         bays = ModuleBay.objects.filter(device=obj).select_related("installed_module__module_type")
-        return {bay.name: bay for bay in bays}
+        device_bays = {}
+        module_scoped_bays = {}
+        for bay in bays:
+            if bay.module_id:
+                module_scoped_bays.setdefault(bay.module_id, {})[bay.name] = bay
+            else:
+                device_bays[bay.name] = bay
+        return device_bays, module_scoped_bays
 
     def _get_module_types(self):
         """Get all module types, indexed by model (part_number), with ModuleTypeMapping checked first."""
@@ -447,7 +470,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Vi
         if not module_bay_id or not module_type_id:
             messages.error(request, "Missing module bay or module type.")
             sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
-            return redirect(f"{sync_url}?tab=modules")
+            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
         module_bay = get_object_or_404(ModuleBay, pk=module_bay_id, device=device)
         module_type = get_object_or_404(ModuleType, pk=module_type_id)
@@ -466,13 +489,13 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Vi
                 f"{{module_path}} which requires NetBox ≥ {MODULE_PATH_MIN_VERSION}.",
             )
             sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
-            return redirect(f"{sync_url}?tab=modules")
+            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
         # Check if bay already has a module installed
         if hasattr(module_bay, "installed_module") and module_bay.installed_module:
             messages.warning(request, f"Module bay '{module_bay.name}' already has a module installed.")
             sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
-            return redirect(f"{sync_url}?tab=modules")
+            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
         try:
             with transaction.atomic():
@@ -497,7 +520,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Vi
             messages.error(request, f"Failed to install module: {e}")
 
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
-        return redirect(f"{sync_url}?tab=modules")
+        return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
     @staticmethod
     def _apply_interface_name_rules(module, module_bay):
@@ -617,7 +640,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         if not parent_index:
             messages.error(request, "Missing parent inventory index.")
             sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
-            return redirect(f"{sync_url}?tab=modules")
+            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
         parent_index = int(parent_index)
 
@@ -626,7 +649,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         if not cached_data:
             messages.error(request, "No cached inventory data. Please refresh modules first.")
             sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
-            return redirect(f"{sync_url}?tab=modules")
+            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
         # Build index map and collect the branch to install
         index_map = {item["entPhysicalIndex"]: item for item in cached_data}
@@ -635,7 +658,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         if not branch_items:
             messages.warning(request, "No installable items found in this branch.")
             sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
-            return redirect(f"{sync_url}?tab=modules")
+            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
         # Load module types (with mappings)
         module_types = self._get_module_types()
@@ -666,7 +689,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         except Exception as e:
             messages.error(request, f"Branch install failed: {e}")
             sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
-            return redirect(f"{sync_url}?tab=modules")
+            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
         # Report results
         if installed:
@@ -677,7 +700,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
             messages.warning(request, f"Failed {len(failed)}: {'; '.join(failed)}")
 
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
-        return redirect(f"{sync_url}?tab=modules")
+        return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
     def _collect_branch(self, parent_index, inventory_data):
         """Collect all items in a branch depth-first, parent first.
@@ -723,6 +746,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         """Try to install a single inventory item.
 
         Re-fetches module bays each time since parent installs create new ones.
+        Scopes bay lookup to the correct parent module to handle duplicate bay names.
         """
         from netbox_librenms_plugin.models import ModuleBayMapping
         from netbox_librenms_plugin.utils import module_type_uses_module_path, supports_module_path
@@ -742,10 +766,18 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
 
         # Re-fetch module bays (parent install creates new child bays)
         bays = ModuleBay.objects.filter(device=device).select_related("installed_module__module_type")
-        module_bays = {bay.name: bay for bay in bays}
+
+        # Determine if this item belongs under an installed module
+        # by tracing its LibreNMS parent hierarchy to an installed item
+        parent_module_id = self._find_parent_module_id(item, index_map, device, ModuleBay)
+
+        if parent_module_id:
+            bay_dict = {bay.name: bay for bay in bays if bay.module_id == parent_module_id}
+        else:
+            bay_dict = {bay.name: bay for bay in bays if not bay.module_id}
 
         # Match module bay using mapping table
-        matched_bay = self._match_bay(item, index_map, module_bays, ModuleBayMapping)
+        matched_bay = self._match_bay(item, index_map, bay_dict, ModuleBayMapping)
         if not matched_bay:
             return {"status": "skipped", "name": name, "reason": "no matching bay"}
 
@@ -768,6 +800,47 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         InstallModuleView._apply_interface_name_rules(module, matched_bay)
 
         return {"status": "installed", "name": f"{matched_type.model} → {matched_bay.name}"}
+
+    @staticmethod
+    def _find_parent_module_id(item, index_map, device, ModuleBay):
+        """Find the NetBox module ID for the installed parent of this inventory item.
+
+        Walks up the LibreNMS hierarchy to find an ancestor whose name matches
+        an installed module bay on the device.
+        """
+        from netbox_librenms_plugin.models import ModuleBayMapping
+
+        current = item
+        for _ in range(10):  # max depth guard
+            parent_idx = current.get("entPhysicalContainedIn", 0)
+            if not parent_idx or parent_idx not in index_map:
+                return None
+            parent = index_map[parent_idx]
+            parent_name = parent.get("entPhysicalName", "")
+
+            # Check if this parent matches an installed module bay on the device
+            device_bays = ModuleBay.objects.filter(device=device, module_id__isnull=True).select_related(
+                "installed_module"
+            )
+
+            for bay in device_bays:
+                if hasattr(bay, "installed_module") and bay.installed_module:
+                    if bay.name == parent_name:
+                        return bay.installed_module.pk
+
+            # Also check ModuleBayMapping for indirect matches
+            mapping = ModuleBayMapping.objects.filter(librenms_name=parent_name).first()
+            if mapping:
+                bay = (
+                    ModuleBay.objects.filter(device=device, name=mapping.netbox_bay_name, module_id__isnull=True)
+                    .select_related("installed_module")
+                    .first()
+                )
+                if bay and hasattr(bay, "installed_module") and bay.installed_module:
+                    return bay.installed_module.pk
+
+            current = parent
+        return None
 
     @staticmethod
     def _match_bay(item, index_map, module_bays, ModuleBayMapping):
