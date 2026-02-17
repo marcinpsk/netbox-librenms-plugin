@@ -1,5 +1,3 @@
-import re
-
 from django.contrib import messages
 from django.core.cache import cache
 from django.db import transaction
@@ -203,68 +201,46 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
     def _match_module_bay(self, item, index_map, module_bays):
         """
         Try to match an inventory item to a NetBox ModuleBay.
-        Matches by parent container name or item name.
+        Checks ModuleBayMapping table first, then falls back to exact parent name match.
         """
+        from netbox_librenms_plugin.models import ModuleBayMapping
+
         parent_name = self._find_parent_container_name(item, index_map)
         item_name = item.get("entPhysicalName", "")
+        phys_class = item.get("entPhysicalClass", "")
 
-        # Try exact match on parent container name first
+        # Check ModuleBayMapping table for parent container name
+        if parent_name:
+            filters = {"librenms_name": parent_name}
+            if phys_class:
+                # Try class-specific mapping first, then generic
+                mapping = ModuleBayMapping.objects.filter(**filters, librenms_class=phys_class).first()
+                if not mapping:
+                    mapping = ModuleBayMapping.objects.filter(**filters, librenms_class="").first()
+            else:
+                mapping = ModuleBayMapping.objects.filter(**filters, librenms_class="").first()
+
+            if mapping and mapping.netbox_bay_name in module_bays:
+                return module_bays[mapping.netbox_bay_name]
+
+        # Check ModuleBayMapping table for item name
+        if item_name:
+            filters = {"librenms_name": item_name}
+            if phys_class:
+                mapping = ModuleBayMapping.objects.filter(**filters, librenms_class=phys_class).first()
+                if not mapping:
+                    mapping = ModuleBayMapping.objects.filter(**filters, librenms_class="").first()
+            else:
+                mapping = ModuleBayMapping.objects.filter(**filters, librenms_class="").first()
+
+            if mapping and mapping.netbox_bay_name in module_bays:
+                return module_bays[mapping.netbox_bay_name]
+
+        # Fallback: exact match on parent container name
         if parent_name and parent_name in module_bays:
             return module_bays[parent_name]
 
-        # Try matching by item name (e.g., "Power Supply 1" → "PS1")
-        for bay_name, bay in module_bays.items():
-            if self._names_match(item_name, bay_name, item.get("entPhysicalClass", "")):
-                return bay
-
         return None
-
-    def _names_match(self, libre_name, bay_name, phys_class):
-        """Heuristic matching between LibreNMS inventory name and NetBox bay name."""
-        if not libre_name or not bay_name:
-            return False
-
-        libre_lower = libre_name.lower().strip()
-        bay_lower = bay_name.lower().strip()
-
-        # Exact match
-        if libre_lower == bay_lower:
-            return True
-
-        # Power supply: "Power Supply 1" ↔ "PS1" or "PSU1"
-        if phys_class == "powerSupply":
-            ps_match = re.search(r"(\d+)", libre_name)
-            bay_match = re.search(r"(\d+)", bay_name)
-            if ps_match and bay_match and ps_match.group(1) == bay_match.group(1):
-                if any(prefix in bay_lower for prefix in ("ps", "psu", "power")):
-                    return True
-
-        # Fan: "FanTray 1" ↔ "Fan 1" or "Fan Bay 1"
-        if phys_class == "fan":
-            fan_match = re.search(r"(\d+)", libre_name)
-            bay_match = re.search(r"(\d+)", bay_name)
-            if fan_match and bay_match and fan_match.group(1) == bay_match.group(1):
-                if "fan" in bay_lower:
-                    return True
-
-        # Slot matching: "Supervisor(slot 1)" or "Linecard(slot 3)" ↔ "Slot 1" / "Slot 3"
-        if phys_class == "module":
-            slot_match = re.search(r"slot\s*(\d+)", libre_name, re.IGNORECASE)
-            bay_match = re.search(r"slot\s*(\d+)", bay_name, re.IGNORECASE)
-            if slot_match and bay_match and slot_match.group(1) == bay_match.group(1):
-                return True
-
-        # Sub-component port matching: "Converter 3/1" ↔ "X2 Port 1",
-        # "TenGigabitEthernet1/5" ↔ "X2 Port 5", "GigabitEthernet3/9" ↔ "X2 Port 9"
-        if phys_class in ("other", "port"):
-            slot_port = re.search(r"(\d+)/(\d+)", libre_name)
-            # Extract trailing number from bay name (e.g., "X2 Port 1" → 1, "SFP 3" → 3)
-            bay_num = re.search(r"(\d+)\s*$", bay_name)
-            if slot_port and bay_num and slot_port.group(2) == bay_num.group(1):
-                if any(kw in bay_lower for kw in ("port", "sfp", "x2", "xfp", "qsfp")):
-                    return True
-
-        return False
 
     def _build_row(self, item, index_map, module_bays, module_types, depth=0):
         """Build a single table row from a LibreNMS inventory item."""

@@ -140,3 +140,44 @@ class ModuleTypeMapping(NetBoxModel):
 
     def __str__(self):
         return f"{self.librenms_model} -> {self.netbox_module_type}"
+
+
+class ModuleBayMapping(NetBoxModel):
+    """Map LibreNMS inventory names to NetBox module bay names.
+
+    Used when LibreNMS inventory names don't match NetBox bay names exactly.
+    For example: LibreNMS "Power Supply 1" → NetBox "PS1".
+    Mappings are global (not scoped to device type or manufacturer).
+    """
+
+    librenms_name = models.CharField(
+        max_length=255,
+        help_text="Name from LibreNMS inventory (entPhysicalName), e.g. 'Power Supply 1'",
+    )
+    librenms_class = models.CharField(
+        max_length=50,
+        blank=True,
+        help_text="Optional entPhysicalClass filter (e.g. 'powerSupply', 'fan', 'module')",
+    )
+    netbox_bay_name = models.CharField(
+        max_length=255,
+        help_text="NetBox module bay name to match, e.g. 'PS1'",
+    )
+    description = models.TextField(
+        blank=True,
+        help_text="Optional description or notes about this mapping",
+    )
+
+    def get_absolute_url(self):
+        """Return the URL for this mapping's detail page."""
+        return reverse("plugins:netbox_librenms_plugin:modulebaymapping_detail", args=[self.pk])
+
+    class Meta:
+        """Meta options for ModuleBayMapping."""
+
+        unique_together = ["librenms_name", "librenms_class"]
+        ordering = ["librenms_name"]
+
+    def __str__(self):
+        cls = f" [{self.librenms_class}]" if self.librenms_class else ""
+        return f"{self.librenms_name}{cls} -> {self.netbox_bay_name}"

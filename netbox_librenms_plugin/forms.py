@@ -15,7 +15,7 @@ from netbox.plugins import get_plugin_config
 from utilities.forms.fields import CSVChoiceField, DynamicModelMultipleChoiceField
 from virtualization.models import Cluster, VirtualMachine
 
-from .models import DeviceTypeMapping, InterfaceTypeMapping, LibreNMSSettings, ModuleTypeMapping
+from .models import DeviceTypeMapping, InterfaceTypeMapping, LibreNMSSettings, ModuleBayMapping, ModuleTypeMapping
 
 logger = logging.getLogger(__name__)
 
@@ -349,6 +349,36 @@ class ModuleTypeMappingFilterForm(NetBoxModelFilterSetForm):
     )
 
     model = ModuleTypeMapping
+
+
+class ModuleBayMappingForm(NetBoxModelForm):
+    """Form for creating and editing module bay mappings between LibreNMS and NetBox."""
+
+    class Meta:
+        """Meta options for ModuleBayMappingForm."""
+
+        model = ModuleBayMapping
+        fields = ["librenms_name", "librenms_class", "netbox_bay_name", "description"]
+
+
+class ModuleBayMappingImportForm(NetBoxModelImportForm):
+    """Form for bulk importing module bay mappings."""
+
+    class Meta:
+        """Meta options for ModuleBayMappingImportForm."""
+
+        model = ModuleBayMapping
+        fields = ["librenms_name", "librenms_class", "netbox_bay_name", "description"]
+
+
+class ModuleBayMappingFilterForm(NetBoxModelFilterSetForm):
+    """Form for filtering module bay mappings."""
+
+    librenms_name = forms.CharField(required=False, label="LibreNMS Name")
+    librenms_class = forms.CharField(required=False, label="LibreNMS Class")
+    netbox_bay_name = forms.CharField(required=False, label="NetBox Bay Name")
+
+    model = ModuleBayMapping
 
 
 class AddToLIbreSNMPV1V2(forms.Form):

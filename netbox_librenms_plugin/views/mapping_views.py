@@ -4,6 +4,7 @@ from utilities.views import register_model_view
 from netbox_librenms_plugin.filters import (
     DeviceTypeMappingFilterSet,
     InterfaceTypeMappingFilterSet,
+    ModuleBayMappingFilterSet,
     ModuleTypeMappingFilterSet,
 )
 from netbox_librenms_plugin.forms import (
@@ -13,14 +14,23 @@ from netbox_librenms_plugin.forms import (
     InterfaceTypeMappingFilterForm,
     InterfaceTypeMappingForm,
     InterfaceTypeMappingImportForm,
+    ModuleBayMappingFilterForm,
+    ModuleBayMappingForm,
+    ModuleBayMappingImportForm,
     ModuleTypeMappingFilterForm,
     ModuleTypeMappingForm,
     ModuleTypeMappingImportForm,
 )
-from netbox_librenms_plugin.models import DeviceTypeMapping, InterfaceTypeMapping, ModuleTypeMapping
+from netbox_librenms_plugin.models import (
+    DeviceTypeMapping,
+    InterfaceTypeMapping,
+    ModuleBayMapping,
+    ModuleTypeMapping,
+)
 from netbox_librenms_plugin.tables.mappings import (
     DeviceTypeMappingTable,
     InterfaceTypeMappingTable,
+    ModuleBayMappingTable,
     ModuleTypeMappingTable,
 )
 from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
@@ -218,3 +228,63 @@ class ModuleTypeMappingChangeLogView(LibreNMSPermissionMixin, generic.ObjectChan
     """Provides a view for displaying the change log of a specific ModuleTypeMapping object."""
 
     queryset = ModuleTypeMapping.objects.all()
+
+
+# --- ModuleBayMapping views ---
+
+
+class ModuleBayMappingListView(LibreNMSPermissionMixin, generic.ObjectListView):
+    """Provides a view for listing all ModuleBayMapping objects."""
+
+    queryset = ModuleBayMapping.objects.all()
+    table = ModuleBayMappingTable
+    filterset = ModuleBayMappingFilterSet
+    filterset_form = ModuleBayMappingFilterForm
+    template_name = "netbox_librenms_plugin/modulebaymapping_list.html"
+
+
+class ModuleBayMappingCreateView(LibreNMSPermissionMixin, generic.ObjectEditView):
+    """Provides a view for creating a new ModuleBayMapping object."""
+
+    queryset = ModuleBayMapping.objects.all()
+    form = ModuleBayMappingForm
+
+
+@register_model_view(ModuleBayMapping, "bulk_import", path="import", detail=False)
+class ModuleBayMappingBulkImportView(LibreNMSPermissionMixin, generic.BulkImportView):
+    """Provides a view for bulk importing ModuleBayMapping objects."""
+
+    queryset = ModuleBayMapping.objects.all()
+    model_form = ModuleBayMappingImportForm
+
+
+class ModuleBayMappingView(LibreNMSPermissionMixin, generic.ObjectView):
+    """Provides a view for displaying details of a specific ModuleBayMapping object."""
+
+    queryset = ModuleBayMapping.objects.all()
+
+
+class ModuleBayMappingEditView(LibreNMSPermissionMixin, generic.ObjectEditView):
+    """Provides a view for editing a specific ModuleBayMapping object."""
+
+    queryset = ModuleBayMapping.objects.all()
+    form = ModuleBayMappingForm
+
+
+class ModuleBayMappingDeleteView(LibreNMSPermissionMixin, generic.ObjectDeleteView):
+    """Provides a view for deleting a specific ModuleBayMapping object."""
+
+    queryset = ModuleBayMapping.objects.all()
+
+
+class ModuleBayMappingBulkDeleteView(LibreNMSPermissionMixin, generic.BulkDeleteView):
+    """Provides a view for deleting multiple ModuleBayMapping objects."""
+
+    queryset = ModuleBayMapping.objects.all()
+    table = ModuleBayMappingTable
+
+
+class ModuleBayMappingChangeLogView(LibreNMSPermissionMixin, generic.ObjectChangeLogView):
+    """Provides a view for displaying the change log of a specific ModuleBayMapping object."""
+
+    queryset = ModuleBayMapping.objects.all()
