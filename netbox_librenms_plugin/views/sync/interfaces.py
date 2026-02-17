@@ -121,6 +121,13 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, C
             if selected_device_id:
                 try:
                     target_device = Device.objects.get(id=selected_device_id)
+                    # Validate the target is the current device or a VC member
+                    if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+                        valid_ids = set(obj.virtual_chassis.members.values_list("id", flat=True))
+                        if target_device.id not in valid_ids:
+                            target_device = obj
+                    elif target_device.id != obj.id:
+                        target_device = obj
                 except (Device.DoesNotExist, ValueError, TypeError):
                     target_device = obj
             else:
@@ -299,7 +306,7 @@ class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermission
                         errors.append(f"Interface with ID {interface_id} not found")
                         continue
                     except Exception as exc:  # pragma: no cover - defensive
-                        errors.append(f"Error deleting interface {interface_name}: {str(exc)}")
+                        errors.append(f"Error deleting interface {interface_name or interface_id}: {str(exc)}")
                         continue
 
         except Exception as exc:  # pragma: no cover

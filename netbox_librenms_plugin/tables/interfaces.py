@@ -53,7 +53,7 @@ class LibreNMSInterfaceTable(tables.Table):
             "data-interface": lambda record: record.get(self.interface_name_field),
             "data-name": lambda record: record.get(self.interface_name_field),
             "data-enabled": lambda record: (
-                str(record.get("ifAdminStatus", "")).lower() if record.get("ifAdminStatus") else ""
+                str(record.get("ifAdminStatus")).lower() if record.get("ifAdminStatus") is not None else ""
             ),
         }
 
