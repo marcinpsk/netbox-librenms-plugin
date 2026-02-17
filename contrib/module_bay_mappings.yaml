@@ -1,0 +1,95 @@
+# Module Bay Mappings - Map LibreNMS inventory container names to NetBox module bay names
+#
+# These mappings replace heuristic matching between LibreNMS inventory and NetBox module bays.
+# Import via: LibreNMS Plugin → Module Bay Mappings → Import
+#
+# Fields:
+#   librenms_name:  LibreNMS entPhysicalName or container name (exact match)
+#   librenms_class: Optional entPhysicalClass filter (powerSupply, fan, module, etc.)
+#                   Leave empty for class-independent mappings
+#   netbox_bay_name: Target NetBox module bay name
+#   description:    Optional description
+
+# --- Power Supplies ---
+- librenms_name: "Power Supply 1"
+  librenms_class: "powerSupply"
+  netbox_bay_name: "PS1"
+  description: "Power supply slot 1"
+- librenms_name: "Power Supply 2"
+  librenms_class: "powerSupply"
+  netbox_bay_name: "PS2"
+  description: "Power supply slot 2"
+- librenms_name: "Power Supply 3"
+  librenms_class: "powerSupply"
+  netbox_bay_name: "PS3"
+  description: "Power supply slot 3"
+
+# --- Fan Trays ---
+- librenms_name: "FanTray 1"
+  librenms_class: "fan"
+  netbox_bay_name: "Fan 1"
+  description: "Fan tray 1"
+- librenms_name: "FanTray 2"
+  librenms_class: "fan"
+  netbox_bay_name: "Fan 2"
+  description: "Fan tray 2"
+- librenms_name: "FanTray 3"
+  librenms_class: "fan"
+  netbox_bay_name: "Fan 3"
+  description: "Fan tray 3"
+
+# --- Cisco Line Card Slots ---
+- librenms_name: "Linecard(slot 1)"
+  librenms_class: "module"
+  netbox_bay_name: "Slot 1"
+  description: "Linecard slot 1"
+- librenms_name: "Linecard(slot 2)"
+  librenms_class: "module"
+  netbox_bay_name: "Slot 2"
+  description: "Linecard slot 2"
+- librenms_name: "Linecard(slot 3)"
+  librenms_class: "module"
+  netbox_bay_name: "Slot 3"
+  description: "Linecard slot 3"
+- librenms_name: "Linecard(slot 4)"
+  librenms_class: "module"
+  netbox_bay_name: "Slot 4"
+  description: "Linecard slot 4"
+- librenms_name: "Linecard(slot 5)"
+  librenms_class: "module"
+  netbox_bay_name: "Slot 5"
+  description: "Linecard slot 5"
+
+# --- Cisco Supervisor Slots ---
+- librenms_name: "Supervisor(slot 1)"
+  librenms_class: "module"
+  netbox_bay_name: "Slot 1"
+  description: "Supervisor slot 1"
+- librenms_name: "Supervisor(slot 2)"
+  librenms_class: "module"
+  netbox_bay_name: "Slot 2"
+  description: "Supervisor slot 2"
+
+# --- Juniper FPC Slots ---
+- librenms_name: "FPC 0"
+  librenms_class: "module"
+  netbox_bay_name: "FPC 0"
+  description: "Juniper FPC slot 0"
+- librenms_name: "FPC 1"
+  librenms_class: "module"
+  netbox_bay_name: "FPC 1"
+  description: "Juniper FPC slot 1"
+- librenms_name: "FPC 2"
+  librenms_class: "module"
+  netbox_bay_name: "FPC 2"
+  description: "Juniper FPC slot 2"
+
+# --- Juniper Routing Engine ---
+- librenms_name: "Routing Engine 0"
+  librenms_class: "module"
+  netbox_bay_name: "RE 0"
+  description: "Juniper routing engine 0"
+- librenms_name: "Routing Engine 1"
+  librenms_class: "module"
+  netbox_bay_name: "RE 1"
+  description: "Juniper routing engine 1"

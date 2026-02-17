@@ -1,6 +1,6 @@
 from django.urls import include, path
 
-from .models import DeviceTypeMapping, InterfaceTypeMapping, ModuleTypeMapping
+from .models import DeviceTypeMapping, InterfaceTypeMapping, ModuleBayMapping, ModuleTypeMapping
 from .views import (
     AddDeviceToLibreNMSView,
     AssignVCSerialView,
@@ -40,6 +40,14 @@ from .views import (
     InterfaceTypeMappingView,
     LibreNMSImportView,
     LibreNMSSettingsView,
+    ModuleBayMappingBulkDeleteView,
+    ModuleBayMappingBulkImportView,
+    ModuleBayMappingChangeLogView,
+    ModuleBayMappingCreateView,
+    ModuleBayMappingDeleteView,
+    ModuleBayMappingEditView,
+    ModuleBayMappingListView,
+    ModuleBayMappingView,
     ModuleTypeMappingBulkDeleteView,
     ModuleTypeMappingBulkImportView,
     ModuleTypeMappingChangeLogView,
@@ -446,6 +454,48 @@ urlpatterns = [
         "module-type-mappings/delete/",
         ModuleTypeMappingBulkDeleteView.as_view(),
         name="moduletypemapping_bulk_delete",
+    ),
+    # Module Bay Mapping URLs
+    path(
+        "module-bay-mappings/",
+        ModuleBayMappingListView.as_view(),
+        name="modulebaymapping_list",
+    ),
+    path(
+        "module-bay-mappings/<int:pk>/",
+        ModuleBayMappingView.as_view(),
+        name="modulebaymapping",
+    ),
+    path(
+        "module-bay-mappings/add/",
+        ModuleBayMappingCreateView.as_view(),
+        name="modulebaymapping_add",
+    ),
+    path(
+        "module-bay-mappings/import/",
+        ModuleBayMappingBulkImportView.as_view(),
+        name="modulebaymapping_import",
+    ),
+    path(
+        "module-bay-mappings/<int:pk>/delete/",
+        ModuleBayMappingDeleteView.as_view(),
+        name="modulebaymapping_delete",
+    ),
+    path(
+        "module-bay-mappings/<int:pk>/edit/",
+        ModuleBayMappingEditView.as_view(),
+        name="modulebaymapping_edit",
+    ),
+    path(
+        "module-bay-mappings/<int:pk>/changelog/",
+        ModuleBayMappingChangeLogView.as_view(),
+        name="modulebaymapping_changelog",
+        kwargs={"model": ModuleBayMapping},
+    ),
+    path(
+        "module-bay-mappings/delete/",
+        ModuleBayMappingBulkDeleteView.as_view(),
+        name="modulebaymapping_bulk_delete",
     ),
     path("api/", include("netbox_librenms_plugin.api.urls")),
 ]

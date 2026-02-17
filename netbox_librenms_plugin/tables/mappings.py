@@ -1,7 +1,7 @@
 import django_tables2 as tables
 from netbox.tables import NetBoxTable, columns
 
-from netbox_librenms_plugin.models import DeviceTypeMapping, InterfaceTypeMapping, ModuleTypeMapping
+from netbox_librenms_plugin.models import DeviceTypeMapping, InterfaceTypeMapping, ModuleBayMapping, ModuleTypeMapping
 
 
 class InterfaceTypeMappingTable(NetBoxTable):
@@ -90,6 +90,38 @@ class ModuleTypeMappingTable(NetBoxTable):
             "id",
             "librenms_model",
             "netbox_module_type",
+            "description",
+            "actions",
+        )
+        attrs = {"class": "table table-hover table-headings table-striped"}
+
+
+class ModuleBayMappingTable(NetBoxTable):
+    """Table for displaying ModuleBayMapping data."""
+
+    librenms_name = tables.Column(verbose_name="LibreNMS Name", linkify=True)
+    librenms_class = tables.Column(verbose_name="LibreNMS Class")
+    netbox_bay_name = tables.Column(verbose_name="NetBox Bay Name")
+    description = tables.Column(verbose_name="Description", linkify=False)
+    actions = columns.ActionsColumn(actions=("edit", "delete"))
+
+    class Meta:
+        """Meta options for ModuleBayMappingTable."""
+
+        model = ModuleBayMapping
+        fields = (
+            "id",
+            "librenms_name",
+            "librenms_class",
+            "netbox_bay_name",
+            "description",
+            "actions",
+        )
+        default_columns = (
+            "id",
+            "librenms_name",
+            "librenms_class",
+            "netbox_bay_name",
             "description",
             "actions",
         )

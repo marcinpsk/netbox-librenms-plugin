@@ -1,6 +1,6 @@
 import django_filters
 
-from .models import DeviceTypeMapping, InterfaceTypeMapping, ModuleTypeMapping
+from .models import DeviceTypeMapping, InterfaceTypeMapping, ModuleBayMapping, ModuleTypeMapping
 
 
 class InterfaceTypeMappingFilterSet(django_filters.FilterSet):
@@ -31,3 +31,13 @@ class ModuleTypeMappingFilterSet(django_filters.FilterSet):
 
         model = ModuleTypeMapping
         fields = ["librenms_model", "description"]
+
+
+class ModuleBayMappingFilterSet(django_filters.FilterSet):
+    """Filter set for ModuleBayMapping model."""
+
+    class Meta:
+        """Meta options for ModuleBayMappingFilterSet."""
+
+        model = ModuleBayMapping
+        fields = ["librenms_name", "librenms_class", "netbox_bay_name"]
