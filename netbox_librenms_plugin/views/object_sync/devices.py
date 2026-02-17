@@ -35,16 +35,19 @@ class DeviceLibreNMSSyncView(BaseLibreNMSSyncView):
     tab = ViewTab(label="LibreNMS Sync", permission=PERM_VIEW_PLUGIN)
 
     def get_interface_context(self, request, obj):
+        """Return interface sync context for the device."""
         interface_name_field = get_interface_name_field(request)
         interface_table_view = DeviceInterfaceTableView()
         interface_table_view.request = request
         return interface_table_view.get_context_data(request, obj, interface_name_field)
 
     def get_cable_context(self, request, obj):
+        """Return cable sync context for the device."""
         cable_table_view = DeviceCableTableView()
         return cable_table_view.get_context_data(request, obj)
 
     def get_ip_context(self, request, obj):
+        """Return IP address sync context for the device."""
         ipaddress_table_view = DeviceIPAddressTableView()
         return ipaddress_table_view.get_context_data(request, obj)
 
@@ -55,12 +58,15 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
     model = Device
 
     def get_interfaces(self, obj):
+        """Return all interfaces for the device."""
         return obj.interfaces.all()
 
     def get_redirect_url(self, obj):
+        """Return the device interface sync redirect URL."""
         return reverse("plugins:netbox_librenms_plugin:vm_interface_sync", kwargs={"pk": obj.pk})
 
     def get_table(self, data, obj, interface_name_field):
+        """Return the appropriate interface table, selecting VC variant if needed."""
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
             table = VCInterfaceTable(data, device=obj, interface_name_field=interface_name_field)
         else:
@@ -73,6 +79,7 @@ class SingleInterfaceVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
     """Verify single interface data for a device via cached LibreNMS payload."""
 
     def post(self, request):
+        """Verify interface data against cached LibreNMS ports for a device."""
         data = json.loads(request.body)
         selected_device_id = data.get("device_id")
         interface_name = data.get("interface_name")
@@ -120,6 +127,7 @@ class DeviceCableTableView(BaseCableTableView):
     model = Device
 
     def get_table(self, data, obj):
+        """Return the appropriate cable table, selecting VC variant if needed."""
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
             return VCCableTable(data, device=obj)
         return LibreNMSCableTable(data, device=obj)

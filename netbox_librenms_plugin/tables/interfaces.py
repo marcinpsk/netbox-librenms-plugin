@@ -21,6 +21,8 @@ class LibreNMSInterfaceTable(tables.Table):
     """
 
     class Meta:
+        """Meta options for LibreNMSInterfaceTable."""
+
         sequence = [
             "selection",
             "name",
@@ -38,6 +40,7 @@ class LibreNMSInterfaceTable(tables.Table):
         }
 
     def __init__(self, *args, device=None, interface_name_field=None, **kwargs):
+        """Initialize table with device context and interface name field."""
         self.device = device
         self.interface_name_field = interface_name_field or get_interface_name_field()
 
@@ -317,6 +320,7 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
     )
 
     def __init__(self, *args, device=None, interface_name_field=None, **kwargs):
+        """Initialize VC interface table with device and name field."""
         super().__init__(*args, device=device, interface_name_field=interface_name_field, **kwargs)
         # Ensure device_selection column is visible
         if hasattr(self.device, "virtual_chassis") and self.device.virtual_chassis:
@@ -356,11 +360,14 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
         )
 
     def format_interface_data(self, port_data, device):
+        """Format interface data including VC device selection column."""
         formatted_data = super().format_interface_data(port_data, device)
         formatted_data["device_selection"] = self.render_device_selection(None, port_data)
         return formatted_data
 
     class Meta:
+        """Meta options for VCInterfaceTable."""
+
         sequence = [
             "selection",
             "device_selection",
@@ -384,6 +391,8 @@ class LibreNMSVMInterfaceTable(LibreNMSInterfaceTable):
     """
 
     class Meta(LibreNMSInterfaceTable.Meta):
+        """Meta options for LibreNMSVMInterfaceTable."""
+
         sequence = [
             "selection",
             "name",

@@ -35,10 +35,13 @@ class LibreNMSSettings(models.Model):
     )
 
     class Meta:
+        """Meta options for LibreNMSSettings."""
+
         verbose_name = "LibreNMS Settings"
         verbose_name_plural = "LibreNMS Settings"
 
     def get_absolute_url(self):
+        """Return the URL for the settings page."""
         return reverse("plugins:netbox_librenms_plugin:settings")
 
     def __str__(self):
@@ -46,6 +49,8 @@ class LibreNMSSettings(models.Model):
 
 
 class InterfaceTypeMapping(NetBoxModel):
+    """Map LibreNMS interface types and speeds to NetBox interface types."""
+
     librenms_type = models.CharField(max_length=100)
     netbox_type = models.CharField(
         max_length=50,
@@ -59,9 +64,12 @@ class InterfaceTypeMapping(NetBoxModel):
     )
 
     def get_absolute_url(self):
+        """Return the URL for this mapping's detail page."""
         return reverse("plugins:netbox_librenms_plugin:interfacetypemapping_detail", args=[self.pk])
 
     class Meta:
+        """Meta options for InterfaceTypeMapping."""
+
         unique_together = ["librenms_type", "librenms_speed"]
 
     def __str__(self):
