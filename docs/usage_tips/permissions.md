@@ -58,7 +58,7 @@ NetBox object permissions are created similarly but for different object types (
 The Interface Type Mapping feature uses its own object permissions in addition to the plugin permissions. To manage interface mappings, users need:
 
 - **Plugin permission**: View permission on LibreNMS Settings (to access the page)
-- **Object permissions**: `netbox_librenms_plugin.add_interfacetypemapping`, `change_interfacetypemapping`, or `delete_interfacetypemapping` as needed
+- **Object permissions**: `netbox_librenms_plugin.add_interfacetypemapping`, `netbox_librenms_plugin.change_interfacetypemapping`, or `netbox_librenms_plugin.delete_interfacetypemapping` as needed
 
 These permissions are enforced automatically by NetBox's generic views.
 
@@ -81,6 +81,7 @@ Users have full access to all plugin features and can import devices, sync inter
 
 
 ## Further Details
+
 ### Tier 1: Plugin Permissions
 
 Plugins permissions use the **LibreNMS Settings** model permissions:

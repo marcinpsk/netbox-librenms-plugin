@@ -119,7 +119,10 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, C
             selected_device_id = self.request.POST.get(device_selection_key)
 
             if selected_device_id:
-                target_device = Device.objects.get(id=selected_device_id)
+                try:
+                    target_device = Device.objects.get(id=selected_device_id)
+                except (Device.DoesNotExist, ValueError, TypeError):
+                    target_device = obj
             else:
                 target_device = obj
 
@@ -155,8 +158,8 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, C
 
     def get_netbox_interface_type(self, librenms_interface):
         """Return the NetBox interface type mapped from LibreNMS type and speed."""
-        speed = convert_speed_to_kbps(librenms_interface["ifSpeed"])
-        mappings = InterfaceTypeMapping.objects.filter(librenms_type=librenms_interface["ifType"])
+        speed = convert_speed_to_kbps(librenms_interface.get("ifSpeed"))
+        mappings = InterfaceTypeMapping.objects.filter(librenms_type=librenms_interface.get("ifType"))
 
         if speed is not None:
             speed_mapping = mappings.filter(librenms_speed__lte=speed).order_by("-librenms_speed").first()
@@ -237,17 +240,13 @@ class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermission
 
     def post(self, request, object_type, object_id):
         """Delete selected NetBox-only interfaces not present in LibreNMS."""
-        # Check plugin write permission first
-        if error := self.require_write_permission_json():
-            return error
-
         # Set permissions dynamically based on object type
         self.required_object_permissions = {
             "POST": self.get_required_permissions_for_object_type(object_type),
         }
 
-        # Check NetBox object permissions
-        if error := self.require_object_permissions_json("POST"):
+        # Check both plugin write and NetBox object permissions
+        if error := self.require_all_permissions_json("POST"):
             return error
 
         if object_type == "device":
@@ -264,13 +263,16 @@ class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermission
 
         deleted_count = 0
         errors = []
+        interface_name = None
 
         try:
             with transaction.atomic():
                 for interface_id in interface_ids:
+                    interface_name = None
                     try:
                         if object_type == "device":
                             interface = Interface.objects.get(id=interface_id)
+                            interface_name = interface.name
                             if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                                 valid_device_ids = [member.id for member in obj.virtual_chassis.members.all()]
                                 if interface.device_id not in valid_device_ids:
@@ -285,11 +287,11 @@ class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermission
                                 continue
                         else:
                             interface = VMInterface.objects.get(id=interface_id)
+                            interface_name = interface.name
                             if interface.virtual_machine_id != obj.id:
                                 errors.append(f"Interface {interface.name} does not belong to this virtual machine")
                                 continue
 
-                        interface_name = interface.name
                         interface.delete()
                         deleted_count += 1
 
