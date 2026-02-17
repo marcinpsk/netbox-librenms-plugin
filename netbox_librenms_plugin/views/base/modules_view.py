@@ -59,7 +59,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 {"module_sync": {"object": obj, "table": None, "cache_expiry": None}},
             )
 
-        # Cache the raw inventory data
+        # Fetch transceiver data and merge with inventory
+        inventory_data = self._merge_transceiver_data(inventory_data)
+
+        # Cache the merged inventory data
         cache.set(
             self.get_cache_key(obj, "inventory"),
             inventory_data,
@@ -87,7 +90,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         module_types = self._get_module_types()
 
         # Collect top-level items and their sub-components
-        top_items = [item for item in inventory_data if item.get("entPhysicalClass") in INVENTORY_CLASSES]
+        # Include synthetic transceiver items (from vendors without ENTITY-MIB SFP data)
+        top_items = [
+            item
+            for item in inventory_data
+            if item.get("entPhysicalClass") in INVENTORY_CLASSES or item.get("_from_transceiver_api")
+        ]
 
         table_data = []
         for item in top_items:
@@ -118,6 +126,71 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             "object": obj,
             "cache_expiry": cache_expiry,
         }
+
+    def _merge_transceiver_data(self, inventory_data):
+        """Merge transceiver API data with entity inventory.
+
+        For vendors like Nokia that don't expose SFPs in ENTITY-MIB,
+        the transceiver API provides SFP model, serial, and type info.
+
+        Strategy:
+        - For transceivers matching existing inventory items by entity_physical_index:
+          supplement entPhysicalModelName if empty
+        - For transceivers NOT in inventory: create synthetic inventory items
+          so they appear in the modules table
+        """
+        success, transceivers = self.librenms_api.get_device_transceivers(self.librenms_id)
+        if not success or not transceivers:
+            return inventory_data
+
+        # Build lookup of existing inventory items by index
+        inv_by_index = {item["entPhysicalIndex"]: item for item in inventory_data}
+
+        # Types that are containers, not real transceiver modules
+        SKIP_TYPES = {"Port Container", "Port", ""}
+
+        for txr in transceivers:
+            ent_idx = txr.get("entity_physical_index")
+            if not ent_idx:
+                continue
+
+            model = (txr.get("model") or "").strip()
+            serial = (txr.get("serial") or "").strip()
+            txr_type = (txr.get("type") or "").strip()
+
+            # Skip containers and entries with no useful data
+            if txr_type in SKIP_TYPES and not model and not serial:
+                continue
+
+            # Use transceiver type as model fallback (e.g., "CFP2/QSFP28")
+            display_model = model or (txr_type if txr_type not in SKIP_TYPES else "")
+
+            if ent_idx in inv_by_index:
+                # Supplement existing inventory item if model is missing
+                existing = inv_by_index[ent_idx]
+                if not (existing.get("entPhysicalModelName") or "").strip() and display_model:
+                    existing["entPhysicalModelName"] = display_model
+                if not (existing.get("entPhysicalSerialNum") or "").strip() and serial:
+                    existing["entPhysicalSerialNum"] = serial
+            else:
+                # Create synthetic inventory item for SFPs not in entity inventory
+                # Try to find port name for this transceiver
+                port_id = txr.get("port_id", 0)
+                name = f"Transceiver (port {port_id})" if port_id else f"Transceiver {ent_idx}"
+
+                synthetic = {
+                    "entPhysicalIndex": ent_idx,
+                    "entPhysicalName": name,
+                    "entPhysicalClass": "port",
+                    "entPhysicalModelName": display_model,
+                    "entPhysicalSerialNum": serial,
+                    "entPhysicalDescr": txr_type,
+                    "entPhysicalContainedIn": 0,
+                    "_from_transceiver_api": True,
+                }
+                inventory_data.append(synthetic)
+
+        return inventory_data
 
     def _get_sub_components(self, parent_idx, inventory_data):
         """Find descendant items with a model name (real hardware, not empty containers).

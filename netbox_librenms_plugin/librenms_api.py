@@ -686,6 +686,51 @@ class LibreNMSAPI:
         except requests.exceptions.RequestException as e:
             return False, str(e)
 
+    def get_device_transceivers(self, device_id):
+        """
+        Fetch all transceiver data for a device from LibreNMS.
+
+        Route: /api/v0/devices/{device_id}/transceivers
+
+        This is a separate data source from entity inventory. Some vendors
+        (e.g., Nokia/SROS) don't expose SFPs via ENTITY-MIB but do report
+        them through vendor-specific MIBs which LibreNMS surfaces here.
+
+        Args:
+            device_id: LibreNMS device ID
+
+        Returns:
+            tuple: (success: bool, data: list)
+
+        Example transceiver item:
+            {
+                "port_id": 519,
+                "entity_physical_index": 1610899520,
+                "type": "CFP2/QSFP28",
+                "model": "3HE10550AARA01",
+                "serial": "X42AU0D",
+                "channels": 4,
+                "connector": "LC",
+                "wavelength": 1301,
+                ...
+            }
+        """
+        try:
+            response = requests.get(
+                f"{self.librenms_url}/api/v0/devices/{device_id}/transceivers",
+                headers=self.headers,
+                timeout=DEFAULT_API_TIMEOUT,
+                verify=self.verify_ssl,
+            )
+            response.raise_for_status()
+
+            if response.status_code == 200:
+                data = response.json()
+                return True, data.get("transceivers", [])
+            return False, []
+        except requests.exceptions.RequestException as e:
+            return False, str(e)
+
     def get_poller_groups(self):
         """
         Fetch all poller groups from LibreNMS.
