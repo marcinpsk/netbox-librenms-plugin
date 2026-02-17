@@ -135,18 +135,6 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, C
             interface_name_field,
         )
 
-        if "enabled" not in exclude_columns:
-            interface.enabled = (
-                True
-                if librenms_interface["ifAdminStatus"] is None
-                else (
-                    librenms_interface["ifAdminStatus"].lower() == "up"
-                    if isinstance(librenms_interface["ifAdminStatus"], str)
-                    else bool(librenms_interface["ifAdminStatus"])
-                )
-            )
-        interface.save()
-
     def get_netbox_interface_type(self, librenms_interface):
         speed = convert_speed_to_kbps(librenms_interface["ifSpeed"])
         mappings = InterfaceTypeMapping.objects.filter(librenms_type=librenms_interface["ifType"])
@@ -207,6 +195,14 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, C
 
         if "librenms_id" in interface.cf:
             interface.custom_field_data["librenms_id"] = librenms_interface.get("port_id")
+
+        if "enabled" not in exclude_columns:
+            admin_status = librenms_interface.get("ifAdminStatus")
+            interface.enabled = (
+                True
+                if admin_status is None
+                else (admin_status.lower() == "up" if isinstance(admin_status, str) else bool(admin_status))
+            )
 
         ifPhysAddress = librenms_interface.get("ifPhysAddress")
         self.handle_mac_address(interface, ifPhysAddress)

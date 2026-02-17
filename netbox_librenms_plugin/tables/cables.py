@@ -111,7 +111,7 @@ class VCCableTable(LibreNMSCableTable):
         super().__init__(*args, device=device, **kwargs)
 
     def render_device_selection(self, value, record):
-        members = self.device.virtual_chassis.members.all()
+        members = self.device.virtual_chassis.members.order_by("vc_position", "name")
         chassis_member = get_virtual_chassis_member(self.device, record["local_port"])
         selected_member_id = chassis_member.id if chassis_member else self.device.id
 

@@ -58,7 +58,7 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
         return obj.interfaces.all()
 
     def get_redirect_url(self, obj):
-        return reverse("plugins:netbox_librenms_plugin:vm_interface_sync", kwargs={"pk": obj.pk})
+        return reverse("plugins:netbox_librenms_plugin:device_interface_sync", kwargs={"pk": obj.pk})
 
     def get_table(self, data, obj, interface_name_field):
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:

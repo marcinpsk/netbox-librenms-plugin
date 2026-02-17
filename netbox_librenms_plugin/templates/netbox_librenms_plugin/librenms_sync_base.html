@@ -208,7 +208,7 @@
                                                   action="{% url 'plugins:netbox_librenms_plugin:update_device_type' pk=object.pk %}"
                                                   style="display: inline;">
                                                 {% csrf_token %}
-                                                <button type="submit" class="btn btn-sm btn-outline-primary"
+                                                <button type="submit" class="btn btn-sm btn-outline-danger"
                                                         title="Sync to {{ librenms_device_hardware_match.device_type }}">
                                                     <i class="mdi mdi-sync"></i> Sync to NetBox
                                                 </button>
@@ -240,7 +240,7 @@
                                 {% if object.virtual_chassis and vc_inventory_serials %}
                                     <span class="badge bg-secondary text-white ms-2">{{ vc_inventory_serials|length }}</span>
                                 {% endif %}
-                            </th>
+                            </td>
                             <td>
                                 <div class="d-flex align-items-center">
                                     <div>
