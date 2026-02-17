@@ -1,6 +1,6 @@
 import django_filters
 
-from .models import DeviceTypeMapping, InterfaceTypeMapping
+from .models import DeviceTypeMapping, InterfaceTypeMapping, ModuleTypeMapping
 
 
 class InterfaceTypeMappingFilterSet(django_filters.FilterSet):
@@ -21,3 +21,13 @@ class DeviceTypeMappingFilterSet(django_filters.FilterSet):
 
         model = DeviceTypeMapping
         fields = ["librenms_hardware", "description"]
+
+
+class ModuleTypeMappingFilterSet(django_filters.FilterSet):
+    """Filter set for ModuleTypeMapping model."""
+
+    class Meta:
+        """Meta options for ModuleTypeMappingFilterSet."""
+
+        model = ModuleTypeMapping
+        fields = ["librenms_model", "description"]

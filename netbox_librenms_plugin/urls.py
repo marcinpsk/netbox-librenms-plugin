@@ -1,6 +1,6 @@
 from django.urls import include, path
 
-from .models import DeviceTypeMapping, InterfaceTypeMapping
+from .models import DeviceTypeMapping, InterfaceTypeMapping, ModuleTypeMapping
 from .views import (
     AddDeviceToLibreNMSView,
     AssignVCSerialView,
@@ -40,6 +40,14 @@ from .views import (
     InterfaceTypeMappingView,
     LibreNMSImportView,
     LibreNMSSettingsView,
+    ModuleTypeMappingBulkDeleteView,
+    ModuleTypeMappingBulkImportView,
+    ModuleTypeMappingChangeLogView,
+    ModuleTypeMappingCreateView,
+    ModuleTypeMappingDeleteView,
+    ModuleTypeMappingEditView,
+    ModuleTypeMappingListView,
+    ModuleTypeMappingView,
     SaveUserPrefView,
     SingleCableVerifyView,
     SingleInterfaceVerifyView,
@@ -396,6 +404,48 @@ urlpatterns = [
         "device-type-mappings/delete/",
         DeviceTypeMappingBulkDeleteView.as_view(),
         name="devicetypemapping_bulk_delete",
+    ),
+    # Module type mapping URLs
+    path(
+        "module-type-mappings/",
+        ModuleTypeMappingListView.as_view(),
+        name="moduletypemapping_list",
+    ),
+    path(
+        "module-type-mappings/<int:pk>/",
+        ModuleTypeMappingView.as_view(),
+        name="moduletypemapping_detail",
+    ),
+    path(
+        "module-type-mappings/add/",
+        ModuleTypeMappingCreateView.as_view(),
+        name="moduletypemapping_add",
+    ),
+    path(
+        "module-type-mappings/import/",
+        ModuleTypeMappingBulkImportView.as_view(),
+        name="moduletypemapping_bulk_import",
+    ),
+    path(
+        "module-type-mappings/<int:pk>/delete/",
+        ModuleTypeMappingDeleteView.as_view(),
+        name="moduletypemapping_delete",
+    ),
+    path(
+        "module-type-mappings/<int:pk>/edit/",
+        ModuleTypeMappingEditView.as_view(),
+        name="moduletypemapping_edit",
+    ),
+    path(
+        "module-type-mappings/<int:pk>/changelog/",
+        ModuleTypeMappingChangeLogView.as_view(),
+        name="moduletypemapping_changelog",
+        kwargs={"model": ModuleTypeMapping},
+    ),
+    path(
+        "module-type-mappings/delete/",
+        ModuleTypeMappingBulkDeleteView.as_view(),
+        name="moduletypemapping_bulk_delete",
     ),
     path("api/", include("netbox_librenms_plugin.api.urls")),
 ]

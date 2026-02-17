@@ -1,6 +1,6 @@
 from netbox.api.serializers import NetBoxModelSerializer
 
-from netbox_librenms_plugin.models import DeviceTypeMapping, InterfaceTypeMapping
+from netbox_librenms_plugin.models import DeviceTypeMapping, InterfaceTypeMapping, ModuleTypeMapping
 
 
 class InterfaceTypeMappingSerializer(NetBoxModelSerializer):
@@ -21,3 +21,13 @@ class DeviceTypeMappingSerializer(NetBoxModelSerializer):
 
         model = DeviceTypeMapping
         fields = ["id", "librenms_hardware", "netbox_device_type", "description"]
+
+
+class ModuleTypeMappingSerializer(NetBoxModelSerializer):
+    """Serialize ModuleTypeMapping model for REST API."""
+
+    class Meta:
+        """Meta options for ModuleTypeMappingSerializer."""
+
+        model = ModuleTypeMapping
+        fields = ["id", "librenms_model", "netbox_module_type", "description"]

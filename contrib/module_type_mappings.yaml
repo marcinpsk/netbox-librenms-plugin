@@ -1,0 +1,60 @@
+# Module Type Mappings — Example
+#
+# Maps LibreNMS inventory model names (entPhysicalModelName) to NetBox module types.
+# Import via: LibreNMS → Module Type Mappings → Import → YAML
+#
+# Fields:
+#   librenms_model      — Model name from LibreNMS SNMP inventory
+#   netbox_module_type  — NetBox ModuleType (matched by model name or ID)
+#   description         — Optional note
+#
+# These mappings are checked FIRST. If no mapping exists, the plugin falls back
+# to exact model name and part_number matching against NetBox module types.
+#
+# Useful for cases where the LibreNMS model string differs from the NetBox
+# module type model, or when part numbers are used as model names in inventory.
+
+# Cisco Catalyst 4900M line cards
+- librenms_model: "WS-X4908-10GE"
+  netbox_module_type: "WS-X4908-10GE"
+  description: "Cisco 8-port 10G X2 line card"
+
+- librenms_model: "WS-X4992"
+  netbox_module_type: "WS-X4992"
+  description: "Cisco 48-port 10/100/1000 line card"
+
+# Cisco power supplies
+- librenms_model: "PWR-C49M-1000AC"
+  netbox_module_type: "PWR-C49M-1000AC"
+  description: "Cisco 1000W AC power supply"
+
+# Cisco SFP/X2 transceivers
+- librenms_model: "X2-10GB-LR"
+  netbox_module_type: "X2-10GB-LR"
+  description: "Cisco X2 10G LR transceiver"
+
+- librenms_model: "X2-10GB-SR"
+  netbox_module_type: "X2-10GB-SR"
+  description: "Cisco X2 10G SR transceiver"
+
+- librenms_model: "GLC-T"
+  netbox_module_type: "GLC-T"
+  description: "Cisco 1G copper SFP"
+
+- librenms_model: "GLC-TE"
+  netbox_module_type: "GLC-TE"
+  description: "Cisco 1G copper SFP (extended temp)"
+
+# Cisco converters
+- librenms_model: "CVR-X2-SFP"
+  netbox_module_type: "CVR-X2-SFP"
+  description: "Cisco X2-to-SFP converter"
+
+# Juniper — part numbers often appear as model names in inventory
+- librenms_model: "710-017414"
+  netbox_module_type: "MX480-CHASSIS-BP"
+  description: "Juniper MX480 backplane (matched by part number)"
+
+- librenms_model: "CHAS-BP-MX480-S"
+  netbox_module_type: "MX480-CHASSIS-BP"
+  description: "Juniper MX480 backplane (matched by name)"

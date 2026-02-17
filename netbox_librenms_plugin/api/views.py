@@ -11,9 +11,9 @@ from rest_framework.permissions import BasePermission, SAFE_METHODS
 from rq.job import Job as RQJob
 
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
-from netbox_librenms_plugin.models import DeviceTypeMapping, InterfaceTypeMapping
+from netbox_librenms_plugin.models import DeviceTypeMapping, InterfaceTypeMapping, ModuleTypeMapping
 
-from .serializers import DeviceTypeMappingSerializer, InterfaceTypeMappingSerializer
+from .serializers import DeviceTypeMappingSerializer, InterfaceTypeMappingSerializer, ModuleTypeMappingSerializer
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,15 @@ class DeviceTypeMappingViewSet(NetBoxModelViewSet):
 
     queryset = DeviceTypeMapping.objects.all()
     serializer_class = DeviceTypeMappingSerializer
+
+
+class ModuleTypeMappingViewSet(NetBoxModelViewSet):
+    """API viewset for ModuleTypeMapping CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+
+    queryset = ModuleTypeMapping.objects.all()
+    serializer_class = ModuleTypeMappingSerializer
 
 
 @api_view(["POST"])
