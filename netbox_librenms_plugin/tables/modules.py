@@ -76,6 +76,11 @@ class LibreNMSModuleTable(tables.Table):
         """Render the entPhysicalClass with an icon."""
         icons = {
             "module": "mdi-expansion-card",
+            "ioModule": "mdi-expansion-card",
+            "cpmModule": "mdi-expansion-card",
+            "mdaModule": "mdi-expansion-card",
+            "fabricModule": "mdi-expansion-card",
+            "xioModule": "mdi-expansion-card",
             "powerSupply": "mdi-power-plug",
             "fan": "mdi-fan",
             "port": "mdi-ethernet",

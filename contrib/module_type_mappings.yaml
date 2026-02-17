@@ -58,3 +58,25 @@
 - librenms_model: "CHAS-BP-MX480-S"
   netbox_module_type: "MX480-CHASSIS-BP"
   description: "Juniper MX480 backplane (matched by name)"
+
+# Nokia — SROS uses Nokia part numbers (3HExxxxx) as inventory model names
+# These must be mapped to the SROS board type used in NetBox module types.
+- librenms_model: "3HE12559AARC01"
+  netbox_module_type: "cpm2-s"
+  description: "Nokia CPM2-s control processor module"
+
+- librenms_model: "3HE16474AARA01"
+  netbox_module_type: "s36-400gb-qsfpdd:cr4800g"
+  description: "Nokia IOM with 36x400G QSFP-DD, CR4800G forwarding"
+
+- librenms_model: "3HE16472AARB01"
+  netbox_module_type: "x2-s36-800g-qsfpdd-6.0t:cr6000g+"
+  description: "Nokia extended IOM v2, 36x800G QSFP-DD"
+
+- librenms_model: "3HE12391AARK01"
+  netbox_module_type: "m36-800g-qsfpdd"
+  description: "Nokia MDA with 36x800G QSFP-DD ports"
+
+- librenms_model: "3HE16471AARG01"
+  netbox_module_type: "xcm-7s-b"
+  description: "Nokia SFM/fabric module for SR-7s"
