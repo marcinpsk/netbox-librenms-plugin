@@ -177,7 +177,7 @@
                       <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                     {% endif %}
                   {% elif validation.device_type.device_type %}
-                    <span class="badge bg-success text-white">{{ validation.device_type.device_type }}</span>
+                    <span class="badge bg-success text-white" {% if validation.device_type.match_type == 'chassis' %}title="Matched via chassis inventory ({{ validation.device_type.chassis_model }})"{% elif validation.device_type.match_type == 'mapping' %}title="Matched via device type mapping"{% endif %}>{{ validation.device_type.device_type }}</span>
                   {% else %}
                     <span class="text-danger"><i class="mdi mdi-close-circle"></i> No matching type</span>
                   {% endif %}
