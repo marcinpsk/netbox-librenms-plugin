@@ -1,4 +1,5 @@
 from dcim.choices import InterfaceTypeChoices
+from dcim.models import DeviceType
 from django.db import models
 from django.urls import reverse
 from netbox.models import NetBoxModel
@@ -74,3 +75,35 @@ class InterfaceTypeMapping(NetBoxModel):
 
     def __str__(self):
         return f"{self.librenms_type} + {self.librenms_speed} -> {self.netbox_type}"
+
+
+class DeviceTypeMapping(NetBoxModel):
+    """Map LibreNMS hardware strings to NetBox DeviceType objects."""
+
+    librenms_hardware = models.CharField(
+        max_length=255,
+        unique=True,
+        help_text="Hardware string as reported by LibreNMS (e.g., 'Juniper MX480 Internet Backbone Router')",
+    )
+    netbox_device_type = models.ForeignKey(
+        DeviceType,
+        on_delete=models.CASCADE,
+        related_name="librenms_mappings",
+        help_text="The NetBox DeviceType this hardware string maps to",
+    )
+    description = models.TextField(
+        blank=True,
+        help_text="Optional description or notes about this mapping",
+    )
+
+    def get_absolute_url(self):
+        """Return the URL for this mapping's detail page."""
+        return reverse("plugins:netbox_librenms_plugin:devicetypemapping_detail", args=[self.pk])
+
+    class Meta:
+        """Meta options for DeviceTypeMapping."""
+
+        ordering = ["librenms_hardware"]
+
+    def __str__(self):
+        return f"{self.librenms_hardware} -> {self.netbox_device_type}"

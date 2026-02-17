@@ -1,14 +1,17 @@
 from netbox.views import generic
 from utilities.views import register_model_view
 
-from netbox_librenms_plugin.filters import InterfaceTypeMappingFilterSet
+from netbox_librenms_plugin.filters import DeviceTypeMappingFilterSet, InterfaceTypeMappingFilterSet
 from netbox_librenms_plugin.forms import (
+    DeviceTypeMappingFilterForm,
+    DeviceTypeMappingForm,
+    DeviceTypeMappingImportForm,
     InterfaceTypeMappingFilterForm,
     InterfaceTypeMappingForm,
     InterfaceTypeMappingImportForm,
 )
-from netbox_librenms_plugin.models import InterfaceTypeMapping
-from netbox_librenms_plugin.tables.mappings import InterfaceTypeMappingTable
+from netbox_librenms_plugin.models import DeviceTypeMapping, InterfaceTypeMapping
+from netbox_librenms_plugin.tables.mappings import DeviceTypeMappingTable, InterfaceTypeMappingTable
 from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
 
 
@@ -84,3 +87,63 @@ class InterfaceTypeMappingChangeLogView(LibreNMSPermissionMixin, generic.ObjectC
     """
 
     queryset = InterfaceTypeMapping.objects.all()
+
+
+# --- DeviceTypeMapping views ---
+
+
+class DeviceTypeMappingListView(LibreNMSPermissionMixin, generic.ObjectListView):
+    """Provides a view for listing all DeviceTypeMapping objects."""
+
+    queryset = DeviceTypeMapping.objects.all()
+    table = DeviceTypeMappingTable
+    filterset = DeviceTypeMappingFilterSet
+    filterset_form = DeviceTypeMappingFilterForm
+    template_name = "netbox_librenms_plugin/devicetypemapping_list.html"
+
+
+class DeviceTypeMappingCreateView(LibreNMSPermissionMixin, generic.ObjectEditView):
+    """Provides a view for creating a new DeviceTypeMapping object."""
+
+    queryset = DeviceTypeMapping.objects.all()
+    form = DeviceTypeMappingForm
+
+
+@register_model_view(DeviceTypeMapping, "bulk_import", path="import", detail=False)
+class DeviceTypeMappingBulkImportView(LibreNMSPermissionMixin, generic.BulkImportView):
+    """Provides a view for bulk importing DeviceTypeMapping objects."""
+
+    queryset = DeviceTypeMapping.objects.all()
+    model_form = DeviceTypeMappingImportForm
+
+
+class DeviceTypeMappingView(LibreNMSPermissionMixin, generic.ObjectView):
+    """Provides a view for displaying details of a specific DeviceTypeMapping object."""
+
+    queryset = DeviceTypeMapping.objects.all()
+
+
+class DeviceTypeMappingEditView(LibreNMSPermissionMixin, generic.ObjectEditView):
+    """Provides a view for editing a specific DeviceTypeMapping object."""
+
+    queryset = DeviceTypeMapping.objects.all()
+    form = DeviceTypeMappingForm
+
+
+class DeviceTypeMappingDeleteView(LibreNMSPermissionMixin, generic.ObjectDeleteView):
+    """Provides a view for deleting a specific DeviceTypeMapping object."""
+
+    queryset = DeviceTypeMapping.objects.all()
+
+
+class DeviceTypeMappingBulkDeleteView(LibreNMSPermissionMixin, generic.BulkDeleteView):
+    """Provides a view for deleting multiple DeviceTypeMapping objects."""
+
+    queryset = DeviceTypeMapping.objects.all()
+    table = DeviceTypeMappingTable
+
+
+class DeviceTypeMappingChangeLogView(LibreNMSPermissionMixin, generic.ObjectChangeLogView):
+    """Provides a view for displaying the change log of a specific DeviceTypeMapping object."""
+
+    queryset = DeviceTypeMapping.objects.all()

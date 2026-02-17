@@ -15,7 +15,7 @@ from netbox.plugins import get_plugin_config
 from utilities.forms.fields import CSVChoiceField, DynamicModelMultipleChoiceField
 from virtualization.models import Cluster, VirtualMachine
 
-from .models import InterfaceTypeMapping, LibreNMSSettings
+from .models import DeviceTypeMapping, InterfaceTypeMapping, LibreNMSSettings
 
 logger = logging.getLogger(__name__)
 
@@ -277,6 +277,45 @@ class InterfaceTypeMappingFilterForm(NetBoxModelFilterSetForm):
     )
 
     model = InterfaceTypeMapping
+
+
+class DeviceTypeMappingForm(NetBoxModelForm):
+    """Form for creating and editing device type mappings between LibreNMS and NetBox."""
+
+    netbox_device_type = forms.ModelChoiceField(
+        queryset=DeviceType.objects.all(),
+        label="NetBox Device Type",
+        widget=forms.Select(attrs={"class": "form-select"}),
+    )
+
+    class Meta:
+        """Meta options for DeviceTypeMappingForm."""
+
+        model = DeviceTypeMapping
+        fields = ["librenms_hardware", "netbox_device_type", "description"]
+
+
+class DeviceTypeMappingImportForm(NetBoxModelImportForm):
+    """Form for bulk importing device type mappings."""
+
+    class Meta:
+        """Meta options for DeviceTypeMappingImportForm."""
+
+        model = DeviceTypeMapping
+        fields = ["librenms_hardware", "netbox_device_type", "description"]
+
+
+class DeviceTypeMappingFilterForm(NetBoxModelFilterSetForm):
+    """Form for filtering device type mappings."""
+
+    librenms_hardware = forms.CharField(required=False, label="LibreNMS Hardware")
+    description = forms.CharField(
+        required=False,
+        label="Description",
+        help_text="Filter by description (partial match)",
+    )
+
+    model = DeviceTypeMapping
 
 
 class AddToLIbreSNMPV1V2(forms.Form):
