@@ -134,10 +134,25 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             child_bays = module_scoped_bays.get(parent_module_id, {}) if parent_module_id else device_bays
 
             # Find sub-components with a model name (transceivers, converters, etc.)
+            # Track bay scope per depth level so nested modules use correct bays
+            bays_by_depth = {0: child_bays}
             sub_items = self._get_sub_components(item["entPhysicalIndex"], inventory_data)
             for depth, sub_item in sub_items:
-                sub_row = self._build_row(sub_item, index_map, child_bays, module_types, depth=depth)
+                scope_bays = bays_by_depth.get(depth, child_bays)
+                sub_row = self._build_row(sub_item, index_map, scope_bays, module_types, depth=depth)
                 table_data.append(sub_row)
+
+                # If this sub-item matched an installed module, deeper items use its bays
+                if sub_row.get("module_bay_id"):
+                    matched_sub_bay = scope_bays.get(sub_row["module_bay"])
+                    if (
+                        matched_sub_bay
+                        and hasattr(matched_sub_bay, "installed_module")
+                        and matched_sub_bay.installed_module
+                    ):
+                        sub_module_id = matched_sub_bay.installed_module.pk
+                        bays_by_depth[depth + 1] = module_scoped_bays.get(sub_module_id, {})
+
                 # Mark parent if any child is installable
                 if sub_row.get("can_install"):
                     table_data[parent_idx]["has_installable_children"] = True
@@ -321,7 +336,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
     def _match_module_bay(self, item, index_map, module_bays):
         """
         Try to match an inventory item to a NetBox ModuleBay.
-        Checks ModuleBayMapping table first, then falls back to exact parent name match.
+        Checks ModuleBayMapping table first, then falls back to exact parent name match,
+        then positional matching for items inside converters/sub-modules.
         """
         from netbox_librenms_plugin.models import ModuleBayMapping
 
@@ -361,6 +377,61 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             return module_bays[parent_name]
         if item_name and item_name in module_bays:
             return module_bays[item_name]
+
+        # Positional fallback: determine slot number from container sibling order
+        # Handles SFPs inside converters where containers are unnamed
+        bay = self._match_bay_by_position(item, index_map, module_bays)
+        if bay:
+            return bay
+
+        return None
+
+    @staticmethod
+    def _match_bay_by_position(item, index_map, module_bays):
+        """Match bay by item's positional order among container siblings.
+
+        When an item is inside a container (no model), walk up to find the
+        nearest ancestor with a model, count which container slot the item
+        occupies, and match to the bay by number (e.g., SFP 1, SFP 2).
+        """
+        # Walk up through modelless containers to find the parent with a model
+        current_idx = item.get("entPhysicalContainedIn", 0)
+        container_idx = None
+        for _ in range(5):
+            if not current_idx or current_idx not in index_map:
+                return None
+            ancestor = index_map[current_idx]
+            model = (ancestor.get("entPhysicalModelName") or "").strip()
+            if model:
+                # Found the parent with a model; container_idx is the intermediate container
+                break
+            container_idx = current_idx
+            current_idx = ancestor.get("entPhysicalContainedIn", 0)
+        else:
+            return None
+
+        if not container_idx:
+            return None
+
+        # Determine position: count siblings of the container under the parent
+        parent_with_model_idx = current_idx
+        siblings = sorted(
+            [i for i in index_map.values() if i.get("entPhysicalContainedIn") == parent_with_model_idx],
+            key=lambda x: x.get("entPhysicalParentRelPos", 0),
+        )
+        slot_num = None
+        for i, sib in enumerate(siblings):
+            if sib["entPhysicalIndex"] == container_idx:
+                slot_num = i + 1
+                break
+
+        if slot_num is None:
+            return None
+
+        # Try common bay naming patterns
+        for pattern in [f"SFP {slot_num}", f"Slot {slot_num}", f"Bay {slot_num}", f"Port {slot_num}"]:
+            if pattern in module_bays:
+                return module_bays[pattern]
 
         return None
 
@@ -564,6 +635,12 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Vi
 
         # Build context variables for template evaluation
         bay_position = module_bay.position or "0"
+        # If position is a template expression (e.g., {module}), extract from bay name
+        if bay_position.startswith("{"):
+            import re
+
+            match = re.search(r"(\d+)$", module_bay.name)
+            bay_position = match.group(1) if match else "0"
         parent_bay_position = "0"
         sfp_slot = bay_position
         slot = bay_position
@@ -886,4 +963,5 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         if item_name and item_name in module_bays:
             return module_bays[item_name]
 
-        return None
+        # Positional fallback for items inside converters
+        return BaseModuleTableView._match_bay_by_position(item, index_map, module_bays)

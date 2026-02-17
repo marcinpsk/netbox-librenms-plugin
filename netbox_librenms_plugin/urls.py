@@ -444,7 +444,7 @@ urlpatterns = [
     path(
         "module-bay-mappings/<int:pk>/",
         ModuleBayMappingView.as_view(),
-        name="modulebaymapping",
+        name="modulebaymapping_detail",
     ),
     path(
         "module-bay-mappings/add/",
