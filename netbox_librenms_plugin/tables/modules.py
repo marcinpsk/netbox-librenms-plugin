@@ -109,8 +109,11 @@ class LibreNMSModuleTable(tables.Table):
             "No Type": "bg-warning",
             "Unmatched": "bg-secondary",
             "Serial Mismatch": "bg-danger",
+            "Requires Upgrade": "bg-warning",
         }
         badge_class = badge_classes.get(value, "bg-secondary")
+        if warning := record.get("module_path_warning"):
+            return format_html('<span class="badge {}" title="{}">{}</span>', badge_class, warning, value)
         return format_html('<span class="badge {}">{}</span>', badge_class, value)
 
     def render_actions(self, value, record):

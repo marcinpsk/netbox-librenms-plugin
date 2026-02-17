@@ -462,3 +462,27 @@ def check_vlan_group_matches(
             netbox_gid = netbox_tagged_group_ids.get(vid)
             return netbox_gid == selected_group_id
     return True
+
+
+# Minimum NetBox version that supports {module_path} token in module templates
+MODULE_PATH_MIN_VERSION = "4.9.0"
+
+
+def supports_module_path():
+    """Check if the running NetBox version supports the {module_path} template token."""
+    from django.conf import settings
+
+    version_str = getattr(settings, "VERSION", "0.0.0")
+    # Strip Docker/suffix info (e.g., "4.5.2-Docker-4.0.0" → "4.5.2")
+    version_str = version_str.split("-")[0]
+    try:
+        current = tuple(int(x) for x in version_str.split("."))
+        required = tuple(int(x) for x in MODULE_PATH_MIN_VERSION.split("."))
+        return current >= required
+    except (ValueError, TypeError):
+        return False
+
+
+def module_type_uses_module_path(module_type):
+    """Check if a ModuleType has any interface templates using {module_path}."""
+    return any("{module_path}" in t.name for t in module_type.interfacetemplates.all())
