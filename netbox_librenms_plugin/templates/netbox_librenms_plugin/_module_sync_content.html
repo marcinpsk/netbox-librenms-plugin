@@ -9,18 +9,64 @@
             Showing inventory items from LibreNMS matched against NetBox module bays and module types.
         </span>
     </div>
-    {% if module_sync.cache_expiry %}
-        <div id="module-cache-countdown" class="me-3">
-            Cache expires in: <span id="module-countdown-timer" data-expiry="{{ module_sync.cache_expiry|date:'c' }}"></span>
-        </div>
-    {% endif %}
+    <div class="d-flex align-items-center">
+        {% if module_sync.cache_expiry %}
+            <div id="module-cache-countdown" class="me-3">
+                Cache expires in: <span id="module-countdown-timer" data-expiry="{{ module_sync.cache_expiry|date:'c' }}"></span>
+            </div>
+        {% endif %}
+        <button type="button" id="bulk-install-btn" class="btn btn-sm btn-success" style="display:none"
+                onclick="submitBulkInstall()">
+            <i class="mdi mdi-download-multiple"></i> Install Selected (<span id="bulk-install-count">0</span>)
+        </button>
+    </div>
 </div>
+
+<form id="bulk-install-form" method="post"
+      action="{% url 'plugins:netbox_librenms_plugin:bulk_install_modules' pk=module_sync.object.pk %}">
+    {% csrf_token %}
+    <input type="hidden" name="modules_json" id="bulk-install-data" value="">
+</form>
 
 <div class="card">
     {% include 'netbox_librenms_plugin/inc/paginator.html' with table=module_sync.table %}
     {% include 'inc/table.html' with table=module_sync.table %}
     {% include 'netbox_librenms_plugin/inc/paginator.html' with table=module_sync.table %}
 </div>
+
+<script>
+document.addEventListener('change', function(e) {
+    if (e.target.classList.contains('module-select-cb')) {
+        updateBulkInstallButton();
+    }
+});
+
+function updateBulkInstallButton() {
+    var checked = document.querySelectorAll('.module-select-cb:checked');
+    var btn = document.getElementById('bulk-install-btn');
+    var count = document.getElementById('bulk-install-count');
+    if (checked.length > 0) {
+        btn.style.display = '';
+        count.textContent = checked.length;
+    } else {
+        btn.style.display = 'none';
+    }
+}
+
+function submitBulkInstall() {
+    var checked = document.querySelectorAll('.module-select-cb:checked');
+    var modules = [];
+    checked.forEach(function(cb) {
+        modules.push({
+            module_bay_id: cb.dataset.bayId,
+            module_type_id: cb.dataset.typeId,
+            serial: cb.dataset.serial
+        });
+    });
+    document.getElementById('bulk-install-data').value = JSON.stringify(modules);
+    document.getElementById('bulk-install-form').submit();
+}
+</script>
 {% else %}
 <div class="card">
     <div class="card-body text-center text-muted py-4">

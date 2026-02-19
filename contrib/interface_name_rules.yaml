@@ -11,10 +11,11 @@
 #
 # Template variables:
 #   {slot}                — Top-level slot/module bay position
-#   {bay_position}        — Position of the bay this module is installed into
+#   {bay_position}        — Position of the bay this module is installed into (raw)
+#   {bay_position_num}    — Numeric suffix of bay position (e.g., "swp1" → "1")
 #   {parent_bay_position} — Position of the parent module's bay
-#   {sfp_slot}            — Sub-bay index within the parent module
-#   {base}                — Original interface name from NetBox template
+#   {sfp_slot}            — Numeric sub-bay index within the parent module
+#   {base}                — Original interface name from the NetBox module template
 #   {channel}             — Breakout channel number (iterated)
 #
 # Arithmetic expressions are supported inside braces:
@@ -58,6 +59,89 @@
 #   channel_count: 4
 #   channel_start: 1
 #   description: "QSFP+ 4x10G breakout with Cisco-style channel numbering (1-4)"
+
+# --- UfiSpace/Arcos Breakout Rules ---
+# UfiSpace switches use swpNsC naming for breakout interfaces.
+# bay_position_num extracts the numeric suffix from the bay name (e.g., "swp1" → "1").
+# Channels start at 1, with 2 channels per 100G QSFP28 (2x100G breakout).
+
+# S9610-36D breakout rules
+- module_type: QSFP-100G-LR4
+  device_type: S9610-36D
+  name_template: "swp{bay_position_num}s{channel}"
+  channel_count: 2
+  channel_start: 1
+  description: "UfiSpace QSFP28 2x100G breakout"
+- module_type: QSFP-100G-SR4
+  device_type: S9610-36D
+  name_template: "swp{bay_position_num}s{channel}"
+  channel_count: 2
+  channel_start: 1
+  description: "UfiSpace QSFP28 2x100G breakout"
+- module_type: QSFP-100G-SWDM4
+  device_type: S9610-36D
+  name_template: "swp{bay_position_num}s{channel}"
+  channel_count: 2
+  channel_start: 1
+  description: "UfiSpace QSFP28 2x100G breakout"
+- module_type: QSFP-100G-ZR
+  device_type: S9610-36D
+  name_template: "swp{bay_position_num}s{channel}"
+  channel_count: 2
+  channel_start: 1
+  description: "UfiSpace QSFP28 2x100G breakout"
+
+# S9610-46DX breakout rules
+- module_type: QSFP-100G-LR4
+  device_type: S9610-46DX
+  name_template: "swp{bay_position_num}s{channel}"
+  channel_count: 2
+  channel_start: 1
+  description: "UfiSpace QSFP28 2x100G breakout"
+- module_type: QSFP-100G-SR4
+  device_type: S9610-46DX
+  name_template: "swp{bay_position_num}s{channel}"
+  channel_count: 2
+  channel_start: 1
+  description: "UfiSpace QSFP28 2x100G breakout"
+- module_type: QSFP-100G-SWDM4
+  device_type: S9610-46DX
+  name_template: "swp{bay_position_num}s{channel}"
+  channel_count: 2
+  channel_start: 1
+  description: "UfiSpace QSFP28 2x100G breakout"
+- module_type: QSFP-100G-ZR
+  device_type: S9610-46DX
+  name_template: "swp{bay_position_num}s{channel}"
+  channel_count: 2
+  channel_start: 1
+  description: "UfiSpace QSFP28 2x100G breakout"
+
+# S9700-53DX breakout rules
+- module_type: QSFP-100G-LR4
+  device_type: S9700-53DX
+  name_template: "swp{bay_position_num}s{channel}"
+  channel_count: 2
+  channel_start: 1
+  description: "UfiSpace QSFP28 2x100G breakout"
+- module_type: QSFP-100G-SR4
+  device_type: S9700-53DX
+  name_template: "swp{bay_position_num}s{channel}"
+  channel_count: 2
+  channel_start: 1
+  description: "UfiSpace QSFP28 2x100G breakout"
+- module_type: QSFP-100G-SWDM4
+  device_type: S9700-53DX
+  name_template: "swp{bay_position_num}s{channel}"
+  channel_count: 2
+  channel_start: 1
+  description: "UfiSpace QSFP28 2x100G breakout"
+- module_type: QSFP-100G-ZR
+  device_type: S9700-53DX
+  name_template: "swp{bay_position_num}s{channel}"
+  channel_count: 2
+  channel_start: 1
+  description: "UfiSpace QSFP28 2x100G breakout"
 
 # --- Juniper ACX7024 Platform-Specific Rules ---
 # These rules are scoped to the ACX7024 device type and use bay_position

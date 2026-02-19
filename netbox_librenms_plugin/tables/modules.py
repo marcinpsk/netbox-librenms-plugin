@@ -9,6 +9,12 @@ from netbox_librenms_plugin.utils import get_table_paginate_count
 class LibreNMSModuleTable(tables.Table):
     """Table for displaying LibreNMS inventory items mapped to NetBox modules."""
 
+    select = tables.Column(
+        verbose_name="",
+        orderable=False,
+        empty_values=(),
+        attrs={"td": {"data-col": "select", "style": "width:30px"}},
+    )
     name = tables.Column(verbose_name="Name", attrs={"td": {"data-col": "name"}})
     model = tables.Column(verbose_name="Model", attrs={"td": {"data-col": "model"}})
     serial = tables.Column(verbose_name="Serial", attrs={"td": {"data-col": "serial"}})
@@ -54,6 +60,20 @@ class LibreNMSModuleTable(tables.Table):
         padding_px = depth * 20
         prefix = "└─ "
         return format_html('<span style="padding-left:{}px">{}{}</span>', padding_px, prefix, value or "-")
+
+    def render_select(self, value, record):
+        """Render checkbox for installable modules."""
+        if not record.get("can_install"):
+            return ""
+        bay_id = record.get("module_bay_id", "")
+        type_id = record.get("module_type_id", "")
+        serial = record.get("serial", "")
+        return format_html(
+            '<input type="checkbox" class="module-select-cb" data-bay-id="{}" data-type-id="{}" data-serial="{}">',
+            bay_id,
+            type_id,
+            serial,
+        )
 
     def render_model(self, value, record):
         """Render model with link to module type if matched."""
