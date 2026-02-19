@@ -117,11 +117,13 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, CacheMixin, 
         """
         Enrich port data with VLAN information from LibreNMS.
 
-        For access ports, parse the basic ifVlan field.
-        For trunk ports (ifTrunk == "dot1Q"), fetch detailed VLAN info.
+        With LibreNMS 24.2.0+, the get_ports() call with with_vlans=True returns
+        detailed VLAN associations (tagged/untagged) for all ports. The
+        parse_port_vlan_data() method handles both the new vlans array format
+        and falls back to ifVlan for older LibreNMS versions.
 
         Args:
-            ports: List of port dicts from get_ports()
+            ports: List of port dicts from get_ports(with_vlans=True)
             interface_name_field: Field to use for interface name
 
         Returns:
@@ -129,17 +131,9 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, CacheMixin, 
         """
         enriched = []
         for port in ports:
-            # Parse basic VLAN data (access ports)
+            # Parse VLAN data - handles both vlans array (new) and ifVlan fallback (old)
             parsed = self.librenms_api.parse_port_vlan_data(port, interface_name_field)
             port.update(parsed)
-
-            # For trunk ports, fetch detailed VLAN info
-            if port.get("ifTrunk") == "dot1Q" and port.get("port_id"):
-                success, port_detail = self.librenms_api.get_port_vlan_details(port["port_id"])
-                if success:
-                    trunk_parsed = self.librenms_api.parse_port_vlan_data(port_detail, interface_name_field)
-                    port.update(trunk_parsed)
-
             enriched.append(port)
         return enriched
 
@@ -262,35 +256,52 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, CacheMixin, 
 
     def _add_vlan_group_selection(self, port, lookup_maps, device):
         """
-        Add VLAN group auto-selection data to port record.
+        Add per-VLAN group auto-selection data to port record.
 
         Sets:
-        - auto_selected_group_id: ID of auto-selected group or None
-        - is_ambiguous: True if VID exists in multiple groups with no clear priority
+        - vlan_group_map: {vid: {"group_id": str, "group_name": str, "is_ambiguous": bool}}
+          Maps each VID to its auto-selected VLAN group based on scope hierarchy.
         """
         vid_to_groups = lookup_maps.get("vid_to_groups", {})
         untagged_vid = port.get("untagged_vlan")
+        tagged_vids = port.get("tagged_vlans", [])
 
-        if not untagged_vid:
-            port["auto_selected_group_id"] = None
-            port["is_ambiguous"] = False
-            return
+        all_vids = []
+        if untagged_vid:
+            all_vids.append(untagged_vid)
+        all_vids.extend(tagged_vids)
 
-        groups = vid_to_groups.get(untagged_vid, [])
-        if len(groups) == 1:
-            port["auto_selected_group_id"] = groups[0].pk
-            port["is_ambiguous"] = False
-        elif len(groups) > 1:
-            most_specific = self._select_most_specific_group(groups, device)
-            if most_specific:
-                port["auto_selected_group_id"] = most_specific.pk
-                port["is_ambiguous"] = False
+        vlan_group_map = {}
+        for vid in all_vids:
+            groups = vid_to_groups.get(vid, [])
+            if len(groups) == 1:
+                vlan_group_map[vid] = {
+                    "group_id": str(groups[0].pk),
+                    "group_name": groups[0].name,
+                    "is_ambiguous": False,
+                }
+            elif len(groups) > 1:
+                most_specific = self._select_most_specific_group(groups, device)
+                if most_specific:
+                    vlan_group_map[vid] = {
+                        "group_id": str(most_specific.pk),
+                        "group_name": most_specific.name,
+                        "is_ambiguous": False,
+                    }
+                else:
+                    vlan_group_map[vid] = {
+                        "group_id": "",
+                        "group_name": "Ambiguous",
+                        "is_ambiguous": True,
+                    }
             else:
-                port["auto_selected_group_id"] = None
-                port["is_ambiguous"] = True
-        else:
-            port["auto_selected_group_id"] = None
-            port["is_ambiguous"] = False
+                vlan_group_map[vid] = {
+                    "group_id": "",
+                    "group_name": "Global",
+                    "is_ambiguous": False,
+                }
+
+        port["vlan_group_map"] = vlan_group_map
 
     def _add_missing_vlans_info(self, port, lookup_maps):
         """

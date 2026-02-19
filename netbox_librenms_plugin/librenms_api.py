@@ -332,25 +332,32 @@ class LibreNMSAPI:
         except requests.exceptions.RequestException:
             return False, None
 
-    def get_ports(self, device_id):
+    def get_ports(self, device_id, with_vlans=True):
         """
         Fetch ports data from LibreNMS for a device using its primary IP.
 
         Includes VLAN assignment data (ifVlan, ifTrunk) for interface VLAN sync.
+        When with_vlans=True, includes detailed VLAN associations (tagged/untagged)
+        for all ports in a single API call (requires LibreNMS 24.2.0+).
 
         Args:
             device_id: LibreNMS device ID
+            with_vlans: Include detailed VLAN data for all ports (default: True)
 
         Returns:
             tuple: (success: bool, data: dict)
         """
         try:
+            params = {
+                "columns": "port_id,ifName,ifType,ifSpeed,ifAdminStatus,ifDescr,ifAlias,ifPhysAddress,ifMtu,ifVlan,ifTrunk"
+            }
+            if with_vlans:
+                params["with"] = "vlans"
+
             response = requests.get(
                 f"{self.librenms_url}/api/v0/devices/{device_id}/ports",
                 headers=self.headers,
-                params={
-                    "columns": "port_id,ifName,ifType,ifSpeed,ifAdminStatus,ifDescr,ifAlias,ifPhysAddress,ifMtu,ifVlan,ifTrunk"
-                },
+                params=params,
                 timeout=DEFAULT_API_TIMEOUT,
                 verify=self.verify_ssl,
             )
