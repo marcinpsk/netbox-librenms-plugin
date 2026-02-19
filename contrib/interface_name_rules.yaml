@@ -24,35 +24,36 @@
 
 # --- Converter Offset Examples ---
 
-# GLC-T (1G copper SFP) installed in CVR-X2-SFP converter
+# SFP-1G-T (1G copper SFP, covers GLC-T/GLC-TE) in CVR-X2-SFP converter
 # X2 bays are numbered 1-N; each converter holds 2 SFP slots
 # Resulting interface: GigabitEthernet<slot>/<computed_port>
-- module_type: GLC-T
+- module_type: SFP-1G-T
   parent_module_type: CVR-X2-SFP
   name_template: "GigabitEthernet{slot}/{8 + ({parent_bay_position} - 1) * 2 + {sfp_slot}}"
   channel_count: 0
   channel_start: 0
-  description: "GLC-T in CVR-X2-SFP: offset port numbering for X2-to-SFP conversion"
-
-# GLC-TE (1G copper SFP enhanced) in CVR-X2-SFP
-- module_type: GLC-TE
-  parent_module_type: CVR-X2-SFP
-  name_template: "GigabitEthernet{slot}/{8 + ({parent_bay_position} - 1) * 2 + {sfp_slot}}"
-  channel_count: 0
-  channel_start: 0
-  description: "GLC-TE in CVR-X2-SFP: same offset as GLC-T"
+  description: "SFP-1G-T in CVR-X2-SFP: offset port numbering for X2-to-SFP conversion"
 
 # --- Breakout Channel Examples ---
 
-# QSFP+ 4x10G breakout — Juniper-style (channels start at 0)
-- module_type: QSFP+-4X10G-LR
+# QSFP-4X10G-LR breakout — Juniper-style (channels start at 0)
+- module_type: QSFP-4X10G-LR
   name_template: "{base}:{channel}"
   channel_count: 4
   channel_start: 0
-  description: "QSFP+ 4x10G breakout with Juniper-style channel numbering (0-3)"
+  description: "QSFP+ 4x10G-LR breakout with Juniper-style channel numbering (0-3)"
+
+# QSFP-4X10G-SR breakout — Juniper-style (channels start at 0)
+- module_type: QSFP-4X10G-SR
+  name_template: "{base}:{channel}"
+  channel_count: 4
+  channel_start: 0
+  description: "QSFP+ 4x10G-SR breakout with Juniper-style channel numbering (0-3)"
+
+# --- Commented Examples ---
 
 # QSFP+ 4x10G breakout — Cisco-style (channels start at 1)
-# - module_type: QSFP+-4X10G-LR
+# - module_type: QSFP-4X10G-LR
 #   name_template: "{base}:{channel}"
 #   channel_count: 4
 #   channel_start: 1
