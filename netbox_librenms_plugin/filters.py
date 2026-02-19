@@ -67,4 +67,4 @@ class NormalizationRuleFilterSet(django_filters.FilterSet):
         """Meta options for NormalizationRuleFilterSet."""
 
         model = NormalizationRule
-        fields = ["scope"]
+        fields = ["scope", "manufacturer"]

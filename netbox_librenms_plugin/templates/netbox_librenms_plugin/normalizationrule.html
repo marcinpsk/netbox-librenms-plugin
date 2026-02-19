@@ -10,6 +10,7 @@
         <thead>
           <tr>
             <th>Scope</th>
+            <th>Manufacturer</th>
             <th>Match Pattern</th>
             <th>Replacement</th>
             <th>Priority</th>
@@ -19,6 +20,7 @@
         <tbody>
           <tr>
             <td>{{ object.get_scope_display }}</td>
+            <td>{% if object.manufacturer %}<a href="{{ object.manufacturer.get_absolute_url }}">{{ object.manufacturer }}</a>{% else %}—{% endif %}</td>
             <td><code>{{ object.match_pattern }}</code></td>
             <td><code>{{ object.replacement }}</code></td>
             <td>{{ object.priority }}</td>

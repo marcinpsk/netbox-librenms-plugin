@@ -176,6 +176,7 @@ class NormalizationRuleTable(NetBoxTable):
     """Table for displaying NormalizationRule data."""
 
     scope = tables.Column(verbose_name="Scope", linkify=True)
+    manufacturer = tables.Column(verbose_name="Manufacturer", linkify=True)
     match_pattern = tables.Column(verbose_name="Match Pattern")
     replacement = tables.Column(verbose_name="Replacement")
     priority = tables.Column(verbose_name="Priority")
@@ -189,6 +190,7 @@ class NormalizationRuleTable(NetBoxTable):
         fields = (
             "id",
             "scope",
+            "manufacturer",
             "match_pattern",
             "replacement",
             "priority",
