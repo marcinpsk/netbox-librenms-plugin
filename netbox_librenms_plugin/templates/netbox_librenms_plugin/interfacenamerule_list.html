@@ -21,9 +21,10 @@
                 <thead><tr><th style="width: 200px;">Variable</th><th>Description</th></tr></thead>
                 <tbody>
                     <tr><td><code>{slot}</code></td><td>Top-level slot/module bay position (from grandparent or parent)</td></tr>
-                    <tr><td><code>{bay_position}</code></td><td>Position of the bay this module is installed into</td></tr>
+                    <tr><td><code>{bay_position}</code></td><td>Position of the bay this module is installed into (raw, e.g., "swp1")</td></tr>
+                    <tr><td><code>{bay_position_num}</code></td><td>Numeric suffix of bay position (e.g., "swp1" &rarr; "1")</td></tr>
                     <tr><td><code>{parent_bay_position}</code></td><td>Position of the parent module's bay</td></tr>
-                    <tr><td><code>{sfp_slot}</code></td><td>Sub-bay index within the parent module (same as bay_position)</td></tr>
+                    <tr><td><code>{sfp_slot}</code></td><td>Numeric sub-bay index within the parent module</td></tr>
                     <tr><td><code>{base}</code></td><td>Original interface name from the NetBox module template</td></tr>
                     <tr><td><code>{channel}</code></td><td>Breakout channel number (iterated from Ch. Start to Ch. Start + Channels - 1)</td></tr>
                 </tbody>
@@ -41,6 +42,8 @@
                     (Channels=4, Ch. Start=0)</li>
                 <li><strong>Platform naming:</strong> QSFP-100G-LR4 on ACX7024 &rarr;
                     <code>et-0/0/{bay_position}</code> (scoped via Parent Device Type)</li>
+                <li><strong>UfiSpace breakout:</strong> QSFP-100G-LR4 on S9610-36D &rarr;
+                    <code>swp{bay_position_num}s{channel}</code> (Channels=2, Ch. Start=1)</li>
             </ul>
 
             {% if supports_module_path %}

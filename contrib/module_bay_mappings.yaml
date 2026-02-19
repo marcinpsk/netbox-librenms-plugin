@@ -99,7 +99,7 @@
   netbox_bay_name: "CMA"
   description: "Nokia CMA2-7s CPM carrier bracket"
 
-# Juniper fixed-form devices
+# Juniper fixed-form devices (ACX7024 etc.)
 - librenms_name: "PSM 0"
   librenms_class: "powerSupply"
   netbox_bay_name: "PSU 0"
@@ -108,6 +108,14 @@
   librenms_class: "powerSupply"
   netbox_bay_name: "PSU 1"
   description: "Juniper PSU slot 1"
+
+# Juniper chassis devices (PTX10008 etc.): PSM → PEM
+# Regex runs after exact matches, so PSM 0/1 → PSU 0/1 above takes priority for ACX
+- librenms_name: "^PSM (\\d+)$"
+  librenms_class: "powerSupply"
+  netbox_bay_name: "PEM \\1"
+  is_regex: true
+  description: "Juniper chassis PSM N → PEM N"
 - librenms_name: "Fan Tray 0"
   librenms_class: "fan"
   netbox_bay_name: "Fan Tray"

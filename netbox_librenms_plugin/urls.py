@@ -35,6 +35,7 @@ from .views import (
     DeviceTypeMappingView,
     DeviceValidationDetailsView,
     DeviceVCDetailsView,
+    BulkInstallModulesView,
     InstallBranchView,
     InstallModuleView,
     InterfaceNameRuleBulkDeleteView,
@@ -130,6 +131,11 @@ urlpatterns = [
         "devices/<int:pk>/install-branch/",
         InstallBranchView.as_view(),
         name="install_branch",
+    ),
+    path(
+        "devices/<int:pk>/bulk-install-modules/",
+        BulkInstallModulesView.as_view(),
+        name="bulk_install_modules",
     ),
     path(
         "devices/<int:pk>/ipaddress-sync/",

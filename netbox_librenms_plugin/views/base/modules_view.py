@@ -20,6 +20,7 @@ INVENTORY_CLASSES = {
     "module",
     "powerSupply",
     "fan",
+    "container",
     "ioModule",
     "cpmModule",
     "mdaModule",
@@ -453,7 +454,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
     def _match_bay_from_description(descr, module_bays):
         """Extract slot position from description and match to bay.
 
-        Handles patterns like "MODEL @ 0/0/5" -> "Transceiver 0/0/5",
+        Handles patterns like "MODEL @ 0/0/5" -> "Transceiver 0/5" (stripping leading path),
+        "FPC: MODEL @ 0/*/*" -> "FPC 0",
         and "PSM 0" / "Fan Tray 0" by direct lookup.
         """
         import re
@@ -465,10 +467,23 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         match = re.search(r"@\s*(\d+(?:/\d+)+)", descr)
         if match:
             position = match.group(1)
-            for prefix in ("Transceiver", "SFP", "Port", "Slot"):
-                bay_name = f"{prefix} {position}"
-                if bay_name in module_bays:
-                    return module_bays[bay_name]
+            # Try full path first, then progressively strip leading segments
+            parts = position.split("/")
+            for start in range(len(parts)):
+                sub_pos = "/".join(parts[start:])
+                for prefix in ("Transceiver", "SFP", "Port", "Slot"):
+                    bay_name = f"{prefix} {sub_pos}"
+                    if bay_name in module_bays:
+                        return module_bays[bay_name]
+
+        # Try "TYPE: MODEL @ N/*/*" pattern (e.g., "FPC: JNP10K-LC1201 @ 0/*/*")
+        match = re.match(r"(\w+):\s*\S+\s*@\s*(\d+)", descr)
+        if match:
+            prefix = match.group(1)
+            slot_num = match.group(2)
+            bay_name = f"{prefix} {slot_num}"
+            if bay_name in module_bays:
+                return module_bays[bay_name]
 
         # Try description as-is for names like "PSM 0", "Fan Tray 0"
         if descr in module_bays:
@@ -747,16 +762,19 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Vi
             return 0
 
         # Build context variables for template evaluation
+        import re
+
         bay_position = module_bay.position or "0"
         # If position is a template expression (e.g., {module}), extract from bay name
         if bay_position.startswith("{"):
-            import re
-
             match = re.search(r"(\d+)$", module_bay.name)
             bay_position = match.group(1) if match else "0"
+        # Extract numeric-only version for arithmetic (e.g., "swp1" → "1")
+        bay_position_num = re.search(r"(\d+)$", bay_position)
+        bay_position_num = bay_position_num.group(1) if bay_position_num else bay_position
         parent_bay_position = "0"
-        sfp_slot = bay_position
-        slot = bay_position
+        sfp_slot = bay_position_num
+        slot = bay_position_num
 
         if module_bay.parent:
             parent_bay = module_bay.parent
@@ -781,6 +799,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Vi
             variables = {
                 "slot": slot,
                 "bay_position": bay_position,
+                "bay_position_num": bay_position_num,
                 "parent_bay_position": parent_bay_position,
                 "sfp_slot": sfp_slot,
                 "base": iface.name,
@@ -1084,3 +1103,91 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
 
         # Positional fallback for items inside converters
         return BaseModuleTableView._match_bay_by_position(item, index_map, module_bays)
+
+
+class BulkInstallModulesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
+    """Install multiple modules at once from the module sync table."""
+
+    def post(self, request, pk):
+        import json
+
+        from dcim.models import Device, Module, ModuleBay, ModuleType
+
+        self.required_object_permissions = {"POST": [("add", Module)]}
+        if error := self.require_all_permissions_json("POST"):
+            return error
+
+        device = get_object_or_404(Device, pk=pk)
+        modules_json = request.POST.get("modules_json", "[]")
+
+        try:
+            modules_data = json.loads(modules_json)
+        except json.JSONDecodeError:
+            messages.error(request, "Invalid module data.")
+            sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+
+        if not modules_data:
+            messages.warning(request, "No modules selected.")
+            sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+
+        from netbox_librenms_plugin.utils import (
+            MODULE_PATH_MIN_VERSION,
+            module_type_uses_module_path,
+            supports_module_path,
+        )
+
+        installed = []
+        failed = []
+        skipped = []
+
+        for entry in modules_data:
+            bay_id = entry.get("module_bay_id")
+            type_id = entry.get("module_type_id")
+            serial = entry.get("serial", "").strip()
+
+            if not bay_id or not type_id:
+                failed.append("Missing bay or type")
+                continue
+
+            try:
+                module_bay = ModuleBay.objects.get(pk=bay_id, device=device)
+                module_type = ModuleType.objects.get(pk=type_id)
+            except (ModuleBay.DoesNotExist, ModuleType.DoesNotExist) as e:
+                failed.append(f"Not found: {e}")
+                continue
+
+            if module_type_uses_module_path(module_type) and not supports_module_path():
+                skipped.append(f"{module_type.model}: requires NetBox ≥ {MODULE_PATH_MIN_VERSION}")
+                continue
+
+            if hasattr(module_bay, "installed_module") and module_bay.installed_module:
+                skipped.append(f"{module_bay.name}: already occupied")
+                continue
+
+            try:
+                with transaction.atomic():
+                    module = Module(
+                        device=device,
+                        module_bay=module_bay,
+                        module_type=module_type,
+                        serial=serial,
+                        status="active",
+                    )
+                    module.full_clean()
+                    module.save()
+                    InstallModuleView._apply_interface_name_rules(module, module_bay)
+                installed.append(f"{module_type.model} → {module_bay.name}")
+            except Exception as e:
+                failed.append(f"{module_type.model}: {e}")
+
+        if installed:
+            messages.success(request, f"Installed {len(installed)} module(s): {', '.join(installed)}")
+        if skipped:
+            messages.info(request, f"Skipped {len(skipped)}: {'; '.join(skipped)}")
+        if failed:
+            messages.warning(request, f"Failed {len(failed)}: {'; '.join(failed)}")
+
+        sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+        return redirect(f"{sync_url}?tab=modules#librenms-module-table")
