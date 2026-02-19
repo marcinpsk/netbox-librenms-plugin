@@ -11,24 +11,24 @@ What issue does this solve?
 Link any related issues if applicable.
 
 ## Scope of Change
-Delete items that don’t apply:
+Tick all that apply:
 
-- Sync/Import logic
-- NetBox models / ORM
-- LibreNMS API interaction
-- Config / settings
-- Web UI / templates
-- Database migrations
-- Tests
-- Docs only
-- Other: <describe>
+- [ ] Sync/Import logic
+- [ ] NetBox models / ORM
+- [ ] LibreNMS API interaction
+- [ ] Config / settings
+- [ ] Web UI / templates
+- [ ] Database migrations
+- [ ] Tests
+- [ ] Docs only
+- Other (please descibe)?
 
 ## How Was This Tested?
-Delete items that don’t apply and describe briefly.
+Tick all that apply and describe briefly.
 
-- Unit tests: <yes/no + what>
-- Manual testing: <yes/no + what>
-- Not tested: <explain why>
+- [ ] Unit tests
+- [ ] Manual testing
+- [ ] Not tested (explain why)
 
 ### Manual Test Steps (if applicable)
 1.
@@ -36,14 +36,14 @@ Delete items that don’t apply and describe briefly.
 3.
 
 ## Risk Assessment
-- Does this change affect existing users?
+- Does this change affect existing users?  
 - Could this cause unintended imports / updates?
 
 Explain briefly.
 
 ## Backwards Compatibility
-- No breaking changes
-- Breaking change (explain and document)
+- [ ] No breaking changes
+- [ ] Breaking change (explain and document)
 
 ## Other Notes
 Anything the maintainer(s) should pay particular attention to?
