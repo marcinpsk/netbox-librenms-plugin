@@ -248,9 +248,8 @@ class SyncInterfacesView(VlanAssignmentMixin, CacheMixin, View):
             librenms_port: Port data dict from LibreNMS with VLAN info
             interface_name: Original interface name for form field lookup
         """
-        # Get VLAN group selection from form (safely handle special chars in name)
+        # Get per-VLAN group selections from form (safely handle special chars in name)
         safe_name = interface_name.replace("/", "_").replace(":", "_")
-        vlan_group_id = self.request.POST.get(f"vlan_group_{safe_name}", "")
 
         # Build VLAN data from port
         vlan_data = {
@@ -258,8 +257,21 @@ class SyncInterfacesView(VlanAssignmentMixin, CacheMixin, View):
             "tagged_vlans": librenms_port.get("tagged_vlans", []),
         }
 
+        # Build per-VLAN group map from POST data
+        vlan_group_map = {}
+        all_vids = []
+        if vlan_data["untagged_vlan"]:
+            all_vids.append(str(vlan_data["untagged_vlan"]))
+        for vid in vlan_data.get("tagged_vlans", []):
+            all_vids.append(str(vid))
+
+        for vid in all_vids:
+            group_id = self.request.POST.get(f"vlan_group_{safe_name}_{vid}", "")
+            if group_id:
+                vlan_group_map[vid] = group_id
+
         # Use mixin method to update interface VLAN assignments
-        self._update_interface_vlan_assignment(interface, vlan_data, vlan_group_id, self._lookup_maps)
+        self._update_interface_vlan_assignment(interface, vlan_data, vlan_group_map, self._lookup_maps)
 
 
 class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):

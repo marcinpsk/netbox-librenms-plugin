@@ -588,14 +588,15 @@ class VlanAssignmentMixin:
         vlans = vid_to_vlans.get(vid, [])
         return vlans[0] if vlans else None
 
-    def _update_interface_vlan_assignment(self, interface, vlan_data, vlan_group_id, lookup_maps):
+    def _update_interface_vlan_assignment(self, interface, vlan_data, vlan_group_map, lookup_maps):
         """
         Update interface VLAN assignments in NetBox (mode, untagged_vlan, tagged_vlans).
 
         Args:
             interface: NetBox Interface or VMInterface object
             vlan_data: Dict with 'untagged_vlan' (int or None) and 'tagged_vlans' (list of ints)
-            vlan_group_id: Optional VLAN group ID to prefer for lookups
+            vlan_group_map: Dict mapping VID (str) to VLAN group ID for per-VLAN group lookups.
+                           Can also be a single group ID string for backward compat.
             lookup_maps: Dict from _build_vlan_lookup_maps()
 
         Returns:
@@ -605,9 +606,22 @@ class VlanAssignmentMixin:
                 - tagged_set: list of VLAN objects
                 - missing_vlans: list of VIDs not found in NetBox
         """
+        # Support both dict (per-VLAN) and string/int/None (single group) for backward compat
+        if not isinstance(vlan_group_map, dict):
+            single_group_id = vlan_group_map
+            vlan_group_map = None
+        else:
+            single_group_id = None
+
         untagged_vid = vlan_data.get("untagged_vlan")
         tagged_vids = vlan_data.get("tagged_vlans", [])
         missing_vlans = []
+
+        def _get_group_id_for_vid(vid):
+            """Resolve the VLAN group ID for a specific VID."""
+            if vlan_group_map is not None:
+                return vlan_group_map.get(str(vid), "")
+            return single_group_id or ""
 
         # Determine mode
         if tagged_vids:
@@ -621,7 +635,7 @@ class VlanAssignmentMixin:
         # Set untagged VLAN
         untagged_set = None
         if untagged_vid:
-            vlan = self._find_vlan_in_group(untagged_vid, vlan_group_id, lookup_maps)
+            vlan = self._find_vlan_in_group(untagged_vid, _get_group_id_for_vid(untagged_vid), lookup_maps)
             if vlan:
                 interface.untagged_vlan = vlan
                 untagged_set = vlan
@@ -631,11 +645,16 @@ class VlanAssignmentMixin:
         else:
             interface.untagged_vlan = None
 
-        # Set tagged VLANs
+        # Save mode + untagged_vlan before M2M operations.
+        # tagged_vlans.set() triggers a DB refresh that wipes unsaved
+        # in-memory attributes, so we must persist first.
+        interface.save()
+
+        # Set tagged VLANs (M2M - requires the instance to be saved first)
         tagged_set = []
         if tagged_vids:
             for vid in tagged_vids:
-                vlan = self._find_vlan_in_group(vid, vlan_group_id, lookup_maps)
+                vlan = self._find_vlan_in_group(vid, _get_group_id_for_vid(vid), lookup_maps)
                 if vlan:
                     tagged_set.append(vlan)
                 else:
