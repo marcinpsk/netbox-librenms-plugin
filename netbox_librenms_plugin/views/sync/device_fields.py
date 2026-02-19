@@ -15,6 +15,7 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
     }
 
     def post(self, request, pk):
+        """Sync the device serial number from LibreNMS."""
         # Check both plugin write and NetBox object permissions
         if error := self.require_all_permissions("POST"):
             return error
@@ -61,6 +62,7 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
     }
 
     def post(self, request, pk):
+        """Sync the device type from LibreNMS hardware info."""
         # Check both plugin write and NetBox object permissions
         if error := self.require_all_permissions("POST"):
             return error
@@ -114,6 +116,7 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
     }
 
     def post(self, request, pk):
+        """Sync the device platform from LibreNMS OS name."""
         # Check both plugin write and NetBox object permissions
         if error := self.require_all_permissions("POST"):
             return error
@@ -176,6 +179,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
     }
 
     def post(self, request, pk):
+        """Create a new platform and assign it to the device."""
         # Check both plugin write and NetBox object permissions
         if error := self.require_all_permissions("POST"):
             return error
@@ -227,6 +231,7 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
     }
 
     def post(self, request, pk):
+        """Sync serial numbers to virtual chassis member devices."""
         # Check both plugin write and NetBox object permissions
         if error := self.require_all_permissions("POST"):
             return error

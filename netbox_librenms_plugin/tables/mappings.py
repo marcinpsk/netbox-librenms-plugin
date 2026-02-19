@@ -16,6 +16,8 @@ class InterfaceTypeMappingTable(NetBoxTable):
     actions = columns.ActionsColumn(actions=("edit", "delete"))
 
     class Meta:
+        """Meta options for InterfaceTypeMappingTable."""
+
         model = InterfaceTypeMapping
         fields = (
             "id",
