@@ -33,7 +33,10 @@ class LibreNMSPluginPermission(BasePermission):
 
 
 class InterfaceTypeMappingViewSet(NetBoxModelViewSet):
+    """API viewset for InterfaceTypeMapping CRUD operations."""
+
     permission_classes = [LibreNMSPluginPermission]
+
     queryset = InterfaceTypeMapping.objects.all()
     serializer_class = InterfaceTypeMappingSerializer
 

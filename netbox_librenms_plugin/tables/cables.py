@@ -46,6 +46,7 @@ class LibreNMSCableTable(tables.Table):
     )
 
     def __init__(self, *args, device=None, **kwargs):
+        """Initialize table with optional device context."""
         self.device = device
         super().__init__(*args, **kwargs)
         self.tab = "cables"
@@ -53,26 +54,31 @@ class LibreNMSCableTable(tables.Table):
         self.prefix = "cables_"
 
     def render_remote_device(self, value, record):
+        """Render remote device name as a link if URL is available."""
         if url := record.get("remote_device_url"):
             return format_html('<a href="{}">{}</a>', url, value)
         return value
 
     def render_local_port(self, value, record):
+        """Render local port name as a link if URL is available."""
         if url := record.get("local_port_url"):
             return format_html('<a href="{}">{}</a>', url, value)
         return value
 
     def render_remote_port(self, value, record):
+        """Render remote port name as a link if URL is available."""
         if url := record.get("remote_port_url"):
             return format_html('<a href="{}">{}</a>', url, value)
         return value
 
     def render_cable_status(self, value, record):
+        """Render cable status as a link if cable URL is available."""
         if url := record.get("cable_url"):
             return format_html('<a href="{}">{}</a>', url, value)
         return value
 
     def configure(self, request):
+        """Configure pagination for the table using the current request."""
         paginate = {
             "paginator_class": EnhancedPaginator,
             "per_page": get_table_paginate_count(request, self.prefix),
@@ -80,6 +86,8 @@ class LibreNMSCableTable(tables.Table):
         tables.RequestConfig(request, paginate).configure(self)
 
     class Meta:
+        """Define column sequence, row attributes, and table styling."""
+
         sequence = [
             "selection",
             "local_port",
@@ -108,10 +116,12 @@ class VCCableTable(LibreNMSCableTable):
     )
 
     def __init__(self, *args, device=None, **kwargs):
+        """Initialize the VC cable table with device context."""
         super().__init__(*args, device=device, **kwargs)
 
     def render_device_selection(self, value, record):
-        members = self.device.virtual_chassis.members.order_by("vc_position", "name")
+        """Render a dropdown to select the virtual chassis member for a port."""
+        members = self.device.virtual_chassis.members.all()
         chassis_member = get_virtual_chassis_member(self.device, record["local_port"])
         selected_member_id = chassis_member.id if chassis_member else self.device.id
 
@@ -127,6 +137,8 @@ class VCCableTable(LibreNMSCableTable):
         )
 
     class Meta(LibreNMSCableTable.Meta):
+        """Define column sequence and attributes for the VC cable table."""
+
         sequence = [
             "selection",
             "device_selection",

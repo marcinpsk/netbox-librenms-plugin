@@ -32,6 +32,7 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
     title = "Import Devices from LibreNMS"
 
     def get_required_permission(self):
+        """Return the permission required to view the import list."""
         from utilities.permissions import get_permission_for_model
 
         return get_permission_for_model(Device, "view")
@@ -330,11 +331,13 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         return render(request, self.template_name, context)
 
     def get_queryset(self, request):  # noqa: D401 - inherited doc
+        """Load import data into _import_data and return an empty Device queryset."""
         import_data = self._get_import_queryset()
         self._import_data = import_data
         return Device.objects.none()
 
     def get_table(self, data, request, bulk_actions=True):
+        """Return a DeviceImportTable populated with validated import data."""
         if not hasattr(self, "_import_data"):
             self._import_data = self._get_import_queryset()
 

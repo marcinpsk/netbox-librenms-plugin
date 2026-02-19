@@ -26,6 +26,7 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, C
             raise Http404(f"Invalid object type: {object_type}")
 
     def post(self, request, object_type, object_id):
+        """Sync selected interfaces from LibreNMS into NetBox."""
         # Set permissions dynamically based on object type
         self.required_object_permissions = {
             "POST": self.get_required_permissions_for_object_type(object_type),
@@ -67,6 +68,7 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, C
         )
 
     def get_object(self, object_type, object_id):
+        """Return the Device or VirtualMachine for the given type and ID."""
         if object_type == "device":
             return get_object_or_404(Device, pk=object_id)
         if object_type == "virtualmachine":
@@ -74,6 +76,7 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, C
         raise Http404("Invalid object type.")
 
     def get_selected_interfaces(self, request, interface_name_field):
+        """Return the list of selected interface names from POST data."""
         selected_interfaces = request.POST.getlist("select")
         if not selected_interfaces:
             messages.error(request, "No interfaces selected for synchronization.")
@@ -81,6 +84,7 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, C
         return selected_interfaces
 
     def get_cached_ports_data(self, request, obj):
+        """Return cached LibreNMS port data for the given object."""
         cached_data = cache.get(self.get_cache_key(obj, "ports"))
         if not cached_data:
             messages.warning(
@@ -98,6 +102,7 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, C
         exclude_columns,
         interface_name_field,
     ):
+        """Create or update NetBox interfaces from LibreNMS port data."""
         with transaction.atomic():
             for port in ports_data:
                 port_name = port.get(interface_name_field)
@@ -106,6 +111,7 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, C
                     self.sync_interface(obj, port, exclude_columns, interface_name_field)
 
     def sync_interface(self, obj, librenms_interface, exclude_columns, interface_name_field):
+        """Create or update a single NetBox interface from LibreNMS data."""
         interface_name = librenms_interface.get(interface_name_field)
 
         if isinstance(obj, Device):
@@ -136,6 +142,7 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, C
         )
 
     def get_netbox_interface_type(self, librenms_interface):
+        """Return the NetBox interface type mapped from LibreNMS type and speed."""
         speed = convert_speed_to_kbps(librenms_interface["ifSpeed"])
         mappings = InterfaceTypeMapping.objects.filter(librenms_type=librenms_interface["ifType"])
 
@@ -148,6 +155,7 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, C
         return mapping.netbox_type if mapping else "other"
 
     def handle_mac_address(self, interface, ifPhysAddress):
+        """Assign or create the MAC address for the given interface."""
         if ifPhysAddress:
             existing_mac = interface.mac_addresses.filter(mac_address=ifPhysAddress).first()
             if existing_mac:
@@ -166,6 +174,7 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, C
         exclude_columns,
         interface_name_field,
     ):
+        """Update interface fields from LibreNMS data, respecting excluded columns."""
         is_device_interface = isinstance(interface, Interface)
 
         LIBRENMS_TO_NETBOX_MAPPING = {
@@ -223,6 +232,7 @@ class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermission
             raise Http404(f"Invalid object type: {object_type}")
 
     def post(self, request, object_type, object_id):
+        """Delete selected NetBox-only interfaces not present in LibreNMS."""
         # Check plugin write permission first
         if error := self.require_write_permission_json():
             return error

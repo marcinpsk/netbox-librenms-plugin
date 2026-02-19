@@ -23,14 +23,17 @@ class VMLibreNMSSyncView(BaseLibreNMSSyncView):
     )
 
     def get_interface_context(self, request, obj):
+        """Return interface sync context for the virtual machine."""
         interface_name_field = get_interface_name_field(request)
         interface_sync_view = VMInterfaceTableView()
         return interface_sync_view.get_context_data(request, obj, interface_name_field)
 
     def get_cable_context(self, request, obj):
+        """Return None; VMs do not support cable sync."""
         return None  # VMs do not expose cable sync data
 
     def get_ip_context(self, request, obj):
+        """Return IP address sync context for the virtual machine."""
         ipaddress_sync_view = VMIPAddressTableView()
         return ipaddress_sync_view.get_context_data(request, obj)
 
@@ -41,12 +44,15 @@ class VMInterfaceTableView(BaseInterfaceTableView):
     model = VirtualMachine
 
     def get_table(self, data, obj, interface_name_field):
+        """Return a VM interface table for the given data."""
         return LibreNMSVMInterfaceTable(data)
 
     def get_interfaces(self, obj):
+        """Return all interfaces for the virtual machine."""
         return obj.interfaces.all()
 
     def get_redirect_url(self, obj):
+        """Return the VM interface sync redirect URL."""
         return reverse("plugins:netbox_librenms_plugin:vm_interface_sync", kwargs={"pk": obj.pk})
 
 
