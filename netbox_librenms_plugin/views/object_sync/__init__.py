@@ -7,6 +7,7 @@ from .devices import (  # noqa: F401
     DeviceLibreNMSSyncView,
     DeviceVLANTableView,
     SingleInterfaceVerifyView,
+    SingleVlanGroupVerifyView,
 )
 from .vms import (  # noqa: F401
     VMInterfaceTableView,

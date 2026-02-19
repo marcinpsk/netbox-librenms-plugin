@@ -32,6 +32,7 @@ from .views import (
     SingleCableVerifyView,
     SingleInterfaceVerifyView,
     SingleIPAddressVerifyView,
+    SingleVlanGroupVerifyView,
     SyncCablesView,
     SyncInterfacesView,
     SyncIPAddressesView,
@@ -86,6 +87,12 @@ urlpatterns = [
         "verify-ipaddress/",
         SingleIPAddressVerifyView.as_view(),
         name="verify_ipaddress",
+    ),
+    # Path for VLAN group verify javascript call (interface VLAN coloring)
+    path(
+        "verify-vlan-group/",
+        SingleVlanGroupVerifyView.as_view(),
+        name="verify_vlan_group",
     ),
     # Virtual machine sync URLs
     path(

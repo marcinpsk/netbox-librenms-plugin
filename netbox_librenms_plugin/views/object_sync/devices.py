@@ -133,6 +133,138 @@ class SingleInterfaceVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
         return JsonResponse({"status": "error", "message": "Interface data not found"}, status=404)
 
 
+class SingleVlanGroupVerifyView(CacheMixin, View):
+    """
+    Verify VLAN assignments for an interface against a specific VLAN group.
+
+    When user changes the VLAN group dropdown, this endpoint re-computes
+    which VLANs are "missing" (don't exist in selected group) and returns
+    updated HTML for the VLANs cell with correct colors.
+    """
+
+    def post(self, request):
+        from ipam.models import VLAN, VLANGroup
+
+        data = json.loads(request.body)
+        device_id = data.get("device_id")
+        interface_name = data.get("interface_name")
+        vlan_group_id = data.get("vlan_group_id")
+        untagged_vlan_str = data.get("untagged_vlan", "")
+        tagged_vlans_str = data.get("tagged_vlans", "")
+
+        if not device_id:
+            return JsonResponse({"status": "error", "message": "No device ID provided"}, status=400)
+
+        device = get_object_or_404(Device, pk=device_id)
+
+        # Parse VLANs from request
+        untagged_vlan = int(untagged_vlan_str) if untagged_vlan_str else None
+        tagged_vlans = []
+        if tagged_vlans_str:
+            tagged_vlans = [int(v) for v in tagged_vlans_str.split(",") if v.strip()]
+
+        # Build lookup for the selected group
+        if vlan_group_id:
+            vlan_group = get_object_or_404(VLANGroup, pk=vlan_group_id)
+            # Get VLANs in selected group + global VLANs
+            group_vids = set(VLAN.objects.filter(group=vlan_group).values_list("vid", flat=True))
+            global_vids = set(VLAN.objects.filter(group__isnull=True).values_list("vid", flat=True))
+            available_vids = group_vids | global_vids
+        else:
+            # No group selected - use global VLANs only
+            available_vids = set(VLAN.objects.filter(group__isnull=True).values_list("vid", flat=True))
+
+        # Compute missing VLANs (not in selected group)
+        missing_vlans = []
+        if untagged_vlan and untagged_vlan not in available_vids:
+            missing_vlans.append(untagged_vlan)
+        for vid in tagged_vlans:
+            if vid not in available_vids:
+                missing_vlans.append(vid)
+
+        # Get NetBox interface for comparison
+        netbox_interface = device.interfaces.filter(name=interface_name).first()
+        exists_in_netbox = bool(netbox_interface)
+
+        # Get NetBox VLAN assignments
+        netbox_untagged_vid = None
+        netbox_tagged_vids = set()
+        if netbox_interface:
+            if netbox_interface.untagged_vlan:
+                netbox_untagged_vid = netbox_interface.untagged_vlan.vid
+            netbox_tagged_vids = {v.vid for v in netbox_interface.tagged_vlans.all()}
+
+        # Render VLANs cell HTML
+        formatted_vlans = self._render_vlans_cell(
+            untagged_vlan,
+            tagged_vlans,
+            missing_vlans,
+            exists_in_netbox,
+            netbox_untagged_vid,
+            netbox_tagged_vids,
+        )
+
+        return JsonResponse({"status": "success", "formatted_vlans": formatted_vlans})
+
+    def _render_vlans_cell(
+        self, untagged, tagged, missing_vlans, exists_in_netbox, netbox_untagged_vid, netbox_tagged_vids
+    ):
+        """
+        Render the VLANs cell HTML with correct color coding.
+
+        Reuses the same color logic as LibreNMSInterfaceTable.render_vlans().
+        """
+        from django.utils.safestring import mark_safe
+
+        parts = []
+
+        if untagged:
+            css = self._get_untagged_vlan_css_class(untagged, netbox_untagged_vid, exists_in_netbox, missing_vlans)
+            warning = self._get_missing_vlan_warning(untagged, missing_vlans)
+            parts.append(f'<span class="{css}">{untagged}(U){warning}</span>')
+
+        for vid in sorted(tagged):
+            css = self._get_tagged_vlan_css_class(vid, netbox_tagged_vids, exists_in_netbox, missing_vlans)
+            warning = self._get_missing_vlan_warning(vid, missing_vlans)
+            parts.append(f'<span class="{css}">{vid}(T){warning}</span>')
+
+        if not parts:
+            return "—"
+
+        return mark_safe(", ".join(parts))
+
+    def _get_untagged_vlan_css_class(self, librenms_vid, netbox_vid, exists_in_netbox, missing_vlans):
+        """Get CSS class for untagged VLAN comparison."""
+        if not exists_in_netbox:
+            return "text-danger"
+        if librenms_vid in missing_vlans:
+            return "text-danger"
+        if librenms_vid == netbox_vid:
+            return "text-success"
+        if netbox_vid is None:
+            return "text-danger"  # No untagged VLAN assigned in NetBox
+        return "text-warning"  # Different untagged VLAN assigned
+
+    def _get_tagged_vlan_css_class(self, vid, netbox_tagged_vids, exists_in_netbox, missing_vlans):
+        """Get CSS class for tagged VLAN comparison."""
+        if not exists_in_netbox:
+            return "text-danger"
+        if vid in missing_vlans:
+            return "text-danger"
+        if vid in netbox_tagged_vids:
+            return "text-success"
+        return "text-danger"  # VLAN not tagged on this interface
+
+    def _get_missing_vlan_warning(self, vid, missing_vlans):
+        """Return warning icon HTML if VLAN is not found in selected group."""
+        if vid in missing_vlans:
+            return (
+                ' <i class="mdi mdi-alert text-danger" '
+                'title="VLAN not in selected group—use VLAN Sync first to create it"></i>'
+            )
+        return ""
+
+
 class DeviceCableTableView(BaseCableTableView):
     """Cable synchronization view for Devices."""
 

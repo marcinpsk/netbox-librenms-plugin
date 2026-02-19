@@ -34,6 +34,7 @@ from .object_sync import (
     DeviceLibreNMSSyncView,
     DeviceVLANTableView,
     SingleInterfaceVerifyView,
+    SingleVlanGroupVerifyView,
     VMInterfaceTableView,
     VMIPAddressTableView,
     VMLibreNMSSyncView,
