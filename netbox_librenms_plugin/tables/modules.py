@@ -18,7 +18,10 @@ class LibreNMSModuleTable(tables.Table):
     module_type = tables.Column(verbose_name="Module Type", attrs={"td": {"data-col": "module_type"}})
     status = tables.Column(verbose_name="Status", attrs={"td": {"data-col": "status"}})
     actions = tables.Column(
-        verbose_name="Actions", orderable=False, empty_values=(), attrs={"td": {"data-col": "actions"}}
+        verbose_name="Actions",
+        orderable=False,
+        empty_values=(),
+        attrs={"td": {"data-col": "actions", "style": "white-space:nowrap"}},
     )
 
     class Meta:
@@ -159,7 +162,7 @@ class LibreNMSModuleTable(tables.Table):
                     '<input type="hidden" name="parent_index" value="{}">'
                     '<button type="submit" class="btn btn-sm btn-primary ms-1"'
                     ' title="Install this module and all installable children">'
-                    '<i class="mdi mdi-file-tree"></i> Install Branch'
+                    '<i class="mdi mdi-file-tree"></i> Branch'
                     "</button></form>",
                     url,
                     self.csrf_token,
