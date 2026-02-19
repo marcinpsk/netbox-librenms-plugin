@@ -101,13 +101,24 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         # Collect top-level items and their sub-components
         # Include synthetic transceiver items (from vendors without ENTITY-MIB SFP data)
+        # Include top-level 'port' items with a model (transceivers in fixed-form switches)
         # Exclude items whose parent is also an INVENTORY_CLASSES item (they appear as sub-components)
         top_items = []
         for item in inventory_data:
             if item.get("_from_transceiver_api"):
                 top_items.append(item)
                 continue
-            if item.get("entPhysicalClass") not in INVENTORY_CLASSES:
+            phys_class = item.get("entPhysicalClass", "")
+            if phys_class not in INVENTORY_CLASSES:
+                # Include top-level port items with a model name (e.g., Arcos SFPs)
+                if phys_class == "port" and (item.get("entPhysicalModelName") or "").strip():
+                    parent_idx_val = item.get("entPhysicalContainedIn", 0)
+                    parent_in_inv = parent_idx_val and parent_idx_val in index_map
+                    parent_is_module = (
+                        parent_in_inv and index_map[parent_idx_val].get("entPhysicalClass", "") in INVENTORY_CLASSES
+                    )
+                    if not parent_is_module:
+                        top_items.append(item)
                 continue
             # Check if parent is also an inventory-class item (skip if so)
             parent_idx = item.get("entPhysicalContainedIn", 0)
@@ -662,6 +673,12 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Vi
                 slot = grandparent.position or parent_bay_position
             else:
                 slot = parent_bay_position
+        elif hasattr(module_bay, "module") and module_bay.module:
+            # Bay belongs to an installed module (not nested, but module-scoped)
+            # Resolve slot from the module's own bay position
+            owner_module = module_bay.module
+            if hasattr(owner_module, "module_bay") and owner_module.module_bay:
+                slot = owner_module.module_bay.position or bay_position
 
         interfaces = Interface.objects.filter(module=module)
         renamed = 0
