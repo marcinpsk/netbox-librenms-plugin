@@ -231,3 +231,40 @@
 - librenms_model: "Q28-PC03"
   netbox_module_type: "QSFP28-100G-CU3M"
   description: "FS.com QSFP28 100G passive DAC 3m"
+
+# ─── Transceiver Mappings: ProLabs ───────────────────────────────────────────
+
+- librenms_model: "Q28LR431-10-IN"
+  netbox_module_type: "QSFP-100G-LR4"
+  description: "ProLabs QSFP28 100G-LR4 10km"
+
+# ─── Transceiver Mappings: Arcos Fixed-Port Part Numbers ─────────────────────
+
+- librenms_model: "SP7041-TE"
+  netbox_module_type: "SFP-1G-T"
+  description: "SFP 1000BASE-T copper (Arcos platform)"
+
+# ─── Transceiver Mappings: LeGrand Innolight ─────────────────────────────────
+
+- librenms_model: "LGI-FTLC9152RGPL"
+  netbox_module_type: "QSFP-100G-SWDM4"
+  description: "LeGrand-branded Finisar QSFP28 100G-SWDM4"
+
+# ─── Transceiver Mappings: Additional Finisar Variants ──────────────────────
+# Some transceivers have customer-code suffixes that normalization may not handle.
+# Add direct mappings as fallback.
+
+- librenms_model: "FTLC1151RDPL-CN"
+  netbox_module_type: "QSFP-100G-LR4"
+  description: "Finisar QSFP28 100G-LR4 (CN customer code)"
+
+- librenms_model: "FTLC1154RDPL-A5"
+  netbox_module_type: "QSFP-100G-LR4"
+  description: "Finisar QSFP28 100G-LR4 (A5 customer code)"
+
+# ─── Unknown / Unidentified Part Numbers ─────────────────────────────────────
+# These are mapped based on port context (QSFP28 100G slot) when vendor is unknown.
+
+- librenms_model: "1F3QAA"
+  netbox_module_type: "QSFP-100G-LR4"
+  description: "Unknown QSFP28 100G (mapped by port context)"

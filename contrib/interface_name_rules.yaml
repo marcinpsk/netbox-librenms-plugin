@@ -58,3 +58,59 @@
 #   channel_count: 4
 #   channel_start: 1
 #   description: "QSFP+ 4x10G breakout with Cisco-style channel numbering (1-4)"
+
+# --- Juniper ACX7024 Platform-Specific Rules ---
+# These rules are scoped to the ACX7024 device type and use bay_position
+# to generate Juniper-style interface names with FPC/PIC/port notation.
+
+# 100GE QSFP28 transceivers -> et-0/0/{port}
+- module_type: QSFP-100G-LR4
+  device_type: ACX7024
+  name_template: "et-0/0/{bay_position}"
+  channel_count: 0
+  channel_start: 0
+  description: "Juniper ACX7024 100GE QSFP28 naming"
+
+- module_type: QSFP-100G-SR4
+  device_type: ACX7024
+  name_template: "et-0/0/{bay_position}"
+  channel_count: 0
+  channel_start: 0
+  description: "Juniper ACX7024 100GE QSFP28 naming"
+
+- module_type: QSFP-100G-SWDM4
+  device_type: ACX7024
+  name_template: "et-0/0/{bay_position}"
+  channel_count: 0
+  channel_start: 0
+  description: "Juniper ACX7024 100GE QSFP28 naming"
+
+# 10GE SFP+ transceivers -> xe-0/0/{port}
+- module_type: SFP-10G-SR
+  device_type: ACX7024
+  name_template: "xe-0/0/{bay_position}"
+  channel_count: 0
+  channel_start: 0
+  description: "Juniper ACX7024 10GE SFP+ naming"
+
+- module_type: SFP-10G-LR
+  device_type: ACX7024
+  name_template: "xe-0/0/{bay_position}"
+  channel_count: 0
+  channel_start: 0
+  description: "Juniper ACX7024 10GE SFP+ naming"
+
+# 1GE SFP transceivers -> ge-0/0/{port}
+- module_type: SFP-1G-T
+  device_type: ACX7024
+  name_template: "ge-0/0/{bay_position}"
+  channel_count: 0
+  channel_start: 0
+  description: "Juniper ACX7024 1GE SFP naming"
+
+- module_type: SFP-1G-LX
+  device_type: ACX7024
+  name_template: "ge-0/0/{bay_position}"
+  channel_count: 0
+  channel_start: 0
+  description: "Juniper ACX7024 1GE SFP naming"

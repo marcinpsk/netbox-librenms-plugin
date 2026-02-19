@@ -281,6 +281,35 @@
   netbox_bay_name: "6/1"
   description: "Nokia MDA in XIOM slot 6"
 
+# --- Juniper ACX / EX Fixed-Form ---
+# Juniper fixed-form devices report PSU/Fan with descriptive names
+# Bay matching uses description-based "@ X/Y/Z" pattern for transceivers
+- librenms_name: "PSM 0"
+  librenms_class: "powerSupply"
+  netbox_bay_name: "PSU 0"
+  description: "Juniper PSU slot 0"
+- librenms_name: "PSM 1"
+  librenms_class: "powerSupply"
+  netbox_bay_name: "PSU 1"
+  description: "Juniper PSU slot 1"
+- librenms_name: "Fan Tray 0"
+  librenms_class: "fan"
+  netbox_bay_name: "Fan Tray"
+  description: "Juniper fan tray"
+
+# --- Arcos (ArcOS) Platform ---
+# ArcOS uses sfpN/psu0 naming for inventory items
+- librenms_name: "psu0"
+  librenms_class: "powerSupply"
+  netbox_bay_name: "PSU 0"
+  description: "Arcos PSU slot 0"
+- librenms_name: "psu1"
+  librenms_class: "powerSupply"
+  netbox_bay_name: "PSU 1"
+  description: "Arcos PSU slot 1"
+# Note: Arcos sfpN->Transceiver N mappings are generated in bulk (sfp0 through sfp53)
+# due to high port counts. Use the API or script to create them.
+
 # --- Cisco X2 Port Containers ---
 # Cisco WS-C4900M and WS-X4908-10GE modules create X2 port bays.
 # LibreNMS names these as "Port Container {slot}/{port}" while NetBox
