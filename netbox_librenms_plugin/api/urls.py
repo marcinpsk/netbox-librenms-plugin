@@ -11,6 +11,7 @@ router.register("device-type-mappings", views.DeviceTypeMappingViewSet)
 router.register("module-type-mappings", views.ModuleTypeMappingViewSet)
 router.register("module-bay-mappings", views.ModuleBayMappingViewSet)
 router.register("interface-name-rules", views.InterfaceNameRuleViewSet)
+router.register("normalization-rules", views.NormalizationRuleViewSet)
 
 urlpatterns = [
     path("jobs/<int:job_pk>/sync-status/", views.sync_job_status, name="sync_job_status"),
