@@ -6,6 +6,7 @@ from netbox_librenms_plugin.models import (
     InterfaceTypeMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
+    NormalizationRule,
 )
 
 
@@ -63,5 +64,22 @@ class InterfaceNameRuleSerializer(NetBoxModelSerializer):
             "name_template",
             "channel_count",
             "channel_start",
+            "description",
+        ]
+
+
+class NormalizationRuleSerializer(NetBoxModelSerializer):
+    """Serialize NormalizationRule model for REST API."""
+
+    class Meta:
+        """Meta options for NormalizationRuleSerializer."""
+
+        model = NormalizationRule
+        fields = [
+            "id",
+            "scope",
+            "match_pattern",
+            "replacement",
+            "priority",
             "description",
         ]

@@ -22,6 +22,7 @@ from .models import (
     LibreNMSSettings,
     ModuleBayMapping,
     ModuleTypeMapping,
+    NormalizationRule,
 )
 
 logger = logging.getLogger(__name__)
@@ -429,6 +430,43 @@ class InterfaceNameRuleFilterForm(NetBoxModelFilterSetForm):
     parent_module_type_id = forms.IntegerField(required=False, label="Parent Module Type ID")
 
     model = InterfaceNameRule
+
+
+class NormalizationRuleForm(NetBoxModelForm):
+    """Form for creating and editing normalization rules."""
+
+    class Meta:
+        """Meta options for NormalizationRuleForm."""
+
+        model = NormalizationRule
+        fields = ["scope", "match_pattern", "replacement", "priority", "description"]
+
+
+class NormalizationRuleImportForm(NetBoxModelImportForm):
+    """Form for bulk importing normalization rules."""
+
+    scope = CSVChoiceField(
+        choices=NormalizationRule.SCOPE_CHOICES,
+        help_text="Scope: module_type, device_type, or module_bay",
+    )
+
+    class Meta:
+        """Meta options for NormalizationRuleImportForm."""
+
+        model = NormalizationRule
+        fields = ["scope", "match_pattern", "replacement", "priority", "description"]
+
+
+class NormalizationRuleFilterForm(NetBoxModelFilterSetForm):
+    """Form for filtering normalization rules."""
+
+    scope = forms.ChoiceField(
+        required=False,
+        choices=[("", "---------")] + NormalizationRule.SCOPE_CHOICES,
+        label="Scope",
+    )
+
+    model = NormalizationRule
 
 
 class AddToLIbreSNMPV1V2(forms.Form):

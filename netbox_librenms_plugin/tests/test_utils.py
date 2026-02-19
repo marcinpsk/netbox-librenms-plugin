@@ -54,9 +54,10 @@ class TestDeviceTypeMatching:
         assert result["device_type"] == mock_dt
         assert result["match_type"] == "exact"
 
+    @patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="NonexistentHardware")
     @patch("netbox_librenms_plugin.models.DeviceTypeMapping")
     @patch("dcim.models.DeviceType")
-    def test_match_device_type_not_found(self, mock_device_type, mock_mapping):
+    def test_match_device_type_not_found(self, mock_device_type, mock_mapping, mock_normalize):
         """Returns None when no match found."""
         mock_mapping.DoesNotExist = Exception
         mock_mapping.objects.get.side_effect = mock_mapping.DoesNotExist

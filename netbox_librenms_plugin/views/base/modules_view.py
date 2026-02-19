@@ -437,7 +437,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
     def _build_row(self, item, index_map, module_bays, module_types, depth=0):
         """Build a single table row from a LibreNMS inventory item."""
-        from netbox_librenms_plugin.utils import module_type_uses_module_path, supports_module_path
+        from netbox_librenms_plugin.utils import (
+            apply_normalization_rules,
+            module_type_uses_module_path,
+            supports_module_path,
+        )
 
         model_name = item.get("entPhysicalModelName", "") or ""
         serial = item.get("entPhysicalSerialNum", "") or ""
@@ -448,8 +452,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Match to NetBox module bay
         matched_bay = self._match_module_bay(item, index_map, module_bays)
 
-        # Match to NetBox module type
+        # Match to NetBox module type (exact first, then normalized)
         matched_type = module_types.get(model_name) if model_name else None
+        if not matched_type and model_name:
+            normalized = apply_normalization_rules(model_name, "module_type")
+            if normalized != model_name:
+                matched_type = module_types.get(normalized)
 
         # Check {module_path} compatibility
         needs_module_path = matched_type and module_type_uses_module_path(matched_type)

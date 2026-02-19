@@ -1,6 +1,13 @@
 from django.urls import include, path
 
-from .models import DeviceTypeMapping, InterfaceNameRule, InterfaceTypeMapping, ModuleBayMapping, ModuleTypeMapping
+from .models import (
+    DeviceTypeMapping,
+    InterfaceNameRule,
+    InterfaceTypeMapping,
+    ModuleBayMapping,
+    ModuleTypeMapping,
+    NormalizationRule,
+)
 from .views import (
     AddDeviceToLibreNMSView,
     AssignVCSerialView,
@@ -65,6 +72,14 @@ from .views import (
     ModuleTypeMappingEditView,
     ModuleTypeMappingListView,
     ModuleTypeMappingView,
+    NormalizationRuleBulkDeleteView,
+    NormalizationRuleBulkImportView,
+    NormalizationRuleChangeLogView,
+    NormalizationRuleCreateView,
+    NormalizationRuleDeleteView,
+    NormalizationRuleEditView,
+    NormalizationRuleListView,
+    NormalizationRuleView,
     SaveUserPrefView,
     SingleCableVerifyView,
     SingleInterfaceVerifyView,
@@ -520,7 +535,7 @@ urlpatterns = [
     path(
         "interface-name-rules/<int:pk>/",
         InterfaceNameRuleView.as_view(),
-        name="interfacenamerule",
+        name="interfacenamerule_detail",
     ),
     path(
         "interface-name-rules/add/",
@@ -552,6 +567,48 @@ urlpatterns = [
         "interface-name-rules/delete/",
         InterfaceNameRuleBulkDeleteView.as_view(),
         name="interfacenamerule_bulk_delete",
+    ),
+    # Normalization rules
+    path(
+        "normalization-rules/",
+        NormalizationRuleListView.as_view(),
+        name="normalizationrule_list",
+    ),
+    path(
+        "normalization-rules/<int:pk>/",
+        NormalizationRuleView.as_view(),
+        name="normalizationrule_detail",
+    ),
+    path(
+        "normalization-rules/add/",
+        NormalizationRuleCreateView.as_view(),
+        name="normalizationrule_add",
+    ),
+    path(
+        "normalization-rules/import/",
+        NormalizationRuleBulkImportView.as_view(),
+        name="normalizationrule_bulk_import",
+    ),
+    path(
+        "normalization-rules/<int:pk>/delete/",
+        NormalizationRuleDeleteView.as_view(),
+        name="normalizationrule_delete",
+    ),
+    path(
+        "normalization-rules/<int:pk>/edit/",
+        NormalizationRuleEditView.as_view(),
+        name="normalizationrule_edit",
+    ),
+    path(
+        "normalization-rules/<int:pk>/changelog/",
+        NormalizationRuleChangeLogView.as_view(),
+        name="normalizationrule_changelog",
+        kwargs={"model": NormalizationRule},
+    ),
+    path(
+        "normalization-rules/delete/",
+        NormalizationRuleBulkDeleteView.as_view(),
+        name="normalizationrule_bulk_delete",
     ),
     path("api/", include("netbox_librenms_plugin.api.urls")),
 ]
