@@ -1020,6 +1020,7 @@ def validate_device_for_import(
                         dt_match = chassis_match
 
             result["device_type"] = dt_match
+            result["device_type"]["found"] = dt_match["matched"]
 
             if not dt_match["matched"]:
                 result["issues"].append(f"No matching device type found for hardware: '{hardware}'")
@@ -1033,11 +1034,6 @@ def validate_device_for_import(
                     }
                     for dt in all_device_types
                 ]
-            else:
-                # Rename 'matched' to 'found' for consistency
-                result["device_type"]["found"] = dt_match["matched"]
-                result["device_type"]["device_type"] = dt_match["device_type"]
-                result["device_type"]["match_type"] = dt_match["match_type"]
 
             # 4. DeviceRole (required) - Must be manually selected by user
             logger.debug(f"[{hostname}] Issues BEFORE adding role issue: {result['issues']}")
