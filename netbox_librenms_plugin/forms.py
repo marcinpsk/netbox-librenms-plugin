@@ -404,6 +404,7 @@ class InterfaceNameRuleForm(NetBoxModelForm):
         fields = [
             "module_type",
             "parent_module_type",
+            "device_type",
             "name_template",
             "channel_count",
             "channel_start",
@@ -421,6 +422,7 @@ class InterfaceNameRuleImportForm(NetBoxModelImportForm):
         fields = [
             "module_type",
             "parent_module_type",
+            "device_type",
             "name_template",
             "channel_count",
             "channel_start",
@@ -433,6 +435,7 @@ class InterfaceNameRuleFilterForm(NetBoxModelFilterSetForm):
 
     module_type_id = forms.IntegerField(required=False, label="Module Type ID")
     parent_module_type_id = forms.IntegerField(required=False, label="Parent Module Type ID")
+    device_type_id = forms.IntegerField(required=False, label="Device Type ID")
 
     model = InterfaceNameRule
 

@@ -140,6 +140,7 @@ class InterfaceNameRuleTable(NetBoxTable):
 
     module_type = tables.Column(verbose_name="Module Type", linkify=True)
     parent_module_type = tables.Column(verbose_name="Parent Module Type", linkify=True)
+    device_type = tables.Column(verbose_name="Device Type", linkify=True)
     name_template = tables.Column(verbose_name="Name Template")
     channel_count = tables.Column(verbose_name="Channels")
     channel_start = tables.Column(verbose_name="Ch. Start")
@@ -154,6 +155,7 @@ class InterfaceNameRuleTable(NetBoxTable):
             "id",
             "module_type",
             "parent_module_type",
+            "device_type",
             "name_template",
             "channel_count",
             "channel_start",
@@ -164,6 +166,7 @@ class InterfaceNameRuleTable(NetBoxTable):
             "id",
             "module_type",
             "parent_module_type",
+            "device_type",
             "name_template",
             "channel_count",
             "description",

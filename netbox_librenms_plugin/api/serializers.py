@@ -61,6 +61,7 @@ class InterfaceNameRuleSerializer(NetBoxModelSerializer):
             "id",
             "module_type",
             "parent_module_type",
+            "device_type",
             "name_template",
             "channel_count",
             "channel_start",

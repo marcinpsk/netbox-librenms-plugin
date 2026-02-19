@@ -216,6 +216,14 @@ class InterfaceNameRule(NetBoxModel):
         related_name="child_interface_name_rules",
         help_text="If set, rule only applies when installed inside this parent module type",
     )
+    device_type = models.ForeignKey(
+        DeviceType,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="interface_name_rules",
+        help_text="If set, rule only applies to devices of this type",
+    )
     name_template = models.CharField(
         max_length=255,
         help_text="Interface name template expression, e.g. 'GigabitEthernet{slot}/{8 + ({parent_bay_position} - 1) * 2 + {sfp_slot}}'",
@@ -240,7 +248,7 @@ class InterfaceNameRule(NetBoxModel):
     class Meta:
         """Meta options for InterfaceNameRule."""
 
-        unique_together = ["module_type", "parent_module_type"]
+        unique_together = ["module_type", "parent_module_type", "device_type"]
         ordering = ["module_type__model"]
 
     def __str__(self):
