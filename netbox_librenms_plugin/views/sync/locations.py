@@ -120,7 +120,7 @@ class SyncSiteLocationView(LibreNMSPermissionMixin, LibreNMSAPIMixin, SingleTabl
                 f"Latitude and/or longitude is missing. Cannot create location '{site.name}' in LibreNMS.",
             )
             return redirect("plugins:netbox_librenms_plugin:site_location_sync")
-       
+
         location_data = self.build_location_data(site)
         success, message = self.librenms_api.add_location(location_data)
         if success:
