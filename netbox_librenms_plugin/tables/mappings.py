@@ -109,6 +109,7 @@ class ModuleBayMappingTable(NetBoxTable):
     librenms_name = tables.Column(verbose_name="LibreNMS Name", linkify=True)
     librenms_class = tables.Column(verbose_name="LibreNMS Class")
     netbox_bay_name = tables.Column(verbose_name="NetBox Bay Name")
+    is_regex = columns.BooleanColumn(verbose_name="Regex")
     description = tables.Column(verbose_name="Description", linkify=False)
     actions = columns.ActionsColumn(actions=("edit", "delete"))
 
@@ -121,6 +122,7 @@ class ModuleBayMappingTable(NetBoxTable):
             "librenms_name",
             "librenms_class",
             "netbox_bay_name",
+            "is_regex",
             "description",
             "actions",
         )
@@ -129,6 +131,7 @@ class ModuleBayMappingTable(NetBoxTable):
             "librenms_name",
             "librenms_class",
             "netbox_bay_name",
+            "is_regex",
             "description",
             "actions",
         )
@@ -138,9 +141,10 @@ class ModuleBayMappingTable(NetBoxTable):
 class InterfaceNameRuleTable(NetBoxTable):
     """Table for displaying InterfaceNameRule data."""
 
+    pk = columns.ToggleColumn()
     module_type = tables.Column(verbose_name="Module Type", linkify=True)
     parent_module_type = tables.Column(verbose_name="Parent Module Type", linkify=True)
-    device_type = tables.Column(verbose_name="Device Type", linkify=True)
+    device_type = tables.Column(verbose_name="Parent Device Type", linkify=True)
     name_template = tables.Column(verbose_name="Name Template")
     channel_count = tables.Column(verbose_name="Channels")
     channel_start = tables.Column(verbose_name="Ch. Start")
@@ -152,6 +156,7 @@ class InterfaceNameRuleTable(NetBoxTable):
 
         model = InterfaceNameRule
         fields = (
+            "pk",
             "id",
             "module_type",
             "parent_module_type",
@@ -163,7 +168,7 @@ class InterfaceNameRuleTable(NetBoxTable):
             "actions",
         )
         default_columns = (
-            "id",
+            "pk",
             "module_type",
             "parent_module_type",
             "device_type",

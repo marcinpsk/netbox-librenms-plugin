@@ -371,7 +371,7 @@ class ModuleBayMappingForm(NetBoxModelForm):
         """Meta options for ModuleBayMappingForm."""
 
         model = ModuleBayMapping
-        fields = ["librenms_name", "librenms_class", "netbox_bay_name", "description"]
+        fields = ["librenms_name", "librenms_class", "netbox_bay_name", "is_regex", "description"]
 
 
 class ModuleBayMappingImportForm(NetBoxModelImportForm):
@@ -381,7 +381,7 @@ class ModuleBayMappingImportForm(NetBoxModelImportForm):
         """Meta options for ModuleBayMappingImportForm."""
 
         model = ModuleBayMapping
-        fields = ["librenms_name", "librenms_class", "netbox_bay_name", "description"]
+        fields = ["librenms_name", "librenms_class", "netbox_bay_name", "is_regex", "description"]
 
 
 class ModuleBayMappingFilterForm(NetBoxModelFilterSetForm):
@@ -390,6 +390,7 @@ class ModuleBayMappingFilterForm(NetBoxModelFilterSetForm):
     librenms_name = forms.CharField(required=False, label="LibreNMS Name")
     librenms_class = forms.CharField(required=False, label="LibreNMS Class")
     netbox_bay_name = forms.CharField(required=False, label="NetBox Bay Name")
+    is_regex = forms.NullBooleanField(required=False, label="Regex")
 
     model = ModuleBayMapping
 
@@ -435,7 +436,7 @@ class InterfaceNameRuleFilterForm(NetBoxModelFilterSetForm):
 
     module_type_id = forms.IntegerField(required=False, label="Module Type ID")
     parent_module_type_id = forms.IntegerField(required=False, label="Parent Module Type ID")
-    device_type_id = forms.IntegerField(required=False, label="Device Type ID")
+    device_type_id = forms.IntegerField(required=False, label="Parent Device Type ID")
 
     model = InterfaceNameRule
 
