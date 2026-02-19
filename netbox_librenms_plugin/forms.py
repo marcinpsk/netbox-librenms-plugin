@@ -2,7 +2,7 @@
 import logging
 
 from dcim.choices import InterfaceTypeChoices
-from dcim.models import Device, DeviceRole, DeviceType, Location, Rack, Site
+from dcim.models import Device, DeviceRole, DeviceType, Location, Manufacturer, Rack, Site
 from django import forms
 from django.http import QueryDict
 from django.utils.translation import gettext_lazy as _
@@ -12,7 +12,12 @@ from netbox.forms import (
     NetBoxModelImportForm,
 )
 from netbox.plugins import get_plugin_config
-from utilities.forms.fields import CSVChoiceField, DynamicModelMultipleChoiceField
+from utilities.forms.fields import (
+    CSVChoiceField,
+    CSVModelChoiceField,
+    DynamicModelChoiceField,
+    DynamicModelMultipleChoiceField,
+)
 from virtualization.models import Cluster, VirtualMachine
 
 from .models import (
@@ -435,11 +440,17 @@ class InterfaceNameRuleFilterForm(NetBoxModelFilterSetForm):
 class NormalizationRuleForm(NetBoxModelForm):
     """Form for creating and editing normalization rules."""
 
+    manufacturer = DynamicModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        required=False,
+        help_text="Optional: scope this rule to a specific manufacturer",
+    )
+
     class Meta:
         """Meta options for NormalizationRuleForm."""
 
         model = NormalizationRule
-        fields = ["scope", "match_pattern", "replacement", "priority", "description"]
+        fields = ["scope", "manufacturer", "match_pattern", "replacement", "priority", "description"]
 
 
 class NormalizationRuleImportForm(NetBoxModelImportForm):
@@ -449,12 +460,18 @@ class NormalizationRuleImportForm(NetBoxModelImportForm):
         choices=NormalizationRule.SCOPE_CHOICES,
         help_text="Scope: module_type, device_type, or module_bay",
     )
+    manufacturer = CSVModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        to_field_name="name",
+        required=False,
+        help_text="Optional manufacturer name (must already exist in NetBox)",
+    )
 
     class Meta:
         """Meta options for NormalizationRuleImportForm."""
 
         model = NormalizationRule
-        fields = ["scope", "match_pattern", "replacement", "priority", "description"]
+        fields = ["scope", "manufacturer", "match_pattern", "replacement", "priority", "description"]
 
 
 class NormalizationRuleFilterForm(NetBoxModelFilterSetForm):
@@ -464,6 +481,11 @@ class NormalizationRuleFilterForm(NetBoxModelFilterSetForm):
         required=False,
         choices=[("", "---------")] + NormalizationRule.SCOPE_CHOICES,
         label="Scope",
+    )
+    manufacturer_id = DynamicModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        required=False,
+        label="Manufacturer",
     )
 
     model = NormalizationRule

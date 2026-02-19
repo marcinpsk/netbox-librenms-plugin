@@ -78,6 +78,7 @@ class NormalizationRuleSerializer(NetBoxModelSerializer):
         fields = [
             "id",
             "scope",
+            "manufacturer",
             "match_pattern",
             "replacement",
             "priority",

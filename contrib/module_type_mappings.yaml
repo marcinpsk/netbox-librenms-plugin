@@ -11,10 +11,12 @@
 # These mappings are checked FIRST. If no mapping exists, the plugin falls back
 # to exact model name and part_number matching against NetBox module types.
 #
-# Useful for cases where the LibreNMS model string differs from the NetBox
-# module type model, or when part numbers are used as model names in inventory.
+# For vendor-specific suffixes (Nokia revision codes, Finisar customer codes),
+# consider using Normalization Rules instead of individual mappings.
+# See contrib/normalization_rules.yaml for examples.
 
-# Cisco Catalyst 4900M line cards
+# ─── Cisco Catalyst 4900M ────────────────────────────────────────────────────
+
 - librenms_model: "WS-X4908-10GE"
   netbox_module_type: "WS-X4908-10GE"
   description: "Cisco 8-port 10G X2 line card"
@@ -23,34 +25,16 @@
   netbox_module_type: "WS-X4992"
   description: "Cisco 48-port 10/100/1000 line card"
 
-# Cisco power supplies
 - librenms_model: "PWR-C49M-1000AC"
   netbox_module_type: "PWR-C49M-1000AC"
   description: "Cisco 1000W AC power supply"
 
-# Cisco SFP/X2 transceivers
-- librenms_model: "X2-10GB-LR"
-  netbox_module_type: "X2-10GB-LR"
-  description: "Cisco X2 10G LR transceiver"
-
-- librenms_model: "X2-10GB-SR"
-  netbox_module_type: "X2-10GB-SR"
-  description: "Cisco X2 10G SR transceiver"
-
-- librenms_model: "GLC-T"
-  netbox_module_type: "GLC-T"
-  description: "Cisco 1G copper SFP"
-
-- librenms_model: "GLC-TE"
-  netbox_module_type: "GLC-TE"
-  description: "Cisco 1G copper SFP (extended temp)"
-
-# Cisco converters
 - librenms_model: "CVR-X2-SFP"
   netbox_module_type: "CVR-X2-SFP"
   description: "Cisco X2-to-SFP converter"
 
-# Juniper — part numbers often appear as model names in inventory
+# ─── Juniper Backplane ───────────────────────────────────────────────────────
+
 - librenms_model: "710-017414"
   netbox_module_type: "MX480-CHASSIS-BP"
   description: "Juniper MX480 backplane (matched by part number)"
@@ -59,53 +43,191 @@
   netbox_module_type: "MX480-CHASSIS-BP"
   description: "Juniper MX480 backplane (matched by name)"
 
-# Nokia 7750 SR-s — LibreNMS reports Nokia part numbers (3HExxxxx) as inventory
-# model names. These must be mapped to the correct SROS board type names.
-#
-# Key corrections from previous versions:
-#   - IOMs are iom-s / iom-s-e (NOT MDA names like s36-400gb-qsfpdd)
-#   - SFMs are SFM-s (NOT xcm-7s-b — XCM is a line card type)
-#   - CMA is CMA2-7s (NOT xcm2-7s — CMA is a physical carrier bracket)
+# ─── Transceiver Mappings: Juniper Part Numbers ─────────────────────────────
+# Juniper-qualified optics use 740-xxxxxx part numbers regardless of OEM vendor.
 
-# IOM (Input/Output Module) — line cards
-- librenms_model: "3HE16474AARA01"
-  netbox_module_type: "IOM-s-e"
-  description: "Nokia IOM-s-e (Input/Output Module, enhanced) for SR-7s/14s"
+- librenms_model: "740-013111"
+  netbox_module_type: "SFP-1G-T"
+  description: "Juniper SFP 1000BASE-T copper"
 
-- librenms_model: "3HE16472AARB01"
-  netbox_module_type: "IOM-s"
-  description: "Nokia IOM-s (Input/Output Module) for SR-7s/14s"
+- librenms_model: "740-021308"
+  netbox_module_type: "SFP-10G-SR"
+  description: "Juniper SFP+ 10G-SR"
 
-# CPM (Control Processor Module)
-- librenms_model: "3HE12559AARC01"
-  netbox_module_type: "CPM2-s"
-  description: "Nokia CPM2-s control processor module for SR-7s/14s"
+- librenms_model: "740-031850"
+  netbox_module_type: "SFP-1G-LX"
+  description: "Juniper SFP 1000BASE-LX 10km"
 
-# SFM (Switch Fabric Module) — internal switching fabric
-- librenms_model: "3HE16471AARG01"
-  netbox_module_type: "SFM-s"
-  description: "Nokia SFM-s switch fabric module for SR-7s/14s"
+- librenms_model: "740-031980"
+  netbox_module_type: "SFP-10G-SR"
+  description: "Juniper SFP+ 10G-SR"
 
-# CMA (Control Mechanical Adapter) — CPM carrier bracket
-- librenms_model: "3HE12560AARA01"
-  netbox_module_type: "CMA2-7s"
-  description: "Nokia CMA2-7s CPM carrier bracket for SR-7s"
+- librenms_model: "740-031981"
+  netbox_module_type: "SFP-10G-LR"
+  description: "Juniper SFP+ 10G-LR"
 
-# MDA (Media Dependent Adapter) — pluggable interface modules
-- librenms_model: "3HE12391AARK01"
-  netbox_module_type: "s36-100gb-qsfp28"
-  description: "Nokia MDA-s 36x 100GE QSFP28"
+- librenms_model: "740-047682"
+  netbox_module_type: "CFP-100G-LR4"
+  description: "Juniper CFP 100G-LR4"
 
-# XIOM (eXtended IO Module) — hosts MDA-s sub-modules
-- librenms_model: "3HE18883AARB01"
-  netbox_module_type: "XIOM-s-3.0t"
-  description: "Nokia XIOM-s (eXtended IO Module) for SR-s series"
+- librenms_model: "740-054050"
+  netbox_module_type: "QSFP-4X10G-LR"
+  description: "Juniper QSFP+ 4x10G-LR"
 
-# Power and cooling
-- librenms_model: "3HE11183AARB01"
-  netbox_module_type: "PS-7750-SR-S-AC"
-  description: "Nokia 6000W AC power module for SR-7s/14s"
+- librenms_model: "740-054053"
+  netbox_module_type: "QSFP-4X10G-SR"
+  description: "Juniper QSFP+ 4x10G-SR"
 
-- librenms_model: "3HE11312AARB01"
-  netbox_module_type: "FAN-7750-SR-S"
-  description: "Nokia fan tray for SR-7s/14s"
+- librenms_model: "740-058732"
+  netbox_module_type: "QSFP-100G-LR4"
+  description: "Juniper QSFP28 100G-LR4"
+
+- librenms_model: "740-061405"
+  netbox_module_type: "QSFP-100G-SR4"
+  description: "Juniper QSFP28 100G-SR4"
+
+- librenms_model: "740-061409"
+  netbox_module_type: "QSFP-100G-LR4"
+  description: "Juniper QSFP28 100G-LR4"
+
+- librenms_model: "740-079871"
+  netbox_module_type: "QSFP28-DD-2X100G-LR4"
+  description: "Juniper QSFP-DD 2x100G-LR4"
+
+- librenms_model: "740-082823"
+  netbox_module_type: "QSFP-DD-400G-LR8"
+  description: "Juniper QSFP-DD 400G-LR8"
+
+- librenms_model: "740-085349"
+  netbox_module_type: "QSFP-DD-400G-FR4"
+  description: "Juniper QSFP-DD 400G-FR4"
+
+- librenms_model: "740-085351"
+  netbox_module_type: "QSFP-DD-400G-DR4"
+  description: "Juniper QSFP-DD 400G-DR4"
+
+- librenms_model: "740-096176"
+  netbox_module_type: "QSFP-DD-400G-LR4"
+  description: "Juniper QSFP-DD 400G-LR4 (10km variant)"
+
+- librenms_model: "740-131169"
+  netbox_module_type: "QSFP-DD-400G-ZR-M"
+  description: "Juniper QSFP-DD 400G-ZR-M"
+
+- librenms_model: "740-151745"
+  netbox_module_type: "QSFP-DD-400G-ZR-M-HP"
+  description: "Juniper QSFP-DD 400G-ZR-M high-power"
+
+- librenms_model: "740-172665"
+  netbox_module_type: "QSFP-100G-ZR"
+  description: "Juniper QSFP28 100G-ZR"
+
+# ─── Transceiver Mappings: Finisar / II-VI / Coherent ────────────────────────
+# These are BASE part numbers (after normalization strips customer suffixes).
+# See contrib/normalization_rules.yaml for the Finisar suffix-stripping rule.
+
+- librenms_model: "FTLC1154RDPL"
+  netbox_module_type: "QSFP-100G-LR4"
+  description: "Finisar QSFP28 100G-LR4"
+
+- librenms_model: "FTLC1151RDPL"
+  netbox_module_type: "QSFP-100G-LR4"
+  description: "Finisar QSFP28 100G-LR4 (variant)"
+
+- librenms_model: "FTLX1474D3BCL"
+  netbox_module_type: "SFP-10G-LR"
+  description: "Finisar SFP+ 10G-LR"
+
+- librenms_model: "FTCD3323R1PCL"
+  netbox_module_type: "QSFP-DD-400G-ZR-M"
+  description: "Finisar/II-VI QSFP-DD 400G-ZR-M coherent"
+
+- librenms_model: "FTLC9152RGPL"
+  netbox_module_type: "QSFP-100G-SWDM4"
+  description: "Finisar QSFP28 100G-SWDM4"
+
+# ─── Transceiver Mappings: Cisco / Cisco-branded OEM ─────────────────────────
+
+- librenms_model: "X2-10GB-LR"
+  netbox_module_type: "X2-10GB-LR"
+  description: "Cisco X2 10G-LR"
+
+- librenms_model: "X2-10GB-SR"
+  netbox_module_type: "X2-10GB-SR"
+  description: "Cisco X2 10G-SR"
+
+- librenms_model: "GLC-T"
+  netbox_module_type: "SFP-1G-T"
+  description: "Cisco SFP 1000BASE-T copper"
+
+- librenms_model: "GLC-TE"
+  netbox_module_type: "SFP-1G-T"
+  description: "Cisco SFP 1000BASE-T copper (extended temp)"
+
+- librenms_model: "SPP5200LR-C5"
+  netbox_module_type: "SFP-10G-LR"
+  description: "Cisco-branded Sumitomo SFP+ 10G-LR"
+
+- librenms_model: "SPP5310LR-C5"
+  netbox_module_type: "SFP-10G-LR"
+  description: "Cisco-branded Sumitomo SFP+ 10G-LR"
+
+- librenms_model: "SFBR-709SMZ-CS1"
+  netbox_module_type: "SFP-10G-SR"
+  description: "Cisco-branded Avago/Broadcom SFP+ 10G-SR"
+
+- librenms_model: "DP04QSDD-HE0"
+  netbox_module_type: "QSFP-DD-400G-ZR+"
+  description: "Cisco/Acacia QSFP-DD 400G-ZR+ coherent"
+
+- librenms_model: "QDD-400G-ZRP-S"
+  netbox_module_type: "QSFP-DD-400G-ZR+"
+  description: "Cisco QSFP-DD 400G-ZR+"
+
+- librenms_model: "QDD-400G-ZR4-S"
+  netbox_module_type: "QSFP-DD-400G-ZR"
+  description: "Cisco QSFP-DD 400G-ZR"
+
+# ─── Transceiver Mappings: Ciena ─────────────────────────────────────────────
+
+- librenms_model: "176-3360-900"
+  netbox_module_type: "QSFP-DD-400G-ZR-M"
+  description: "Ciena QSFP-DD 400G-ZR-M coherent"
+
+- librenms_model: "176-3530-901"
+  netbox_module_type: "QSFP-DD-400G-ZR"
+  description: "Ciena QSFP-DD 400G-ZR coherent"
+
+- librenms_model: "176-3590-900"
+  netbox_module_type: "QSFP-DD-400G-ZR-M"
+  description: "Ciena QSFP-DD 400G-ZR-M coherent"
+
+# ─── Transceiver Mappings: T1 Nexus ─────────────────────────────────────────
+
+- librenms_model: "T1-QDD-400G-LR4"
+  netbox_module_type: "QSFP-DD-400G-LR4"
+  description: "T1 Nexus QSFP-DD 400G-LR4"
+
+- librenms_model: "T1-QDD-400G-FR4"
+  netbox_module_type: "QSFP-DD-400G-FR4"
+  description: "T1 Nexus QSFP-DD 400G-FR4"
+
+- librenms_model: "T1-QSFP28-LR4"
+  netbox_module_type: "QSFP-100G-LR4"
+  description: "T1 Nexus QSFP28 100G-LR4"
+
+- librenms_model: "100G-LR4_A3"
+  netbox_module_type: "QSFP-100G-LR4"
+  description: "T1 Nexus QSFP28 100G-LR4 (rev A3)"
+
+# ─── Transceiver Mappings: Innolight ────────────────────────────────────────
+
+- librenms_model: "T-DQ4CNT-NCN"
+  netbox_module_type: "QSFP-DD-400G-FR4"
+  description: "Innolight QSFP-DD 400G-FR4"
+
+# ─── Transceiver Mappings: FS.com ────────────────────────────────────────────
+
+- librenms_model: "Q28-PC03"
+  netbox_module_type: "QSFP28-100G-CU3M"
+  description: "FS.com QSFP28 100G passive DAC 3m"

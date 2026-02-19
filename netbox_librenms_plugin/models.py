@@ -1,7 +1,7 @@
 import re
 
 from dcim.choices import InterfaceTypeChoices
-from dcim.models import DeviceType, ModuleType
+from dcim.models import DeviceType, Manufacturer, ModuleType
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.urls import reverse
@@ -277,6 +277,15 @@ class NormalizationRule(NetBoxModel):
         max_length=50,
         choices=SCOPE_CHOICES,
         help_text="Which matching lookup this rule applies to",
+    )
+    manufacturer = models.ForeignKey(
+        Manufacturer,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="normalization_rules",
+        help_text="Optional: only apply this rule to items from this manufacturer. "
+        "Leave blank for vendor-agnostic rules.",
     )
     match_pattern = models.CharField(
         max_length=500,
