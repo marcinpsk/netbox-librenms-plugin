@@ -111,13 +111,19 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             phys_class = item.get("entPhysicalClass", "")
             if phys_class not in INVENTORY_CLASSES:
                 # Include top-level port items with a model name (e.g., Arcos SFPs)
+                # but only if no ancestor is an INVENTORY_CLASSES item (would appear as sub-component)
                 if phys_class == "port" and (item.get("entPhysicalModelName") or "").strip():
-                    parent_idx_val = item.get("entPhysicalContainedIn", 0)
-                    parent_in_inv = parent_idx_val and parent_idx_val in index_map
-                    parent_is_module = (
-                        parent_in_inv and index_map[parent_idx_val].get("entPhysicalClass", "") in INVENTORY_CLASSES
-                    )
-                    if not parent_is_module:
+                    has_module_ancestor = False
+                    cur_idx = item.get("entPhysicalContainedIn", 0)
+                    seen = set()
+                    while cur_idx and cur_idx in index_map and cur_idx not in seen:
+                        seen.add(cur_idx)
+                        ancestor = index_map[cur_idx]
+                        if ancestor.get("entPhysicalClass", "") in INVENTORY_CLASSES:
+                            has_module_ancestor = True
+                            break
+                        cur_idx = ancestor.get("entPhysicalContainedIn", 0)
+                    if not has_module_ancestor:
                         top_items.append(item)
                 continue
             # Check if parent is also an inventory-class item (skip if so)
@@ -202,6 +208,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Build lookup of existing inventory items by index
         inv_by_index = {item["entPhysicalIndex"]: item for item in inventory_data}
 
+        # Build set of existing serial numbers to detect duplicates
+        # (transceiver API may use different entity indices than ENTITY-MIB)
+        existing_serials = {(item.get("entPhysicalSerialNum") or "").strip() for item in inventory_data}
+        existing_serials.discard("")
+
         # Types that are containers, not real transceiver modules
         SKIP_TYPES = {"Port Container", "Port", ""}
 
@@ -229,6 +240,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 if not (existing.get("entPhysicalSerialNum") or "").strip() and serial:
                     existing["entPhysicalSerialNum"] = serial
             else:
+                # Skip if this serial already exists in inventory (duplicate from
+                # transceiver API using different entity indices than ENTITY-MIB)
+                if serial and serial in existing_serials:
+                    continue
+
                 # Create synthetic inventory item for SFPs not in entity inventory
                 # Try to find port name for this transceiver
                 port_id = txr.get("port_id", 0)
