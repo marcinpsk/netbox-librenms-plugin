@@ -361,12 +361,20 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         return None
 
     def _lookup_bay_mapping(self, name, phys_class, module_bays):
-        """Look up a ModuleBayMapping by librenms_name and return matched bay."""
+        """Look up a ModuleBayMapping by librenms_name and return matched bay.
+
+        Tries exact matches first, then regex patterns (is_regex=True).
+        For regex matches, netbox_bay_name supports backreferences.
+        """
+        import re
+
         from netbox_librenms_plugin.models import ModuleBayMapping
 
         if not name:
             return None
-        filters = {"librenms_name": name}
+
+        # Exact match first
+        filters = {"librenms_name": name, "is_regex": False}
         if phys_class:
             mapping = ModuleBayMapping.objects.filter(**filters, librenms_class=phys_class).first()
             if not mapping:
@@ -375,6 +383,25 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             mapping = ModuleBayMapping.objects.filter(**filters, librenms_class="").first()
         if mapping and mapping.netbox_bay_name in module_bays:
             return module_bays[mapping.netbox_bay_name]
+
+        # Regex pattern matching
+        regex_filters = {"is_regex": True}
+        if phys_class:
+            regex_mappings = list(ModuleBayMapping.objects.filter(**regex_filters, librenms_class=phys_class)) + list(
+                ModuleBayMapping.objects.filter(**regex_filters, librenms_class="")
+            )
+        else:
+            regex_mappings = list(ModuleBayMapping.objects.filter(**regex_filters, librenms_class=""))
+
+        for mapping in regex_mappings:
+            try:
+                match = re.fullmatch(mapping.librenms_name, name)
+            except re.error:
+                continue
+            if match:
+                resolved_bay = match.expand(mapping.netbox_bay_name)
+                if resolved_bay in module_bays:
+                    return module_bays[resolved_bay]
         return None
 
     def _match_module_bay(self, item, index_map, module_bays):

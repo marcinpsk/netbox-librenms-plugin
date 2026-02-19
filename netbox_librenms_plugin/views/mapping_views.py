@@ -314,6 +314,15 @@ class InterfaceNameRuleListView(LibreNMSPermissionMixin, generic.ObjectListView)
     filterset_form = InterfaceNameRuleFilterForm
     template_name = "netbox_librenms_plugin/interfacenamerule_list.html"
 
+    def get_extra_context(self, request):
+        """Add module_path support info to context."""
+        from netbox_librenms_plugin.utils import MODULE_PATH_MIN_VERSION, supports_module_path
+
+        return {
+            "supports_module_path": supports_module_path(),
+            "module_path_min_version": MODULE_PATH_MIN_VERSION,
+        }
+
 
 class InterfaceNameRuleCreateView(LibreNMSPermissionMixin, generic.ObjectEditView):
     """Provides a view for creating a new InterfaceNameRule object."""

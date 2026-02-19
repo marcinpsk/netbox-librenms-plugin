@@ -150,12 +150,15 @@ class ModuleBayMapping(NetBoxModel):
 
     Used when LibreNMS inventory names don't match NetBox bay names exactly.
     For example: LibreNMS "Power Supply 1" → NetBox "PS1".
+    When is_regex is True, librenms_name is treated as a regex pattern and
+    netbox_bay_name can use backreferences (\\1, \\2, etc.).
     Mappings are global (not scoped to device type or manufacturer).
     """
 
     librenms_name = models.CharField(
         max_length=255,
-        help_text="Name from LibreNMS inventory (entPhysicalName), e.g. 'Power Supply 1'",
+        help_text="Name from LibreNMS inventory (entPhysicalName). "
+        "When 'Use Regex' is enabled, this is a Python regex pattern.",
     )
     librenms_class = models.CharField(
         max_length=50,
@@ -164,12 +167,25 @@ class ModuleBayMapping(NetBoxModel):
     )
     netbox_bay_name = models.CharField(
         max_length=255,
-        help_text="NetBox module bay name to match, e.g. 'PS1'",
+        help_text="NetBox module bay name to match. With regex, supports backreferences (\\1, \\2, etc.).",
+    )
+    is_regex = models.BooleanField(
+        default=False,
+        help_text="Treat LibreNMS Name as a regex pattern with backreferences in NetBox Bay Name",
     )
     description = models.TextField(
         blank=True,
         help_text="Optional description or notes about this mapping",
     )
+
+    def clean(self):
+        """Validate that regex patterns compile when is_regex is True."""
+        super().clean()
+        if self.is_regex:
+            try:
+                re.compile(self.librenms_name)
+            except re.error as e:
+                raise ValidationError({"librenms_name": f"Invalid regex: {e}"})
 
     def get_absolute_url(self):
         """Return the URL for this mapping's detail page."""
@@ -222,7 +238,7 @@ class InterfaceNameRule(NetBoxModel):
         null=True,
         blank=True,
         related_name="interface_name_rules",
-        help_text="If set, rule only applies to devices of this type",
+        help_text="If set, rule only applies to devices of this parent device type",
     )
     name_template = models.CharField(
         max_length=255,

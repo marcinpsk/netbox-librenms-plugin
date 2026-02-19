@@ -47,7 +47,7 @@ class ModuleBayMappingFilterSet(django_filters.FilterSet):
         """Meta options for ModuleBayMappingFilterSet."""
 
         model = ModuleBayMapping
-        fields = ["librenms_name", "librenms_class", "netbox_bay_name"]
+        fields = ["librenms_name", "librenms_class", "netbox_bay_name", "is_regex"]
 
 
 class InterfaceNameRuleFilterSet(django_filters.FilterSet):

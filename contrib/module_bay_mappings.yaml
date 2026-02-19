@@ -4,101 +4,88 @@
 # Import via: LibreNMS Plugin → Module Bay Mappings → Import
 #
 # Fields:
-#   librenms_name:  LibreNMS entPhysicalName or container name (exact match)
+#   librenms_name:  LibreNMS entPhysicalName or container name (exact match or regex)
 #   librenms_class: Optional entPhysicalClass filter (powerSupply, fan, module, etc.)
 #                   Leave empty for class-independent mappings
-#   netbox_bay_name: Target NetBox module bay name
+#   netbox_bay_name: Target NetBox module bay name (supports \1, \2 backreferences with regex)
+#   is_regex:       Set to true to treat librenms_name as a Python regex pattern
 #   description:    Optional description
+#
+# Regex patterns use Python re.fullmatch() — the pattern must match the entire string.
+# Backreferences (\1, \2) in netbox_bay_name reference capture groups in the pattern.
 
-# --- Power Supplies ---
-- librenms_name: "Power Supply 1"
+# ─── Regex Patterns ──────────────────────────────────────────────────────────
+# These patterns replace many individual exact-match entries.
+
+# Arcos/UfiSpace: sfpN → Transceiver N (covers sfp0 through sfp53+)
+- librenms_name: "^sfp(\\d+)$"
+  netbox_bay_name: "Transceiver \\1"
+  is_regex: true
+  description: "Arcos sfpN → Transceiver N"
+
+# Cisco X2: Port Container slot/port → X2 Port port
+- librenms_name: "^Port Container (\\d+)/(\\d+)$"
+  netbox_bay_name: "X2 Port \\2"
+  is_regex: true
+  description: "Cisco X2 Port Container → X2 Port N"
+
+# Cisco modules: Linecard/Supervisor(slot N) → Slot N
+- librenms_name: "^Linecard\\(slot (\\d+)\\)$"
+  librenms_class: "module"
+  netbox_bay_name: "Slot \\1"
+  is_regex: true
+  description: "Cisco Linecard slot → Slot N"
+- librenms_name: "^Supervisor\\(slot (\\d+)\\)$"
+  librenms_class: "module"
+  netbox_bay_name: "Slot \\1"
+  is_regex: true
+  description: "Cisco Supervisor slot → Slot N"
+
+# Generic power supplies and fans
+- librenms_name: "^Power Supply (\\d+)$"
   librenms_class: "powerSupply"
-  netbox_bay_name: "PS1"
-  description: "Power supply slot 1"
-- librenms_name: "Power Supply 2"
+  netbox_bay_name: "PS\\1"
+  is_regex: true
+  description: "Power Supply N → PSN"
+- librenms_name: "^FanTray (\\d+)$"
+  librenms_class: "fan"
+  netbox_bay_name: "Fan Tray \\1"
+  is_regex: true
+  description: "FanTray N → Fan Tray N"
+
+# Nokia 7750 SR chassis fans and power modules
+- librenms_name: "^Chassis 1 Fan (\\d+)$"
+  librenms_class: "fan"
+  netbox_bay_name: "Fan \\1"
+  is_regex: true
+  description: "Nokia chassis fan → Fan N"
+- librenms_name: "^Chassis 1 PowShelf 1 PM (\\d+)$"
   librenms_class: "powerSupply"
-  netbox_bay_name: "PS2"
-  description: "Power supply slot 2"
-- librenms_name: "Power Supply 3"
-  librenms_class: "powerSupply"
-  netbox_bay_name: "PS3"
-  description: "Power supply slot 3"
+  netbox_bay_name: "PM \\1"
+  is_regex: true
+  description: "Nokia power module → PM N"
 
-# --- Fan Trays ---
-- librenms_name: "FanTray 1"
-  librenms_class: "fan"
-  netbox_bay_name: "Fan 1"
-  description: "Fan tray 1"
-- librenms_name: "FanTray 2"
-  librenms_class: "fan"
-  netbox_bay_name: "Fan 2"
-  description: "Fan tray 2"
-- librenms_name: "FanTray 3"
-  librenms_class: "fan"
-  netbox_bay_name: "Fan 3"
-  description: "Fan tray 3"
+# Nokia MDA and XIOM sub-module bays
+- librenms_name: "^MDA (\\d+)/(\\d+)$"
+  librenms_class: "mdaModule"
+  netbox_bay_name: "\\1/\\2"
+  is_regex: true
+  description: "Nokia MDA N/M → N/M"
+- librenms_name: "^XIOM (\\d+)/x(\\d+)$"
+  librenms_class: "xioModule"
+  netbox_bay_name: "\\1/x\\2"
+  is_regex: true
+  description: "Nokia XIOM N/xM → N/xM"
+- librenms_name: "^MDA (\\d+)/x\\d+/(\\d+)$"
+  librenms_class: "mdaModule"
+  netbox_bay_name: "\\1/\\2"
+  is_regex: true
+  description: "Nokia MDA in XIOM N/x1/M → N/M"
 
-# --- Cisco Line Card Slots ---
-- librenms_name: "Linecard(slot 1)"
-  librenms_class: "module"
-  netbox_bay_name: "Slot 1"
-  description: "Linecard slot 1"
-- librenms_name: "Linecard(slot 2)"
-  librenms_class: "module"
-  netbox_bay_name: "Slot 2"
-  description: "Linecard slot 2"
-- librenms_name: "Linecard(slot 3)"
-  librenms_class: "module"
-  netbox_bay_name: "Slot 3"
-  description: "Linecard slot 3"
-- librenms_name: "Linecard(slot 4)"
-  librenms_class: "module"
-  netbox_bay_name: "Slot 4"
-  description: "Linecard slot 4"
-- librenms_name: "Linecard(slot 5)"
-  librenms_class: "module"
-  netbox_bay_name: "Slot 5"
-  description: "Linecard slot 5"
+# ─── Exact Match Entries ─────────────────────────────────────────────────────
+# These are for special cases where names don't follow a regex pattern.
 
-# --- Cisco Supervisor Slots ---
-- librenms_name: "Supervisor(slot 1)"
-  librenms_class: "module"
-  netbox_bay_name: "Slot 1"
-  description: "Supervisor slot 1"
-- librenms_name: "Supervisor(slot 2)"
-  librenms_class: "module"
-  netbox_bay_name: "Slot 2"
-  description: "Supervisor slot 2"
-
-# --- Juniper FPC Slots ---
-- librenms_name: "FPC 0"
-  librenms_class: "module"
-  netbox_bay_name: "FPC 0"
-  description: "Juniper FPC slot 0"
-- librenms_name: "FPC 1"
-  librenms_class: "module"
-  netbox_bay_name: "FPC 1"
-  description: "Juniper FPC slot 1"
-- librenms_name: "FPC 2"
-  librenms_class: "module"
-  netbox_bay_name: "FPC 2"
-  description: "Juniper FPC slot 2"
-
-# --- Juniper Routing Engine ---
-- librenms_name: "Routing Engine 0"
-  librenms_class: "module"
-  netbox_bay_name: "RE 0"
-  description: "Juniper routing engine 0"
-- librenms_name: "Routing Engine 1"
-  librenms_class: "module"
-  netbox_bay_name: "RE 1"
-  description: "Juniper routing engine 1"
-
-# --- Nokia 7750 SR-7s ---
-# Nokia uses vendor-specific SNMP classes (ioModule, cpmModule, fabricModule, etc.)
-# and chassis-prefixed naming that differs from NetBox bay names.
-
-# CPM slots — LibreNMS "Slot A/B" with class cpmModule → NetBox "Slot A/B"
+# Nokia CPM slots
 - librenms_name: "Slot A"
   librenms_class: "cpmModule"
   netbox_bay_name: "Slot A"
@@ -107,183 +94,12 @@
   librenms_class: "cpmModule"
   netbox_bay_name: "Slot B"
   description: "Nokia CPM slot B"
-
-# CMA (CPM carrier bracket)
 - librenms_name: "SR-7s 2 CPM mini"
   librenms_class: "cpmCarrier"
   netbox_bay_name: "CMA"
   description: "Nokia CMA2-7s CPM carrier bracket"
 
-# Fan trays — LibreNMS "Chassis 1 Fan X" → NetBox "Fan X"
-- librenms_name: "Chassis 1 Fan 1"
-  librenms_class: "fan"
-  netbox_bay_name: "Fan 1"
-  description: "Nokia fan tray 1"
-- librenms_name: "Chassis 1 Fan 2"
-  librenms_class: "fan"
-  netbox_bay_name: "Fan 2"
-  description: "Nokia fan tray 2"
-- librenms_name: "Chassis 1 Fan 3"
-  librenms_class: "fan"
-  netbox_bay_name: "Fan 3"
-  description: "Nokia fan tray 3"
-- librenms_name: "Chassis 1 Fan 4"
-  librenms_class: "fan"
-  netbox_bay_name: "Fan 4"
-  description: "Nokia fan tray 4"
-
-# Power modules — LibreNMS "Chassis 1 PowShelf 1 PM X" → NetBox "PM X"
-- librenms_name: "Chassis 1 PowShelf 1 PM 1"
-  librenms_class: "powerSupply"
-  netbox_bay_name: "PM 1"
-  description: "Nokia power module 1"
-- librenms_name: "Chassis 1 PowShelf 1 PM 2"
-  librenms_class: "powerSupply"
-  netbox_bay_name: "PM 2"
-  description: "Nokia power module 2"
-- librenms_name: "Chassis 1 PowShelf 1 PM 3"
-  librenms_class: "powerSupply"
-  netbox_bay_name: "PM 3"
-  description: "Nokia power module 3"
-- librenms_name: "Chassis 1 PowShelf 1 PM 4"
-  librenms_class: "powerSupply"
-  netbox_bay_name: "PM 4"
-  description: "Nokia power module 4"
-- librenms_name: "Chassis 1 PowShelf 1 PM 5"
-  librenms_class: "powerSupply"
-  netbox_bay_name: "PM 5"
-  description: "Nokia power module 5"
-- librenms_name: "Chassis 1 PowShelf 1 PM 6"
-  librenms_class: "powerSupply"
-  netbox_bay_name: "PM 6"
-  description: "Nokia power module 6"
-- librenms_name: "Chassis 1 PowShelf 1 PM 7"
-  librenms_class: "powerSupply"
-  netbox_bay_name: "PM 7"
-  description: "Nokia power module 7"
-- librenms_name: "Chassis 1 PowShelf 1 PM 8"
-  librenms_class: "powerSupply"
-  netbox_bay_name: "PM 8"
-  description: "Nokia power module 8"
-- librenms_name: "Chassis 1 PowShelf 1 PM 9"
-  librenms_class: "powerSupply"
-  netbox_bay_name: "PM 9"
-  description: "Nokia power module 9"
-- librenms_name: "Chassis 1 PowShelf 1 PM 10"
-  librenms_class: "powerSupply"
-  netbox_bay_name: "PM 10"
-  description: "Nokia power module 10"
-
-# --- Nokia MDA/XIOM sub-module bays (for slots 1-6) ---
-# When an IOM-s/IOM-s-e is installed in "Slot N", it creates module bays
-# "N/1", "N/2" (MDA slots) and "N/x1" (XIOM slot).
-# LibreNMS names these as "MDA N/1", "XIOM N/x1", etc.
-- librenms_name: "MDA 1/1"
-  librenms_class: "mdaModule"
-  netbox_bay_name: "1/1"
-  description: "Nokia MDA in IOM slot 1 position 1"
-- librenms_name: "MDA 1/2"
-  librenms_class: "mdaModule"
-  netbox_bay_name: "1/2"
-  description: "Nokia MDA in IOM slot 1 position 2"
-- librenms_name: "MDA 2/1"
-  librenms_class: "mdaModule"
-  netbox_bay_name: "2/1"
-  description: "Nokia MDA in IOM slot 2 position 1"
-- librenms_name: "MDA 2/2"
-  librenms_class: "mdaModule"
-  netbox_bay_name: "2/2"
-  description: "Nokia MDA in IOM slot 2 position 2"
-- librenms_name: "MDA 3/1"
-  librenms_class: "mdaModule"
-  netbox_bay_name: "3/1"
-  description: "Nokia MDA in IOM slot 3 position 1"
-- librenms_name: "MDA 3/2"
-  librenms_class: "mdaModule"
-  netbox_bay_name: "3/2"
-  description: "Nokia MDA in IOM slot 3 position 2"
-- librenms_name: "MDA 4/1"
-  librenms_class: "mdaModule"
-  netbox_bay_name: "4/1"
-  description: "Nokia MDA in IOM slot 4 position 1"
-- librenms_name: "MDA 4/2"
-  librenms_class: "mdaModule"
-  netbox_bay_name: "4/2"
-  description: "Nokia MDA in IOM slot 4 position 2"
-- librenms_name: "MDA 5/1"
-  librenms_class: "mdaModule"
-  netbox_bay_name: "5/1"
-  description: "Nokia MDA in IOM slot 5 position 1"
-- librenms_name: "MDA 5/2"
-  librenms_class: "mdaModule"
-  netbox_bay_name: "5/2"
-  description: "Nokia MDA in IOM slot 5 position 2"
-- librenms_name: "MDA 6/1"
-  librenms_class: "mdaModule"
-  netbox_bay_name: "6/1"
-  description: "Nokia MDA in IOM slot 6 position 1"
-- librenms_name: "MDA 6/2"
-  librenms_class: "mdaModule"
-  netbox_bay_name: "6/2"
-  description: "Nokia MDA in IOM slot 6 position 2"
-
-# XIOM slots inside IOMs
-- librenms_name: "XIOM 1/x1"
-  librenms_class: "xioModule"
-  netbox_bay_name: "1/x1"
-  description: "Nokia XIOM in IOM slot 1"
-- librenms_name: "XIOM 2/x1"
-  librenms_class: "xioModule"
-  netbox_bay_name: "2/x1"
-  description: "Nokia XIOM in IOM slot 2"
-- librenms_name: "XIOM 3/x1"
-  librenms_class: "xioModule"
-  netbox_bay_name: "3/x1"
-  description: "Nokia XIOM in IOM slot 3"
-- librenms_name: "XIOM 4/x1"
-  librenms_class: "xioModule"
-  netbox_bay_name: "4/x1"
-  description: "Nokia XIOM in IOM slot 4"
-- librenms_name: "XIOM 5/x1"
-  librenms_class: "xioModule"
-  netbox_bay_name: "5/x1"
-  description: "Nokia XIOM in IOM slot 5"
-- librenms_name: "XIOM 6/x1"
-  librenms_class: "xioModule"
-  netbox_bay_name: "6/x1"
-  description: "Nokia XIOM in IOM slot 6"
-
-# MDA slots inside XIOMs (3rd level nesting)
-# XIOM module bay template uses "{module}/1", so when XIOM is in bay "N/x1"
-# the child bay name resolves to "N/1" (not "N/x1/1") in current NetBox.
-- librenms_name: "MDA 1/x1/1"
-  librenms_class: "mdaModule"
-  netbox_bay_name: "1/1"
-  description: "Nokia MDA in XIOM slot 1"
-- librenms_name: "MDA 2/x1/1"
-  librenms_class: "mdaModule"
-  netbox_bay_name: "2/1"
-  description: "Nokia MDA in XIOM slot 2"
-- librenms_name: "MDA 3/x1/1"
-  librenms_class: "mdaModule"
-  netbox_bay_name: "3/1"
-  description: "Nokia MDA in XIOM slot 3"
-- librenms_name: "MDA 4/x1/1"
-  librenms_class: "mdaModule"
-  netbox_bay_name: "4/1"
-  description: "Nokia MDA in XIOM slot 4"
-- librenms_name: "MDA 5/x1/1"
-  librenms_class: "mdaModule"
-  netbox_bay_name: "5/1"
-  description: "Nokia MDA in XIOM slot 5"
-- librenms_name: "MDA 6/x1/1"
-  librenms_class: "mdaModule"
-  netbox_bay_name: "6/1"
-  description: "Nokia MDA in XIOM slot 6"
-
-# --- Juniper ACX / EX Fixed-Form ---
-# Juniper fixed-form devices report PSU/Fan with descriptive names
-# Bay matching uses description-based "@ X/Y/Z" pattern for transceivers
+# Juniper fixed-form devices
 - librenms_name: "PSM 0"
   librenms_class: "powerSupply"
   netbox_bay_name: "PSU 0"
@@ -297,8 +113,7 @@
   netbox_bay_name: "Fan Tray"
   description: "Juniper fan tray"
 
-# --- Arcos (ArcOS) Platform ---
-# ArcOS uses sfpN/psu0 naming for inventory items
+# Arcos power supplies
 - librenms_name: "psu0"
   librenms_class: "powerSupply"
   netbox_bay_name: "PSU 0"
@@ -307,58 +122,3 @@
   librenms_class: "powerSupply"
   netbox_bay_name: "PSU 1"
   description: "Arcos PSU slot 1"
-# Note: Arcos sfpN->Transceiver N mappings are generated in bulk (sfp0 through sfp53)
-# due to high port counts. Use the API or script to create them.
-
-# --- Cisco X2 Port Containers ---
-# Cisco WS-C4900M and WS-X4908-10GE modules create X2 port bays.
-# LibreNMS names these as "Port Container {slot}/{port}" while NetBox
-# module templates create "X2 Port {port}" bays under the installed module.
-- librenms_name: "Port Container 1/1"
-  netbox_bay_name: "X2 Port 1"
-  description: "Cisco X2 slot 1 port 1"
-- librenms_name: "Port Container 1/2"
-  netbox_bay_name: "X2 Port 2"
-  description: "Cisco X2 slot 1 port 2"
-- librenms_name: "Port Container 1/3"
-  netbox_bay_name: "X2 Port 3"
-  description: "Cisco X2 slot 1 port 3"
-- librenms_name: "Port Container 1/4"
-  netbox_bay_name: "X2 Port 4"
-  description: "Cisco X2 slot 1 port 4"
-- librenms_name: "Port Container 1/5"
-  netbox_bay_name: "X2 Port 5"
-  description: "Cisco X2 slot 1 port 5"
-- librenms_name: "Port Container 1/6"
-  netbox_bay_name: "X2 Port 6"
-  description: "Cisco X2 slot 1 port 6"
-- librenms_name: "Port Container 1/7"
-  netbox_bay_name: "X2 Port 7"
-  description: "Cisco X2 slot 1 port 7"
-- librenms_name: "Port Container 1/8"
-  netbox_bay_name: "X2 Port 8"
-  description: "Cisco X2 slot 1 port 8"
-- librenms_name: "Port Container 3/1"
-  netbox_bay_name: "X2 Port 1"
-  description: "Cisco X2 slot 3 port 1"
-- librenms_name: "Port Container 3/2"
-  netbox_bay_name: "X2 Port 2"
-  description: "Cisco X2 slot 3 port 2"
-- librenms_name: "Port Container 3/3"
-  netbox_bay_name: "X2 Port 3"
-  description: "Cisco X2 slot 3 port 3"
-- librenms_name: "Port Container 3/4"
-  netbox_bay_name: "X2 Port 4"
-  description: "Cisco X2 slot 3 port 4"
-- librenms_name: "Port Container 3/5"
-  netbox_bay_name: "X2 Port 5"
-  description: "Cisco X2 slot 3 port 5"
-- librenms_name: "Port Container 3/6"
-  netbox_bay_name: "X2 Port 6"
-  description: "Cisco X2 slot 3 port 6"
-- librenms_name: "Port Container 3/7"
-  netbox_bay_name: "X2 Port 7"
-  description: "Cisco X2 slot 3 port 7"
-- librenms_name: "Port Container 3/8"
-  netbox_bay_name: "X2 Port 8"
-  description: "Cisco X2 slot 3 port 8"
