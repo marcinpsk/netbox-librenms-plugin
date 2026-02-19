@@ -29,7 +29,6 @@ class LibreNMSInterfaceTable(tables.Table):
             "type",
             "speed",
             "vlans",
-            "vlan_group_select",
             "mac_address",
             "mtu",
             "enabled",
@@ -101,79 +100,186 @@ class LibreNMSInterfaceTable(tables.Table):
         orderable=False,
         attrs={"td": {"data-col": "vlans"}},
     )
-    vlan_group_select = tables.Column(
-        verbose_name="VLAN Group",
-        empty_values=(),
-        orderable=False,
-        attrs={"td": {"data-col": "vlan_group_select"}},
-    )
 
     def render_vlans(self, value, record):
         """
         Render VLANs column showing untagged and tagged VLANs.
         Format: "100(U), 200(T), 300(T)" or "100(U)" for access ports.
-        Shows warning icon for VLANs not found in NetBox.
+
+        Color logic:
+        - Red + warning icon: VLAN not in any NetBox group (cannot sync)
+        - Red: Not present in NetBox (no VLAN assigned on interface)
+        - Orange: Mismatched (different untagged VLAN assigned)
+        - Green: Matching (VLAN matches NetBox assignment)
+
+        Compact display: shows up to 3 VLANs inline, then summarizes.
+        An edit button opens the VLAN detail modal.
+        Hidden inputs store per-VLAN group assignments for form submission.
         """
-        parts = []
         untagged = record.get("untagged_vlan")
         tagged = record.get("tagged_vlans", [])
         missing_vlans = record.get("missing_vlans", [])
 
+        # Get NetBox interface for comparison
+        exists_in_netbox = record.get("exists_in_netbox", False)
+        netbox_interface = record.get("netbox_interface")
+
+        # Get NetBox VLAN assignments
+        netbox_untagged_vid = None
+        netbox_tagged_vids = set()
+        if netbox_interface:
+            if netbox_interface.untagged_vlan:
+                netbox_untagged_vid = netbox_interface.untagged_vlan.vid
+            netbox_tagged_vids = {v.vid for v in netbox_interface.tagged_vlans.all()}
+
+        all_vlans = []
         if untagged:
-            warning = ""
-            css = ""
-            if untagged in missing_vlans:
-                css = "text-warning"
-                warning = ' <i class="mdi mdi-alert text-warning" title="VLAN not in NetBox—use VLAN Sync first"></i>'
-            parts.append(f'<span class="{css}">{untagged}(U){warning}</span>')
-
+            all_vlans.append(("U", untagged))
         for vid in sorted(tagged):
-            warning = ""
-            css = ""
-            if vid in missing_vlans:
-                css = "text-warning"
-                warning = ' <i class="mdi mdi-alert text-warning" title="VLAN not in NetBox—use VLAN Sync first"></i>'
-            parts.append(f'<span class="{css}">{vid}(T){warning}</span>')
+            all_vlans.append(("T", vid))
 
-        if not parts:
-            return "—"
+        if not all_vlans:
+            return format_html("—")
 
-        return format_html(mark_safe(", ".join(parts)))
-
-    def render_vlan_group_select(self, value, record):
-        """
-        Render per-row VLAN group dropdown.
-        Auto-selects based on priority; shows warning for ambiguous VIDs.
-        """
         interface_name = record.get(self.interface_name_field, "")
-        selected_group_id = record.get("auto_selected_group_id")
-        is_ambiguous = record.get("is_ambiguous", False)
-
-        # Build select options
-        options = ['<option value="">-- No Group (Global) --</option>']
-        for group in self.vlan_groups:
-            selected = "selected" if group.pk == selected_group_id else ""
-            scope_info = f" ({group.scope})" if hasattr(group, "scope") and group.scope else ""
-            options.append(f'<option value="{group.pk}" {selected}>{group.name}{scope_info}</option>')
-
-        # Create safe name for form field (escape special chars)
         safe_name = interface_name.replace("/", "_").replace(":", "_")
 
-        select_html = format_html(
-            '<select name="vlan_group_{}" class="form-select form-select-sm" style="min-width: 150px;">{}</select>',
-            safe_name,
-            mark_safe("".join(options)),
+        # Build compact colored summary (show up to 3 VLANs, summarize rest)
+        MAX_INLINE = 3
+        inline_parts = []
+        for vlan_type, vid in all_vlans[:MAX_INLINE]:
+            if vlan_type == "U":
+                css = self._get_untagged_vlan_css_class(vid, netbox_untagged_vid, exists_in_netbox, missing_vlans)
+            else:
+                css = self._get_tagged_vlan_css_class(vid, netbox_tagged_vids, exists_in_netbox, missing_vlans)
+            warning = self._get_missing_vlan_warning(vid, missing_vlans)
+            inline_parts.append(f'<span class="{css}">{vid}({vlan_type}){warning}</span>')
+
+        summary = ", ".join(inline_parts)
+        if len(all_vlans) > MAX_INLINE:
+            extra = len(all_vlans) - MAX_INLINE
+            summary += f' <span class="text-muted">+{extra} more</span>'
+
+        # Build tooltip showing auto-selected VLAN group per VLAN
+        vlan_group_map = record.get("vlan_group_map", {})
+        tooltip_lines = []
+        for vlan_type, vid in all_vlans:
+            group_info = vlan_group_map.get(vid, {})
+            group_name = group_info.get("group_name", "Global")
+            tooltip_lines.append(f"VLAN {vid}({vlan_type}) → {group_name}")
+        tooltip_text = "&#10;".join(tooltip_lines)
+
+        # Build hidden inputs for per-VLAN group selections (submitted with form)
+        hidden_inputs = []
+        for vlan_type, vid in all_vlans:
+            group_info = vlan_group_map.get(vid, {})
+            group_id = group_info.get("group_id", "")
+            hidden_inputs.append(
+                f'<input type="hidden" name="vlan_group_{safe_name}_{vid}" '
+                f'value="{group_id}" class="vlan-group-hidden" '
+                f'data-interface="{interface_name}" data-vid="{vid}">'
+            )
+
+        # Build JSON data for modal
+        vlan_json_items = []
+        for vlan_type, vid in all_vlans:
+            group_info = vlan_group_map.get(vid, {})
+            is_missing = vid in missing_vlans
+            if vlan_type == "U":
+                css = self._get_untagged_vlan_css_class(vid, netbox_untagged_vid, exists_in_netbox, missing_vlans)
+            else:
+                css = self._get_tagged_vlan_css_class(vid, netbox_tagged_vids, exists_in_netbox, missing_vlans)
+            vlan_json_items.append(
+                f'{{"vid":{vid},"type":"{vlan_type}",'
+                f'"group_id":"{group_info.get("group_id", "")}",'
+                f'"group_name":"{group_info.get("group_name", "Global")}",'
+                f'"css":"{css}","missing":{str(is_missing).lower()}}}'
+            )
+        vlan_json = "[" + ",".join(vlan_json_items) + "]"
+
+        device_id = self.device.pk if self.device else ""
+
+        # Build vlan_groups JSON for modal dropdowns
+        group_options = [{"id": "", "name": "-- No Group (Global) --", "scope": ""}]
+        for group in self.vlan_groups:
+            scope_info = str(group.scope) if hasattr(group, "scope") and group.scope else ""
+            group_options.append({"id": str(group.pk), "name": group.name, "scope": scope_info})
+        import json
+
+        groups_json = json.dumps(group_options)
+
+        edit_btn = (
+            f'<button type="button" class="btn btn-sm btn-link p-0 ms-1 vlan-edit-btn" '
+            f'data-interface="{interface_name}" '
+            f'data-safe-name="{safe_name}" '
+            f'data-device-id="{device_id}" '
+            f"data-vlans='{vlan_json}' "
+            f"data-vlan-groups='{groups_json}' "
+            f'title="Edit VLAN group assignments">'
+            f'<i class="mdi mdi-pencil"></i></button>'
         )
 
-        # Add warning icon if ambiguous
-        if is_ambiguous:
-            warning_html = format_html(
-                '<i class="mdi mdi-alert text-warning ms-1" '
-                'title="VID exists in multiple groups—please select the target group"></i>'
-            )
-            return format_html("{}{}", select_html, warning_html)
+        html = f'<span title="{tooltip_text}">{summary}</span>{edit_btn}{"".join(hidden_inputs)}'
 
-        return select_html
+        return mark_safe(html)
+
+    def _get_untagged_vlan_css_class(self, librenms_vid, netbox_vid, exists_in_netbox, missing_vlans):
+        """
+        Get CSS class for untagged VLAN comparison.
+
+        Color logic:
+        - Red (text-danger) + warning icon: VLAN not in any NetBox group (cannot sync)
+        - Red (text-danger): Interface missing from NetBox, or no untagged VLAN in NetBox
+        - Orange (text-warning): Different untagged VLAN assigned (mismatch)
+        - Green (text-success): Same untagged VLAN assigned (match)
+
+        Note: Warning icon is added separately by _get_missing_vlan_warning().
+
+        Returns:
+            CSS class string: text-danger, text-warning, or text-success
+        """
+        if not exists_in_netbox:
+            return "text-danger"  # Interface doesn't exist in NetBox
+        if librenms_vid in missing_vlans:
+            return "text-danger"  # VLAN not in any NetBox group - warning icon added
+        if librenms_vid == netbox_vid:
+            return "text-success"  # Exact match
+        if netbox_vid is None:
+            return "text-danger"  # No untagged VLAN assigned in NetBox - not present
+        return "text-warning"  # Different untagged VLAN assigned - mismatch
+
+    def _get_tagged_vlan_css_class(self, vid, netbox_tagged_vids, exists_in_netbox, missing_vlans):
+        """
+        Get CSS class for tagged VLAN comparison.
+
+        Color logic:
+        - Red (text-danger) + warning icon: VLAN not in any NetBox group (cannot sync)
+        - Red (text-danger): Interface missing from NetBox, or VLAN not tagged on this interface
+        - Green (text-success): VLAN is tagged on this interface in NetBox
+
+        Note: Tagged VLANs are binary - either present or not. There is no
+        "mismatch" concept like untagged (which can have a different VID).
+
+        Note: Warning icon is added separately by _get_missing_vlan_warning().
+
+        Returns:
+            CSS class string: text-danger or text-success
+        """
+        if not exists_in_netbox:
+            return "text-danger"  # Interface doesn't exist in NetBox
+        if vid in missing_vlans:
+            return "text-danger"  # VLAN not in any NetBox group - warning icon added
+        if vid in netbox_tagged_vids:
+            return "text-success"  # VLAN is tagged on this interface
+        return "text-danger"  # VLAN not tagged on this interface - not present
+
+    def _get_missing_vlan_warning(self, vid, missing_vlans):
+        """Return warning icon HTML if VLAN is not found in any NetBox VLAN group."""
+        if vid in missing_vlans:
+            return (
+                ' <i class="mdi mdi-alert text-danger" title="VLAN not in NetBox—use VLAN Sync first to create it"></i>'
+            )
+        return ""
 
     def render_speed(self, value, record):
         """Render interface speed with appropriate styling based on comparison with NetBox"""
@@ -462,7 +568,6 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
             "type",
             "speed",
             "vlans",
-            "vlan_group_select",
             "mac_address",
             "mtu",
             "enabled",
@@ -486,7 +591,6 @@ class LibreNMSVMInterfaceTable(LibreNMSInterfaceTable):
             "selection",
             "name",
             "vlans",
-            "vlan_group_select",
             "mac_address",
             "mtu",
             "enabled",

@@ -160,6 +160,43 @@
             </div>
         </div>
     </div>
+
+    <!-- VLAN Detail Modal (inside form so hidden inputs are submitted) -->
+    <div class="modal fade" id="vlanDetailModal" tabindex="-1" aria-labelledby="vlanDetailModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="vlanDetailModalLabel">VLAN Assignments</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="text-muted mb-2">Interface: <strong id="vlanModalInterfaceName"></strong></p>
+                    <table class="table table-sm table-hover mb-3" id="vlanDetailTable">
+                        <thead>
+                            <tr>
+                                <th style="width: 80px;">VID</th>
+                                <th style="width: 60px;">Type</th>
+                                <th>VLAN Group</th>
+                            </tr>
+                        </thead>
+                        <tbody id="vlanDetailTableBody">
+                            <!-- Populated by JS -->
+                        </tbody>
+                    </table>
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="applyVlanGroupToAll">
+                        <label class="form-check-label" for="applyVlanGroupToAll">
+                            Apply group assignments to all interfaces with matching VLANs
+                        </label>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-primary" id="saveVlanGroups">Save</button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                </div>
+            </div>
+        </div>
+    </div>
 </form>
 {% else %}
 <div class="card">

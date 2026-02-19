@@ -213,7 +213,8 @@ function initializeVCMemberSelect() {
         const cableTable = document.getElementById('librenms-cable-table-vc');
 
         if (interfaceTable) {
-            const interfaceSelects = interfaceTable.querySelectorAll('.form-select.tomselected');
+            // Only target VC member selects, exclude VLAN group selects
+            const interfaceSelects = interfaceTable.querySelectorAll('.form-select.tomselected:not(.vlan-group-select)');
             interfaceSelects.forEach(select => {
                 if (select.tomselect && !select.dataset.interfaceSelectInitialized) {
                     select.dataset.interfaceSelectInitialized = 'true';
@@ -272,6 +273,256 @@ function initializeVRFSelects() {
             });
         }
     }, TOMSELECT_INIT_DELAY_MS);
+}
+
+/**
+ * Initialize VLAN edit buttons that open the VLAN detail modal.
+ * Each button carries per-VLAN data and VLAN group options as data attributes.
+ */
+function initializeVlanGroupSelects() {
+    document.querySelectorAll('.vlan-edit-btn').forEach(btn => {
+        if (btn.dataset.vlanEditInitialized) return;
+        btn.dataset.vlanEditInitialized = 'true';
+
+        btn.addEventListener('click', function (e) {
+            e.preventDefault();
+            openVlanDetailModal(this);
+        });
+    });
+}
+
+/**
+ * Open the VLAN detail modal for a specific interface.
+ * Populates the modal table with per-VLAN rows and group dropdowns.
+ *
+ * @param {HTMLElement} btn - The edit button element with data attributes
+ */
+function openVlanDetailModal(btn) {
+    const interfaceName = btn.dataset.interface;
+    const safeName = btn.dataset.safeName;
+    const deviceId = btn.dataset.deviceId;
+    const vlans = JSON.parse(btn.dataset.vlans);
+    const vlanGroups = JSON.parse(btn.dataset.vlanGroups);
+
+    // Set modal title
+    document.getElementById('vlanModalInterfaceName').textContent = interfaceName;
+
+    // Store current interface context on modal for save handler
+    const modal = document.getElementById('vlanDetailModal');
+    modal.dataset.currentInterface = interfaceName;
+    modal.dataset.currentSafeName = safeName;
+    modal.dataset.currentDeviceId = deviceId;
+
+    // Build table rows
+    const tbody = document.getElementById('vlanDetailTableBody');
+    tbody.innerHTML = '';
+
+    vlans.forEach(vlan => {
+        const tr = document.createElement('tr');
+
+        // VID cell
+        const tdVid = document.createElement('td');
+        const vidSpan = document.createElement('span');
+        vidSpan.className = vlan.css;
+        vidSpan.textContent = vlan.vid;
+        if (vlan.missing) {
+            vidSpan.innerHTML += ' <i class="mdi mdi-alert text-danger" title="VLAN not in NetBox"></i>';
+        }
+        tdVid.appendChild(vidSpan);
+        tr.appendChild(tdVid);
+
+        // Type cell
+        const tdType = document.createElement('td');
+        tdType.textContent = vlan.type === 'U' ? 'Untagged' : 'Tagged';
+        tr.appendChild(tdType);
+
+        // VLAN Group dropdown cell
+        const tdGroup = document.createElement('td');
+        const select = document.createElement('select');
+        select.className = 'form-select form-select-sm vlan-modal-group-select';
+        select.dataset.vid = vlan.vid;
+        select.dataset.interface = interfaceName;
+        select.dataset.safeName = safeName;
+
+        vlanGroups.forEach(group => {
+            const option = document.createElement('option');
+            option.value = group.id;
+            option.textContent = group.scope ? `${group.name} (${group.scope})` : group.name;
+            if (String(group.id) === String(vlan.group_id)) {
+                option.selected = true;
+            }
+            select.appendChild(option);
+        });
+
+        // On change, update the hidden input for this VLAN immediately
+        select.addEventListener('change', function () {
+            updateHiddenVlanGroupInput(safeName, vlan.vid, this.value);
+
+            // Re-verify VLAN colors after group change
+            verifyVlanInGroup(this, deviceId, vlan.vid, this.value);
+        });
+
+        tdGroup.appendChild(select);
+        tr.appendChild(tdGroup);
+
+        tbody.appendChild(tr);
+    });
+
+    // Reset "apply to all" checkbox
+    const applyAllCheckbox = document.getElementById('applyVlanGroupToAll');
+    if (applyAllCheckbox) {
+        applyAllCheckbox.checked = false;
+    }
+
+    // Show modal via hidden trigger (bootstrap not globally available in NetBox/Tabler)
+    let trigger = document.getElementById('vlanModalTrigger');
+    if (!trigger) {
+        trigger = document.createElement('button');
+        trigger.id = 'vlanModalTrigger';
+        trigger.setAttribute('data-bs-toggle', 'modal');
+        trigger.setAttribute('data-bs-target', '#vlanDetailModal');
+        trigger.style.display = 'none';
+        document.body.appendChild(trigger);
+    }
+    trigger.click();
+}
+
+/**
+ * Update the hidden input for a specific VLAN group assignment.
+ *
+ * @param {string} safeName - Safe interface name (slashes replaced)
+ * @param {number} vid - VLAN ID
+ * @param {string} groupId - Selected group ID
+ */
+function updateHiddenVlanGroupInput(safeName, vid, groupId) {
+    const input = document.querySelector(
+        `input.vlan-group-hidden[name="vlan_group_${safeName}_${vid}"]`
+    );
+    if (input) {
+        input.value = groupId;
+    }
+}
+
+/**
+ * Verify if a VLAN exists in the selected group and update the modal row status.
+ *
+ * @param {HTMLSelectElement} select - The group dropdown in the modal
+ * @param {string} deviceId - Device ID for API call
+ * @param {number} vid - VLAN ID to verify
+ * @param {string} groupId - Selected group ID
+ */
+function verifyVlanInGroup(select, deviceId, vid, groupId) {
+    if (!deviceId) return;
+
+    fetch('/plugins/librenms_plugin/verify-vlan-group/', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+        },
+        body: JSON.stringify({
+            device_id: deviceId,
+            interface_name: select.dataset.interface,
+            vlan_group_id: groupId,
+            untagged_vlan: String(vid),
+            tagged_vlans: ''
+        })
+    })
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'success') {
+                // Update the VID color in the modal row
+                const row = select.closest('tr');
+                if (row) {
+                    const vidSpan = row.querySelector('td:first-child span');
+                    if (vidSpan && data.formatted_vlans) {
+                        if (data.formatted_vlans.includes('mdi-alert')) {
+                            vidSpan.className = 'text-danger';
+                        } else {
+                            vidSpan.className = 'text-success';
+                        }
+                    }
+                }
+            }
+        })
+        .catch(error => {
+            console.error('VLAN verification error:', error);
+        });
+}
+
+/**
+ * Initialize the VLAN modal save button.
+ * Handles "Apply to all interfaces" when the checkbox is checked.
+ */
+function initializeVlanModalSave() {
+    const saveBtn = document.getElementById('saveVlanGroups');
+    if (!saveBtn || saveBtn.dataset.initialized) return;
+    saveBtn.dataset.initialized = 'true';
+
+    saveBtn.addEventListener('click', function () {
+        const applyToAll = document.getElementById('applyVlanGroupToAll')?.checked;
+        const modalEl = document.getElementById('vlanDetailModal');
+        const currentSafeName = modalEl.dataset.currentSafeName;
+
+        // Collect all group selections from the modal
+        const modalSelects = document.querySelectorAll('#vlanDetailTableBody .vlan-modal-group-select');
+        const vidGroupMap = {};
+        modalSelects.forEach(select => {
+            vidGroupMap[select.dataset.vid] = select.value;
+        });
+
+        // Determine which buttons to update
+        const buttonsToUpdate = applyToAll
+            ? document.querySelectorAll('.vlan-edit-btn')
+            : document.querySelectorAll(`.vlan-edit-btn[data-safe-name="${currentSafeName}"]`);
+
+        buttonsToUpdate.forEach(btn => {
+            try {
+                const btnVlans = JSON.parse(btn.dataset.vlans);
+                const groups = JSON.parse(btn.dataset.vlanGroups);
+                const btnSafeName = btn.dataset.safeName;
+                let changed = false;
+
+                btnVlans.forEach(v => {
+                    if (vidGroupMap.hasOwnProperty(String(v.vid))) {
+                        const newGroupId = vidGroupMap[String(v.vid)];
+                        v.group_id = newGroupId;
+                        const matchedGroup = groups.find(g => String(g.id) === String(newGroupId));
+                        v.group_name = matchedGroup ? matchedGroup.name : '-- No Group (Global) --';
+                        changed = true;
+
+                        // Update the hidden input for this VID on this interface
+                        const input = document.querySelector(
+                            `input.vlan-group-hidden[name="vlan_group_${btnSafeName}_${v.vid}"]`
+                        );
+                        if (input) {
+                            input.value = newGroupId;
+                        }
+                    }
+                });
+
+                if (changed) {
+                    btn.dataset.vlans = JSON.stringify(btnVlans);
+                    // Update the tooltip on the summary span (sibling before the button)
+                    const summarySpan = btn.previousElementSibling;
+                    if (summarySpan && summarySpan.tagName === 'SPAN') {
+                        const tooltipLines = btnVlans.map(v =>
+                            `VLAN ${v.vid}(${v.type}) \u2192 ${v.group_name}`
+                        );
+                        summarySpan.title = tooltipLines.join('\n');
+                    }
+                }
+            } catch (e) {
+                // Skip buttons with invalid data
+            }
+        });
+
+        // Close the modal
+        const closeBtn = modalEl.querySelector('[data-bs-dismiss="modal"]');
+        if (closeBtn) {
+            closeBtn.click();
+        }
+    });
 }
 
 /**
@@ -905,6 +1156,8 @@ function initializeScripts() {
     initializeCheckboxes();
     initializeVCMemberSelect();
     initializeVRFSelects();
+    initializeVlanGroupSelects();
+    initializeVlanModalSave();
     initializeFilters();
     initializeCountdowns();
     initializeVLANCountdown();
