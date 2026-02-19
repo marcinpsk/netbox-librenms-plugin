@@ -331,7 +331,7 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         return render(request, self.template_name, context)
 
     def get_queryset(self, request):  # noqa: D401 - inherited doc
-        """Return an empty Device queryset; actual data is loaded via _get_import_queryset."""
+        """Load import data into _import_data and return an empty Device queryset."""
         import_data = self._get_import_queryset()
         self._import_data = import_data
         return Device.objects.none()

@@ -42,11 +42,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Cache
         return cached_data.get("links", [])
 
     def create_cable(self, local_interface, remote_interface, request):
-        """Create a cable between local and remote interfaces.
-
-        Returns:
-            True on success, False on failure.
-        """
+        """Create a cable between local and remote interfaces."""
         try:
             Cable.objects.create(
                 a_terminations=[local_interface],
@@ -86,7 +82,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Cache
             return {"status": "invalid"}
 
     def verify_cable_creation_requirements(self, link_data):
-        """Return True if all required interface IDs are present in link data."""
+        """Return True if all required NetBox IDs are present in link data."""
         required_fields = [
             "netbox_local_interface_id",
             "netbox_remote_device_id",

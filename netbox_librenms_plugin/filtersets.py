@@ -129,7 +129,7 @@ class VMStatusFilterSet(NetBoxModelFilterSet):
         search_fields = ["virtualmachine", "site", "cluster", "platform"]
 
     def search(self, queryset, name, value):
-        """Search VMs by name, site, cluster, role or platform."""
+        """Search VMs by name, site, cluster, or platform."""
         if not value.strip():
             return queryset
         return queryset.filter(

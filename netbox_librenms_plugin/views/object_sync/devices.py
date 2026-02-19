@@ -63,7 +63,7 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
 
     def get_redirect_url(self, obj):
         """Return the device interface sync redirect URL."""
-        return reverse("plugins:netbox_librenms_plugin:vm_interface_sync", kwargs={"pk": obj.pk})
+        return reverse("plugins:netbox_librenms_plugin:device_interface_sync", kwargs={"pk": obj.pk})
 
     def get_table(self, data, obj, interface_name_field):
         """Return the appropriate interface table, selecting VC variant if needed."""
