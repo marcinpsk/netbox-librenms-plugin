@@ -58,3 +58,16 @@
 - librenms_hardware: "8201-SYS"
   netbox_device_type: "8201"
   description: "Cisco 8201 (hardware string differs from model)"
+
+# UfiSpace — LibreNMS reports SONiC/ONIE platform names
+- librenms_hardware: "x86-64-ufispace-s9610-36d-r0"
+  netbox_device_type: "S9610-36D"
+  description: "UfiSpace S9610-36D"
+
+- librenms_hardware: "x86-64-ufispace-s9610-46dx-r0"
+  netbox_device_type: "S9610-46DX"
+  description: "UfiSpace S9610-46DX"
+
+- librenms_hardware: "x86-64-ufispace-s9700-53dx-r9"
+  netbox_device_type: "S9700-53DX"
+  description: "UfiSpace S9700-53DX"
