@@ -28,6 +28,81 @@ detect_plugin_workspace() {
   fi
 }
 
+# Configure proxy for apt and pip if proxy environment variables are set
+if [ -n "$HTTP_PROXY" ] || [ -n "$HTTPS_PROXY" ]; then
+  echo "🌐 Configuring proxy settings..."
+
+  # Configure apt proxy
+  if [ -n "$HTTP_PROXY" ]; then
+    echo "Acquire::http::Proxy \"$HTTP_PROXY\";" > /etc/apt/apt.conf.d/80proxy
+    SAFE_HTTP_PROXY=$(echo "$HTTP_PROXY" | sed 's|://[^@]*@|://***:***@|')
+    echo "  ✓ apt HTTP proxy: $SAFE_HTTP_PROXY"
+  fi
+  if [ -n "$HTTPS_PROXY" ]; then
+    echo "Acquire::https::Proxy \"$HTTPS_PROXY\";" >> /etc/apt/apt.conf.d/80proxy
+    SAFE_HTTPS_PROXY=$(echo "$HTTPS_PROXY" | sed 's|://[^@]*@|://***:***@|')
+    echo "  ✓ apt HTTPS proxy: $SAFE_HTTPS_PROXY"
+  fi
+
+  # Configure pip proxy via environment (already set, but ensure it's exported)
+  export HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY no_proxy
+
+  # Install custom CA certificate into the system trust store (for MITM proxies)
+  PLUGIN_WS_DIR_EARLY="$(detect_plugin_workspace)"
+  [ -z "$PLUGIN_WS_DIR_EARLY" ] && PLUGIN_WS_DIR_EARLY="/workspaces/netbox-librenms-plugin"
+  CA_BUNDLE_SRC="$PLUGIN_WS_DIR_EARLY/ca-bundle.crt"
+  if [ -f "$CA_BUNDLE_SRC" ]; then
+    echo "🔐 Installing custom CA certificate into system trust store..."
+    cert_count=$(grep -c '-----BEGIN CERTIFICATE-----' "$CA_BUNDLE_SRC" 2>/dev/null || true)
+    if [ "${cert_count:-0}" -eq 0 ]; then
+      echo "  ⚠️  ca-bundle.crt does not contain any PEM certificate blocks; skipping CA install."
+    else
+      mkdir -p /usr/local/share/ca-certificates/proxy
+      # Remove stale split fragments so they don't accumulate across rebuilds
+      find /usr/local/share/ca-certificates/proxy -maxdepth 1 -name 'cert-*' -delete 2>/dev/null || true
+      # Split the bundle into individual certs — update-ca-certificates needs one
+      # cert per file and skips non-CA leaf certs, so extract each PEM block as
+      # a separate .crt file.
+      csplit -z -f /usr/local/share/ca-certificates/proxy/cert- \
+        "$CA_BUNDLE_SRC" '/-----BEGIN CERTIFICATE-----/' '{*}' \
+        >/dev/null 2>&1
+      CSPLIT_STATUS=$?
+      if [ "$CSPLIT_STATUS" -ne 0 ]; then
+        echo "  ⚠️  Failed to split ca-bundle.crt (csplit exit code: $CSPLIT_STATUS). Skipping CA install."
+      elif compgen -G "/usr/local/share/ca-certificates/proxy/cert-*" > /dev/null; then
+        # Rename split fragments to .crt
+        for f in /usr/local/share/ca-certificates/proxy/cert-*; do
+          mv "$f" "${f}.crt" 2>/dev/null || true
+        done
+        update-ca-certificates 2>/dev/null
+        echo "  ✓ CA certificate installed into system trust store ($cert_count cert(s))"
+      else
+        echo "  ⚠️  No certificate fragments were generated from ca-bundle.crt; skipping CA install."
+      fi
+    fi
+    # Point environment variables to the system bundle
+    export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+    export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+    export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+    export GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt
+    # Configure pip globally so isolated virtualenvs (e.g. pre-commit) also
+    # use the system CA bundle instead of their bundled certifi.
+    pip config set global.cert /etc/ssl/certs/ca-certificates.crt 2>/dev/null || true
+  else
+    echo "  ℹ️  No ca-bundle.crt found at $CA_BUNDLE_SRC, skipping CA install"
+    # Only disable git SSL verification if explicitly opted-in via ALLOW_GIT_SSL_DISABLE.
+    # Silently disabling SSL is a security risk; prefer providing a CA bundle instead.
+    if [ "${ALLOW_GIT_SSL_DISABLE:-false}" = "true" ]; then
+      git config --global http.sslVerify false
+      echo "  ⚠️  git SSL verification disabled globally (ALLOW_GIT_SSL_DISABLE=true)"
+    else
+      echo "  ⚠️  No CA bundle found and git SSL verification was NOT disabled."
+      echo "     If you need to disable it, set ALLOW_GIT_SSL_DISABLE=true in .devcontainer/.env"
+      echo "     Preferred: provide a ca-bundle.crt in the workspace root instead."
+    fi
+  fi
+fi
+
 # Verify NetBox virtual environment exists
 if [ ! -f "/opt/netbox/venv/bin/activate" ]; then
     echo "❌ NetBox virtual environment not found at /opt/netbox/venv/"
