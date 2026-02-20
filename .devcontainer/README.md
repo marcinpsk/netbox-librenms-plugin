@@ -180,18 +180,14 @@ Add your proxy settings to `.devcontainer/.env`:
 HTTP_PROXY=http://proxy.example.com:8080
 HTTPS_PROXY=http://proxy.example.com:8080
 NO_PROXY=localhost,127.0.0.1,postgres,redis
-
-# CA Certificate Bundle (if your proxy uses a custom CA)
-# Place your CA cert in the workspace, e.g., /workspaces/netbox-librenms-plugin/ca-bundle.crt
-# REQUESTS_CA_BUNDLE=/workspaces/netbox-librenms-plugin/ca-bundle.crt
-# SSL_CERT_FILE=/workspaces/netbox-librenms-plugin/ca-bundle.crt
-# CURL_CA_BUNDLE=/workspaces/netbox-librenms-plugin/ca-bundle.crt
 ```
+
+> **Note:** You do **not** need to set `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`, or `CURL_CA_BUNDLE` manually. When a `ca-bundle.crt` file is present in the workspace root, `setup.sh` automatically installs it into the system trust store and sets these variables to `/etc/ssl/certs/ca-certificates.crt`.
 
 **Step 3: Add your CA certificate** (optional, only if your proxy intercepts TLS):
    - Export your proxy's CA certificate (usually available from your IT department or browser)
    - Save it as `ca-bundle.crt` in the root of your workspace
-   - Uncomment and update the `*_CA_BUNDLE` / `SSL_CERT_FILE` lines in `.env`
+   - `setup.sh` will automatically install it and configure CA bundle environment variables
 
 **Step 4: Rebuild the container**:
    - VS Code: Ctrl+Shift+P → "Dev Containers: Rebuild Container"

@@ -35,11 +35,13 @@ if [ -n "$HTTP_PROXY" ] || [ -n "$HTTPS_PROXY" ]; then
   # Configure apt proxy
   if [ -n "$HTTP_PROXY" ]; then
     echo "Acquire::http::Proxy \"$HTTP_PROXY\";" > /etc/apt/apt.conf.d/80proxy
-    echo "  ✓ apt HTTP proxy: $HTTP_PROXY"
+    SAFE_HTTP_PROXY=$(echo "$HTTP_PROXY" | sed 's|://[^@]*@|://***:***@|')
+    echo "  ✓ apt HTTP proxy: $SAFE_HTTP_PROXY"
   fi
   if [ -n "$HTTPS_PROXY" ]; then
     echo "Acquire::https::Proxy \"$HTTPS_PROXY\";" >> /etc/apt/apt.conf.d/80proxy
-    echo "  ✓ apt HTTPS proxy: $HTTPS_PROXY"
+    SAFE_HTTPS_PROXY=$(echo "$HTTPS_PROXY" | sed 's|://[^@]*@|://***:***@|')
+    echo "  ✓ apt HTTPS proxy: $SAFE_HTTPS_PROXY"
   fi
 
   # Configure pip proxy via environment (already set, but ensure it's exported)
@@ -51,21 +53,33 @@ if [ -n "$HTTP_PROXY" ] || [ -n "$HTTPS_PROXY" ]; then
   CA_BUNDLE_SRC="$PLUGIN_WS_DIR_EARLY/ca-bundle.crt"
   if [ -f "$CA_BUNDLE_SRC" ]; then
     echo "🔐 Installing custom CA certificate into system trust store..."
-    mkdir -p /usr/local/share/ca-certificates/proxy
-    # Remove stale split fragments so they don't accumulate across rebuilds
-    find /usr/local/share/ca-certificates/proxy -maxdepth 1 -name 'cert-*' -delete 2>/dev/null || true
-    # Split the bundle into individual certs — update-ca-certificates needs one
-    # cert per file and skips non-CA leaf certs, so extract each PEM block as
-    # a separate .crt file.
-    csplit -z -f /usr/local/share/ca-certificates/proxy/cert- \
-      "$CA_BUNDLE_SRC" '/-----BEGIN CERTIFICATE-----/' '{*}' \
-      >/dev/null 2>&1
-    # Rename split fragments to .crt
-    for f in /usr/local/share/ca-certificates/proxy/cert-*; do
-      mv "$f" "${f}.crt" 2>/dev/null || true
-    done
-    update-ca-certificates 2>/dev/null
-    echo "  ✓ CA certificate installed into system trust store"
+    cert_count=$(grep -c '-----BEGIN CERTIFICATE-----' "$CA_BUNDLE_SRC" 2>/dev/null || true)
+    if [ "${cert_count:-0}" -eq 0 ]; then
+      echo "  ⚠️  ca-bundle.crt does not contain any PEM certificate blocks; skipping CA install."
+    else
+      mkdir -p /usr/local/share/ca-certificates/proxy
+      # Remove stale split fragments so they don't accumulate across rebuilds
+      find /usr/local/share/ca-certificates/proxy -maxdepth 1 -name 'cert-*' -delete 2>/dev/null || true
+      # Split the bundle into individual certs — update-ca-certificates needs one
+      # cert per file and skips non-CA leaf certs, so extract each PEM block as
+      # a separate .crt file.
+      csplit -z -f /usr/local/share/ca-certificates/proxy/cert- \
+        "$CA_BUNDLE_SRC" '/-----BEGIN CERTIFICATE-----/' '{*}' \
+        >/dev/null 2>&1
+      CSPLIT_STATUS=$?
+      if [ "$CSPLIT_STATUS" -ne 0 ]; then
+        echo "  ⚠️  Failed to split ca-bundle.crt (csplit exit code: $CSPLIT_STATUS). Skipping CA install."
+      elif compgen -G "/usr/local/share/ca-certificates/proxy/cert-*" > /dev/null; then
+        # Rename split fragments to .crt
+        for f in /usr/local/share/ca-certificates/proxy/cert-*; do
+          mv "$f" "${f}.crt" 2>/dev/null || true
+        done
+        update-ca-certificates 2>/dev/null
+        echo "  ✓ CA certificate installed into system trust store ($cert_count cert(s))"
+      else
+        echo "  ⚠️  No certificate fragments were generated from ca-bundle.crt; skipping CA install."
+      fi
+    fi
     # Point environment variables to the system bundle
     export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
     export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
