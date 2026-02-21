@@ -2,10 +2,10 @@ from netbox.api.serializers import NetBoxModelSerializer
 
 from netbox_librenms_plugin.models import (
     DeviceTypeMapping,
+    InterfaceNameRule,
     InterfaceTypeMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
-    NormalizationRule,
 )
 
 
@@ -46,22 +46,22 @@ class ModuleBayMappingSerializer(NetBoxModelSerializer):
         """Meta options for ModuleBayMappingSerializer."""
 
         model = ModuleBayMapping
-        fields = ["id", "librenms_name", "librenms_class", "netbox_bay_name", "is_regex", "description"]
+        fields = ["id", "librenms_name", "librenms_class", "netbox_bay_name", "description"]
 
 
-class NormalizationRuleSerializer(NetBoxModelSerializer):
-    """Serialize NormalizationRule model for REST API."""
+class InterfaceNameRuleSerializer(NetBoxModelSerializer):
+    """Serialize InterfaceNameRule model for REST API."""
 
     class Meta:
-        """Meta options for NormalizationRuleSerializer."""
+        """Meta options for InterfaceNameRuleSerializer."""
 
-        model = NormalizationRule
+        model = InterfaceNameRule
         fields = [
             "id",
-            "scope",
-            "manufacturer",
-            "match_pattern",
-            "replacement",
-            "priority",
+            "module_type",
+            "parent_module_type",
+            "name_template",
+            "channel_count",
+            "channel_start",
             "description",
         ]

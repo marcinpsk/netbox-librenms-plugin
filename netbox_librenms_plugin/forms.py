@@ -2,7 +2,7 @@
 import logging
 
 from dcim.choices import InterfaceTypeChoices
-from dcim.models import Device, DeviceRole, DeviceType, Location, Manufacturer, Rack, Site
+from dcim.models import Device, DeviceRole, DeviceType, Location, Rack, Site
 from django import forms
 from django.http import QueryDict
 from django.utils.translation import gettext_lazy as _
@@ -12,21 +12,16 @@ from netbox.forms import (
     NetBoxModelImportForm,
 )
 from netbox.plugins import get_plugin_config
-from utilities.forms.fields import (
-    CSVChoiceField,
-    CSVModelChoiceField,
-    DynamicModelChoiceField,
-    DynamicModelMultipleChoiceField,
-)
+from utilities.forms.fields import CSVChoiceField, DynamicModelMultipleChoiceField
 from virtualization.models import Cluster, VirtualMachine
 
 from .models import (
     DeviceTypeMapping,
+    InterfaceNameRule,
     InterfaceTypeMapping,
     LibreNMSSettings,
     ModuleBayMapping,
     ModuleTypeMapping,
-    NormalizationRule,
 )
 
 logger = logging.getLogger(__name__)
@@ -370,7 +365,7 @@ class ModuleBayMappingForm(NetBoxModelForm):
         """Meta options for ModuleBayMappingForm."""
 
         model = ModuleBayMapping
-        fields = ["librenms_name", "librenms_class", "netbox_bay_name", "is_regex", "description"]
+        fields = ["librenms_name", "librenms_class", "netbox_bay_name", "description"]
 
 
 class ModuleBayMappingImportForm(NetBoxModelImportForm):
@@ -380,7 +375,7 @@ class ModuleBayMappingImportForm(NetBoxModelImportForm):
         """Meta options for ModuleBayMappingImportForm."""
 
         model = ModuleBayMapping
-        fields = ["librenms_name", "librenms_class", "netbox_bay_name", "is_regex", "description"]
+        fields = ["librenms_name", "librenms_class", "netbox_bay_name", "description"]
 
 
 class ModuleBayMappingFilterForm(NetBoxModelFilterSetForm):
@@ -389,63 +384,51 @@ class ModuleBayMappingFilterForm(NetBoxModelFilterSetForm):
     librenms_name = forms.CharField(required=False, label="LibreNMS Name")
     librenms_class = forms.CharField(required=False, label="LibreNMS Class")
     netbox_bay_name = forms.CharField(required=False, label="NetBox Bay Name")
-    is_regex = forms.NullBooleanField(required=False, label="Regex")
 
     model = ModuleBayMapping
 
 
-class NormalizationRuleForm(NetBoxModelForm):
-    """Form for creating and editing normalization rules."""
-
-    manufacturer = DynamicModelChoiceField(
-        queryset=Manufacturer.objects.all(),
-        required=False,
-        help_text="Optional: scope this rule to a specific manufacturer",
-    )
+class InterfaceNameRuleForm(NetBoxModelForm):
+    """Form for creating and editing interface name rules."""
 
     class Meta:
-        """Meta options for NormalizationRuleForm."""
+        """Meta options for InterfaceNameRuleForm."""
 
-        model = NormalizationRule
-        fields = ["scope", "manufacturer", "match_pattern", "replacement", "priority", "description"]
+        model = InterfaceNameRule
+        fields = [
+            "module_type",
+            "parent_module_type",
+            "name_template",
+            "channel_count",
+            "channel_start",
+            "description",
+        ]
 
 
-class NormalizationRuleImportForm(NetBoxModelImportForm):
-    """Form for bulk importing normalization rules."""
-
-    scope = CSVChoiceField(
-        choices=NormalizationRule.SCOPE_CHOICES,
-        help_text="Scope: module_type, device_type, or module_bay",
-    )
-    manufacturer = CSVModelChoiceField(
-        queryset=Manufacturer.objects.all(),
-        to_field_name="name",
-        required=False,
-        help_text="Optional manufacturer name (must already exist in NetBox)",
-    )
+class InterfaceNameRuleImportForm(NetBoxModelImportForm):
+    """Form for bulk importing interface name rules."""
 
     class Meta:
-        """Meta options for NormalizationRuleImportForm."""
+        """Meta options for InterfaceNameRuleImportForm."""
 
-        model = NormalizationRule
-        fields = ["scope", "manufacturer", "match_pattern", "replacement", "priority", "description"]
+        model = InterfaceNameRule
+        fields = [
+            "module_type",
+            "parent_module_type",
+            "name_template",
+            "channel_count",
+            "channel_start",
+            "description",
+        ]
 
 
-class NormalizationRuleFilterForm(NetBoxModelFilterSetForm):
-    """Form for filtering normalization rules."""
+class InterfaceNameRuleFilterForm(NetBoxModelFilterSetForm):
+    """Form for filtering interface name rules."""
 
-    scope = forms.ChoiceField(
-        required=False,
-        choices=[("", "---------")] + NormalizationRule.SCOPE_CHOICES,
-        label="Scope",
-    )
-    manufacturer_id = DynamicModelChoiceField(
-        queryset=Manufacturer.objects.all(),
-        required=False,
-        label="Manufacturer",
-    )
+    module_type_id = forms.IntegerField(required=False, label="Module Type ID")
+    parent_module_type_id = forms.IntegerField(required=False, label="Parent Module Type ID")
 
-    model = NormalizationRule
+    model = InterfaceNameRule
 
 
 class AddToLIbreSNMPV1V2(forms.Form):

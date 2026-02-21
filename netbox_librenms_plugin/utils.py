@@ -253,11 +253,6 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict:
         device_type = DeviceType.objects.filter(model__iexact=hardware_name).first()
         return {"matched": True, "device_type": device_type, "match_type": "exact"}
 
-    # Try again with normalized hardware name
-    normalized = apply_normalization_rules(hardware_name, "device_type")
-    if normalized != hardware_name:
-        return match_librenms_hardware_to_device_type(normalized)
-
     return {"matched": False, "device_type": None, "match_type": None}
 
 
@@ -554,43 +549,3 @@ def evaluate_name_template(template: str, variables: dict) -> str:
 
     result = re.sub(r"\{([^}]+)\}", _eval_expr, result)
     return result
-
-
-def apply_normalization_rules(value: str, scope: str, manufacturer=None) -> str:
-    """Apply NormalizationRule chain to transform a string before matching.
-
-    Rules for the given scope are applied in priority order.  Each rule's
-    regex substitution transforms the output of the previous rule, forming
-    a pipeline.  If no rules match, the original value is returned unchanged.
-
-    When *manufacturer* is given, manufacturer-scoped rules run first,
-    followed by unscoped (manufacturer=NULL) rules.  When *manufacturer*
-    is ``None``, all rules for the scope run in priority order.
-
-    This is the generic building block shared by module-type, device-type,
-    and module-bay lookups — one implementation, multiple callers.
-
-    Args:
-        value:  The raw string to normalize (e.g. '3HE16474AARA01').
-        scope:  One of NormalizationRule.SCOPE_* constants.
-        manufacturer:  Optional Manufacturer instance to scope rules.
-
-    Returns:
-        The normalized string after all matching rules have been applied.
-    """
-    from netbox_librenms_plugin.models import NormalizationRule
-
-    if not value:
-        return value
-
-    if manufacturer:
-        # Manufacturer-specific rules first, then unscoped rules
-        for mfg_filter in [{"manufacturer": manufacturer}, {"manufacturer__isnull": True}]:
-            rules = NormalizationRule.objects.filter(scope=scope, **mfg_filter).order_by("priority", "pk")
-            for rule in rules:
-                value = re.sub(rule.match_pattern, rule.replacement, value)
-    else:
-        rules = NormalizationRule.objects.filter(scope=scope).order_by("priority", "pk")
-        for rule in rules:
-            value = re.sub(rule.match_pattern, rule.replacement, value)
-    return value

@@ -1,8 +1,5 @@
-import re
-
 from dcim.choices import InterfaceTypeChoices
-from dcim.models import DeviceType, Manufacturer, ModuleType
-from django.core.exceptions import ValidationError
+from dcim.models import DeviceType, ModuleType
 from django.db import models
 from django.urls import reverse
 from netbox.models import NetBoxModel
@@ -150,15 +147,12 @@ class ModuleBayMapping(NetBoxModel):
 
     Used when LibreNMS inventory names don't match NetBox bay names exactly.
     For example: LibreNMS "Power Supply 1" → NetBox "PS1".
-    When is_regex is True, librenms_name is treated as a regex pattern and
-    netbox_bay_name can use backreferences (\\1, \\2, etc.).
     Mappings are global (not scoped to device type or manufacturer).
     """
 
     librenms_name = models.CharField(
         max_length=255,
-        help_text="Name from LibreNMS inventory (entPhysicalName). "
-        "When 'Use Regex' is enabled, this is a Python regex pattern.",
+        help_text="Name from LibreNMS inventory (entPhysicalName), e.g. 'Power Supply 1'",
     )
     librenms_class = models.CharField(
         max_length=50,
@@ -167,25 +161,12 @@ class ModuleBayMapping(NetBoxModel):
     )
     netbox_bay_name = models.CharField(
         max_length=255,
-        help_text="NetBox module bay name to match. With regex, supports backreferences (\\1, \\2, etc.).",
-    )
-    is_regex = models.BooleanField(
-        default=False,
-        help_text="Treat LibreNMS Name as a regex pattern with backreferences in NetBox Bay Name",
+        help_text="NetBox module bay name to match, e.g. 'PS1'",
     )
     description = models.TextField(
         blank=True,
         help_text="Optional description or notes about this mapping",
     )
-
-    def clean(self):
-        """Validate that regex patterns compile when is_regex is True."""
-        super().clean()
-        if self.is_regex:
-            try:
-                re.compile(self.librenms_name)
-            except re.error as e:
-                raise ValidationError({"librenms_name": f"Invalid regex: {e}"})
 
     def get_absolute_url(self):
         """Return the URL for this mapping's detail page."""
@@ -202,78 +183,63 @@ class ModuleBayMapping(NetBoxModel):
         return f"{self.librenms_name}{cls} -> {self.netbox_bay_name}"
 
 
-class NormalizationRule(NetBoxModel):
-    """Regex-based string normalization applied before matching lookups.
+class InterfaceNameRule(NetBoxModel):
+    """Post-install interface rename rule for module types.
 
-    Generic building block: a single rule engine handles normalization
-    for module types, device types, module bays, and future scopes.
-    Rules are applied in priority order; each transforms the string
-    for the next rule in the chain.
+    Handles cases where NetBox's position-based naming can't produce
+    the correct interface name, such as converter offset (CVR-X2-SFP)
+    or breakout transceivers (QSFP+ 4x10G).
 
-    Example – strip Nokia revision suffixes:
-        scope:       module_type
-        match_pattern:  ^(3HE\\w{5}[A-Z]{2})[A-Z]{2}\\d{2}$
-        replacement:    \\1
-        Result: 3HE16474AARA01 → 3HE16474AA
+    The name_template uses Python str.format() syntax with these variables:
+      {slot}               - Slot number from parent module bay position
+      {bay_position}       - Position of the bay this module is installed into
+      {parent_bay_position} - Position of the parent module's bay
+      {sfp_slot}           - Sub-bay index (1-based) within the parent module
+      {base}               - Base interface name from NetBox position resolution
+      {channel}            - Channel number (iterated for breakout)
     """
 
-    SCOPE_MODULE_TYPE = "module_type"
-    SCOPE_DEVICE_TYPE = "device_type"
-    SCOPE_MODULE_BAY = "module_bay"
-
-    SCOPE_CHOICES = [
-        (SCOPE_MODULE_TYPE, "Module Type"),
-        (SCOPE_DEVICE_TYPE, "Device Type"),
-        (SCOPE_MODULE_BAY, "Module Bay"),
-    ]
-
-    scope = models.CharField(
-        max_length=50,
-        choices=SCOPE_CHOICES,
-        help_text="Which matching lookup this rule applies to",
+    module_type = models.ForeignKey(
+        ModuleType,
+        on_delete=models.CASCADE,
+        related_name="interface_name_rules",
+        help_text="The module type whose installation triggers this rename rule",
     )
-    manufacturer = models.ForeignKey(
-        Manufacturer,
+    parent_module_type = models.ForeignKey(
+        ModuleType,
         on_delete=models.CASCADE,
         null=True,
         blank=True,
-        related_name="normalization_rules",
-        help_text="Optional: only apply this rule to items from this manufacturer. "
-        "Leave blank for vendor-agnostic rules.",
+        related_name="child_interface_name_rules",
+        help_text="If set, rule only applies when installed inside this parent module type",
     )
-    match_pattern = models.CharField(
-        max_length=500,
-        help_text="Regex pattern to match against input string (Python re syntax)",
+    name_template = models.CharField(
+        max_length=255,
+        help_text="Interface name template expression, e.g. 'GigabitEthernet{slot}/{8 + ({parent_bay_position} - 1) * 2 + {sfp_slot}}'",
     )
-    replacement = models.CharField(
-        max_length=500,
-        help_text="Replacement string (supports regex back-references \\1, \\2, …)",
+    channel_count = models.PositiveSmallIntegerField(
+        default=0,
+        help_text="Number of breakout channels (0 = no breakout). Creates this many interfaces per template.",
     )
-    priority = models.PositiveIntegerField(
-        default=100,
-        help_text="Lower values run first. Rules chain: each transforms the output of the previous.",
+    channel_start = models.PositiveSmallIntegerField(
+        default=0,
+        help_text="Starting channel number for breakout interfaces (e.g., 0 for Juniper, 1 for Cisco)",
     )
     description = models.TextField(
         blank=True,
         help_text="Optional description or notes about this rule",
     )
 
-    def clean(self):
-        """Validate that match_pattern compiles as a regex."""
-        super().clean()
-        try:
-            re.compile(self.match_pattern)
-        except re.error as e:
-            raise ValidationError({"match_pattern": f"Invalid regex: {e}"})
-
     def get_absolute_url(self):
         """Return the URL for this rule's detail page."""
-        return reverse("plugins:netbox_librenms_plugin:normalizationrule_detail", args=[self.pk])
+        return reverse("plugins:netbox_librenms_plugin:interfacenamerule_detail", args=[self.pk])
 
     class Meta:
-        """Meta options for NormalizationRule."""
+        """Meta options for InterfaceNameRule."""
 
-        ordering = ["scope", "priority", "pk"]
+        unique_together = ["module_type", "parent_module_type"]
+        ordering = ["module_type__model"]
 
     def __str__(self):
-        return f"[{self.get_scope_display()}] {self.match_pattern} → {self.replacement}"
+        parent = f" in {self.parent_module_type.model}" if self.parent_module_type else ""
+        return f"{self.module_type.model}{parent} → {self.name_template}"

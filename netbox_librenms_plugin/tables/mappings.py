@@ -3,10 +3,10 @@ from netbox.tables import NetBoxTable, columns
 
 from netbox_librenms_plugin.models import (
     DeviceTypeMapping,
+    InterfaceNameRule,
     InterfaceTypeMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
-    NormalizationRule,
 )
 
 
@@ -108,7 +108,6 @@ class ModuleBayMappingTable(NetBoxTable):
     librenms_name = tables.Column(verbose_name="LibreNMS Name", linkify=True)
     librenms_class = tables.Column(verbose_name="LibreNMS Class")
     netbox_bay_name = tables.Column(verbose_name="NetBox Bay Name")
-    is_regex = columns.BooleanColumn(verbose_name="Regex")
     description = tables.Column(verbose_name="Description", linkify=False)
     actions = columns.ActionsColumn(actions=("edit", "delete"))
 
@@ -121,7 +120,6 @@ class ModuleBayMappingTable(NetBoxTable):
             "librenms_name",
             "librenms_class",
             "netbox_bay_name",
-            "is_regex",
             "description",
             "actions",
         )
@@ -130,44 +128,43 @@ class ModuleBayMappingTable(NetBoxTable):
             "librenms_name",
             "librenms_class",
             "netbox_bay_name",
-            "is_regex",
             "description",
             "actions",
         )
         attrs = {"class": "table table-hover table-headings table-striped"}
 
 
-class NormalizationRuleTable(NetBoxTable):
-    """Table for displaying NormalizationRule data."""
+class InterfaceNameRuleTable(NetBoxTable):
+    """Table for displaying InterfaceNameRule data."""
 
-    scope = tables.Column(verbose_name="Scope", linkify=True)
-    manufacturer = tables.Column(verbose_name="Manufacturer", linkify=True)
-    match_pattern = tables.Column(verbose_name="Match Pattern")
-    replacement = tables.Column(verbose_name="Replacement")
-    priority = tables.Column(verbose_name="Priority")
+    module_type = tables.Column(verbose_name="Module Type", linkify=True)
+    parent_module_type = tables.Column(verbose_name="Parent Module Type", linkify=True)
+    name_template = tables.Column(verbose_name="Name Template")
+    channel_count = tables.Column(verbose_name="Channels")
+    channel_start = tables.Column(verbose_name="Ch. Start")
     description = tables.Column(verbose_name="Description", linkify=False)
     actions = columns.ActionsColumn(actions=("edit", "delete"))
 
     class Meta:
-        """Meta options for NormalizationRuleTable."""
+        """Meta options for InterfaceNameRuleTable."""
 
-        model = NormalizationRule
+        model = InterfaceNameRule
         fields = (
             "id",
-            "scope",
-            "manufacturer",
-            "match_pattern",
-            "replacement",
-            "priority",
+            "module_type",
+            "parent_module_type",
+            "name_template",
+            "channel_count",
+            "channel_start",
             "description",
             "actions",
         )
         default_columns = (
             "id",
-            "scope",
-            "match_pattern",
-            "replacement",
-            "priority",
+            "module_type",
+            "parent_module_type",
+            "name_template",
+            "channel_count",
             "description",
             "actions",
         )

@@ -13,18 +13,18 @@ from rq.job import Job as RQJob
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
 from netbox_librenms_plugin.models import (
     DeviceTypeMapping,
+    InterfaceNameRule,
     InterfaceTypeMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
-    NormalizationRule,
 )
 
 from .serializers import (
     DeviceTypeMappingSerializer,
+    InterfaceNameRuleSerializer,
     InterfaceTypeMappingSerializer,
     ModuleBayMappingSerializer,
     ModuleTypeMappingSerializer,
-    NormalizationRuleSerializer,
 )
 
 logger = logging.getLogger(__name__)
@@ -80,13 +80,13 @@ class ModuleBayMappingViewSet(NetBoxModelViewSet):
     serializer_class = ModuleBayMappingSerializer
 
 
-class NormalizationRuleViewSet(NetBoxModelViewSet):
-    """API viewset for NormalizationRule CRUD operations."""
+class InterfaceNameRuleViewSet(NetBoxModelViewSet):
+    """API viewset for InterfaceNameRule CRUD operations."""
 
     permission_classes = [LibreNMSPluginPermission]
 
-    queryset = NormalizationRule.objects.all()
-    serializer_class = NormalizationRuleSerializer
+    queryset = InterfaceNameRule.objects.all()
+    serializer_class = InterfaceNameRuleSerializer
 
 
 @api_view(["POST"])

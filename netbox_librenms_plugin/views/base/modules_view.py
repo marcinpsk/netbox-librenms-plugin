@@ -20,7 +20,6 @@ INVENTORY_CLASSES = {
     "module",
     "powerSupply",
     "fan",
-    "container",
     "ioModule",
     "cpmModule",
     "mdaModule",
@@ -102,30 +101,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         # Collect top-level items and their sub-components
         # Include synthetic transceiver items (from vendors without ENTITY-MIB SFP data)
-        # Include top-level 'port' items with a model (transceivers in fixed-form switches)
         # Exclude items whose parent is also an INVENTORY_CLASSES item (they appear as sub-components)
         top_items = []
         for item in inventory_data:
             if item.get("_from_transceiver_api"):
                 top_items.append(item)
                 continue
-            phys_class = item.get("entPhysicalClass", "")
-            if phys_class not in INVENTORY_CLASSES:
-                # Include top-level port items with a model name (e.g., Arcos SFPs)
-                # but only if no ancestor is an INVENTORY_CLASSES item (would appear as sub-component)
-                if phys_class == "port" and (item.get("entPhysicalModelName") or "").strip():
-                    has_module_ancestor = False
-                    cur_idx = item.get("entPhysicalContainedIn", 0)
-                    seen = set()
-                    while cur_idx and cur_idx in index_map and cur_idx not in seen:
-                        seen.add(cur_idx)
-                        ancestor = index_map[cur_idx]
-                        if ancestor.get("entPhysicalClass", "") in INVENTORY_CLASSES:
-                            has_module_ancestor = True
-                            break
-                        cur_idx = ancestor.get("entPhysicalContainedIn", 0)
-                    if not has_module_ancestor:
-                        top_items.append(item)
+            if item.get("entPhysicalClass") not in INVENTORY_CLASSES:
                 continue
             # Check if parent is also an inventory-class item (skip if so)
             parent_idx = item.get("entPhysicalContainedIn", 0)
@@ -209,11 +191,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Build lookup of existing inventory items by index
         inv_by_index = {item["entPhysicalIndex"]: item for item in inventory_data}
 
-        # Build set of existing serial numbers to detect duplicates
-        # (transceiver API may use different entity indices than ENTITY-MIB)
-        existing_serials = {(item.get("entPhysicalSerialNum") or "").strip() for item in inventory_data}
-        existing_serials.discard("")
-
         # Types that are containers, not real transceiver modules
         SKIP_TYPES = {"Port Container", "Port", ""}
 
@@ -241,11 +218,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 if not (existing.get("entPhysicalSerialNum") or "").strip() and serial:
                     existing["entPhysicalSerialNum"] = serial
             else:
-                # Skip if this serial already exists in inventory (duplicate from
-                # transceiver API using different entity indices than ENTITY-MIB)
-                if serial and serial in existing_serials:
-                    continue
-
                 # Create synthetic inventory item for SFPs not in entity inventory
                 # Try to find port name for this transceiver
                 port_id = txr.get("port_id", 0)
@@ -361,68 +333,44 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             return parent.get("entPhysicalName", "")
         return None
 
-    def _lookup_bay_mapping(self, name, phys_class, module_bays):
-        """Look up a ModuleBayMapping by librenms_name and return matched bay.
-
-        Tries exact matches first, then regex patterns (is_regex=True).
-        For regex matches, netbox_bay_name supports backreferences.
-        """
-        import re
-
-        from netbox_librenms_plugin.models import ModuleBayMapping
-
-        if not name:
-            return None
-
-        # Exact match first
-        filters = {"librenms_name": name, "is_regex": False}
-        if phys_class:
-            mapping = ModuleBayMapping.objects.filter(**filters, librenms_class=phys_class).first()
-            if not mapping:
-                mapping = ModuleBayMapping.objects.filter(**filters, librenms_class="").first()
-        else:
-            mapping = ModuleBayMapping.objects.filter(**filters, librenms_class="").first()
-        if mapping and mapping.netbox_bay_name in module_bays:
-            return module_bays[mapping.netbox_bay_name]
-
-        # Regex pattern matching
-        regex_filters = {"is_regex": True}
-        if phys_class:
-            regex_mappings = list(ModuleBayMapping.objects.filter(**regex_filters, librenms_class=phys_class)) + list(
-                ModuleBayMapping.objects.filter(**regex_filters, librenms_class="")
-            )
-        else:
-            regex_mappings = list(ModuleBayMapping.objects.filter(**regex_filters, librenms_class=""))
-
-        for mapping in regex_mappings:
-            try:
-                match = re.fullmatch(mapping.librenms_name, name)
-            except re.error:
-                continue
-            if match:
-                resolved_bay = match.expand(mapping.netbox_bay_name)
-                if resolved_bay in module_bays:
-                    return module_bays[resolved_bay]
-        return None
-
     def _match_module_bay(self, item, index_map, module_bays):
         """
         Try to match an inventory item to a NetBox ModuleBay.
         Checks ModuleBayMapping table first, then falls back to exact parent name match,
-        then description-based matching, then positional matching.
+        then positional matching for items inside converters/sub-modules.
         """
+        from netbox_librenms_plugin.models import ModuleBayMapping
+
         parent_name = self._find_parent_container_name(item, index_map)
         item_name = item.get("entPhysicalName", "")
-        item_descr = item.get("entPhysicalDescr", "")
         phys_class = item.get("entPhysicalClass", "")
 
-        # Check ModuleBayMapping table for parent container name, then item name
-        bay = self._lookup_bay_mapping(parent_name, phys_class, module_bays)
-        if bay:
-            return bay
-        bay = self._lookup_bay_mapping(item_name, phys_class, module_bays)
-        if bay:
-            return bay
+        # Check ModuleBayMapping table for parent container name
+        if parent_name:
+            filters = {"librenms_name": parent_name}
+            if phys_class:
+                # Try class-specific mapping first, then generic
+                mapping = ModuleBayMapping.objects.filter(**filters, librenms_class=phys_class).first()
+                if not mapping:
+                    mapping = ModuleBayMapping.objects.filter(**filters, librenms_class="").first()
+            else:
+                mapping = ModuleBayMapping.objects.filter(**filters, librenms_class="").first()
+
+            if mapping and mapping.netbox_bay_name in module_bays:
+                return module_bays[mapping.netbox_bay_name]
+
+        # Check ModuleBayMapping table for item name
+        if item_name:
+            filters = {"librenms_name": item_name}
+            if phys_class:
+                mapping = ModuleBayMapping.objects.filter(**filters, librenms_class=phys_class).first()
+                if not mapping:
+                    mapping = ModuleBayMapping.objects.filter(**filters, librenms_class="").first()
+            else:
+                mapping = ModuleBayMapping.objects.filter(**filters, librenms_class="").first()
+
+            if mapping and mapping.netbox_bay_name in module_bays:
+                return module_bays[mapping.netbox_bay_name]
 
         # Fallback: exact match on parent container name or item name
         if parent_name and parent_name in module_bays:
@@ -430,64 +378,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if item_name and item_name in module_bays:
             return module_bays[item_name]
 
-        # Description-based matching: check mapping table and direct match
-        bay = self._lookup_bay_mapping(item_descr, phys_class, module_bays)
-        if bay:
-            return bay
-        if item_descr and item_descr in module_bays:
-            return module_bays[item_descr]
-
-        # Extract position from description "@ X/Y/Z" pattern (e.g., Juniper)
-        bay = self._match_bay_from_description(item_descr, module_bays)
-        if bay:
-            return bay
-
         # Positional fallback: determine slot number from container sibling order
         # Handles SFPs inside converters where containers are unnamed
         bay = self._match_bay_by_position(item, index_map, module_bays)
         if bay:
             return bay
-
-        return None
-
-    @staticmethod
-    def _match_bay_from_description(descr, module_bays):
-        """Extract slot position from description and match to bay.
-
-        Handles patterns like "MODEL @ 0/0/5" -> "Transceiver 0/5" (stripping leading path),
-        "FPC: MODEL @ 0/*/*" -> "FPC 0",
-        and "PSM 0" / "Fan Tray 0" by direct lookup.
-        """
-        import re
-
-        if not descr:
-            return None
-
-        # Try "@ X/Y/Z" pattern (e.g., "QSFP-100GBASE-LR4 @ 0/0/0")
-        match = re.search(r"@\s*(\d+(?:/\d+)+)", descr)
-        if match:
-            position = match.group(1)
-            # Try full path first, then progressively strip leading segments
-            parts = position.split("/")
-            for start in range(len(parts)):
-                sub_pos = "/".join(parts[start:])
-                for prefix in ("Transceiver", "SFP", "Port", "Slot"):
-                    bay_name = f"{prefix} {sub_pos}"
-                    if bay_name in module_bays:
-                        return module_bays[bay_name]
-
-        # Try "TYPE: MODEL @ N/*/*" pattern (e.g., "FPC: JNP10K-LC1201 @ 0/*/*")
-        match = re.match(r"(\w+):\s*\S+\s*@\s*(\d+)", descr)
-        if match:
-            prefix = match.group(1)
-            slot_num = match.group(2)
-            bay_name = f"{prefix} {slot_num}"
-            if bay_name in module_bays:
-                return module_bays[bay_name]
-
-        # Try description as-is for names like "PSM 0", "Fan Tray 0"
-        if descr in module_bays:
-            return module_bays[descr]
 
         return None
 
@@ -542,11 +437,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
     def _build_row(self, item, index_map, module_bays, module_types, depth=0):
         """Build a single table row from a LibreNMS inventory item."""
-        from netbox_librenms_plugin.utils import (
-            apply_normalization_rules,
-            module_type_uses_module_path,
-            supports_module_path,
-        )
+        from netbox_librenms_plugin.utils import module_type_uses_module_path, supports_module_path
 
         model_name = item.get("entPhysicalModelName", "") or ""
         serial = item.get("entPhysicalSerialNum", "") or ""
@@ -557,12 +448,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Match to NetBox module bay
         matched_bay = self._match_module_bay(item, index_map, module_bays)
 
-        # Match to NetBox module type (exact first, then normalized)
+        # Match to NetBox module type
         matched_type = module_types.get(model_name) if model_name else None
-        if not matched_type and model_name:
-            normalized = apply_normalization_rules(model_name, "module_type")
-            if normalized != model_name:
-                matched_type = module_types.get(normalized)
 
         # Check {module_path} compatibility
         needs_module_path = matched_type and module_type_uses_module_path(matched_type)
@@ -693,14 +580,125 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Vi
                 module.full_clean()
                 module.save()
 
+                # Post-install: apply InterfaceNameRule if one exists
+                renamed = self._apply_interface_name_rules(module, module_bay)
+
+            rename_msg = f" ({renamed} interface(s) renamed)" if renamed else ""
             messages.success(
-                request, f"Installed {module_type.model} in {module_bay.name} (serial: {serial or 'N/A'})."
+                request, f"Installed {module_type.model} in {module_bay.name} (serial: {serial or 'N/A'}).{rename_msg}"
             )
         except Exception as e:
             messages.error(request, f"Failed to install module: {e}")
 
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
         return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+
+    @staticmethod
+    def _apply_interface_name_rules(module, module_bay):
+        """Apply InterfaceNameRule rename after module installation.
+
+        Looks up a matching rule for (module_type, parent_module_type) and
+        renames interfaces created by NetBox's template instantiation.
+
+        Returns:
+            Number of interfaces renamed, or 0 if no rule matched.
+        """
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.models import InterfaceNameRule
+        from netbox_librenms_plugin.utils import evaluate_name_template
+
+        module_type = module.module_type
+
+        # Determine parent module type (if installed inside another module)
+        parent_module_type = None
+        if module_bay.parent:
+            parent_bay = module_bay.parent
+            if hasattr(parent_bay, "installed_module") and parent_bay.installed_module:
+                parent_module_type = parent_bay.installed_module.module_type
+
+        # Look up rule: specific parent first, then generic (null parent)
+        rule = None
+        if parent_module_type:
+            rule = InterfaceNameRule.objects.filter(
+                module_type=module_type,
+                parent_module_type=parent_module_type,
+            ).first()
+        if not rule:
+            rule = InterfaceNameRule.objects.filter(
+                module_type=module_type,
+                parent_module_type__isnull=True,
+            ).first()
+
+        if not rule:
+            return 0
+
+        # Build context variables for template evaluation
+        bay_position = module_bay.position or "0"
+        # If position is a template expression (e.g., {module}), extract from bay name
+        if bay_position.startswith("{"):
+            import re
+
+            match = re.search(r"(\d+)$", module_bay.name)
+            bay_position = match.group(1) if match else "0"
+        parent_bay_position = "0"
+        sfp_slot = bay_position
+        slot = bay_position
+
+        if module_bay.parent:
+            parent_bay = module_bay.parent
+            parent_bay_position = parent_bay.position or "0"
+            # slot is typically the top-level module position
+            if parent_bay.parent and hasattr(parent_bay.parent, "installed_module"):
+                grandparent = parent_bay.parent
+                slot = grandparent.position or parent_bay_position
+            else:
+                slot = parent_bay_position
+
+        interfaces = Interface.objects.filter(module=module)
+        renamed = 0
+
+        for iface in interfaces:
+            variables = {
+                "slot": slot,
+                "bay_position": bay_position,
+                "parent_bay_position": parent_bay_position,
+                "sfp_slot": sfp_slot,
+                "base": iface.name,
+            }
+
+            if rule.channel_count > 0:
+                # Breakout: rename base and create additional channel interfaces
+                for ch in range(rule.channel_count):
+                    variables["channel"] = str(rule.channel_start + ch)
+                    new_name = evaluate_name_template(rule.name_template, variables)
+                    if ch == 0:
+                        iface.name = new_name
+                        iface.full_clean()
+                        iface.save()
+                        renamed += 1
+                    else:
+                        # Create additional breakout interfaces
+                        breakout_iface = Interface(
+                            device=module.device,
+                            module=module,
+                            name=new_name,
+                            type=iface.type,
+                            enabled=iface.enabled,
+                        )
+                        breakout_iface.full_clean()
+                        breakout_iface.save()
+                        renamed += 1
+            else:
+                # Simple rename (converter offset, etc.)
+                new_name = evaluate_name_template(rule.name_template, variables)
+                if new_name != iface.name:
+                    iface.name = new_name
+                    iface.full_clean()
+                    iface.save()
+                    renamed += 1
+
+        return renamed
 
 
 class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
@@ -875,6 +873,9 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         module.full_clean()
         module.save()
 
+        # Apply interface name rules
+        InstallModuleView._apply_interface_name_rules(module, matched_bay)
+
         return {"status": "installed", "name": f"{matched_type.model} → {matched_bay.name}"}
 
     @staticmethod
@@ -964,90 +965,3 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
 
         # Positional fallback for items inside converters
         return BaseModuleTableView._match_bay_by_position(item, index_map, module_bays)
-
-
-class BulkInstallModulesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
-    """Install multiple modules at once from the module sync table."""
-
-    def post(self, request, pk):
-        import json
-
-        from dcim.models import Device, Module, ModuleBay, ModuleType
-
-        self.required_object_permissions = {"POST": [("add", Module)]}
-        if error := self.require_all_permissions_json("POST"):
-            return error
-
-        device = get_object_or_404(Device, pk=pk)
-        modules_json = request.POST.get("modules_json", "[]")
-
-        try:
-            modules_data = json.loads(modules_json)
-        except json.JSONDecodeError:
-            messages.error(request, "Invalid module data.")
-            sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
-            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
-
-        if not modules_data:
-            messages.warning(request, "No modules selected.")
-            sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
-            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
-
-        from netbox_librenms_plugin.utils import (
-            MODULE_PATH_MIN_VERSION,
-            module_type_uses_module_path,
-            supports_module_path,
-        )
-
-        installed = []
-        failed = []
-        skipped = []
-
-        for entry in modules_data:
-            bay_id = entry.get("module_bay_id")
-            type_id = entry.get("module_type_id")
-            serial = entry.get("serial", "").strip()
-
-            if not bay_id or not type_id:
-                failed.append("Missing bay or type")
-                continue
-
-            try:
-                module_bay = ModuleBay.objects.get(pk=bay_id, device=device)
-                module_type = ModuleType.objects.get(pk=type_id)
-            except (ModuleBay.DoesNotExist, ModuleType.DoesNotExist) as e:
-                failed.append(f"Not found: {e}")
-                continue
-
-            if module_type_uses_module_path(module_type) and not supports_module_path():
-                skipped.append(f"{module_type.model}: requires NetBox ≥ {MODULE_PATH_MIN_VERSION}")
-                continue
-
-            if hasattr(module_bay, "installed_module") and module_bay.installed_module:
-                skipped.append(f"{module_bay.name}: already occupied")
-                continue
-
-            try:
-                with transaction.atomic():
-                    module = Module(
-                        device=device,
-                        module_bay=module_bay,
-                        module_type=module_type,
-                        serial=serial,
-                        status="active",
-                    )
-                    module.full_clean()
-                    module.save()
-                installed.append(f"{module_type.model} → {module_bay.name}")
-            except Exception as e:
-                failed.append(f"{module_type.model}: {e}")
-
-        if installed:
-            messages.success(request, f"Installed {len(installed)} module(s): {', '.join(installed)}")
-        if skipped:
-            messages.info(request, f"Skipped {len(skipped)}: {'; '.join(skipped)}")
-        if failed:
-            messages.warning(request, f"Failed {len(failed)}: {'; '.join(failed)}")
-
-        sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
-        return redirect(f"{sync_url}?tab=modules#librenms-module-table")
