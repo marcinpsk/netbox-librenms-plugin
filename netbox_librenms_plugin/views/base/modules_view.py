@@ -360,44 +360,41 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             return parent.get("entPhysicalName", "")
         return None
 
+    def _lookup_bay_mapping(self, name, phys_class, module_bays):
+        """Look up a ModuleBayMapping by librenms_name and return matched bay."""
+        from netbox_librenms_plugin.models import ModuleBayMapping
+
+        if not name:
+            return None
+        filters = {"librenms_name": name}
+        if phys_class:
+            mapping = ModuleBayMapping.objects.filter(**filters, librenms_class=phys_class).first()
+            if not mapping:
+                mapping = ModuleBayMapping.objects.filter(**filters, librenms_class="").first()
+        else:
+            mapping = ModuleBayMapping.objects.filter(**filters, librenms_class="").first()
+        if mapping and mapping.netbox_bay_name in module_bays:
+            return module_bays[mapping.netbox_bay_name]
+        return None
+
     def _match_module_bay(self, item, index_map, module_bays):
         """
         Try to match an inventory item to a NetBox ModuleBay.
         Checks ModuleBayMapping table first, then falls back to exact parent name match,
-        then positional matching for items inside converters/sub-modules.
+        then description-based matching, then positional matching.
         """
-        from netbox_librenms_plugin.models import ModuleBayMapping
-
         parent_name = self._find_parent_container_name(item, index_map)
         item_name = item.get("entPhysicalName", "")
+        item_descr = item.get("entPhysicalDescr", "")
         phys_class = item.get("entPhysicalClass", "")
 
-        # Check ModuleBayMapping table for parent container name
-        if parent_name:
-            filters = {"librenms_name": parent_name}
-            if phys_class:
-                # Try class-specific mapping first, then generic
-                mapping = ModuleBayMapping.objects.filter(**filters, librenms_class=phys_class).first()
-                if not mapping:
-                    mapping = ModuleBayMapping.objects.filter(**filters, librenms_class="").first()
-            else:
-                mapping = ModuleBayMapping.objects.filter(**filters, librenms_class="").first()
-
-            if mapping and mapping.netbox_bay_name in module_bays:
-                return module_bays[mapping.netbox_bay_name]
-
-        # Check ModuleBayMapping table for item name
-        if item_name:
-            filters = {"librenms_name": item_name}
-            if phys_class:
-                mapping = ModuleBayMapping.objects.filter(**filters, librenms_class=phys_class).first()
-                if not mapping:
-                    mapping = ModuleBayMapping.objects.filter(**filters, librenms_class="").first()
-            else:
-                mapping = ModuleBayMapping.objects.filter(**filters, librenms_class="").first()
-
-            if mapping and mapping.netbox_bay_name in module_bays:
-                return module_bays[mapping.netbox_bay_name]
+        # Check ModuleBayMapping table for parent container name, then item name
+        bay = self._lookup_bay_mapping(parent_name, phys_class, module_bays)
+        if bay:
+            return bay
+        bay = self._lookup_bay_mapping(item_name, phys_class, module_bays)
+        if bay:
+            return bay
 
         # Fallback: exact match on parent container name or item name
         if parent_name and parent_name in module_bays:
@@ -405,11 +402,50 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if item_name and item_name in module_bays:
             return module_bays[item_name]
 
+        # Description-based matching: check mapping table and direct match
+        bay = self._lookup_bay_mapping(item_descr, phys_class, module_bays)
+        if bay:
+            return bay
+        if item_descr and item_descr in module_bays:
+            return module_bays[item_descr]
+
+        # Extract position from description "@ X/Y/Z" pattern (e.g., Juniper)
+        bay = self._match_bay_from_description(item_descr, module_bays)
+        if bay:
+            return bay
+
         # Positional fallback: determine slot number from container sibling order
         # Handles SFPs inside converters where containers are unnamed
         bay = self._match_bay_by_position(item, index_map, module_bays)
         if bay:
             return bay
+
+        return None
+
+    @staticmethod
+    def _match_bay_from_description(descr, module_bays):
+        """Extract slot position from description and match to bay.
+
+        Handles patterns like "MODEL @ 0/0/5" -> "Transceiver 0/0/5",
+        and "PSM 0" / "Fan Tray 0" by direct lookup.
+        """
+        import re
+
+        if not descr:
+            return None
+
+        # Try "@ X/Y/Z" pattern (e.g., "QSFP-100GBASE-LR4 @ 0/0/0")
+        match = re.search(r"@\s*(\d+(?:/\d+)+)", descr)
+        if match:
+            position = match.group(1)
+            for prefix in ("Transceiver", "SFP", "Port", "Slot"):
+                bay_name = f"{prefix} {position}"
+                if bay_name in module_bays:
+                    return module_bays[bay_name]
+
+        # Try description as-is for names like "PSM 0", "Fan Tray 0"
+        if descr in module_bays:
+            return module_bays[descr]
 
         return None
 
@@ -652,17 +688,32 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Vi
             if hasattr(parent_bay, "installed_module") and parent_bay.installed_module:
                 parent_module_type = parent_bay.installed_module.module_type
 
-        # Look up rule: specific parent first, then generic (null parent)
+        # Look up rule: most specific first (device_type + parent), then broader matches
+        device_type = module.device.device_type if module.device else None
         rule = None
-        if parent_module_type:
+        if parent_module_type and device_type:
             rule = InterfaceNameRule.objects.filter(
                 module_type=module_type,
                 parent_module_type=parent_module_type,
+                device_type=device_type,
+            ).first()
+        if not rule and parent_module_type:
+            rule = InterfaceNameRule.objects.filter(
+                module_type=module_type,
+                parent_module_type=parent_module_type,
+                device_type__isnull=True,
+            ).first()
+        if not rule and device_type:
+            rule = InterfaceNameRule.objects.filter(
+                module_type=module_type,
+                parent_module_type__isnull=True,
+                device_type=device_type,
             ).first()
         if not rule:
             rule = InterfaceNameRule.objects.filter(
                 module_type=module_type,
                 parent_module_type__isnull=True,
+                device_type__isnull=True,
             ).first()
 
         if not rule:

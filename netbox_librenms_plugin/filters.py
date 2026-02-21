@@ -57,7 +57,7 @@ class InterfaceNameRuleFilterSet(django_filters.FilterSet):
         """Meta options for InterfaceNameRuleFilterSet."""
 
         model = InterfaceNameRule
-        fields = ["module_type", "parent_module_type"]
+        fields = ["module_type", "parent_module_type", "device_type"]
 
 
 class NormalizationRuleFilterSet(django_filters.FilterSet):
