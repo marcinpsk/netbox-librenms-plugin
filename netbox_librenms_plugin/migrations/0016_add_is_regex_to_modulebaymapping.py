@@ -5,7 +5,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("netbox_librenms_plugin", "0015_add_device_type_to_interfacenamerule"),
+        ("netbox_librenms_plugin", "0014_normalizationrule_manufacturer"),
     ]
 
     operations = [

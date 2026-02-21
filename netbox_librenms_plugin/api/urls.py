@@ -10,7 +10,6 @@ router.register("interface-type-mappings", views.InterfaceTypeMappingViewSet)
 router.register("device-type-mappings", views.DeviceTypeMappingViewSet)
 router.register("module-type-mappings", views.ModuleTypeMappingViewSet)
 router.register("module-bay-mappings", views.ModuleBayMappingViewSet)
-router.register("interface-name-rules", views.InterfaceNameRuleViewSet)
 router.register("normalization-rules", views.NormalizationRuleViewSet)
 
 urlpatterns = [

@@ -5,7 +5,7 @@ import utilities.json
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("netbox_librenms_plugin", "0012_interfacenamerule"),
+        ("netbox_librenms_plugin", "0011_modulebaymapping"),
     ]
 
     operations = [

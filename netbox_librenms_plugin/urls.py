@@ -2,7 +2,6 @@ from django.urls import include, path
 
 from .models import (
     DeviceTypeMapping,
-    InterfaceNameRule,
     InterfaceTypeMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
@@ -39,14 +38,6 @@ from .views import (
     DeviceVLANTableView,
     InstallBranchView,
     InstallModuleView,
-    InterfaceNameRuleBulkDeleteView,
-    InterfaceNameRuleBulkImportView,
-    InterfaceNameRuleChangeLogView,
-    InterfaceNameRuleCreateView,
-    InterfaceNameRuleDeleteView,
-    InterfaceNameRuleEditView,
-    InterfaceNameRuleListView,
-    InterfaceNameRuleView,
     InterfaceTypeMappingBulkDeleteView,
     InterfaceTypeMappingBulkImportView,
     InterfaceTypeMappingChangeLogView,
@@ -531,48 +522,6 @@ urlpatterns = [
         "module-bay-mappings/delete/",
         ModuleBayMappingBulkDeleteView.as_view(),
         name="modulebaymapping_bulk_delete",
-    ),
-    # Interface Name Rule URLs
-    path(
-        "interface-name-rules/",
-        InterfaceNameRuleListView.as_view(),
-        name="interfacenamerule_list",
-    ),
-    path(
-        "interface-name-rules/<int:pk>/",
-        InterfaceNameRuleView.as_view(),
-        name="interfacenamerule_detail",
-    ),
-    path(
-        "interface-name-rules/add/",
-        InterfaceNameRuleCreateView.as_view(),
-        name="interfacenamerule_add",
-    ),
-    path(
-        "interface-name-rules/import/",
-        InterfaceNameRuleBulkImportView.as_view(),
-        name="interfacenamerule_bulk_import",
-    ),
-    path(
-        "interface-name-rules/<int:pk>/delete/",
-        InterfaceNameRuleDeleteView.as_view(),
-        name="interfacenamerule_delete",
-    ),
-    path(
-        "interface-name-rules/<int:pk>/edit/",
-        InterfaceNameRuleEditView.as_view(),
-        name="interfacenamerule_edit",
-    ),
-    path(
-        "interface-name-rules/<int:pk>/changelog/",
-        InterfaceNameRuleChangeLogView.as_view(),
-        name="interfacenamerule_changelog",
-        kwargs={"model": InterfaceNameRule},
-    ),
-    path(
-        "interface-name-rules/delete/",
-        InterfaceNameRuleBulkDeleteView.as_view(),
-        name="interfacenamerule_bulk_delete",
     ),
     # Normalization rules
     path(
