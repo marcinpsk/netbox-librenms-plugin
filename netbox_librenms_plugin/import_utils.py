@@ -2228,42 +2228,86 @@ def create_virtual_chassis_with_members(master_device: Device, members_info: lis
         raise
 
 
-def _refresh_existing_device(validation: dict) -> None:
-    """Refresh existing_device from DB to pick up changes made in NetBox since caching."""
+def _refresh_existing_device(validation: dict, libre_device: dict = None) -> None:
+    """Refresh existing_device from DB to pick up changes made in NetBox since caching.
+
+    When existing_device is None (wasn't found at cache time), re-check if the device
+    was imported since caching by looking up librenms_id or hostname.
+    """
     existing = validation.get("existing_device")
-    if not existing or not hasattr(existing, "pk"):
+    if existing and hasattr(existing, "pk"):
+        try:
+            from dcim.models import Device
+            from virtualization.models import VirtualMachine
+
+            if validation.get("import_as_vm"):
+                refreshed = VirtualMachine.objects.filter(pk=existing.pk).first()
+            else:
+                refreshed = Device.objects.filter(pk=existing.pk).first()
+
+            if refreshed:
+                validation["existing_device"] = refreshed
+                if hasattr(refreshed, "role") and refreshed.role:
+                    validation["device_role"] = {"found": True, "role": refreshed.role}
+            else:
+                # Device was deleted since caching — recompute readiness
+                validation["existing_device"] = None
+                validation["existing_match_type"] = None
+                validation["can_import"] = True
+                if validation.get("import_as_vm"):
+                    validation["is_ready"] = bool(
+                        validation.get("site", {}).get("found") and validation.get("device_role", {}).get("found")
+                    )
+                else:
+                    validation["is_ready"] = bool(
+                        validation.get("site", {}).get("found")
+                        and validation.get("device_type", {}).get("found")
+                        and validation.get("device_role", {}).get("found")
+                    )
+        except Exception as e:
+            existing_id = getattr(existing, "pk", "unknown") if existing else "none"
+            logger.error(f"Failed to refresh existing device (pk={existing_id}): {e}")
+        return
+
+    # existing_device was None at cache time — check if device was imported since
+    if not libre_device:
         return
     try:
         from dcim.models import Device
-        from virtualization.models import VirtualMachine
 
-        if validation.get("import_as_vm"):
-            refreshed = VirtualMachine.objects.filter(pk=existing.pk).first()
-        else:
-            refreshed = Device.objects.filter(pk=existing.pk).first()
+        librenms_id = libre_device.get("device_id")
+        hostname = libre_device.get("hostname", "")
+        sys_name = libre_device.get("sysName", "")
 
-        if refreshed:
-            validation["existing_device"] = refreshed
-            if hasattr(refreshed, "role") and refreshed.role:
-                validation["device_role"] = {"found": True, "role": refreshed.role}
-        else:
-            # Device was deleted since caching — recompute readiness
-            validation["existing_device"] = None
-            validation["existing_match_type"] = None
-            validation["can_import"] = True
-            if validation.get("import_as_vm"):
-                validation["is_ready"] = bool(
-                    validation.get("site", {}).get("found") and validation.get("device_role", {}).get("found")
-                )
-            else:
-                validation["is_ready"] = bool(
-                    validation.get("site", {}).get("found")
-                    and validation.get("device_type", {}).get("found")
-                    and validation.get("device_role", {}).get("found")
-                )
+        new_device = None
+        match_type = None
+
+        # Check by librenms_id custom field first
+        if librenms_id:
+            try:
+                new_device = Device.objects.filter(custom_field_data__librenms_id=int(librenms_id)).first()
+                if new_device:
+                    match_type = "librenms_id"
+            except (ValueError, TypeError):
+                pass
+
+        # Fall back to hostname match
+        if not new_device and hostname:
+            new_device = Device.objects.filter(name__iexact=hostname).first()
+            if not new_device and sys_name:
+                new_device = Device.objects.filter(name__iexact=sys_name).first()
+            if new_device:
+                match_type = "hostname"
+
+        if new_device:
+            validation["existing_device"] = new_device
+            validation["existing_match_type"] = match_type
+            validation["can_import"] = False
+            validation["is_ready"] = False
+            if hasattr(new_device, "role") and new_device.role:
+                validation["device_role"] = {"found": True, "role": new_device.role}
     except Exception as e:
-        existing_id = getattr(existing, "pk", "unknown") if existing else "none"
-        logger.error(f"Failed to refresh existing device (pk={existing_id}): {e}")
+        logger.error(f"Failed to check for newly imported device: {e}")
 
 
 def process_device_filters(
@@ -2427,8 +2471,8 @@ def process_device_filters(
                 device["_validation"] = cached_device["_validation"]
 
                 # Refresh existing_device from DB to avoid stale data
-                # (user may have changed role, name, etc. in NetBox)
-                _refresh_existing_device(device["_validation"])
+                # (user may have imported the device or changed it in NetBox)
+                _refresh_existing_device(device["_validation"], libre_device=device)
 
                 # Apply exclude_existing filter if enabled
                 if exclude_existing:

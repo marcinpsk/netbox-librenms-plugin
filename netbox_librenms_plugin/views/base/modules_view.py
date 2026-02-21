@@ -345,11 +345,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         parent_name = self._find_parent_container_name(item, index_map)
         item_name = item.get("entPhysicalName", "")
+        item_descr = item.get("entPhysicalDescr", "")
         phys_class = item.get("entPhysicalClass", "")
 
-        # Check ModuleBayMapping table for parent container name (exact match)
-        if parent_name:
-            filters = {"librenms_name": parent_name, "is_regex": False}
+        # Build candidate names: parent, item name, item description
+        candidate_names = [n for n in [parent_name, item_name, item_descr] if n]
+
+        # Check ModuleBayMapping table for each candidate (exact match)
+        for name in candidate_names:
+            filters = {"librenms_name": name, "is_regex": False}
             if phys_class:
                 mapping = ModuleBayMapping.objects.filter(**filters, librenms_class=phys_class).first()
                 if not mapping:
@@ -360,32 +364,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if mapping and mapping.netbox_bay_name in module_bays:
                 return module_bays[mapping.netbox_bay_name]
 
-        # Check ModuleBayMapping table for item name (exact match)
-        if item_name:
-            filters = {"librenms_name": item_name, "is_regex": False}
-            if phys_class:
-                mapping = ModuleBayMapping.objects.filter(**filters, librenms_class=phys_class).first()
-                if not mapping:
-                    mapping = ModuleBayMapping.objects.filter(**filters, librenms_class="").first()
-            else:
-                mapping = ModuleBayMapping.objects.filter(**filters, librenms_class="").first()
-
-            if mapping and mapping.netbox_bay_name in module_bays:
-                return module_bays[mapping.netbox_bay_name]
-
-        # Regex pattern matching on both parent_name and item_name
-        for name in [parent_name, item_name]:
-            if not name:
-                continue
+        # Regex pattern matching on all candidate names
+        for name in candidate_names:
             bay = self._lookup_regex_bay_mapping(re, name, phys_class, module_bays, ModuleBayMapping)
             if bay:
                 return bay
 
-        # Fallback: exact match on parent container name or item name
-        if parent_name and parent_name in module_bays:
-            return module_bays[parent_name]
-        if item_name and item_name in module_bays:
-            return module_bays[item_name]
+        # Fallback: exact match on candidate names against bay dict
+        for name in candidate_names:
+            if name in module_bays:
+                return module_bays[name]
 
         # Positional fallback: determine slot number from container sibling order
         # Handles SFPs inside converters where containers are unnamed
@@ -814,6 +802,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
                 return None
             parent = index_map[parent_idx]
             parent_name = parent.get("entPhysicalName", "")
+            parent_descr = parent.get("entPhysicalDescr", "")
 
             # Check if this parent matches an installed module bay on the device
             device_bays = ModuleBay.objects.filter(device=device, module_id__isnull=True).select_related(
@@ -822,19 +811,22 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
 
             for bay in device_bays:
                 if hasattr(bay, "installed_module") and bay.installed_module:
-                    if bay.name == parent_name:
+                    if bay.name == parent_name or (parent_descr and bay.name == parent_descr):
                         return bay.installed_module.pk
 
             # Also check ModuleBayMapping for indirect matches
-            mapping = ModuleBayMapping.objects.filter(librenms_name=parent_name).first()
-            if mapping:
-                bay = (
-                    ModuleBay.objects.filter(device=device, name=mapping.netbox_bay_name, module_id__isnull=True)
-                    .select_related("installed_module")
-                    .first()
-                )
-                if bay and hasattr(bay, "installed_module") and bay.installed_module:
-                    return bay.installed_module.pk
+            for name in [parent_name, parent_descr]:
+                if not name:
+                    continue
+                mapping = ModuleBayMapping.objects.filter(librenms_name=name).first()
+                if mapping:
+                    bay = (
+                        ModuleBay.objects.filter(device=device, name=mapping.netbox_bay_name, module_id__isnull=True)
+                        .select_related("installed_module")
+                        .first()
+                    )
+                    if bay and hasattr(bay, "installed_module") and bay.installed_module:
+                        return bay.installed_module.pk
 
             current = parent
         return None
@@ -853,11 +845,15 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
                 parent_name = parent.get("entPhysicalName", "")
 
         item_name = item.get("entPhysicalName", "")
+        item_descr = item.get("entPhysicalDescr", "")
         phys_class = item.get("entPhysicalClass", "")
 
-        # Check mapping for parent container name (exact match)
-        if parent_name:
-            filters = {"librenms_name": parent_name, "is_regex": False}
+        # Build candidate names: parent, item name, item description
+        candidate_names = [n for n in [parent_name, item_name, item_descr] if n]
+
+        # Check mapping for each candidate (exact match)
+        for name in candidate_names:
+            filters = {"librenms_name": name, "is_regex": False}
             if phys_class:
                 mapping = ModuleBayMapping.objects.filter(**filters, librenms_class=phys_class).first()
                 if not mapping:
@@ -867,31 +863,16 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
             if mapping and mapping.netbox_bay_name in module_bays:
                 return module_bays[mapping.netbox_bay_name]
 
-        # Check mapping for item name (exact match)
-        if item_name:
-            filters = {"librenms_name": item_name, "is_regex": False}
-            if phys_class:
-                mapping = ModuleBayMapping.objects.filter(**filters, librenms_class=phys_class).first()
-                if not mapping:
-                    mapping = ModuleBayMapping.objects.filter(**filters, librenms_class="").first()
-            else:
-                mapping = ModuleBayMapping.objects.filter(**filters, librenms_class="").first()
-            if mapping and mapping.netbox_bay_name in module_bays:
-                return module_bays[mapping.netbox_bay_name]
-
-        # Regex pattern matching on both parent_name and item_name
-        for name in [parent_name, item_name]:
-            if not name:
-                continue
+        # Regex pattern matching on all candidate names
+        for name in candidate_names:
             bay = BaseModuleTableView._lookup_regex_bay_mapping(re, name, phys_class, module_bays, ModuleBayMapping)
             if bay:
                 return bay
 
-        # Fallback: exact match on parent container name
-        if parent_name and parent_name in module_bays:
-            return module_bays[parent_name]
-        if item_name and item_name in module_bays:
-            return module_bays[item_name]
+        # Fallback: exact match on candidate names against bay dict
+        for name in candidate_names:
+            if name in module_bays:
+                return module_bays[name]
 
         # Positional fallback for items inside converters
         return BaseModuleTableView._match_bay_by_position(item, index_map, module_bays)
