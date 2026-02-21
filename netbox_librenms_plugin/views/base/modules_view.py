@@ -124,14 +124,26 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             table_data.append(row)
 
             # Determine which bays sub-components should match against:
-            # If parent matched a bay with an installed module, use that module's child bays
+            # If parent matched a bay with an installed module, use that module's child bays.
+            # If parent matched a bay but it's NOT installed, children can't be installed
+            # individually (parent must be installed first to create child bays).
             parent_module_id = None
+            parent_bay_matched_but_uninstalled = False
             if row.get("module_bay_id"):
                 matched_bay = device_bays.get(row["module_bay"])
                 if matched_bay and hasattr(matched_bay, "installed_module") and matched_bay.installed_module:
                     parent_module_id = matched_bay.installed_module.pk
+                else:
+                    # Parent matched a bay but it's not installed yet
+                    parent_bay_matched_but_uninstalled = True
 
-            child_bays = module_scoped_bays.get(parent_module_id, {}) if parent_module_id else device_bays
+            if parent_bay_matched_but_uninstalled:
+                # Empty dict: children can't match any bay individually
+                child_bays = {}
+            elif parent_module_id:
+                child_bays = module_scoped_bays.get(parent_module_id, {})
+            else:
+                child_bays = device_bays
 
             # Find sub-components with a model name (transceivers, converters, etc.)
             # Track bay scope per depth level so nested modules use correct bays
@@ -156,6 +168,20 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 # Mark parent if any child is installable
                 if sub_row.get("can_install"):
                     table_data[parent_idx]["has_installable_children"] = True
+
+            # When parent is installable but children can't match bays yet
+            # (parent module not installed), enable "Install Branch" if children
+            # have matching module types (branch install handles bay creation)
+            if (
+                parent_bay_matched_but_uninstalled
+                and row.get("can_install")
+                and not table_data[parent_idx].get("has_installable_children")
+            ):
+                for _depth, sub_item in sub_items:
+                    sub_model = (sub_item.get("entPhysicalModelName") or "").strip()
+                    if sub_model and sub_model in module_types:
+                        table_data[parent_idx]["has_installable_children"] = True
+                        break
 
         # Sort top-level groups by status, keeping children after their parent
         table_data = self._sort_with_hierarchy(table_data)
@@ -774,15 +800,19 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
             return {"status": "skipped", "name": name, "reason": "bay already occupied"}
 
         # Install
-        module = Module(
-            device=device,
-            module_bay=matched_bay,
-            module_type=matched_type,
-            serial=serial,
-            status="active",
-        )
-        module.full_clean()
-        module.save()
+        try:
+            with transaction.atomic():  # savepoint: failure here won't abort parent tx
+                module = Module(
+                    device=device,
+                    module_bay=matched_bay,
+                    module_type=matched_type,
+                    serial=serial,
+                    status="active",
+                )
+                module.full_clean()
+                module.save()
+        except Exception as e:
+            return {"status": "failed", "name": name, "reason": str(e)}
 
         return {"status": "installed", "name": f"{matched_type.model} → {matched_bay.name}"}
 
