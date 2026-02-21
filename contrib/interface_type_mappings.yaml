@@ -1,7 +1,7 @@
-# Interface Type Mappings — Example
+# Interface Type Mappings
 #
 # Maps LibreNMS interface types (and optional speeds) to NetBox interface types.
-# Import via: LibreNMS → Interface Mappings → Import → YAML
+# Import via: LibreNMS Plugin > Interface Mappings > Import
 #
 # Fields:
 #   librenms_type  — IANA ifType string from LibreNMS (e.g. ethernetCsmacd)

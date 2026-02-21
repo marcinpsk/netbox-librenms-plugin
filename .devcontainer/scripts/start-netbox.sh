@@ -1,4 +1,5 @@
 #!/bin/bash
+# netbox-librenms-plugin devcontainer script
 
 # Check if we should run in background or foreground
 BACKGROUND=false

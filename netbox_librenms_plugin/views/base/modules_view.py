@@ -336,20 +336,21 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
     def _match_module_bay(self, item, index_map, module_bays):
         """
         Try to match an inventory item to a NetBox ModuleBay.
-        Checks ModuleBayMapping table first, then falls back to exact parent name match,
-        then positional matching for items inside converters/sub-modules.
+        Checks ModuleBayMapping table first (exact then regex), then falls back
+        to exact parent name match, then positional matching.
         """
+        import re
+
         from netbox_librenms_plugin.models import ModuleBayMapping
 
         parent_name = self._find_parent_container_name(item, index_map)
         item_name = item.get("entPhysicalName", "")
         phys_class = item.get("entPhysicalClass", "")
 
-        # Check ModuleBayMapping table for parent container name
+        # Check ModuleBayMapping table for parent container name (exact match)
         if parent_name:
-            filters = {"librenms_name": parent_name}
+            filters = {"librenms_name": parent_name, "is_regex": False}
             if phys_class:
-                # Try class-specific mapping first, then generic
                 mapping = ModuleBayMapping.objects.filter(**filters, librenms_class=phys_class).first()
                 if not mapping:
                     mapping = ModuleBayMapping.objects.filter(**filters, librenms_class="").first()
@@ -359,9 +360,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if mapping and mapping.netbox_bay_name in module_bays:
                 return module_bays[mapping.netbox_bay_name]
 
-        # Check ModuleBayMapping table for item name
+        # Check ModuleBayMapping table for item name (exact match)
         if item_name:
-            filters = {"librenms_name": item_name}
+            filters = {"librenms_name": item_name, "is_regex": False}
             if phys_class:
                 mapping = ModuleBayMapping.objects.filter(**filters, librenms_class=phys_class).first()
                 if not mapping:
@@ -371,6 +372,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
             if mapping and mapping.netbox_bay_name in module_bays:
                 return module_bays[mapping.netbox_bay_name]
+
+        # Regex pattern matching on both parent_name and item_name
+        for name in [parent_name, item_name]:
+            if not name:
+                continue
+            bay = self._lookup_regex_bay_mapping(re, name, phys_class, module_bays, ModuleBayMapping)
+            if bay:
+                return bay
 
         # Fallback: exact match on parent container name or item name
         if parent_name and parent_name in module_bays:
@@ -384,6 +393,31 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if bay:
             return bay
 
+        return None
+
+    @staticmethod
+    def _lookup_regex_bay_mapping(re, name, phys_class, module_bays, ModuleBayMapping):
+        """Try regex ModuleBayMapping patterns against a name.
+
+        Returns matched module bay or None.
+        """
+        regex_filters = {"is_regex": True}
+        if phys_class:
+            regex_mappings = list(ModuleBayMapping.objects.filter(**regex_filters, librenms_class=phys_class)) + list(
+                ModuleBayMapping.objects.filter(**regex_filters, librenms_class="")
+            )
+        else:
+            regex_mappings = list(ModuleBayMapping.objects.filter(**regex_filters, librenms_class=""))
+
+        for mapping in regex_mappings:
+            try:
+                match = re.fullmatch(mapping.librenms_name, name)
+            except re.error:
+                continue
+            if match:
+                resolved_bay = match.expand(mapping.netbox_bay_name)
+                if resolved_bay in module_bays:
+                    return module_bays[resolved_bay]
         return None
 
     @staticmethod
@@ -580,125 +614,14 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Vi
                 module.full_clean()
                 module.save()
 
-                # Post-install: apply InterfaceNameRule if one exists
-                renamed = self._apply_interface_name_rules(module, module_bay)
-
-            rename_msg = f" ({renamed} interface(s) renamed)" if renamed else ""
             messages.success(
-                request, f"Installed {module_type.model} in {module_bay.name} (serial: {serial or 'N/A'}).{rename_msg}"
+                request, f"Installed {module_type.model} in {module_bay.name} (serial: {serial or 'N/A'})."
             )
         except Exception as e:
             messages.error(request, f"Failed to install module: {e}")
 
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
         return redirect(f"{sync_url}?tab=modules#librenms-module-table")
-
-    @staticmethod
-    def _apply_interface_name_rules(module, module_bay):
-        """Apply InterfaceNameRule rename after module installation.
-
-        Looks up a matching rule for (module_type, parent_module_type) and
-        renames interfaces created by NetBox's template instantiation.
-
-        Returns:
-            Number of interfaces renamed, or 0 if no rule matched.
-        """
-        from dcim.models import Interface
-
-        from netbox_librenms_plugin.models import InterfaceNameRule
-        from netbox_librenms_plugin.utils import evaluate_name_template
-
-        module_type = module.module_type
-
-        # Determine parent module type (if installed inside another module)
-        parent_module_type = None
-        if module_bay.parent:
-            parent_bay = module_bay.parent
-            if hasattr(parent_bay, "installed_module") and parent_bay.installed_module:
-                parent_module_type = parent_bay.installed_module.module_type
-
-        # Look up rule: specific parent first, then generic (null parent)
-        rule = None
-        if parent_module_type:
-            rule = InterfaceNameRule.objects.filter(
-                module_type=module_type,
-                parent_module_type=parent_module_type,
-            ).first()
-        if not rule:
-            rule = InterfaceNameRule.objects.filter(
-                module_type=module_type,
-                parent_module_type__isnull=True,
-            ).first()
-
-        if not rule:
-            return 0
-
-        # Build context variables for template evaluation
-        bay_position = module_bay.position or "0"
-        # If position is a template expression (e.g., {module}), extract from bay name
-        if bay_position.startswith("{"):
-            import re
-
-            match = re.search(r"(\d+)$", module_bay.name)
-            bay_position = match.group(1) if match else "0"
-        parent_bay_position = "0"
-        sfp_slot = bay_position
-        slot = bay_position
-
-        if module_bay.parent:
-            parent_bay = module_bay.parent
-            parent_bay_position = parent_bay.position or "0"
-            # slot is typically the top-level module position
-            if parent_bay.parent and hasattr(parent_bay.parent, "installed_module"):
-                grandparent = parent_bay.parent
-                slot = grandparent.position or parent_bay_position
-            else:
-                slot = parent_bay_position
-
-        interfaces = Interface.objects.filter(module=module)
-        renamed = 0
-
-        for iface in interfaces:
-            variables = {
-                "slot": slot,
-                "bay_position": bay_position,
-                "parent_bay_position": parent_bay_position,
-                "sfp_slot": sfp_slot,
-                "base": iface.name,
-            }
-
-            if rule.channel_count > 0:
-                # Breakout: rename base and create additional channel interfaces
-                for ch in range(rule.channel_count):
-                    variables["channel"] = str(rule.channel_start + ch)
-                    new_name = evaluate_name_template(rule.name_template, variables)
-                    if ch == 0:
-                        iface.name = new_name
-                        iface.full_clean()
-                        iface.save()
-                        renamed += 1
-                    else:
-                        # Create additional breakout interfaces
-                        breakout_iface = Interface(
-                            device=module.device,
-                            module=module,
-                            name=new_name,
-                            type=iface.type,
-                            enabled=iface.enabled,
-                        )
-                        breakout_iface.full_clean()
-                        breakout_iface.save()
-                        renamed += 1
-            else:
-                # Simple rename (converter offset, etc.)
-                new_name = evaluate_name_template(rule.name_template, variables)
-                if new_name != iface.name:
-                    iface.name = new_name
-                    iface.full_clean()
-                    iface.save()
-                    renamed += 1
-
-        return renamed
 
 
 class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
@@ -873,9 +796,6 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         module.full_clean()
         module.save()
 
-        # Apply interface name rules
-        InstallModuleView._apply_interface_name_rules(module, matched_bay)
-
         return {"status": "installed", "name": f"{matched_type.model} → {matched_bay.name}"}
 
     @staticmethod
@@ -922,6 +842,8 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
     @staticmethod
     def _match_bay(item, index_map, module_bays, ModuleBayMapping):
         """Match an inventory item to a module bay (same logic as BaseModuleTableView)."""
+        import re
+
         # Resolve parent name
         contained_in = item.get("entPhysicalContainedIn", 0)
         parent_name = None
@@ -933,9 +855,9 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         item_name = item.get("entPhysicalName", "")
         phys_class = item.get("entPhysicalClass", "")
 
-        # Check mapping for parent container name
+        # Check mapping for parent container name (exact match)
         if parent_name:
-            filters = {"librenms_name": parent_name}
+            filters = {"librenms_name": parent_name, "is_regex": False}
             if phys_class:
                 mapping = ModuleBayMapping.objects.filter(**filters, librenms_class=phys_class).first()
                 if not mapping:
@@ -945,9 +867,9 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
             if mapping and mapping.netbox_bay_name in module_bays:
                 return module_bays[mapping.netbox_bay_name]
 
-        # Check mapping for item name
+        # Check mapping for item name (exact match)
         if item_name:
-            filters = {"librenms_name": item_name}
+            filters = {"librenms_name": item_name, "is_regex": False}
             if phys_class:
                 mapping = ModuleBayMapping.objects.filter(**filters, librenms_class=phys_class).first()
                 if not mapping:
@@ -956,6 +878,14 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
                 mapping = ModuleBayMapping.objects.filter(**filters, librenms_class="").first()
             if mapping and mapping.netbox_bay_name in module_bays:
                 return module_bays[mapping.netbox_bay_name]
+
+        # Regex pattern matching on both parent_name and item_name
+        for name in [parent_name, item_name]:
+            if not name:
+                continue
+            bay = BaseModuleTableView._lookup_regex_bay_mapping(re, name, phys_class, module_bays, ModuleBayMapping)
+            if bay:
+                return bay
 
         # Fallback: exact match on parent container name
         if parent_name and parent_name in module_bays:

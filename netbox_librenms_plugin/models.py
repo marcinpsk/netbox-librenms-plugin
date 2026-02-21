@@ -1,5 +1,8 @@
+import re
+
 from dcim.choices import InterfaceTypeChoices
 from dcim.models import DeviceType, ModuleType
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.urls import reverse
 from netbox.models import NetBoxModel
@@ -147,12 +150,15 @@ class ModuleBayMapping(NetBoxModel):
 
     Used when LibreNMS inventory names don't match NetBox bay names exactly.
     For example: LibreNMS "Power Supply 1" → NetBox "PS1".
+    When is_regex is True, librenms_name is treated as a regex pattern and
+    netbox_bay_name can use backreferences (\\1, \\2, etc.).
     Mappings are global (not scoped to device type or manufacturer).
     """
 
     librenms_name = models.CharField(
         max_length=255,
-        help_text="Name from LibreNMS inventory (entPhysicalName), e.g. 'Power Supply 1'",
+        help_text="Name from LibreNMS inventory (entPhysicalName). "
+        "When 'Use Regex' is enabled, this is a Python regex pattern.",
     )
     librenms_class = models.CharField(
         max_length=50,
@@ -161,12 +167,25 @@ class ModuleBayMapping(NetBoxModel):
     )
     netbox_bay_name = models.CharField(
         max_length=255,
-        help_text="NetBox module bay name to match, e.g. 'PS1'",
+        help_text="NetBox module bay name to match. With regex, supports backreferences (\\1, \\2, etc.).",
+    )
+    is_regex = models.BooleanField(
+        default=False,
+        help_text="Treat LibreNMS Name as a regex pattern with backreferences in NetBox Bay Name",
     )
     description = models.TextField(
         blank=True,
         help_text="Optional description or notes about this mapping",
     )
+
+    def clean(self):
+        """Validate that regex patterns compile when is_regex is True."""
+        super().clean()
+        if self.is_regex:
+            try:
+                re.compile(self.librenms_name)
+            except re.error as e:
+                raise ValidationError({"librenms_name": f"Invalid regex: {e}"})
 
     def get_absolute_url(self):
         """Return the URL for this mapping's detail page."""
@@ -181,65 +200,3 @@ class ModuleBayMapping(NetBoxModel):
     def __str__(self):
         cls = f" [{self.librenms_class}]" if self.librenms_class else ""
         return f"{self.librenms_name}{cls} -> {self.netbox_bay_name}"
-
-
-class InterfaceNameRule(NetBoxModel):
-    """Post-install interface rename rule for module types.
-
-    Handles cases where NetBox's position-based naming can't produce
-    the correct interface name, such as converter offset (CVR-X2-SFP)
-    or breakout transceivers (QSFP+ 4x10G).
-
-    The name_template uses Python str.format() syntax with these variables:
-      {slot}               - Slot number from parent module bay position
-      {bay_position}       - Position of the bay this module is installed into
-      {parent_bay_position} - Position of the parent module's bay
-      {sfp_slot}           - Sub-bay index (1-based) within the parent module
-      {base}               - Base interface name from NetBox position resolution
-      {channel}            - Channel number (iterated for breakout)
-    """
-
-    module_type = models.ForeignKey(
-        ModuleType,
-        on_delete=models.CASCADE,
-        related_name="interface_name_rules",
-        help_text="The module type whose installation triggers this rename rule",
-    )
-    parent_module_type = models.ForeignKey(
-        ModuleType,
-        on_delete=models.CASCADE,
-        null=True,
-        blank=True,
-        related_name="child_interface_name_rules",
-        help_text="If set, rule only applies when installed inside this parent module type",
-    )
-    name_template = models.CharField(
-        max_length=255,
-        help_text="Interface name template expression, e.g. 'GigabitEthernet{slot}/{8 + ({parent_bay_position} - 1) * 2 + {sfp_slot}}'",
-    )
-    channel_count = models.PositiveSmallIntegerField(
-        default=0,
-        help_text="Number of breakout channels (0 = no breakout). Creates this many interfaces per template.",
-    )
-    channel_start = models.PositiveSmallIntegerField(
-        default=0,
-        help_text="Starting channel number for breakout interfaces (e.g., 0 for Juniper, 1 for Cisco)",
-    )
-    description = models.TextField(
-        blank=True,
-        help_text="Optional description or notes about this rule",
-    )
-
-    def get_absolute_url(self):
-        """Return the URL for this rule's detail page."""
-        return reverse("plugins:netbox_librenms_plugin:interfacenamerule_detail", args=[self.pk])
-
-    class Meta:
-        """Meta options for InterfaceNameRule."""
-
-        unique_together = ["module_type", "parent_module_type"]
-        ordering = ["module_type__model"]
-
-    def __str__(self):
-        parent = f" in {self.parent_module_type.model}" if self.parent_module_type else ""
-        return f"{self.module_type.model}{parent} → {self.name_template}"

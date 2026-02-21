@@ -99,7 +99,7 @@
   netbox_bay_name: "CMA"
   description: "Nokia CMA2-7s CPM carrier bracket"
 
-# Juniper fixed-form devices (ACX7024 etc.)
+# Juniper fixed-form devices
 - librenms_name: "PSM 0"
   librenms_class: "powerSupply"
   netbox_bay_name: "PSU 0"
@@ -116,6 +116,7 @@
   netbox_bay_name: "PEM \\1"
   is_regex: true
   description: "Juniper chassis PSM N → PEM N"
+
 - librenms_name: "Fan Tray 0"
   librenms_class: "fan"
   netbox_bay_name: "Fan Tray"

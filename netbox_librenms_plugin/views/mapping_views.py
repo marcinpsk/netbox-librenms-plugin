@@ -3,7 +3,6 @@ from utilities.views import register_model_view
 
 from netbox_librenms_plugin.filters import (
     DeviceTypeMappingFilterSet,
-    InterfaceNameRuleFilterSet,
     InterfaceTypeMappingFilterSet,
     ModuleBayMappingFilterSet,
     ModuleTypeMappingFilterSet,
@@ -12,9 +11,6 @@ from netbox_librenms_plugin.forms import (
     DeviceTypeMappingFilterForm,
     DeviceTypeMappingForm,
     DeviceTypeMappingImportForm,
-    InterfaceNameRuleFilterForm,
-    InterfaceNameRuleForm,
-    InterfaceNameRuleImportForm,
     InterfaceTypeMappingFilterForm,
     InterfaceTypeMappingForm,
     InterfaceTypeMappingImportForm,
@@ -27,14 +23,12 @@ from netbox_librenms_plugin.forms import (
 )
 from netbox_librenms_plugin.models import (
     DeviceTypeMapping,
-    InterfaceNameRule,
     InterfaceTypeMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
 )
 from netbox_librenms_plugin.tables.mappings import (
     DeviceTypeMappingTable,
-    InterfaceNameRuleTable,
     InterfaceTypeMappingTable,
     ModuleBayMappingTable,
     ModuleTypeMappingTable,
@@ -294,63 +288,3 @@ class ModuleBayMappingChangeLogView(LibreNMSPermissionMixin, generic.ObjectChang
     """Provides a view for displaying the change log of a specific ModuleBayMapping object."""
 
     queryset = ModuleBayMapping.objects.all()
-
-
-# --- InterfaceNameRule views ---
-
-
-class InterfaceNameRuleListView(LibreNMSPermissionMixin, generic.ObjectListView):
-    """Provides a view for listing all InterfaceNameRule objects."""
-
-    queryset = InterfaceNameRule.objects.all()
-    table = InterfaceNameRuleTable
-    filterset = InterfaceNameRuleFilterSet
-    filterset_form = InterfaceNameRuleFilterForm
-    template_name = "netbox_librenms_plugin/interfacenamerule_list.html"
-
-
-class InterfaceNameRuleCreateView(LibreNMSPermissionMixin, generic.ObjectEditView):
-    """Provides a view for creating a new InterfaceNameRule object."""
-
-    queryset = InterfaceNameRule.objects.all()
-    form = InterfaceNameRuleForm
-
-
-@register_model_view(InterfaceNameRule, "bulk_import", path="import", detail=False)
-class InterfaceNameRuleBulkImportView(LibreNMSPermissionMixin, generic.BulkImportView):
-    """Provides a view for bulk importing InterfaceNameRule objects."""
-
-    queryset = InterfaceNameRule.objects.all()
-    model_form = InterfaceNameRuleImportForm
-
-
-class InterfaceNameRuleView(LibreNMSPermissionMixin, generic.ObjectView):
-    """Provides a view for displaying details of a specific InterfaceNameRule object."""
-
-    queryset = InterfaceNameRule.objects.all()
-
-
-class InterfaceNameRuleEditView(LibreNMSPermissionMixin, generic.ObjectEditView):
-    """Provides a view for editing a specific InterfaceNameRule object."""
-
-    queryset = InterfaceNameRule.objects.all()
-    form = InterfaceNameRuleForm
-
-
-class InterfaceNameRuleDeleteView(LibreNMSPermissionMixin, generic.ObjectDeleteView):
-    """Provides a view for deleting a specific InterfaceNameRule object."""
-
-    queryset = InterfaceNameRule.objects.all()
-
-
-class InterfaceNameRuleBulkDeleteView(LibreNMSPermissionMixin, generic.BulkDeleteView):
-    """Provides a view for deleting multiple InterfaceNameRule objects."""
-
-    queryset = InterfaceNameRule.objects.all()
-    table = InterfaceNameRuleTable
-
-
-class InterfaceNameRuleChangeLogView(LibreNMSPermissionMixin, generic.ObjectChangeLogView):
-    """Provides a view for displaying the change log of a specific InterfaceNameRule object."""
-
-    queryset = InterfaceNameRule.objects.all()

@@ -1,6 +1,6 @@
 import django_filters
 
-from .models import DeviceTypeMapping, InterfaceNameRule, InterfaceTypeMapping, ModuleBayMapping, ModuleTypeMapping
+from .models import DeviceTypeMapping, InterfaceTypeMapping, ModuleBayMapping, ModuleTypeMapping
 
 
 class InterfaceTypeMappingFilterSet(django_filters.FilterSet):
@@ -40,14 +40,4 @@ class ModuleBayMappingFilterSet(django_filters.FilterSet):
         """Meta options for ModuleBayMappingFilterSet."""
 
         model = ModuleBayMapping
-        fields = ["librenms_name", "librenms_class", "netbox_bay_name"]
-
-
-class InterfaceNameRuleFilterSet(django_filters.FilterSet):
-    """Filter set for InterfaceNameRule model."""
-
-    class Meta:
-        """Meta options for InterfaceNameRuleFilterSet."""
-
-        model = InterfaceNameRule
-        fields = ["module_type", "parent_module_type"]
+        fields = ["librenms_name", "librenms_class", "netbox_bay_name", "is_regex"]

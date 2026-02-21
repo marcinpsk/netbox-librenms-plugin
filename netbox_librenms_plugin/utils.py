@@ -1,4 +1,3 @@
-import ast
 import re
 from typing import Optional
 
@@ -487,65 +486,3 @@ def supports_module_path():
 def module_type_uses_module_path(module_type):
     """Check if a ModuleType has any interface templates using {module_path}."""
     return any("{module_path}" in t.name for t in module_type.interfacetemplates.all())
-
-
-def evaluate_name_template(template: str, variables: dict) -> str:
-    """Evaluate a name template with arithmetic expressions.
-
-    Supports templates like:
-        "GigabitEthernet{slot}/{8 + ({parent_bay_position} - 1) * 2 + {sfp_slot}}"
-
-    Variables are substituted first, then any brace-enclosed expression
-    containing arithmetic operators is safely evaluated via ast.literal_eval
-    after reducing the expression.
-
-    Args:
-        template: The name template string with {variable} placeholders.
-        variables: Dict mapping variable names to their values.
-
-    Returns:
-        The evaluated interface name string.
-
-    Raises:
-        ValueError: If an expression cannot be safely evaluated.
-    """
-    # First pass: substitute all simple variables
-    result = template
-    for key, value in variables.items():
-        result = result.replace(f"{{{key}}}", str(value))
-
-    # Second pass: evaluate any remaining brace-enclosed arithmetic expressions
-    def _eval_expr(match):
-        expr = match.group(1).strip()
-        # Only allow digits, arithmetic operators, parentheses, and whitespace
-        if not re.match(r"^[\d\s\+\-\*\/\(\)]+$", expr):
-            raise ValueError(f"Unsafe expression in name template: {expr}")
-        try:
-            # Compile and evaluate safely using AST
-            node = ast.parse(expr, mode="eval")
-            # Walk AST to verify only safe node types
-            for child in ast.walk(node):
-                if not isinstance(
-                    child,
-                    (
-                        ast.Expression,
-                        ast.BinOp,
-                        ast.UnaryOp,
-                        ast.Constant,
-                        ast.Add,
-                        ast.Sub,
-                        ast.Mult,
-                        ast.Div,
-                        ast.FloorDiv,
-                        ast.Mod,
-                        ast.USub,
-                        ast.UAdd,
-                    ),
-                ):
-                    raise ValueError(f"Unsafe AST node in expression: {type(child).__name__}")
-            return str(eval(compile(node, "<template>", "eval")))  # noqa: S307
-        except (SyntaxError, TypeError) as e:
-            raise ValueError(f"Invalid arithmetic expression '{expr}': {e}") from e
-
-    result = re.sub(r"\{([^}]+)\}", _eval_expr, result)
-    return result

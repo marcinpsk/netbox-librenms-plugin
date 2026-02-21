@@ -19,7 +19,7 @@ feature in the NetBox UI.
 | `interface_type_mappings.yaml` | Maps LibreNMS interface types + speeds to NetBox interface types |
 | `device_type_mappings.yaml` | Maps LibreNMS hardware strings to NetBox device types |
 | `module_type_mappings.yaml` | Maps LibreNMS inventory model names to NetBox module types (incl. transceivers) |
-| `normalization_rules.yaml` | Regex-based string normalization before matching (Nokia suffixes, Finisar codes, etc.) |
+| `module_bay_mappings.yaml` | Maps LibreNMS inventory container names to NetBox module bay names |
 
 ## Customisation
 

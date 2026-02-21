@@ -17,7 +17,6 @@ from virtualization.models import Cluster, VirtualMachine
 
 from .models import (
     DeviceTypeMapping,
-    InterfaceNameRule,
     InterfaceTypeMapping,
     LibreNMSSettings,
     ModuleBayMapping,
@@ -365,7 +364,7 @@ class ModuleBayMappingForm(NetBoxModelForm):
         """Meta options for ModuleBayMappingForm."""
 
         model = ModuleBayMapping
-        fields = ["librenms_name", "librenms_class", "netbox_bay_name", "description"]
+        fields = ["librenms_name", "librenms_class", "netbox_bay_name", "is_regex", "description"]
 
 
 class ModuleBayMappingImportForm(NetBoxModelImportForm):
@@ -375,7 +374,7 @@ class ModuleBayMappingImportForm(NetBoxModelImportForm):
         """Meta options for ModuleBayMappingImportForm."""
 
         model = ModuleBayMapping
-        fields = ["librenms_name", "librenms_class", "netbox_bay_name", "description"]
+        fields = ["librenms_name", "librenms_class", "netbox_bay_name", "is_regex", "description"]
 
 
 class ModuleBayMappingFilterForm(NetBoxModelFilterSetForm):
@@ -384,51 +383,9 @@ class ModuleBayMappingFilterForm(NetBoxModelFilterSetForm):
     librenms_name = forms.CharField(required=False, label="LibreNMS Name")
     librenms_class = forms.CharField(required=False, label="LibreNMS Class")
     netbox_bay_name = forms.CharField(required=False, label="NetBox Bay Name")
+    is_regex = forms.NullBooleanField(required=False, label="Regex")
 
     model = ModuleBayMapping
-
-
-class InterfaceNameRuleForm(NetBoxModelForm):
-    """Form for creating and editing interface name rules."""
-
-    class Meta:
-        """Meta options for InterfaceNameRuleForm."""
-
-        model = InterfaceNameRule
-        fields = [
-            "module_type",
-            "parent_module_type",
-            "name_template",
-            "channel_count",
-            "channel_start",
-            "description",
-        ]
-
-
-class InterfaceNameRuleImportForm(NetBoxModelImportForm):
-    """Form for bulk importing interface name rules."""
-
-    class Meta:
-        """Meta options for InterfaceNameRuleImportForm."""
-
-        model = InterfaceNameRule
-        fields = [
-            "module_type",
-            "parent_module_type",
-            "name_template",
-            "channel_count",
-            "channel_start",
-            "description",
-        ]
-
-
-class InterfaceNameRuleFilterForm(NetBoxModelFilterSetForm):
-    """Form for filtering interface name rules."""
-
-    module_type_id = forms.IntegerField(required=False, label="Module Type ID")
-    parent_module_type_id = forms.IntegerField(required=False, label="Parent Module Type ID")
-
-    model = InterfaceNameRule
 
 
 class AddToLIbreSNMPV1V2(forms.Form):

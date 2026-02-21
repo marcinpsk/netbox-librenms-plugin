@@ -1,4 +1,5 @@
 #!/bin/bash
+# netbox-librenms-plugin devcontainer script
 
 echo "🔍 DevContainer Startup Diagnostics"
 echo "=================================="

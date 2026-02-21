@@ -3,7 +3,6 @@ from netbox.tables import NetBoxTable, columns
 
 from netbox_librenms_plugin.models import (
     DeviceTypeMapping,
-    InterfaceNameRule,
     InterfaceTypeMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
@@ -108,6 +107,7 @@ class ModuleBayMappingTable(NetBoxTable):
     librenms_name = tables.Column(verbose_name="LibreNMS Name", linkify=True)
     librenms_class = tables.Column(verbose_name="LibreNMS Class")
     netbox_bay_name = tables.Column(verbose_name="NetBox Bay Name")
+    is_regex = columns.BooleanColumn(verbose_name="Regex")
     description = tables.Column(verbose_name="Description", linkify=False)
     actions = columns.ActionsColumn(actions=("edit", "delete"))
 
@@ -120,6 +120,7 @@ class ModuleBayMappingTable(NetBoxTable):
             "librenms_name",
             "librenms_class",
             "netbox_bay_name",
+            "is_regex",
             "description",
             "actions",
         )
@@ -128,43 +129,7 @@ class ModuleBayMappingTable(NetBoxTable):
             "librenms_name",
             "librenms_class",
             "netbox_bay_name",
-            "description",
-            "actions",
-        )
-        attrs = {"class": "table table-hover table-headings table-striped"}
-
-
-class InterfaceNameRuleTable(NetBoxTable):
-    """Table for displaying InterfaceNameRule data."""
-
-    module_type = tables.Column(verbose_name="Module Type", linkify=True)
-    parent_module_type = tables.Column(verbose_name="Parent Module Type", linkify=True)
-    name_template = tables.Column(verbose_name="Name Template")
-    channel_count = tables.Column(verbose_name="Channels")
-    channel_start = tables.Column(verbose_name="Ch. Start")
-    description = tables.Column(verbose_name="Description", linkify=False)
-    actions = columns.ActionsColumn(actions=("edit", "delete"))
-
-    class Meta:
-        """Meta options for InterfaceNameRuleTable."""
-
-        model = InterfaceNameRule
-        fields = (
-            "id",
-            "module_type",
-            "parent_module_type",
-            "name_template",
-            "channel_count",
-            "channel_start",
-            "description",
-            "actions",
-        )
-        default_columns = (
-            "id",
-            "module_type",
-            "parent_module_type",
-            "name_template",
-            "channel_count",
+            "is_regex",
             "description",
             "actions",
         )

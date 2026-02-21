@@ -1,7 +1,7 @@
-# Module Type Mappings — Example
+# Module Type Mappings
 #
 # Maps LibreNMS inventory model names (entPhysicalModelName) to NetBox module types.
-# Import via: LibreNMS → Module Type Mappings → Import → YAML
+# Import via: LibreNMS Plugin > Module Type Mappings > Import
 #
 # Fields:
 #   librenms_model      — Model name from LibreNMS SNMP inventory
@@ -10,10 +10,6 @@
 #
 # These mappings are checked FIRST. If no mapping exists, the plugin falls back
 # to exact model name and part_number matching against NetBox module types.
-#
-# For vendor-specific suffixes (Nokia revision codes, Finisar customer codes),
-# consider using Normalization Rules instead of individual mappings.
-# See contrib/normalization_rules.yaml for examples.
 
 # ─── Cisco Catalyst 4900M ────────────────────────────────────────────────────
 
