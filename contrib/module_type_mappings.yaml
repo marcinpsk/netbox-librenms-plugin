@@ -98,6 +98,42 @@
   netbox_module_type: "JNP7100-FAN1RU-AO"
   description: "Juniper ACX7100 1RU fan tray AO"
 
+# ─── Nokia 7750 SR-7s Module Mappings ────────────────────────────────────────
+# Nokia uses full 3HExxxxxxxx01 part numbers in ENTITY-MIB, but NetBox types
+# have abbreviated 3HExxxxxxAA PNs. These mappings bridge the gap.
+
+- librenms_model: "3HE11183AARB01"
+  netbox_module_type: "PS-7750-SR-S-AC"
+  description: "Nokia 7750 SR-s AC Power Module"
+
+- librenms_model: "3HE11312AARB01"
+  netbox_module_type: "FAN-7750-SR-S"
+  description: "Nokia 7750 SR-s Fan Module"
+
+- librenms_model: "3HE16474AARA01"
+  netbox_module_type: "XCM-7s-b"
+  description: "Nokia 7750 SR-7s IOM (XCM-7s-b)"
+
+- librenms_model: "3HE16472AARB01"
+  netbox_module_type: "XCM2-7s"
+  description: "Nokia 7750 SR-7s IOM (XCM2-7s)"
+
+- librenms_model: "3HE12391AARK01"
+  netbox_module_type: "m36-800g-qsfpdd"
+  description: "Nokia MDA 36-port multirate"
+
+- librenms_model: "3HE18883AARB01"
+  netbox_module_type: "XIOM-s-3.0t"
+  description: "Nokia XIOM 36-port 3.0T"
+
+- librenms_model: "3HE12559AARC01"
+  netbox_module_type: "CPM2-s"
+  description: "Nokia 7750 SR-s Control Processing Module"
+
+- librenms_model: "3HE16471AARG01"
+  netbox_module_type: "SFM2-s"
+  description: "Nokia 7750 SR-s Switch Fabric Module"
+
 # ─── Transceiver Mappings: Juniper Part Numbers ─────────────────────────────
 # Juniper-qualified optics use 740-xxxxxx part numbers regardless of OEM vendor.
 

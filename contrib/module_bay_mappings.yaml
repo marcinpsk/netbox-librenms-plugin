@@ -66,21 +66,22 @@
   description: "Nokia power module → PM N"
 
 # Nokia MDA and XIOM sub-module bays
+# Bay names resolve from {module}/N templates: IOM Slot 1 pos=1 → bay {module}/1 = 1/1
 - librenms_name: "^MDA (\\d+)/(\\d+)$"
   librenms_class: "mdaModule"
   netbox_bay_name: "\\1/\\2"
   is_regex: true
-  description: "Nokia MDA N/M → N/M"
+  description: "Nokia MDA N/M → N/M (matches {module}/M on IOM)"
 - librenms_name: "^XIOM (\\d+)/x(\\d+)$"
   librenms_class: "xioModule"
   netbox_bay_name: "\\1/x\\2"
   is_regex: true
-  description: "Nokia XIOM N/xM → N/xM"
-- librenms_name: "^MDA (\\d+)/x\\d+/(\\d+)$"
+  description: "Nokia XIOM N/xM → N/xM (matches {module}/xM on IOM)"
+- librenms_name: "^MDA (\\d+)/x(\\d+)/(\\d+)$"
   librenms_class: "mdaModule"
-  netbox_bay_name: "\\1/\\2"
+  netbox_bay_name: "x\\2/\\3"
   is_regex: true
-  description: "Nokia MDA in XIOM N/x1/M → N/M"
+  description: "Nokia MDA in XIOM N/xP/Q → xP/Q (matches {module}/Q on XIOM)"
 
 # ─── Exact Match Entries ─────────────────────────────────────────────────────
 # These are for special cases where names don't follow a regex pattern.

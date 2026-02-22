@@ -240,6 +240,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if (item.get("entPhysicalSerialNum") or "").strip()
         }
 
+        # Build port_id → ifName lookup for better synthetic item naming
+        port_name_map = self._build_port_name_map(transceivers)
+
         # Types that are containers, not real transceiver modules
         SKIP_TYPES = {"Port Container", "Port", ""}
 
@@ -272,7 +275,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     continue
                 # Create synthetic inventory item for SFPs not in entity inventory
                 port_id = txr.get("port_id", 0)
-                name = f"Transceiver (port {port_id})" if port_id else f"Transceiver {ent_idx}"
+                ifname = port_name_map.get(port_id)
+                if ifname:
+                    name = ifname
+                elif port_id:
+                    name = f"Transceiver (port {port_id})"
+                else:
+                    name = f"Transceiver {ent_idx}"
 
                 synthetic = {
                     "entPhysicalIndex": ent_idx,
@@ -287,6 +296,27 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 inventory_data.append(synthetic)
 
         return inventory_data
+
+    def _build_port_name_map(self, transceivers):
+        """Build port_id → ifName mapping for transceiver ports.
+
+        Fetches port data from LibreNMS to resolve port IDs to interface names,
+        enabling better bay matching for synthetic transceiver items (e.g.,
+        Nokia 1/1/c1 instead of opaque port IDs).
+        """
+        port_ids = {txr.get("port_id") for txr in transceivers if txr.get("port_id")}
+        if not port_ids:
+            return {}
+
+        success, ports_data = self.librenms_api.get_ports(self.librenms_id)
+        if not success or not isinstance(ports_data, dict):
+            return {}
+
+        return {
+            p["port_id"]: p["ifName"]
+            for p in ports_data.get("ports", [])
+            if p.get("port_id") in port_ids and p.get("ifName")
+        }
 
     def _get_sub_components(self, parent_idx, inventory_data):
         """Find descendant items with a model name (real hardware, not empty containers).
