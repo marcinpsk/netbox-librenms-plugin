@@ -20,6 +20,7 @@ INVENTORY_CLASSES = {
     "module",
     "powerSupply",
     "fan",
+    "port",
     "ioModule",
     "cpmModule",
     "mdaModule",
