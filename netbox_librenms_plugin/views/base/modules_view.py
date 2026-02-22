@@ -102,7 +102,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         # Collect top-level items and their sub-components
         # Include synthetic transceiver items (from vendors without ENTITY-MIB SFP data)
-        # Exclude items whose parent is also an INVENTORY_CLASSES item (they appear as sub-components)
+        # Exclude items that have any ancestor with an INVENTORY_CLASSES class
+        # (they appear as sub-components under that ancestor)
         top_items = []
         for item in inventory_data:
             if item.get("_from_transceiver_api"):
@@ -110,12 +111,19 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 continue
             if item.get("entPhysicalClass") not in INVENTORY_CLASSES:
                 continue
-            # Check if parent is also an inventory-class item (skip if so)
-            parent_idx = item.get("entPhysicalContainedIn", 0)
-            if parent_idx and parent_idx in index_map:
-                parent_class = index_map[parent_idx].get("entPhysicalClass", "")
-                if parent_class in INVENTORY_CLASSES:
-                    continue
+            # Walk up ancestor chain; skip if any ancestor is an inventory-class item
+            is_descendant = False
+            current_idx = item.get("entPhysicalContainedIn", 0)
+            for _ in range(10):
+                if not current_idx or current_idx not in index_map:
+                    break
+                ancestor = index_map[current_idx]
+                if ancestor.get("entPhysicalClass") in INVENTORY_CLASSES:
+                    is_descendant = True
+                    break
+                current_idx = ancestor.get("entPhysicalContainedIn", 0)
+            if is_descendant:
+                continue
             top_items.append(item)
 
         table_data = []
