@@ -21,12 +21,16 @@ INVENTORY_CLASSES = {
     "powerSupply",
     "fan",
     "port",
+    "container",
     "ioModule",
     "cpmModule",
     "mdaModule",
     "fabricModule",
     "xioModule",
 }
+
+# Model name values that indicate a generic/empty container (not real hardware)
+_GENERIC_CONTAINER_MODELS = {"", "BUILTIN", "Default", "N/A"}
 
 
 class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
@@ -109,8 +113,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if item.get("_from_transceiver_api"):
                 top_items.append(item)
                 continue
-            if item.get("entPhysicalClass") not in INVENTORY_CLASSES:
+            phys_class = item.get("entPhysicalClass")
+            if phys_class not in INVENTORY_CLASSES:
                 continue
+            # Skip containers with generic/empty model names (not real hardware)
+            if phys_class == "container":
+                model = (item.get("entPhysicalModelName") or "").strip()
+                if model in _GENERIC_CONTAINER_MODELS:
+                    continue
             # Walk up ancestor chain; skip if any ancestor is an inventory-class item
             is_descendant = False
             current_idx = item.get("entPhysicalContainedIn", 0)
@@ -223,8 +233,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if not success or not transceivers:
             return inventory_data
 
-        # Build lookup of existing inventory items by index
+        # Build lookup of existing inventory items by index and serial
         inv_by_index = {item["entPhysicalIndex"]: item for item in inventory_data}
+        inv_serials = {
+            (item.get("entPhysicalSerialNum") or "").strip()
+            for item in inventory_data
+            if (item.get("entPhysicalSerialNum") or "").strip()
+        }
 
         # Types that are containers, not real transceiver modules
         SKIP_TYPES = {"Port Container", "Port", ""}
@@ -253,8 +268,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 if not (existing.get("entPhysicalSerialNum") or "").strip() and serial:
                     existing["entPhysicalSerialNum"] = serial
             else:
+                # Skip if serial already exists in ENTITY-MIB data (avoid duplicates)
+                if serial and serial in inv_serials:
+                    continue
                 # Create synthetic inventory item for SFPs not in entity inventory
-                # Try to find port name for this transceiver
                 port_id = txr.get("port_id", 0)
                 name = f"Transceiver (port {port_id})" if port_id else f"Transceiver {ent_idx}"
 
@@ -286,12 +303,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         children = [i for i in inventory_data if i.get("entPhysicalContainedIn") == parent_idx]
         for child in children:
             model = (child.get("entPhysicalModelName") or "").strip()
-            if model:
+            if model and model not in _GENERIC_CONTAINER_MODELS:
                 results.append((depth, child))
                 # Continue looking for deeper components (e.g., SFPs inside converters)
                 self._collect_descendants(child["entPhysicalIndex"], inventory_data, depth + 1, results)
             else:
-                # Skip containers without models, but check their children
+                # Skip generic/empty items, but check their children
                 self._collect_descendants(child["entPhysicalIndex"], inventory_data, depth, results)
 
     def _sort_with_hierarchy(self, table_data):
