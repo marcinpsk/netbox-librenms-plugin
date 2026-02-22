@@ -537,10 +537,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         }
 
         if module_path_blocked:
-            from netbox_librenms_plugin.utils import MODULE_PATH_MIN_VERSION
-
             row["row_class"] = "table-warning"
-            row["module_path_warning"] = f"Requires NetBox ≥ {MODULE_PATH_MIN_VERSION}"
+            row["module_path_warning"] = (
+                "This module type uses {module_path} in its interface template "
+                "but the running NetBox does not support it yet."
+            )
 
         if name_conflict:
             row["row_class"] = "table-warning"
@@ -615,17 +616,13 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Vi
         module_type = get_object_or_404(ModuleType, pk=module_type_id)
 
         # Block install if module type uses {module_path} and NetBox doesn't support it
-        from netbox_librenms_plugin.utils import (
-            MODULE_PATH_MIN_VERSION,
-            module_type_uses_module_path,
-            supports_module_path,
-        )
+        from netbox_librenms_plugin.utils import module_type_uses_module_path, supports_module_path
 
         if module_type_uses_module_path(module_type) and not supports_module_path():
             messages.error(
                 request,
                 f"Cannot install {module_type.model}: its interface templates use "
-                f"{{module_path}} which requires NetBox ≥ {MODULE_PATH_MIN_VERSION}.",
+                f"{{module_path}} which this NetBox version does not support.",
             )
             sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
             return redirect(f"{sync_url}?tab=modules#librenms-module-table")
