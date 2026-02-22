@@ -39,6 +39,65 @@
   netbox_module_type: "MX480-CHASSIS-BP"
   description: "Juniper MX480 backplane (matched by name)"
 
+# ─── Juniper FPC / Line Card Mappings ────────────────────────────────────────
+# Juniper FPCs use 750-xxxxxx part numbers as entPhysicalModelName.
+
+- librenms_model: "750-018124"
+  netbox_module_type: "DPCE-R-4XGE-XFP"
+  description: "Juniper DPCE 4-port 10G XFP DPC"
+
+- librenms_model: "750-022765"
+  netbox_module_type: "DPCE-R-20GE-2XGE"
+  description: "Juniper DPCE 20x1G + 2x10G combo DPC"
+
+- librenms_model: "750-028467"
+  netbox_module_type: "MPC-3D-16XGE-SFPP"
+  description: "Juniper MPC 16-port 10G SFP+"
+
+- librenms_model: "750-056519"
+  netbox_module_type: "MPC7E-MRATE"
+  description: "Juniper MPC7E 12-port QSFP+/QSFP28 multirate"
+
+- librenms_model: "750-062581"
+  netbox_module_type: "MPC-3D-16XGE-SFPP"
+  description: "Juniper MPC 16-port 10G SFP+ (variant PN)"
+
+# ─── Juniper Power Supply Mappings ───────────────────────────────────────────
+
+- librenms_model: "740-029970"
+  netbox_module_type: "PWR-MX480-2520-AC"
+  description: "Juniper MX480 2520W AC PSU"
+
+- librenms_model: "740-063046"
+  netbox_module_type: "PWR-MX480-2520-AC"
+  description: "Juniper MX480 2520W AC PSU (variant PN)"
+
+- librenms_model: "740-027760"
+  netbox_module_type: "PWR-MX960-4100-AC"
+  description: "Juniper MX960 4100W AC PSU"
+
+- librenms_model: "740-110419"
+  netbox_module_type: "JNP-PWR2200-AC"
+  description: "Juniper MX304 2200W AC PSU"
+
+- librenms_model: "JPSU-1600W-1UACAFO"
+  netbox_module_type: "JPSU-1600W-1UACAFO"
+  description: "Juniper ACX7100 1600W AC PSU AFO"
+
+# ─── Juniper Fan Tray Mappings ───────────────────────────────────────────────
+
+- librenms_model: "740-031521"
+  netbox_module_type: "FFANTRAY-MX960-HC"
+  description: "Juniper MX960 high-capacity fan tray"
+
+- librenms_model: "760-126744"
+  netbox_module_type: "JNP-FAN-2RU"
+  description: "Juniper MX304 2RU fan tray"
+
+- librenms_model: "JNP7100-FAN1RU-AO"
+  netbox_module_type: "JNP7100-FAN1RU-AO"
+  description: "Juniper ACX7100 1RU fan tray AO"
+
 # ─── Transceiver Mappings: Juniper Part Numbers ─────────────────────────────
 # Juniper-qualified optics use 740-xxxxxx part numbers regardless of OEM vendor.
 

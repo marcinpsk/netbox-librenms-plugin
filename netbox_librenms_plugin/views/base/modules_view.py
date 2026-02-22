@@ -116,11 +116,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             phys_class = item.get("entPhysicalClass")
             if phys_class not in INVENTORY_CLASSES:
                 continue
-            # Skip containers with generic/empty model names (not real hardware)
-            if phys_class == "container":
-                model = (item.get("entPhysicalModelName") or "").strip()
-                if model in _GENERIC_CONTAINER_MODELS:
-                    continue
+            # Skip items with generic model names (not real hardware)
+            model = (item.get("entPhysicalModelName") or "").strip()
+            if model and model in _GENERIC_CONTAINER_MODELS:
+                continue
             # Walk up ancestor chain; skip if any ancestor is an inventory-class item
             is_descendant = False
             current_idx = item.get("entPhysicalContainedIn", 0)
