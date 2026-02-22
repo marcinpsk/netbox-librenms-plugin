@@ -116,18 +116,29 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             phys_class = item.get("entPhysicalClass")
             if phys_class not in INVENTORY_CLASSES:
                 continue
-            # Skip items with generic model names (not real hardware)
+            # Skip items with generic model names (not real hardware).
+            # Containers with empty model are physical slot representations.
             model = (item.get("entPhysicalModelName") or "").strip()
+            if phys_class == "container" and model in _GENERIC_CONTAINER_MODELS:
+                continue
             if model and model in _GENERIC_CONTAINER_MODELS:
                 continue
-            # Walk up ancestor chain; skip if any ancestor is an inventory-class item
+            # Walk up ancestor chain; skip if any ancestor is an inventory-class item.
+            # Containers with empty model are physical slot/bay representations, not
+            # real modules — skip them so children can be top-level items.
             is_descendant = False
             current_idx = item.get("entPhysicalContainedIn", 0)
             for _ in range(10):
                 if not current_idx or current_idx not in index_map:
                     break
                 ancestor = index_map[current_idx]
-                if ancestor.get("entPhysicalClass") in INVENTORY_CLASSES:
+                anc_class = ancestor.get("entPhysicalClass")
+                if anc_class in INVENTORY_CLASSES:
+                    anc_model = (ancestor.get("entPhysicalModelName") or "").strip()
+                    # Empty-model containers are just physical slot representations
+                    if anc_class == "container" and not anc_model:
+                        current_idx = ancestor.get("entPhysicalContainedIn", 0)
+                        continue
                     is_descendant = True
                     break
                 current_idx = ancestor.get("entPhysicalContainedIn", 0)

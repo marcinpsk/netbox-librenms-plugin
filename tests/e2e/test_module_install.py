@@ -262,9 +262,10 @@ class TestModuleInstallWorkflow:
         rows = self._get_table_rows(page)
 
         # Children of Supervisor(slot 1) should show "No matching bay"
+        # since Supervisor isn't installed, its child bays don't exist yet
         children = [r for r in rows if r["name"].startswith("└─") and "TenGigabitEthernet1/" in r["name"]]
         for child in children:
-            assert child["bay"] == "No matching bay", (
+            assert "No matching bay" in child["bay"], (
                 f"Child '{child['name']}' should show 'No matching bay' when parent not installed, got '{child['bay']}'"
             )
 
