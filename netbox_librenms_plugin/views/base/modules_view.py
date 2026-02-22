@@ -485,7 +485,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
     def _build_row(self, item, index_map, module_bays, module_types, depth=0):
         """Build a single table row from a LibreNMS inventory item."""
-        from netbox_librenms_plugin.utils import module_type_uses_module_path, supports_module_path
+        from netbox_librenms_plugin.utils import (
+            has_nested_name_conflict,
+            module_type_uses_module_path,
+            supports_module_path,
+        )
 
         model_name = item.get("entPhysicalModelName", "") or ""
         serial = item.get("entPhysicalSerialNum", "") or ""
@@ -502,6 +506,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Check {module_path} compatibility
         needs_module_path = matched_type and module_type_uses_module_path(matched_type)
         module_path_blocked = needs_module_path and not supports_module_path()
+
+        # Check for nested module naming conflicts
+        name_conflict = (
+            matched_type
+            and matched_bay
+            and not module_path_blocked
+            and has_nested_name_conflict(matched_type, matched_bay)
+        )
 
         # Determine status
         status = self._determine_status(matched_bay, matched_type, serial, module_path_blocked)
@@ -529,6 +541,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
             row["row_class"] = "table-warning"
             row["module_path_warning"] = f"Requires NetBox ≥ {MODULE_PATH_MIN_VERSION}"
+
+        if name_conflict:
+            row["row_class"] = "table-warning"
+            row["name_conflict_warning"] = (
+                "This module type uses {module} in its interface template. "
+                "Installing multiple siblings will create duplicate interface names. "
+                "An interface naming plugin with a rewrite rule for this module type can resolve this."
+            )
 
         # Add URLs for matched objects
         if matched_bay:
@@ -812,7 +832,14 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
                 module.full_clean()
                 module.save()
         except Exception as e:
-            return {"status": "failed", "name": name, "reason": str(e)}
+            error_msg = str(e)
+            if "dcim_interface_unique_device_name" in error_msg:
+                error_msg = (
+                    "duplicate interface name — this module type's interface template "
+                    "uses {module} which resolves to the same name for all siblings. "
+                    "An interface naming plugin with a rewrite rule for this module type can fix this."
+                )
+            return {"status": "failed", "name": name, "reason": error_msg}
 
         return {"status": "installed", "name": f"{matched_type.model} → {matched_bay.name}"}
 

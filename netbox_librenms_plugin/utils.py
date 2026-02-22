@@ -486,3 +486,40 @@ def supports_module_path():
 def module_type_uses_module_path(module_type):
     """Check if a ModuleType has any interface templates using {module_path}."""
     return any("{module_path}" in t.name for t in module_type.interfacetemplates.all())
+
+
+def has_nested_name_conflict(module_type, module_bay):
+    """Check if installing this module type in a nested bay would cause a name conflict.
+
+    Returns True when ALL of the following are true:
+    - The module type has interface templates using only ``{module}`` (not ``{module_path}``)
+    - The bay is nested (its parent is owned by an installed module)
+    - There is at least one sibling bay under the same parent
+
+    In this situation NetBox's ``resolve_name()`` replaces ``{module}`` with the
+    root ancestor's bay position, producing the same interface name for every
+    sibling at this nesting level.
+    """
+    from dcim.constants import MODULE_TOKEN
+
+    if not module_bay or not module_bay.module_id:
+        return False  # Top-level bay — no conflict
+
+    templates = list(module_type.interfacetemplates.all())
+    if not templates:
+        return False  # No interface templates
+
+    uses_module_token = any(MODULE_TOKEN in t.name for t in templates)
+    if not uses_module_token:
+        return False  # Template doesn't use {module}
+
+    # Count how many unique interface names this template would produce across siblings
+    # If all siblings resolve to the same name, there's a conflict
+    from dcim.models import ModuleBay as ModuleBayModel
+
+    sibling_count = ModuleBayModel.objects.filter(
+        device=module_bay.device,
+        module_id=module_bay.module_id,
+    ).count()
+
+    return sibling_count > 1
