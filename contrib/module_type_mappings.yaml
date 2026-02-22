@@ -186,6 +186,10 @@
 
 # ─── Transceiver Mappings: Ciena ─────────────────────────────────────────────
 
+- librenms_model: "180-3530-900"
+  netbox_module_type: "QSFP-DD-400G-ZR"
+  description: "Ciena WaveLogic 5 Nano QSFP-DD 400ZR"
+
 - librenms_model: "176-3360-900"
   netbox_module_type: "QSFP-DD-400G-ZR-M"
   description: "Ciena QSFP-DD 400G-ZR-M coherent"
