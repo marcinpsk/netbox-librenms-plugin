@@ -1,5 +1,7 @@
+import json as json_module
+
 import django_tables2 as tables
-from django.utils.html import format_html
+from django.utils.html import escape, format_html
 from django.utils.safestring import mark_safe
 from netbox.tables.columns import BooleanColumn, ToggleColumn
 from utilities.paginator import EnhancedPaginator
@@ -7,10 +9,14 @@ from utilities.templatetags.helpers import humanize_speed
 
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.utils import (
+    check_vlan_group_matches,
     convert_speed_to_kbps,
     format_mac_address,
     get_interface_name_field,
+    get_missing_vlan_warning,
     get_table_paginate_count,
+    get_tagged_vlan_css_class,
+    get_untagged_vlan_css_class,
     get_virtual_chassis_member,
 )
 
@@ -123,13 +129,18 @@ class LibreNMSInterfaceTable(tables.Table):
         exists_in_netbox = record.get("exists_in_netbox", False)
         netbox_interface = record.get("netbox_interface")
 
-        # Get NetBox VLAN assignments
+        # Get NetBox VLAN assignments (VID + group for group-aware comparison)
         netbox_untagged_vid = None
+        netbox_untagged_group_id = None
         netbox_tagged_vids = set()
+        netbox_tagged_group_ids = {}
         if netbox_interface:
             if netbox_interface.untagged_vlan:
                 netbox_untagged_vid = netbox_interface.untagged_vlan.vid
-            netbox_tagged_vids = {v.vid for v in netbox_interface.tagged_vlans.all()}
+                netbox_untagged_group_id = netbox_interface.untagged_vlan.group_id
+            for v in netbox_interface.tagged_vlans.all():
+                netbox_tagged_vids.add(v.vid)
+                netbox_tagged_group_ids[v.vid] = v.group_id
 
         all_vlans = []
         if untagged:
@@ -144,14 +155,27 @@ class LibreNMSInterfaceTable(tables.Table):
         safe_name = interface_name.replace("/", "_").replace(":", "_")
 
         # Build compact colored summary (show up to 3 VLANs, summarize rest)
+        vlan_group_map = record.get("vlan_group_map", {})
         MAX_INLINE = 3
         inline_parts = []
         for vlan_type, vid in all_vlans[:MAX_INLINE]:
+            selected_gid = self._parse_group_id(vlan_group_map.get(vid, {}).get("group_id", ""))
+            group_matches = check_vlan_group_matches(
+                vlan_type,
+                vid,
+                selected_gid,
+                netbox_untagged_group_id,
+                netbox_tagged_group_ids,
+                netbox_untagged_vid,
+                netbox_tagged_vids,
+            )
             if vlan_type == "U":
-                css = self._get_untagged_vlan_css_class(vid, netbox_untagged_vid, exists_in_netbox, missing_vlans)
+                css = get_untagged_vlan_css_class(
+                    vid, netbox_untagged_vid, exists_in_netbox, missing_vlans, group_matches
+                )
             else:
-                css = self._get_tagged_vlan_css_class(vid, netbox_tagged_vids, exists_in_netbox, missing_vlans)
-            warning = self._get_missing_vlan_warning(vid, missing_vlans)
+                css = get_tagged_vlan_css_class(vid, netbox_tagged_vids, exists_in_netbox, missing_vlans, group_matches)
+            warning = get_missing_vlan_warning(vid, missing_vlans)
             inline_parts.append(f'<span class="{css}">{vid}({vlan_type}){warning}</span>')
 
         summary = ", ".join(inline_parts)
@@ -160,7 +184,6 @@ class LibreNMSInterfaceTable(tables.Table):
             summary += f' <span class="text-muted">+{extra} more</span>'
 
         # Build tooltip showing auto-selected VLAN group per VLAN
-        vlan_group_map = record.get("vlan_group_map", {})
         tooltip_lines = []
         for vlan_type, vid in all_vlans:
             if vid in missing_vlans:
@@ -168,7 +191,7 @@ class LibreNMSInterfaceTable(tables.Table):
             else:
                 group_info = vlan_group_map.get(vid, {})
                 group_name = group_info.get("group_name", "Global")
-                tooltip_lines.append(f"VLAN {vid}({vlan_type}) → {group_name}")
+                tooltip_lines.append(f"VLAN {vid}({vlan_type}) → {escape(group_name)}")
         tooltip_text = "&#10;".join(tooltip_lines)
 
         # Build hidden inputs for per-VLAN group selections (submitted with form)
@@ -177,28 +200,51 @@ class LibreNMSInterfaceTable(tables.Table):
             group_info = vlan_group_map.get(vid, {})
             group_id = group_info.get("group_id", "")
             hidden_inputs.append(
-                f'<input type="hidden" name="vlan_group_{safe_name}_{vid}" '
-                f'value="{group_id}" class="vlan-group-hidden" '
-                f'data-interface="{interface_name}" data-vid="{vid}">'
+                format_html(
+                    '<input type="hidden" name="vlan_group_{}_{}" '
+                    'value="{}" class="vlan-group-hidden" '
+                    'data-interface="{}" data-vid="{}">',
+                    safe_name,
+                    vid,
+                    group_id,
+                    interface_name,
+                    vid,
+                )
             )
 
-        # Build JSON data for modal
+        # Build JSON data for modal (use proper json serialization for safety)
         vlan_json_items = []
         for vlan_type, vid in all_vlans:
             group_info = vlan_group_map.get(vid, {})
             is_missing = vid in missing_vlans
+            selected_gid = self._parse_group_id(group_info.get("group_id", ""))
+            group_matches = check_vlan_group_matches(
+                vlan_type,
+                vid,
+                selected_gid,
+                netbox_untagged_group_id,
+                netbox_tagged_group_ids,
+                netbox_untagged_vid,
+                netbox_tagged_vids,
+            )
             if vlan_type == "U":
-                css = self._get_untagged_vlan_css_class(vid, netbox_untagged_vid, exists_in_netbox, missing_vlans)
+                css = get_untagged_vlan_css_class(
+                    vid, netbox_untagged_vid, exists_in_netbox, missing_vlans, group_matches
+                )
             else:
-                css = self._get_tagged_vlan_css_class(vid, netbox_tagged_vids, exists_in_netbox, missing_vlans)
+                css = get_tagged_vlan_css_class(vid, netbox_tagged_vids, exists_in_netbox, missing_vlans, group_matches)
             display_group_name = "Not in NetBox" if is_missing else group_info.get("group_name", "Global")
             vlan_json_items.append(
-                f'{{"vid":{vid},"type":"{vlan_type}",'
-                f'"group_id":"{group_info.get("group_id", "")}",'
-                f'"group_name":"{display_group_name}",'
-                f'"css":"{css}","missing":{str(is_missing).lower()}}}'
+                {
+                    "vid": vid,
+                    "type": vlan_type,
+                    "group_id": group_info.get("group_id", ""),
+                    "group_name": display_group_name,
+                    "css": css,
+                    "missing": is_missing,
+                }
             )
-        vlan_json = "[" + ",".join(vlan_json_items) + "]"
+        vlan_json = json_module.dumps(vlan_json_items)
 
         device_id = self.device.pk if self.device else ""
 
@@ -207,82 +253,43 @@ class LibreNMSInterfaceTable(tables.Table):
         for group in self.vlan_groups:
             scope_info = str(group.scope) if hasattr(group, "scope") and group.scope else ""
             group_options.append({"id": str(group.pk), "name": group.name, "scope": scope_info})
-        import json
 
-        groups_json = json.dumps(group_options)
+        groups_json = json_module.dumps(group_options)
 
-        edit_btn = (
-            f'<button type="button" class="btn btn-sm btn-link p-0 ms-1 vlan-edit-btn" '
-            f'data-interface="{interface_name}" '
-            f'data-safe-name="{safe_name}" '
-            f'data-device-id="{device_id}" '
-            f"data-vlans='{vlan_json}' "
-            f"data-vlan-groups='{groups_json}' "
-            f'title="Edit VLAN group assignments">'
-            f'<i class="mdi mdi-pencil"></i></button>'
+        # Escape JSON for safe embedding in HTML attributes
+        escaped_vlan_json = escape(vlan_json)
+        escaped_groups_json = escape(groups_json)
+
+        edit_btn = format_html(
+            '<button type="button" class="btn btn-sm btn-link p-0 ms-1 vlan-edit-btn" '
+            'data-interface="{}" '
+            'data-safe-name="{}" '
+            'data-device-id="{}" '
+            "data-vlans='{}' "
+            "data-vlan-groups='{}' "
+            'title="Edit VLAN group assignments">'
+            '<i class="mdi mdi-pencil"></i></button>',
+            interface_name,
+            safe_name,
+            device_id,
+            escaped_vlan_json,
+            escaped_groups_json,
         )
 
-        html = f'<span title="{tooltip_text}">{summary}</span>{edit_btn}{"".join(hidden_inputs)}'
+        hidden_inputs_html = mark_safe("".join(str(h) for h in hidden_inputs))
 
-        return mark_safe(html)
+        return format_html(
+            '<span title="{}">{}</span>{}{}',
+            mark_safe(tooltip_text),
+            mark_safe(summary),
+            edit_btn,
+            hidden_inputs_html,
+        )
 
-    def _get_untagged_vlan_css_class(self, librenms_vid, netbox_vid, exists_in_netbox, missing_vlans):
-        """
-        Get CSS class for untagged VLAN comparison.
-
-        Color logic:
-        - Red (text-danger) + warning icon: VLAN not in any NetBox group (cannot sync)
-        - Red (text-danger): Interface missing from NetBox, or no untagged VLAN in NetBox
-        - Orange (text-warning): Different untagged VLAN assigned (mismatch)
-        - Green (text-success): Same untagged VLAN assigned (match)
-
-        Note: Warning icon is added separately by _get_missing_vlan_warning().
-
-        Returns:
-            CSS class string: text-danger, text-warning, or text-success
-        """
-        if not exists_in_netbox:
-            return "text-danger"  # Interface doesn't exist in NetBox
-        if librenms_vid in missing_vlans:
-            return "text-danger"  # VLAN not in any NetBox group - warning icon added
-        if librenms_vid == netbox_vid:
-            return "text-success"  # Exact match
-        if netbox_vid is None:
-            return "text-danger"  # No untagged VLAN assigned in NetBox - not present
-        return "text-warning"  # Different untagged VLAN assigned - mismatch
-
-    def _get_tagged_vlan_css_class(self, vid, netbox_tagged_vids, exists_in_netbox, missing_vlans):
-        """
-        Get CSS class for tagged VLAN comparison.
-
-        Color logic:
-        - Red (text-danger) + warning icon: VLAN not in any NetBox group (cannot sync)
-        - Red (text-danger): Interface missing from NetBox, or VLAN not tagged on this interface
-        - Green (text-success): VLAN is tagged on this interface in NetBox
-
-        Note: Tagged VLANs are binary - either present or not. There is no
-        "mismatch" concept like untagged (which can have a different VID).
-
-        Note: Warning icon is added separately by _get_missing_vlan_warning().
-
-        Returns:
-            CSS class string: text-danger or text-success
-        """
-        if not exists_in_netbox:
-            return "text-danger"  # Interface doesn't exist in NetBox
-        if vid in missing_vlans:
-            return "text-danger"  # VLAN not in any NetBox group - warning icon added
-        if vid in netbox_tagged_vids:
-            return "text-success"  # VLAN is tagged on this interface
-        return "text-danger"  # VLAN not tagged on this interface - not present
-
-    def _get_missing_vlan_warning(self, vid, missing_vlans):
-        """Return warning icon HTML if VLAN is not found in any NetBox VLAN group."""
-        if vid in missing_vlans:
-            return (
-                ' <i class="mdi mdi-alert text-danger" title="VLAN not in NetBox—use VLAN Sync first to create it"></i>'
-            )
-        return ""
+    @staticmethod
+    def _parse_group_id(group_id_str):
+        """Normalize a group ID string to int or None for comparison."""
+        return int(group_id_str) if group_id_str else None
 
     def render_speed(self, value, record):
         """Render interface speed with appropriate styling based on comparison with NetBox"""

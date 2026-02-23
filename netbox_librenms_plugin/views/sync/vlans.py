@@ -114,7 +114,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheM
                         group=row_vlan_group,
                         defaults={
                             "name": librenms_name,
-                            "status": self._get_vlan_status(vlan_data),
+                            "status": "active",
                         },
                     )
                     if created:
@@ -126,16 +126,21 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheM
                     else:
                         skipped_count += 1
                 else:
-                    # Global VLAN: try VID+name match first
-                    vlan = VLAN.objects.filter(vid=vid, name=librenms_name, group__isnull=True).first()
-                    if not vlan:
-                        vlan = VLAN.objects.create(
-                            vid=vid,
-                            name=librenms_name,
-                            group=None,
-                            status=self._get_vlan_status(vlan_data),
-                        )
+                    # Global VLAN: match by VID only (unique constraint with group=NULL)
+                    vlan, created = VLAN.objects.get_or_create(
+                        vid=vid,
+                        group=None,
+                        defaults={
+                            "name": librenms_name,
+                            "status": "active",
+                        },
+                    )
+                    if created:
                         created_count += 1
+                    elif vlan.name != librenms_name:
+                        vlan.name = librenms_name
+                        vlan.save()
+                        updated_count += 1
                     else:
                         skipped_count += 1
 

@@ -606,6 +606,10 @@ function initializeVlanModalSave() {
                     device_id: deviceId,
                     vid_group_map: vidGroupMap
                 })
+            }).then(response => {
+                if (!response.ok) {
+                    console.error('Failed to persist VLAN group overrides: HTTP', response.status);
+                }
             }).catch(error => {
                 console.error('Failed to persist VLAN group overrides:', error);
             });
@@ -667,7 +671,12 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
             vlan_group_id: groupId || null
         })
     })
-        .then(response => response.json())
+        .then(response => {
+            if (!response.ok) {
+                throw new Error('HTTP ' + response.status);
+            }
+            return response.json();
+        })
         .then(data => {
             if (data.status !== 'success') return;
 

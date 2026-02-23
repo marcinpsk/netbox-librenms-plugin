@@ -148,7 +148,7 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             interface_name_field = get_interface_name_field(request)
 
         cached_data = cache.get(self.get_cache_key(obj, "ports"))
-        last_fetched = cache.get(self.get_last_fetched_key(obj), "ports")
+        last_fetched = cache.get(self.get_last_fetched_key(obj, "ports"))
 
         # Get VLAN groups for dropdown
         vlan_groups = self.get_vlan_groups_for_device(obj)
@@ -311,20 +311,29 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         if vlan_group_overrides:
             from ipam.models import VLANGroup
 
+            # Batch-fetch all referenced override group IDs to avoid N+1 queries
+            override_group_ids = {
+                vlan_group_overrides[str(vid)]
+                for vid in all_vids
+                if str(vid) in vlan_group_overrides and vlan_group_overrides[str(vid)]
+            }
+            override_groups_by_id = {}
+            if override_group_ids:
+                override_groups_by_id = VLANGroup.objects.in_bulk(list(override_group_ids))
+
             for vid in all_vids:
                 vid_str = str(vid)
                 if vid_str in vlan_group_overrides:
                     override_group_id = vlan_group_overrides[vid_str]
                     if override_group_id:
-                        try:
-                            group = VLANGroup.objects.get(pk=override_group_id)
+                        group = override_groups_by_id.get(int(override_group_id))
+                        if group:
                             vlan_group_map[vid] = {
                                 "group_id": str(group.pk),
                                 "group_name": group.name,
                                 "is_ambiguous": False,
                             }
-                        except VLANGroup.DoesNotExist:
-                            pass  # Override references deleted group; keep auto-selection
+                        # else: Override references deleted group; keep auto-selection
                     else:
                         # User explicitly chose "No Group (Global)"
                         vlan_group_map[vid] = {

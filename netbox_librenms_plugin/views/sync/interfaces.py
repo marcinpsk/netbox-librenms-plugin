@@ -165,10 +165,14 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
             )
 
         # Sync VLANs if not excluded
+        vlan_synced = False
         if "vlans" not in exclude_columns:
             self._sync_interface_vlans(interface, librenms_interface, interface_name)
+            vlan_synced = True
 
-        interface.save()
+        # Skip redundant save when _sync_interface_vlans already saved (via _update_interface_vlan_assignment)
+        if not vlan_synced:
+            interface.save()
 
     def get_netbox_interface_type(self, librenms_interface):
         """Return the NetBox interface type mapped from LibreNMS type and speed."""

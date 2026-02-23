@@ -17,7 +17,13 @@ from netbox_librenms_plugin.tables.interfaces import (
     LibreNMSInterfaceTable,
     VCInterfaceTable,
 )
-from netbox_librenms_plugin.utils import get_interface_name_field, get_vlan_sync_css_class
+from netbox_librenms_plugin.utils import (
+    get_interface_name_field,
+    get_missing_vlan_warning,
+    get_tagged_vlan_css_class,
+    get_untagged_vlan_css_class,
+    get_vlan_sync_css_class,
+)
 
 from ..base.cables_view import BaseCableTableView
 from ..base.interfaces_view import BaseInterfaceTableView
@@ -131,7 +137,7 @@ class SingleInterfaceVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
         return JsonResponse({"status": "error", "message": "Interface data not found"}, status=404)
 
 
-class SingleVlanGroupVerifyView(CacheMixin, View):
+class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
     """
     Verify VLAN assignments for an interface against a specific VLAN group.
 
@@ -156,7 +162,10 @@ class SingleVlanGroupVerifyView(CacheMixin, View):
             return JsonResponse({"status": "error", "message": "No VID provided"}, status=400)
 
         device = get_object_or_404(Device, pk=device_id)
-        vid = int(vid_str)
+        try:
+            vid = int(vid_str)
+        except (ValueError, TypeError):
+            return JsonResponse({"status": "error", "message": "Invalid VID"}, status=400)
 
         # Build lookup for the selected group
         if vlan_group_id:
@@ -177,19 +186,35 @@ class SingleVlanGroupVerifyView(CacheMixin, View):
         netbox_interface = device.interfaces.filter(name=interface_name).first()
         exists_in_netbox = bool(netbox_interface)
 
-        # Get NetBox VLAN assignments
+        # Get NetBox VLAN assignments (VID + group for group-aware comparison)
         netbox_untagged_vid = None
+        netbox_untagged_group_id = None
         netbox_tagged_vids = set()
+        netbox_tagged_group_ids = {}
         if netbox_interface:
             if netbox_interface.untagged_vlan:
                 netbox_untagged_vid = netbox_interface.untagged_vlan.vid
-            netbox_tagged_vids = {v.vid for v in netbox_interface.tagged_vlans.all()}
+                netbox_untagged_group_id = netbox_interface.untagged_vlan.group_id
+            for v in netbox_interface.tagged_vlans.all():
+                netbox_tagged_vids.add(v.vid)
+                netbox_tagged_group_ids[v.vid] = v.group_id
+
+        # Determine group match: selected group vs NetBox VLAN's actual group
+        selected_gid = int(vlan_group_id) if vlan_group_id else None
 
         # Determine CSS class based on actual VLAN type
         if vlan_type == "U":
-            css_class = self._get_untagged_vlan_css_class(vid, netbox_untagged_vid, exists_in_netbox, missing_vlans)
+            # Group matches only matters when VIDs match
+            group_matches = (netbox_untagged_group_id == selected_gid) if netbox_untagged_vid == vid else True
+            css_class = get_untagged_vlan_css_class(
+                vid, netbox_untagged_vid, exists_in_netbox, missing_vlans, group_matches
+            )
         else:
-            css_class = self._get_tagged_vlan_css_class(vid, netbox_tagged_vids, exists_in_netbox, missing_vlans)
+            netbox_gid = netbox_tagged_group_ids.get(vid)
+            group_matches = (netbox_gid == selected_gid) if vid in netbox_tagged_vids else True
+            css_class = get_tagged_vlan_css_class(
+                vid, netbox_tagged_vids, exists_in_netbox, missing_vlans, group_matches
+            )
 
         # Also render formatted HTML for backward compatibility
         formatted_vlans = self._render_vlans_cell(
@@ -223,13 +248,13 @@ class SingleVlanGroupVerifyView(CacheMixin, View):
         parts = []
 
         if untagged:
-            css = self._get_untagged_vlan_css_class(untagged, netbox_untagged_vid, exists_in_netbox, missing_vlans)
-            warning = self._get_missing_vlan_warning(untagged, missing_vlans)
+            css = get_untagged_vlan_css_class(untagged, netbox_untagged_vid, exists_in_netbox, missing_vlans)
+            warning = get_missing_vlan_warning(untagged, missing_vlans)
             parts.append(f'<span class="{css}">{untagged}(U){warning}</span>')
 
         for vid in sorted(tagged):
-            css = self._get_tagged_vlan_css_class(vid, netbox_tagged_vids, exists_in_netbox, missing_vlans)
-            warning = self._get_missing_vlan_warning(vid, missing_vlans)
+            css = get_tagged_vlan_css_class(vid, netbox_tagged_vids, exists_in_netbox, missing_vlans)
+            warning = get_missing_vlan_warning(vid, missing_vlans)
             parts.append(f'<span class="{css}">{vid}(T){warning}</span>')
 
         if not parts:
@@ -237,39 +262,8 @@ class SingleVlanGroupVerifyView(CacheMixin, View):
 
         return mark_safe(", ".join(parts))
 
-    def _get_untagged_vlan_css_class(self, librenms_vid, netbox_vid, exists_in_netbox, missing_vlans):
-        """Get CSS class for untagged VLAN comparison."""
-        if not exists_in_netbox:
-            return "text-danger"
-        if librenms_vid in missing_vlans:
-            return "text-danger"
-        if librenms_vid == netbox_vid:
-            return "text-success"
-        if netbox_vid is None:
-            return "text-danger"  # No untagged VLAN assigned in NetBox
-        return "text-warning"  # Different untagged VLAN assigned
 
-    def _get_tagged_vlan_css_class(self, vid, netbox_tagged_vids, exists_in_netbox, missing_vlans):
-        """Get CSS class for tagged VLAN comparison."""
-        if not exists_in_netbox:
-            return "text-danger"
-        if vid in missing_vlans:
-            return "text-danger"
-        if vid in netbox_tagged_vids:
-            return "text-success"
-        return "text-danger"  # VLAN not tagged on this interface
-
-    def _get_missing_vlan_warning(self, vid, missing_vlans):
-        """Return warning icon HTML if VLAN is not found in selected group."""
-        if vid in missing_vlans:
-            return (
-                ' <i class="mdi mdi-alert text-danger" '
-                'title="VLAN not in selected group—use VLAN Sync first to create it"></i>'
-            )
-        return ""
-
-
-class VerifyVlanSyncGroupView(View):
+class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, View):
     """
     Verify whether a VLAN (by VID) exists in a selected VLAN group.
 
@@ -289,7 +283,10 @@ class VerifyVlanSyncGroupView(View):
         if not vid_str:
             return JsonResponse({"status": "error", "message": "No VID provided"}, status=400)
 
-        vid = int(vid_str)
+        try:
+            vid = int(vid_str)
+        except (ValueError, TypeError):
+            return JsonResponse({"status": "error", "message": "Invalid VID"}, status=400)
 
         # Check if VLAN exists in the selected group (or globally)
         if vlan_group_id:
@@ -314,7 +311,7 @@ class VerifyVlanSyncGroupView(View):
         )
 
 
-class SaveVlanGroupOverridesView(CacheMixin, View):
+class SaveVlanGroupOverridesView(LibreNMSPermissionMixin, CacheMixin, View):
     """
     Persist user VLAN-group-override selections in cache.
 
@@ -326,6 +323,10 @@ class SaveVlanGroupOverridesView(CacheMixin, View):
     """
 
     def post(self, request):
+        # Require plugin write permission to persist VLAN group overrides
+        if error := self.require_write_permission_json():
+            return error
+
         data = json.loads(request.body)
         device_id = data.get("device_id")
         vid_group_map = data.get("vid_group_map", {})

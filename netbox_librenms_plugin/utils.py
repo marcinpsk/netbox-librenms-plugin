@@ -300,3 +300,123 @@ def get_vlan_sync_css_class(exists_in_netbox: bool, name_matches: bool = True) -
     if name_matches:
         return "text-success"
     return "text-warning"
+
+
+# ============================================
+# Interface VLAN CSS helpers
+# ============================================
+# Shared by LibreNMSInterfaceTable (tables/interfaces.py) and
+# SingleVlanGroupVerifyView (views/object_sync/devices.py).
+
+
+def get_untagged_vlan_css_class(librenms_vid, netbox_vid, exists_in_netbox, missing_vlans, group_matches=True):
+    """
+    Get CSS class for an untagged VLAN comparison.
+
+    Color logic:
+    - Red (text-danger) + warning icon: VLAN not in any NetBox group (cannot sync)
+    - Red (text-danger): Interface missing from NetBox, or no untagged VLAN in NetBox
+    - Orange (text-warning): Different untagged VLAN assigned, or same VID but different group
+    - Green (text-success): Same untagged VLAN assigned in same group (match)
+
+    Args:
+        librenms_vid: VLAN ID from LibreNMS.
+        netbox_vid: VLAN ID currently assigned in NetBox (int or None).
+        exists_in_netbox: Whether the interface exists in NetBox.
+        missing_vlans: List of VIDs not found in any NetBox VLAN group.
+        group_matches: Whether the selected VLAN group matches the NetBox VLAN's group.
+                       Only meaningful when VIDs match; defaults to True.
+
+    Returns:
+        CSS class string: text-danger, text-warning, or text-success.
+    """
+    if not exists_in_netbox:
+        return "text-danger"
+    if librenms_vid in missing_vlans:
+        return "text-danger"
+    if librenms_vid == netbox_vid:
+        if not group_matches:
+            return "text-warning"
+        return "text-success"
+    if netbox_vid is None:
+        return "text-danger"
+    return "text-warning"
+
+
+def get_tagged_vlan_css_class(vid, netbox_tagged_vids, exists_in_netbox, missing_vlans, group_matches=True):
+    """
+    Get CSS class for a tagged VLAN comparison.
+
+    Color logic:
+    - Red (text-danger) + warning icon: VLAN not in any NetBox group (cannot sync)
+    - Red (text-danger): Interface missing from NetBox, or VLAN not tagged on this interface
+    - Orange (text-warning): Same VID tagged but in different VLAN group
+    - Green (text-success): VLAN is tagged on this interface in same group
+
+    Args:
+        vid: VLAN ID to check.
+        netbox_tagged_vids: Set of VIDs currently tagged on the NetBox interface.
+        exists_in_netbox: Whether the interface exists in NetBox.
+        missing_vlans: List of VIDs not found in any NetBox VLAN group.
+        group_matches: Whether the selected VLAN group matches the NetBox VLAN's group.
+                       Only meaningful when VIDs match; defaults to True.
+
+    Returns:
+        CSS class string: text-danger, text-warning, or text-success.
+    """
+    if not exists_in_netbox:
+        return "text-danger"
+    if vid in missing_vlans:
+        return "text-danger"
+    if vid in netbox_tagged_vids:
+        if not group_matches:
+            return "text-warning"
+        return "text-success"
+    return "text-danger"
+
+
+def get_missing_vlan_warning(vid, missing_vlans):
+    """Return warning icon HTML if VLAN is not found in any NetBox VLAN group."""
+    if vid in missing_vlans:
+        return (
+            ' <i class="mdi mdi-alert text-danger" '
+            'title="VLAN not in NetBox\u2014use VLAN Sync first to create it"></i>'
+        )
+    return ""
+
+
+def check_vlan_group_matches(
+    vlan_type,
+    vid,
+    selected_group_id,
+    netbox_untagged_group_id,
+    netbox_tagged_group_ids,
+    netbox_untagged_vid,
+    netbox_tagged_vids,
+):
+    """
+    Check whether the selected VLAN group matches the NetBox VLAN's group.
+
+    Only relevant when VIDs match — if VIDs differ, the CSS is already
+    warning/danger regardless of group.
+
+    Args:
+        vlan_type: "U" or "T".
+        vid: VLAN ID.
+        selected_group_id: Group ID (int or None) the user selected.
+        netbox_untagged_group_id: group_id of netbox untagged VLAN (int or None).
+        netbox_tagged_group_ids: {vid: group_id} of netbox tagged VLANs.
+        netbox_untagged_vid: VID of netbox untagged VLAN (int or None).
+        netbox_tagged_vids: set of VIDs tagged in netbox.
+
+    Returns:
+        bool: True if groups match (or comparison not applicable).
+    """
+    if vlan_type == "U":
+        if netbox_untagged_vid == vid:
+            return netbox_untagged_group_id == selected_group_id
+    else:
+        if vid in netbox_tagged_vids:
+            netbox_gid = netbox_tagged_group_ids.get(vid)
+            return netbox_gid == selected_group_id
+    return True
