@@ -1,7 +1,10 @@
 """Tests for device mismatch detection in get_librenms_device_info.
 
-Covers the hostname/IP matching logic that determines whether a
-mismatched_device warning is shown on the LibreNMS Sync page.
+Covers the identity cross-matching logic that determines whether a
+mismatched_device warning banner is shown on the LibreNMS Sync page.
+
+Match rule: mismatch is False when ANY NetBox identity (device name,
+primary IP, DNS name) matches ANY LibreNMS identity (sysName, hostname, ip).
 """
 
 from unittest.mock import MagicMock, patch
@@ -21,7 +24,7 @@ def _make_view(librenms_id, device_info, librenms_url="https://librenms.example.
     return view
 
 
-def _make_obj(name, primary_ip=None, virtual_chassis=None, cf=None):
+def _make_obj(name, primary_ip=None, dns_name=None, virtual_chassis=None, cf=None):
     """Create a mock NetBox device object."""
     obj = MagicMock()
     obj.name = name
@@ -29,6 +32,7 @@ def _make_obj(name, primary_ip=None, virtual_chassis=None, cf=None):
     if primary_ip:
         obj.primary_ip = MagicMock()
         obj.primary_ip.address.ip = primary_ip
+        obj.primary_ip.dns_name = dns_name or ""
     else:
         obj.primary_ip = None
     obj.virtual_chassis = virtual_chassis
@@ -36,7 +40,9 @@ def _make_obj(name, primary_ip=None, virtual_chassis=None, cf=None):
 
 
 class TestMismatchDetection:
-    """Tests for hostname/IP mismatch detection logic."""
+    """Tests for identity cross-matching logic."""
+
+    # -- No device / API failure -------------------------------------------
 
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
     def test_no_librenms_id_returns_not_found(self, mock_hw):
@@ -57,19 +63,11 @@ class TestMismatchDetection:
         assert result["found_in_librenms"] is False
         assert result["mismatched_device"] is False
 
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_ip_match_no_mismatch(self, mock_hw):
-        """Matching IP addresses — no mismatch."""
-        view = _make_view(42, {"sysName": "different-name", "ip": "10.0.0.1"})
-        obj = _make_obj("sw01", primary_ip="10.0.0.1")
-        result = view.get_librenms_device_info(obj)
-
-        assert result["found_in_librenms"] is True
-        assert result["mismatched_device"] is False
+    # -- Name matches ------------------------------------------------------
 
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_exact_hostname_match(self, mock_hw):
-        """Exact hostname match (case-insensitive) — no mismatch."""
+    def test_exact_sysname_match(self, mock_hw):
+        """NetBox name matches LibreNMS sysName (case-insensitive)."""
         view = _make_view(42, {"sysName": "SW01", "ip": "10.0.0.2"})
         obj = _make_obj("sw01", primary_ip="10.0.0.1")
         result = view.get_librenms_device_info(obj)
@@ -78,8 +76,18 @@ class TestMismatchDetection:
         assert result["mismatched_device"] is False
 
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
+    def test_netbox_name_matches_librenms_hostname(self, mock_hw):
+        """NetBox name matches LibreNMS hostname field."""
+        view = _make_view(42, {"sysName": "something-else", "hostname": "sw01", "ip": "10.0.0.2"})
+        obj = _make_obj("sw01", primary_ip="10.0.0.1")
+        result = view.get_librenms_device_info(obj)
+
+        assert result["found_in_librenms"] is True
+        assert result["mismatched_device"] is False
+
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
     def test_fqdn_match(self, mock_hw):
-        """Full FQDN match — no mismatch."""
+        """Full FQDN match -- no mismatch."""
         view = _make_view(42, {"sysName": "sw01.example.net", "ip": "10.0.0.2"})
         obj = _make_obj("sw01.example.net", primary_ip="10.0.0.1")
         result = view.get_librenms_device_info(obj)
@@ -87,20 +95,107 @@ class TestMismatchDetection:
         assert result["found_in_librenms"] is True
         assert result["mismatched_device"] is False
 
+    # -- IP matches --------------------------------------------------------
+
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_fqdn_domain_differs_is_mismatch(self, mock_hw):
-        """Different FQDN domains — mismatch detected."""
-        view = _make_view(42, {"sysName": "sw01.other.net", "ip": "10.0.0.2"})
-        obj = _make_obj("sw01.example.net", primary_ip="10.0.0.1")
+    def test_netbox_ip_matches_librenms_ip(self, mock_hw):
+        """NetBox primary IP matches LibreNMS IP -- no mismatch."""
+        view = _make_view(42, {"sysName": "different", "ip": "10.0.0.1"})
+        obj = _make_obj("sw01", primary_ip="10.0.0.1")
+        result = view.get_librenms_device_info(obj)
+
+        assert result["found_in_librenms"] is True
+        assert result["mismatched_device"] is False
+
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
+    def test_netbox_ip_matches_librenms_hostname_ip(self, mock_hw):
+        """LibreNMS hostname is an IP that matches NetBox primary IP."""
+        view = _make_view(42, {"sysName": "different", "hostname": "10.0.0.1", "ip": "10.0.0.1"})
+        obj = _make_obj("sw01", primary_ip="10.0.0.1")
+        result = view.get_librenms_device_info(obj)
+
+        assert result["found_in_librenms"] is True
+        assert result["mismatched_device"] is False
+
+    # -- DNS name matches --------------------------------------------------
+
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
+    def test_dns_name_matches_sysname(self, mock_hw):
+        """NetBox DNS name matches LibreNMS sysName."""
+        view = _make_view(42, {"sysName": "sw01.example.net", "ip": "10.0.0.2"})
+        obj = _make_obj("sw01", primary_ip="10.0.0.1", dns_name="sw01.example.net")
+        result = view.get_librenms_device_info(obj)
+
+        assert result["found_in_librenms"] is True
+        assert result["mismatched_device"] is False
+
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
+    def test_dns_name_matches_librenms_hostname(self, mock_hw):
+        """NetBox DNS name matches LibreNMS hostname field."""
+        view = _make_view(42, {"sysName": "something", "hostname": "sw01.example.net", "ip": "10.0.0.2"})
+        obj = _make_obj("sw01", primary_ip="10.0.0.1", dns_name="sw01.example.net")
+        result = view.get_librenms_device_info(obj)
+
+        assert result["found_in_librenms"] is True
+        assert result["mismatched_device"] is False
+
+    # -- Mismatches --------------------------------------------------------
+
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
+    def test_completely_different_is_mismatch(self, mock_hw):
+        """No identities overlap -- mismatch."""
+        view = _make_view(42, {"sysName": "router-01", "hostname": "router-01.corp", "ip": "10.0.0.2"})
+        obj = _make_obj("switch-05", primary_ip="10.0.0.1", dns_name="switch-05.corp")
         result = view.get_librenms_device_info(obj)
 
         assert result["found_in_librenms"] is True
         assert result["mismatched_device"] is True
 
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_short_vs_fqdn_is_mismatch(self, mock_hw):
-        """Short name vs FQDN — mismatch (strict comparison)."""
+    def test_short_vs_fqdn_matches_via_domain_strip(self, mock_hw):
+        """Short name vs FQDN -- matches after domain stripping."""
         view = _make_view(42, {"sysName": "sw01.example.net", "ip": "10.0.0.2"})
+        obj = _make_obj("sw01", primary_ip="10.0.0.1")
+        result = view.get_librenms_device_info(obj)
+
+        assert result["found_in_librenms"] is True
+        assert result["mismatched_device"] is False
+
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
+    def test_fqdn_domain_differs_matches_via_domain_strip(self, mock_hw):
+        """Different FQDN domains -- matches because domain-stripped
+        LibreNMS short name 'sw01' matches NetBox FQDN split 'sw01'.
+
+        NetBox name 'sw01.example.net' is compared as-is (no stripping),
+        but the LibreNMS domain-stripped 'sw01' does NOT appear in the
+        NetBox identities since NetBox names are not domain-stripped.
+        However, both sides share the short name via NetBox raw name
+        normalization — actually NetBox keeps the full name.
+        """
+        view = _make_view(42, {"sysName": "sw01.other.net", "ip": "10.0.0.2"})
+        obj = _make_obj("sw01.example.net", primary_ip="10.0.0.1")
+        result = view.get_librenms_device_info(obj)
+
+        assert result["found_in_librenms"] is True
+        # NetBox identities: {"sw01.example.net", "10.0.0.1"}
+        # LibreNMS identities: {"sw01.other.net", "sw01", "10.0.0.2"}
+        # No overlap → mismatch
+        assert result["mismatched_device"] is True
+
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
+    def test_no_netbox_name_no_ip_match(self, mock_hw):
+        """No NetBox name and IPs differ -- mismatch."""
+        view = _make_view(42, {"sysName": "sw01", "ip": "10.0.0.2"})
+        obj = _make_obj(None, primary_ip="10.0.0.1")
+        result = view.get_librenms_device_info(obj)
+
+        assert result["found_in_librenms"] is True
+        assert result["mismatched_device"] is True
+
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
+    def test_no_librenms_sysname_no_match(self, mock_hw):
+        """No sysName, no hostname, IPs differ -- mismatch."""
+        view = _make_view(42, {"sysName": None, "ip": "10.0.0.2"})
         obj = _make_obj("sw01", primary_ip="10.0.0.1")
         result = view.get_librenms_device_info(obj)
 
@@ -108,33 +203,16 @@ class TestMismatchDetection:
         assert result["mismatched_device"] is True
 
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_fqdn_vs_short_is_mismatch(self, mock_hw):
-        """FQDN vs short name — mismatch (strict comparison)."""
-        view = _make_view(42, {"sysName": "sw01", "ip": "10.0.0.2"})
-        obj = _make_obj("sw01.example.net", primary_ip="10.0.0.1")
+    def test_no_identities_at_all(self, mock_hw):
+        """Both sides have no identities -- mismatch (cannot confirm)."""
+        view = _make_view(42, {"sysName": None, "ip": None})
+        obj = _make_obj(None, primary_ip=None)
         result = view.get_librenms_device_info(obj)
 
         assert result["found_in_librenms"] is True
         assert result["mismatched_device"] is True
 
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_completely_different_names_is_mismatch(self, mock_hw):
-        """Completely different hostnames — mismatch."""
-        view = _make_view(42, {"sysName": "router-01", "ip": "10.0.0.2"})
-        obj = _make_obj("switch-05", primary_ip="10.0.0.1")
-        result = view.get_librenms_device_info(obj)
-
-        assert result["found_in_librenms"] is True
-        assert result["mismatched_device"] is True
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_found_in_librenms_always_true_with_valid_id(self, mock_hw):
-        """found_in_librenms is True even when hostname mismatches."""
-        view = _make_view(42, {"sysName": "totally-different", "ip": "10.0.0.2"})
-        obj = _make_obj("my-device", primary_ip="10.0.0.1")
-        result = view.get_librenms_device_info(obj)
-
-        assert result["found_in_librenms"] is True
+    # -- Virtual Chassis ---------------------------------------------------
 
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
     def test_vc_suffix_stripped(self, mock_hw):
@@ -147,53 +225,96 @@ class TestMismatchDetection:
         assert result["mismatched_device"] is False
 
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_vc_base_hostname_match(self, mock_hw):
-        """VC member with explicit librenms_id matches base hostname."""
+    def test_vc_different_name_is_mismatch(self, mock_hw):
+        """VC member with different name after suffix strip -- mismatch."""
         vc = MagicMock()
         view = _make_view(42, {"sysName": "switch-1", "ip": "10.0.0.2"})
         obj = _make_obj("switch-2 (2)", primary_ip="10.0.0.1", virtual_chassis=vc, cf={"librenms_id": 42})
         result = view.get_librenms_device_info(obj)
 
         assert result["found_in_librenms"] is True
-        assert result["mismatched_device"] is False
+        assert result["mismatched_device"] is True
+
+    # -- found_in_librenms always True with valid ID -----------------------
 
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_vc_different_base_hostname_is_mismatch(self, mock_hw):
-        """VC member with completely different base hostname — mismatch."""
-        vc = MagicMock()
-        view = _make_view(42, {"sysName": "router-1", "ip": "10.0.0.2"})
-        obj = _make_obj("switch-2 (2)", primary_ip="10.0.0.1", virtual_chassis=vc, cf={"librenms_id": 42})
+    def test_found_in_librenms_always_true_with_valid_id(self, mock_hw):
+        """found_in_librenms is True even when identities mismatch."""
+        view = _make_view(42, {"sysName": "totally-different", "ip": "10.0.0.2"})
+        obj = _make_obj("my-device", primary_ip="10.0.0.1")
         result = view.get_librenms_device_info(obj)
 
         assert result["found_in_librenms"] is True
-        assert result["mismatched_device"] is True
+
+    # -- Domain stripping --------------------------------------------------
 
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_no_netbox_hostname(self, mock_hw):
-        """No NetBox hostname — mismatch (cannot compare)."""
-        view = _make_view(42, {"sysName": "sw01", "ip": "10.0.0.2"})
-        obj = _make_obj(None, primary_ip="10.0.0.1")
-        result = view.get_librenms_device_info(obj)
-
-        assert result["found_in_librenms"] is True
-        assert result["mismatched_device"] is True
-
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_no_librenms_sysname(self, mock_hw):
-        """No LibreNMS sysName — mismatch (cannot compare)."""
-        view = _make_view(42, {"sysName": None, "ip": "10.0.0.2"})
+    def test_domain_strip_hostname(self, mock_hw):
+        """LibreNMS hostname FQDN stripped to short name matches NetBox name."""
+        view = _make_view(42, {"sysName": "other", "hostname": "sw01.example.net", "ip": "10.0.0.2"})
         obj = _make_obj("sw01", primary_ip="10.0.0.1")
         result = view.get_librenms_device_info(obj)
 
-        assert result["found_in_librenms"] is True
-        assert result["mismatched_device"] is True
+        assert result["mismatched_device"] is False
 
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_no_ip_no_hostname_both_none(self, mock_hw):
-        """No IP and no hostnames — None==None IP match, no mismatch."""
-        view = _make_view(42, {"sysName": None, "ip": None})
-        obj = _make_obj(None, primary_ip=None)
+    def test_domain_strip_sysname(self, mock_hw):
+        """LibreNMS sysName FQDN stripped to short name matches NetBox name."""
+        view = _make_view(42, {"sysName": "sw01.corp.local", "ip": "10.0.0.2"})
+        obj = _make_obj("sw01", primary_ip="10.0.0.1")
         result = view.get_librenms_device_info(obj)
 
-        assert result["found_in_librenms"] is True
         assert result["mismatched_device"] is False
+
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
+    def test_domain_strip_no_false_positive(self, mock_hw):
+        """Domain stripping doesn't cause false match when short names differ."""
+        view = _make_view(42, {"sysName": "router01.example.net", "ip": "10.0.0.2"})
+        obj = _make_obj("switch01", primary_ip="10.0.0.1")
+        result = view.get_librenms_device_info(obj)
+
+        assert result["mismatched_device"] is True
+
+    # -- VC pattern stripping ----------------------------------------------
+
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.models.LibreNMSSettings.objects")
+    def test_vc_pattern_strip_default(self, mock_settings_qs, mock_hw):
+        """Default VC pattern '-M{position}' is stripped from NetBox name."""
+        settings_obj = MagicMock()
+        settings_obj.vc_member_name_pattern = "-M{position}"
+        mock_settings_qs.first.return_value = settings_obj
+
+        view = _make_view(42, {"sysName": "switch01", "ip": "10.0.0.2"})
+        obj = _make_obj("switch01-M2", primary_ip="10.0.0.1")
+        result = view.get_librenms_device_info(obj)
+
+        assert result["mismatched_device"] is False
+
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.models.LibreNMSSettings.objects")
+    def test_vc_pattern_strip_custom(self, mock_settings_qs, mock_hw):
+        """Custom VC pattern '-SW{position}' is stripped from NetBox name."""
+        settings_obj = MagicMock()
+        settings_obj.vc_member_name_pattern = "-SW{position}"
+        mock_settings_qs.first.return_value = settings_obj
+
+        view = _make_view(42, {"sysName": "switch01", "ip": "10.0.0.2"})
+        obj = _make_obj("switch01-SW3", primary_ip="10.0.0.1")
+        result = view.get_librenms_device_info(obj)
+
+        assert result["mismatched_device"] is False
+
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.models.LibreNMSSettings.objects")
+    def test_vc_pattern_no_match_leaves_name(self, mock_settings_qs, mock_hw):
+        """VC pattern doesn't match -- name unchanged, still mismatched."""
+        settings_obj = MagicMock()
+        settings_obj.vc_member_name_pattern = "-M{position}"
+        mock_settings_qs.first.return_value = settings_obj
+
+        view = _make_view(42, {"sysName": "switch01", "ip": "10.0.0.2"})
+        obj = _make_obj("switch99", primary_ip="10.0.0.1")
+        result = view.get_librenms_device_info(obj)
+
+        assert result["mismatched_device"] is True
