@@ -6,8 +6,9 @@ This document provides an overview of the NetBox LibreNMS Plugin's codebase orga
 
 - `netbox_librenms_plugin/` — Main plugin code
   - `views/` — Custom views for devices, mappings, VMs, etc.
-    - `base/` — Abstract base views for shared logic
-    - `sync/` — Views for synchronization logic
+    - `base/` — Abstract base views for shared logic (interfaces, cables, IP addresses, VLANs)
+    - `object_sync/` — Per-model sync views registered as tabs on Device/VM detail pages
+    - `sync/` — POST-only views that apply sync changes (interfaces, cables, IP addresses, VLANs, devices)
   - `models.py` — Database models
   - `forms.py` — Custom forms
   - `tables/` — Table definitions for UI

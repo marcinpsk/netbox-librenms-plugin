@@ -85,6 +85,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         interface_context = self.get_interface_context(request, obj)
         cable_context = self.get_cable_context(request, obj)
         ip_context = self.get_ip_context(request, obj)
+        vlan_context = self.get_vlan_context(request, obj)
 
         interface_name_field = get_interface_name_field(request)
 
@@ -101,6 +102,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 "interface_sync": interface_context,
                 "cable_sync": cable_context,
                 "ip_sync": ip_context,
+                "vlan_sync": vlan_context,
                 "v1v2form": AddToLIbreSNMPV1V2(prefix="v1v2"),
                 "v3form": AddToLIbreSNMPV3(prefix="v3"),
                 "librenms_device_id": self.librenms_id,
@@ -232,6 +234,13 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
     def get_ip_context(self, request, obj):
         """
         Get the context data for IP address sync.
+        Subclasses should override this method.
+        """
+        return None
+
+    def get_vlan_context(self, request, obj):
+        """
+        Get the context data for VLAN sync.
         Subclasses should override this method.
         """
         return None
