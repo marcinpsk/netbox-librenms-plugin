@@ -478,7 +478,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Regex pattern matching on all candidate names
         for name in candidate_names:
             bay = self._lookup_regex_bay_mapping(re, name, phys_class, module_bays, ModuleBayMapping)
-            if bay:
+            if bay and self._fpc_slot_matches(name, bay):
                 return bay
 
         # Fallback: exact match on candidate names against bay dict
@@ -493,6 +493,30 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             return bay
 
         return None
+
+    @staticmethod
+    def _fpc_slot_matches(candidate_name, bay):
+        """Validate that a regex-matched bay's parent slot position is consistent with
+        a positional descriptor like 'Model @ FPC/pic/port'.
+
+        Returns True if the descriptor has no FPC reference, or if the bay's parent
+        module slot position matches the FPC number in the descriptor. Prevents
+        orphaned top-level items (e.g. QSFP @ 1/1/1 when FPC1 is not installed)
+        from incorrectly matching bays belonging to a different FPC's module.
+        """
+        import re as _re
+
+        match = _re.search(r"@\s+(\d+)/", candidate_name)
+        if not match:
+            return True
+        expected_fpc = match.group(1)
+        module = getattr(bay, "module", None)
+        if not module:
+            return True
+        parent_bay = getattr(module, "module_bay", None)
+        if not parent_bay:
+            return True
+        return parent_bay.position == expected_fpc
 
     @staticmethod
     def _lookup_regex_bay_mapping(re, name, phys_class, module_bays, ModuleBayMapping):
