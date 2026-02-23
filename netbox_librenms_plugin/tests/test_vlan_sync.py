@@ -420,3 +420,42 @@ class TestSyncVLANActions:
 
         status = "active" if vlan_state == 1 else "reserved"
         assert status == "reserved"
+
+
+# ============================================
+# VLAN SYNC CSS CLASS UTILITY
+# ============================================
+
+
+class TestGetVlanSyncCssClass:
+    """Tests for the shared get_vlan_sync_css_class utility."""
+
+    def test_not_in_netbox(self):
+        """VLAN not in NetBox should return text-danger."""
+        from netbox_librenms_plugin.utils import get_vlan_sync_css_class
+
+        assert get_vlan_sync_css_class(exists_in_netbox=False) == "text-danger"
+
+    def test_not_in_netbox_name_match_irrelevant(self):
+        """Name match flag should be irrelevant when VLAN doesn't exist."""
+        from netbox_librenms_plugin.utils import get_vlan_sync_css_class
+
+        assert get_vlan_sync_css_class(exists_in_netbox=False, name_matches=True) == "text-danger"
+
+    def test_exists_name_matches(self):
+        """VLAN exists with matching name should return text-success."""
+        from netbox_librenms_plugin.utils import get_vlan_sync_css_class
+
+        assert get_vlan_sync_css_class(exists_in_netbox=True, name_matches=True) == "text-success"
+
+    def test_exists_name_mismatch(self):
+        """VLAN exists but name differs should return text-warning."""
+        from netbox_librenms_plugin.utils import get_vlan_sync_css_class
+
+        assert get_vlan_sync_css_class(exists_in_netbox=True, name_matches=False) == "text-warning"
+
+    def test_default_name_matches_is_true(self):
+        """Default name_matches should be True (success when exists)."""
+        from netbox_librenms_plugin.utils import get_vlan_sync_css_class
+
+        assert get_vlan_sync_css_class(exists_in_netbox=True) == "text-success"
