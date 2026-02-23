@@ -18,6 +18,7 @@ Templates are located in `templates/netbox_librenms_plugin/` and follow NetBox's
 
   - `librenms_sync_base.html` provides the main layout for device/VM sync pages, extending NetBox's object template and including custom blocks for status, actions, and content.
   - `_interface_sync.html` and `_interface_sync_content.html` are used for the interface sync tab, supporting dynamic updates and user actions (like syncing selected interfaces).
+  - `_vlan_sync.html` and `_vlan_sync_content.html` provide the VLAN sync tab (Devices only), with per-VLAN group selection dropdowns, color-coded status indicators (green/yellow/red), and a cache countdown timer. The VLANs tab is conditionally rendered only for devices in `librenms_sync_base.html`.
 
 **Mapping Views:**
 

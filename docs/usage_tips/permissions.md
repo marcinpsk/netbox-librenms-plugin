@@ -75,7 +75,7 @@ Users can access all plugin pages, refresh data from LibreNMS, and review compar
 ### Full Plugin Access
 
 - **Plugin permissions**: View + Change (Can view LibreNMS Plugin Pages and Import and sync devices data)
-- **NetBox permissions**: Add/change permissions for devices, interfaces, cables, IP addresses
+- **NetBox permissions**: Add/change permissions for devices, interfaces, cables, IP addresses, VLANs
 
 Users have full access to all plugin features and can import devices, sync interfaces, and create cables.
 
@@ -94,7 +94,7 @@ Users without View permission won't see the LibreNMS menu or the LibreNMS Sync t
 
 ### Tier 2: NetBox Object Permissions
 
-When the plugin creates or modifies NetBox objects (devices, interfaces, cables, IP addresses), NetBox enforces its standard object permissions. The plugin checks these permissions and will block operations if the user lacks the required access.
+When the plugin creates or modifies NetBox objects (devices, interfaces, cables, IP addresses, VLANs), NetBox enforces its standard object permissions. The plugin checks these permissions and will block operations if the user lacks the required access.
 
 | Plugin Action | Required Object Permissions |
 |---------------|----------------------------|
@@ -107,6 +107,7 @@ When the plugin creates or modifies NetBox objects (devices, interfaces, cables,
 | Delete VM interfaces | `virtualization.delete_vminterface` |
 | Sync cables | `dcim.add_cable`, `dcim.change_cable` |
 | Sync IP addresses | `ipam.add_ipaddress`, `ipam.change_ipaddress` |
+| Sync VLANs | `ipam.add_vlan`, `ipam.change_vlan` |
 | Sync device fields | `dcim.change_device` |
 | Create platform | `dcim.add_platform` |
 
