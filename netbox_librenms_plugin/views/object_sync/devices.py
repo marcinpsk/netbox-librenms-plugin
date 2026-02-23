@@ -17,15 +17,14 @@ from netbox_librenms_plugin.tables.interfaces import (
     LibreNMSInterfaceTable,
     VCInterfaceTable,
 )
-from netbox_librenms_plugin.utils import get_interface_name_field
+from netbox_librenms_plugin.utils import get_interface_name_field, get_vlan_sync_css_class
 
 from ..base.cables_view import BaseCableTableView
 from ..base.interfaces_view import BaseInterfaceTableView
 from ..base.ip_addresses_view import BaseIPAddressTableView
 from ..base.librenms_sync_view import BaseLibreNMSSyncView
-from ..mixins import CacheMixin, LibreNMSPermissionMixin
 from ..base.vlan_table_view import BaseVLANTableView
-from ..mixins import CacheMixin
+from ..mixins import CacheMixin, LibreNMSPermissionMixin
 
 
 @register_model_view(Device, name="librenms_sync", path="librenms-sync")
@@ -72,9 +71,8 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
         """Return the device interface sync redirect URL."""
         return reverse("plugins:netbox_librenms_plugin:device_interface_sync", kwargs={"pk": obj.pk})
 
-    def get_table(self, data, obj, interface_name_field):
-        """Return the appropriate interface table, selecting VC variant if needed."""
     def get_table(self, data, obj, interface_name_field, vlan_groups=None):
+        """Return the appropriate interface table, selecting VC variant if needed."""
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
             table = VCInterfaceTable(
                 data, device=obj, interface_name_field=interface_name_field, vlan_groups=vlan_groups
@@ -149,19 +147,16 @@ class SingleVlanGroupVerifyView(CacheMixin, View):
         device_id = data.get("device_id")
         interface_name = data.get("interface_name")
         vlan_group_id = data.get("vlan_group_id")
-        untagged_vlan_str = data.get("untagged_vlan", "")
-        tagged_vlans_str = data.get("tagged_vlans", "")
+        vlan_type = data.get("vlan_type", "U")  # "U" or "T"
+        vid_str = data.get("vid", "") or data.get("untagged_vlan", "")
 
         if not device_id:
             return JsonResponse({"status": "error", "message": "No device ID provided"}, status=400)
+        if not vid_str:
+            return JsonResponse({"status": "error", "message": "No VID provided"}, status=400)
 
         device = get_object_or_404(Device, pk=device_id)
-
-        # Parse VLANs from request
-        untagged_vlan = int(untagged_vlan_str) if untagged_vlan_str else None
-        tagged_vlans = []
-        if tagged_vlans_str:
-            tagged_vlans = [int(v) for v in tagged_vlans_str.split(",") if v.strip()]
+        vid = int(vid_str)
 
         # Build lookup for the selected group
         if vlan_group_id:
@@ -174,13 +169,9 @@ class SingleVlanGroupVerifyView(CacheMixin, View):
             # No group selected - use global VLANs only
             available_vids = set(VLAN.objects.filter(group__isnull=True).values_list("vid", flat=True))
 
-        # Compute missing VLANs (not in selected group)
-        missing_vlans = []
-        if untagged_vlan and untagged_vlan not in available_vids:
-            missing_vlans.append(untagged_vlan)
-        for vid in tagged_vlans:
-            if vid not in available_vids:
-                missing_vlans.append(vid)
+        # Compute whether VID is missing from selected group
+        is_missing = vid not in available_vids
+        missing_vlans = [vid] if is_missing else []
 
         # Get NetBox interface for comparison
         netbox_interface = device.interfaces.filter(name=interface_name).first()
@@ -194,17 +185,30 @@ class SingleVlanGroupVerifyView(CacheMixin, View):
                 netbox_untagged_vid = netbox_interface.untagged_vlan.vid
             netbox_tagged_vids = {v.vid for v in netbox_interface.tagged_vlans.all()}
 
-        # Render VLANs cell HTML
+        # Determine CSS class based on actual VLAN type
+        if vlan_type == "U":
+            css_class = self._get_untagged_vlan_css_class(vid, netbox_untagged_vid, exists_in_netbox, missing_vlans)
+        else:
+            css_class = self._get_tagged_vlan_css_class(vid, netbox_tagged_vids, exists_in_netbox, missing_vlans)
+
+        # Also render formatted HTML for backward compatibility
         formatted_vlans = self._render_vlans_cell(
-            untagged_vlan,
-            tagged_vlans,
+            vid if vlan_type == "U" else None,
+            [vid] if vlan_type == "T" else [],
             missing_vlans,
             exists_in_netbox,
             netbox_untagged_vid,
             netbox_tagged_vids,
         )
 
-        return JsonResponse({"status": "success", "formatted_vlans": formatted_vlans})
+        return JsonResponse(
+            {
+                "status": "success",
+                "formatted_vlans": formatted_vlans,
+                "css_class": css_class,
+                "is_missing": is_missing,
+            }
+        )
 
     def _render_vlans_cell(
         self, untagged, tagged, missing_vlans, exists_in_netbox, netbox_untagged_vid, netbox_tagged_vids
@@ -265,6 +269,89 @@ class SingleVlanGroupVerifyView(CacheMixin, View):
         return ""
 
 
+class VerifyVlanSyncGroupView(View):
+    """
+    Verify whether a VLAN (by VID) exists in a selected VLAN group.
+
+    Called from the VLAN sync tab when the user changes the per-row
+    VLAN group dropdown. Returns the correct CSS class so the JS can
+    update row colors without a full page reload.
+    """
+
+    def post(self, request):
+        from ipam.models import VLAN, VLANGroup
+
+        data = json.loads(request.body)
+        vlan_group_id = data.get("vlan_group_id")
+        vid_str = data.get("vid", "")
+        librenms_name = data.get("name", "")
+
+        if not vid_str:
+            return JsonResponse({"status": "error", "message": "No VID provided"}, status=400)
+
+        vid = int(vid_str)
+
+        # Check if VLAN exists in the selected group (or globally)
+        if vlan_group_id:
+            vlan_group = get_object_or_404(VLANGroup, pk=vlan_group_id)
+            netbox_vlan = VLAN.objects.filter(vid=vid, group=vlan_group).first()
+        else:
+            # No group = global VLANs
+            netbox_vlan = VLAN.objects.filter(vid=vid, group__isnull=True).first()
+
+        exists_in_netbox = bool(netbox_vlan)
+        name_matches = netbox_vlan.name == librenms_name if netbox_vlan else False
+        css_class = get_vlan_sync_css_class(exists_in_netbox, name_matches)
+
+        return JsonResponse(
+            {
+                "status": "success",
+                "exists_in_netbox": exists_in_netbox,
+                "name_matches": name_matches,
+                "css_class": css_class,
+                "netbox_vlan_name": netbox_vlan.name if netbox_vlan else None,
+            }
+        )
+
+
+class SaveVlanGroupOverridesView(CacheMixin, View):
+    """
+    Persist user VLAN-group-override selections in cache.
+
+    When the user edits VLAN group assignments in the modal and checks
+    "Apply to all interfaces", the JS posts the {vid: group_id} map here
+    so that subsequent table pages render with the same choices.
+    The overrides are stored with the same remaining TTL as the ports
+    cache so they expire together.
+    """
+
+    def post(self, request):
+        data = json.loads(request.body)
+        device_id = data.get("device_id")
+        vid_group_map = data.get("vid_group_map", {})
+
+        if not device_id:
+            return JsonResponse({"status": "error", "message": "No device ID provided"}, status=400)
+
+        device = get_object_or_404(Device, pk=device_id)
+
+        # Use the remaining TTL of the ports cache so both expire together
+        ports_ttl = cache.ttl(self.get_cache_key(device, "ports"))
+        if ports_ttl is None or ports_ttl <= 0:
+            return JsonResponse(
+                {"status": "error", "message": "No cached port data; refresh interfaces first"},
+                status=400,
+            )
+
+        # Merge with any existing overrides (user may save multiple times)
+        existing = cache.get(self.get_vlan_overrides_key(device)) or {}
+        existing.update(vid_group_map)
+
+        cache.set(self.get_vlan_overrides_key(device), existing, timeout=ports_ttl)
+
+        return JsonResponse({"status": "success"})
+
+
 class DeviceCableTableView(BaseCableTableView):
     """Cable synchronization view for Devices."""
 
@@ -287,10 +374,3 @@ class DeviceVLANTableView(BaseVLANTableView):
     """VLAN synchronization table view for Devices."""
 
     model = Device
-
-    def get_interfaces(self, obj):
-        """Get all interfaces for the device."""
-        return obj.interfaces.all()
-
-    def get_redirect_url(self, obj):
-        return reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": obj.pk}) + "?tab=vlans"

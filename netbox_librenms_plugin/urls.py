@@ -32,7 +32,9 @@ from .views import (
     SingleCableVerifyView,
     SingleInterfaceVerifyView,
     SingleIPAddressVerifyView,
+    SaveVlanGroupOverridesView,
     SingleVlanGroupVerifyView,
+    VerifyVlanSyncGroupView,
     SyncCablesView,
     SyncInterfacesView,
     SyncIPAddressesView,
@@ -93,6 +95,18 @@ urlpatterns = [
         "verify-vlan-group/",
         SingleVlanGroupVerifyView.as_view(),
         name="verify_vlan_group",
+    ),
+    # Verify VLAN existence in a group (VLAN sync tab coloring)
+    path(
+        "verify-vlan-sync-group/",
+        VerifyVlanSyncGroupView.as_view(),
+        name="verify_vlan_sync_group",
+    ),
+    # Save VLAN group overrides to cache ("apply to all" persistence)
+    path(
+        "save-vlan-group-overrides/",
+        SaveVlanGroupOverridesView.as_view(),
+        name="save_vlan_group_overrides",
     ),
     # Virtual machine sync URLs
     path(
