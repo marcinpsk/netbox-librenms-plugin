@@ -232,6 +232,18 @@
                     virutal chassis. The selected device can be changed in the table before sync the interface.</p>
                 <p>When changing the selected device for an interface row, the data will be checked again against the
                     newly selected device.</p>
+                <h5>VLAN Group Selection</h5>
+                <p>Each VLAN in the VLANs column is automatically assigned to a VLAN group using a priority
+                    scope order: <strong>Rack → Location → Site → Site Group → Region → Global</strong>.
+                    The most specific scope that contains the VLAN wins. If a VLAN exists in only one group,
+                    that group is selected regardless of scope. Click the <i class="mdi mdi-pencil"></i> icon
+                    on any row to change the group assignment for individual VLANs.</p>
+                <p>Check <strong>Apply group assignments to all interfaces with matching VLANs</strong> in the
+                    modal to apply your selection to every interface that shares the same VLAN IDs. This choice is
+                    saved for the duration of the cache, so subsequent table pages will also use it.</p>
+                <p>VLANs shown with a <i class="mdi mdi-alert text-danger"></i>
+                    warning icon do not exist in the selected VLAN group in NetBox yet. Use the <strong>VLAN Sync</strong> tab to create them
+                    before syncing interfaces.</p>
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
