@@ -8,14 +8,15 @@ from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_virtual_chassis_member,
 )
-from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin
+from netbox_librenms_plugin.views.mixins import (
+    CacheMixin,
+    LibreNMSAPIMixin,
+    LibreNMSPermissionMixin,
+    VlanAssignmentMixin,
+)
 
 
-class BaseInterfaceTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
-from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin, VlanAssignmentMixin
-
-
-class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, CacheMixin, View):
+class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin, CacheMixin, View):
     """
     Base view for fetching interface data from LibreNMS and generating table data.
     Includes VLAN enrichment for interface VLAN sync functionality.
@@ -153,6 +154,9 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, CacheMixin, 
         vlan_groups = self.get_vlan_groups_for_device(obj)
         lookup_maps = self._build_vlan_lookup_maps(vlan_groups)
 
+        # Load any user VLAN group overrides from cache (set by "apply to all")
+        vlan_group_overrides = cache.get(self.get_vlan_overrides_key(obj)) or {}
+
         if cached_data:
             ports_data = cached_data.get("ports", [])
 
@@ -194,8 +198,8 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, CacheMixin, 
                 if port.get("ifAlias") in (port.get("ifDescr"), port.get("ifName")):
                     port["ifAlias"] = ""
 
-                # Add VLAN group auto-selection data to port
-                self._add_vlan_group_selection(port, lookup_maps, obj)
+                # Add VLAN group auto-selection data to port, applying any user overrides
+                self._add_vlan_group_selection(port, lookup_maps, obj, vlan_group_overrides)
 
                 # Add missing VLANs info for warning display
                 self._add_missing_vlans_info(port, lookup_maps)
@@ -254,13 +258,15 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, CacheMixin, 
             "netbox_only_interfaces": netbox_only_interfaces,
         }
 
-    def _add_vlan_group_selection(self, port, lookup_maps, device):
+    def _add_vlan_group_selection(self, port, lookup_maps, device, vlan_group_overrides=None):
         """
         Add per-VLAN group auto-selection data to port record.
 
         Sets:
         - vlan_group_map: {vid: {"group_id": str, "group_name": str, "is_ambiguous": bool}}
           Maps each VID to its auto-selected VLAN group based on scope hierarchy.
+          If vlan_group_overrides contains a user selection for a VID, that takes
+          precedence over auto-selection.
         """
         vid_to_groups = lookup_maps.get("vid_to_groups", {})
         untagged_vid = port.get("untagged_vlan")
@@ -300,6 +306,32 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, CacheMixin, 
                     "group_name": "Global",
                     "is_ambiguous": False,
                 }
+
+        # Apply user overrides from "apply to all" selections (persisted in cache)
+        if vlan_group_overrides:
+            from ipam.models import VLANGroup
+
+            for vid in all_vids:
+                vid_str = str(vid)
+                if vid_str in vlan_group_overrides:
+                    override_group_id = vlan_group_overrides[vid_str]
+                    if override_group_id:
+                        try:
+                            group = VLANGroup.objects.get(pk=override_group_id)
+                            vlan_group_map[vid] = {
+                                "group_id": str(group.pk),
+                                "group_name": group.name,
+                                "is_ambiguous": False,
+                            }
+                        except VLANGroup.DoesNotExist:
+                            pass  # Override references deleted group; keep auto-selection
+                    else:
+                        # User explicitly chose "No Group (Global)"
+                        vlan_group_map[vid] = {
+                            "group_id": "",
+                            "group_name": "Global",
+                            "is_ambiguous": False,
+                        }
 
         port["vlan_group_map"] = vlan_group_map
 

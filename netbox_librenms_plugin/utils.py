@@ -278,3 +278,25 @@ def find_matching_platform(librenms_os: str) -> dict:
         return {"found": True, "platform": platform, "match_type": "exact"}
 
     return {"found": False, "platform": None, "match_type": None}
+
+
+def get_vlan_sync_css_class(exists_in_netbox: bool, name_matches: bool = True) -> str:
+    """
+    Determine CSS class for a VLAN row on the VLAN sync tab.
+
+    Used by both the server-side table renderer (LibreNMSVLANTable)
+    and the client-facing verify endpoint (VerifyVlanSyncGroupView)
+    to keep color logic consistent.
+
+    Args:
+        exists_in_netbox: Whether the VLAN exists in NetBox (in the selected group or globally).
+        name_matches: Whether the VLAN name in NetBox matches the LibreNMS name.
+
+    Returns:
+        CSS class string: 'text-success', 'text-warning', or 'text-danger'.
+    """
+    if not exists_in_netbox:
+        return "text-danger"
+    if name_matches:
+        return "text-success"
+    return "text-warning"

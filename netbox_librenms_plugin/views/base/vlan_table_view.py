@@ -4,11 +4,17 @@ from django.shortcuts import get_object_or_404, render
 from django.utils import timezone
 from django.views import View
 
+from netbox_librenms_plugin.constants import LIBRENMS_VLAN_STATE_ACTIVE
 from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
-from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin, VlanAssignmentMixin
+from netbox_librenms_plugin.views.mixins import (
+    CacheMixin,
+    LibreNMSAPIMixin,
+    LibreNMSPermissionMixin,
+    VlanAssignmentMixin,
+)
 
 
-class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, CacheMixin, View):
+class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin, CacheMixin, View):
     """
     Base view for VLAN synchronization table.
     Fetches LibreNMS VLAN data and compares with NetBox.
@@ -20,20 +26,6 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, CacheMixin, View)
     def get_object(self, pk):
         """Retrieve the object (Device or VirtualMachine)."""
         return get_object_or_404(self.model, pk=pk)
-
-    def get_interfaces(self, obj):
-        """
-        Get interfaces related to the object.
-        Should be implemented in subclasses.
-        """
-        raise NotImplementedError
-
-    def get_redirect_url(self, obj):
-        """
-        Get the redirect URL for the object.
-        Should be implemented in subclasses.
-        """
-        raise NotImplementedError
 
     def post(self, request, pk):
         """Handle POST request to fetch and cache LibreNMS VLAN data."""
@@ -85,7 +77,7 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, CacheMixin, View)
 
         return True, None
 
-    def get_vlan_context(self, request, obj, selected_vlan_group=None):
+    def get_vlan_context(self, request, obj):
         """
         Build context for VLAN sync table.
 
@@ -203,9 +195,10 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, CacheMixin, View)
                     "vlan_id": vid,
                     "name": name,
                     "type": vlan.get("vlan_type", "ethernet"),
-                    "state": vlan.get("vlan_state", 1),
+                    "state": vlan.get("vlan_state", LIBRENMS_VLAN_STATE_ACTIVE),
                     "exists_in_netbox": bool(netbox_vlan),
                     "netbox_vlan_id": netbox_vlan.pk if netbox_vlan else None,
+                    "netbox_vlan_name": netbox_vlan.name if netbox_vlan else None,
                     "netbox_vlan_group": netbox_vlan.group.name if netbox_vlan and netbox_vlan.group else None,
                     "netbox_vlan_group_id": netbox_vlan.group.pk if netbox_vlan and netbox_vlan.group else None,
                     "name_matches": netbox_vlan.name == name if netbox_vlan else False,

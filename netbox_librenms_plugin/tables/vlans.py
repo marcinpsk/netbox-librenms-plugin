@@ -4,7 +4,8 @@ from django.utils.safestring import mark_safe
 from netbox.tables.columns import ToggleColumn
 from utilities.paginator import EnhancedPaginator
 
-from netbox_librenms_plugin.utils import get_table_paginate_count
+from netbox_librenms_plugin.constants import LIBRENMS_VLAN_STATE_ACTIVE
+from netbox_librenms_plugin.utils import get_table_paginate_count, get_vlan_sync_css_class
 
 
 class LibreNMSVLANTable(tables.Table):
@@ -76,16 +77,29 @@ class LibreNMSVLANTable(tables.Table):
 
     def render_vlan_id(self, value, record):
         """Render VLAN ID with color based on sync status."""
-        css_class = self._get_css_class(record)
+        css_class = get_vlan_sync_css_class(
+            record.get("exists_in_netbox", False),
+            record.get("name_matches", True),
+        )
         return format_html('<span class="{}">{}</span>', css_class, value)
 
     def render_name(self, value, record):
         """Render VLAN name with color based on sync status."""
-        css_class = self._get_css_class(record)
+        css_class = get_vlan_sync_css_class(
+            record.get("exists_in_netbox", False),
+            record.get("name_matches", True),
+        )
 
-        # Check if name matches
+        # Add tooltip on name mismatch
         if record.get("exists_in_netbox") and not record.get("name_matches", True):
-            css_class = "text-warning"
+            netbox_name = record.get("netbox_vlan_name", "")
+            tooltip = f"NetBox: {netbox_name} | LibreNMS: {value}"
+            return format_html(
+                '<span class="{}" title="{}">{}</span>',
+                css_class,
+                tooltip,
+                value or "",
+            )
 
         return format_html('<span class="{}">{}</span>', css_class, value or "")
 
@@ -118,8 +132,11 @@ class LibreNMSVLANTable(tables.Table):
             options.append(f'<option value="{group.pk}" {selected}>{group.name}{scope_info}</option>')
 
         select_html = format_html(
-            '<select name="vlan_group_{}" class="form-select form-select-sm" style="min-width: 180px;">{}</select>',
+            '<select name="vlan_group_{}" class="form-select form-select-sm vlan-sync-group-select"'
+            ' data-vlan-id="{}" data-vlan-name="{}" style="min-width: 180px;">{}</select>',
             vlan_id,
+            vlan_id,
+            record.get("name", ""),
             mark_safe("".join(options)),
         )
 
@@ -135,15 +152,9 @@ class LibreNMSVLANTable(tables.Table):
 
     def render_state(self, value, record):
         """Render VLAN state (active/inactive)."""
-        if value == 1 or value == "active":
+        if value == LIBRENMS_VLAN_STATE_ACTIVE or value == "active":
             return format_html('<span class="text-success">Active</span>')
         return format_html('<span class="text-muted">Inactive</span>')
-
-    def _get_css_class(self, record):
-        """Get CSS class based on sync status."""
-        if record.get("exists_in_netbox"):
-            return "text-success"
-        return "text-danger"
 
     def configure(self, request):
         """Configure the table with pagination."""

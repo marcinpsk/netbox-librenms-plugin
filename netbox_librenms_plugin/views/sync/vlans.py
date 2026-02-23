@@ -8,38 +8,39 @@ from django.urls import reverse
 from django.views import View
 from ipam.models import VLAN, VLANGroup
 
-from netbox_librenms_plugin.views.mixins import CacheMixin
+from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
 
-class SyncVLANsView(CacheMixin, View):
+class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
     """
     Handle POST requests to create/update VLANs in NetBox from LibreNMS data.
     """
+
+    required_object_permissions = {
+        "POST": [
+            ("add", VLAN),
+            ("change", VLAN),
+        ],
+    }
 
     def post(self, request, object_type: str, object_id: int):
         """
         Process sync request.
 
         Expected POST data:
-        - vlan_group: ID of target VLAN group (optional)
         - action: 'create_vlans'
         - select: List of VLAN IDs to create
+        - vlan_group_{vid}: Per-row VLAN group selection
         """
+        # Check both plugin write and NetBox object permissions
+        if error := self.require_all_permissions("POST"):
+            return error
+
         obj = self.get_object(object_type, object_id)
         action = request.POST.get("action", "")
 
-        # Get optional VLAN group
-        vlan_group_id = request.POST.get("vlan_group")
-        vlan_group = None
-        if vlan_group_id:
-            try:
-                vlan_group = VLANGroup.objects.get(pk=int(vlan_group_id))
-            except (ValueError, VLANGroup.DoesNotExist):
-                messages.error(request, "Invalid VLAN group selected.")
-                return self._redirect(object_type, object_id)
-
         if action == "create_vlans":
-            return self._handle_create_vlans(request, obj, vlan_group, object_type, object_id)
+            return self._handle_create_vlans(request, obj, object_type, object_id)
         else:
             messages.error(request, "Invalid action specified.")
             return self._redirect(object_type, object_id)
@@ -59,11 +60,11 @@ class SyncVLANsView(CacheMixin, View):
         )
         return redirect(reverse(url_name, kwargs={"pk": object_id}) + "?tab=vlans")
 
-    def _handle_create_vlans(self, request, obj, vlan_group, object_type, object_id):
+    def _handle_create_vlans(self, request, obj, object_type, object_id):
         """
         Handle creating selected VLANs in NetBox.
 
-        Now reads per-row VLAN group selections from form fields named 'vlan_group_{vid}'.
+        Reads per-row VLAN group selections from form fields named 'vlan_group_{vid}'.
         """
         selected_vlans = request.POST.getlist("select")
 
@@ -113,7 +114,7 @@ class SyncVLANsView(CacheMixin, View):
                         group=row_vlan_group,
                         defaults={
                             "name": librenms_name,
-                            "status": "active" if vlan_data.get("vlan_state") == 1 else "reserved",
+                            "status": self._get_vlan_status(vlan_data),
                         },
                     )
                     if created:
@@ -132,7 +133,7 @@ class SyncVLANsView(CacheMixin, View):
                             vid=vid,
                             name=librenms_name,
                             group=None,
-                            status="active" if vlan_data.get("vlan_state") == 1 else "reserved",
+                            status=self._get_vlan_status(vlan_data),
                         )
                         created_count += 1
                     else:

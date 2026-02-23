@@ -40,9 +40,8 @@ class LibreNMSInterfaceTable(tables.Table):
             "id": "librenms-interface-table",
         }
 
-    def __init__(self, *args, device=None, interface_name_field=None, **kwargs):
-        """Initialize table with device context and interface name field."""
     def __init__(self, *args, device=None, interface_name_field=None, vlan_groups=None, **kwargs):
+        """Initialize table with device context and interface name field."""
         self.device = device
         self.interface_name_field = interface_name_field or get_interface_name_field()
         self.vlan_groups = vlan_groups or []
@@ -164,9 +163,12 @@ class LibreNMSInterfaceTable(tables.Table):
         vlan_group_map = record.get("vlan_group_map", {})
         tooltip_lines = []
         for vlan_type, vid in all_vlans:
-            group_info = vlan_group_map.get(vid, {})
-            group_name = group_info.get("group_name", "Global")
-            tooltip_lines.append(f"VLAN {vid}({vlan_type}) → {group_name}")
+            if vid in missing_vlans:
+                tooltip_lines.append(f"VLAN {vid}({vlan_type}) → ⚠ Not in NetBox")
+            else:
+                group_info = vlan_group_map.get(vid, {})
+                group_name = group_info.get("group_name", "Global")
+                tooltip_lines.append(f"VLAN {vid}({vlan_type}) → {group_name}")
         tooltip_text = "&#10;".join(tooltip_lines)
 
         # Build hidden inputs for per-VLAN group selections (submitted with form)
@@ -189,10 +191,11 @@ class LibreNMSInterfaceTable(tables.Table):
                 css = self._get_untagged_vlan_css_class(vid, netbox_untagged_vid, exists_in_netbox, missing_vlans)
             else:
                 css = self._get_tagged_vlan_css_class(vid, netbox_tagged_vids, exists_in_netbox, missing_vlans)
+            display_group_name = "Not in NetBox" if is_missing else group_info.get("group_name", "Global")
             vlan_json_items.append(
                 f'{{"vid":{vid},"type":"{vlan_type}",'
                 f'"group_id":"{group_info.get("group_id", "")}",'
-                f'"group_name":"{group_info.get("group_name", "Global")}",'
+                f'"group_name":"{display_group_name}",'
                 f'"css":"{css}","missing":{str(is_missing).lower()}}}'
             )
         vlan_json = "[" + ",".join(vlan_json_items) + "]"
@@ -508,10 +511,8 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
         attrs={"td": {"data-col": "device_selection"}},
     )
 
-    def __init__(self, *args, device=None, interface_name_field=None, **kwargs):
-        """Initialize VC interface table with device and name field."""
-        super().__init__(*args, device=device, interface_name_field=interface_name_field, **kwargs)
     def __init__(self, *args, device=None, interface_name_field=None, vlan_groups=None, **kwargs):
+        """Initialize VC interface table with device and name field."""
         super().__init__(
             *args, device=device, interface_name_field=interface_name_field, vlan_groups=vlan_groups, **kwargs
         )
