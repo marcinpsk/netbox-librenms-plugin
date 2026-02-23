@@ -177,38 +177,36 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                     vc_serials = self._get_vc_inventory_serials(obj)
                     librenms_device_details["vc_inventory_serials"] = vc_serials
 
-                # Get just the hostname part from LibreNMS FQDN if present
-                librenms_host = librenms_hostname.split(".")[0].lower() if librenms_hostname else None
-                netbox_host = netbox_hostname.split(".")[0].lower() if netbox_hostname else None
+                # Device was retrieved successfully via librenms_id — trust the ID
+                found_in_librenms = True
 
-                # Check for matching IP or hostname
-                # If IP matches, we have a match
+                # Check for matching IP or hostname to detect mismatches.
+                # Comparison is strict: full name must match (FQDN to FQDN,
+                # short name to short name).  The mismatch is non-blocking,
+                # so a false-positive warning is preferable to silently
+                # hiding a real mismatch.
+                hostname_match = False
                 if netbox_ip == librenms_ip:
-                    found_in_librenms = True
-                # Check hostname match with normalization for VC suffixes
-                elif netbox_host and librenms_host:
-                    # Normalize NetBox hostname by removing VC member suffixes like ' (1)', ' (2)', etc.
-                    netbox_host_normalized = re.sub(r"\s*\(\d+\)$", "", netbox_host)
+                    hostname_match = True
+                elif netbox_hostname and librenms_hostname:
+                    netbox_name_norm = netbox_hostname.lower()
+                    librenms_name_norm = librenms_hostname.lower()
 
-                    if netbox_host_normalized == librenms_host:
-                        found_in_librenms = True
-                    # For VC members with explicit librenms_id, validate hostname similarity
+                    # Strip VC member suffix like " (1)" before comparing
+                    netbox_name_norm = re.sub(r"\s*\(\d+\)$", "", netbox_name_norm)
+
+                    if netbox_name_norm == librenms_name_norm:
+                        hostname_match = True
+                    # For VC members with explicit librenms_id, compare base
+                    # hostnames to handle numbering like "switch-1" / "switch-2"
                     elif hasattr(obj, "virtual_chassis") and obj.virtual_chassis and obj.cf.get("librenms_id"):
-                        # Extract base hostname (before any VC numbering like -1, -2, etc.)
-                        # This handles cases where VC members in NetBox (e.g., "switch-1 (1)")
-                        # point to the primary device in LibreNMS (e.g., "switch-1")
-                        netbox_base = re.sub(r"[-_]?\d+$", "", netbox_host_normalized)
-                        librenms_base = re.sub(r"[-_]?\d+$", "", librenms_host)
+                        netbox_base = re.sub(r"[-_]?\d+$", "", netbox_name_norm.split(".")[0])
+                        librenms_base = re.sub(r"[-_]?\d+$", "", librenms_name_norm.split(".")[0])
 
                         if netbox_base and librenms_base and netbox_base == librenms_base:
-                            # Base hostnames match (e.g., "switch" matches "switch")
-                            found_in_librenms = True
-                        else:
-                            # Hostnames don't match even after normalization
-                            mismatched_device = True
-                    else:
-                        mismatched_device = True
-                else:
+                            hostname_match = True
+
+                if not hostname_match:
                     mismatched_device = True
 
         return {

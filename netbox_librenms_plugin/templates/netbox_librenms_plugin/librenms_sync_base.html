@@ -84,6 +84,52 @@
                             <td>{{ librenms_device_id }}</td>
                         </tr>
 
+                        <!-- Name Row -->
+                        <tr>
+                            <th scope="row" style="padding-left: 1rem;">
+                                Name
+                                {% if mismatched_device %}
+                                <span class="text-warning ms-1" title="LibreNMS name '{{ sysName|default:'-' }}' does not match NetBox name '{{ object.name }}'">
+                                    <i class="mdi mdi-alert"></i>
+                                </span>
+                                {% endif %}
+                            </th>
+                            <td>
+                                {% if sysName %}
+                                    {{ sysName }}
+                                    {% if not mismatched_device %}
+                                    <span class="text-success ms-1" title="Name matches NetBox">
+                                        <i class="mdi mdi-check-circle"></i>
+                                    </span>
+                                    {% endif %}
+                                {% else %}
+                                    <span class="text-muted">-</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+
+                        <!-- Serial Row -->
+                        {% if librenms_device_serial and librenms_device_serial != "-" %}
+                        <tr>
+                            <th scope="row" style="padding-left: 1rem;">
+                                Serial
+                                {% if object.serial and librenms_device_serial != object.serial %}
+                                <span class="text-warning ms-1" title="LibreNMS serial '{{ librenms_device_serial }}' does not match NetBox serial '{{ object.serial }}'">
+                                    <i class="mdi mdi-alert"></i>
+                                </span>
+                                {% endif %}
+                            </th>
+                            <td>
+                                {{ librenms_device_serial }}
+                                {% if object.serial and librenms_device_serial == object.serial %}
+                                <span class="text-success ms-1" title="Serial matches NetBox">
+                                    <i class="mdi mdi-check-circle"></i>
+                                </span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endif %}
+
                         {% with model_name=object|meta:"model_name" %}
                         {% if model_name == "device" %}
                         <!-- OS Version Row (Devices Only) -->
@@ -420,6 +466,22 @@
     {% endif %}
 {% elif librenms_device_id %}
 {% if found_in_librenms %}
+
+{% if mismatched_device %}
+<div class="alert alert-warning d-flex align-items-center mt-3 mb-2" role="alert">
+    <i class="mdi mdi-alert me-2 fs-3"></i>
+    <div>
+        <strong>Device name mismatch:</strong>
+        NetBox device <strong>{{ object.name }}</strong> is linked to LibreNMS device <strong>{{ sysName|default:'-' }}</strong>
+        (ID: <code>{{ librenms_device_id }}</code>).
+        {% if object.primary_ip %}
+        NetBox IP: <code>{{ object.primary_ip.address.ip }}</code>, LibreNMS IP: <code>{{ librenms_device_ip|default:'-' }}</code>.
+        {% endif %}
+        <span class="text-muted">If this is incorrect, update or remove the <code>librenms_id</code> custom field.</span>
+    </div>
+</div>
+{% endif %}
+
 <!-- Tab Navigation -->
 <div class="d-flex justify-content-between align-items-center">
     <ul class="nav nav-tabs mt-3" id="librenmsSync" role="tablist">
@@ -492,37 +554,6 @@
 </div>
 
 
-{% elif mismatched_device %}
-<div>
-    <div class="alert alert-warning d-flex align-items-center">
-        <i class="mdi mdi-alert me-2"></i>
-        <div>
-            <strong>Device Mismatch:</strong>
-            The LibreNMS device with ID <code>{{ librenms_device_id }}</code> does not match the NetBox device.
-            <hr class="my-2">
-            <span class="text-muted">
-                Netbox Device Details:
-                <ul class="mb-1">
-                    <li>NetBox Name: {{ object.name }}</li>
-                    <li>Primary IP: {{ object.primary_ip.address.ip|default:'-' }}</li>
-                    <li>Primary IP DNS Name: {{ object.primary_ip.dns_name|default:'-' }}</li>
-
-                </ul>
-                LibreNMS Device with ID <code>{{ librenms_device_id }}</code>:
-                <ul class="mb-1">
-                    <li>LibreNMS Name: {{ sysName|default:'-' }}</li>
-                    <li>Hardware: {{ librenms_device_hardware }}</li>
-                    <li>IP Address: {{ librenms_device_ip }}</li>
-                </ul>
-                Options:
-                <ul class="mb-0">
-                    <li>Remove custom field value and let LibreNMS plugin try to find it</li>
-                    <li>Manually enter the correct LibreNMS device ID</li>
-                </ul>
-            </span>
-        </div>
-    </div>
-</div>
 {% else %}
 <div>
     <div class="alert alert-warning d-flex align-items-center">
