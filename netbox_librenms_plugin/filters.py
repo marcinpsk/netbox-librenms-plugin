@@ -1,6 +1,6 @@
 import django_filters
 
-from .models import DeviceTypeMapping, InterfaceTypeMapping, ModuleBayMapping, ModuleTypeMapping
+from .models import DeviceTypeMapping, InterfaceTypeMapping, ModuleBayMapping, ModuleTypeMapping, NormalizationRule
 
 
 class InterfaceTypeMappingFilterSet(django_filters.FilterSet):
@@ -41,3 +41,13 @@ class ModuleBayMappingFilterSet(django_filters.FilterSet):
 
         model = ModuleBayMapping
         fields = ["librenms_name", "librenms_class", "netbox_bay_name", "is_regex"]
+
+
+class NormalizationRuleFilterSet(django_filters.FilterSet):
+    """Filter set for NormalizationRule model."""
+
+    class Meta:
+        """Meta options for NormalizationRuleFilterSet."""
+
+        model = NormalizationRule
+        fields = ["scope", "manufacturer"]

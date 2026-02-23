@@ -53,6 +53,14 @@ from .mapping_views import (
     ModuleTypeMappingEditView,
     ModuleTypeMappingListView,
     ModuleTypeMappingView,
+    NormalizationRuleBulkDeleteView,
+    NormalizationRuleBulkImportView,
+    NormalizationRuleChangeLogView,
+    NormalizationRuleCreateView,
+    NormalizationRuleDeleteView,
+    NormalizationRuleEditView,
+    NormalizationRuleListView,
+    NormalizationRuleView,
 )
 from .object_sync import (
     DeviceCableTableView,

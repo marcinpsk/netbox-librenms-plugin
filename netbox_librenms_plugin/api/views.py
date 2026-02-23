@@ -16,6 +16,7 @@ from netbox_librenms_plugin.models import (
     InterfaceTypeMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
+    NormalizationRule,
 )
 
 from .serializers import (
@@ -23,6 +24,7 @@ from .serializers import (
     InterfaceTypeMappingSerializer,
     ModuleBayMappingSerializer,
     ModuleTypeMappingSerializer,
+    NormalizationRuleSerializer,
 )
 
 logger = logging.getLogger(__name__)
@@ -76,6 +78,15 @@ class ModuleBayMappingViewSet(NetBoxModelViewSet):
 
     queryset = ModuleBayMapping.objects.all()
     serializer_class = ModuleBayMappingSerializer
+
+
+class NormalizationRuleViewSet(NetBoxModelViewSet):
+    """API viewset for NormalizationRule CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+
+    queryset = NormalizationRule.objects.all()
+    serializer_class = NormalizationRuleSerializer
 
 
 @api_view(["POST"])

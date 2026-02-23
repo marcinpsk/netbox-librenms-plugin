@@ -100,6 +100,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Build a lookup of all inventory items by index for parent resolution
         index_map = {item["entPhysicalIndex"]: item for item in inventory_data}
 
+        # Store manufacturer for normalization rules in _build_row
+        self._device_manufacturer = getattr(getattr(obj, "device_type", None), "manufacturer", None)
+
         # Get NetBox module bays and modules for this device
         device_bays, module_scoped_bays = self._get_module_bays(obj)
         module_types = self._get_module_types()
@@ -552,6 +555,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
     def _build_row(self, item, index_map, module_bays, module_types, depth=0):
         """Build a single table row from a LibreNMS inventory item."""
         from netbox_librenms_plugin.utils import (
+            apply_normalization_rules,
             has_nested_name_conflict,
             module_type_uses_module_path,
             supports_module_path,
@@ -566,8 +570,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Match to NetBox module bay
         matched_bay = self._match_module_bay(item, index_map, module_bays)
 
-        # Match to NetBox module type
+        # Match to NetBox module type (direct lookup, then normalization fallback)
         matched_type = module_types.get(model_name) if model_name else None
+        if not matched_type and model_name:
+            normalized = apply_normalization_rules(
+                model_name, "module_type", manufacturer=getattr(self, "_device_manufacturer", None)
+            )
+            if normalized != model_name:
+                matched_type = module_types.get(normalized)
 
         # Check {module_path} compatibility
         needs_module_path = matched_type and module_type_uses_module_path(matched_type)
@@ -846,14 +856,23 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         Scopes bay lookup to the correct parent module to handle duplicate bay names.
         """
         from netbox_librenms_plugin.models import ModuleBayMapping
-        from netbox_librenms_plugin.utils import module_type_uses_module_path, supports_module_path
+        from netbox_librenms_plugin.utils import (
+            apply_normalization_rules,
+            module_type_uses_module_path,
+            supports_module_path,
+        )
 
         model_name = (item.get("entPhysicalModelName") or "").strip()
         serial = (item.get("entPhysicalSerialNum") or "").strip()
         name = item.get("entPhysicalName", "") or model_name
 
-        # Match module type
+        # Match module type (direct, then normalization fallback)
         matched_type = module_types.get(model_name)
+        if not matched_type and model_name:
+            manufacturer = getattr(getattr(device, "device_type", None), "manufacturer", None)
+            normalized = apply_normalization_rules(model_name, "module_type", manufacturer=manufacturer)
+            if normalized != model_name:
+                matched_type = module_types.get(normalized)
         if not matched_type:
             return {"status": "skipped", "name": name, "reason": "no matching type"}
 

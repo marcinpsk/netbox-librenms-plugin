@@ -6,6 +6,7 @@ from netbox_librenms_plugin.models import (
     InterfaceTypeMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
+    NormalizationRule,
 )
 
 
@@ -131,6 +132,42 @@ class ModuleBayMappingTable(NetBoxTable):
             "netbox_bay_name",
             "is_regex",
             "description",
+            "actions",
+        )
+        attrs = {"class": "table table-hover table-headings table-striped"}
+
+
+class NormalizationRuleTable(NetBoxTable):
+    """Table for displaying NormalizationRule data."""
+
+    scope = tables.Column(verbose_name="Scope", linkify=True)
+    manufacturer = tables.Column(verbose_name="Manufacturer", linkify=True)
+    match_pattern = tables.Column(verbose_name="Match Pattern")
+    replacement = tables.Column(verbose_name="Replacement")
+    priority = tables.Column(verbose_name="Priority")
+    description = tables.Column(verbose_name="Description", linkify=False)
+    actions = columns.ActionsColumn(actions=("edit", "delete"))
+
+    class Meta:
+        """Meta options for NormalizationRuleTable."""
+
+        model = NormalizationRule
+        fields = (
+            "id",
+            "scope",
+            "manufacturer",
+            "match_pattern",
+            "replacement",
+            "priority",
+            "description",
+            "actions",
+        )
+        default_columns = (
+            "id",
+            "scope",
+            "match_pattern",
+            "replacement",
+            "priority",
             "actions",
         )
         attrs = {"class": "table table-hover table-headings table-striped"}

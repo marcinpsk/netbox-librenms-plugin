@@ -80,9 +80,7 @@
   netbox_module_type: "JNP-PWR2200-AC"
   description: "Juniper MX304 2200W AC PSU"
 
-- librenms_model: "JPSU-1600W-1UACAFO"
-  netbox_module_type: "JPSU-1600W-1UACAFO"
-  description: "Juniper ACX7100 1600W AC PSU AFO"
+# Removed: JPSU-1600W-1UACAFO — exact model match, no mapping needed
 
 # ─── Juniper Fan Tray Mappings ───────────────────────────────────────────────
 
@@ -94,45 +92,14 @@
   netbox_module_type: "JNP-FAN-2RU"
   description: "Juniper MX304 2RU fan tray"
 
-- librenms_model: "JNP7100-FAN1RU-AO"
-  netbox_module_type: "JNP7100-FAN1RU-AO"
-  description: "Juniper ACX7100 1RU fan tray AO"
+# Removed: JNP7100-FAN1RU-AO — exact model match, no mapping needed
 
 # ─── Nokia 7750 SR-7s Module Mappings ────────────────────────────────────────
-# Nokia uses full 3HExxxxxxxx01 part numbers in ENTITY-MIB, but NetBox types
-# have abbreviated 3HExxxxxxAA PNs. These mappings bridge the gap.
-
-- librenms_model: "3HE11183AARB01"
-  netbox_module_type: "PS-7750-SR-S-AC"
-  description: "Nokia 7750 SR-s AC Power Module"
-
-- librenms_model: "3HE11312AARB01"
-  netbox_module_type: "FAN-7750-SR-S"
-  description: "Nokia 7750 SR-s Fan Module"
-
-- librenms_model: "3HE16474AARA01"
-  netbox_module_type: "XCM-7s-b"
-  description: "Nokia 7750 SR-7s IOM (XCM-7s-b)"
-
-- librenms_model: "3HE16472AARB01"
-  netbox_module_type: "XCM2-7s"
-  description: "Nokia 7750 SR-7s IOM (XCM2-7s)"
-
-- librenms_model: "3HE12391AARK01"
-  netbox_module_type: "m36-800g-qsfpdd"
-  description: "Nokia MDA 36-port multirate"
-
-- librenms_model: "3HE18883AARB01"
-  netbox_module_type: "XIOM-s-3.0t"
-  description: "Nokia XIOM 36-port 3.0T"
-
-- librenms_model: "3HE12559AARC01"
-  netbox_module_type: "CPM2-s"
-  description: "Nokia 7750 SR-s Control Processing Module"
-
-- librenms_model: "3HE16471AARG01"
-  netbox_module_type: "SFM2-s"
-  description: "Nokia 7750 SR-s Switch Fabric Module"
+# Nokia 3HE part numbers are handled by NormalizationRule:
+#   1. Strip extra text (e.g. "3HE10550AARA01 NOK IPU3BFUEAA" → "3HE10550AARA01")
+#   2. Strip revision suffix (e.g. "3HE10550AARA01" → "3HE10550AA")
+# The normalized value matches the part_number field on NetBox ModuleTypes.
+# No explicit Nokia mappings are needed.
 
 # ─── Transceiver Mappings: Juniper Part Numbers ─────────────────────────────
 # Juniper-qualified optics use 740-xxxxxx part numbers regardless of OEM vendor.

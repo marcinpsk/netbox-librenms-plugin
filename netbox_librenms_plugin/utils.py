@@ -521,3 +521,40 @@ def has_nested_name_conflict(module_type, module_bay):
     ).count()
 
     return sibling_count > 1
+
+
+def apply_normalization_rules(value: str, scope: str, manufacturer=None) -> str:
+    """Apply NormalizationRule chain to transform a string before matching.
+
+    Rules for the given scope are applied in priority order.  Each rule's
+    regex substitution transforms the output of the previous rule, forming
+    a pipeline.  If no rules match, the original value is returned unchanged.
+
+    When *manufacturer* is given, manufacturer-scoped rules run first,
+    followed by unscoped (manufacturer=NULL) rules.  When *manufacturer*
+    is ``None``, all rules for the scope run in priority order.
+
+    Args:
+        value:  The raw string to normalize (e.g. '3HE16474AARA01').
+        scope:  One of NormalizationRule.SCOPE_* constants.
+        manufacturer:  Optional Manufacturer instance to scope rules.
+
+    Returns:
+        The normalized string after all matching rules have been applied.
+    """
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    if not value:
+        return value
+
+    if manufacturer:
+        # Manufacturer-specific rules first, then unscoped rules
+        for mfg_filter in [{"manufacturer": manufacturer}, {"manufacturer__isnull": True}]:
+            rules = NormalizationRule.objects.filter(scope=scope, **mfg_filter).order_by("priority", "pk")
+            for rule in rules:
+                value = re.sub(rule.match_pattern, rule.replacement, value)
+    else:
+        rules = NormalizationRule.objects.filter(scope=scope).order_by("priority", "pk")
+        for rule in rules:
+            value = re.sub(rule.match_pattern, rule.replacement, value)
+    return value

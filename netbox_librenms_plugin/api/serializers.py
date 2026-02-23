@@ -5,6 +5,7 @@ from netbox_librenms_plugin.models import (
     InterfaceTypeMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
+    NormalizationRule,
 )
 
 
@@ -46,3 +47,21 @@ class ModuleBayMappingSerializer(NetBoxModelSerializer):
 
         model = ModuleBayMapping
         fields = ["id", "librenms_name", "librenms_class", "netbox_bay_name", "is_regex", "description"]
+
+
+class NormalizationRuleSerializer(NetBoxModelSerializer):
+    """Serialize NormalizationRule model for REST API."""
+
+    class Meta:
+        """Meta options for NormalizationRuleSerializer."""
+
+        model = NormalizationRule
+        fields = [
+            "id",
+            "scope",
+            "manufacturer",
+            "match_pattern",
+            "replacement",
+            "priority",
+            "description",
+        ]

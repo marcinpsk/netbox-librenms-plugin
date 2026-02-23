@@ -6,6 +6,7 @@ from netbox_librenms_plugin.filters import (
     InterfaceTypeMappingFilterSet,
     ModuleBayMappingFilterSet,
     ModuleTypeMappingFilterSet,
+    NormalizationRuleFilterSet,
 )
 from netbox_librenms_plugin.forms import (
     DeviceTypeMappingFilterForm,
@@ -20,18 +21,23 @@ from netbox_librenms_plugin.forms import (
     ModuleTypeMappingFilterForm,
     ModuleTypeMappingForm,
     ModuleTypeMappingImportForm,
+    NormalizationRuleFilterForm,
+    NormalizationRuleForm,
+    NormalizationRuleImportForm,
 )
 from netbox_librenms_plugin.models import (
     DeviceTypeMapping,
     InterfaceTypeMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
+    NormalizationRule,
 )
 from netbox_librenms_plugin.tables.mappings import (
     DeviceTypeMappingTable,
     InterfaceTypeMappingTable,
     ModuleBayMappingTable,
     ModuleTypeMappingTable,
+    NormalizationRuleTable,
 )
 from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
 
@@ -288,3 +294,63 @@ class ModuleBayMappingChangeLogView(LibreNMSPermissionMixin, generic.ObjectChang
     """Provides a view for displaying the change log of a specific ModuleBayMapping object."""
 
     queryset = ModuleBayMapping.objects.all()
+
+
+# --- NormalizationRule views ---
+
+
+class NormalizationRuleListView(LibreNMSPermissionMixin, generic.ObjectListView):
+    """Provides a view for listing all NormalizationRule objects."""
+
+    queryset = NormalizationRule.objects.all()
+    table = NormalizationRuleTable
+    filterset = NormalizationRuleFilterSet
+    filterset_form = NormalizationRuleFilterForm
+    template_name = "netbox_librenms_plugin/normalizationrule_list.html"
+
+
+class NormalizationRuleCreateView(LibreNMSPermissionMixin, generic.ObjectEditView):
+    """Provides a view for creating a new NormalizationRule object."""
+
+    queryset = NormalizationRule.objects.all()
+    form = NormalizationRuleForm
+
+
+@register_model_view(NormalizationRule, "bulk_import", path="import", detail=False)
+class NormalizationRuleBulkImportView(LibreNMSPermissionMixin, generic.BulkImportView):
+    """Provides a view for bulk importing NormalizationRule objects."""
+
+    queryset = NormalizationRule.objects.all()
+    model_form = NormalizationRuleImportForm
+
+
+class NormalizationRuleView(LibreNMSPermissionMixin, generic.ObjectView):
+    """Provides a view for displaying details of a specific NormalizationRule object."""
+
+    queryset = NormalizationRule.objects.all()
+
+
+class NormalizationRuleEditView(LibreNMSPermissionMixin, generic.ObjectEditView):
+    """Provides a view for editing a specific NormalizationRule object."""
+
+    queryset = NormalizationRule.objects.all()
+    form = NormalizationRuleForm
+
+
+class NormalizationRuleDeleteView(LibreNMSPermissionMixin, generic.ObjectDeleteView):
+    """Provides a view for deleting a specific NormalizationRule object."""
+
+    queryset = NormalizationRule.objects.all()
+
+
+class NormalizationRuleBulkDeleteView(LibreNMSPermissionMixin, generic.BulkDeleteView):
+    """Provides a view for deleting multiple NormalizationRule objects."""
+
+    queryset = NormalizationRule.objects.all()
+    table = NormalizationRuleTable
+
+
+class NormalizationRuleChangeLogView(LibreNMSPermissionMixin, generic.ObjectChangeLogView):
+    """Provides a view for displaying the change log of a specific NormalizationRule object."""
+
+    queryset = NormalizationRule.objects.all()
