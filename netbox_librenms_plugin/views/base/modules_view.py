@@ -150,8 +150,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             top_items.append(item)
 
         table_data = []
+        from netbox_librenms_plugin.utils import apply_normalization_rules
+
+        # Build combined bay lookup so top-level items (including synthetic
+        # transceiver entries) can match bays created by installed modules.
+        all_bays = dict(device_bays)
+        for scope_bays in module_scoped_bays.values():
+            all_bays.update(scope_bays)
+
         for item in top_items:
-            row = self._build_row(item, index_map, device_bays, module_types, depth=0)
+            row = self._build_row(item, index_map, all_bays, module_types, depth=0)
             parent_idx = len(table_data)
             table_data.append(row)
 
@@ -162,7 +170,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             parent_module_id = None
             parent_bay_matched_but_uninstalled = False
             if row.get("module_bay_id"):
-                matched_bay = device_bays.get(row["module_bay"])
+                matched_bay = all_bays.get(row["module_bay"])
                 if matched_bay and hasattr(matched_bay, "installed_module") and matched_bay.installed_module:
                     parent_module_id = matched_bay.installed_module.pk
                 else:
@@ -211,7 +219,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             ):
                 for _depth, sub_item in sub_items:
                     sub_model = (sub_item.get("entPhysicalModelName") or "").strip()
-                    if sub_model and sub_model in module_types:
+                    if sub_model and (
+                        sub_model in module_types
+                        or apply_normalization_rules(
+                            sub_model,
+                            "module_type",
+                            manufacturer=getattr(self, "_device_manufacturer", None),
+                        )
+                        in module_types
+                    ):
                         table_data[parent_idx]["has_installable_children"] = True
                         break
 
