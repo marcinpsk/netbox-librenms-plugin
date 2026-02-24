@@ -184,7 +184,6 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
         if not vlan_synced:
             interface.save()
 
-
     def get_netbox_interface_type(self, librenms_interface):
         """Return the NetBox interface type mapped from LibreNMS type and speed."""
         speed = convert_speed_to_kbps(librenms_interface.get("ifSpeed"))

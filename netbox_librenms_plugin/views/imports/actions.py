@@ -824,7 +824,6 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
 
         from dcim.models import Device
 
-
         action = request.POST.get("action")
         existing_device_id = request.POST.get("existing_device_id")
 
