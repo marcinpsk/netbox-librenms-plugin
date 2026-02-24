@@ -142,9 +142,28 @@ def get_table_paginate_count(request: HttpRequest, table_prefix: str) -> int:
     return netbox_get_paginate_count(request)
 
 
+def get_user_pref(request, path, default=None):
+    """Get a user preference value via request.user.config."""
+    if hasattr(request, "user") and hasattr(request.user, "config"):
+        return request.user.config.get(path, default)
+    return default
+
+
+def save_user_pref(request, path, value):
+    """Save a user preference value via request.user.config."""
+    if hasattr(request, "user") and hasattr(request.user, "config"):
+        try:
+            request.user.config.set(path, value, commit=True)
+        except (TypeError, ValueError):
+            pass
+
+
 def get_interface_name_field(request: Optional[HttpRequest] = None) -> str:
     """
     Get interface name field with request override support.
+
+    Checks in order: GET/POST params, user preference, plugin config default.
+    When a param is explicitly provided, persists it to user preferences.
 
     Args:
         request: Optional HTTP request object that may contain override
@@ -153,10 +172,18 @@ def get_interface_name_field(request: Optional[HttpRequest] = None) -> str:
         str: Interface name field to use
     """
     if request:
-        if request.GET.get("interface_name_field"):
-            return request.GET.get("interface_name_field")
-        if request.POST.get("interface_name_field"):
-            return request.POST.get("interface_name_field")
+        # Explicit override from request params
+        param_val = request.GET.get("interface_name_field") or request.POST.get("interface_name_field")
+        if param_val:
+            existing = get_user_pref(request, "plugins.netbox_librenms_plugin.interface_name_field")
+            if param_val != existing:
+                save_user_pref(request, "plugins.netbox_librenms_plugin.interface_name_field", param_val)
+            return param_val
+
+        # Check user preference
+        pref_val = get_user_pref(request, "plugins.netbox_librenms_plugin.interface_name_field")
+        if pref_val:
+            return pref_val
 
     # Fall back to plugin config
     return get_plugin_config("netbox_librenms_plugin", "interface_name_field")

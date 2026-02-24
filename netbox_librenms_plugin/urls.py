@@ -29,6 +29,7 @@ from .views import (
     InterfaceTypeMappingView,
     LibreNMSImportView,
     LibreNMSSettingsView,
+    SaveUserPrefView,
     SingleCableVerifyView,
     SingleInterfaceVerifyView,
     SingleIPAddressVerifyView,
@@ -257,6 +258,11 @@ urlpatterns = [
         "device-import/rack-update/<str:device_id>/",
         DeviceRackUpdateView.as_view(),
         name="device_rack_update",
+    ),
+    path(
+        "save-user-pref/",
+        SaveUserPrefView.as_view(),
+        name="save_user_pref",
     ),
     path(
         "vm-status/",

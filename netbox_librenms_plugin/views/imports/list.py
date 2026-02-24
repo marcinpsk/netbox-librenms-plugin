@@ -15,6 +15,7 @@ from netbox_librenms_plugin.import_utils import (
 )
 from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
+from netbox_librenms_plugin.utils import get_user_pref
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 logger = logging.getLogger(__name__)
@@ -306,6 +307,15 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         except Exception:
             settings = None
 
+        # User preference overrides for toggles (persisted per-user)
+        use_sysname = get_user_pref(request, "plugins.netbox_librenms_plugin.use_sysname")
+        strip_domain = get_user_pref(request, "plugins.netbox_librenms_plugin.strip_domain")
+        # Fall back to server-level settings
+        if use_sysname is None:
+            use_sysname = getattr(settings, "use_sysname_default", True) if settings else True
+        if strip_domain is None:
+            strip_domain = getattr(settings, "strip_domain_default", False) if settings else False
+
         # Get active cached searches for this server
         cached_searches = get_active_cached_searches(self.librenms_api.server_key)
 
@@ -318,6 +328,8 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             "filters_submitted": filters_submitted,
             "show_filter_warning": bool(filter_warning),
             "settings": settings,
+            "use_sysname": use_sysname,
+            "strip_domain": strip_domain,
             "vc_detection_enabled": getattr(self, "_vc_detection_enabled", False),
             "cache_cleared": getattr(self, "_cache_cleared", False),
             "from_cache": getattr(self, "_from_cache", False),
