@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Ensure aliases are available in the postAttach terminal session
+source "$(dirname "$0")/load-aliases.sh" 2>/dev/null
+
 echo ""
 echo "🎯 NetBox LibreNMS Plugin Development Environment"
 
@@ -46,6 +49,7 @@ fi
 echo ""
 echo "🚀 Quick start:"
 echo "   • Type 'netbox-run' to start the development server"
+echo "   • Type 'netbox-restart' to restart NetBox (after config changes)"
 echo "   • Type 'dev-help' to see all available commands"
 echo "   • Edit code in the workspace - auto-reload is enabled"
 echo ""

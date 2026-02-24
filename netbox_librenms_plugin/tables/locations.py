@@ -19,9 +19,11 @@ class SiteLocationSyncTable(tables.Table):
     actions = tables.Column(empty_values=())
 
     def render_latitude(self, value, record):
+        """Render latitude with sync-status styling."""
         return self.render_coordinate(value, record.is_synced)
 
     def render_longitude(self, value, record):
+        """Render longitude with sync-status styling."""
         return self.render_coordinate(value, record.is_synced)
 
     def render_coordinate(self, value, is_synced):
@@ -68,6 +70,8 @@ class SiteLocationSyncTable(tables.Table):
         tables.RequestConfig(request, paginate).configure(self)
 
     class Meta:
+        """Meta options for SiteLocationSyncTable."""
+
         fields = (
             "netbox_site",
             "latitude",

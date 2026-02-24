@@ -9,6 +9,7 @@ from .actions import (  # noqa: F401
     DeviceRoleUpdateView,
     DeviceValidationDetailsView,
     DeviceVCDetailsView,
+    SaveUserPrefView,
 )
 from .list import LibreNMSImportView  # noqa: F401
 
@@ -22,4 +23,5 @@ __all__ = [
     "DeviceValidationDetailsView",
     "DeviceVCDetailsView",
     "LibreNMSImportView",
+    "SaveUserPrefView",
 ]

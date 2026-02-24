@@ -7,7 +7,7 @@ from django.utils import timezone
 from django_rq import get_queue
 from netbox.api.viewsets import NetBoxModelViewSet
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import BasePermission
+from rest_framework.permissions import BasePermission, SAFE_METHODS
 from rq.job import Job as RQJob
 
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
@@ -27,13 +27,16 @@ class LibreNMSPluginPermission(BasePermission):
     """
 
     def has_permission(self, request, view):
-        if request.method == "GET":
+        if request.method in SAFE_METHODS:
             return request.user.has_perm(PERM_VIEW_PLUGIN)
         return request.user.has_perm(PERM_CHANGE_PLUGIN)
 
 
 class InterfaceTypeMappingViewSet(NetBoxModelViewSet):
+    """API viewset for InterfaceTypeMapping CRUD operations."""
+
     permission_classes = [LibreNMSPluginPermission]
+
     queryset = InterfaceTypeMapping.objects.all()
     serializer_class = InterfaceTypeMappingSerializer
 

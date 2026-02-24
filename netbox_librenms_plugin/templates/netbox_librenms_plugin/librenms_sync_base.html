@@ -59,7 +59,14 @@
     <!-- Left: Device Status Card (Smaller) -->
     <div class="col-md-3">
         <div class="card">
-            <h5 class="card-header">LibreNMS Status</h5>
+            <h5 class="card-header d-flex justify-content-between align-items-center">
+                LibreNMS Status
+                {% if mismatched_device %}
+                <a href="#" class="btn btn-sm btn-outline-warning px-1" style="padding-top:0;padding-bottom:0;line-height:1.2" data-bs-toggle="modal" data-bs-target="#mismatchModal" title="Click for details">
+                    <i class="mdi mdi-alert"></i> Mismatch found
+                </a>
+                {% endif %}
+            </h5>
             <div class="card-body p-0">
                 <table class="table table-sm table-hover attr-table mb-0">
                     <tbody>
@@ -83,6 +90,52 @@
                             <th scope="row" style="padding-left: 1rem;">ID</th>
                             <td>{{ librenms_device_id }}</td>
                         </tr>
+
+                        <!-- Hostname Row -->
+                        <tr>
+                            <th scope="row" style="padding-left: 1rem;">Hostname</th>
+                            <td>
+                                {% if librenms_device_hostname and librenms_device_hostname != "-" %}
+                                    {{ librenms_device_hostname }}
+                                {% else %}
+                                    <span class="text-muted">-</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+
+                        <!-- sysName Row -->
+                        <tr>
+                            <th scope="row" style="padding-left: 1rem;">sysName</th>
+                            <td>
+                                {% if sysName %}
+                                    {{ sysName }}
+                                {% else %}
+                                    <span class="text-muted">-</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+
+                        <!-- Serial Row -->
+                        {% if librenms_device_serial and librenms_device_serial != "-" %}
+                        <tr>
+                            <th scope="row" style="padding-left: 1rem;">
+                                Serial
+                                {% if object.serial and librenms_device_serial != object.serial %}
+                                <span class="text-warning ms-1" title="LibreNMS serial '{{ librenms_device_serial }}' does not match NetBox serial '{{ object.serial }}'">
+                                    <i class="mdi mdi-alert"></i>
+                                </span>
+                                {% endif %}
+                            </th>
+                            <td>
+                                {{ librenms_device_serial }}
+                                {% if object.serial and librenms_device_serial == object.serial %}
+                                <span class="text-success ms-1" title="Serial matches NetBox">
+                                    <i class="mdi mdi-check-circle"></i>
+                                </span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endif %}
 
                         {% with model_name=object|meta:"model_name" %}
                         {% if model_name == "device" %}
@@ -448,6 +501,7 @@
     {% endif %}
 {% elif librenms_device_id %}
 {% if found_in_librenms %}
+
 <!-- Tab Navigation -->
 <div class="d-flex justify-content-between align-items-center">
     <ul class="nav nav-tabs mt-3" id="librenmsSync" role="tablist">
@@ -471,9 +525,20 @@
                 IP Addresses
             </button>
         </li>
+        {% with model_name=object|meta:"model_name" %}
+        {% if model_name == "device" %}
+        <li class="nav-item" role="presentation">
+            <button class="nav-link" id="vlans-tab" data-tab="vlans" data-bs-toggle="tab"
+                data-bs-target="#vlans" type="button" role="tab" aria-controls="vlans">
+                VLANs
+            </button>
+        </li>
+        {% endif %}
+        {% endwith %}
     </ul>
     <div class="btn-group btn-group-sm mt-3" role="group" data-bs-toggle="tooltip" data-bs-placement="top"
-        title="Select preferred interface name field">
+        title="Select preferred interface name field"
+        data-save-pref-url="{% url 'plugins:netbox_librenms_plugin:save_user_pref' %}">
         <input type="radio" class="btn-check interface-name-field" name="interface_name_field" value="ifDescr"
             id="ifDescr" {% if interface_name_field == 'ifDescr' %}checked{% endif %}>
         <label class="btn btn-outline-primary" for="ifDescr">ifDescr</label>
@@ -498,40 +563,18 @@
         data-tab-id="ipaddresses">
         {% include 'netbox_librenms_plugin/_ipaddress_sync.html' %}
     </div>
-</div>
 
-
-{% elif mismatched_device %}
-<div>
-    <div class="alert alert-warning d-flex align-items-center">
-        <i class="mdi mdi-alert me-2"></i>
-        <div>
-            <strong>Device Mismatch:</strong>
-            The LibreNMS device with ID <code>{{ librenms_device_id }}</code> does not match the NetBox device.
-            <hr class="my-2">
-            <span class="text-muted">
-                Netbox Device Details:
-                <ul class="mb-1">
-                    <li>NetBox Name: {{ object.name }}</li>
-                    <li>Primary IP: {{ object.primary_ip.address.ip|default:'-' }}</li>
-                    <li>Primary IP DNS Name: {{ object.primary_ip.dns_name|default:'-' }}</li>
-
-                </ul>
-                LibreNMS Device with ID <code>{{ librenms_device_id }}</code>:
-                <ul class="mb-1">
-                    <li>LibreNMS Name: {{ sysName|default:'-' }}</li>
-                    <li>Hardware: {{ librenms_device_hardware }}</li>
-                    <li>IP Address: {{ librenms_device_ip }}</li>
-                </ul>
-                Options:
-                <ul class="mb-0">
-                    <li>Remove custom field value and let LibreNMS plugin try to find it</li>
-                    <li>Manually enter the correct LibreNMS device ID</li>
-                </ul>
-            </span>
-        </div>
+    {% with model_name=object|meta:"model_name" %}
+    {% if model_name == "device" %}
+    <div class="tab-pane fade" id="vlans" role="tabpanel" aria-labelledby="vlans-tab"
+        data-tab-id="vlans">
+        {% include 'netbox_librenms_plugin/_vlan_sync.html' %}
     </div>
+    {% endif %}
+    {% endwith %}
 </div>
+
+
 {% else %}
 <div>
     <div class="alert alert-warning d-flex align-items-center">
@@ -579,6 +622,57 @@
 
 <!-- Add to LibreNMS Modal Placeholder-->
 <div id="modal-div"></div>
+
+{% if mismatched_device %}
+<!-- Device Identity Mismatch Modal -->
+<div class="modal fade" id="mismatchModal" tabindex="-1" aria-labelledby="mismatchModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="mismatchModalLabel">
+                    <i class="mdi mdi-alert text-warning me-1"></i> Device Identity Mismatch
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p>No matching value was found between the NetBox device and the linked LibreNMS device
+                    (ID: <code>{{ librenms_device_id }}</code>).</p>
+                <table class="table table-sm table-bordered mb-3">
+                    <thead>
+                        <tr>
+                            <th></th>
+                            <th>NetBox</th>
+                            <th>LibreNMS</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <th>Name / sysName</th>
+                            <td>{{ object.name|default:'-' }}</td>
+                            <td>{{ sysName|default:'-' }}</td>
+                        </tr>
+                        <tr>
+                            <th>IP</th>
+                            <td>{{ object.primary_ip.address.ip|default:'-' }}</td>
+                            <td>{{ librenms_device_ip|default:'-' }}</td>
+                        </tr>
+                        <tr>
+                            <th>DNS / Hostname</th>
+                            <td>{{ netbox_dns_name|default:'-' }}</td>
+                            <td>{{ librenms_device_hostname|default:'-' }}</td>
+                        </tr>
+                    </tbody>
+                </table>
+                <p class="text-muted mb-0"> Please review the details to
+                    ensure the correct device is being used for LibreNMS sync.</p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
 
 
 <!-- Add to LibreNMS Modal -->

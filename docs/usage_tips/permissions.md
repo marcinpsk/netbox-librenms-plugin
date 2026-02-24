@@ -58,7 +58,7 @@ NetBox object permissions are created similarly but for different object types (
 The Interface Type Mapping feature uses its own object permissions in addition to the plugin permissions. To manage interface mappings, users need:
 
 - **Plugin permission**: View permission on LibreNMS Settings (to access the page)
-- **Object permissions**: `netbox_librenms_plugin.add_interfacetypemapping`, `change_interfacetypemapping`, or `delete_interfacetypemapping` as needed
+- **Object permissions**: `netbox_librenms_plugin.add_interfacetypemapping`, `netbox_librenms_plugin.change_interfacetypemapping`, or `netbox_librenms_plugin.delete_interfacetypemapping` as needed
 
 These permissions are enforced automatically by NetBox's generic views.
 
@@ -75,12 +75,13 @@ Users can access all plugin pages, refresh data from LibreNMS, and review compar
 ### Full Plugin Access
 
 - **Plugin permissions**: View + Change (Can view LibreNMS Plugin Pages and Import and sync devices data)
-- **NetBox permissions**: Add/change permissions for devices, interfaces, cables, IP addresses
+- **NetBox permissions**: Add/change permissions for devices, interfaces, cables, IP addresses, VLANs
 
 Users have full access to all plugin features and can import devices, sync interfaces, and create cables.
 
 
 ## Further Details
+
 ### Tier 1: Plugin Permissions
 
 Plugins permissions use the **LibreNMS Settings** model permissions:
@@ -94,7 +95,7 @@ Users without View permission won't see the LibreNMS menu or the LibreNMS Sync t
 
 ### Tier 2: NetBox Object Permissions
 
-When the plugin creates or modifies NetBox objects (devices, interfaces, cables, IP addresses), NetBox enforces its standard object permissions. The plugin checks these permissions and will block operations if the user lacks the required access.
+When the plugin creates or modifies NetBox objects (devices, interfaces, cables, IP addresses, VLANs), NetBox enforces its standard object permissions. The plugin checks these permissions and will block operations if the user lacks the required access.
 
 | Plugin Action | Required Object Permissions |
 |---------------|----------------------------|
@@ -107,6 +108,7 @@ When the plugin creates or modifies NetBox objects (devices, interfaces, cables,
 | Delete VM interfaces | `virtualization.delete_vminterface` |
 | Sync cables | `dcim.add_cable`, `dcim.change_cable` |
 | Sync IP addresses | `ipam.add_ipaddress`, `ipam.change_ipaddress` |
+| Sync VLANs | `ipam.add_vlan`, `ipam.change_vlan` |
 | Sync device fields | `dcim.change_device` |
 | Create platform | `dcim.add_platform` |
 

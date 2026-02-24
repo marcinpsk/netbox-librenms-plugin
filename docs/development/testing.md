@@ -27,6 +27,8 @@ The test suite covers all major plugin functionality. Tests are organized by the
 | [test_import_validation_helpers.py](../../netbox_librenms_plugin/tests/test_import_validation_helpers.py) | Field validation for sites, roles, platforms, and device types |
 | [test_utils.py](../../netbox_librenms_plugin/tests/test_utils.py) | General utilities—name matching, speed conversion, and data formatting |
 | [test_background_jobs.py](../../netbox_librenms_plugin/tests/test_background_jobs.py) | Background job execution and view decision logic |
+| [test_vlan_sync.py](../../netbox_librenms_plugin/tests/test_vlan_sync.py) | VLAN sync—API fetching, comparison logic, CSS class utilities, and sync actions |
+| [test_interface_vlan_sync.py](../../netbox_librenms_plugin/tests/test_interface_vlan_sync.py) | Interface VLAN assignments—group resolution, mode detection, and per-interface VLAN assignment |
 
 Supporting files:
 

@@ -235,6 +235,51 @@
     }
 
     // ============================================
+    // USER PREFERENCE PERSISTENCE
+    // ============================================
+
+    /**
+     * Save a user preference via the save-user-pref endpoint.
+     * Uses the URL from a data attribute on the page to avoid hardcoding.
+     *
+     * @param {string} key - Preference key (e.g., 'use_sysname', 'strip_domain')
+     * @param {*} value - Preference value to save
+     */
+    function savePref(key, value) {
+        const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value
+            || getCookie('csrftoken');
+        if (!csrfToken) {
+            return;
+        }
+        const savePrefUrl = document.querySelector('[data-save-pref-url]')?.dataset.savePrefUrl;
+        if (!savePrefUrl) {
+            return;
+        }
+        fetch(savePrefUrl, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': csrfToken
+            },
+            body: JSON.stringify({ key: key, value: value })
+        }).catch(function (err) {
+            console.debug('savePref: fetch failed:', err.message);
+        });
+    }
+
+    /**
+     * Initialize toggle listeners for use-sysname and strip-domain preferences.
+     * Persists toggle state to user preferences on change.
+     */
+    function initializeTogglePrefs() {
+        const sysname = document.getElementById('use-sysname-toggle');
+        const strip = document.getElementById('strip-domain-toggle');
+        if (sysname) sysname.addEventListener('change', function () { savePref('use_sysname', this.checked); });
+        if (strip) strip.addEventListener('change', function () { savePref('strip_domain', this.checked); });
+    }
+
+    // ============================================
     // MODAL MANAGEMENT
     // ============================================
 
@@ -1280,6 +1325,7 @@
         initializeFilterForm();
         initializeBulkImport();
         initializeHTMXHandlers();
+        initializeTogglePrefs();
         initializeCachedSearchCountdowns();
         initializeCacheExpirationMonitor();
     }

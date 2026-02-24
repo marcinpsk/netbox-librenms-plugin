@@ -1,11 +1,12 @@
 """HTMX endpoints and POST handlers for importing LibreNMS devices."""
 
+import json
 import logging
 
 from django.contrib import messages
 from django.core.cache import cache
 from django.core.exceptions import PermissionDenied
-from django.http import HttpResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.views import View
 
@@ -28,7 +29,7 @@ from netbox_librenms_plugin.import_validation_helpers import (
     fetch_model_by_id,
 )
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
-from netbox_librenms_plugin.utils import save_import_toggle_prefs
+from netbox_librenms_plugin.utils import save_user_pref
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 logger = logging.getLogger(__name__)
@@ -210,6 +211,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
     """HTMX view to confirm bulk imports before execution."""
 
     def post(self, request):
+        """Render a confirmation modal for selected devices before bulk import."""
         # Check write permission before showing import confirmation
         if error := self.require_write_permission():
             return error
@@ -383,6 +385,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         return request.POST.get("use_background_job") == "on"
 
     def post(self, request):  # noqa: PLR0912 - branching keeps responses explicit
+        """Import selected devices from LibreNMS into NetBox."""
         # Check write permission before any import operation
         if error := self.require_write_permission():
             return error
@@ -664,6 +667,7 @@ class DeviceVCDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
     """HTMX view to show virtual chassis details."""
 
     def get(self, request, device_id):
+        """Render virtual chassis details for a LibreNMS device."""
         libre_device = get_librenms_device_by_id(self.librenms_api, device_id)
         if not libre_device:
             return HttpResponse(
@@ -689,6 +693,7 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
     """HTMX view to show detailed validation information."""
 
     def get(self, request, device_id):
+        """Render detailed validation information for a LibreNMS device."""
         libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
 
         if not libre_device:
@@ -774,6 +779,7 @@ class DeviceRoleUpdateView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImpo
     """HTMX view to update a table row when a role is selected."""
 
     def post(self, request, device_id):
+        """Update the table row after a device role selection change."""
         libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
 
         if not libre_device:
@@ -786,6 +792,7 @@ class DeviceClusterUpdateView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceI
     """HTMX view to update a table row when a cluster is selected/deselected."""
 
     def post(self, request, device_id):
+        """Update the table row after a cluster selection change."""
         libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
 
         if not libre_device:
@@ -798,6 +805,7 @@ class DeviceRackUpdateView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImpo
     """HTMX view to update a table row when a rack is selected."""
 
     def post(self, request, device_id):
+        """Update the table row after a rack selection change."""
         libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
 
         if not libre_device:
@@ -815,8 +823,6 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
             return error
 
         from dcim.models import Device
-
-        save_import_toggle_prefs(request)
 
         action = request.POST.get("action")
         existing_device_id = request.POST.get("existing_device_id")
@@ -990,3 +996,29 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
         response = self.render_device_row(request, libre_device, validation, selections)
         response["HX-Trigger"] = "closeModal"
         return response
+
+
+class SaveUserPrefView(LibreNMSPermissionMixin, View):
+    """Save a user preference via POST. Used by JS toggle handlers."""
+
+    ALLOWED_PREFS = {
+        "use_sysname": "plugins.netbox_librenms_plugin.use_sysname",
+        "strip_domain": "plugins.netbox_librenms_plugin.strip_domain",
+        "interface_name_field": "plugins.netbox_librenms_plugin.interface_name_field",
+    }
+
+    def post(self, request):
+        """Persist a user preference toggle value."""
+        try:
+            data = json.loads(request.body)
+        except (json.JSONDecodeError, ValueError):
+            return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+        key = data.get("key")
+        value = data.get("value")
+
+        if key not in self.ALLOWED_PREFS:
+            return JsonResponse({"error": "Invalid preference key"}, status=400)
+
+        save_user_pref(request, self.ALLOWED_PREFS[key], value)
+        return JsonResponse({"status": "ok"})

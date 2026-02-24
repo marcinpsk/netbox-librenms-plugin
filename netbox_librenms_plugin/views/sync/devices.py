@@ -12,6 +12,7 @@ class AddDeviceToLibreNMSView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
     """Add a NetBox device or VM to LibreNMS via the API."""
 
     def get_form_class(self):
+        """Return the appropriate SNMP form class based on the SNMP version."""
         snmp_version = self.request.POST.get("snmp_version")
         if not snmp_version:
             snmp_version = self.request.POST.get("v1v2-snmp_version") or self.request.POST.get("v3-snmp_version")
@@ -21,12 +22,14 @@ class AddDeviceToLibreNMSView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         return AddToLIbreSNMPV3
 
     def get_object(self, object_id):
+        """Return the Device or VirtualMachine for the given ID."""
         try:
             return Device.objects.get(pk=object_id)
         except Device.DoesNotExist:
             return VirtualMachine.objects.get(pk=object_id)
 
     def post(self, request, object_id):
+        """Add a device to LibreNMS using the submitted SNMP form."""
         # Check write permission before adding device to LibreNMS
         if error := self.require_write_permission():
             return error
@@ -50,6 +53,7 @@ class AddDeviceToLibreNMSView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         return redirect(self.object.get_absolute_url())
 
     def form_valid(self, form, snmp_version=None):
+        """Submit the validated SNMP form data to the LibreNMS API."""
         data = form.cleaned_data
         # Use the snmp_version from toggle/form for v1/v2c, or from form data for v3
         version = snmp_version or data.get("snmp_version")
@@ -101,6 +105,7 @@ class UpdateDeviceLocationView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
     """Update the LibreNMS site/location based on the NetBox site."""
 
     def post(self, request, pk):
+        """Sync the device location to LibreNMS from the NetBox site."""
         # Check write permission before updating location in LibreNMS
         if error := self.require_write_permission():
             return error
