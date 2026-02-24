@@ -46,10 +46,7 @@
     "CURL_CA_BUNDLE": "${localEnv:CURL_CA_BUNDLE}",
     "ALLOW_GIT_SSL_DISABLE": "${localEnv:ALLOW_GIT_SSL_DISABLE:false}"
   },
-  "features": {
-    "ghcr.io/devcontainers/features/git:1": {},
-    "ghcr.io/devcontainers/features/github-cli:1": {}
-  },
+  "features": {},
   "customizations": {
     "vscode": {
       "extensions": [
