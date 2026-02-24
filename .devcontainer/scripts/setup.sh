@@ -260,7 +260,7 @@ email = '${SUPERUSER_EMAIL:-admin@example.com}'
 password = '${SUPERUSER_PASSWORD:-admin}'
 if not User.objects.filter(username=username).exists():
     User.objects.create_superuser(username, email, password)
-    print(f'Created superuser: {username}/{password}')
+    print(f'Created superuser: {username}')
 else:
     print(f'Superuser {username} already exists')
 " 2>/dev/null || true

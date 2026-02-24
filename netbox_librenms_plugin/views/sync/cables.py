@@ -91,7 +91,6 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Cache
         """Return True if all required NetBox IDs are present in link data."""
         required_fields = [
             "netbox_local_interface_id",
-            "netbox_remote_device_id",
             "netbox_remote_interface_id",
         ]
 

@@ -760,6 +760,8 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
                 librenms_device_type = hw_match["device_type"]
                 if not existing_device.device_type or existing_device.device_type.pk != librenms_device_type.pk:
                     device_type_synced = False
+            else:
+                device_type_synced = False
 
         all_synced = serial_synced and platform_synced and device_type_synced
 

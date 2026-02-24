@@ -9,17 +9,7 @@ If the table doesn't exist (fresh install), the database_operations handle creat
 import django.db.models.deletion
 import taggit.managers
 import utilities.json
-from django.db import connection, migrations, models
-
-
-def table_exists(name):
-    """Check if a table exists in the database."""
-    with connection.cursor() as cursor:
-        cursor.execute(
-            "SELECT 1 FROM information_schema.tables WHERE table_name = %s",
-            [name],
-        )
-        return cursor.fetchone() is not None
+from django.db import migrations, models
 
 
 class Migration(migrations.Migration):

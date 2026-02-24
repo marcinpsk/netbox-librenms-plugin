@@ -1,3 +1,4 @@
+import logging
 import re
 from typing import Optional
 
@@ -7,6 +8,8 @@ from django.http import HttpRequest
 from netbox.config import get_config
 from netbox.plugins import get_plugin_config
 from utilities.paginator import get_paginate_count as netbox_get_paginate_count
+
+logger = logging.getLogger(__name__)
 
 
 def convert_speed_to_kbps(speed_bps: int) -> int:
@@ -222,6 +225,8 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict:
             "match_type": "mapping",
         }
     except DeviceTypeMapping.DoesNotExist:
+        pass
+    except DeviceTypeMapping.MultipleObjectsReturned:
         pass
 
     # Try part number exact match
@@ -552,9 +557,19 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None) -> str:
         for mfg_filter in [{"manufacturer": manufacturer}, {"manufacturer__isnull": True}]:
             rules = NormalizationRule.objects.filter(scope=scope, **mfg_filter).order_by("priority", "pk")
             for rule in rules:
-                value = re.sub(rule.match_pattern, rule.replacement, value)
+                try:
+                    value = re.sub(rule.match_pattern, rule.replacement, value)
+                except re.error:
+                    logger.error(
+                        "Invalid regex in NormalizationRule pk=%s pattern=%r — skipping", rule.pk, rule.match_pattern
+                    )
     else:
         rules = NormalizationRule.objects.filter(scope=scope).order_by("priority", "pk")
         for rule in rules:
-            value = re.sub(rule.match_pattern, rule.replacement, value)
+            try:
+                value = re.sub(rule.match_pattern, rule.replacement, value)
+            except re.error:
+                logger.error(
+                    "Invalid regex in NormalizationRule pk=%s pattern=%r — skipping", rule.pk, rule.match_pattern
+                )
     return value

@@ -61,6 +61,7 @@ class TestEnsureLibreNMSIdCustomField:
 
         # Should log when created
         mock_get_logger.assert_called_with("netbox_librenms_plugin")
+        mock_get_logger.return_value.info.assert_called_once()
 
     def test_skips_when_already_executed(self):
         """Handler is a no-op on second invocation (per-migrate dedup)."""

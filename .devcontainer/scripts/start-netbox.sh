@@ -19,7 +19,6 @@ if [ "$CODESPACES" = "true" ] && [ -n "$CODESPACE_NAME" ]; then
   echo "🔗 GitHub Codespaces detected"
 else
   ACCESS_URL="http://localhost:8000"
-  echo "🐛 Debug: ACCESS_URL is set to: $ACCESS_URL"
 fi
 
 # Kill any orphaned RQ workers (not tracked by PID file)
@@ -27,7 +26,9 @@ echo "🧹 Cleaning up orphaned processes..."
 ORPHAN_RQ_PIDS=$(pgrep -f "python.*rqworker" 2>/dev/null)
 if [ -n "$ORPHAN_RQ_PIDS" ]; then
   echo "   Found orphaned RQ workers, killing..."
-  pkill -9 -f "python.*rqworker" 2>/dev/null
+  pkill -15 -f "python.*rqworker" 2>/dev/null
+  sleep 2
+  pgrep -f "python.*rqworker" >/dev/null 2>&1 && pkill -9 -f "python.*rqworker" 2>/dev/null
   sleep 1
 fi
 
@@ -35,7 +36,9 @@ fi
 ORPHAN_NETBOX_PIDS=$(pgrep -f "python.*runserver.*8000" 2>/dev/null)
 if [ -n "$ORPHAN_NETBOX_PIDS" ]; then
   echo "   Found orphaned NetBox servers, killing..."
-  pkill -9 -f "python.*runserver.*8000" 2>/dev/null
+  pkill -15 -f "python.*runserver.*8000" 2>/dev/null
+  sleep 2
+  pgrep -f "python.*runserver.*8000" >/dev/null 2>&1 && pkill -9 -f "python.*runserver.*8000" 2>/dev/null
   sleep 1
 fi
 

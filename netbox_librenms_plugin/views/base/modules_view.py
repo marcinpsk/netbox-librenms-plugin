@@ -540,7 +540,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if match:
                 resolved_bay = match.expand(mapping.netbox_bay_name)
                 if resolved_bay in module_bays:
-                    return module_bays[resolved_bay]
+                    bay = module_bays[resolved_bay]
+                    if BaseModuleTableView._fpc_slot_matches(name, bay):
+                        return bay
         return None
 
     @staticmethod
@@ -789,7 +791,12 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
             sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
             return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
-        parent_index = int(parent_index)
+        try:
+            parent_index = int(parent_index)
+        except ValueError:
+            messages.error(request, "Invalid parent inventory index.")
+            sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
         # Get cached inventory data
         cached_data = cache.get(self.get_cache_key(device, "inventory"))

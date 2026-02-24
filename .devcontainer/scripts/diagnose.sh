@@ -38,7 +38,7 @@ echo ""
 echo "🚀 Process Status:"
 if [ -f /tmp/netbox.pid ]; then
   PID=$(cat /tmp/netbox.pid)
-  if kill -0 $PID 2>/dev/null; then
+  if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
     echo "  - NetBox server: Running (PID: $PID)"
   else
     echo "  - NetBox server: PID file exists but process not running"

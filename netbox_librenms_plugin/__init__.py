@@ -84,6 +84,8 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
     _ensure_librenms_id_custom_field._executed = True  # not reset; see comment above
 
     try:
+        import logging
+
         from django.contrib.contenttypes.models import ContentType
 
         from extras.models import CustomField
@@ -114,16 +116,12 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
                 cf.object_types.add(ct)
 
         if created:
-            import logging
-
             logging.getLogger("netbox_librenms_plugin").info(
                 "Auto-created 'librenms_id' custom field for Device, VirtualMachine, Interface, VMInterface"
             )
     except Exception as e:
         # Don't break startup if custom field creation fails (e.g., during initial migration),
         # but log the error so it's not silently swallowed.
-        import logging
-
         logging.getLogger("netbox_librenms_plugin").exception("Failed to auto-create 'librenms_id' custom field: %s", e)
 
 
