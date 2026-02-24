@@ -6,6 +6,7 @@ from .base.cables_view import BaseCableTableView, SingleCableVerifyView
 from .base.interfaces_view import BaseInterfaceTableView
 from .base.ip_addresses_view import BaseIPAddressTableView, SingleIPAddressVerifyView
 from .base.librenms_sync_view import BaseLibreNMSSyncView
+from .base.vlan_table_view import BaseVLANTableView
 from .imports import (
     BulkImportConfirmView,
     BulkImportDevicesView,
@@ -15,6 +16,7 @@ from .imports import (
     DeviceValidationDetailsView,
     DeviceVCDetailsView,
     LibreNMSImportView,
+    SaveUserPrefView,
 )
 from .mapping_views import (
     InterfaceTypeMappingBulkDeleteView,
@@ -31,7 +33,11 @@ from .object_sync import (
     DeviceInterfaceTableView,
     DeviceIPAddressTableView,
     DeviceLibreNMSSyncView,
+    DeviceVLANTableView,
+    SaveVlanGroupOverridesView,
     SingleInterfaceVerifyView,
+    SingleVlanGroupVerifyView,
+    VerifyVlanSyncGroupView,
     VMInterfaceTableView,
     VMIPAddressTableView,
     VMLibreNMSSyncView,
@@ -50,3 +56,4 @@ from .sync.devices import AddDeviceToLibreNMSView, UpdateDeviceLocationView
 from .sync.interfaces import DeleteNetBoxInterfacesView, SyncInterfacesView
 from .sync.ip_addresses import SyncIPAddressesView
 from .sync.locations import SyncSiteLocationView
+from .sync.vlans import SyncVLANsView

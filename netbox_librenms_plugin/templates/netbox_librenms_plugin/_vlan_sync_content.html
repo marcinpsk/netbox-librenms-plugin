@@ -1,0 +1,62 @@
+{% load helpers %}
+{% include 'inc/messages.html' %}
+
+{% if vlan_sync.error_message %}
+<!-- Error Message -->
+<div class="alert alert-danger">
+    <i class="mdi mdi-alert-circle"></i> {{ vlan_sync.error_message }}
+</div>
+{% elif not vlan_sync.vlan_table or not vlan_sync.vlan_table.rows %}
+<!-- No VLAN Data -->
+<div class="card">
+    <div class="card-body text-center text-muted py-4">
+        <i class="mdi mdi-sync-off mdi-48px"></i>
+        <p class="mt-2 mb-0">No VLAN data loaded. Click <strong>Refresh VLANs</strong> to fetch data from LibreNMS.</p>
+    </div>
+</div>
+{% else %}
+
+{% with model_name=vlan_sync.object|meta:"model_name" %}
+<form method="post"
+      action="{% url 'plugins:netbox_librenms_plugin:sync_selected_vlans' object_type=model_name object_id=vlan_sync.object.pk %}">
+{% endwith %}
+    {% csrf_token %}
+    <input type="hidden" name="action" value="create_vlans">
+
+    <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
+        <div>
+            <button type="submit" class="btn btn-primary">
+                <span class="spinner spinner-border d-none" id="sync-spinner"></span>
+                <span>Sync Selected VLANs</span>
+            </button>
+            <small class="text-muted ms-2">
+                <i class="mdi mdi-information-outline"></i> Select a VLAN Group for each row, or leave empty for global VLANs
+            </small>
+        </div>
+        <div class="ms-auto d-flex align-items-center">
+            {% if vlan_sync.cache_expiry %}
+            <div id="vlan-cache-countdown" class="me-3">
+                Cache expires in: <span id="vlan-countdown-timer"
+                    data-expiry="{{ vlan_sync.cache_expiry|date:'c' }}"></span>
+            </div>
+            {% endif %}
+            <div class="color-key me-3">
+                <span class="badge text-success text-white">Matching values</span>
+                <span class="badge text-warning text-white">Mismatched values</span>
+                <span class="badge text-danger text-white">Not present in NetBox</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="row mb-3">
+        <div class="col col-md-12">
+            <div class="card">
+                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=vlan_sync.vlan_table %}
+                {% include 'inc/table.html' with table=vlan_sync.vlan_table %}
+                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=vlan_sync.vlan_table %}
+            </div>
+        </div>
+    </div>
+</form>
+
+{% endif %}

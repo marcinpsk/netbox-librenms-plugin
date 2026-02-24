@@ -18,6 +18,7 @@ from .views import (
     DeviceStatusListView,
     DeviceValidationDetailsView,
     DeviceVCDetailsView,
+    DeviceVLANTableView,
     InterfaceTypeMappingBulkDeleteView,
     InterfaceTypeMappingBulkImportView,
     InterfaceTypeMappingChangeLogView,
@@ -28,13 +29,18 @@ from .views import (
     InterfaceTypeMappingView,
     LibreNMSImportView,
     LibreNMSSettingsView,
+    SaveUserPrefView,
     SingleCableVerifyView,
     SingleInterfaceVerifyView,
     SingleIPAddressVerifyView,
+    SaveVlanGroupOverridesView,
+    SingleVlanGroupVerifyView,
+    VerifyVlanSyncGroupView,
     SyncCablesView,
     SyncInterfacesView,
     SyncIPAddressesView,
     SyncSiteLocationView,
+    SyncVLANsView,
     TestLibreNMSConnectionView,
     UpdateDeviceLocationView,
     UpdateDevicePlatformView,
@@ -85,6 +91,24 @@ urlpatterns = [
         SingleIPAddressVerifyView.as_view(),
         name="verify_ipaddress",
     ),
+    # Path for VLAN group verify javascript call (interface VLAN coloring)
+    path(
+        "verify-vlan-group/",
+        SingleVlanGroupVerifyView.as_view(),
+        name="verify_vlan_group",
+    ),
+    # Verify VLAN existence in a group (VLAN sync tab coloring)
+    path(
+        "verify-vlan-sync-group/",
+        VerifyVlanSyncGroupView.as_view(),
+        name="verify_vlan_sync_group",
+    ),
+    # Save VLAN group overrides to cache ("apply to all" persistence)
+    path(
+        "save-vlan-group-overrides/",
+        SaveVlanGroupOverridesView.as_view(),
+        name="save_vlan_group_overrides",
+    ),
     # Virtual machine sync URLs
     path(
         "virtual-machines/<int:pk>/interface-sync/",
@@ -124,6 +148,17 @@ urlpatterns = [
         "<str:object_type>/<int:pk>/sync-ip-addresses/",
         SyncIPAddressesView.as_view(),
         name="sync_device_ip_addresses",
+    ),
+    # VLAN sync URLs
+    path(
+        "devices/<int:pk>/vlan-sync/",
+        DeviceVLANTableView.as_view(),
+        name="device_vlan_sync",
+    ),
+    path(
+        "<str:object_type>/<int:object_id>/sync-vlans/",
+        SyncVLANsView.as_view(),
+        name="sync_selected_vlans",
     ),
     # Add Device to LibreNMS URLs
     path(
@@ -223,6 +258,11 @@ urlpatterns = [
         "device-import/rack-update/<str:device_id>/",
         DeviceRackUpdateView.as_view(),
         name="device_rack_update",
+    ),
+    path(
+        "save-user-pref/",
+        SaveUserPrefView.as_view(),
+        name="save_user_pref",
     ),
     path(
         "vm-status/",

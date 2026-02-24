@@ -1,12 +1,18 @@
+import logging
+
 from django.contrib import messages
 from django.http import HttpResponse
 from django.shortcuts import redirect, render
+from django.utils.html import escape
 from django.views import View
 
 from netbox_librenms_plugin.forms import ImportSettingsForm, ServerConfigForm
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.models import LibreNMSSettings
+from netbox_librenms_plugin.utils import save_user_pref
 from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
+
+logger = logging.getLogger(__name__)
 
 
 class LibreNMSSettingsView(LibreNMSPermissionMixin, View):
@@ -68,6 +74,30 @@ class LibreNMSSettingsView(LibreNMSPermissionMixin, View):
 
             if import_form.is_valid():
                 import_form.save()
+                # Also update current user's preferences to match new defaults
+                try:
+                    save_user_pref(
+                        request,
+                        "plugins.netbox_librenms_plugin.use_sysname",
+                        import_form.cleaned_data.get("use_sysname_default", False),
+                    )
+                    save_user_pref(
+                        request,
+                        "plugins.netbox_librenms_plugin.strip_domain",
+                        import_form.cleaned_data.get("strip_domain_default", False),
+                    )
+                except (TypeError, ValueError) as e:
+                    logger.warning(
+                        "Failed to update user preferences due to invalid value: %s (user: %s)",
+                        e,
+                        request.user,
+                    )
+                except Exception as e:
+                    logger.exception(
+                        "Unexpected error while updating user preferences for user %s: %s",
+                        request.user,
+                        e,
+                    )
                 messages.success(
                     request,
                     "Import settings updated successfully.",
@@ -118,9 +148,9 @@ class TestLibreNMSConnectionView(LibreNMSPermissionMixin, View):
             system_info = api_client.test_connection()
 
             if system_info and not system_info.get("error"):
-                version = system_info.get("local_ver", "Unknown")
-                database = system_info.get("database_ver", "Unknown")
-                php_version = system_info.get("php_ver", "Unknown")
+                version = escape(system_info.get("local_ver", "Unknown"))
+                database = escape(system_info.get("database_ver", "Unknown"))
+                php_version = escape(system_info.get("php_ver", "Unknown"))
 
                 return HttpResponse(
                     f'<div class="alert alert-success">'
@@ -132,7 +162,7 @@ class TestLibreNMSConnectionView(LibreNMSPermissionMixin, View):
                     f"</div>"
                 )
             elif system_info and system_info.get("error"):
-                error_msg = system_info.get("message", "Unknown error occurred")
+                error_msg = escape(system_info.get("message", "Unknown error occurred"))
                 return HttpResponse(
                     f'<div class="alert alert-danger">'
                     f'<i class="ti ti-alert-circle me-2"></i>'
@@ -152,13 +182,13 @@ class TestLibreNMSConnectionView(LibreNMSPermissionMixin, View):
             return HttpResponse(
                 f'<div class="alert alert-danger">'
                 f'<i class="ti ti-alert-circle me-2"></i>'
-                f"<strong>Configuration error:</strong><br>{str(e)}"
+                f"<strong>Configuration error:</strong><br>{escape(str(e))}"
                 f"</div>"
             )
         except Exception as e:
             return HttpResponse(
                 f'<div class="alert alert-danger">'
                 f'<i class="ti ti-alert-circle me-2"></i>'
-                f"<strong>Connection failed:</strong><br>{str(e)}"
+                f"<strong>Connection failed:</strong><br>{escape(str(e))}"
                 f"</div>"
             )

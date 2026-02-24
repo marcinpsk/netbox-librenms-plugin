@@ -11,7 +11,7 @@ Views are organized by resource type (e.g., devices, mappings, VMs) in the `view
 
 **Base views:**
 
-  - The `base/` subdirectory contains abstract base views (e.g., `BaseLibreNMSSyncView`, `BaseInterfaceTableView`) that encapsulate shared logic for related resources.
+  - The `base/` subdirectory contains abstract base views (e.g., `BaseLibreNMSSyncView`, `BaseInterfaceTableView`, `BaseCableTableView`, `BaseIPAddressTableView`, `BaseVLANTableView`) that encapsulate shared logic for related resources.
 
 **Mixins:**
 
@@ -46,6 +46,20 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
     # Implements get_interfaces and get_redirect_url for devices
     ...
 ```
+
+#### Example: VLAN Table View
+
+```python
+from .base.vlan_table_view import BaseVLANTableView
+
+class DeviceVLANTableView(BaseVLANTableView):
+    model = Device
+    # Inherits VLAN comparison, group resolution, and caching from base view
+    # Only the model attribute needs to be set
+    ...
+```
+
+`BaseVLANTableView` additionally inherits `VlanAssignmentMixin` for VLAN group scope resolution. It fetches device VLANs from LibreNMS, compares them against NetBox VLAN objects across relevant VLAN groups, and renders a color-coded table with per-VLAN group dropdowns.
 
 ### Customizing or Adding Views
 

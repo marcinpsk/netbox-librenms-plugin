@@ -67,6 +67,29 @@ class TestLibreNMSAPIInit:
         with pytest.raises(ValueError):
             LibreNMSAPI(server_key="nonexistent")
 
+    def test_init_nonexistent_server_key_raises_keyerror(self, mock_librenms_config):
+        """Verify KeyError raised when specific server_key doesn't exist."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        with pytest.raises(KeyError, match="nonexistent"):
+            LibreNMSAPI(server_key="nonexistent")
+
+    def test_init_default_falls_back_to_first_server(self, mock_librenms_config):
+        """Verify 'default' key falls back to first configured server."""
+        mock_config = mock_librenms_config["mock_config"]
+        mock_config.return_value = {
+            "primary": {
+                "librenms_url": "https://primary.example.com",
+                "api_token": "primary-token",
+            }
+        }
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        assert api.server_key == "primary"
+        assert api.librenms_url == "https://primary.example.com"
+
 
 # =============================================================================
 # Test Class 2: Connection Testing (4 tests)
