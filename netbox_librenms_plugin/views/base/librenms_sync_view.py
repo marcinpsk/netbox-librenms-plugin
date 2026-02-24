@@ -139,7 +139,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
             success, device_info = self.librenms_api.get_device_info(self.librenms_id)
             if success and device_info:
                 # Get NetBox device details
-                netbox_ip = str(obj.primary_ip.address.ip) if obj.primary_ip else None
+                netbox_ip = str(obj.primary_ip.address.ip).lower() if obj.primary_ip else None
                 netbox_name = obj.name
 
                 # Get LibreNMS device details
