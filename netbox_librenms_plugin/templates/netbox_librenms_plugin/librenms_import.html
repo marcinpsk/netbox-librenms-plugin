@@ -434,37 +434,4 @@
     </div>
   </div>
 
-  <script>
-    // Persist use-sysname and strip-domain toggles to user preferences
-    document.addEventListener('DOMContentLoaded', function() {
-      function savePref(key, value) {
-        const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value
-          || document.cookie.match(/csrftoken=([^;]+)/)?.[1] || '';
-        if (!csrfToken) {
-          console.debug('savePref: no CSRF token available');
-          return;
-        }
-        fetch('{% url "plugins:netbox_librenms_plugin:save_user_pref" %}', {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-CSRFToken': csrfToken
-          },
-          body: JSON.stringify({key: key, value: value})
-        }).then(function(response) {
-          if (!response.ok) {
-            console.debug('savePref: server returned', response.status);
-          }
-        }).catch(function(err) {
-          console.debug('savePref: fetch failed:', err.message);
-        });
-      }
-      const sysname = document.getElementById('use-sysname-toggle');
-      const strip = document.getElementById('strip-domain-toggle');
-      if (sysname) sysname.addEventListener('change', function() { savePref('use_sysname', this.checked); });
-      if (strip) strip.addEventListener('change', function() { savePref('strip_domain', this.checked); });
-    });
-  </script>
-
 {% endblock %}

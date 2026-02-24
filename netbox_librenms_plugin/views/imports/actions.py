@@ -223,8 +223,6 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 status=400,
             )
 
-        save_import_toggle_prefs(request)
-
         use_sysname = request.POST.get("use-sysname-toggle") == "on"
         strip_domain = request.POST.get("strip-domain-toggle") == "on"
 
