@@ -9,7 +9,7 @@ from django.views import View
 from netbox_librenms_plugin.forms import ImportSettingsForm, ServerConfigForm
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.models import LibreNMSSettings
-from netbox_librenms_plugin.utils import _save_user_pref
+from netbox_librenms_plugin.utils import save_user_pref
 from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
 
 logger = logging.getLogger(__name__)
@@ -76,18 +76,28 @@ class LibreNMSSettingsView(LibreNMSPermissionMixin, View):
                 import_form.save()
                 # Also update current user's preferences to match new defaults
                 try:
-                    _save_user_pref(
+                    save_user_pref(
                         request,
                         "plugins.netbox_librenms_plugin.use_sysname",
                         import_form.cleaned_data.get("use_sysname_default", False),
                     )
-                    _save_user_pref(
+                    save_user_pref(
                         request,
                         "plugins.netbox_librenms_plugin.strip_domain",
                         import_form.cleaned_data.get("strip_domain_default", False),
                     )
+                except (TypeError, ValueError) as e:
+                    logger.warning(
+                        "Failed to update user preferences due to invalid value: %s (user: %s)",
+                        e,
+                        request.user,
+                    )
                 except Exception as e:
-                    logger.warning("Failed to update user preferences: %s (user: %s)", e, request.user)
+                    logger.exception(
+                        "Unexpected error while updating user preferences for user %s: %s",
+                        request.user,
+                        e,
+                    )
                 messages.success(
                     request,
                     "Import settings updated successfully.",

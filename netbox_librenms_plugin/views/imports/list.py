@@ -15,7 +15,7 @@ from netbox_librenms_plugin.import_utils import (
 )
 from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
-from netbox_librenms_plugin.utils import _get_user_pref
+from netbox_librenms_plugin.utils import get_user_pref
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 logger = logging.getLogger(__name__)
@@ -308,8 +308,8 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             settings = None
 
         # User preference overrides for toggles (persisted per-user)
-        use_sysname = _get_user_pref(request, "plugins.netbox_librenms_plugin.use_sysname")
-        strip_domain = _get_user_pref(request, "plugins.netbox_librenms_plugin.strip_domain")
+        use_sysname = get_user_pref(request, "plugins.netbox_librenms_plugin.use_sysname")
+        strip_domain = get_user_pref(request, "plugins.netbox_librenms_plugin.strip_domain")
         # Fall back to server-level settings
         if use_sysname is None:
             use_sysname = getattr(settings, "use_sysname_default", True) if settings else True

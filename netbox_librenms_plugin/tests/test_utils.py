@@ -4,6 +4,7 @@ Phase 2 tests covering device type matching, site matching,
 platform matching, and conversion helper functions.
 """
 
+import json
 from unittest.mock import MagicMock, patch
 
 # =============================================================================
@@ -464,3 +465,103 @@ class TestInterfaceNameField:
         mock_request.user.config.set.assert_called_once_with(
             "plugins.netbox_librenms_plugin.interface_name_field", "ifDescr", commit=True
         )
+
+
+# =============================================================================
+# TestSaveUserPrefView - 6 tests
+# =============================================================================
+
+
+class TestSaveUserPrefView:
+    """Test SaveUserPrefView endpoint for JS-driven preference persistence."""
+
+    def _make_request(self, body, has_perm=True):
+        """Create a mock POST request with JSON body."""
+        request = MagicMock()
+        request.body = json.dumps(body).encode()
+        request.user.has_perm.return_value = has_perm
+        request.user.config = MagicMock()
+        request.method = "POST"
+        return request
+
+    def test_save_valid_boolean_pref(self):
+        """Saving a valid boolean preference returns ok."""
+        from netbox_librenms_plugin.views.imports.actions import SaveUserPrefView
+
+        view = SaveUserPrefView()
+        request = self._make_request({"key": "use_sysname", "value": True})
+        view.request = request
+
+        response = view.post(request)
+
+        assert response.status_code == 200
+        data = json.loads(response.content)
+        assert data["status"] == "ok"
+        request.user.config.set.assert_called_once_with("plugins.netbox_librenms_plugin.use_sysname", True, commit=True)
+
+    def test_save_string_pref(self):
+        """Saving interface_name_field string value works."""
+        from netbox_librenms_plugin.views.imports.actions import SaveUserPrefView
+
+        view = SaveUserPrefView()
+        request = self._make_request({"key": "interface_name_field", "value": "ifDescr"})
+        view.request = request
+
+        response = view.post(request)
+
+        assert response.status_code == 200
+        request.user.config.set.assert_called_once_with(
+            "plugins.netbox_librenms_plugin.interface_name_field", "ifDescr", commit=True
+        )
+
+    def test_reject_invalid_key(self):
+        """Invalid preference key returns 400."""
+        from netbox_librenms_plugin.views.imports.actions import SaveUserPrefView
+
+        view = SaveUserPrefView()
+        request = self._make_request({"key": "malicious_key", "value": True})
+        view.request = request
+
+        response = view.post(request)
+
+        assert response.status_code == 400
+        data = json.loads(response.content)
+        assert "Invalid preference key" in data["error"]
+        request.user.config.set.assert_not_called()
+
+    def test_reject_invalid_json(self):
+        """Invalid JSON body returns 400."""
+        from netbox_librenms_plugin.views.imports.actions import SaveUserPrefView
+
+        view = SaveUserPrefView()
+        request = MagicMock()
+        request.body = b"not valid json"
+        view.request = request
+
+        response = view.post(request)
+
+        assert response.status_code == 400
+        data = json.loads(response.content)
+        assert "Invalid JSON" in data["error"]
+
+    def test_save_false_value(self):
+        """Saving False for a toggle works correctly."""
+        from netbox_librenms_plugin.views.imports.actions import SaveUserPrefView
+
+        view = SaveUserPrefView()
+        request = self._make_request({"key": "strip_domain", "value": False})
+        view.request = request
+
+        response = view.post(request)
+
+        assert response.status_code == 200
+        request.user.config.set.assert_called_once_with(
+            "plugins.netbox_librenms_plugin.strip_domain", False, commit=True
+        )
+
+    def test_uses_permission_mixin(self):
+        """SaveUserPrefView inherits from LibreNMSPermissionMixin."""
+        from netbox_librenms_plugin.views.imports.actions import SaveUserPrefView
+        from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
+
+        assert issubclass(SaveUserPrefView, LibreNMSPermissionMixin)

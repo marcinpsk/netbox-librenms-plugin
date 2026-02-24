@@ -29,7 +29,7 @@ from netbox_librenms_plugin.import_validation_helpers import (
     fetch_model_by_id,
 )
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
-from netbox_librenms_plugin.utils import save_import_toggle_prefs
+from netbox_librenms_plugin.utils import save_user_pref
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 logger = logging.getLogger(__name__)
@@ -222,8 +222,6 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 '<div class="alert alert-warning mb-0">Select at least one device.</div>',
                 status=400,
             )
-
-        save_import_toggle_prefs(request)
 
         use_sysname = request.POST.get("use-sysname-toggle") == "on"
         strip_domain = request.POST.get("strip-domain-toggle") == "on"
@@ -755,7 +753,7 @@ class DeviceRackUpdateView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImpo
         return self.render_device_row(request, libre_device, validation, selections)
 
 
-class SaveUserPrefView(View):
+class SaveUserPrefView(LibreNMSPermissionMixin, View):
     """Save a user preference via POST. Used by JS toggle handlers."""
 
     ALLOWED_PREFS = {
@@ -766,8 +764,6 @@ class SaveUserPrefView(View):
 
     def post(self, request):
         """Persist a user preference toggle value."""
-        from netbox_librenms_plugin.utils import _save_user_pref
-
         try:
             data = json.loads(request.body)
         except (json.JSONDecodeError, ValueError):
@@ -779,5 +775,5 @@ class SaveUserPrefView(View):
         if key not in self.ALLOWED_PREFS:
             return JsonResponse({"error": "Invalid preference key"}, status=400)
 
-        _save_user_pref(request, self.ALLOWED_PREFS[key], value)
+        save_user_pref(request, self.ALLOWED_PREFS[key], value)
         return JsonResponse({"status": "ok"})

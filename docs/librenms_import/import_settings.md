@@ -13,6 +13,19 @@ To configure global defaults for all imports:
 
 These defaults apply to all future imports unless overridden during the import process.
 
+## User Preferences and Defaults
+
+The plugin uses a two-tier preference system for the **Use sysName** and **Strip Domain** toggles:
+
+1. **Plugin defaults** (set by admins on the Settings page) apply to all users who have not yet changed their own toggle settings.
+2. **Per-user preferences** are saved automatically when a user changes a toggle on the import page. Once saved, the user's preference takes priority over the plugin default.
+
+**Important notes:**
+
+- Changing the plugin defaults does **not** override existing user preferences. Users who have previously changed a toggle keep their personal setting.
+- When an admin saves import settings, only the admin's own preferences are updated to match the new defaults. Other users are unaffected.
+- There is no "reset to defaults" for individual users. To revert to the plugin default, a user simply needs to toggle the setting to match.
+
 ## Device Naming Options
 
 The plugin provides two settings that control how device names are created in NetBox. Both are configured in Plugin Settings under **Plugins → LibreNMS Plugin → Settings → Plugin Settings** and can be overridden on the LibreNMS import page.
@@ -49,10 +62,10 @@ If neither sysName nor hostname exists, the plugin generates a name as `device-{
 
 ## Per-Import Overrides
 
-When using bulk import, you can override the default settings in the confirmation modal before importing. This allows you to:
+On the import page, the **Use sysName** and **Strip Domain** toggles are pre-populated from your saved preference (or the plugin default if you haven't set one). Changing a toggle immediately saves your preference for next time and applies to the current import.
+
+This allows you to:
 
 - Import some devices with sysName and others with hostname
 - Apply domain stripping selectively based on device type or location
-- Test different naming conventions before changing global defaults
-
-The override only affects the current import operation and doesn't change your saved defaults.
+- Test different naming conventions — your last choice is remembered automatically
