@@ -28,7 +28,6 @@ from .views import (
     DeviceTypeMappingView,
     DeviceValidationDetailsView,
     DeviceVCDetailsView,
-    BulkInstallModulesView,
     DeviceVLANTableView,
     InstallBranchView,
     InstallModuleView,
