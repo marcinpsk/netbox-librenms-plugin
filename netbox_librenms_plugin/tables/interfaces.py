@@ -1,4 +1,5 @@
 import json as json_module
+import re
 
 import django_tables2 as tables
 from django.utils.html import escape, format_html
@@ -152,7 +153,7 @@ class LibreNMSInterfaceTable(tables.Table):
             return format_html("—")
 
         interface_name = record.get(self.interface_name_field, "")
-        safe_name = interface_name.replace("/", "_").replace(":", "_")
+        safe_name = re.sub(r"[^A-Za-z0-9_-]", "_", interface_name)
 
         # Build compact colored summary (show up to 3 VLANs, summarize rest)
         vlan_group_map = record.get("vlan_group_map", {})

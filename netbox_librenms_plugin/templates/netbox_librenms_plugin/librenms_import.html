@@ -209,8 +209,8 @@
                       <small class="form-text text-muted d-block">{{ filter_form.use_background_job.help_text }}</small>
                     {% endif %}
                     {% else %}
-                    <input type="checkbox" class="form-check-input" disabled title="Background jobs require superuser access">
-                    <label class="form-check-label text-muted">
+                    <input type="checkbox" class="form-check-input" id="id_use_background_job_disabled" disabled title="Background jobs require superuser access">
+                    <label class="form-check-label text-muted" for="id_use_background_job_disabled">
                       {{ filter_form.use_background_job.label }}
                     </label>
                     <small class="form-text text-muted d-block">

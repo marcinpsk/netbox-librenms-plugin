@@ -41,9 +41,7 @@
     "https_proxy": "${localEnv:HTTPS_PROXY}",
     "NO_PROXY": "${localEnv:NO_PROXY}",
     "no_proxy": "${localEnv:NO_PROXY}",
-    "REQUESTS_CA_BUNDLE": "${localEnv:REQUESTS_CA_BUNDLE}",
     "SSL_CERT_FILE": "${localEnv:SSL_CERT_FILE}",
-    "CURL_CA_BUNDLE": "${localEnv:CURL_CA_BUNDLE}",
     "ALLOW_GIT_SSL_DISABLE": "${localEnv:ALLOW_GIT_SSL_DISABLE:false}"
   },
   "features": {},

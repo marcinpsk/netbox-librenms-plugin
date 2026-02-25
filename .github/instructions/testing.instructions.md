@@ -6,6 +6,7 @@ description: Testing patterns and conventions for the NetBox LibreNMS plugin
 # Testing Patterns
 
 ## General Test Conventions
+
 - Use plain **pytest classes**, not Django `TestCase`. Avoid `from django.test import TestCase`.
 - **Never use `@pytest.mark.django_db`** for unit tests—mock all database interactions with `MagicMock`.
 - Use **inline imports** inside test methods to avoid Django initialization at module load time.
@@ -14,6 +15,7 @@ description: Testing patterns and conventions for the NetBox LibreNMS plugin
 - See [docs/development/testing.md](../../docs/development/testing.md) for test file structure and running instructions.
 
 ## Background Job Tests
+
 - Instantiate `JobRunner` subclasses using `object.__new__(JobClass)` to bypass `__init__`, then set `job.job = MagicMock()` and `job.logger = MagicMock()`. See `create_mock_job_runner()` helper in `tests/test_background_jobs.py`.
 - Patch deferred/inline imports at their **source** module (e.g., `netbox_librenms_plugin.import_utils.process_device_filters`), not the consuming module.
 - Patch `cache` where imported: `netbox_librenms_plugin.views.imports.list.cache`, not `django.core.cache.cache`.
@@ -22,10 +24,12 @@ description: Testing patterns and conventions for the NetBox LibreNMS plugin
 - Cache key tests must patch `get_validated_device_cache_key` from `import_utils.py`; never hardcode key formats like `job_123_device_1`.
 
 ## Test File Naming
+
 - Follow the `test_{module_name}.py` convention for new test files.
 - `test_netbox_librenms_plugin.py` is an empty placeholder — do not add tests there.
 
 ## Test Coverage by Module
+
 - `librenms_api.py` → `test_librenms_api.py`, `test_librenms_api_helpers.py`
 - `import_utils.py`, `import_validation_helpers.py`, `utils.py` → `test_import_utils.py`, `test_import_validation_helpers.py`, `test_utils.py`
 - `jobs.py`, `views/imports/list.py` → `test_background_jobs.py`
@@ -35,6 +39,7 @@ description: Testing patterns and conventions for the NetBox LibreNMS plugin
 - Views (`views/sync/`, `views/object_sync/`, `views/imports/actions.py`) — no dedicated test files yet. Test business logic via the utility modules they call, not via HTTP requests.
 
 ## Permission Test Patterns
+
 When testing permissions (see `test_permissions.py` for reference):
 - Create a mock view instance with `object.__new__(ViewClass)`, set `request = MagicMock()` with `request.user.has_perm.side_effect = lambda p: p in allowed_perms`.
 - For `NetBoxObjectPermissionMixin` tests, set `required_object_permissions` on the instance before calling `check_object_permissions()`.
@@ -42,6 +47,7 @@ When testing permissions (see `test_permissions.py` for reference):
 - For JSON variants (`require_all_permissions_json`), assert `isinstance(response, JsonResponse)` and check `response.status_code == 403`.
 
 ## Shared Fixtures (`conftest.py`)
+
 Reuse fixtures from `tests/conftest.py` instead of creating ad-hoc mocks:
 - **Configuration**: `mock_multi_server_config`, `mock_legacy_config`
 - **API client**: `mock_librenms_api`

@@ -186,7 +186,7 @@ if [ -f "$CONF_FILE" ]; then
       echo "import importlib.util, os";
       echo "PLUGINS = ['netbox_librenms_plugin']";
       echo "PLUGINS_CONFIG = {'netbox_librenms_plugin': {}}";
-      echo "_pc_path = '/workspaces/netbox-librenms-plugin/.devcontainer/config/plugin-config.py'";
+      echo "_pc_path = '$PLUGIN_WS_DIR/.devcontainer/config/plugin-config.py'";
       echo "if os.path.isfile(_pc_path):";
       echo "    _spec = importlib.util.spec_from_file_location('workspace_plugin_config', _pc_path)";
       echo "    _mod = importlib.util.module_from_spec(_spec)";
@@ -200,7 +200,7 @@ if [ -f "$CONF_FILE" ]; then
       echo "    print('ℹ️ plugin-config.py not found; using defaults')";
 
       echo "# Import optional extra NetBox configuration (uppercase settings)";
-      echo "_xc_path = '/workspaces/netbox-librenms-plugin/.devcontainer/config/extra-configuration.py'";
+      echo "_xc_path = '$PLUGIN_WS_DIR/.devcontainer/config/extra-configuration.py'";
       echo "if os.path.isfile(_xc_path):";
       echo "    _xc_spec = importlib.util.spec_from_file_location('workspace_extra_configuration', _xc_path)";
       echo "    _xc_mod = importlib.util.module_from_spec(_xc_spec)";
@@ -213,7 +213,7 @@ if [ -f "$CONF_FILE" ]; then
       echo "        print(f'⚠️  Failed to apply extra-configuration.py: {e}')";
 
       echo "# Import Codespaces configuration when applicable (uppercase settings)";
-      echo "_cs_path = '/workspaces/netbox-librenms-plugin/.devcontainer/config/codespaces-configuration.py'";
+      echo "_cs_path = '$PLUGIN_WS_DIR/.devcontainer/config/codespaces-configuration.py'";
       echo "if os.environ.get('CODESPACES') == 'true' and os.path.isfile(_cs_path):";
       echo "    _cs_spec = importlib.util.spec_from_file_location('workspace_codespaces_configuration', _cs_path)";
       echo "    _cs_mod = importlib.util.module_from_spec(_cs_spec)";

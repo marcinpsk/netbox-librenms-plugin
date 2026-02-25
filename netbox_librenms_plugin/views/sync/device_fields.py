@@ -1,7 +1,7 @@
 from dcim.models import Device, Manufacturer, Platform
 from django.contrib import messages
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.shortcuts import get_object_or_404, redirect
 from django.views import View
 
@@ -231,26 +231,24 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 pass
 
         try:
-            platform = Platform.objects.create(
-                name=platform_name,
-                manufacturer=manufacturer,
-            )
+            with transaction.atomic():
+                platform = Platform.objects.create(
+                    name=platform_name,
+                    manufacturer=manufacturer,
+                )
+
+                device.platform = platform
+                device.full_clean()
+                device.save()
         except IntegrityError:
             messages.error(
                 request,
                 f"Platform '{platform_name}' could not be created (slug collision). Try a different name.",
             )
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
-
-        old_platform = device.platform
-        device.platform = platform
-        try:
-            device.full_clean()
-            device.save()
-        except (ValidationError, IntegrityError) as e:
-            device.platform = old_platform
+        except ValidationError as e:
             error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
-            messages.error(request, f"Failed to assign platform '{platform}': {error_msg}")
+            messages.error(request, f"Failed to assign platform '{platform_name}': {error_msg}")
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         messages.success(

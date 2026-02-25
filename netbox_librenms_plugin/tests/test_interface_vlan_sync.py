@@ -228,10 +228,7 @@ class TestVlanAssignmentMixin:
 class TestPortVlanEnrichment:
     """Tests for port VLAN data enrichment."""
 
-    pytest_plugins = ["tests.test_librenms_api_helpers"]
-
-    @patch("requests.get")
-    def test_parse_port_vlan_data_access_port(self, mock_get, mock_librenms_config):
+    def test_parse_port_vlan_data_access_port(self, mock_librenms_config):
         """Test parsing access port VLAN data."""
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
@@ -253,8 +250,7 @@ class TestPortVlanEnrichment:
         assert result["untagged_vlan"] == 100
         assert result["tagged_vlans"] == []
 
-    @patch("requests.get")
-    def test_parse_port_vlan_data_trunk_port(self, mock_get, mock_librenms_config):
+    def test_parse_port_vlan_data_trunk_port(self, mock_librenms_config):
         """Test parsing trunk port VLAN data."""
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
@@ -281,8 +277,7 @@ class TestPortVlanEnrichment:
         assert result["untagged_vlan"] == 90
         assert sorted(result["tagged_vlans"]) == [50, 60]
 
-    @patch("requests.get")
-    def test_parse_port_vlan_data_uses_interface_name_field(self, mock_get, mock_librenms_config):
+    def test_parse_port_vlan_data_uses_interface_name_field(self, mock_librenms_config):
         """Test that parse_port_vlan_data respects interface_name_field parameter."""
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 

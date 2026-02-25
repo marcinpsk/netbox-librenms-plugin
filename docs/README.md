@@ -54,6 +54,7 @@ Create cable connection in NetBox from LibreNMS links data.
 Create IP address in NetBox from LibreNMS device IP data.
 
 ### VLAN Sync
+
 - Create VLAN objects in NetBox from LibreNMS device VLAN data
 - Per-VLAN group assignment with scope-aware auto-selection
 

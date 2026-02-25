@@ -301,13 +301,14 @@ document.addEventListener('DOMContentLoaded', function() {
     const stripDomainCheckbox = document.getElementById('id_strip_domain_default');
 
     // Store the initial values to detect changes
-    const initialServerValue = serverSelect.value;
-    const initialVcPatternValue = vcPatternInput.value;
+    const initialServerValue = serverSelect ? serverSelect.value : '';
+    const initialVcPatternValue = vcPatternInput ? vcPatternInput.value : '';
     const initialUseSysnameValue = useSysnameCheckbox ? useSysnameCheckbox.checked : true;
     const initialStripDomainValue = stripDomainCheckbox ? stripDomainCheckbox.checked : false;
 
     // Enable/disable server save button based on changes
     function updateServerSaveButton() {
+        if (!serverSelect || !saveServerBtn) return;
         const hasChanges = serverSelect.value !== initialServerValue;
         saveServerBtn.disabled = !hasChanges;
         saveServerBtn.classList.toggle('btn-primary', hasChanges);
@@ -316,7 +317,8 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Enable/disable import save button based on changes
     function updateImportSaveButton() {
-        const vcPatternChanged = vcPatternInput.value !== initialVcPatternValue;
+        if (!saveImportBtn) return;
+        const vcPatternChanged = vcPatternInput ? (vcPatternInput.value !== initialVcPatternValue) : false;
         const useSysnameChanged = useSysnameCheckbox ? (useSysnameCheckbox.checked !== initialUseSysnameValue) : false;
         const stripDomainChanged = stripDomainCheckbox ? (stripDomainCheckbox.checked !== initialStripDomainValue) : false;
         const hasChanges = vcPatternChanged || useSysnameChanged || stripDomainChanged;
@@ -326,8 +328,8 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     // Listen for changes on respective form fields
-    serverSelect.addEventListener('change', updateServerSaveButton);
-    vcPatternInput.addEventListener('input', updateImportSaveButton);
+    if (serverSelect) serverSelect.addEventListener('change', updateServerSaveButton);
+    if (vcPatternInput) vcPatternInput.addEventListener('input', updateImportSaveButton);
     if (useSysnameCheckbox) useSysnameCheckbox.addEventListener('change', updateImportSaveButton);
     if (stripDomainCheckbox) stripDomainCheckbox.addEventListener('change', updateImportSaveButton);
 

@@ -105,8 +105,13 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
             vlan_table.configure(request)
 
         # Calculate cache TTL
-        cache_ttl = cache.ttl(self.get_cache_key(obj, "vlans"))
-        cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl else None
+        import datetime
+
+        try:
+            cache_ttl = cache.ttl(self.get_cache_key(obj, "vlans"))
+        except AttributeError:
+            cache_ttl = None
+        cache_expiry = timezone.now() + datetime.timedelta(seconds=cache_ttl) if cache_ttl else None
 
         return {
             "object": obj,

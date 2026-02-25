@@ -29,9 +29,9 @@ services:
       https_proxy: ${HTTPS_PROXY:-}
       NO_PROXY: ${NO_PROXY:-}
       no_proxy: ${NO_PROXY:-}
-      REQUESTS_CA_BUNDLE: ${REQUESTS_CA_BUNDLE:-}
-      SSL_CERT_FILE: ${SSL_CERT_FILE:-}
-      CURL_CA_BUNDLE: ${CURL_CA_BUNDLE:-}
+      REQUESTS_CA_BUNDLE: ${REQUESTS_CA_BUNDLE}
+      SSL_CERT_FILE: ${SSL_CERT_FILE}
+      CURL_CA_BUNDLE: ${CURL_CA_BUNDLE}
       ALLOW_GIT_SSL_DISABLE: ${ALLOW_GIT_SSL_DISABLE:-false}
     depends_on:
       postgres:

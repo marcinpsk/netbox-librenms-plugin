@@ -162,15 +162,12 @@ class TestMismatchDetection:
         assert result["mismatched_device"] is False
 
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.match_librenms_hardware_to_device_type")
-    def test_fqdn_domain_differs_matches_via_domain_strip(self, mock_hw):
-        """Different FQDN domains -- matches because domain-stripped
-        LibreNMS short name 'sw01' matches NetBox FQDN split 'sw01'.
+    def test_fqdn_domain_differs_mismatch_via_domain_strip(self, mock_hw):
+        """Different FQDN domains -- mismatch because identity sets do not overlap.
 
-        NetBox name 'sw01.example.net' is compared as-is (no stripping),
-        but the LibreNMS domain-stripped 'sw01' does NOT appear in the
-        NetBox identities since NetBox names are not domain-stripped.
-        However, both sides share the short name via NetBox raw name
-        normalization — actually NetBox keeps the full name.
+        NetBox identities: {"sw01.example.net", "10.0.0.1"}
+        LibreNMS identities: {"sw01.other.net", "sw01", "10.0.0.2"}
+        No overlap, so the device is found but flagged as mismatched.
         """
         view = _make_view(42, {"sysName": "sw01.other.net", "ip": "10.0.0.2"})
         obj = _make_obj("sw01.example.net", primary_ip="10.0.0.1")
