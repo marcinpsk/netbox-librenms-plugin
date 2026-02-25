@@ -18,7 +18,6 @@ if [ "$CODESPACES" = "true" ] && [ -n "$CODESPACE_NAME" ]; then
   echo "🔗 GitHub Codespaces detected"
 else
   ACCESS_URL="http://localhost:8000"
-  echo "🐛 Debug: ACCESS_URL is set to: $ACCESS_URL"
 fi
 
 # Kill any orphaned RQ workers (not tracked by PID file)
@@ -26,7 +25,9 @@ echo "🧹 Cleaning up orphaned processes..."
 ORPHAN_RQ_PIDS=$(pgrep -f "python.*rqworker" 2>/dev/null)
 if [ -n "$ORPHAN_RQ_PIDS" ]; then
   echo "   Found orphaned RQ workers, killing..."
-  pkill -9 -f "python.*rqworker" 2>/dev/null
+  pkill -15 -f "python.*rqworker" 2>/dev/null
+  sleep 2
+  pgrep -f "python.*rqworker" >/dev/null 2>&1 && pkill -9 -f "python.*rqworker" 2>/dev/null
   sleep 1
 fi
 
@@ -34,15 +35,29 @@ fi
 ORPHAN_NETBOX_PIDS=$(pgrep -f "python.*runserver.*8000" 2>/dev/null)
 if [ -n "$ORPHAN_NETBOX_PIDS" ]; then
   echo "   Found orphaned NetBox servers, killing..."
-  pkill -9 -f "python.*runserver.*8000" 2>/dev/null
+  pkill -15 -f "python.*runserver.*8000" 2>/dev/null
+  sleep 2
+  pgrep -f "python.*runserver.*8000" >/dev/null 2>&1 && pkill -9 -f "python.*runserver.*8000" 2>/dev/null
   sleep 1
 fi
+
+# Verify a PID matches the expected process before killing it
+is_expected_pid() {
+  local pid="$1" pattern="$2"
+  ps -p "$pid" -o args= 2>/dev/null | grep -Eq "$pattern"
+}
 
 # Stop any tracked processes from PID files
 if [ -f /tmp/netbox.pid ]; then
   OLD_PID=$(cat /tmp/netbox.pid 2>/dev/null)
   if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
-    kill "$OLD_PID" 2>/dev/null || kill -9 "$OLD_PID" 2>/dev/null
+    if is_expected_pid "$OLD_PID" "python.*runserver.*8000"; then
+      kill "$OLD_PID" 2>/dev/null
+      sleep 2
+      kill -0 "$OLD_PID" 2>/dev/null && kill -9 "$OLD_PID" 2>/dev/null
+    else
+      echo "⚠️  Skipping stale /tmp/netbox.pid (PID $OLD_PID is not NetBox runserver)"
+    fi
   fi
   rm -f /tmp/netbox.pid
 fi
@@ -50,7 +65,13 @@ fi
 if [ -f /tmp/rqworker.pid ]; then
   OLD_PID=$(cat /tmp/rqworker.pid 2>/dev/null)
   if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
-    kill "$OLD_PID" 2>/dev/null || kill -9 "$OLD_PID" 2>/dev/null
+    if is_expected_pid "$OLD_PID" "python.*rqworker"; then
+      kill "$OLD_PID" 2>/dev/null
+      sleep 2
+      kill -0 "$OLD_PID" 2>/dev/null && kill -9 "$OLD_PID" 2>/dev/null
+    else
+      echo "⚠️  Skipping stale /tmp/rqworker.pid (PID $OLD_PID is not rqworker)"
+    fi
   fi
   rm -f /tmp/rqworker.pid
 fi

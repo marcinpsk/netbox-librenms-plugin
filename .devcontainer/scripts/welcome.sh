@@ -6,7 +6,8 @@ source "$(dirname "$0")/load-aliases.sh" 2>/dev/null
 echo ""
 echo "🎯 NetBox LibreNMS Plugin Development Environment"
 
-if [ ! -f "/workspaces/netbox-librenms-plugin/.devcontainer/config/plugin-config.py" ]; then
+PLUGIN_WS_DIR="${PLUGIN_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
+if [ ! -f "$PLUGIN_WS_DIR/.devcontainer/config/plugin-config.py" ]; then
   echo ""
   echo "⚠️  Plugin configuration not found: .devcontainer/config/plugin-config.py"
   echo "   Create it first: cp .devcontainer/config/plugin-config.py.example .devcontainer/config/plugin-config.py"
@@ -43,7 +44,7 @@ if [ -n "$CODESPACES" ]; then
   echo "   💡 Click the link in the Ports panel or look for the 'Open in Browser' button"
 else
   echo "🖥️  Local Development Environment:"
-  echo "   NetBox will be available at: http://localhost:8000 (paste into you browser)"
+  echo "   NetBox will be available at: http://localhost:8000 (paste into your browser)"
 fi
 
 echo ""

@@ -6,6 +6,21 @@ export PATH="/opt/netbox/venv/bin:$PATH"
 export DEBUG="${DEBUG:-True}"
 PLUGIN_DIR="/workspaces/netbox-librenms-plugin"
 
+# Clean up empty CA bundle vars (Compose/devcontainer inject "" when host var is
+# unset, which breaks requests/curl).  When setup.sh has installed custom CAs
+# into the system trust store, point to it instead.
+for _ca_var in REQUESTS_CA_BUNDLE SSL_CERT_FILE CURL_CA_BUNDLE; do
+  _val="${!_ca_var}"
+  if [ -z "$_val" ]; then
+    if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
+      declare -x "$_ca_var=/etc/ssl/certs/ca-certificates.crt"
+    else
+      unset "$_ca_var"
+    fi
+  fi
+done
+unset _ca_var _val
+
 alias netbox-run-bg="$PLUGIN_DIR/.devcontainer/scripts/start-netbox.sh --background"
 alias netbox-run="$PLUGIN_DIR/.devcontainer/scripts/start-netbox.sh"
 
@@ -29,11 +44,15 @@ alias netbox-stop='echo "🛑 Stopping NetBox and RQ workers..."; \
   fi; \
   if pgrep -f "python.*rqworker" >/dev/null 2>&1; then \
     ORPHAN_COUNT=$(pgrep -cf "python.*rqworker" 2>/dev/null || echo 0); \
-    pkill -9 -f "python.*rqworker" 2>/dev/null; \
+    pkill -15 -f "python.*rqworker" 2>/dev/null; \
+    sleep 2; \
+    pgrep -f "python.*rqworker" >/dev/null 2>&1 && pkill -9 -f "python.*rqworker" 2>/dev/null; \
     echo "   Killed $ORPHAN_COUNT orphaned RQ worker(s)"; \
   fi; \
   if pgrep -f "python.*runserver.*8000" >/dev/null 2>&1; then \
-    pkill -9 -f "python.*runserver.*8000" 2>/dev/null; \
+    pkill -15 -f "python.*runserver.*8000" 2>/dev/null; \
+    sleep 2; \
+    pgrep -f "python.*runserver.*8000" >/dev/null 2>&1 && pkill -9 -f "python.*runserver.*8000" 2>/dev/null; \
     echo "   Killed orphaned NetBox server(s)"; \
   fi; \
   echo "✅ All processes stopped"'
