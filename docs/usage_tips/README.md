@@ -61,7 +61,7 @@ For best results, align chassis member positions with interface naming patterns.
     - Review interface mappings indicated by the icons (🔗 shows a mapping is configured)
     - Check speed and type matches
     - Confirm member assignments for virtual chassis
-2. Exclude columns to exclude from interface sync
+2. Exclude columns from interface sync
     - Sync only the values you want to sync
 3. Sync VLANs first to ensure that VLANs are created in NetBox before syncing interfaces, allowing for proper VLAN assignments. Use the VLAN tab on the device sync page to create VLANs from LibreNMS data.
 
