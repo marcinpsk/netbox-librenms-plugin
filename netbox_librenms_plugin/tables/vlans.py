@@ -1,5 +1,5 @@
 import django_tables2 as tables
-from django.utils.html import format_html
+from django.utils.html import escape, format_html
 from django.utils.safestring import mark_safe
 from netbox.tables.columns import ToggleColumn
 from utilities.paginator import EnhancedPaginator
@@ -128,8 +128,8 @@ class LibreNMSVLANTable(tables.Table):
         options = ['<option value="">-- No Group (Global) --</option>']
         for group in self.vlan_groups:
             selected = "selected" if group.pk == selected_group_id else ""
-            scope_info = f" ({group.scope})" if group.scope else ""
-            options.append(f'<option value="{group.pk}" {selected}>{group.name}{scope_info}</option>')
+            scope_info = f" ({escape(group.scope)})" if group.scope else ""
+            options.append(f'<option value="{group.pk}" {selected}>{escape(group.name)}{scope_info}</option>')
 
         select_html = format_html(
             '<select name="vlan_group_{}" class="form-select form-select-sm vlan-sync-group-select"'

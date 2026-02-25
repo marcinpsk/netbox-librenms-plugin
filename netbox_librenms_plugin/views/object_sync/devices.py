@@ -96,7 +96,10 @@ class SingleInterfaceVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
 
     def post(self, request):
         """Verify interface data against cached LibreNMS ports for a device."""
-        data = json.loads(request.body)
+        try:
+            data = json.loads(request.body)
+        except (json.JSONDecodeError, ValueError):
+            return JsonResponse({"status": "error", "message": "Invalid JSON"}, status=400)
         selected_device_id = data.get("device_id")
         interface_name = data.get("interface_name")
         interface_name_field = data.get("interface_name_field") or get_interface_name_field()
@@ -149,7 +152,10 @@ class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
     def post(self, request):
         from ipam.models import VLAN, VLANGroup
 
-        data = json.loads(request.body)
+        try:
+            data = json.loads(request.body)
+        except (json.JSONDecodeError, ValueError):
+            return JsonResponse({"status": "error", "message": "Invalid JSON"}, status=400)
         device_id = data.get("device_id")
         interface_name = data.get("interface_name")
         vlan_group_id = data.get("vlan_group_id")
@@ -275,7 +281,10 @@ class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, View):
     def post(self, request):
         from ipam.models import VLAN, VLANGroup
 
-        data = json.loads(request.body)
+        try:
+            data = json.loads(request.body)
+        except (json.JSONDecodeError, ValueError):
+            return JsonResponse({"status": "error", "message": "Invalid JSON"}, status=400)
         vlan_group_id = data.get("vlan_group_id")
         vid_str = data.get("vid", "")
         librenms_name = data.get("name", "")
@@ -327,7 +336,10 @@ class SaveVlanGroupOverridesView(LibreNMSPermissionMixin, CacheMixin, View):
         if error := self.require_write_permission_json():
             return error
 
-        data = json.loads(request.body)
+        try:
+            data = json.loads(request.body)
+        except (json.JSONDecodeError, ValueError):
+            return JsonResponse({"status": "error", "message": "Invalid JSON"}, status=400)
         device_id = data.get("device_id")
         vid_group_map = data.get("vid_group_map", {})
 
@@ -337,7 +349,10 @@ class SaveVlanGroupOverridesView(LibreNMSPermissionMixin, CacheMixin, View):
         device = get_object_or_404(Device, pk=device_id)
 
         # Use the remaining TTL of the ports cache so both expire together
-        ports_ttl = cache.ttl(self.get_cache_key(device, "ports"))
+        try:
+            ports_ttl = cache.ttl(self.get_cache_key(device, "ports"))
+        except AttributeError:
+            ports_ttl = None
         if ports_ttl is None or ports_ttl <= 0:
             return JsonResponse(
                 {"status": "error", "message": "No cached port data; refresh interfaces first"},

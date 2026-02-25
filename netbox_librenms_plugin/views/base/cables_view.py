@@ -56,8 +56,10 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         ports_data = self.get_ports_data(obj)
         local_ports_map = {}
         for port in ports_data.get("ports", []):
-            port_id = str(port["port_id"])
-            port_name = port[self.interface_name_field]
+            port_id = str(port.get("port_id", ""))
+            port_name = port.get(self.interface_name_field)
+            if not port_id or port_name is None:
+                continue
             local_ports_map[port_id] = port_name
 
         links = data.get("links", [])
@@ -282,9 +284,14 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             )
 
         # Calculate cache expiry
-        cache_ttl = cache.ttl(self.get_cache_key(obj, "links"))
+        import datetime
+
+        try:
+            cache_ttl = cache.ttl(self.get_cache_key(obj, "links"))
+        except AttributeError:
+            cache_ttl = None
         if cache_ttl is not None:
-            cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl)
+            cache_expiry = timezone.now() + datetime.timedelta(seconds=cache_ttl)
         # Generate the table
         table = self.get_table(links_data, obj)
 
@@ -332,7 +339,10 @@ class SingleCableVerifyView(BaseCableTableView):
     """
 
     def post(self, request):
-        data = json.loads(request.body)
+        try:
+            data = json.loads(request.body)
+        except (json.JSONDecodeError, ValueError):
+            return JsonResponse({"status": "error", "message": "Invalid JSON"}, status=400)
         selected_device_id = data.get("device_id")
         local_port = data.get("local_port")
 

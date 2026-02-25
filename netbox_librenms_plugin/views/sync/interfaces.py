@@ -1,3 +1,5 @@
+import logging
+
 from dcim.models import Device, Interface, MACAddress
 from django.contrib import messages
 from django.core.cache import cache
@@ -16,6 +18,8 @@ from netbox_librenms_plugin.views.mixins import (
     NetBoxObjectPermissionMixin,
     VlanAssignmentMixin,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, VlanAssignmentMixin, CacheMixin, View):
@@ -359,12 +363,14 @@ class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermission
                     except (Interface.DoesNotExist, VMInterface.DoesNotExist):
                         errors.append(f"Interface with ID {interface_id} not found")
                         continue
-                    except Exception as exc:  # pragma: no cover - defensive
-                        errors.append(f"Error deleting interface {interface_name or interface_id}: {str(exc)}")
+                    except Exception:  # pragma: no cover - defensive
+                        logger.exception("Error deleting interface %s", interface_name or interface_id)
+                        errors.append(f"Error deleting interface {interface_name or interface_id}")
                         continue
 
-        except Exception as exc:  # pragma: no cover
-            return JsonResponse({"error": f"Transaction failed: {str(exc)}"}, status=500)
+        except Exception:  # pragma: no cover
+            logger.exception("Transaction failed during interface deletion")
+            return JsonResponse({"error": "Transaction failed during interface deletion"}, status=500)
 
         response_data = {
             "status": "success",

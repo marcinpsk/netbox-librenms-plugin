@@ -22,7 +22,7 @@ def _get_safe_redirect_url(request):
         require_https=request.is_secure(),
     ):
         return referrer
-    return getattr(request, "path", "/")
+    return "/"
 
 
 class LibreNMSPermissionMixin(PermissionRequiredMixin):
@@ -594,9 +594,9 @@ class VlanAssignmentMixin:
         if vlan:
             return vlan
 
-        # Fallback: first matching VLAN
+        # Fallback: only return if there's exactly one matching VLAN (avoid ambiguity)
         vlans = vid_to_vlans.get(vid, [])
-        return vlans[0] if vlans else None
+        return vlans[0] if len(vlans) == 1 else None
 
     def _update_interface_vlan_assignment(self, interface, vlan_data, vlan_group_map, lookup_maps):
         """

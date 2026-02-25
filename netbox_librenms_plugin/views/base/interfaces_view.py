@@ -244,8 +244,13 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
             virtual_chassis_members = obj.virtual_chassis.members.all()
 
-        cache_ttl = cache.ttl(self.get_cache_key(obj, "ports"))
-        cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl is not None else None
+        import datetime
+
+        try:
+            cache_ttl = cache.ttl(self.get_cache_key(obj, "ports"))
+        except AttributeError:
+            cache_ttl = None
+        cache_expiry = timezone.now() + datetime.timedelta(seconds=cache_ttl) if cache_ttl is not None else None
 
         return {
             "object": obj,
@@ -326,7 +331,10 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
                 if vid_str in vlan_group_overrides:
                     override_group_id = vlan_group_overrides[vid_str]
                     if override_group_id:
-                        group = override_groups_by_id.get(int(override_group_id))
+                        try:
+                            group = override_groups_by_id.get(int(override_group_id))
+                        except (ValueError, TypeError):
+                            group = None
                         if group:
                             vlan_group_map[vid] = {
                                 "group_id": str(group.pk),

@@ -215,7 +215,11 @@ class ImportDevicesJob(JobRunner):
             from netbox_librenms_plugin.import_utils import bulk_import_vms
 
             vm_result = bulk_import_vms(
-                vm_imports, api, sync_options, libre_devices_cache, job=self, user=self.job.user
+                vm_imports,
+                api,
+                sync_options,
+                libre_devices_cache,
+                job=self,
             )
 
         # Combine results

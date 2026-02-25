@@ -35,6 +35,15 @@ function getCookie(name) {
 }
 
 /**
+ * Safely resolve the CSRF token from the page form or cookie.
+ * Returns the token string or an empty string if unavailable.
+ */
+function getCSRFToken() {
+    const el = document.querySelector('[name=csrfmiddlewaretoken]');
+    return (el ? el.value : null) || getCookie('csrftoken') || '';
+}
+
+/**
  * Extract device/VM ID and type from current URL pathname.
  * Supports multiple URL patterns:
  * - /dcim/devices/{id}/
@@ -444,7 +453,7 @@ function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
-            'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+            'X-CSRFToken': getCSRFToken()
         },
         body: JSON.stringify({
             device_id: deviceId,
@@ -616,7 +625,7 @@ function initializeVlanModalSave() {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+                    'X-CSRFToken': getCSRFToken()
                 },
                 body: JSON.stringify({
                     device_id: deviceId,
@@ -672,14 +681,14 @@ function initializeVlanSyncGroupSelects() {
  * @param {string} groupId - Selected VLAN group ID (empty string = global)
  */
 function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
-    const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]');
+    const csrfToken = getCSRFToken();
     if (!csrfToken) return;
 
     fetch('/plugins/librenms_plugin/verify-vlan-sync-group/', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
-            'X-CSRFToken': csrfToken.value
+            'X-CSRFToken': csrfToken
         },
         body: JSON.stringify({
             vid: String(vid),
@@ -748,7 +757,7 @@ function handleVRFChange(select, value) {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
-            'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+            'X-CSRFToken': getCSRFToken()
         },
         body: JSON.stringify({
             device_id: deviceId,
@@ -784,7 +793,7 @@ function handleInterfaceChange(select, value) {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
-            'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+            'X-CSRFToken': getCSRFToken()
         },
         body: JSON.stringify({
             device_id: value,
@@ -821,7 +830,7 @@ function handleCableChange(select, value) {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
-            'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+            'X-CSRFToken': getCSRFToken()
         },
         body: JSON.stringify({
             device_id: value,
@@ -1171,7 +1180,7 @@ function updateInterfaceNameField() {
             // Persist to user preferences via API
             const savePrefUrl = this.closest('[data-save-pref-url]')?.dataset.savePrefUrl;
             if (savePrefUrl) {
-                const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value || getCookie('csrftoken');
+                const csrfToken = getCSRFToken();
                 if (csrfToken) {
                     fetch(savePrefUrl, {
                         method: 'POST',
@@ -1262,7 +1271,7 @@ function deleteSelectedInterfaces(selectedCheckboxes) {
     const formData = new FormData();
 
     // Add CSRF token
-    const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value;
+    const csrfToken = getCSRFToken();
 
     if (!csrfToken) {
         alert('CSRF token not found. Please refresh the page and try again.');
@@ -1425,9 +1434,9 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // Configure HTMX to include CSRF token in all requests
     document.body.addEventListener('htmx:configRequest', function (event) {
-        const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]');
+        const csrfToken = getCSRFToken();
         if (csrfToken) {
-            event.detail.headers['X-CSRFToken'] = csrfToken.value;
+            event.detail.headers['X-CSRFToken'] = csrfToken;
         }
     });
 });

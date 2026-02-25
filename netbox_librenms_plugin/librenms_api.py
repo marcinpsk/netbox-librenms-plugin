@@ -365,7 +365,11 @@ class LibreNMSAPI:
             data = response.json()
             return True, data
         except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 404:
+            if with_vlans and e.response is not None and e.response.status_code not in (401, 403, 404):
+                # Retry without VLAN expansion for older LibreNMS versions
+                logger.info("Retrying get_ports without VLAN expansion for device %s", device_id)
+                return self.get_ports(device_id, with_vlans=False)
+            if e.response is not None and e.response.status_code == 404:
                 return False, "Device not found in LibreNMS"
             return False, f"HTTP error: {str(e)}"
         except requests.exceptions.RequestException as e:
@@ -1012,7 +1016,11 @@ class LibreNMSAPI:
         if vlans_data:
             # Parse from detailed vlans array
             for vlan_entry in vlans_data:
-                vlan_id = vlan_entry.get("vlan")
+                raw_vlan_id = vlan_entry.get("vlan")
+                try:
+                    vlan_id = int(raw_vlan_id)
+                except (ValueError, TypeError):
+                    continue
                 if vlan_entry.get("untagged") == 1:
                     untagged_vlan = vlan_id
                 else:
