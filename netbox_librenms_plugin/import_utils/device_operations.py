@@ -4,7 +4,7 @@ import logging
 
 from dcim.models import Device, DeviceRole, DeviceType, Rack, Site
 from django.core.cache import cache
-from virtualization.models import Cluster
+from virtualization.models import Cluster  # noqa: F401 — used by test mock.patch targets
 from django.db import transaction
 from django.utils import timezone
 
