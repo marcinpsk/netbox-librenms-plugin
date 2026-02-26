@@ -20,26 +20,22 @@ else
   ACCESS_URL="http://localhost:8000"
 fi
 
-# Kill any orphaned RQ workers (not tracked by PID file)
-echo "🧹 Cleaning up orphaned processes..."
-ORPHAN_RQ_PIDS=$(pgrep -f "python.*rqworker" 2>/dev/null)
-if [ -n "$ORPHAN_RQ_PIDS" ]; then
-  echo "   Found orphaned RQ workers, killing..."
-  pkill -15 -f "python.*rqworker" 2>/dev/null
+# Graceful termination: SIGTERM, wait, then SIGKILL if still alive.
+# Usage: graceful_kill_pattern "pattern" — for orphan cleanup via pkill/pgrep
+#        graceful_kill_pid PID          — for tracked PID cleanup
+graceful_kill_pattern() {
+  local pattern="$1"
+  pkill -15 -f "$pattern" 2>/dev/null
   sleep 2
-  pgrep -f "python.*rqworker" >/dev/null 2>&1 && pkill -9 -f "python.*rqworker" 2>/dev/null
-  sleep 1
-fi
+  pgrep -f "$pattern" >/dev/null 2>&1 && pkill -9 -f "$pattern" 2>/dev/null
+}
 
-# Kill any orphaned NetBox runserver processes
-ORPHAN_NETBOX_PIDS=$(pgrep -f "python.*runserver.*8000" 2>/dev/null)
-if [ -n "$ORPHAN_NETBOX_PIDS" ]; then
-  echo "   Found orphaned NetBox servers, killing..."
-  pkill -15 -f "python.*runserver.*8000" 2>/dev/null
+graceful_kill_pid() {
+  local pid="$1"
+  kill -15 "$pid" 2>/dev/null
   sleep 2
-  pgrep -f "python.*runserver.*8000" >/dev/null 2>&1 && pkill -9 -f "python.*runserver.*8000" 2>/dev/null
-  sleep 1
-fi
+  kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+}
 
 # Verify a PID matches the expected process before killing it
 is_expected_pid() {
@@ -47,14 +43,24 @@ is_expected_pid() {
   ps -p "$pid" -o args= 2>/dev/null | grep -Eq "$pattern"
 }
 
+# Kill any orphaned processes (not tracked by PID file)
+echo "🧹 Cleaning up orphaned processes..."
+if pgrep -f "python.*rqworker" >/dev/null 2>&1; then
+  echo "   Found orphaned RQ workers, killing..."
+  graceful_kill_pattern "python.*rqworker"
+fi
+
+if pgrep -f "python.*runserver.*8000" >/dev/null 2>&1; then
+  echo "   Found orphaned NetBox servers, killing..."
+  graceful_kill_pattern "python.*runserver.*8000"
+fi
+
 # Stop any tracked processes from PID files
 if [ -f /tmp/netbox.pid ]; then
   OLD_PID=$(cat /tmp/netbox.pid 2>/dev/null)
   if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
     if is_expected_pid "$OLD_PID" "python.*runserver.*8000"; then
-      kill "$OLD_PID" 2>/dev/null
-      sleep 2
-      kill -0 "$OLD_PID" 2>/dev/null && kill -9 "$OLD_PID" 2>/dev/null
+      graceful_kill_pid "$OLD_PID"
     else
       echo "⚠️  Skipping stale /tmp/netbox.pid (PID $OLD_PID is not NetBox runserver)"
     fi
@@ -66,9 +72,7 @@ if [ -f /tmp/rqworker.pid ]; then
   OLD_PID=$(cat /tmp/rqworker.pid 2>/dev/null)
   if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
     if is_expected_pid "$OLD_PID" "python.*rqworker"; then
-      kill "$OLD_PID" 2>/dev/null
-      sleep 2
-      kill -0 "$OLD_PID" 2>/dev/null && kill -9 "$OLD_PID" 2>/dev/null
+      graceful_kill_pid "$OLD_PID"
     else
       echo "⚠️  Skipping stale /tmp/rqworker.pid (PID $OLD_PID is not rqworker)"
     fi
