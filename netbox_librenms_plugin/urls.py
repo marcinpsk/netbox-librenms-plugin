@@ -1,6 +1,6 @@
 from django.urls import include, path
 
-from .models import InterfaceTypeMapping
+from .models import DeviceTypeMapping, InterfaceTypeMapping, ModuleBayMapping, ModuleTypeMapping, NormalizationRule
 from .views import (
     AddDeviceToLibreNMSView,
     AssignVCSerialView,
@@ -10,15 +10,27 @@ from .views import (
     DeleteNetBoxInterfacesView,
     DeviceCableTableView,
     DeviceClusterUpdateView,
+    DeviceConflictActionView,
     DeviceInterfaceTableView,
     DeviceIPAddressTableView,
     DeviceLibreNMSSyncView,
+    DeviceModuleTableView,
     DeviceRackUpdateView,
     DeviceRoleUpdateView,
     DeviceStatusListView,
+    DeviceTypeMappingBulkDeleteView,
+    DeviceTypeMappingBulkImportView,
+    DeviceTypeMappingChangeLogView,
+    DeviceTypeMappingCreateView,
+    DeviceTypeMappingDeleteView,
+    DeviceTypeMappingEditView,
+    DeviceTypeMappingListView,
+    DeviceTypeMappingView,
     DeviceValidationDetailsView,
     DeviceVCDetailsView,
     DeviceVLANTableView,
+    InstallBranchView,
+    InstallModuleView,
     InterfaceTypeMappingBulkDeleteView,
     InterfaceTypeMappingBulkImportView,
     InterfaceTypeMappingChangeLogView,
@@ -29,6 +41,30 @@ from .views import (
     InterfaceTypeMappingView,
     LibreNMSImportView,
     LibreNMSSettingsView,
+    ModuleBayMappingBulkDeleteView,
+    ModuleBayMappingBulkImportView,
+    ModuleBayMappingChangeLogView,
+    ModuleBayMappingCreateView,
+    ModuleBayMappingDeleteView,
+    ModuleBayMappingEditView,
+    ModuleBayMappingListView,
+    ModuleBayMappingView,
+    ModuleTypeMappingBulkDeleteView,
+    ModuleTypeMappingBulkImportView,
+    ModuleTypeMappingChangeLogView,
+    ModuleTypeMappingCreateView,
+    ModuleTypeMappingDeleteView,
+    ModuleTypeMappingEditView,
+    ModuleTypeMappingListView,
+    ModuleTypeMappingView,
+    NormalizationRuleBulkDeleteView,
+    NormalizationRuleBulkImportView,
+    NormalizationRuleChangeLogView,
+    NormalizationRuleCreateView,
+    NormalizationRuleDeleteView,
+    NormalizationRuleEditView,
+    NormalizationRuleListView,
+    NormalizationRuleView,
     SaveUserPrefView,
     SingleCableVerifyView,
     SingleInterfaceVerifyView,
@@ -43,6 +79,7 @@ from .views import (
     SyncVLANsView,
     TestLibreNMSConnectionView,
     UpdateDeviceLocationView,
+    UpdateDeviceNameView,
     UpdateDevicePlatformView,
     UpdateDeviceSerialView,
     UpdateDeviceTypeView,
@@ -68,6 +105,21 @@ urlpatterns = [
         "devices/<int:pk>/cable-sync/",
         DeviceCableTableView.as_view(),
         name="device_cable_sync",
+    ),
+    path(
+        "devices/<int:pk>/module-sync/",
+        DeviceModuleTableView.as_view(),
+        name="device_module_sync",
+    ),
+    path(
+        "devices/<int:pk>/install-module/",
+        InstallModuleView.as_view(),
+        name="install_module",
+    ),
+    path(
+        "devices/<int:pk>/install-branch/",
+        InstallBranchView.as_view(),
+        name="install_branch",
     ),
     path(
         "devices/<int:pk>/ipaddress-sync/",
@@ -188,7 +240,12 @@ urlpatterns = [
         UpdateDeviceLocationView.as_view(),
         name="update_device_location",
     ),
-    # Update device field URLs (serial, device type, platform)
+    # Update device field URLs (name, serial, device type, platform)
+    path(
+        "devices/<int:pk>/update-name/",
+        UpdateDeviceNameView.as_view(),
+        name="update_device_name",
+    ),
     path(
         "devices/<int:pk>/update-serial/",
         UpdateDeviceSerialView.as_view(),
@@ -260,6 +317,11 @@ urlpatterns = [
         name="device_rack_update",
     ),
     path(
+        "device-import/conflict-action/<str:device_id>/",
+        DeviceConflictActionView.as_view(),
+        name="device_conflict_action",
+    ),
+    path(
         "save-user-pref/",
         SaveUserPrefView.as_view(),
         name="save_user_pref",
@@ -322,6 +384,174 @@ urlpatterns = [
         "interface-type-mappings/delete/",
         InterfaceTypeMappingBulkDeleteView.as_view(),
         name="interfacetypemapping_bulk_delete",
+    ),
+    # Device type mapping URLs
+    path(
+        "device-type-mappings/",
+        DeviceTypeMappingListView.as_view(),
+        name="devicetypemapping_list",
+    ),
+    path(
+        "device-type-mappings/<int:pk>/",
+        DeviceTypeMappingView.as_view(),
+        name="devicetypemapping_detail",
+    ),
+    path(
+        "device-type-mappings/add/",
+        DeviceTypeMappingCreateView.as_view(),
+        name="devicetypemapping_add",
+    ),
+    path(
+        "device-type-mappings/import/",
+        DeviceTypeMappingBulkImportView.as_view(),
+        name="devicetypemapping_bulk_import",
+    ),
+    path(
+        "device-type-mappings/<int:pk>/delete/",
+        DeviceTypeMappingDeleteView.as_view(),
+        name="devicetypemapping_delete",
+    ),
+    path(
+        "device-type-mappings/<int:pk>/edit/",
+        DeviceTypeMappingEditView.as_view(),
+        name="devicetypemapping_edit",
+    ),
+    path(
+        "device-type-mappings/<int:pk>/changelog/",
+        DeviceTypeMappingChangeLogView.as_view(),
+        name="devicetypemapping_changelog",
+        kwargs={"model": DeviceTypeMapping},
+    ),
+    path(
+        "device-type-mappings/delete/",
+        DeviceTypeMappingBulkDeleteView.as_view(),
+        name="devicetypemapping_bulk_delete",
+    ),
+    # Module type mapping URLs
+    path(
+        "module-type-mappings/",
+        ModuleTypeMappingListView.as_view(),
+        name="moduletypemapping_list",
+    ),
+    path(
+        "module-type-mappings/<int:pk>/",
+        ModuleTypeMappingView.as_view(),
+        name="moduletypemapping_detail",
+    ),
+    path(
+        "module-type-mappings/add/",
+        ModuleTypeMappingCreateView.as_view(),
+        name="moduletypemapping_add",
+    ),
+    path(
+        "module-type-mappings/import/",
+        ModuleTypeMappingBulkImportView.as_view(),
+        name="moduletypemapping_bulk_import",
+    ),
+    path(
+        "module-type-mappings/<int:pk>/delete/",
+        ModuleTypeMappingDeleteView.as_view(),
+        name="moduletypemapping_delete",
+    ),
+    path(
+        "module-type-mappings/<int:pk>/edit/",
+        ModuleTypeMappingEditView.as_view(),
+        name="moduletypemapping_edit",
+    ),
+    path(
+        "module-type-mappings/<int:pk>/changelog/",
+        ModuleTypeMappingChangeLogView.as_view(),
+        name="moduletypemapping_changelog",
+        kwargs={"model": ModuleTypeMapping},
+    ),
+    path(
+        "module-type-mappings/delete/",
+        ModuleTypeMappingBulkDeleteView.as_view(),
+        name="moduletypemapping_bulk_delete",
+    ),
+    # Module Bay Mapping URLs
+    path(
+        "module-bay-mappings/",
+        ModuleBayMappingListView.as_view(),
+        name="modulebaymapping_list",
+    ),
+    path(
+        "module-bay-mappings/<int:pk>/",
+        ModuleBayMappingView.as_view(),
+        name="modulebaymapping_detail",
+    ),
+    path(
+        "module-bay-mappings/add/",
+        ModuleBayMappingCreateView.as_view(),
+        name="modulebaymapping_add",
+    ),
+    path(
+        "module-bay-mappings/import/",
+        ModuleBayMappingBulkImportView.as_view(),
+        name="modulebaymapping_bulk_import",
+    ),
+    path(
+        "module-bay-mappings/<int:pk>/delete/",
+        ModuleBayMappingDeleteView.as_view(),
+        name="modulebaymapping_delete",
+    ),
+    path(
+        "module-bay-mappings/<int:pk>/edit/",
+        ModuleBayMappingEditView.as_view(),
+        name="modulebaymapping_edit",
+    ),
+    path(
+        "module-bay-mappings/<int:pk>/changelog/",
+        ModuleBayMappingChangeLogView.as_view(),
+        name="modulebaymapping_changelog",
+        kwargs={"model": ModuleBayMapping},
+    ),
+    path(
+        "module-bay-mappings/delete/",
+        ModuleBayMappingBulkDeleteView.as_view(),
+        name="modulebaymapping_bulk_delete",
+    ),
+    # Normalization Rule URLs
+    path(
+        "normalization-rules/",
+        NormalizationRuleListView.as_view(),
+        name="normalizationrule_list",
+    ),
+    path(
+        "normalization-rules/<int:pk>/",
+        NormalizationRuleView.as_view(),
+        name="normalizationrule_detail",
+    ),
+    path(
+        "normalization-rules/add/",
+        NormalizationRuleCreateView.as_view(),
+        name="normalizationrule_add",
+    ),
+    path(
+        "normalization-rules/import/",
+        NormalizationRuleBulkImportView.as_view(),
+        name="normalizationrule_bulk_import",
+    ),
+    path(
+        "normalization-rules/<int:pk>/delete/",
+        NormalizationRuleDeleteView.as_view(),
+        name="normalizationrule_delete",
+    ),
+    path(
+        "normalization-rules/<int:pk>/edit/",
+        NormalizationRuleEditView.as_view(),
+        name="normalizationrule_edit",
+    ),
+    path(
+        "normalization-rules/<int:pk>/changelog/",
+        NormalizationRuleChangeLogView.as_view(),
+        name="normalizationrule_changelog",
+        kwargs={"model": NormalizationRule},
+    ),
+    path(
+        "normalization-rules/delete/",
+        NormalizationRuleBulkDeleteView.as_view(),
+        name="normalizationrule_bulk_delete",
     ),
     path("api/", include("netbox_librenms_plugin.api.urls")),
 ]

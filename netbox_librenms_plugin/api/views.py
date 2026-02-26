@@ -11,9 +11,21 @@ from rest_framework.permissions import BasePermission, SAFE_METHODS
 from rq.job import Job as RQJob
 
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
-from netbox_librenms_plugin.models import InterfaceTypeMapping
+from netbox_librenms_plugin.models import (
+    DeviceTypeMapping,
+    InterfaceTypeMapping,
+    ModuleBayMapping,
+    ModuleTypeMapping,
+    NormalizationRule,
+)
 
-from .serializers import InterfaceTypeMappingSerializer
+from .serializers import (
+    DeviceTypeMappingSerializer,
+    InterfaceTypeMappingSerializer,
+    ModuleBayMappingSerializer,
+    ModuleTypeMappingSerializer,
+    NormalizationRuleSerializer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +34,8 @@ class LibreNMSPluginPermission(BasePermission):
     """
     Permission class for LibreNMS plugin API endpoints.
 
-    - GET requests require view_librenmssettings
-    - All other requests require change_librenmssettings
+    - Safe requests (GET, HEAD, OPTIONS) require netbox_librenms_plugin.view_librenmssettings
+    - All other requests require netbox_librenms_plugin.change_librenmssettings
     """
 
     def has_permission(self, request, view):
@@ -39,6 +51,42 @@ class InterfaceTypeMappingViewSet(NetBoxModelViewSet):
 
     queryset = InterfaceTypeMapping.objects.all()
     serializer_class = InterfaceTypeMappingSerializer
+
+
+class DeviceTypeMappingViewSet(NetBoxModelViewSet):
+    """API viewset for DeviceTypeMapping CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+
+    queryset = DeviceTypeMapping.objects.all()
+    serializer_class = DeviceTypeMappingSerializer
+
+
+class ModuleTypeMappingViewSet(NetBoxModelViewSet):
+    """API viewset for ModuleTypeMapping CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+
+    queryset = ModuleTypeMapping.objects.all()
+    serializer_class = ModuleTypeMappingSerializer
+
+
+class ModuleBayMappingViewSet(NetBoxModelViewSet):
+    """API viewset for ModuleBayMapping CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+
+    queryset = ModuleBayMapping.objects.all()
+    serializer_class = ModuleBayMappingSerializer
+
+
+class NormalizationRuleViewSet(NetBoxModelViewSet):
+    """API viewset for NormalizationRule CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+
+    queryset = NormalizationRule.objects.all()
+    serializer_class = NormalizationRuleSerializer
 
 
 @api_view(["POST"])

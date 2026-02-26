@@ -1,3 +1,4 @@
+import logging
 import re
 from typing import Optional
 
@@ -7,6 +8,8 @@ from django.http import HttpRequest
 from netbox.config import get_config
 from netbox.plugins import get_plugin_config
 from utilities.paginator import get_paginate_count as netbox_get_paginate_count
+
+logger = logging.getLogger(__name__)
 
 
 def convert_speed_to_kbps(speed_bps: int) -> int:
@@ -193,7 +196,8 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict:
     """
     Match LibreNMS hardware string to a NetBox DeviceType.
 
-    Only performs exact matching on part_number and model fields (case-insensitive).
+    Checks DeviceTypeMapping table first, then falls back to exact matching
+    on part_number and model fields (case-insensitive).
 
     Args:
         hardware_name (str): Hardware string from LibreNMS API (e.g., 'C9200L-48P-4X')
@@ -202,12 +206,28 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict:
         dict: Dictionary containing:
             - matched (bool): Whether a match was found
             - device_type (DeviceType|None): The matched DeviceType object
-            - match_type (str|None): Always 'exact' if found, None otherwise
+            - match_type (str|None): 'mapping' if via DeviceTypeMapping, 'exact' if via
+              part_number/model, None otherwise
     """
     from dcim.models import DeviceType
 
+    from netbox_librenms_plugin.models import DeviceTypeMapping
+
     if not hardware_name or hardware_name == "-":
         return {"matched": False, "device_type": None, "match_type": None}
+
+    # Check DeviceTypeMapping table first
+    try:
+        mapping = DeviceTypeMapping.objects.get(librenms_hardware__iexact=hardware_name)
+        return {
+            "matched": True,
+            "device_type": mapping.netbox_device_type,
+            "match_type": "mapping",
+        }
+    except DeviceTypeMapping.DoesNotExist:
+        pass
+    except DeviceTypeMapping.MultipleObjectsReturned:
+        pass
 
     # Try part number exact match
     try:
@@ -447,3 +467,109 @@ def check_vlan_group_matches(
             netbox_gid = netbox_tagged_group_ids.get(vid)
             return netbox_gid == selected_group_id
     return True
+
+
+# Minimum NetBox version that supports {module_path} token in module templates
+
+
+def supports_module_path():
+    """Check if the running NetBox supports the {module_path} template token.
+
+    Detects by checking for MODULE_PATH_TOKEN in dcim.constants rather than
+    comparing version strings — works with patched/pre-release builds too.
+    """
+    try:
+        from dcim.constants import MODULE_PATH_TOKEN  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+def module_type_uses_module_path(module_type):
+    """Check if a ModuleType has any interface templates using {module_path}."""
+    return any("{module_path}" in t.name for t in module_type.interfacetemplates.all())
+
+
+def has_nested_name_conflict(module_type, module_bay):
+    """Check if installing this module type in a nested bay would cause a name conflict.
+
+    Returns True when ALL of the following are true:
+    - The module type has interface templates using only ``{module}`` (not ``{module_path}``)
+    - The bay is nested (its parent is owned by an installed module)
+    - There is at least one sibling bay under the same parent
+
+    In this situation NetBox's ``resolve_name()`` replaces ``{module}`` with the
+    root ancestor's bay position, producing the same interface name for every
+    sibling at this nesting level.
+    """
+    from dcim.constants import MODULE_TOKEN
+
+    if not module_bay or not module_bay.module_id:
+        return False  # Top-level bay — no conflict
+
+    templates = list(module_type.interfacetemplates.all())
+    if not templates:
+        return False  # No interface templates
+
+    uses_module_token = any(MODULE_TOKEN in t.name for t in templates)
+    if not uses_module_token:
+        return False  # Template doesn't use {module}
+
+    # Count how many unique interface names this template would produce across siblings
+    # If all siblings resolve to the same name, there's a conflict
+    from dcim.models import ModuleBay as ModuleBayModel
+
+    sibling_count = ModuleBayModel.objects.filter(
+        device=module_bay.device,
+        module_id=module_bay.module_id,
+    ).count()
+
+    return sibling_count > 1
+
+
+def apply_normalization_rules(value: str, scope: str, manufacturer=None) -> str:
+    """Apply NormalizationRule chain to transform a string before matching.
+
+    Rules for the given scope are applied in priority order.  Each rule's
+    regex substitution transforms the output of the previous rule, forming
+    a pipeline.  If no rules match, the original value is returned unchanged.
+
+    When *manufacturer* is given, manufacturer-scoped rules run first,
+    followed by unscoped (manufacturer=NULL) rules.  When *manufacturer*
+    is ``None``, all rules for the scope run in priority order.
+
+    Args:
+        value:  The raw string to normalize (e.g. '3HE16474AARA01').
+        scope:  One of NormalizationRule.SCOPE_* constants.
+        manufacturer:  Optional Manufacturer instance to scope rules.
+
+    Returns:
+        The normalized string after all matching rules have been applied.
+    """
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    if not value:
+        return value
+
+    if manufacturer:
+        # Manufacturer-specific rules first, then unscoped rules
+        for mfg_filter in [{"manufacturer": manufacturer}, {"manufacturer__isnull": True}]:
+            rules = NormalizationRule.objects.filter(scope=scope, **mfg_filter).order_by("priority", "pk")
+            for rule in rules:
+                try:
+                    value = re.sub(rule.match_pattern, rule.replacement, value)
+                except re.error:
+                    logger.error(
+                        "Invalid regex in NormalizationRule pk=%s pattern=%r — skipping", rule.pk, rule.match_pattern
+                    )
+    else:
+        rules = NormalizationRule.objects.filter(scope=scope).order_by("priority", "pk")
+        for rule in rules:
+            try:
+                value = re.sub(rule.match_pattern, rule.replacement, value)
+            except re.error:
+                logger.error(
+                    "Invalid regex in NormalizationRule pk=%s pattern=%r — skipping", rule.pk, rule.match_pattern
+                )
+    return value
