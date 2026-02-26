@@ -1000,7 +1000,6 @@ class TestDeviceValidation:
         assert "platform" in result
 
     @patch("netbox_librenms_plugin.import_utils.device_operations.cache")
-    @patch("virtualization.models.Cluster")
     @patch("virtualization.models.VirtualMachine")
     @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
@@ -1014,14 +1013,13 @@ class TestDeviceValidation:
         self,
         mock_site_model,
         mock_rack,
-        mock_cluster_module,
+        mock_cluster,
         mock_role,
         mock_match_type,
         mock_find_platform,
         mock_find_site,
         mock_device,
         mock_vm,
-        mock_cluster_local,
         mock_cache,
     ):
         """Import as VM mode uses cluster instead of site/device_type."""
@@ -1045,8 +1043,7 @@ class TestDeviceValidation:
         }
         mock_role.objects.all.return_value = []
         mock_clusters = [MagicMock(id=1, name="VMware Cluster")]
-        # Cluster is imported locally in the VM path, so we need to mock it there
-        mock_cluster_local.objects.all.return_value = mock_clusters
+        mock_cluster.objects.all.return_value = mock_clusters
         mock_cache.get.return_value = None  # Force cache miss to trigger Cluster.objects.all()
         mock_rack.objects.filter.return_value = []
         mock_site_model.objects.all.return_value = []
