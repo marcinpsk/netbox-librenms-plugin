@@ -105,21 +105,38 @@ alias netbox-logs="tail -f /tmp/netbox.log"
 alias rq-logs="tail -f /tmp/rqworker.log"
 
 netbox-status() {
-  if [ -f /tmp/netbox.pid ] && kill -0 "$(cat /tmp/netbox.pid)" 2>/dev/null; then
-    echo "NetBox is running (PID: $(cat /tmp/netbox.pid))"
+  local PID
+  if [ -f /tmp/netbox.pid ]; then
+    PID=$(cat /tmp/netbox.pid 2>/dev/null)
+    if [ -n "$PID" ] && is_expected_pid "$PID" "python.*runserver.*8000"; then
+      echo "NetBox is running (PID: $PID)"
+    else
+      echo "NetBox is not running"
+    fi
   else
     echo "NetBox is not running"
   fi
-  if [ -f /tmp/rqworker.pid ] && kill -0 "$(cat /tmp/rqworker.pid)" 2>/dev/null; then
-    echo "RQ worker is running (PID: $(cat /tmp/rqworker.pid))"
+  if [ -f /tmp/rqworker.pid ]; then
+    PID=$(cat /tmp/rqworker.pid 2>/dev/null)
+    if [ -n "$PID" ] && is_expected_pid "$PID" "python.*rqworker"; then
+      echo "RQ worker is running (PID: $PID)"
+    else
+      echo "RQ worker is not running"
+    fi
   else
     echo "RQ worker is not running"
   fi
 }
 
 rq-status() {
-  if [ -f /tmp/rqworker.pid ] && kill -0 "$(cat /tmp/rqworker.pid)" 2>/dev/null; then
-    echo "RQ worker is running (PID: $(cat /tmp/rqworker.pid))"
+  local PID
+  if [ -f /tmp/rqworker.pid ]; then
+    PID=$(cat /tmp/rqworker.pid 2>/dev/null)
+    if [ -n "$PID" ] && is_expected_pid "$PID" "python.*rqworker"; then
+      echo "RQ worker is running (PID: $PID)"
+    else
+      echo "RQ worker is not running"
+    fi
   else
     echo "RQ worker is not running"
   fi
