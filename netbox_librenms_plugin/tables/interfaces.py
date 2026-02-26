@@ -1,5 +1,7 @@
+import json as json_module
+
 import django_tables2 as tables
-from django.utils.html import format_html
+from django.utils.html import escape, format_html
 from django.utils.safestring import mark_safe
 from netbox.tables.columns import BooleanColumn, ToggleColumn
 from utilities.paginator import EnhancedPaginator
@@ -7,10 +9,14 @@ from utilities.templatetags.helpers import humanize_speed
 
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.utils import (
+    check_vlan_group_matches,
     convert_speed_to_kbps,
     format_mac_address,
     get_interface_name_field,
+    get_missing_vlan_warning,
     get_table_paginate_count,
+    get_tagged_vlan_css_class,
+    get_untagged_vlan_css_class,
     get_virtual_chassis_member,
 )
 
@@ -21,11 +27,14 @@ class LibreNMSInterfaceTable(tables.Table):
     """
 
     class Meta:
+        """Meta options for LibreNMSInterfaceTable."""
+
         sequence = [
             "selection",
             "name",
             "type",
             "speed",
+            "vlans",
             "mac_address",
             "mtu",
             "enabled",
@@ -37,9 +46,11 @@ class LibreNMSInterfaceTable(tables.Table):
             "id": "librenms-interface-table",
         }
 
-    def __init__(self, *args, device=None, interface_name_field=None, **kwargs):
+    def __init__(self, *args, device=None, interface_name_field=None, vlan_groups=None, **kwargs):
+        """Initialize table with device context and interface name field."""
         self.device = device
         self.interface_name_field = interface_name_field or get_interface_name_field()
+        self.vlan_groups = vlan_groups or []
 
         # Update column accessors after initialization
         for column in ["selection", "name"]:
@@ -49,9 +60,9 @@ class LibreNMSInterfaceTable(tables.Table):
         self._meta.row_attrs = {
             "data-interface": lambda record: record.get(self.interface_name_field),
             "data-name": lambda record: record.get(self.interface_name_field),
-            "data-enabled": lambda record: record.get("ifAdminStatus", "").lower()
-            if record.get("ifAdminStatus")
-            else "",
+            "data-enabled": lambda record: (
+                str(record.get("ifAdminStatus")).lower() if record.get("ifAdminStatus") is not None else ""
+            ),
         }
 
         super().__init__(*args, **kwargs)
@@ -88,6 +99,197 @@ class LibreNMSInterfaceTable(tables.Table):
         verbose_name="LibreNMS ID",
         attrs={"td": {"data-col": "librenms_id"}},
     )
+    vlans = tables.Column(
+        verbose_name="VLANs",
+        empty_values=(),
+        orderable=False,
+        attrs={"td": {"data-col": "vlans"}},
+    )
+
+    def render_vlans(self, value, record):
+        """
+        Render VLANs column showing untagged and tagged VLANs.
+        Format: "100(U), 200(T), 300(T)" or "100(U)" for access ports.
+
+        Color logic:
+        - Red + warning icon: VLAN not in any NetBox group (cannot sync)
+        - Red: Not present in NetBox (no VLAN assigned on interface)
+        - Orange: Mismatched (different untagged VLAN assigned)
+        - Green: Matching (VLAN matches NetBox assignment)
+
+        Compact display: shows up to 3 VLANs inline, then summarizes.
+        An edit button opens the VLAN detail modal.
+        Hidden inputs store per-VLAN group assignments for form submission.
+        """
+        untagged = record.get("untagged_vlan")
+        tagged = record.get("tagged_vlans", [])
+        missing_vlans = record.get("missing_vlans", [])
+
+        # Get NetBox interface for comparison
+        exists_in_netbox = record.get("exists_in_netbox", False)
+        netbox_interface = record.get("netbox_interface")
+
+        # Get NetBox VLAN assignments (VID + group for group-aware comparison)
+        netbox_untagged_vid = None
+        netbox_untagged_group_id = None
+        netbox_tagged_vids = set()
+        netbox_tagged_group_ids = {}
+        if netbox_interface:
+            if netbox_interface.untagged_vlan:
+                netbox_untagged_vid = netbox_interface.untagged_vlan.vid
+                netbox_untagged_group_id = netbox_interface.untagged_vlan.group_id
+            for v in netbox_interface.tagged_vlans.all():
+                netbox_tagged_vids.add(v.vid)
+                netbox_tagged_group_ids[v.vid] = v.group_id
+
+        all_vlans = []
+        if untagged:
+            all_vlans.append(("U", untagged))
+        for vid in sorted(tagged):
+            all_vlans.append(("T", vid))
+
+        if not all_vlans:
+            return format_html("—")
+
+        interface_name = record.get(self.interface_name_field, "")
+        safe_name = interface_name.replace("/", "_").replace(":", "_")
+
+        # Build compact colored summary (show up to 3 VLANs, summarize rest)
+        vlan_group_map = record.get("vlan_group_map", {})
+        MAX_INLINE = 3
+        inline_parts = []
+        for vlan_type, vid in all_vlans[:MAX_INLINE]:
+            selected_gid = self._parse_group_id(vlan_group_map.get(vid, {}).get("group_id", ""))
+            group_matches = check_vlan_group_matches(
+                vlan_type,
+                vid,
+                selected_gid,
+                netbox_untagged_group_id,
+                netbox_tagged_group_ids,
+                netbox_untagged_vid,
+                netbox_tagged_vids,
+            )
+            if vlan_type == "U":
+                css = get_untagged_vlan_css_class(
+                    vid, netbox_untagged_vid, exists_in_netbox, missing_vlans, group_matches
+                )
+            else:
+                css = get_tagged_vlan_css_class(vid, netbox_tagged_vids, exists_in_netbox, missing_vlans, group_matches)
+            warning = get_missing_vlan_warning(vid, missing_vlans)
+            inline_parts.append(f'<span class="{css}">{vid}({vlan_type}){warning}</span>')
+
+        summary = ", ".join(inline_parts)
+        if len(all_vlans) > MAX_INLINE:
+            extra = len(all_vlans) - MAX_INLINE
+            summary += f' <span class="text-muted">+{extra} more</span>'
+
+        # Build tooltip showing auto-selected VLAN group per VLAN
+        tooltip_lines = []
+        for vlan_type, vid in all_vlans:
+            if vid in missing_vlans:
+                tooltip_lines.append(f"VLAN {vid}({vlan_type}) → ⚠ Not in NetBox")
+            else:
+                group_info = vlan_group_map.get(vid, {})
+                group_name = group_info.get("group_name", "Global")
+                tooltip_lines.append(f"VLAN {vid}({vlan_type}) → {escape(group_name)}")
+        tooltip_text = "&#10;".join(tooltip_lines)
+
+        # Build hidden inputs for per-VLAN group selections (submitted with form)
+        hidden_inputs = []
+        for vlan_type, vid in all_vlans:
+            group_info = vlan_group_map.get(vid, {})
+            group_id = group_info.get("group_id", "")
+            hidden_inputs.append(
+                format_html(
+                    '<input type="hidden" name="vlan_group_{}_{}" '
+                    'value="{}" class="vlan-group-hidden" '
+                    'data-interface="{}" data-vid="{}">',
+                    safe_name,
+                    vid,
+                    group_id,
+                    interface_name,
+                    vid,
+                )
+            )
+
+        # Build JSON data for modal (use proper json serialization for safety)
+        vlan_json_items = []
+        for vlan_type, vid in all_vlans:
+            group_info = vlan_group_map.get(vid, {})
+            is_missing = vid in missing_vlans
+            selected_gid = self._parse_group_id(group_info.get("group_id", ""))
+            group_matches = check_vlan_group_matches(
+                vlan_type,
+                vid,
+                selected_gid,
+                netbox_untagged_group_id,
+                netbox_tagged_group_ids,
+                netbox_untagged_vid,
+                netbox_tagged_vids,
+            )
+            if vlan_type == "U":
+                css = get_untagged_vlan_css_class(
+                    vid, netbox_untagged_vid, exists_in_netbox, missing_vlans, group_matches
+                )
+            else:
+                css = get_tagged_vlan_css_class(vid, netbox_tagged_vids, exists_in_netbox, missing_vlans, group_matches)
+            display_group_name = "Not in NetBox" if is_missing else group_info.get("group_name", "Global")
+            vlan_json_items.append(
+                {
+                    "vid": vid,
+                    "type": vlan_type,
+                    "group_id": group_info.get("group_id", ""),
+                    "group_name": display_group_name,
+                    "css": css,
+                    "missing": is_missing,
+                }
+            )
+        vlan_json = json_module.dumps(vlan_json_items)
+
+        device_id = self.device.pk if self.device else ""
+
+        # Build vlan_groups JSON for modal dropdowns
+        group_options = [{"id": "", "name": "-- No Group (Global) --", "scope": ""}]
+        for group in self.vlan_groups:
+            scope_info = str(group.scope) if hasattr(group, "scope") and group.scope else ""
+            group_options.append({"id": str(group.pk), "name": group.name, "scope": scope_info})
+
+        groups_json = json_module.dumps(group_options)
+
+        # Escape JSON for safe embedding in HTML attributes
+        escaped_vlan_json = escape(vlan_json)
+        escaped_groups_json = escape(groups_json)
+
+        edit_btn = format_html(
+            '<button type="button" class="btn btn-sm btn-link p-0 ms-1 vlan-edit-btn" '
+            'data-interface="{}" '
+            'data-safe-name="{}" '
+            'data-device-id="{}" '
+            "data-vlans='{}' "
+            "data-vlan-groups='{}' "
+            'title="Edit VLAN group assignments">'
+            '<i class="mdi mdi-pencil"></i></button>',
+            interface_name,
+            safe_name,
+            device_id,
+            escaped_vlan_json,
+            escaped_groups_json,
+        )
+
+        hidden_inputs_html = mark_safe("".join(str(h) for h in hidden_inputs))
+
+        return format_html(
+            '<span title="{}">{}</span>{}{}',
+            mark_safe(tooltip_text),
+            mark_safe(summary),
+            edit_btn,
+            hidden_inputs_html,
+        )
+
+    @staticmethod
+    def _parse_group_id(group_id_str):
+        """Normalize a group ID string to int or None for comparison."""
+        return int(group_id_str) if group_id_str else None
 
     def render_speed(self, value, record):
         """Render interface speed with appropriate styling based on comparison with NetBox"""
@@ -316,8 +518,11 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
         attrs={"td": {"data-col": "device_selection"}},
     )
 
-    def __init__(self, *args, device=None, interface_name_field=None, **kwargs):
-        super().__init__(*args, device=device, interface_name_field=interface_name_field, **kwargs)
+    def __init__(self, *args, device=None, interface_name_field=None, vlan_groups=None, **kwargs):
+        """Initialize VC interface table with device and name field."""
+        super().__init__(
+            *args, device=device, interface_name_field=interface_name_field, vlan_groups=vlan_groups, **kwargs
+        )
         # Ensure device_selection column is visible
         if hasattr(self.device, "virtual_chassis") and self.device.virtual_chassis:
             self.columns.show("device_selection")
@@ -356,17 +561,21 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
         )
 
     def format_interface_data(self, port_data, device):
+        """Format interface data including VC device selection column."""
         formatted_data = super().format_interface_data(port_data, device)
         formatted_data["device_selection"] = self.render_device_selection(None, port_data)
         return formatted_data
 
     class Meta:
+        """Meta options for VCInterfaceTable."""
+
         sequence = [
             "selection",
             "device_selection",
             "name",
             "type",
             "speed",
+            "vlans",
             "mac_address",
             "mtu",
             "enabled",
@@ -384,9 +593,12 @@ class LibreNMSVMInterfaceTable(LibreNMSInterfaceTable):
     """
 
     class Meta(LibreNMSInterfaceTable.Meta):
+        """Meta options for LibreNMSVMInterfaceTable."""
+
         sequence = [
             "selection",
             "name",
+            "vlans",
             "mac_address",
             "mtu",
             "enabled",

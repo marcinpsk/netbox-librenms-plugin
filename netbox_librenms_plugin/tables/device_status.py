@@ -25,6 +25,7 @@ class DeviceStatusTable(DeviceTable):
     )
 
     def render_librenms_status(self, value, record):
+        """Render LibreNMS sync status with link to sync page."""
         sync_url = reverse(
             "plugins:netbox_librenms_plugin:device_librenms_sync",
             kwargs={"pk": record.pk},
@@ -52,6 +53,8 @@ class DeviceStatusTable(DeviceTable):
         return mark_safe(f'<a href="{sync_url}">{status}</a>')
 
     class Meta(DeviceTable.Meta):
+        """Meta options for DeviceStatusTable."""
+
         model = Device
         fields = (
             "pk",
@@ -89,7 +92,9 @@ class DeviceImportTable(tables.Table):
     name = "DeviceImportTable"  # Required by NetBox table utilities
 
     def __init__(self, *args, **kwargs):
+        """Initialize table with cached querysets and apply sorting."""
         super().__init__(*args, **kwargs)
+
         # Cache querysets to avoid N queries per render
         from dcim.models import DeviceRole
         from virtualization.models import Cluster
@@ -127,6 +132,7 @@ class DeviceImportTable(tables.Table):
         # Sort the data list in place
         # Handle None values by treating them as empty strings for sorting
         def sort_key(item):
+            """Return lowercase sort value for a data field."""
             value = item.get(data_key, "")
             return (value or "").lower() if isinstance(value, str) else str(value or "")
 
@@ -425,6 +431,7 @@ class DeviceImportTable(tables.Table):
         """
         Render action buttons for import using HTMX.
         Shows Import button if can import, otherwise shows Preview/Configure.
+        Permission checks are handled by backend require_write_permission() which shows toast.
         """
         validation = record.get("_validation", {})
         device_id = record.get("device_id")
@@ -625,6 +632,8 @@ class DeviceImportTable(tables.Table):
         )
 
     class Meta:
+        """Meta options for DeviceImportTable."""
+
         # No model - we're working with LibreNMS API dictionaries, not Django model instances
         # This prevents NetBoxTable from auto-adding custom fields from Device model
 

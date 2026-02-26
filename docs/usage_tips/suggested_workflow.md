@@ -49,7 +49,11 @@ Use the [Device Import](../librenms_import/overview.md) feature to bring devices
 - Start with a small set (single location or device type) to verify your setup
 - Enable Virtual Chassis detection only when importing stackable switches
 
-## 6. Sync Interfaces
+## 6. Sync VLAN
+- Create VLAN objects in NetBox from LibreNMS device VLAN data
+- Per-VLAN group assignment with scope-aware auto-selection
+
+## 7. Sync Interfaces
 
 After devices are imported, sync their interfaces:
 
@@ -59,7 +63,7 @@ After devices are imported, sync their interfaces:
 
 **Why after import**: Interfaces require the device to exist in NetBox first. The `librenms_id` field set during import enables accurate synchronization.
 
-## 7. Sync Cables and IP Addresses
+## 8. Sync Cables and IP Addresses
 
 Complete your device data by syncing:
 
@@ -68,7 +72,7 @@ Complete your device data by syncing:
 
 **Why last**: Both features require that interfaces already exist in NetBox and ideally with the `librenms_id` field set. The `librenms_id` field on interfaces ensures accurate matching.
 
-## 8. Sync Locations (Optional)
+## 9. Sync Locations (Optional)
 
 If you want to synchronize location latitude/longitude data between NetBox Sites and LibreNMS locations, use the location sync feature.
 

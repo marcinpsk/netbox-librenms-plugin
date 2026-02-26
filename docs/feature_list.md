@@ -41,6 +41,7 @@
   * Speed
   * MAC Address
   * MTU
+  * VLAN assignments
 * Sync all or specific fields
 
 ### Cable Sync {#cable-sync}
@@ -53,6 +54,12 @@
 * Create IP address objects in Netbox from LibreNMS device IP data
 * Best results when the [custom field](usage_tips/custom_field.md) `librenms_id` is populated on interfaces
 
+### VLAN Sync {#vlan-sync}
+
+* Create VLAN objects in NetBox from LibreNMS device VLAN data
+* Per-VLAN group assignment with scope-aware auto-selection
+
+
 ### Location
 
 * NetBox Site to LibreNMS location synchronization
@@ -63,4 +70,3 @@
 * Customizable LibreNMS to NetBox interface type mappings
 * Interface Speed-based mapping rules
 * Bulk import support
-

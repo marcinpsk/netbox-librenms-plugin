@@ -235,6 +235,51 @@
     }
 
     // ============================================
+    // USER PREFERENCE PERSISTENCE
+    // ============================================
+
+    /**
+     * Save a user preference via the save-user-pref endpoint.
+     * Uses the URL from a data attribute on the page to avoid hardcoding.
+     *
+     * @param {string} key - Preference key (e.g., 'use_sysname', 'strip_domain')
+     * @param {*} value - Preference value to save
+     */
+    function savePref(key, value) {
+        const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value
+            || getCookie('csrftoken');
+        if (!csrfToken) {
+            return;
+        }
+        const savePrefUrl = document.querySelector('[data-save-pref-url]')?.dataset.savePrefUrl;
+        if (!savePrefUrl) {
+            return;
+        }
+        fetch(savePrefUrl, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': csrfToken
+            },
+            body: JSON.stringify({ key: key, value: value })
+        }).catch(function (err) {
+            console.debug('savePref: fetch failed:', err.message);
+        });
+    }
+
+    /**
+     * Initialize toggle listeners for use-sysname and strip-domain preferences.
+     * Persists toggle state to user preferences on change.
+     */
+    function initializeTogglePrefs() {
+        const sysname = document.getElementById('use-sysname-toggle');
+        const strip = document.getElementById('strip-domain-toggle');
+        if (sysname) sysname.addEventListener('change', function () { savePref('use_sysname', this.checked); });
+        if (strip) strip.addEventListener('change', function () { savePref('strip_domain', this.checked); });
+    }
+
+    // ============================================
     // MODAL MANAGEMENT
     // ============================================
 
@@ -252,7 +297,7 @@
 
         const manager = new ModalManager(modalElement);
         manager.show();
-        
+
         // Store backdrop reference for legacy compatibility
         if (fallbackBackdropRef && manager.backdropElement) {
             fallbackBackdropRef.element = manager.backdropElement;
@@ -667,7 +712,7 @@
                 });
 
                 if (deviceCount) deviceCount.style.display = 'none';
-                
+
                 if (cancelBtn) {
                     cancelBtn.innerHTML = '<i class="mdi mdi-close"></i> Close';
                     cancelBtn.onclick = function () {
@@ -765,6 +810,10 @@
                 }
             })
                 .then(response => {
+                    // Check for HTTP errors first
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                    }
                     // Check if response is JSON (background job) or HTML (synchronous)
                     const contentType = response.headers.get('content-type');
                     if (contentType && contentType.includes('application/json')) {
@@ -789,15 +838,11 @@
                         } else {
                             // Unexpected JSON response
                             alert('Unexpected response from server. Please try again.');
-                            if (modalInstance) {
-                                modalInstance.hide();
-                            }
+                            filterModalManager.hide();
                         }
                     } else if (result.type === 'html') {
                         // Synchronous response - navigate to the URL to reload with results
-                        if (modalInstance) {
-                            modalInstance.hide();
-                        }
+                        filterModalManager.hide();
                         // Navigate to the results URL, allowing proper browser history
                         window.location.href = finalUrl;
                     }
@@ -813,7 +858,9 @@
                         // Request was cancelled by user - silent
                     } else {
                         console.error('Error fetching filtered results:', error);
-                        alert('Error loading filtered results. Please try again.');
+                        // Show more specific error if available
+                        const errorMsg = error.message || 'Error loading filtered results. Please try again.';
+                        alert(errorMsg);
                     }
 
                     // Hide modal on error
@@ -1297,6 +1344,7 @@
         initializeFilterForm();
         initializeBulkImport();
         initializeHTMXHandlers();
+        initializeTogglePrefs();
         initializeCachedSearchCountdowns();
         initializeCacheExpirationMonitor();
     }

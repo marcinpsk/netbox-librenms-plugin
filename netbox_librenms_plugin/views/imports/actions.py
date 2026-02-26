@@ -1,10 +1,12 @@
 """HTMX endpoints and POST handlers for importing LibreNMS devices."""
 
+import json
 import logging
 
 from django.contrib import messages
 from django.core.cache import cache
-from django.http import HttpResponse
+from django.core.exceptions import PermissionDenied
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.views import View
 
@@ -27,7 +29,8 @@ from netbox_librenms_plugin.import_validation_helpers import (
     fetch_model_by_id,
 )
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
-from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+from netbox_librenms_plugin.utils import save_user_pref
+from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 logger = logging.getLogger(__name__)
 
@@ -204,10 +207,15 @@ def _apply_user_selections_to_validation(
                 apply_rack_to_validation(validation, rack)
 
 
-class BulkImportConfirmView(LibreNMSAPIMixin, View):
+class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
     """HTMX view to confirm bulk imports before execution."""
 
     def post(self, request):
+        """Render a confirmation modal for selected devices before bulk import."""
+        # Check write permission before showing import confirmation
+        if error := self.require_write_permission():
+            return error
+
         device_ids = request.POST.getlist("select")
         if not device_ids:
             return HttpResponse(
@@ -352,7 +360,7 @@ class BulkImportConfirmView(LibreNMSAPIMixin, View):
         )
 
 
-class BulkImportDevicesView(LibreNMSAPIMixin, View):
+class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
     """Handle bulk import requests coming from the LibreNMS import table."""
 
     def should_use_background_job_for_import(self, request):
@@ -362,15 +370,26 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
         Import jobs provide active cancellation and keep the browser responsive
         during bulk imports.
 
+        Note: Non-superusers automatically fall back to synchronous mode because
+        the /api/core/background-tasks/ endpoint requires superuser access.
+
         Args:
             request: Django request object containing POST data
 
         Returns:
             bool: True if background job should be used, False for synchronous
         """
+        # Non-superusers cannot poll background-tasks API (requires IsSuperuser)
+        if not request.user.is_superuser:
+            return False
         return request.POST.get("use_background_job") == "on"
 
     def post(self, request):  # noqa: PLR0912 - branching keeps responses explicit
+        """Import selected devices from LibreNMS into NetBox."""
+        # Check write permission before any import operation
+        if error := self.require_write_permission():
+            return error
+
         device_ids = request.POST.getlist("select")
         if not device_ids:
             messages.error(request, "No devices selected for import")
@@ -529,6 +548,7 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
                     sync_options=sync_options,
                     manual_mappings_per_device=manual_mappings_per_device,  # type: ignore
                     libre_devices_cache=libre_devices_cache_sync,
+                    user=request.user,  # Pass user for permission checks
                 )
 
             # Import VMs if any
@@ -538,7 +558,19 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
                     self.librenms_api,
                     sync_options,
                     libre_devices_cache_sync,
+                    user=request.user,  # Pass user for permission checks
                 )
+
+        except PermissionDenied as exc:
+            # Handle permission errors with a user-friendly message
+            logger.warning(f"Permission denied during import: {exc}")
+            messages.error(request, str(exc))
+            if request.headers.get("HX-Request"):
+                return HttpResponse(
+                    "",
+                    headers={"HX-Redirect": "/plugins/librenms_plugin/librenms-import/"},
+                )
+            return redirect("plugins:netbox_librenms_plugin:librenms_import")
 
         except Exception as exc:  # pragma: no cover - defensive guard
             logger.exception("Error during bulk import")
@@ -631,10 +663,11 @@ class BulkImportDevicesView(LibreNMSAPIMixin, View):
         return redirect("plugins:netbox_librenms_plugin:librenms_import")
 
 
-class DeviceVCDetailsView(LibreNMSAPIMixin, View):
+class DeviceVCDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
     """HTMX view to show virtual chassis details."""
 
     def get(self, request, device_id):
+        """Render virtual chassis details for a LibreNMS device."""
         libre_device = get_librenms_device_by_id(self.librenms_api, device_id)
         if not libre_device:
             return HttpResponse(
@@ -656,10 +689,11 @@ class DeviceVCDetailsView(LibreNMSAPIMixin, View):
         )
 
 
-class DeviceValidationDetailsView(LibreNMSAPIMixin, DeviceImportHelperMixin, View):
+class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View):
     """HTMX view to show detailed validation information."""
 
     def get(self, request, device_id):
+        """Render detailed validation information for a LibreNMS device."""
         libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
 
         if not libre_device:
@@ -680,10 +714,11 @@ class DeviceValidationDetailsView(LibreNMSAPIMixin, DeviceImportHelperMixin, Vie
         )
 
 
-class DeviceRoleUpdateView(LibreNMSAPIMixin, DeviceImportHelperMixin, View):
+class DeviceRoleUpdateView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View):
     """HTMX view to update a table row when a role is selected."""
 
     def post(self, request, device_id):
+        """Update the table row after a device role selection change."""
         libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
 
         if not libre_device:
@@ -692,10 +727,11 @@ class DeviceRoleUpdateView(LibreNMSAPIMixin, DeviceImportHelperMixin, View):
         return self.render_device_row(request, libre_device, validation, selections)
 
 
-class DeviceClusterUpdateView(LibreNMSAPIMixin, DeviceImportHelperMixin, View):
+class DeviceClusterUpdateView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View):
     """HTMX view to update a table row when a cluster is selected/deselected."""
 
     def post(self, request, device_id):
+        """Update the table row after a cluster selection change."""
         libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
 
         if not libre_device:
@@ -704,13 +740,40 @@ class DeviceClusterUpdateView(LibreNMSAPIMixin, DeviceImportHelperMixin, View):
         return self.render_device_row(request, libre_device, validation, selections)
 
 
-class DeviceRackUpdateView(LibreNMSAPIMixin, DeviceImportHelperMixin, View):
+class DeviceRackUpdateView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View):
     """HTMX view to update a table row when a rack is selected."""
 
     def post(self, request, device_id):
+        """Update the table row after a rack selection change."""
         libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
 
         if not libre_device:
             return HttpResponse("Device not found", status=404)
 
         return self.render_device_row(request, libre_device, validation, selections)
+
+
+class SaveUserPrefView(LibreNMSPermissionMixin, View):
+    """Save a user preference via POST. Used by JS toggle handlers."""
+
+    ALLOWED_PREFS = {
+        "use_sysname": "plugins.netbox_librenms_plugin.use_sysname",
+        "strip_domain": "plugins.netbox_librenms_plugin.strip_domain",
+        "interface_name_field": "plugins.netbox_librenms_plugin.interface_name_field",
+    }
+
+    def post(self, request):
+        """Persist a user preference toggle value."""
+        try:
+            data = json.loads(request.body)
+        except (json.JSONDecodeError, ValueError):
+            return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+        key = data.get("key")
+        value = data.get("value")
+
+        if key not in self.ALLOWED_PREFS:
+            return JsonResponse({"error": "Invalid preference key"}, status=400)
+
+        save_user_pref(request, self.ALLOWED_PREFS[key], value)
+        return JsonResponse({"status": "ok"})

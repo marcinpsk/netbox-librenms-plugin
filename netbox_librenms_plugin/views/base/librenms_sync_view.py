@@ -3,16 +3,16 @@ import re
 from django.shortcuts import get_object_or_404, render
 from netbox.views import generic
 
-from netbox_librenms_plugin.forms import AddToLIbreSNMPV2, AddToLIbreSNMPV3
+from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_librenms_sync_device,
     match_librenms_hardware_to_device_type,
 )
-from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 
-class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
+class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.ObjectListView):
     """
     Base view for LibreNMS sync information.
     """
@@ -85,6 +85,7 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
         interface_context = self.get_interface_context(request, obj)
         cable_context = self.get_cable_context(request, obj)
         ip_context = self.get_ip_context(request, obj)
+        vlan_context = self.get_vlan_context(request, obj)
 
         interface_name_field = get_interface_name_field(request)
 
@@ -101,7 +102,8 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
                 "interface_sync": interface_context,
                 "cable_sync": cable_context,
                 "ip_sync": ip_context,
-                "v2form": AddToLIbreSNMPV2(prefix="v2"),
+                "vlan_sync": vlan_context,
+                "v1v2form": AddToLIbreSNMPV1V2(prefix="v1v2"),
                 "v3form": AddToLIbreSNMPV3(prefix="v3"),
                 "librenms_device_id": self.librenms_id,
                 "found_in_librenms": librenms_info.get("found_in_librenms"),
@@ -137,11 +139,11 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
             success, device_info = self.librenms_api.get_device_info(self.librenms_id)
             if success and device_info:
                 # Get NetBox device details
-                netbox_ip = str(obj.primary_ip.address.ip) if obj.primary_ip else None
-                netbox_hostname = obj.name
+                netbox_ip = str(obj.primary_ip.address.ip).lower() if obj.primary_ip else None
+                netbox_name = obj.name
 
                 # Get LibreNMS device details
-                librenms_hostname = device_info.get("sysName")
+                librenms_sysname = device_info.get("sysName")
                 librenms_ip = device_info.get("ip")
 
                 # Extract new fields
@@ -165,7 +167,8 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
                         "librenms_device_features": features,
                         "librenms_device_location": device_info.get("location", "-"),
                         "librenms_device_ip": librenms_ip,
-                        "sysName": librenms_hostname,
+                        "sysName": librenms_sysname,
+                        "librenms_device_hostname": device_info.get("hostname", "-"),
                         "librenms_device_hardware_match": hardware_match,
                     }
                 )
@@ -175,39 +178,61 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
                     vc_serials = self._get_vc_inventory_serials(obj)
                     librenms_device_details["vc_inventory_serials"] = vc_serials
 
-                # Get just the hostname part from LibreNMS FQDN if present
-                librenms_host = librenms_hostname.split(".")[0].lower() if librenms_hostname else None
-                netbox_host = netbox_hostname.split(".")[0].lower() if netbox_hostname else None
+                # Device was retrieved successfully via librenms_id — trust the ID
+                found_in_librenms = True
 
-                # Check for matching IP or hostname
-                # If IP matches, we have a match
-                if netbox_ip == librenms_ip:
-                    found_in_librenms = True
-                # Check hostname match with normalization for VC suffixes
-                elif netbox_host and librenms_host:
-                    # Normalize NetBox hostname by removing VC member suffixes like ' (1)', ' (2)', etc.
-                    netbox_host_normalized = re.sub(r"\s*\(\d+\)$", "", netbox_host)
+                # Normalise the NetBox name once for comparisons
+                netbox_name_norm = netbox_name.lower() if netbox_name else None
+                if netbox_name_norm:
+                    # Strip VC member suffix like " (1)" before comparing
+                    netbox_name_norm = re.sub(r"\s*\(\d+\)$", "", netbox_name_norm)
 
-                    if netbox_host_normalized == librenms_host:
-                        found_in_librenms = True
-                    # For VC members with explicit librenms_id, validate hostname similarity
-                    elif hasattr(obj, "virtual_chassis") and obj.virtual_chassis and obj.cf.get("librenms_id"):
-                        # Extract base hostname (before any VC numbering like -1, -2, etc.)
-                        # This handles cases where VC members in NetBox (e.g., "switch-1 (1)")
-                        # point to the primary device in LibreNMS (e.g., "switch-1")
-                        netbox_base = re.sub(r"[-_]?\d+$", "", netbox_host_normalized)
-                        librenms_base = re.sub(r"[-_]?\d+$", "", librenms_host)
+                # Also strip the VC member naming pattern from settings
+                # (e.g. "-M2", " (2)", "-SW3") to recover the base device name
+                netbox_name_vc_stripped = None
+                if netbox_name_norm:
+                    netbox_name_vc_stripped = self._strip_vc_pattern(netbox_name_norm)
 
-                        if netbox_base and librenms_base and netbox_base == librenms_base:
-                            # Base hostnames match (e.g., "switch" matches "switch")
-                            found_in_librenms = True
-                        else:
-                            # Hostnames don't match even after normalization
-                            mismatched_device = True
-                    else:
-                        mismatched_device = True
+                # Collect all NetBox identity values to compare against
+                netbox_dns_name = (
+                    obj.primary_ip.dns_name.lower() if obj.primary_ip and obj.primary_ip.dns_name else None
+                )
+                netbox_identities = {
+                    v
+                    for v in [
+                        netbox_name_norm,
+                        netbox_ip,
+                        netbox_dns_name,
+                        netbox_name_vc_stripped,
+                    ]
+                    if v
+                }
+
+                # Collect all LibreNMS identity values, including
+                # domain-stripped short names (e.g. "sw01.example.net" → "sw01")
+                librenms_hostname = device_info.get("hostname")
+                librenms_values = []
+                for val in [librenms_sysname, librenms_hostname, librenms_ip]:
+                    if val:
+                        lower_val = val.lower()
+                        librenms_values.append(lower_val)
+                        # Add short name (strip domain) if it looks like an FQDN
+                        short = lower_val.split(".")[0]
+                        if short != lower_val:
+                            librenms_values.append(short)
+                librenms_identities = set(librenms_values)
+
+                # A device is considered matched when ANY NetBox identity
+                # appears in the LibreNMS identities.  This covers:
+                #   - NetBox name == sysName or hostname
+                #   - NetBox primary IP == LibreNMS hostname (added by IP)
+                #   - NetBox DNS name == sysName or hostname (FQDN match)
+                if netbox_identities & librenms_identities:
+                    mismatched_device = False
                 else:
                     mismatched_device = True
+
+                librenms_device_details["netbox_dns_name"] = netbox_dns_name or "-"
 
         return {
             "found_in_librenms": found_in_librenms,
@@ -235,6 +260,48 @@ class BaseLibreNMSSyncView(LibreNMSAPIMixin, generic.ObjectListView):
         Subclasses should override this method.
         """
         return None
+
+    def get_vlan_context(self, request, obj):
+        """
+        Get the context data for VLAN sync.
+        Subclasses should override this method.
+        """
+        return None
+
+    @staticmethod
+    def _strip_vc_pattern(name):
+        """Strip the VC member naming suffix from a device name.
+
+        Uses the vc_member_name_pattern from LibreNMSSettings to build a
+        regex that removes the suffix.  For example, with the default
+        pattern ``-M{position}`` and name ``switch01-m2``, this returns
+        ``switch01``.
+
+        Returns the stripped name, or None if it equals the original
+        (i.e. no suffix was found).
+        """
+        try:
+            from netbox_librenms_plugin.models import LibreNMSSettings
+
+            settings = LibreNMSSettings.objects.first()
+            pattern = (
+                settings.vc_member_name_pattern
+                if settings and isinstance(settings.vc_member_name_pattern, str)
+                else "-M{position}"
+            )
+            if not isinstance(pattern, str):
+                pattern = "-M{position}"
+
+            # Turn the pattern into a regex by replacing placeholders
+            # {position} → \d+   {serial} → .+
+            regex_suffix = re.escape(pattern)
+            regex_suffix = regex_suffix.replace(re.escape("{position}"), r"\d+")
+            regex_suffix = regex_suffix.replace(re.escape("{serial}"), r".+")
+
+            stripped = re.sub(regex_suffix + "$", "", name, flags=re.IGNORECASE)
+            return stripped if stripped != name else None
+        except Exception:
+            return None
 
     def _get_vc_inventory_serials(self, obj):
         """

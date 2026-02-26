@@ -15,12 +15,13 @@ from netbox_librenms_plugin.import_utils import (
 )
 from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
-from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+from netbox_librenms_plugin.utils import get_user_pref
+from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 logger = logging.getLogger(__name__)
 
 
-class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
+class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.ObjectListView):
     """Import devices from LibreNMS into NetBox with validation metadata."""
 
     queryset = Device.objects.none()
@@ -32,6 +33,7 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
     title = "Import Devices from LibreNMS"
 
     def get_required_permission(self):
+        """Return the permission required to view the import list."""
         from utilities.permissions import get_permission_for_model
 
         return get_permission_for_model(Device, "view")
@@ -49,9 +51,15 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
         - Job tracking in NetBox Jobs interface
         - Results cached for later retrieval
 
+        Note: Non-superusers automatically fall back to synchronous mode because
+        the /api/core/background-tasks/ endpoint requires superuser access.
+
         Returns:
             bool: True if background job should be used, False for synchronous
         """
+        # Non-superusers cannot poll background-tasks API (requires IsSuperuser)
+        if not self.request.user.is_superuser:
+            return False
         return self._filter_form_data.get("use_background_job", True)
 
     def _load_job_results(self, job_id):
@@ -299,6 +307,15 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
         except Exception:
             settings = None
 
+        # User preference overrides for toggles (persisted per-user)
+        use_sysname = get_user_pref(request, "plugins.netbox_librenms_plugin.use_sysname")
+        strip_domain = get_user_pref(request, "plugins.netbox_librenms_plugin.strip_domain")
+        # Fall back to server-level settings
+        if use_sysname is None:
+            use_sysname = getattr(settings, "use_sysname_default", True) if settings else True
+        if strip_domain is None:
+            strip_domain = getattr(settings, "strip_domain_default", False) if settings else False
+
         # Get active cached searches for this server
         cached_searches = get_active_cached_searches(self.librenms_api.server_key)
 
@@ -311,6 +328,8 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
             "filters_submitted": filters_submitted,
             "show_filter_warning": bool(filter_warning),
             "settings": settings,
+            "use_sysname": use_sysname,
+            "strip_domain": strip_domain,
             "vc_detection_enabled": getattr(self, "_vc_detection_enabled", False),
             "cache_cleared": getattr(self, "_cache_cleared", False),
             "from_cache": getattr(self, "_from_cache", False),
@@ -319,20 +338,26 @@ class LibreNMSImportView(LibreNMSAPIMixin, generic.ObjectListView):
             "cache_metadata_missing": getattr(self, "_cache_metadata_missing", False),
             "cached_searches": cached_searches,
             "librenms_server_info": self.get_server_info(),
+            "can_use_background_jobs": request.user.is_superuser,
         }
         return render(request, self.template_name, context)
 
     def get_queryset(self, request):  # noqa: D401 - inherited doc
+        """Load import data into _import_data and return an empty Device queryset."""
         import_data = self._get_import_queryset()
         self._import_data = import_data
         return Device.objects.none()
 
     def get_table(self, data, request, bulk_actions=True):
+        """Return a DeviceImportTable populated with validated import data."""
         if not hasattr(self, "_import_data"):
             self._import_data = self._get_import_queryset()
 
         data = self._import_data
-        table = DeviceImportTable(data, order_by=request.GET.get("sort"))
+        table = DeviceImportTable(
+            data,
+            order_by=request.GET.get("sort"),
+        )
         return table
 
     def _get_import_queryset(self):

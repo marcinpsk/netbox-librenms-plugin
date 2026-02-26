@@ -200,12 +200,22 @@
                 </div>
                 <div class="p-3 my-3 bg-primary-subtle border border-primary rounded-1">
                   <div class="form-check">
+                    {% if can_use_background_jobs %}
                     {{ filter_form.use_background_job }}
                     <label class="form-check-label" for="{{ filter_form.use_background_job.id_for_label }}">
                       {{ filter_form.use_background_job.label }}
                     </label>
                     {% if filter_form.use_background_job.help_text %}
                       <small class="form-text text-muted d-block">{{ filter_form.use_background_job.help_text }}</small>
+                    {% endif %}
+                    {% else %}
+                    <input type="checkbox" class="form-check-input" disabled title="Background jobs require superuser access">
+                    <label class="form-check-label text-muted">
+                      {{ filter_form.use_background_job.label }}
+                    </label>
+                    <small class="form-text text-muted d-block">
+                      <i class="mdi mdi-information-outline"></i> Background jobs require superuser access. Filters will process synchronously.
+                    </small>
                     {% endif %}
                   </div>
                 </div>
@@ -334,10 +344,11 @@
           {% endif %}
         {% endif %}
         {# Import Settings #}
-        <div class="d-flex align-items-center gap-2 border-start ps-2">
+        <div class="d-flex align-items-center gap-2 border-start ps-2"
+             data-save-pref-url="{% url 'plugins:netbox_librenms_plugin:save_user_pref' %}">
             <strong class="small">Settings:</strong>
             <div class="form-check form-switch mb-0">
-                <input class="form-check-input" type="checkbox" id="use-sysname-toggle" name="use-sysname-toggle" {% if settings.use_sysname_default %}checked{% endif %}
+                <input class="form-check-input" type="checkbox" id="use-sysname-toggle" name="use-sysname-toggle" {% if use_sysname %}checked{% endif %}
                        data-bs-toggle="tooltip"
                        title="Use SNMP sysName instead of LibreNMS hostname">
                 <label class="form-check-label small" for="use-sysname-toggle">
@@ -345,7 +356,7 @@
                 </label>
             </div>
             <div class="form-check form-switch mb-0">
-                <input class="form-check-input" type="checkbox" id="strip-domain-toggle" name="strip-domain-toggle" {% if settings.strip_domain_default %}checked{% endif %}
+                <input class="form-check-input" type="checkbox" id="strip-domain-toggle" name="strip-domain-toggle" {% if strip_domain %}checked{% endif %}
                        data-bs-toggle="tooltip"
                        title="Remove domain suffix (e.g., 'switch01.example.com' → 'switch01'). IP addresses preserved.">
                 <label class="form-check-label small" for="strip-domain-toggle">
@@ -413,13 +424,14 @@
           <p class="text-info mb-3" id="filter-device-count" style="display: none;">
             <strong>LibreNMS Devices:</strong> <span id="filter-device-count-value">0</span>
           </p>
+          {% if can_use_background_jobs %}
           <button type="button" class="btn btn-secondary btn-sm" id="cancel-filter-btn">
             <i class="mdi mdi-close"></i> Cancel
           </button>
+          {% endif %}
         </div>
       </div>
     </div>
   </div>
 
 {% endblock %}
-

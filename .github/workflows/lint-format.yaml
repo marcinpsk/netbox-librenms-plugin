@@ -15,12 +15,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.9'
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
@@ -28,14 +29,22 @@ jobs:
           pip install ruff
 
       - name: Run Ruff linting
-        run: ruff check .
-        continue-on-error: true
+        run: |
+          echo "::group::Ruff Linting"
+          ruff check . --output-format=github
+          echo "::endgroup::"
 
       - name: Run Ruff formatting check
-        run: ruff format --check .
-        continue-on-error: true
+        run: |
+          echo "::group::Ruff Formatting"
+          ruff format --check .
+          echo "::endgroup::"
 
       - name: Report formatting issues
-        if: always()
+        if: failure()
         run: |
-          echo "If there are any formatting issues, run 'ruff check --fix .' and 'ruff format .' locally and push the changes."
+          echo "::error::Formatting or linting issues detected!"
+          echo "To fix locally, run:"
+          echo "  ruff check --fix ."
+          echo "  ruff format ."
+          echo "Then commit and push the changes."

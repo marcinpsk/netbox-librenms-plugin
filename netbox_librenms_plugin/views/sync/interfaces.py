@@ -10,21 +10,47 @@ from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.utils import convert_speed_to_kbps, get_interface_name_field
-from netbox_librenms_plugin.views.mixins import CacheMixin
+from netbox_librenms_plugin.views.mixins import (
+    CacheMixin,
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+    VlanAssignmentMixin,
+)
 
 
-class SyncInterfacesView(CacheMixin, View):
+class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, VlanAssignmentMixin, CacheMixin, View):
     """Sync selected interfaces from LibreNMS into NetBox."""
 
+    def get_required_permissions_for_object_type(self, object_type):
+        """Return the required permissions based on object type."""
+        if object_type == "device":
+            return [("add", Interface), ("change", Interface)]
+        elif object_type == "virtualmachine":
+            return [("add", VMInterface), ("change", VMInterface)]
+        else:
+            raise Http404(f"Invalid object type: {object_type}")
+
     def post(self, request, object_type, object_id):
+        """Sync selected interfaces from LibreNMS into NetBox."""
+        # Set permissions dynamically based on object type
+        self.required_object_permissions = {
+            "POST": self.get_required_permissions_for_object_type(object_type),
+        }
+
+        # Check both plugin write and NetBox object permissions
+        if error := self.require_all_permissions("POST"):
+            return error
+
         url_name = (
             "dcim:device_librenms_sync"
             if object_type == "device"
             else "plugins:netbox_librenms_plugin:vm_librenms_sync"
         )
         obj = self.get_object(object_type, object_id)
+        self.object = obj  # Store for use in sync methods
 
         interface_name_field = get_interface_name_field(request)
+        self.interface_name_field = interface_name_field
         selected_interfaces = self.get_selected_interfaces(request, interface_name_field)
         exclude_columns = request.POST.getlist("exclude_columns")
 
@@ -41,6 +67,11 @@ class SyncInterfacesView(CacheMixin, View):
                 + f"?tab=interfaces&interface_name_field={interface_name_field}"
             )
 
+        # Prepare VLAN lookup maps if VLAN sync is enabled
+        vlan_groups = self.get_vlan_groups_for_device(obj)
+        lookup_maps = self._build_vlan_lookup_maps(vlan_groups)
+        self._lookup_maps = lookup_maps
+
         self.sync_selected_interfaces(obj, selected_interfaces, ports_data, exclude_columns, interface_name_field)
 
         messages.success(request, "Selected interfaces synced successfully.")
@@ -49,6 +80,7 @@ class SyncInterfacesView(CacheMixin, View):
         )
 
     def get_object(self, object_type, object_id):
+        """Return the Device or VirtualMachine for the given type and ID."""
         if object_type == "device":
             return get_object_or_404(Device, pk=object_id)
         if object_type == "virtualmachine":
@@ -56,6 +88,7 @@ class SyncInterfacesView(CacheMixin, View):
         raise Http404("Invalid object type.")
 
     def get_selected_interfaces(self, request, interface_name_field):
+        """Return the list of selected interface names from POST data."""
         selected_interfaces = request.POST.getlist("select")
         if not selected_interfaces:
             messages.error(request, "No interfaces selected for synchronization.")
@@ -63,6 +96,7 @@ class SyncInterfacesView(CacheMixin, View):
         return selected_interfaces
 
     def get_cached_ports_data(self, request, obj):
+        """Return cached LibreNMS port data for the given object."""
         cached_data = cache.get(self.get_cache_key(obj, "ports"))
         if not cached_data:
             messages.warning(
@@ -80,6 +114,7 @@ class SyncInterfacesView(CacheMixin, View):
         exclude_columns,
         interface_name_field,
     ):
+        """Create or update NetBox interfaces from LibreNMS port data."""
         with transaction.atomic():
             for port in ports_data:
                 port_name = port.get(interface_name_field)
@@ -88,6 +123,7 @@ class SyncInterfacesView(CacheMixin, View):
                     self.sync_interface(obj, port, exclude_columns, interface_name_field)
 
     def sync_interface(self, obj, librenms_interface, exclude_columns, interface_name_field):
+        """Create or update a single NetBox interface from LibreNMS data."""
         interface_name = librenms_interface.get(interface_name_field)
 
         if isinstance(obj, Device):
@@ -95,7 +131,17 @@ class SyncInterfacesView(CacheMixin, View):
             selected_device_id = self.request.POST.get(device_selection_key)
 
             if selected_device_id:
-                target_device = Device.objects.get(id=selected_device_id)
+                try:
+                    target_device = Device.objects.get(id=selected_device_id)
+                    # Validate the target is the current device or a VC member
+                    if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+                        valid_ids = set(obj.virtual_chassis.members.values_list("id", flat=True))
+                        if target_device.id not in valid_ids:
+                            target_device = obj
+                    elif target_device.id != obj.id:
+                        target_device = obj
+                except (Device.DoesNotExist, ValueError, TypeError):
+                    target_device = obj
             else:
                 target_device = obj
 
@@ -120,18 +166,28 @@ class SyncInterfacesView(CacheMixin, View):
         if "enabled" not in exclude_columns:
             interface.enabled = (
                 True
-                if librenms_interface["ifAdminStatus"] is None
+                if librenms_interface.get("ifAdminStatus") is None
                 else (
                     librenms_interface["ifAdminStatus"].lower() == "up"
                     if isinstance(librenms_interface["ifAdminStatus"], str)
                     else bool(librenms_interface["ifAdminStatus"])
                 )
             )
-        interface.save()
+
+        # Sync VLANs if not excluded
+        vlan_synced = False
+        if "vlans" not in exclude_columns:
+            self._sync_interface_vlans(interface, librenms_interface, interface_name)
+            vlan_synced = True
+
+        # Skip redundant save when _sync_interface_vlans already saved (via _update_interface_vlan_assignment)
+        if not vlan_synced:
+            interface.save()
 
     def get_netbox_interface_type(self, librenms_interface):
-        speed = convert_speed_to_kbps(librenms_interface["ifSpeed"])
-        mappings = InterfaceTypeMapping.objects.filter(librenms_type=librenms_interface["ifType"])
+        """Return the NetBox interface type mapped from LibreNMS type and speed."""
+        speed = convert_speed_to_kbps(librenms_interface.get("ifSpeed"))
+        mappings = InterfaceTypeMapping.objects.filter(librenms_type=librenms_interface.get("ifType"))
 
         if speed is not None:
             speed_mapping = mappings.filter(librenms_speed__lte=speed).order_by("-librenms_speed").first()
@@ -142,6 +198,7 @@ class SyncInterfacesView(CacheMixin, View):
         return mapping.netbox_type if mapping else "other"
 
     def handle_mac_address(self, interface, ifPhysAddress):
+        """Assign or create the MAC address for the given interface."""
         if ifPhysAddress:
             existing_mac = interface.mac_addresses.filter(mac_address=ifPhysAddress).first()
             if existing_mac:
@@ -160,6 +217,7 @@ class SyncInterfacesView(CacheMixin, View):
         exclude_columns,
         interface_name_field,
     ):
+        """Update interface fields from LibreNMS data, respecting excluded columns."""
         is_device_interface = isinstance(interface, Interface)
 
         LIBRENMS_TO_NETBOX_MAPPING = {
@@ -195,11 +253,65 @@ class SyncInterfacesView(CacheMixin, View):
 
         interface.save()
 
+    def _sync_interface_vlans(self, interface, librenms_port, interface_name):
+        """
+        Sync VLAN assignments from LibreNMS to NetBox interface.
+        Sets mode, untagged_vlan, and tagged_vlans based on LibreNMS data.
 
-class DeleteNetBoxInterfacesView(CacheMixin, View):
+        Args:
+            interface: NetBox Interface or VMInterface object
+            librenms_port: Port data dict from LibreNMS with VLAN info
+            interface_name: Original interface name for form field lookup
+        """
+        # Get per-VLAN group selections from form (safely handle special chars in name)
+        safe_name = interface_name.replace("/", "_").replace(":", "_")
+
+        # Build VLAN data from port
+        vlan_data = {
+            "untagged_vlan": librenms_port.get("untagged_vlan"),
+            "tagged_vlans": librenms_port.get("tagged_vlans", []),
+        }
+
+        # Build per-VLAN group map from POST data
+        vlan_group_map = {}
+        all_vids = []
+        if vlan_data["untagged_vlan"]:
+            all_vids.append(str(vlan_data["untagged_vlan"]))
+        for vid in vlan_data.get("tagged_vlans", []):
+            all_vids.append(str(vid))
+
+        for vid in all_vids:
+            group_id = self.request.POST.get(f"vlan_group_{safe_name}_{vid}", "")
+            if group_id:
+                vlan_group_map[vid] = group_id
+
+        # Use mixin method to update interface VLAN assignments
+        self._update_interface_vlan_assignment(interface, vlan_data, vlan_group_map, self._lookup_maps)
+
+
+class DeleteNetBoxInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
     """Delete interfaces that exist only in NetBox."""
 
+    def get_required_permissions_for_object_type(self, object_type):
+        """Return the required permissions based on object type."""
+        if object_type == "device":
+            return [("delete", Interface)]
+        elif object_type == "virtualmachine":
+            return [("delete", VMInterface)]
+        else:
+            raise Http404(f"Invalid object type: {object_type}")
+
     def post(self, request, object_type, object_id):
+        """Delete selected NetBox-only interfaces not present in LibreNMS."""
+        # Set permissions dynamically based on object type
+        self.required_object_permissions = {
+            "POST": self.get_required_permissions_for_object_type(object_type),
+        }
+
+        # Check both plugin write and NetBox object permissions
+        if error := self.require_all_permissions_json("POST"):
+            return error
+
         if object_type == "device":
             obj = get_object_or_404(Device, pk=object_id)
         elif object_type == "virtualmachine":
@@ -214,13 +326,16 @@ class DeleteNetBoxInterfacesView(CacheMixin, View):
 
         deleted_count = 0
         errors = []
+        interface_name = None
 
         try:
             with transaction.atomic():
                 for interface_id in interface_ids:
+                    interface_name = None
                     try:
                         if object_type == "device":
                             interface = Interface.objects.get(id=interface_id)
+                            interface_name = interface.name
                             if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                                 valid_device_ids = [member.id for member in obj.virtual_chassis.members.all()]
                                 if interface.device_id not in valid_device_ids:
@@ -235,11 +350,11 @@ class DeleteNetBoxInterfacesView(CacheMixin, View):
                                 continue
                         else:
                             interface = VMInterface.objects.get(id=interface_id)
+                            interface_name = interface.name
                             if interface.virtual_machine_id != obj.id:
                                 errors.append(f"Interface {interface.name} does not belong to this virtual machine")
                                 continue
 
-                        interface_name = interface.name
                         interface.delete()
                         deleted_count += 1
 
@@ -247,7 +362,7 @@ class DeleteNetBoxInterfacesView(CacheMixin, View):
                         errors.append(f"Interface with ID {interface_id} not found")
                         continue
                     except Exception as exc:  # pragma: no cover - defensive
-                        errors.append(f"Error deleting interface {interface_name}: {str(exc)}")
+                        errors.append(f"Error deleting interface {interface_name or interface_id}: {str(exc)}")
                         continue
 
         except Exception as exc:  # pragma: no cover

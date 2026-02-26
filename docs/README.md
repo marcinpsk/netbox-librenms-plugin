@@ -41,6 +41,7 @@ Pull interface data from Devices and Virtual Machines from LibreNMS into NetBox.
 * Speed
 * MTU
 * MAC Address
+* VLAN (Tagged and untagged)
 
 > Set custom mappings for interface types to ensure that the correct interface type is used when syncing from LibreNMS to NetBox.
 
@@ -51,6 +52,10 @@ Create cable connection in NetBox from LibreNMS links data.
 ### IP Address Sync
 
 Create IP address in NetBox from LibreNMS device IP data.
+
+### VLAN Sync
+- Create VLAN objects in NetBox from LibreNMS device VLAN data
+- Per-VLAN group assignment with scope-aware auto-selection
 
 ### Add device to LibreNMS from Netbox
 

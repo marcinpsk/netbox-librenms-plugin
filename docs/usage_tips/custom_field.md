@@ -30,7 +30,7 @@ Follow these steps to create the `librenms_id` custom field in NetBox:
 
 3. **Configure the Custom Field:**
 
-    - **Object Types:** 
+    - **Object Types:**
         - Check **dcim > device**
         - Check **virtualization > virtual machine**
         - Check **dcim > interface**
@@ -75,4 +75,4 @@ You can manually assign a value to the `librenms_id` custom field for a device u
 - If `librenms_id` is set, the plugin will prioritize it over other identification methods.
 - Ensure the `librenms_id` corresponds to the correct device ID in LibreNMS to prevent mismatches.
 - The custom field is optional but recommended for optimal plugin performance.
-- Using the custom field on interfaces will greatly improve the interface matching required for cable creation.
+- Using the custom field on interfaces will greatly improve the interface matching required for cable synchronization.
