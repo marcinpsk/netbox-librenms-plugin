@@ -73,8 +73,7 @@ def _get_librenms_poller_group_choices():
                         label = f"{group_name} ({group_id})"
                     choices.append((group_id, label))
     except Exception:
-        # If API call fails, just use default option
-        pass
+        logger.exception("Failed to fetch LibreNMS poller groups; using default choices")
 
     return choices
 
