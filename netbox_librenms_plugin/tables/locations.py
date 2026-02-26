@@ -11,17 +11,19 @@ class SiteLocationSyncTable(tables.Table):
     """
 
     netbox_site = tables.Column(linkify=True)
-    latitude = tables.Column(accessor="netbox_site.latitude")
-    longitude = tables.Column(accessor="netbox_site.longitude")
-    librenms_location = tables.Column(accessor="librenms_location.location", verbose_name="LibreNMS Location")
-    librenms_latitude = tables.Column(accessor="librenms_location.lat", verbose_name="LibreNMS Latitude")
-    librenms_longitude = tables.Column(accessor="librenms_location.lng", verbose_name="LibreNMS Longitude")
+    latitude = tables.Column(accessor="netbox_site__latitude")
+    longitude = tables.Column(accessor="netbox_site__longitude")
+    librenms_location = tables.Column(accessor="librenms_location__location", verbose_name="LibreNMS Location")
+    librenms_latitude = tables.Column(accessor="librenms_location__lat", verbose_name="LibreNMS Latitude")
+    librenms_longitude = tables.Column(accessor="librenms_location__lng", verbose_name="LibreNMS Longitude")
     actions = tables.Column(empty_values=())
 
     def render_latitude(self, value, record):
+        """Render latitude with sync-status styling."""
         return self.render_coordinate(value, record.is_synced)
 
     def render_longitude(self, value, record):
+        """Render longitude with sync-status styling."""
         return self.render_coordinate(value, record.is_synced)
 
     def render_coordinate(self, value, is_synced):
@@ -68,6 +70,8 @@ class SiteLocationSyncTable(tables.Table):
         tables.RequestConfig(request, paginate).configure(self)
 
     class Meta:
+        """Meta options for SiteLocationSyncTable."""
+
         fields = (
             "netbox_site",
             "latitude",

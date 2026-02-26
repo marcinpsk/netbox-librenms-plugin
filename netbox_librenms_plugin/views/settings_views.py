@@ -1,21 +1,26 @@
+import logging
+
 from django.contrib import messages
-from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.http import HttpResponse
 from django.shortcuts import redirect, render
+from django.utils.html import escape
 from django.views import View
 
 from netbox_librenms_plugin.forms import ImportSettingsForm, ServerConfigForm
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.models import LibreNMSSettings
+from netbox_librenms_plugin.utils import _save_user_pref
+from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
+
+logger = logging.getLogger(__name__)
 
 
-class LibreNMSSettingsView(PermissionRequiredMixin, View):
+class LibreNMSSettingsView(LibreNMSPermissionMixin, View):
     """
     View for managing plugin settings including server selection and import options.
     Uses two separate forms for cleaner validation and separation of concerns.
     """
 
-    permission_required = "netbox_librenms_plugin.change_librenmssettings"
     template_name = "netbox_librenms_plugin/settings.html"
 
     def get(self, request):
@@ -39,6 +44,10 @@ class LibreNMSSettingsView(PermissionRequiredMixin, View):
 
     def post(self, request):
         """Handle form submission - process the appropriate form based on form_type."""
+        # Check write permission for POST actions
+        if error := self.require_write_permission():
+            return error
+
         # Get or create the settings object
         settings, created = LibreNMSSettings.objects.get_or_create()
 
@@ -65,6 +74,20 @@ class LibreNMSSettingsView(PermissionRequiredMixin, View):
 
             if import_form.is_valid():
                 import_form.save()
+                # Also update current user's preferences to match new defaults
+                try:
+                    _save_user_pref(
+                        request,
+                        "plugins.netbox_librenms_plugin.use_sysname",
+                        import_form.cleaned_data.get("use_sysname_default", False),
+                    )
+                    _save_user_pref(
+                        request,
+                        "plugins.netbox_librenms_plugin.strip_domain",
+                        import_form.cleaned_data.get("strip_domain_default", False),
+                    )
+                except Exception as e:
+                    logger.warning("Failed to update user preferences: %s (user: %s)", e, request.user)
                 messages.success(
                     request,
                     "Import settings updated successfully.",
@@ -89,7 +112,7 @@ class LibreNMSSettingsView(PermissionRequiredMixin, View):
         )
 
 
-class TestLibreNMSConnectionView(View):
+class TestLibreNMSConnectionView(LibreNMSPermissionMixin, View):
     """
     HTMX view to test LibreNMS server connection.
     Returns HTML fragment instead of JSON for HTMX compatibility.
@@ -115,9 +138,9 @@ class TestLibreNMSConnectionView(View):
             system_info = api_client.test_connection()
 
             if system_info and not system_info.get("error"):
-                version = system_info.get("local_ver", "Unknown")
-                database = system_info.get("database_ver", "Unknown")
-                php_version = system_info.get("php_ver", "Unknown")
+                version = escape(system_info.get("local_ver", "Unknown"))
+                database = escape(system_info.get("database_ver", "Unknown"))
+                php_version = escape(system_info.get("php_ver", "Unknown"))
 
                 return HttpResponse(
                     f'<div class="alert alert-success">'
@@ -129,7 +152,7 @@ class TestLibreNMSConnectionView(View):
                     f"</div>"
                 )
             elif system_info and system_info.get("error"):
-                error_msg = system_info.get("message", "Unknown error occurred")
+                error_msg = escape(system_info.get("message", "Unknown error occurred"))
                 return HttpResponse(
                     f'<div class="alert alert-danger">'
                     f'<i class="ti ti-alert-circle me-2"></i>'
@@ -149,13 +172,13 @@ class TestLibreNMSConnectionView(View):
             return HttpResponse(
                 f'<div class="alert alert-danger">'
                 f'<i class="ti ti-alert-circle me-2"></i>'
-                f"<strong>Configuration error:</strong><br>{str(e)}"
+                f"<strong>Configuration error:</strong><br>{escape(str(e))}"
                 f"</div>"
             )
         except Exception as e:
             return HttpResponse(
                 f'<div class="alert alert-danger">'
                 f'<i class="ti ti-alert-circle me-2"></i>'
-                f"<strong>Connection failed:</strong><br>{str(e)}"
+                f"<strong>Connection failed:</strong><br>{escape(str(e))}"
                 f"</div>"
             )

@@ -10,11 +10,13 @@ from .imports import (
     BulkImportConfirmView,
     BulkImportDevicesView,
     DeviceClusterUpdateView,
+    DeviceConflictActionView,
     DeviceRackUpdateView,
     DeviceRoleUpdateView,
     DeviceValidationDetailsView,
     DeviceVCDetailsView,
     LibreNMSImportView,
+    SaveUserPrefView,
 )
 from .mapping_views import (
     InterfaceTypeMappingBulkDeleteView,
@@ -42,6 +44,7 @@ from .sync.cables import SyncCablesView
 from .sync.device_fields import (
     AssignVCSerialView,
     CreateAndAssignPlatformView,
+    UpdateDeviceNameView,
     UpdateDevicePlatformView,
     UpdateDeviceSerialView,
     UpdateDeviceTypeView,

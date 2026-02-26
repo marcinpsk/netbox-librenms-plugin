@@ -14,17 +14,16 @@ from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_virtual_chassis_member,
 )
-from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin
+from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 
-class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
+class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
     """
     Base view for synchronizing cable information from LibreNMS.
     """
 
     model = None  # To be defined in subclasses
     partial_template_name = "netbox_librenms_plugin/_cable_sync_content.html"
-    interface_name_field = get_interface_name_field()
 
     def get_object(self, pk):
         """Retrieve the object (Device or VirtualMachine)."""
@@ -53,11 +52,12 @@ class BaseCableTableView(LibreNMSAPIMixin, CacheMixin, View):
         if not success or "error" in data:
             return None
 
+        interface_name_field = get_interface_name_field(getattr(self, "request", None))
         ports_data = self.get_ports_data(obj)
         local_ports_map = {}
         for port in ports_data.get("ports", []):
             port_id = str(port["port_id"])
-            port_name = port[self.interface_name_field]
+            port_name = port[interface_name_field]
             local_ports_map[port_id] = port_name
 
         links = data.get("links", [])

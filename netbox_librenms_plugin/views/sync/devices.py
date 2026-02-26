@@ -4,53 +4,62 @@ from django.shortcuts import get_object_or_404, redirect
 from django.views import View
 from virtualization.models import VirtualMachine
 
-from netbox_librenms_plugin.forms import AddToLIbreSNMPV2, AddToLIbreSNMPV3
-from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
+from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 
-class AddDeviceToLibreNMSView(LibreNMSAPIMixin, View):
+class AddDeviceToLibreNMSView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
     """Add a NetBox device or VM to LibreNMS via the API."""
 
     def get_form_class(self):
+        """Return the appropriate SNMP form class based on the SNMP version."""
         snmp_version = self.request.POST.get("snmp_version")
         if not snmp_version:
-            snmp_version = self.request.POST.get("v2-snmp_version") or self.request.POST.get("v3-snmp_version")
+            snmp_version = self.request.POST.get("v1v2-snmp_version") or self.request.POST.get("v3-snmp_version")
 
-        if snmp_version == "v2c":
-            return AddToLIbreSNMPV2
+        if snmp_version in ("v1", "v2c"):
+            return AddToLIbreSNMPV1V2
         return AddToLIbreSNMPV3
 
     def get_object(self, object_id):
+        """Return the Device or VirtualMachine for the given ID."""
         try:
             return Device.objects.get(pk=object_id)
         except Device.DoesNotExist:
-            return VirtualMachine.objects.get(pk=object_id)
+            return get_object_or_404(VirtualMachine, pk=object_id)
 
     def post(self, request, object_id):
+        """Add a device to LibreNMS using the submitted SNMP form."""
+        # Check write permission before adding device to LibreNMS
+        if error := self.require_write_permission():
+            return error
+
         self.object = self.get_object(object_id)
         form_class = self.get_form_class()
 
-        snmp_version = (
-            request.POST.get("snmp_version")
-            or request.POST.get("v2-snmp_version")
-            or request.POST.get("v3-snmp_version")
-        )
-        prefix = "v2" if snmp_version == "v2c" else "v3"
+        snmp_version = request.POST.get("v1v2-snmp_version") or request.POST.get("v3-snmp_version")
+        prefix = "v1v2" if snmp_version in ("v1", "v2c") else "v3"
 
         form = form_class(request.POST, prefix=prefix)
         if form.is_valid():
-            return self.form_valid(form)
+            # Inject snmp_version from toggle into cleaned_data for v1/v2c forms
+            if snmp_version in ("v1", "v2c"):
+                form.cleaned_data["snmp_version"] = snmp_version
+            return self.form_valid(form, snmp_version=snmp_version)
 
         for field, errors in form.errors.items():
             for error in errors:
                 messages.error(request, f"{field}: {error}")
         return redirect(self.object.get_absolute_url())
 
-    def form_valid(self, form):
+    def form_valid(self, form, snmp_version=None):
+        """Submit the validated SNMP form data to the LibreNMS API."""
         data = form.cleaned_data
+        # Use the snmp_version from toggle/form for v1/v2c, or from form data for v3
+        version = snmp_version or data.get("snmp_version")
         device_data = {
             "hostname": data.get("hostname"),
-            "snmp_version": data.get("snmp_version"),
+            "snmp_version": version,
             "force_add": data.get("force_add", False),
         }
 
@@ -66,7 +75,7 @@ class AddDeviceToLibreNMSView(LibreNMSAPIMixin, View):
             except (ValueError, TypeError):
                 pass
 
-        if device_data["snmp_version"] == "v2c":
+        if device_data["snmp_version"] in ("v1", "v2c"):
             device_data["community"] = data.get("community")
         elif device_data["snmp_version"] == "v3":
             device_data.update(
@@ -92,10 +101,15 @@ class AddDeviceToLibreNMSView(LibreNMSAPIMixin, View):
         return redirect(self.object.get_absolute_url())
 
 
-class UpdateDeviceLocationView(LibreNMSAPIMixin, View):
+class UpdateDeviceLocationView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
     """Update the LibreNMS site/location based on the NetBox site."""
 
     def post(self, request, pk):
+        """Sync the device location to LibreNMS from the NetBox site."""
+        # Check write permission before updating location in LibreNMS
+        if error := self.require_write_permission():
+            return error
+
         device = get_object_or_404(Device, pk=pk)
         self.librenms_id = self.librenms_api.get_librenms_id(device)
 
