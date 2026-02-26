@@ -21,29 +21,11 @@ for _ca_var in REQUESTS_CA_BUNDLE SSL_CERT_FILE CURL_CA_BUNDLE; do
 done
 unset _ca_var _val
 
-alias netbox-run-bg="$PLUGIN_DIR/.devcontainer/scripts/start-netbox.sh --background"
-alias netbox-run="$PLUGIN_DIR/.devcontainer/scripts/start-netbox.sh"
+# Load shared process management helpers
+source "$PLUGIN_DIR/.devcontainer/scripts/process-helpers.sh"
 
-# Graceful termination helpers (shared with start-netbox.sh pattern)
-graceful_kill_pid() {
-  local pid="$1"
-  kill -15 "$pid" 2>/dev/null
-  sleep 2
-  kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
-}
-
-graceful_kill_pattern() {
-  local pattern="$1"
-  pkill -15 -f "$pattern" 2>/dev/null
-  sleep 2
-  pgrep -f "$pattern" >/dev/null 2>&1 && pkill -9 -f "$pattern" 2>/dev/null
-}
-
-# Verify a PID matches the expected process before killing it
-is_expected_pid() {
-  local pid="$1" pattern="$2"
-  ps -p "$pid" -o args= 2>/dev/null | grep -Eq "$pattern"
-}
+netbox-run-bg() { "$PLUGIN_DIR/.devcontainer/scripts/start-netbox.sh" --background; }
+netbox-run()    { "$PLUGIN_DIR/.devcontainer/scripts/start-netbox.sh"; }
 
 # Robust stop command that kills both tracked and orphaned processes
 netbox-stop() {
