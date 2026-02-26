@@ -83,9 +83,9 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
         return
     _ensure_librenms_id_custom_field._executed = True  # not reset; see comment above
 
-    try:
-        import logging
+    import logging
 
+    try:
         from django.contrib.contenttypes.models import ContentType
 
         from extras.models import CustomField

@@ -56,9 +56,12 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         ports_data = self.get_ports_data(obj)
         local_ports_map = {}
         for port in ports_data.get("ports", []):
-            port_id = str(port.get("port_id", ""))
+            raw_port_id = port.get("port_id")
+            if raw_port_id is None:
+                continue
+            port_id = str(raw_port_id)
             port_name = port.get(interface_name_field)
-            if not port_id or port_name is None:
+            if port_name is None:
                 continue
             local_ports_map[port_id] = port_name
 

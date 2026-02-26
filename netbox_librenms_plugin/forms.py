@@ -777,7 +777,9 @@ class LibreNMSImportFilterForm(forms.Form):
 
         try:
             # Use caching to avoid repeated API calls
-            cache_key = "librenms_locations_choices"
+            api = LibreNMSAPI()
+            server_id = api.librenms_url.rstrip("/")
+            cache_key = f"librenms_locations_choices:{server_id}"
             cached_choices = cache.get(cache_key)
 
             if cached_choices:
@@ -785,7 +787,6 @@ class LibreNMSImportFilterForm(forms.Form):
                 return
 
             # Fetch locations from LibreNMS
-            api = LibreNMSAPI()
             success, locations = api.get_locations()
 
             if success and locations:

@@ -1,3 +1,5 @@
+import logging
+
 from dcim.models import Cable, Device, Interface
 from django.contrib import messages
 from django.core.cache import cache
@@ -8,6 +10,8 @@ from django.urls import reverse
 from django.views import View
 
 from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
+
+logger = logging.getLogger(__name__)
 
 
 class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
@@ -124,9 +128,13 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Cache
         results = {"valid": [], "invalid": [], "duplicate": [], "missing_remote": []}
 
         for interface in selected_interfaces:
-            with transaction.atomic():
-                result = self.process_single_interface(interface, cached_links)
-            results[result["status"]].append(result.get("interface", ""))
+            try:
+                with transaction.atomic():
+                    result = self.process_single_interface(interface, cached_links)
+                results[result["status"]].append(result.get("interface", ""))
+            except Exception:
+                logger.exception("Failed to sync cable for interface %s", interface.get("interface", ""))
+                results["invalid"].append(interface.get("interface", ""))
 
         return results
 

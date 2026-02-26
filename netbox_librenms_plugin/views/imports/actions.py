@@ -856,12 +856,17 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
 
         librenms_id = libre_device.get("device_id")
 
+        try:
+            librenms_id_int = int(librenms_id)
+        except (TypeError, ValueError):
+            return HttpResponse("Invalid or missing LibreNMS device_id", status=400)
+
         if action == "link":
             # Link to LibreNMS and update name from LibreNMS data
             use_sysname = request.POST.get("use-sysname-toggle") == "on"
             strip_domain = request.POST.get("strip-domain-toggle") == "on"
             hostname = _determine_device_name(libre_device, use_sysname=use_sysname, strip_domain=strip_domain)
-            existing_device.custom_field_data["librenms_id"] = int(librenms_id)
+            existing_device.custom_field_data["librenms_id"] = librenms_id_int
             existing_device.name = hostname
             if librenms_device_type:
                 existing_device.device_type = librenms_device_type
@@ -874,7 +879,7 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
             strip_domain = request.POST.get("strip-domain-toggle") == "on"
             incoming_serial = libre_device.get("serial") or ""
             hostname = _determine_device_name(libre_device, use_sysname=use_sysname, strip_domain=strip_domain)
-            existing_device.custom_field_data["librenms_id"] = int(librenms_id)
+            existing_device.custom_field_data["librenms_id"] = librenms_id_int
             if incoming_serial and incoming_serial != "-":
                 conflict_device = Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
                 if conflict_device:
@@ -896,7 +901,7 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
         elif action == "update_serial":
             # Update only the serial and link to LibreNMS
             incoming_serial = libre_device.get("serial") or ""
-            existing_device.custom_field_data["librenms_id"] = int(librenms_id)
+            existing_device.custom_field_data["librenms_id"] = librenms_id_int
             if incoming_serial and incoming_serial != "-":
                 conflict_device = Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
                 if conflict_device:

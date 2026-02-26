@@ -237,7 +237,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         table = self.get_table(table_data, obj)
         table.configure(request)
 
-        cache_ttl = cache.ttl(self.get_cache_key(obj, "inventory"))
+        cache_ttl = getattr(cache, "ttl", lambda k: None)(self.get_cache_key(obj, "inventory"))
         cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl is not None else None
 
         return {
