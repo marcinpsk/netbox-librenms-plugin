@@ -22,7 +22,10 @@ done
 unset _ca_var _val
 
 # Load shared process management helpers
-source "$PLUGIN_DIR/.devcontainer/scripts/process-helpers.sh"
+if ! source "$PLUGIN_DIR/.devcontainer/scripts/process-helpers.sh"; then
+  printf '%s\n' "Failed to load process-helpers.sh" >&2
+  return 1
+fi
 
 netbox-run-bg() { "$PLUGIN_DIR/.devcontainer/scripts/start-netbox.sh" --background; }
 netbox-run()    { "$PLUGIN_DIR/.devcontainer/scripts/start-netbox.sh"; }

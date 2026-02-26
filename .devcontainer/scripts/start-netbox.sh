@@ -21,7 +21,10 @@ else
 fi
 
 # Load shared process management helpers
-source "$(dirname "$0")/process-helpers.sh"
+if ! source "$(dirname "$0")/process-helpers.sh"; then
+  echo "ERROR: Failed to load process-helpers.sh" >&2
+  exit 1
+fi
 
 # Kill any orphaned processes (not tracked by PID file)
 echo "🧹 Cleaning up orphaned processes..."
