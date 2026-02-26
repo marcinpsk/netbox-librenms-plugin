@@ -39,6 +39,12 @@ graceful_kill_pattern() {
   pgrep -f "$pattern" >/dev/null 2>&1 && pkill -9 -f "$pattern" 2>/dev/null
 }
 
+# Verify a PID matches the expected process before killing it
+is_expected_pid() {
+  local pid="$1" pattern="$2"
+  ps -p "$pid" -o args= 2>/dev/null | grep -Eq "$pattern"
+}
+
 # Robust stop command that kills both tracked and orphaned processes
 netbox-stop() {
   echo "🛑 Stopping NetBox and RQ workers..."
@@ -46,8 +52,12 @@ netbox-stop() {
     local PID
     PID=$(cat /tmp/netbox.pid 2>/dev/null)
     if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
-      graceful_kill_pid "$PID"
-      echo "   Stopped NetBox (PID: $PID)"
+      if is_expected_pid "$PID" "python.*runserver.*8000"; then
+        graceful_kill_pid "$PID"
+        echo "   Stopped NetBox (PID: $PID)"
+      else
+        echo "   Skipping stale /tmp/netbox.pid (PID $PID is not NetBox runserver)"
+      fi
     fi
     rm -f /tmp/netbox.pid
   fi
@@ -55,8 +65,12 @@ netbox-stop() {
     local PID
     PID=$(cat /tmp/rqworker.pid 2>/dev/null)
     if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
-      graceful_kill_pid "$PID"
-      echo "   Stopped RQ worker (PID: $PID)"
+      if is_expected_pid "$PID" "python.*rqworker"; then
+        graceful_kill_pid "$PID"
+        echo "   Stopped RQ worker (PID: $PID)"
+      else
+        echo "   Skipping stale /tmp/rqworker.pid (PID $PID is not rqworker)"
+      fi
     fi
     rm -f /tmp/rqworker.pid
   fi
@@ -78,7 +92,13 @@ netbox-restart() {
 }
 
 netbox-reload() {
-  cd "$PLUGIN_DIR" && (command -v uv >/dev/null 2>&1 && uv pip install -e . || pip install -e .) && netbox-restart
+  cd "$PLUGIN_DIR" || return 1
+  if command -v uv >/dev/null 2>&1; then
+    uv pip install -e . || return 1
+  else
+    pip install -e . || return 1
+  fi
+  netbox-restart
 }
 
 alias netbox-logs="tail -f /tmp/netbox.log"
@@ -118,7 +138,12 @@ netbox-manage() {
 }
 
 plugin-install() {
-  cd "$PLUGIN_DIR" && (command -v uv >/dev/null 2>&1 && uv pip install -e . || pip install -e .)
+  cd "$PLUGIN_DIR" || return 1
+  if command -v uv >/dev/null 2>&1; then
+    uv pip install -e .
+  else
+    pip install -e .
+  fi
 }
 
 plugins-install() {
