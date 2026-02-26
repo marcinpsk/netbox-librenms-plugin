@@ -31,7 +31,7 @@ echo "  - Plugin directory: $(test -d "$PLUGIN_WS_DIR" && echo 'Exists' || echo 
 echo "  - Setup script: $(test -f "$PLUGIN_WS_DIR/.devcontainer/scripts/setup.sh" && echo 'Exists' || echo 'Missing')"
 echo "  - Start script: $(test -f "$PLUGIN_WS_DIR/.devcontainer/scripts/start-netbox.sh" && echo 'Exists' || echo 'Missing')"
 echo "  - Start script executable: $(test -x "$PLUGIN_WS_DIR/.devcontainer/scripts/start-netbox.sh" && echo 'Yes' || echo 'No')"
-echo "  - Plugin config: $(test -f "$PLUGIN_WS_DIR/.devcontainer/plugin-config.py" && echo 'Found' || echo 'Missing (using defaults)')"
+echo "  - Plugin config: $(test -f "$PLUGIN_WS_DIR/.devcontainer/config/plugin-config.py" && echo 'Found' || echo 'Missing (using defaults)')"
 echo "  - NetBox config path: /opt/netbox/netbox/netbox/configuration.py"
 
 echo ""
