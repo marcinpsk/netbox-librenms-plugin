@@ -4,9 +4,9 @@ import logging
 
 from dcim.models import Device, DeviceRole, DeviceType, Rack, Site
 from django.core.cache import cache
-from virtualization.models import Cluster  # noqa: F401 — used by test mock.patch targets
 from django.db import transaction
 from django.utils import timezone
+from virtualization.models import Cluster  # noqa: F401 — used by test mock.patch targets
 
 from ..librenms_api import LibreNMSAPI
 from ..utils import (
@@ -414,7 +414,6 @@ def validate_device_for_import(
             # 3. Validate DeviceType (required)
             hardware = libre_device.get("hardware", "")
             dt_match = match_librenms_hardware_to_device_type(hardware)
-
             result["device_type"] = dt_match
 
             if not dt_match["matched"]:
