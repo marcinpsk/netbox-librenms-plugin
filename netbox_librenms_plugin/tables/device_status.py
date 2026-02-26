@@ -480,9 +480,9 @@ class DeviceImportTable(tables.Table):
                 btn_icon = "mdi-information-outline"
                 btn_label = " Details"
             else:
-                btn_class = "btn-outline-info"
-                btn_icon = "mdi-information-outline"
-                btn_label = " Details"
+                btn_class = "btn-outline-success"
+                btn_icon = "mdi-check-circle"
+                btn_label = ""
 
             btn_title = "Resolve conflict" if (has_actions or has_mismatch) else "View details"
             buttons.append(
