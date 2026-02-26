@@ -4,7 +4,7 @@
 
 export PATH="/opt/netbox/venv/bin:$PATH"
 export DEBUG="${DEBUG:-True}"
-PLUGIN_DIR="/workspaces/netbox-librenms-plugin"
+PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 # Clean up empty CA bundle vars (Compose/devcontainer inject "" when host var is
 # unset, which breaks requests/curl).  When setup.sh has installed custom CAs
