@@ -221,4 +221,4 @@ dev-help() {
   echo "📖 NetBox available at: http://localhost:8000 (admin/admin)"
 }
 
-echo "✅ Aliases loaded! Try: rq-status, rq-stats, rq-recent, dev-help"
+echo "✅ Dev helpers loaded! Try: rq-status, rq-stats, rq-recent, dev-help"
