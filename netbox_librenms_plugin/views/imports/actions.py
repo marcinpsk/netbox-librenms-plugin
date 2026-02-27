@@ -29,10 +29,39 @@ from netbox_librenms_plugin.import_validation_helpers import (
     fetch_model_by_id,
 )
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
-from netbox_librenms_plugin.utils import save_user_pref
+from netbox_librenms_plugin.utils import get_user_pref, save_user_pref
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_naming_preferences(request) -> tuple[bool, bool]:
+    """Resolve use_sysname/strip_domain: POST data → user pref → plugin settings."""
+    if "use-sysname-toggle" in request.POST:
+        use_sysname = request.POST.get("use-sysname-toggle") == "on"
+    else:
+        pref = get_user_pref(request, "plugins.netbox_librenms_plugin.use_sysname")
+        if pref is not None:
+            use_sysname = pref
+        else:
+            from netbox_librenms_plugin.models import LibreNMSSettings
+
+            settings = LibreNMSSettings.objects.first()
+            use_sysname = getattr(settings, "use_sysname_default", True) if settings else True
+
+    if "strip-domain-toggle" in request.POST:
+        strip_domain = request.POST.get("strip-domain-toggle") == "on"
+    else:
+        pref = get_user_pref(request, "plugins.netbox_librenms_plugin.strip_domain")
+        if pref is not None:
+            strip_domain = pref
+        else:
+            from netbox_librenms_plugin.models import LibreNMSSettings
+
+            settings = LibreNMSSettings.objects.first()
+            strip_domain = getattr(settings, "strip_domain_default", False) if settings else False
+
+    return use_sysname, strip_domain
 
 
 class DeviceImportHelperMixin:
@@ -113,11 +142,16 @@ class DeviceImportHelperMixin:
         # This checks: user preference, cache status, and VM vs Device
         enable_vc = not is_vm and self._should_enable_vc_detection(device_id, request)
 
+        # Extract naming preferences: POST data (hx-include) → user pref → plugin settings.
+        use_sysname, strip_domain = _resolve_naming_preferences(request)
+
         validation = validate_device_for_import(
             libre_device,
             import_as_vm=is_vm,
             api=self.librenms_api if enable_vc else None,
             include_vc_detection=enable_vc,
+            use_sysname=use_sysname,
+            strip_domain=strip_domain,
         )
         validation["import_as_vm"] = is_vm
 
@@ -259,19 +293,20 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             rack_id = selections["rack_id"]
             is_vm = bool(cluster_id)
 
-            validation = validate_device_for_import(libre_device, import_as_vm=is_vm, api=self.librenms_api)
+            validation = validate_device_for_import(
+                libre_device,
+                import_as_vm=is_vm,
+                api=self.librenms_api,
+                use_sysname=use_sysname,
+                strip_domain=strip_domain,
+            )
 
             # Mark validation with VC detection flag for proper URL generation in table
             # Bulk confirm should respect the initial filter's VC detection preference
             vc_requested = request.GET.get("enable_vc_detection") == "true"
             validation["_vc_detection_enabled"] = vc_requested
 
-            device_name = _determine_device_name(
-                libre_device,
-                use_sysname=use_sysname,
-                strip_domain=strip_domain,
-                device_id=device_id,
-            )
+            device_name = validation["resolved_name"]
 
             if validation.get("virtual_chassis", {}).get("is_stack") and device_name:
                 validation["virtual_chassis"] = update_vc_member_suggested_names(

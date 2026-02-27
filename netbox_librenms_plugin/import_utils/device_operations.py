@@ -83,6 +83,8 @@ def validate_device_for_import(
     *,
     include_vc_detection: bool = True,
     force_vc_refresh: bool = False,
+    use_sysname: bool = True,
+    strip_domain: bool = False,
 ) -> dict:
     """
     Validate if a LibreNMS device can be imported to NetBox.
@@ -101,6 +103,8 @@ def validate_device_for_import(
         api: Optional LibreNMSAPI instance for virtual chassis detection
         include_vc_detection: Skip VC detection when False to speed up bulk operations
         force_vc_refresh: When True, bypass cached VC data and re-query LibreNMS
+        use_sysname: If True, prefer sysName over hostname (matches import behaviour)
+        strip_domain: If True, strip domain suffix from device name
 
     Returns:
         dict: Validation result with structure:
@@ -149,6 +153,7 @@ def validate_device_for_import(
         "is_ready": False,
         "can_import": False,
         "import_as_vm": import_as_vm,
+        "resolved_name": None,  # Final device name after applying user preferences
         "existing_device": None,
         "existing_match_type": None,  # Track how existing device was matched
         "serial_action": None,  # None, "link", "conflict", "update_serial", "hostname_differs"
@@ -195,7 +200,13 @@ def validate_device_for_import(
         # 1. Check if device/VM already exists in NetBox
         # Always check both Devices AND VMs to properly detect existing objects
         librenms_id = libre_device.get("device_id")
-        hostname = libre_device.get("hostname", "")
+        hostname = _determine_device_name(
+            libre_device,
+            use_sysname=use_sysname,
+            strip_domain=strip_domain,
+            device_id=librenms_id,
+        )
+        result["resolved_name"] = hostname
         logger.debug(
             f"Checking for existing device/VM: "
             f"librenms_id={librenms_id} (type={type(librenms_id).__name__}), "
@@ -625,7 +636,13 @@ def import_single_device(
 
         # Validate device if validation not provided
         if validation is None:
-            validation = validate_device_for_import(libre_device)
+            use_sysname_opt = sync_options.get("use_sysname", True) if sync_options else True
+            strip_domain_opt = sync_options.get("strip_domain", False) if sync_options else False
+            validation = validate_device_for_import(
+                libre_device,
+                use_sysname=use_sysname_opt,
+                strip_domain=strip_domain_opt,
+            )
 
         # Check if device already exists
         if validation.get("existing_device"):

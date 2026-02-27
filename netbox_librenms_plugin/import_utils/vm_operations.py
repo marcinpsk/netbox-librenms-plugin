@@ -154,7 +154,15 @@ def bulk_import_vms(
                 continue
 
             # Validate as VM
-            validation = validate_device_for_import(libre_device, import_as_vm=True, api=api)
+            use_sysname_opt = sync_options.get("use_sysname", True) if sync_options else True
+            strip_domain_opt = sync_options.get("strip_domain", False) if sync_options else False
+            validation = validate_device_for_import(
+                libre_device,
+                import_as_vm=True,
+                api=api,
+                use_sysname=use_sysname_opt,
+                strip_domain=strip_domain_opt,
+            )
 
             # Check if VM already exists
             if validation.get("existing_device"):
