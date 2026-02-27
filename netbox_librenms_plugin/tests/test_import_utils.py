@@ -1104,6 +1104,188 @@ class TestDeviceValidation:
         assert result["import_as_vm"] is True
 
 
+class TestDeviceNamingPreferences:
+    """Test that validation honours use_sysname and strip_domain user preferences."""
+
+    COMMON_PATCHES = [
+        "netbox_librenms_plugin.import_utils.Site",
+        "netbox_librenms_plugin.import_utils.Rack",
+        "netbox_librenms_plugin.import_utils.Cluster",
+        "netbox_librenms_plugin.import_utils.DeviceRole",
+        "netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type",
+        "netbox_librenms_plugin.import_utils.find_matching_platform",
+        "netbox_librenms_plugin.import_utils.find_matching_site",
+        "netbox_librenms_plugin.import_utils.Device",
+        "virtualization.models.VirtualMachine",
+    ]
+
+    def _setup_no_existing(self, mocks):
+        """Configure mocks so no existing device is found."""
+        mock_vm = mocks[-1]  # VirtualMachine
+        mock_device = mocks[-2]  # Device
+        mock_find_site = mocks[-3]
+        mock_find_platform = mocks[-4]
+        mock_match_type = mocks[-5]
+        mock_role = mocks[-6]
+        mock_rack = mocks[-8]
+        mock_site_model = mocks[-9]
+
+        mock_vm.objects.filter.return_value.first.return_value = None
+        mock_device.objects.filter.return_value.first.return_value = None
+        mock_find_site.return_value = {
+            "found": False,
+            "site": None,
+            "match_type": None,
+            "confidence": 0.0,
+        }
+        mock_find_platform.return_value = {
+            "found": False,
+            "platform": None,
+            "match_type": None,
+        }
+        mock_match_type.return_value = {
+            "matched": False,
+            "device_type": None,
+            "match_type": None,
+        }
+        mock_role.objects.all.return_value = []
+        mock_rack.objects.filter.return_value = []
+        mock_site_model.objects.all.return_value = []
+
+    @patch("virtualization.models.VirtualMachine")
+    @patch("netbox_librenms_plugin.import_utils.Device")
+    @patch("netbox_librenms_plugin.import_utils.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.import_utils.DeviceRole")
+    @patch("netbox_librenms_plugin.import_utils.Cluster")
+    @patch("netbox_librenms_plugin.import_utils.Rack")
+    @patch("netbox_librenms_plugin.import_utils.Site")
+    def test_resolved_name_uses_sysname_by_default(self, *mocks):
+        """Default use_sysname=True uses sysName for resolved_name."""
+        self._setup_no_existing(mocks)
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        device_data = {
+            "device_id": 1,
+            "hostname": "10.0.0.1",
+            "sysName": "core-switch",
+        }
+        result = validate_device_for_import(device_data, include_vc_detection=False)
+        assert result["resolved_name"] == "core-switch"
+
+    @patch("virtualization.models.VirtualMachine")
+    @patch("netbox_librenms_plugin.import_utils.Device")
+    @patch("netbox_librenms_plugin.import_utils.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.import_utils.DeviceRole")
+    @patch("netbox_librenms_plugin.import_utils.Cluster")
+    @patch("netbox_librenms_plugin.import_utils.Rack")
+    @patch("netbox_librenms_plugin.import_utils.Site")
+    def test_resolved_name_uses_hostname_when_sysname_disabled(self, *mocks):
+        """use_sysname=False uses hostname for resolved_name."""
+        self._setup_no_existing(mocks)
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        device_data = {
+            "device_id": 1,
+            "hostname": "10.0.0.1",
+            "sysName": "core-switch",
+        }
+        result = validate_device_for_import(
+            device_data,
+            include_vc_detection=False,
+            use_sysname=False,
+        )
+        assert result["resolved_name"] == "10.0.0.1"
+
+    @patch("virtualization.models.VirtualMachine")
+    @patch("netbox_librenms_plugin.import_utils.Device")
+    @patch("netbox_librenms_plugin.import_utils.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.import_utils.DeviceRole")
+    @patch("netbox_librenms_plugin.import_utils.Cluster")
+    @patch("netbox_librenms_plugin.import_utils.Rack")
+    @patch("netbox_librenms_plugin.import_utils.Site")
+    def test_resolved_name_strips_domain(self, *mocks):
+        """strip_domain=True strips the domain suffix."""
+        self._setup_no_existing(mocks)
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        device_data = {
+            "device_id": 1,
+            "hostname": "switch-01.example.com",
+            "sysName": "switch-01.example.com",
+        }
+        result = validate_device_for_import(
+            device_data,
+            include_vc_detection=False,
+            strip_domain=True,
+        )
+        assert result["resolved_name"] == "switch-01"
+
+    @patch("virtualization.models.VirtualMachine")
+    @patch("netbox_librenms_plugin.import_utils.Device")
+    @patch("netbox_librenms_plugin.import_utils.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.import_utils.DeviceRole")
+    @patch("netbox_librenms_plugin.import_utils.Cluster")
+    @patch("netbox_librenms_plugin.import_utils.Rack")
+    @patch("netbox_librenms_plugin.import_utils.Site")
+    def test_duplicate_detection_uses_resolved_name(self, *mocks):
+        """Duplicate detection should match against the resolved name, not raw hostname."""
+        self._setup_no_existing(mocks)
+
+        mock_device = mocks[-2]  # Device
+        # The first filter call (librenms_id) returns None,
+        # the second filter call (name__iexact) returns the existing device.
+        existing = MagicMock()
+        existing.name = "core-switch"
+        existing.serial = ""
+        mock_device.objects.filter.return_value.first.side_effect = [None, existing]
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        device_data = {
+            "device_id": 999,
+            "hostname": "10.0.0.1",
+            "sysName": "core-switch",
+        }
+        # use_sysname=True (default): resolved name is "core-switch"
+        # so duplicate detection should find existing device "core-switch"
+        result = validate_device_for_import(device_data, include_vc_detection=False)
+
+        assert result["existing_device"] == existing
+        assert result["existing_match_type"] == "hostname"
+
+    @patch("virtualization.models.VirtualMachine")
+    @patch("netbox_librenms_plugin.import_utils.Device")
+    @patch("netbox_librenms_plugin.import_utils.find_matching_site")
+    @patch("netbox_librenms_plugin.import_utils.find_matching_platform")
+    @patch("netbox_librenms_plugin.import_utils.match_librenms_hardware_to_device_type")
+    @patch("netbox_librenms_plugin.import_utils.DeviceRole")
+    @patch("netbox_librenms_plugin.import_utils.Cluster")
+    @patch("netbox_librenms_plugin.import_utils.Rack")
+    @patch("netbox_librenms_plugin.import_utils.Site")
+    def test_backward_compatible_defaults(self, *mocks):
+        """Calling without naming params produces resolved_name in result."""
+        self._setup_no_existing(mocks)
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        device_data = {
+            "device_id": 1,
+            "hostname": "switch-01",
+        }
+        result = validate_device_for_import(device_data, include_vc_detection=False)
+
+        # resolved_name should be present and match sysName fallback to hostname
+        assert "resolved_name" in result
+        assert result["resolved_name"] == "switch-01"
+
+
 class TestSerialNumberMatching:
     """Test serial number matching in device validation."""
 
