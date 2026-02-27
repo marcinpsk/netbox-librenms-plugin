@@ -11,24 +11,24 @@ What issue does this solve?
 Link any related issues if applicable.
 
 ## Scope of Change
-Tick all that apply:
+Delete items that don’t apply:
 
-- [ ] Sync/Import logic
-- [ ] NetBox models / ORM
-- [ ] LibreNMS API interaction
-- [ ] Config / settings
-- [ ] Web UI / templates
-- [ ] Database migrations
-- [ ] Tests
-- [ ] Docs only
-- Other (please descibe)?
+- Sync/Import logic
+- NetBox models / ORM
+- LibreNMS API interaction
+- Config / settings
+- Web UI / templates
+- Database migrations
+- Tests
+- Docs only
+- Other: <describe>
 
 ## How Was This Tested?
-Tick all that apply and describe briefly.
+Delete items that don’t apply and describe briefly.
 
-- [ ] Unit tests
-- [ ] Manual testing
-- [ ] Not tested (explain why)
+- Unit tests: <yes/no + what>
+- Manual testing: <yes/no + what>
+- Not tested: <explain why>
 
 ### Manual Test Steps (if applicable)
 1.
@@ -42,8 +42,8 @@ Tick all that apply and describe briefly.
 Explain briefly.
 
 ## Backwards Compatibility
-- [ ] No breaking changes
-- [ ] Breaking change (explain and document)
+- No breaking changes
+- Breaking change (explain and document)
 
 ## Other Notes
 Anything the maintainer(s) should pay particular attention to?
