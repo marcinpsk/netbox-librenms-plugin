@@ -6,6 +6,7 @@ description: Sync page architecture, base views, and sync action patterns
 # Sync Pages
 
 ## Three-Layer View Architecture
+
 All four sync resources (interfaces, cables, IP addresses, VLANs) follow the same pattern:
 
 1. **Base views** (`views/base/`) — abstract classes that define the data pipeline:
@@ -24,6 +25,7 @@ All four sync resources (interfaces, cables, IP addresses, VLANs) follow the sam
    - Follow a consistent pattern: check permissions → read selected rows from POST → load cached data → apply changes in `transaction.atomic()` → redirect to sync tab.
 
 ## Data Pipeline (Base Views)
+
 Every base table view follows: **fetch → cache → compare → render**.
 
 - **Fetch:** Call LibreNMS API (e.g., `get_ports()`, `get_device_ips()`, `get_device_vlans()`).
@@ -32,6 +34,7 @@ Every base table view follows: **fetch → cache → compare → render**.
 - **Render:** Build a django-tables2 table, return a partial template (`_*_sync_content.html`).
 
 ## Sync Action View Pattern
+
 ```python
 class SyncSomeResourceView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
     required_object_permissions = {"POST": [("add", Model), ("change", Model)]}
@@ -47,6 +50,7 @@ class SyncSomeResourceView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
 ```
 
 ## Table Conventions (`tables/*.py`)
+
 - Tables define HTMX-enabled columns and checkboxes. Selection uses `ToggleColumn(attrs={"input": {"name": "select"}})`.
 - Constructor takes contextual params (e.g., `device`, `interface_name_field`, `vlan_groups`) to customize rendering.
 - Tables set `self.tab` and `self.prefix` for multi-table pagination via `get_table_paginate_count()`.
@@ -54,11 +58,13 @@ class SyncSomeResourceView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
 - VLAN columns use `render_vlans()` with hidden inputs for per-row group selection and JSON data for modals.
 
 ## Key Mixins Used by Sync Views
+
 - **`LibreNMSAPIMixin`** — lazy-creates `LibreNMSAPI` instance via `self.librenms_api` property. Also provides `get_server_info()` for template context.
 - **`CacheMixin`** — generates consistent cache keys via `get_cache_key(obj, data_type)` and `get_last_fetched_key(obj, data_type)`. Also provides `get_vlan_overrides_key(obj)` for VLAN group override persistence.
 - **`VlanAssignmentMixin`** — VLAN group scope resolution: Rack → Location → Site → SiteGroup → Region → Global. Used by interface and VLAN sync for auto-selecting the most-specific VLAN group and building lookup maps.
 
 ## JavaScript (`librenms_sync.js`)
+
 - Not wrapped in an IIFE — functions are global. Master initializer `initializeScripts()` runs on `DOMContentLoaded` and `htmx:afterSwap`.
 - **Key function groups:**
   - Checkbox management: `initializeTableCheckboxes()`, `updateBulkActionButton()`.

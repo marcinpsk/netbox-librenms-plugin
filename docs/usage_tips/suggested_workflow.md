@@ -50,8 +50,11 @@ Use the [Device Import](../librenms_import/overview.md) feature to bring devices
 - Enable Virtual Chassis detection only when importing stackable switches
 
 ## 6. Sync VLAN
+
 - Create VLAN objects in NetBox from LibreNMS device VLAN data
 - Per-VLAN group assignment with scope-aware auto-selection
+
+**Why before interfaces**: Syncing VLANs first ensures they exist in NetBox before interface sync, enabling proper tagged and untagged VLAN assignments on interfaces.
 
 ## 7. Sync Interfaces
 

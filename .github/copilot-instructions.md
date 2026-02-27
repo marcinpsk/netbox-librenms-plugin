@@ -9,7 +9,7 @@
 ## Architecture & Key Modules
 - Plugin hooks into NetBox (Django 5) under `netbox_librenms_plugin/`; respect NetBox plugin APIs (`navigation.py`, `urls.py`, `api/`).
 - LibreNMS communication lives in `librenms_api.py`; reuse this client instead of new `requests` calls. It handles multi-server configs via `LibreNMSSettings` model and the `servers` plugin config, plus caching via Django cache + custom fields.
-- Views follow a three-layer structure:
+- Views follow a four-layer structure:
   - **Base views** (`views/base/`) — abstract views for each sync resource (`BaseInterfaceTableView`, `BaseCableTableView`, `BaseIPAddressTableView`, `BaseVLANTableView`).
   - **Object sync views** (`views/object_sync/`) — concrete per-model views registered as tabs on NetBox's Device/VM detail pages via `@register_model_view(Device, ...)`. These wire base views to models.
   - **Sync action views** (`views/sync/`) — POST-only views that apply changes (add/change/delete NetBox objects). Includes `interfaces.py`, `cables.py`, `ip_addresses.py`, `vlans.py`, `devices.py`, `device_fields.py`, `locations.py`.
