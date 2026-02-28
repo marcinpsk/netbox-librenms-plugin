@@ -876,9 +876,10 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
         if not libre_device:
             return HttpResponse("LibreNMS device not found", status=404)
 
-        # Require force flag when device type mismatches
+        # Require force flag when device type mismatches, but only for actions that use it
+        _FORCE_REQUIRED_ACTIONS = {"link", "update", "update_serial", "update_type"}
         force = request.POST.get("force") == "on"
-        if validation.get("device_type_mismatch") and not force:
+        if validation.get("device_type_mismatch") and action in _FORCE_REQUIRED_ACTIONS and not force:
             return HttpResponse(
                 "Device type mismatch detected. Check the force checkbox to proceed.",
                 status=400,
@@ -890,6 +891,20 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
             librenms_device_type = validation.get("device_type", {}).get("device_type")
 
         librenms_id = libre_device.get("device_id")
+
+        # Check for LibreNMS ID collision before any linking action
+        if action in {"link", "update", "update_serial"}:
+            id_conflict = (
+                Device.objects.filter(custom_field_data__librenms_id=int(librenms_id))
+                .exclude(pk=existing_device.pk)
+                .first()
+            )
+            if id_conflict:
+                return HttpResponse(
+                    f"LibreNMS ID conflict: ID {librenms_id} is already assigned to device "
+                    f"'{id_conflict.name}' (ID: {id_conflict.pk})",
+                    status=409,
+                )
 
         if action == "link":
             # Link to LibreNMS and update name from LibreNMS data

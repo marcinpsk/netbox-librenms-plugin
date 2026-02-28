@@ -789,8 +789,7 @@ def validate_device_for_import(
             # Note: name_sync_available/suggested_name are intentionally not set for VMs
             # because UpdateDeviceNameView only supports Device objects; VM name-sync
             # would require a separate implementation.
-            sys_name = libre_device.get("sysName") or ""
-            if sys_name and existing_vm.name == sys_name:
+            if hostname and existing_vm.name == hostname:
                 result["name_matches"] = True
 
         # Check for existing Device (by librenms_id custom field)
@@ -808,13 +807,12 @@ def validate_device_for_import(
                 result["existing_match_type"] = "librenms_id"
                 result["can_import"] = False
 
-                # Check if name matches sysName
-                sys_name = libre_device.get("sysName") or ""
-                if sys_name and existing_device.name == sys_name:
+                # Check if name matches resolved name (accounts for use_sysname/strip_domain)
+                if hostname and existing_device.name == hostname:
                     result["name_matches"] = True
-                elif sys_name and existing_device.name != sys_name:
+                elif hostname and existing_device.name != hostname:
                     result["name_sync_available"] = True
-                    result["suggested_name"] = sys_name
+                    result["suggested_name"] = hostname
 
                 # Check for serial drift on the linked device
                 incoming_serial = libre_device.get("serial") or ""
