@@ -2234,17 +2234,20 @@ def _refresh_existing_device(validation: dict) -> None:
             # Device was deleted since caching — recompute readiness
             validation["existing_device"] = None
             validation["existing_match_type"] = None
-            validation["can_import"] = True
             if validation.get("import_as_vm"):
-                validation["is_ready"] = bool(
-                    validation.get("site", {}).get("found") and validation.get("device_role", {}).get("found")
+                required_found = (
+                    validation.get("site", {}).get("found")
+                    and validation.get("cluster", {}).get("found")
+                    and validation.get("device_role", {}).get("found")
                 )
             else:
-                validation["is_ready"] = bool(
+                required_found = (
                     validation.get("site", {}).get("found")
                     and validation.get("device_type", {}).get("found")
                     and validation.get("device_role", {}).get("found")
                 )
+            validation["can_import"] = bool(required_found)
+            validation["is_ready"] = bool(required_found)
     except Exception as e:
         existing_id = getattr(existing, "pk", "unknown") if existing else "none"
         logger.error(f"Failed to refresh existing device (pk={existing_id}): {e}")

@@ -256,6 +256,7 @@
                     {{ validation.existing_device.platform }}
                     {% if sync_info and not sync_info.platform_synced %}
                       {% if sync_info.platform_info.platform_exists %}
+                        {% if not validation.import_as_vm and not validation.existing_device.cluster %}
                         <form style="display:inline" class="ms-1"
                               hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
                               hx-swap="none">
@@ -266,6 +267,7 @@
                             <i class="mdi mdi-sync"></i>
                           </button>
                         </form>
+                        {% endif %}
                       {% else %}
                         <span class="text-muted ms-1" title="Platform '{{ sync_info.platform_info.librenms_os }}' not in NetBox">
                           <i class="mdi mdi-alert-outline"></i>
@@ -278,7 +280,7 @@
                     <span class="badge bg-success text-white">{{ validation.platform.platform.name }}</span>
                   {% elif sync_info and sync_info.platform_info.platform_exists %}
                     <span class="text-muted">Not set</span>
-                    {% if validation.existing_device %}
+                    {% if validation.existing_device and not validation.import_as_vm and not validation.existing_device.cluster %}
                     <form style="display:inline" class="ms-1"
                           hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
                           hx-swap="none">
