@@ -4,6 +4,7 @@ from dcim.models import Device, Interface
 from django.contrib import messages
 from django.core.cache import cache
 from django.core.exceptions import MultipleObjectsReturned
+from django.db.models import Q
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, render
 from django.urls import reverse
@@ -82,7 +83,10 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         # First try matching by LibreNMS ID
         if remote_device_id:
             try:
-                device = Device.objects.get(**{f"custom_field_data__librenms_id__{server_key}": remote_device_id})
+                device = Device.objects.get(
+                    Q(**{f"custom_field_data__librenms_id__{server_key}": remote_device_id})
+                    | Q(custom_field_data__librenms_id=remote_device_id)
+                )
                 return device, True, None
             except Device.DoesNotExist:
                 pass
@@ -125,7 +129,8 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 # First try to find interface by librenms_id
                 if local_port_id:
                     interface = chassis_member.interfaces.filter(
-                        **{f"custom_field_data__librenms_id__{server_key}": local_port_id}
+                        Q(**{f"custom_field_data__librenms_id__{server_key}": local_port_id})
+                        | Q(custom_field_data__librenms_id=local_port_id)
                     ).first()
 
                 # Only if librenms_id match fails, try matching by name
@@ -135,7 +140,8 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 # First try to find interface by librenms_id
                 if local_port_id:
                     interface = obj.interfaces.filter(
-                        **{f"custom_field_data__librenms_id__{server_key}": local_port_id}
+                        Q(**{f"custom_field_data__librenms_id__{server_key}": local_port_id})
+                        | Q(custom_field_data__librenms_id=local_port_id)
                     ).first()
 
                 # Only if librenms_id match fails, try matching by name
@@ -161,7 +167,8 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 # First try to find interface by librenms_id
                 if librenms_remote_port_id:
                     netbox_remote_interface = chassis_member.interfaces.filter(
-                        **{f"custom_field_data__librenms_id__{server_key}": librenms_remote_port_id}
+                        Q(**{f"custom_field_data__librenms_id__{server_key}": librenms_remote_port_id})
+                        | Q(custom_field_data__librenms_id=librenms_remote_port_id)
                     ).first()
 
                 # If not found by librenms_id, fall back to name matching on the correct chassis member
@@ -172,7 +179,8 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 # First try to find interface by librenms_id
                 if librenms_remote_port_id:
                     netbox_remote_interface = device.interfaces.filter(
-                        **{f"custom_field_data__librenms_id__{server_key}": librenms_remote_port_id}
+                        Q(**{f"custom_field_data__librenms_id__{server_key}": librenms_remote_port_id})
+                        | Q(custom_field_data__librenms_id=librenms_remote_port_id)
                     ).first()
 
                 # If not found by librenms_id, fall back to name matching
@@ -378,7 +386,8 @@ class SingleCableVerifyView(BaseCableTableView):
                     if local_port_id := link_data.get("local_port_id"):
                         _sk = self.librenms_api.server_key
                         interface = selected_device.interfaces.filter(
-                            **{f"custom_field_data__librenms_id__{_sk}": local_port_id}
+                            Q(**{f"custom_field_data__librenms_id__{_sk}": local_port_id})
+                            | Q(custom_field_data__librenms_id=local_port_id)
                         ).first()
 
                     # If not found by librenms_id, try matching by name
