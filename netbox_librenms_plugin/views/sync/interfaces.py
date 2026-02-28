@@ -9,7 +9,7 @@ from django.views import View
 from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.models import InterfaceTypeMapping
-from netbox_librenms_plugin.utils import convert_speed_to_kbps, get_interface_name_field
+from netbox_librenms_plugin.utils import convert_speed_to_kbps, get_interface_name_field, set_librenms_device_id
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSPermissionMixin,
@@ -235,7 +235,9 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
                 setattr(interface, netbox_key, librenms_interface.get(librenms_key))
 
         if "librenms_id" in interface.cf:
-            interface.custom_field_data["librenms_id"] = librenms_interface.get("port_id")
+            port_id = librenms_interface.get("port_id")
+            if port_id is not None:
+                set_librenms_device_id(interface, port_id, self.librenms_api.server_key)
 
         if "enabled" not in exclude_columns:
             admin_status = librenms_interface.get("ifAdminStatus")
