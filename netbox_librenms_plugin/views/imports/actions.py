@@ -891,13 +891,17 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
             librenms_device_type = validation.get("device_type", {}).get("device_type")
 
         librenms_id = libre_device.get("device_id")
+        try:
+            librenms_id = int(librenms_id)
+        except (TypeError, ValueError):
+            return HttpResponse("Invalid or missing LibreNMS device_id in payload", status=400)
 
         if action == "link":
             # Link to LibreNMS and update name from LibreNMS data
             use_sysname = request.POST.get("use-sysname-toggle") == "on"
             strip_domain = request.POST.get("strip-domain-toggle") == "on"
             hostname = _determine_device_name(libre_device, use_sysname=use_sysname, strip_domain=strip_domain)
-            set_librenms_device_id(existing_device, int(librenms_id), self.librenms_api.server_key)
+            set_librenms_device_id(existing_device, librenms_id, self.librenms_api.server_key)
             existing_device.name = hostname
             if librenms_device_type:
                 existing_device.device_type = librenms_device_type
@@ -910,7 +914,6 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
             strip_domain = request.POST.get("strip-domain-toggle") == "on"
             incoming_serial = libre_device.get("serial") or ""
             hostname = _determine_device_name(libre_device, use_sysname=use_sysname, strip_domain=strip_domain)
-            set_librenms_device_id(existing_device, int(librenms_id), self.librenms_api.server_key)
             if incoming_serial and incoming_serial != "-":
                 conflict_device = Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
                 if conflict_device:
@@ -923,6 +926,7 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
             existing_device.name = hostname
             if librenms_device_type:
                 existing_device.device_type = librenms_device_type
+            set_librenms_device_id(existing_device, librenms_id, self.librenms_api.server_key)
             existing_device.save()
             logger.info(
                 f"Updated device '{existing_device.name}': serial={incoming_serial}, "
@@ -932,7 +936,6 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
         elif action == "update_serial":
             # Update only the serial and link to LibreNMS
             incoming_serial = libre_device.get("serial") or ""
-            set_librenms_device_id(existing_device, int(librenms_id), self.librenms_api.server_key)
             if incoming_serial and incoming_serial != "-":
                 conflict_device = Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
                 if conflict_device:
@@ -944,6 +947,7 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
                 existing_device.serial = incoming_serial
             if librenms_device_type:
                 existing_device.device_type = librenms_device_type
+            set_librenms_device_id(existing_device, librenms_id, self.librenms_api.server_key)
             existing_device.save()
             logger.info(
                 f"Updated serial on device '{existing_device.name}' to {incoming_serial}, "

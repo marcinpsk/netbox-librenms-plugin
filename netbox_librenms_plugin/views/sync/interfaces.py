@@ -235,7 +235,9 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
                 setattr(interface, netbox_key, librenms_interface.get(librenms_key))
 
         if "librenms_id" in interface.cf:
-            set_librenms_device_id(interface, librenms_interface.get("port_id"), self.librenms_api.server_key)
+            port_id = librenms_interface.get("port_id")
+            if port_id is not None:
+                set_librenms_device_id(interface, port_id, self.librenms_api.server_key)
 
         if "enabled" not in exclude_columns:
             admin_status = librenms_interface.get("ifAdminStatus")

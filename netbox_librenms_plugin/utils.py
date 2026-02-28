@@ -9,6 +9,13 @@ from netbox.plugins import get_plugin_config
 from utilities.paginator import get_paginate_count as netbox_get_paginate_count
 
 
+import logging
+
+from django.db.models import Q
+
+logger = logging.getLogger(__name__)
+
+
 def get_librenms_device_id(obj, server_key: str = "default"):
     """
     Get the LibreNMS device/port ID for a specific server from the JSON custom field.
@@ -49,6 +56,13 @@ def set_librenms_device_id(obj, device_id, server_key: str = "default"):
     cf_value = obj.custom_field_data.get("librenms_id") or {}
     if isinstance(cf_value, int):
         cf_value = {"default": cf_value}  # migrate legacy value on first write
+    elif not isinstance(cf_value, dict):
+        logger.warning(
+            "librenms_id custom field has unexpected type %s on %r; resetting to empty dict.",
+            type(cf_value).__name__,
+            obj,
+        )
+        cf_value = {}
     cf_value[server_key] = device_id
     obj.custom_field_data["librenms_id"] = cf_value
 
@@ -58,6 +72,9 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
     Return the first object of *model* whose ``librenms_id`` JSON field contains
     *librenms_id* under *server_key*.
 
+    Also matches legacy records that stored ``librenms_id`` as a bare integer
+    directly in ``custom_field_data``.
+
     Args:
         model: A Django model class (Device, VirtualMachine, Interface, …).
         librenms_id: The LibreNMS device/port ID to look up.
@@ -66,7 +83,10 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
     Returns:
         Model instance or None
     """
-    return model.objects.filter(**{f"custom_field_data__librenms_id__{server_key}": librenms_id}).first()
+    return model.objects.filter(
+        Q(**{f"custom_field_data__librenms_id__{server_key}": librenms_id})
+        | Q(custom_field_data__librenms_id=librenms_id)
+    ).first()
 
 
 def convert_speed_to_kbps(speed_bps: int) -> int:
