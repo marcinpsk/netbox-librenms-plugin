@@ -18,7 +18,7 @@
     {% else %}
       <i class="mdi mdi-close-circle text-danger"></i>
     {% endif %}
-    Import Validation: {{ libre_device.sysName|default:libre_device.hostname }}
+    Import Validation: {{ validation.resolved_name|default:libre_device.sysName|default:libre_device.hostname }}
   </h5>
   <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
 </div>
@@ -402,6 +402,11 @@
           <i class="mdi mdi-alert-circle"></i>
           Import blocked: The incoming serial number is already assigned to another device in NetBox.
           Resolve the duplicate serial before linking.
+        </div>
+      {% elif validation.import_as_vm %}
+        <div class="alert alert-info py-2 mb-3">
+          <i class="mdi mdi-information-outline"></i>
+          Hostname match found for a VM — use the import action to proceed.
         </div>
       {% else %}
       <div class="mb-3">

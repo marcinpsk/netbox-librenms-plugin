@@ -37,6 +37,10 @@ logger = logging.getLogger(__name__)
 
 def _resolve_naming_preferences(request) -> tuple[bool, bool]:
     """Resolve use_sysname/strip_domain: POST data → user pref → plugin settings."""
+    from netbox_librenms_plugin.models import LibreNMSSettings
+
+    settings = None
+
     if "use-sysname-toggle" in request.POST:
         use_sysname = request.POST.get("use-sysname-toggle") == "on"
     else:
@@ -44,8 +48,6 @@ def _resolve_naming_preferences(request) -> tuple[bool, bool]:
         if pref is not None:
             use_sysname = pref
         else:
-            from netbox_librenms_plugin.models import LibreNMSSettings
-
             settings = LibreNMSSettings.objects.first()
             use_sysname = getattr(settings, "use_sysname_default", True) if settings else True
 
@@ -56,9 +58,8 @@ def _resolve_naming_preferences(request) -> tuple[bool, bool]:
         if pref is not None:
             strip_domain = pref
         else:
-            from netbox_librenms_plugin.models import LibreNMSSettings
-
-            settings = LibreNMSSettings.objects.first()
+            if settings is None:
+                settings = LibreNMSSettings.objects.first()
             strip_domain = getattr(settings, "strip_domain_default", False) if settings else False
 
     return use_sysname, strip_domain
