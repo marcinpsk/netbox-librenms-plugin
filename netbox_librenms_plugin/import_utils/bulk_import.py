@@ -129,6 +129,7 @@ def bulk_import_devices_shared(
                 api=api,
                 use_sysname=use_sysname_opt,
                 strip_domain=strip_domain_opt,
+                server_key=api.server_key,
             )
 
             # Build manual mappings from validation + any provided overrides
@@ -484,6 +485,7 @@ def process_device_filters(
                 api=api_for_validation,
                 include_vc_detection=vc_detection_enabled,
                 force_vc_refresh=clear_cache,
+                server_key=api.server_key,
             )
         except (BrokenPipeError, ConnectionError, IOError) as e:
             if request:

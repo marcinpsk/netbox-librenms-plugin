@@ -29,7 +29,7 @@ from netbox_librenms_plugin.import_validation_helpers import (
     fetch_model_by_id,
 )
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
-from netbox_librenms_plugin.utils import get_user_pref, save_user_pref
+from netbox_librenms_plugin.utils import get_user_pref, save_user_pref, set_librenms_device_id
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 logger = logging.getLogger(__name__)
@@ -152,6 +152,7 @@ class DeviceImportHelperMixin:
             include_vc_detection=enable_vc,
             use_sysname=use_sysname,
             strip_domain=strip_domain,
+            server_key=self.librenms_api.server_key,
         )
         validation["import_as_vm"] = is_vm
 
@@ -299,6 +300,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 api=self.librenms_api,
                 use_sysname=use_sysname,
                 strip_domain=strip_domain,
+                server_key=self.librenms_api.server_key,
             )
 
             # Mark validation with VC detection flag for proper URL generation in table
@@ -664,6 +666,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                         import_as_vm=is_vm,
                         api=None,  # No VC detection needed for already-imported devices
                         include_vc_detection=False,
+                        server_key=self.librenms_api.server_key,
                     )
                     validation["import_as_vm"] = is_vm
 
@@ -894,7 +897,7 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
             use_sysname = request.POST.get("use-sysname-toggle") == "on"
             strip_domain = request.POST.get("strip-domain-toggle") == "on"
             hostname = _determine_device_name(libre_device, use_sysname=use_sysname, strip_domain=strip_domain)
-            existing_device.custom_field_data["librenms_id"] = int(librenms_id)
+            set_librenms_device_id(existing_device, int(librenms_id), self.librenms_api.server_key)
             existing_device.name = hostname
             if librenms_device_type:
                 existing_device.device_type = librenms_device_type
@@ -907,7 +910,7 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
             strip_domain = request.POST.get("strip-domain-toggle") == "on"
             incoming_serial = libre_device.get("serial") or ""
             hostname = _determine_device_name(libre_device, use_sysname=use_sysname, strip_domain=strip_domain)
-            existing_device.custom_field_data["librenms_id"] = int(librenms_id)
+            set_librenms_device_id(existing_device, int(librenms_id), self.librenms_api.server_key)
             if incoming_serial and incoming_serial != "-":
                 conflict_device = Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
                 if conflict_device:
@@ -929,7 +932,7 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
         elif action == "update_serial":
             # Update only the serial and link to LibreNMS
             incoming_serial = libre_device.get("serial") or ""
-            existing_device.custom_field_data["librenms_id"] = int(librenms_id)
+            set_librenms_device_id(existing_device, int(librenms_id), self.librenms_api.server_key)
             if incoming_serial and incoming_serial != "-":
                 conflict_device = Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
                 if conflict_device:

@@ -1346,7 +1346,7 @@ class TestSerialNumberMatching:
 
         def device_filter(**kwargs):
             result = MagicMock()
-            if "custom_field_data__librenms_id" in kwargs:
+            if any(k.startswith("custom_field_data__librenms_id") for k in kwargs):
                 result.first.return_value = existing
             else:
                 result.first.return_value = None
@@ -1386,7 +1386,7 @@ class TestSerialNumberMatching:
 
         def device_filter(**kwargs):
             result = MagicMock()
-            if "custom_field_data__librenms_id" in kwargs:
+            if any(k.startswith("custom_field_data__librenms_id") for k in kwargs):
                 result.first.return_value = existing
             elif "serial" in kwargs:
                 result.first.return_value = None
@@ -1428,7 +1428,7 @@ class TestSerialNumberMatching:
 
         def device_filter(**kwargs):
             result = MagicMock()
-            if "custom_field_data__librenms_id" in kwargs:
+            if any(k.startswith("custom_field_data__librenms_id") for k in kwargs):
                 result.first.return_value = existing
             else:
                 result.first.return_value = None
@@ -1664,7 +1664,7 @@ class TestDeviceConflictActionView:
 
             view.post(request, device_id=10)
 
-        assert existing_device.custom_field_data["librenms_id"] == 10
+        assert existing_device.custom_field_data["librenms_id"] == {"default": 10}
         assert existing_device.name == "switch-01.example.com"
         existing_device.save.assert_called_once()
 
@@ -1704,7 +1704,7 @@ class TestDeviceConflictActionView:
 
             view.post(request, device_id=10)
 
-        assert existing_device.custom_field_data["librenms_id"] == 10
+        assert existing_device.custom_field_data["librenms_id"] == {"default": 10}
         assert existing_device.serial == "NEW-SERIAL"
         assert existing_device.name == "new-name.example.com"
         existing_device.save.assert_called_once()
@@ -1740,7 +1740,7 @@ class TestDeviceConflictActionView:
 
             view.post(request, device_id=10)
 
-        assert existing_device.custom_field_data["librenms_id"] == 10
+        assert existing_device.custom_field_data["librenms_id"] == {"default": 10}
         assert existing_device.serial == "NEW-SERIAL"
         # Name should NOT be changed by update_serial
         assert existing_device.name == "switch-01"
@@ -1910,7 +1910,7 @@ class TestDeviceConflictActionView:
 
             view.post(request, device_id=10)
 
-        assert existing_device.custom_field_data["librenms_id"] == 10
+        assert existing_device.custom_field_data["librenms_id"] == {"default": 10}
         existing_device.save.assert_called_once()
 
     @patch("netbox_librenms_plugin.views.imports.actions.cache")
@@ -1955,7 +1955,7 @@ class TestDeviceConflictActionView:
             view.post(request, device_id=10)
 
         assert existing_device.device_type == librenms_device_type
-        assert existing_device.custom_field_data["librenms_id"] == 10
+        assert existing_device.custom_field_data["librenms_id"] == {"default": 10}
         existing_device.save.assert_called_once()
 
     @patch("netbox_librenms_plugin.views.imports.actions.cache")

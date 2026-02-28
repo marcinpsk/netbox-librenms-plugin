@@ -85,6 +85,7 @@ def validate_device_for_import(
     force_vc_refresh: bool = False,
     use_sysname: bool = True,
     strip_domain: bool = False,
+    server_key: str = "default",
 ) -> dict:
     """
     Validate if a LibreNMS device can be imported to NetBox.
@@ -216,9 +217,10 @@ def validate_device_for_import(
         from virtualization.models import VirtualMachine
 
         # Check for existing VM first (by librenms_id custom field)
-        # Always query with int to match custom field type
         try:
-            existing_vm = VirtualMachine.objects.filter(custom_field_data__librenms_id=int(librenms_id)).first()
+            from netbox_librenms_plugin.utils import find_by_librenms_id
+
+            existing_vm = find_by_librenms_id(VirtualMachine, int(librenms_id), server_key)
         except (ValueError, TypeError):
             # librenms_id is not convertible to int; no match will be found
             existing_vm = None
@@ -239,10 +241,11 @@ def validate_device_for_import(
                 result["name_matches"] = True
 
         # Check for existing Device (by librenms_id custom field)
-        # Always query with int to match custom field type
         if not result["existing_device"]:
             try:
-                existing_device = Device.objects.filter(custom_field_data__librenms_id=int(librenms_id)).first()
+                from netbox_librenms_plugin.utils import find_by_librenms_id
+
+                existing_device = find_by_librenms_id(Device, int(librenms_id), server_key)
             except (ValueError, TypeError):
                 # librenms_id is not convertible to int; no match will be found
                 existing_device = None
@@ -642,6 +645,7 @@ def import_single_device(
                 libre_device,
                 use_sysname=use_sysname_opt,
                 strip_domain=strip_domain_opt,
+                server_key=server_key or "default",
             )
 
         # Check if device already exists
@@ -727,7 +731,7 @@ def import_single_device(
                 "role": device_role,
                 "status": "active" if libre_device.get("status") == 1 else "offline",
                 "comments": f"Imported from LibreNMS by netbox-librenms-plugin on {import_time}",
-                "custom_field_data": {"librenms_id": int(device_id)},
+                "custom_field_data": {"librenms_id": {(server_key or "default"): int(device_id)}},
             }
 
             # Add optional fields
