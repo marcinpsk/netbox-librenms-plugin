@@ -13,7 +13,9 @@ from .permissions import require_permissions
 logger = logging.getLogger(__name__)
 
 
-def create_vm_from_librenms(libre_device: dict, validation: dict, use_sysname: bool = True, role=None):
+def create_vm_from_librenms(
+    libre_device: dict, validation: dict, use_sysname: bool = True, role=None, server_key: str = "default"
+):
     """
     Create a NetBox VirtualMachine from LibreNMS device data.
 
@@ -58,7 +60,7 @@ def create_vm_from_librenms(libre_device: dict, validation: dict, use_sysname: b
         role=role,  # Optional VM role
         platform=platform,
         comments=f"Imported from LibreNMS by netbox-librenms-plugin on {import_time}",
-        custom_field_data={"librenms_id": int(libre_device["device_id"])},
+        custom_field_data={"librenms_id": {server_key: int(libre_device["device_id"])}},
     )
 
     logger.info(f"Created VM {vm.name} (ID: {vm.pk}) from LibreNMS device {libre_device['device_id']}")
@@ -162,6 +164,7 @@ def bulk_import_vms(
                 api=api,
                 use_sysname=use_sysname_opt,
                 strip_domain=strip_domain_opt,
+                server_key=api.server_key,
             )
 
             # Check if VM already exists
@@ -206,7 +209,9 @@ def bulk_import_vms(
             libre_device["_computed_name"] = vm_name
 
             # Create VM
-            vm = create_vm_from_librenms(libre_device, validation, use_sysname=use_sysname, role=role)
+            vm = create_vm_from_librenms(
+                libre_device, validation, use_sysname=use_sysname, role=role, server_key=api.server_key
+            )
 
             result["success"].append(
                 {
