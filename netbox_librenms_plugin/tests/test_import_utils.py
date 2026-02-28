@@ -1344,9 +1344,12 @@ class TestSerialNumberMatching:
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
-        def device_filter(**kwargs):
+        def device_filter(*args, **kwargs):
             result = MagicMock()
-            if any(k.startswith("custom_field_data__librenms_id") for k in kwargs):
+            q_has_librenms = any("librenms_id" in str(arg) for arg in args) or any(
+                k.startswith("custom_field_data__librenms_id") for k in kwargs
+            )
+            if q_has_librenms:
                 result.first.return_value = existing
             else:
                 result.first.return_value = None
@@ -1384,9 +1387,12 @@ class TestSerialNumberMatching:
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
-        def device_filter(**kwargs):
+        def device_filter(*args, **kwargs):
             result = MagicMock()
-            if any(k.startswith("custom_field_data__librenms_id") for k in kwargs):
+            q_has_librenms = any("librenms_id" in str(arg) for arg in args) or any(
+                k.startswith("custom_field_data__librenms_id") for k in kwargs
+            )
+            if q_has_librenms:
                 result.first.return_value = existing
             elif "serial" in kwargs:
                 result.first.return_value = None
@@ -1426,9 +1432,12 @@ class TestSerialNumberMatching:
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
-        def device_filter(**kwargs):
+        def device_filter(*args, **kwargs):
             result = MagicMock()
-            if any(k.startswith("custom_field_data__librenms_id") for k in kwargs):
+            q_has_librenms = any("librenms_id" in str(arg) for arg in args) or any(
+                k.startswith("custom_field_data__librenms_id") for k in kwargs
+            )
+            if q_has_librenms:
                 result.first.return_value = existing
             else:
                 result.first.return_value = None
