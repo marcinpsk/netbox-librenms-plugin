@@ -1,7 +1,6 @@
 from dcim.models import Cable, Device, Interface
 from django.contrib import messages
 from django.core.cache import cache
-from django.db import transaction
 from django.db.models import Q
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
@@ -87,7 +86,6 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Cache
         """Return True if all required NetBox IDs are present in link data."""
         required_fields = [
             "netbox_local_interface_id",
-            "netbox_remote_device_id",
             "netbox_remote_interface_id",
         ]
 
@@ -116,10 +114,9 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Cache
         """Process cable sync for all selected interfaces and return results."""
         results = {"valid": [], "invalid": [], "duplicate": [], "missing_remote": []}
 
-        with transaction.atomic():
-            for interface in selected_interfaces:
-                result = self.process_single_interface(interface, cached_links)
-                results[result["status"]].append(result.get("interface", ""))
+        for interface in selected_interfaces:
+            result = self.process_single_interface(interface, cached_links)
+            results[result["status"]].append(result.get("interface", ""))
 
         return results
 

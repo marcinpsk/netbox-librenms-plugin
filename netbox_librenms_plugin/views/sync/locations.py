@@ -30,8 +30,7 @@ class SyncSiteLocationView(LibreNMSPermissionMixin, LibreNMSAPIMixin, SingleTabl
     def get_context_data(self, **kwargs):
         """Return context with filter form for site-location sync."""
         context = super().get_context_data(**kwargs)
-        queryset = self.get_queryset()
-        context["filter_form"] = self.filterset(self.request.GET, queryset=queryset).form
+        context["filter_form"] = self.filterset(self.request.GET, queryset=self.object_list).form
         return context
 
     def get_queryset(self):
@@ -164,7 +163,11 @@ class SyncSiteLocationView(LibreNMSPermissionMixin, LibreNMSAPIMixin, SingleTabl
 
     def build_location_data(self, site, include_name=True):
         """Build a location data dict from the given site."""
-        data = {"lat": str(site.latitude), "lng": str(site.longitude)}
+        data = {}
+        if site.latitude is not None:
+            data["lat"] = str(site.latitude)
+        if site.longitude is not None:
+            data["lng"] = str(site.longitude)
         if include_name:
             data["location"] = site.name
         return data

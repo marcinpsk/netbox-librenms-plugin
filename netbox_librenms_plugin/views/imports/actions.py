@@ -764,6 +764,9 @@ class SaveUserPrefView(LibreNMSPermissionMixin, View):
 
     def post(self, request):
         """Persist a user preference toggle value."""
+        if error := self.require_write_permission_json():
+            return error
+
         try:
             data = json.loads(request.body)
         except (json.JSONDecodeError, ValueError):

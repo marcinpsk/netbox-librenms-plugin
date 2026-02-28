@@ -7,6 +7,7 @@ from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
 from django.views import View
 from ipam.models import VLAN, VLANGroup
+from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
@@ -49,6 +50,8 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheM
         """Get the target object (Device or VM)."""
         if object_type == "device":
             return get_object_or_404(Device, pk=object_id)
+        if object_type == "virtualmachine":
+            return get_object_or_404(VirtualMachine, pk=object_id)
         raise Http404("Invalid object type.")
 
     def _redirect(self, object_type: str, object_id: int):

@@ -22,11 +22,13 @@ class LibreNMSPluginPermission(BasePermission):
     """
     Permission class for LibreNMS plugin API endpoints.
 
-    - GET requests require view_librenmssettings
-    - All other requests require change_librenmssettings
+    - GET requests require netbox_librenms_plugin.view_librenmssettings
+    - All other requests require netbox_librenms_plugin.change_librenmssettings
     """
 
     def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
         if request.method in SAFE_METHODS:
             return request.user.has_perm(PERM_VIEW_PLUGIN)
         return request.user.has_perm(PERM_CHANGE_PLUGIN)
@@ -69,7 +71,7 @@ def sync_job_status(request, job_pk):
         rq_status = rq_job.get_status()
 
         # If RQ job is stopped or failed, update database
-        if rq_job.is_stopped or rq_job.is_failed:
+        if getattr(rq_job, "is_stopped", False) or rq_job.is_failed:
             job.status = JobStatusChoices.STATUS_FAILED
             if not job.completed:
                 job.completed = timezone.now()
