@@ -575,8 +575,8 @@ def module_type_uses_module_token(module_type) -> bool:
 
 
 def module_type_is_end_module(module_type) -> bool:
-    """Return True if this module type defines no module bays (i.e., it is a leaf/end module)."""
-    return not module_type.modulebays.exists()
+    """Return True if this module type defines no module bay templates (i.e., it is a leaf/end module)."""
+    return not module_type.modulebaytemplates.exists()
 
 
 def has_nested_name_conflict(module_type, module_bay):
