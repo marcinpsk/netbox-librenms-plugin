@@ -150,16 +150,25 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             top_items.append(item)
 
         table_data = []
-        from netbox_librenms_plugin.utils import apply_normalization_rules
+        from netbox_librenms_plugin.utils import (
+            apply_normalization_rules,
+            module_type_uses_module_path,
+            supports_module_path,
+        )
 
-        # Build combined bay lookup so top-level items (including synthetic
-        # transceiver entries) can match bays created by installed modules.
+        # Build combined bay lookup so synthetic transceiver entries (which may
+        # live inside installed modules) can find their module-scoped bays.
         all_bays = dict(device_bays)
         for scope_bays in module_scoped_bays.values():
             all_bays.update(scope_bays)
 
         for item in top_items:
-            row = self._build_row(item, index_map, all_bays, module_types, depth=0)
+            # Transceiver API entries may live inside installed modules, so they
+            # need the full bay map.  ENTITY-MIB top-level items must only match
+            # device-level bays to avoid name collisions with module-scoped bays
+            # that share the same name as a device bay.
+            item_bays = all_bays if item.get("_from_transceiver_api") else device_bays
+            row = self._build_row(item, index_map, item_bays, module_types, depth=0)
             parent_idx = len(table_data)
             table_data.append(row)
 
@@ -170,7 +179,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             parent_module_id = None
             parent_bay_matched_but_uninstalled = False
             if row.get("module_bay_id"):
-                matched_bay = all_bays.get(row["module_bay"])
+                matched_bay = item_bays.get(row["module_bay"])
                 if matched_bay and hasattr(matched_bay, "installed_module") and matched_bay.installed_module:
                     parent_module_id = matched_bay.installed_module.pk
                 else:
@@ -210,8 +219,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     table_data[parent_idx]["has_installable_children"] = True
 
             # When parent is installable but children can't match bays yet
-            # (parent module not installed), enable "Install Branch" if children
-            # have matching module types (branch install handles bay creation)
+            # (parent module not installed), enable "Install Branch" only if
+            # children have matching module types that are not module_path_blocked.
             if (
                 parent_bay_matched_but_uninstalled
                 and row.get("can_install")
@@ -219,15 +228,17 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             ):
                 for _depth, sub_item in sub_items:
                     sub_model = (sub_item.get("entPhysicalModelName") or "").strip()
-                    if sub_model and (
-                        sub_model in module_types
-                        or apply_normalization_rules(
+                    if not sub_model:
+                        continue
+                    matched = module_types.get(sub_model)
+                    if not matched:
+                        normalized = apply_normalization_rules(
                             sub_model,
                             "module_type",
                             manufacturer=getattr(self, "_device_manufacturer", None),
                         )
-                        in module_types
-                    ):
+                        matched = module_types.get(normalized)
+                    if matched and not (module_type_uses_module_path(matched) and not supports_module_path()):
                         table_data[parent_idx]["has_installable_children"] = True
                         break
 

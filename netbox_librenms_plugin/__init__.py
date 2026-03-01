@@ -70,15 +70,15 @@ class LibreNMSSyncConfig(PluginConfig):
 
 def _ensure_librenms_id_custom_field(sender, **kwargs):
     """
-    Auto-create the 'librenms_id' custom field if it doesn't exist.
+    Auto-create (or migrate) the 'librenms_id' custom field.
     Runs after migrations via post_migrate signal to ensure tables exist.
     Uses dispatch_uid to avoid duplicate connections.
+
+    librenms_id stores a per-server JSON mapping {"server_key": device_id}.
+    Legacy installations may have this field typed as 'integer'; we upgrade it
+    to 'json' automatically so the UI and API accept the dict format.
     """
     # Only run once per migrate invocation (post_migrate fires per-app).
-    # The _executed flag is intentionally never reset: migrations are expected to
-    # run in short-lived CLI processes (manage.py migrate) where the flag is
-    # naturally cleared on exit.  Long-running processes (e.g. gunicorn workers)
-    # should not rely on this handler re-executing after startup.
     if getattr(_ensure_librenms_id_custom_field, "_executed", False):
         return
     _ensure_librenms_id_custom_field._executed = True  # not reset; see comment above
@@ -93,7 +93,7 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
         cf, created = CustomField.objects.get_or_create(
             name="librenms_id",
             defaults={
-                "type": "integer",
+                "type": "json",
                 "label": "LibreNMS ID",
                 "description": "LibreNMS Device ID for synchronization (auto-created by plugin)",
                 "required": False,
@@ -102,6 +102,15 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
                 "is_cloneable": False,
             },
         )
+
+        # Migrate legacy integer-typed field to JSON so the multi-server
+        # dict format {"server_key": device_id} is accepted by the UI/API.
+        if not created and cf.type == "integer":
+            cf.type = "json"
+            cf.save(update_fields=["type"])
+            logging.getLogger("netbox_librenms_plugin").info(
+                "Migrated 'librenms_id' custom field type from integer to json"
+            )
 
         # Ensure the field is assigned to the required object types
         from dcim.models import Device, Interface
