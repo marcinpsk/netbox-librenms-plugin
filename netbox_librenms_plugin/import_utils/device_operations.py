@@ -198,6 +198,7 @@ def validate_device_for_import(
         "serial_action": None,  # None, "link", "conflict", "update_serial", "hostname_differs"
         "serial_confirmed": False,  # True when librenms_id match and serial matches
         "serial_duplicate": False,  # True when incoming serial is already on a different device
+        "librenms_id_needs_migration": False,  # True when librenms_id is still a legacy bare int
         "name_matches": False,  # True when existing device name matches LibreNMS sysName
         "name_sync_available": False,  # True when existing device name differs from sysName
         "suggested_name": None,  # sysName to suggest when name_sync_available is True
@@ -270,6 +271,10 @@ def validate_device_for_import(
             result["import_as_vm"] = True  # Force VM mode since VM exists
             result["can_import"] = False
 
+            # Detect legacy bare-integer format so UI can offer a migration action
+            if isinstance(existing_vm.custom_field_data.get("librenms_id"), int):
+                result["librenms_id_needs_migration"] = True
+
             # Check if name matches resolved name (accounts for use_sysname/strip_domain)
             # Note: name_sync_available/suggested_name are intentionally not set for VMs
             # because UpdateDeviceNameView only supports Device objects; VM name-sync
@@ -292,6 +297,10 @@ def validate_device_for_import(
                 result["existing_device"] = existing_device
                 result["existing_match_type"] = "librenms_id"
                 result["can_import"] = False
+
+                # Detect legacy bare-integer format so UI can offer a migration action
+                if isinstance(existing_device.custom_field_data.get("librenms_id"), int):
+                    result["librenms_id_needs_migration"] = True
 
                 # Check if name matches resolved name (accounts for use_sysname/strip_domain)
                 if hostname and existing_device.name == hostname:

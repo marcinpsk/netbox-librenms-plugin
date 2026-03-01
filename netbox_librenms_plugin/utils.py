@@ -86,6 +86,39 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
     ).first()
 
 
+def migrate_legacy_librenms_id(obj, server_key: str = "default") -> bool:
+    """
+    Migrate a legacy bare-integer ``librenms_id`` custom field to the JSON dict format,
+    scoped to *server_key*.
+
+    Only performs the migration when the current value is a bare integer, i.e. a record
+    created before the multi-server JSON refactor.  The integer is assumed to belong to
+    the server identified by *server_key* (the caller must verify this, e.g. by confirming
+    that the LibreNMS device ID and serial number both match).
+
+    Does **not** call ``obj.save()`` — the caller is responsible for persisting the change.
+
+    Args:
+        obj: NetBox object with a ``librenms_id`` custom field.
+        server_key: LibreNMS server key the legacy integer should be scoped to.
+
+    Returns:
+        True if the value was migrated, False if it was already in the correct format.
+    """
+    cf_value = obj.custom_field_data.get("librenms_id")
+    if not isinstance(cf_value, int):
+        return False
+    obj.custom_field_data["librenms_id"] = {server_key: cf_value}
+    logger.info(
+        "Migrated legacy librenms_id %d → {%r: %d} on %r",
+        cf_value,
+        server_key,
+        cf_value,
+        obj,
+    )
+    return True
+
+
 def convert_speed_to_kbps(speed_bps: int) -> int:
     """
     Convert speed from bits per second to kilobits per second.
