@@ -373,8 +373,8 @@ def create_virtual_chassis_with_members(master_device: Device, members_info: lis
             members_created = 0
 
             for member in members_info:
-                # Skip if this is the master's serial
-                if member.get("serial") == master_device.serial:
+                # Skip if this is the master's serial (only when both serials are non-empty)
+                if member.get("serial") and member.get("serial") == master_device.serial:
                     continue
 
                 serial = member.get("serial")
@@ -414,7 +414,9 @@ def create_virtual_chassis_with_members(master_device: Device, members_info: lis
                 position += 1
 
             # Validate member count
-            expected_members = len([m for m in members_info if m.get("serial") != master_device.serial])
+            expected_members = len(
+                [m for m in members_info if not (m.get("serial") and m.get("serial") == master_device.serial)]
+            )
             if members_created < expected_members:
                 logger.warning(
                     f"Created {members_created} members but expected {expected_members}. "

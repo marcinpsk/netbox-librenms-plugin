@@ -400,6 +400,10 @@ def validate_device_for_import(
                             )
                             result["can_import"] = False
 
+        # Refresh local variable to reflect any VM-mode adjustments made during detection
+        # (e.g. existing VM found by hostname sets result["import_as_vm"] = True)
+        import_as_vm = result["import_as_vm"]
+
         # Validate based on import type (Device or VM)
         if import_as_vm:
             # 2. For VMs: Validate Cluster (required) - Must be manually selected

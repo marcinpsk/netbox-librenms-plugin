@@ -1,10 +1,6 @@
 """Permission check helpers for device import operations."""
 
-import logging
-
 from django.core.exceptions import PermissionDenied
-
-logger = logging.getLogger(__name__)
 
 
 def check_user_permissions(user, permissions):

@@ -8,6 +8,7 @@ from django.core.cache import cache
 from django.core.exceptions import PermissionDenied
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
+from django.utils.html import escape
 from django.views import View
 
 from netbox_librenms_plugin.import_utils import (
@@ -907,7 +908,7 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
             if id_conflict and id_conflict.pk != existing_device.pk:
                 return HttpResponse(
                     f"LibreNMS ID conflict: ID {librenms_id} is already assigned to device "
-                    f"'{id_conflict.name}' (ID: {id_conflict.pk})",
+                    f"'{escape(id_conflict.name)}' (ID: {id_conflict.pk})",
                     status=409,
                 )
 
@@ -1042,7 +1043,7 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
                     existing_device.save()
                     logger.info(f"Synced platform on '{existing_device.name}' to {match_result['platform']}")
                 else:
-                    return HttpResponse(f"Platform '{librenms_os}' not found in NetBox", status=400)
+                    return HttpResponse(f"Platform '{escape(librenms_os)}' not found in NetBox", status=400)
             else:
                 return HttpResponse("No OS info from LibreNMS", status=400)
 
@@ -1057,7 +1058,7 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
                 existing_device.save()
                 logger.info(f"Synced device type on '{existing_device.name}' to {hw_match['device_type']}")
             else:
-                return HttpResponse(f"No matching device type for '{hardware}'", status=400)
+                return HttpResponse(f"No matching device type for '{escape(hardware)}'", status=400)
 
         elif action == "migrate_librenms_id":
             # Migrate legacy bare-integer librenms_id to the JSON dict format.
@@ -1084,7 +1085,7 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
             )
 
         else:
-            return HttpResponse(f"Unknown action: {action}", status=400)
+            return HttpResponse(f"Unknown action: {escape(action)}", status=400)
 
         # Clear cached validation so re-validation picks up the changes
         cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)

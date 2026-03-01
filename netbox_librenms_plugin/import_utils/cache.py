@@ -1,5 +1,7 @@
 """Cache key generation and management for device import operations."""
 
+import hashlib
+import json
 import logging
 
 from django.core.cache import cache
@@ -71,9 +73,15 @@ def get_active_cached_searches(server_key: str) -> list[dict]:
         metadata = cache.get(cache_key)
         if metadata:
             # Cache still exists, calculate time remaining
-            cached_at = datetime.fromisoformat(metadata.get("cached_at"))
             cache_timeout = metadata.get("cache_timeout", 300)
             now = datetime.now(timezone.utc)
+            try:
+                cached_at_raw = metadata.get("cached_at")
+                cached_at = (
+                    datetime.fromisoformat(cached_at_raw) if cached_at_raw else datetime.fromtimestamp(0, timezone.utc)
+                )
+            except (ValueError, TypeError):
+                cached_at = datetime.fromtimestamp(0, timezone.utc)
             age_seconds = (now - cached_at).total_seconds()
             remaining_seconds = max(0, cache_timeout - age_seconds)
 
@@ -130,8 +138,8 @@ def get_validated_device_cache_key(server_key: str, filters: dict, device_id: in
         >>> key
         'validated_device_default_-1234567890_123_vc'
     """
-    # Sort filters for consistent hashing
-    filter_hash = hash(str(sorted(filters.items())))
+    # Sort filters for a deterministic, cross-process stable hash
+    filter_hash = hashlib.sha256(json.dumps(sorted(filters.items()), sort_keys=True).encode()).hexdigest()[:16]
     vc_part = "vc" if vc_enabled else "novc"
     return f"validated_device_{server_key}_{filter_hash}_{device_id}_{vc_part}"
 
