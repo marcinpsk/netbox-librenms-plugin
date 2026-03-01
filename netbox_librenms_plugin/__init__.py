@@ -81,7 +81,6 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
     # Only run once per migrate invocation (post_migrate fires per-app).
     if getattr(_ensure_librenms_id_custom_field, "_executed", False):
         return
-    _ensure_librenms_id_custom_field._executed = True  # not reset; see comment above
 
     import logging
 
@@ -128,6 +127,9 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
             logging.getLogger("netbox_librenms_plugin").info(
                 "Auto-created 'librenms_id' custom field for Device, VirtualMachine, Interface, VMInterface"
             )
+
+        # Only mark as executed after successful completion to allow retry on failure.
+        _ensure_librenms_id_custom_field._executed = True
     except Exception as e:
         # Don't break startup if custom field creation fails (e.g., during initial migration),
         # but log the error so it's not silently swallowed.

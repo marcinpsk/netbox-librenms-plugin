@@ -142,6 +142,9 @@ class TestEnsureLibreNMSIdCustomField:
             call_args = logger_instance.exception.call_args
             assert "librenms_id" in call_args[0][0]
 
+        # On failure, _executed must NOT be set — failed attempts should allow retry
+        assert not getattr(_ensure_librenms_id_custom_field, "_executed", False)
+
     @patch("dcim.models.Interface", new_callable=MagicMock)
     @patch("dcim.models.Device", new_callable=MagicMock)
     @patch("virtualization.models.VMInterface", new_callable=MagicMock)

@@ -233,7 +233,6 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                     mismatched_device = False
                 else:
                     # Device is still found (we have librenms_id), just mismatched
-                    found_in_librenms = True
                     mismatched_device = True
 
                 librenms_device_details["netbox_dns_name"] = netbox_dns_name or "-"
