@@ -5,6 +5,7 @@ import logging
 from dcim.models import Device, DeviceRole, DeviceType, Rack, Site
 from django.core.cache import cache
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from virtualization.models import Cluster  # noqa: F401 — used by test mock.patch targets
 
@@ -483,7 +484,10 @@ def validate_device_for_import(
                     if chassis_match and chassis_match["matched"]:
                         dt_match = chassis_match
 
-            result["device_type"] = dt_match
+            # Update result keys individually to preserve the existing schema (especially "found")
+            result["device_type"]["found"] = dt_match["matched"]
+            result["device_type"]["device_type"] = dt_match.get("device_type")
+            result["device_type"]["match_type"] = dt_match.get("match_type")
 
             if not dt_match["matched"]:
                 result["device_type"]["found"] = False
@@ -498,11 +502,6 @@ def validate_device_for_import(
                     }
                     for dt in all_device_types
                 ]
-            else:
-                # Rename 'matched' to 'found' for consistency
-                result["device_type"]["found"] = dt_match["matched"]
-                result["device_type"]["device_type"] = dt_match["device_type"]
-                result["device_type"]["match_type"] = dt_match["match_type"]
 
             # 4. DeviceRole (required) - Must be manually selected by user
             logger.debug(f"[{hostname}] Issues BEFORE adding role issue: {result['issues']}")
@@ -527,9 +526,6 @@ def validate_device_for_import(
                 available_racks = cache.get(cache_key)
 
                 if available_racks is None:
-                    from dcim.models import Rack
-                    from django.db.models import Q
-
                     # Query racks for this site - include both:
                     # 1. Racks assigned to locations within the site
                     # 2. Racks directly assigned to the site (without location)
@@ -701,7 +697,7 @@ def import_single_device(
                 libre_device,
                 use_sysname=use_sysname_opt,
                 strip_domain=strip_domain_opt,
-                server_key=server_key or "default",
+                server_key=api.server_key,
             )
 
         # Check if device already exists
@@ -787,7 +783,7 @@ def import_single_device(
                 "role": device_role,
                 "status": "active" if libre_device.get("status") == 1 else "offline",
                 "comments": f"Imported from LibreNMS by netbox-librenms-plugin on {import_time}",
-                "custom_field_data": {"librenms_id": {(server_key or "default"): int(device_id)}},
+                "custom_field_data": {"librenms_id": {api.server_key: int(device_id)}},
             }
 
             # Add optional fields

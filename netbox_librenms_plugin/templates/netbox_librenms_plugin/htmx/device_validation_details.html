@@ -97,7 +97,7 @@
                 <td style="padding-left: 0.75rem;">Name</td>
                 <td>
                   {% if validation.existing_device %}
-                    <a href="{{ existing_device_url }}" target="_blank">
+                    <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">
                       {{ validation.existing_device.name }}
                     </a>
                     {% if validation.name_sync_available %}
@@ -419,7 +419,7 @@
         {% endif %}
         <span class="text-muted ms-1">
           — Exists as
-          <a href="{{ existing_device_url }}" target="_blank">{{ validation.existing_device.name }}</a>,
+          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>,
           not linked to LibreNMS.
         </span>
       </div>
@@ -479,7 +479,7 @@
         {% endif %}
         <span class="text-muted ms-1">
           — Exists as
-          <a href="{{ existing_device_url }}" target="_blank">{{ validation.existing_device.name }}</a>,
+          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>,
           not linked to LibreNMS.
         </span>
       </div>
@@ -517,7 +517,7 @@
         <span class="badge bg-warning-lt me-1"><i class="mdi mdi-ip-network"></i> IP match</span>
         <span class="text-muted ms-1">
           — Device with IP {{ libre_device.ip }} exists as
-          <a href="{{ existing_device_url }}" target="_blank">{{ validation.existing_device.name }}</a>.
+          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>.
           Consider adding LibreNMS ID manually.
         </span>
       </div>
@@ -526,7 +526,7 @@
       <div class="alert alert-info py-2 mb-3">
         <i class="mdi mdi-link"></i>
         <strong>Exists</strong> — Device already exists as
-        <a href="{{ existing_device_url }}" target="_blank">{{ validation.existing_device.name }}</a>.
+        <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>.
       </div>
     {% endif %}
 
@@ -569,17 +569,17 @@
   {% if validation.existing_device %}
     {% if validation.import_as_vm or validation.existing_device.cluster %}
       <a href="{{ existing_device_url }}"
-         class="btn btn-primary btn-sm" target="_blank">
+         class="btn btn-primary btn-sm" target="_blank" rel="noopener noreferrer">
         <i class="mdi mdi-open-in-new"></i> View VM in NetBox
       </a>
     {% else %}
       <a href="{{ existing_device_url }}"
-         class="btn btn-primary btn-sm" target="_blank">
+         class="btn btn-primary btn-sm" target="_blank" rel="noopener noreferrer">
         <i class="mdi mdi-open-in-new"></i> View in NetBox
       </a>
       {% if validation.existing_match_type == 'librenms_id' %}
         <a href="{% url 'plugins:netbox_librenms_plugin:device_librenms_sync' pk=validation.existing_device.pk %}"
-           class="btn btn-outline-primary btn-sm" target="_blank">
+           class="btn btn-outline-primary btn-sm" target="_blank" rel="noopener noreferrer">
           <i class="mdi mdi-sync"></i> Full Sync Page
         </a>
       {% endif %}

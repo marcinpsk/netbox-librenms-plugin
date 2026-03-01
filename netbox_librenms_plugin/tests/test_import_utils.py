@@ -341,7 +341,6 @@ class TestDeviceValidation:
         }
         mock_role.objects.all.return_value = []
         mock_cluster.objects.all.return_value = []
-        mock_rack.objects.filter.return_value = []
         mock_site_model.objects.all.return_value = [mock_site]
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
@@ -399,7 +398,6 @@ class TestDeviceValidation:
         }
         mock_role.objects.all.return_value = []
         mock_cluster.objects.all.return_value = []
-        mock_rack.objects.filter.return_value = []
         mock_site_model.objects.all.return_value = []
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
@@ -461,7 +459,6 @@ class TestDeviceValidation:
         }
         mock_role.objects.all.return_value = []
         mock_cluster.objects.all.return_value = []
-        mock_rack.objects.filter.return_value = []
         mock_site_model.objects.all.return_value = []
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
@@ -519,7 +516,6 @@ class TestDeviceValidation:
         }
         mock_role.objects.all.return_value = []
         mock_cluster.objects.all.return_value = []
-        mock_rack.objects.filter.return_value = []
         mock_site_model.objects.all.return_value = []
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
@@ -577,7 +573,6 @@ class TestDeviceValidation:
         }
         mock_role.objects.all.return_value = []
         mock_cluster.objects.all.return_value = []
-        mock_rack.objects.filter.return_value = []
         mock_site_model.objects.all.return_value = []
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
@@ -638,7 +633,6 @@ class TestDeviceValidation:
         }
         mock_role.objects.all.return_value = []
         mock_cluster.objects.all.return_value = []
-        mock_rack.objects.filter.return_value = []
         mock_site_model.objects.all.return_value = []
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
@@ -651,7 +645,7 @@ class TestDeviceValidation:
 
         result = validate_device_for_import(device_data, include_vc_detection=False)
 
-        assert result["device_type"]["matched"] is False
+        assert result["device_type"]["found"] is False
         assert any("device type" in issue.lower() for issue in result["issues"])
 
     @patch("virtualization.models.VirtualMachine")
@@ -698,7 +692,6 @@ class TestDeviceValidation:
         }
         mock_role.objects.all.return_value = [MagicMock(id=1, name="Access Switch")]
         mock_cluster.objects.all.return_value = []
-        mock_rack.objects.filter.return_value = []
         mock_site_model.objects.all.return_value = [mock_site]
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
@@ -757,7 +750,6 @@ class TestDeviceValidation:
         }
         mock_role.objects.all.return_value = []
         mock_cluster.objects.all.return_value = []
-        mock_rack.objects.filter.return_value = []
         mock_site_model.objects.all.return_value = []
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
@@ -816,7 +808,6 @@ class TestDeviceValidation:
         }
         mock_role.objects.all.return_value = []
         mock_cluster.objects.all.return_value = []
-        mock_rack.objects.filter.return_value = []
         mock_site_model.objects.all.return_value = []
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
@@ -877,7 +868,6 @@ class TestDeviceValidation:
         }
         mock_role.objects.all.return_value = []
         mock_cluster.objects.all.return_value = []
-        mock_rack.objects.filter.return_value = []
         mock_site_model.objects.all.return_value = []
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
@@ -891,7 +881,7 @@ class TestDeviceValidation:
         result = validate_device_for_import(device_data, include_vc_detection=False)
 
         assert result is not None
-        assert result["device_type"]["matched"] is False
+        assert result["device_type"]["found"] is False
 
     @patch("virtualization.models.VirtualMachine")
     @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
@@ -974,7 +964,6 @@ class TestDeviceValidation:
         }
         mock_role.objects.all.return_value = []
         mock_cluster.objects.all.return_value = []
-        mock_rack.objects.filter.return_value = []
         mock_site_model.objects.all.return_value = []
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
@@ -1045,7 +1034,6 @@ class TestDeviceValidation:
         mock_clusters = [MagicMock(id=1, name="VMware Cluster")]
         mock_cluster.objects.all.return_value = mock_clusters
         mock_cache.get.return_value = None  # Force cache miss to trigger Cluster.objects.all()
-        mock_rack.objects.filter.return_value = []
         mock_site_model.objects.all.return_value = []
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
@@ -1109,6 +1097,7 @@ class TestSerialNumberMatching:
         "netbox_librenms_plugin.import_utils.device_operations.Rack",
         "netbox_librenms_plugin.import_utils.device_operations.Cluster",
         "netbox_librenms_plugin.import_utils.device_operations.DeviceRole",
+        "netbox_librenms_plugin.import_utils.device_operations.DeviceType",
         "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type",
         "netbox_librenms_plugin.import_utils.device_operations.find_matching_platform",
         "netbox_librenms_plugin.import_utils.device_operations.find_matching_site",
@@ -1125,12 +1114,14 @@ class TestSerialNumberMatching:
             self.mock_rack,
             self.mock_cluster,
             self.mock_role,
+            self.mock_device_type,
             self.mock_match_type,
             self.mock_find_platform,
             self.mock_find_site,
             self.mock_device,
             self.mock_vm,
         ) = mocks
+        self.mock_device_type.objects.all.return_value = []
 
     def _stop_patches(self):
         """Stop all patches."""
@@ -1265,7 +1256,6 @@ class TestSerialNumberMatching:
         self.mock_match_type.return_value = {"matched": False, "device_type": None, "match_type": None}
         self.mock_role.objects.all.return_value = []
         self.mock_cluster.objects.all.return_value = []
-        self.mock_rack.objects.filter.return_value = []
         self.mock_site_model.objects.all.return_value = []
 
     def test_serial_dash_ignored(self):
@@ -1366,7 +1356,6 @@ class TestSerialNumberMatching:
         self.mock_match_type.return_value = {"matched": False, "device_type": None, "match_type": None}
         self.mock_role.objects.all.return_value = []
         self.mock_cluster.objects.all.return_value = []
-        self.mock_rack.objects.filter.return_value = []
         self.mock_site_model.objects.all.return_value = []
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
@@ -1412,7 +1401,6 @@ class TestSerialNumberMatching:
         self.mock_match_type.return_value = {"matched": False, "device_type": None, "match_type": None}
         self.mock_role.objects.all.return_value = []
         self.mock_cluster.objects.all.return_value = []
-        self.mock_rack.objects.filter.return_value = []
         self.mock_site_model.objects.all.return_value = []
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
@@ -1451,7 +1439,6 @@ class TestSerialNumberMatching:
         self.mock_match_type.return_value = {"matched": True, "device_type": mock_dt, "match_type": "exact"}
         self.mock_role.objects.all.return_value = []
         self.mock_cluster.objects.all.return_value = []
-        self.mock_rack.objects.filter.return_value = []
         self.mock_site_model.objects.all.return_value = []
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
@@ -1492,7 +1479,6 @@ class TestSerialNumberMatching:
         self.mock_match_type.return_value = {"matched": True, "device_type": MagicMock(), "match_type": "exact"}
         self.mock_role.objects.all.return_value = [mock_existing_role]
         self.mock_cluster.objects.all.return_value = []
-        self.mock_rack.objects.filter.return_value = []
         self.mock_site_model.objects.all.return_value = []
 
         with patch("netbox_librenms_plugin.import_utils.device_operations.cache") as mock_cache:
@@ -1548,7 +1534,6 @@ class TestSerialNumberMatching:
         }
         self.mock_role.objects.all.return_value = []
         self.mock_cluster.objects.all.return_value = []
-        self.mock_rack.objects.filter.return_value = []
         self.mock_site_model.objects.all.return_value = []
 
         with patch("netbox_librenms_plugin.import_utils.device_operations.cache") as mock_cache:
@@ -1594,7 +1579,6 @@ class TestSerialNumberMatching:
         self.mock_match_type.return_value = {"matched": True, "device_type": same_device_type, "match_type": "exact"}
         self.mock_role.objects.all.return_value = []
         self.mock_cluster.objects.all.return_value = []
-        self.mock_rack.objects.filter.return_value = []
         self.mock_site_model.objects.all.return_value = []
 
         with patch("netbox_librenms_plugin.import_utils.device_operations.cache") as mock_cache:
@@ -1654,7 +1638,6 @@ class TestLegacyLibreNMSIdMigration:
         self.mock_match_type.return_value = {"matched": False, "device_type": None, "match_type": None}
         self.mock_role.objects.all.return_value = []
         self.mock_cluster.objects.all.return_value = []
-        self.mock_rack.objects.filter.return_value = []
         self.mock_site_model.objects.all.return_value = []
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
@@ -1766,7 +1749,7 @@ class TestDeviceConflictActionView:
         """Create a DeviceConflictActionView instance with mocked dependencies."""
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
-        view = object.__new__(DeviceConflictActionView)
+        view = DeviceConflictActionView()
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
         view.request = MagicMock()
@@ -2363,14 +2346,17 @@ class TestDeviceNamingPreferences:
 
     def _setup_no_existing(self, mocks):
         """Configure mocks so no existing device is found."""
-        mock_vm = mocks[-1]  # VirtualMachine
-        mock_device = mocks[-2]  # Device
-        mock_find_site = mocks[-3]
-        mock_find_platform = mocks[-4]
-        mock_match_type = mocks[-5]
-        mock_role = mocks[-6]
-        mock_rack = mocks[-8]
-        mock_site_model = mocks[-9]
+        (
+            mock_site_model,
+            mock_rack,
+            mock_cluster,
+            mock_role,
+            mock_match_type,
+            mock_find_platform,
+            mock_find_site,
+            mock_device,
+            mock_vm,
+        ) = mocks
 
         mock_vm.objects.filter.return_value.first.return_value = None
         mock_device.objects.filter.return_value.first.return_value = None
@@ -2391,7 +2377,6 @@ class TestDeviceNamingPreferences:
             "match_type": None,
         }
         mock_role.objects.all.return_value = []
-        mock_rack.objects.filter.return_value = []
         mock_site_model.objects.all.return_value = []
 
     @patch("virtualization.models.VirtualMachine")
