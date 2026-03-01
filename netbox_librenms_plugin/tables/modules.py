@@ -114,12 +114,18 @@ class LibreNMSModuleTable(tables.Table):
             "No Type": "bg-warning",
             "Unmatched": "bg-secondary",
             "Serial Mismatch": "bg-danger",
-            "Requires Upgrade": "bg-warning",
             "Name Conflict": "bg-warning",
         }
         badge_class = badge_classes.get(value, "bg-secondary")
         if warning := record.get("module_path_warning"):
-            return format_html('<span class="badge {}" title="{}">{}</span>', badge_class, warning, value)
+            return format_html(
+                '<span class="badge {}" title="{}">{}</span>'
+                ' <i class="mdi mdi-alert-outline text-warning" title="{}"></i>',
+                badge_class,
+                warning,
+                value,
+                "Upgrade NetBox to fully support {module_path}",
+            )
         if warning := record.get("name_conflict_warning"):
             return format_html(
                 '<span class="badge {}" title="{}">{}</span>'
@@ -128,6 +134,13 @@ class LibreNMSModuleTable(tables.Table):
                 warning,
                 value,
                 warning,
+            )
+        if hint := record.get("module_type_upgrade_hint"):
+            return format_html(
+                '<span class="badge {}">{}</span> <i class="mdi mdi-information-outline text-info" title="{}"></i>',
+                badge_class,
+                value,
+                hint,
             )
         return format_html('<span class="badge {}">{}</span>', badge_class, value)
 

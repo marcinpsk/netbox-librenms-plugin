@@ -150,11 +150,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             top_items.append(item)
 
         table_data = []
-        from netbox_librenms_plugin.utils import (
-            apply_normalization_rules,
-            module_type_uses_module_path,
-            supports_module_path,
-        )
+        from netbox_librenms_plugin.utils import apply_normalization_rules
 
         # Build combined bay lookup so synthetic transceiver entries (which may
         # live inside installed modules) can find their module-scoped bays.
@@ -219,8 +215,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     table_data[parent_idx]["has_installable_children"] = True
 
             # When parent is installable but children can't match bays yet
-            # (parent module not installed), enable "Install Branch" only if
-            # children have matching module types that are not module_path_blocked.
+            # (parent module not installed), enable "Install Branch" if any child
+            # has a matching module type (branch install handles bay creation).
             if (
                 parent_bay_matched_but_uninstalled
                 and row.get("can_install")
@@ -238,7 +234,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                             manufacturer=getattr(self, "_device_manufacturer", None),
                         )
                         matched = module_types.get(normalized)
-                    if matched and not (module_type_uses_module_path(matched) and not supports_module_path()):
+                    if matched:
                         table_data[parent_idx]["has_installable_children"] = True
                         break
 
@@ -610,7 +606,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         from netbox_librenms_plugin.utils import (
             apply_normalization_rules,
             has_nested_name_conflict,
+            module_type_is_end_module,
             module_type_uses_module_path,
+            module_type_uses_module_token,
             supports_module_path,
         )
 
@@ -632,20 +630,23 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if normalized != model_name:
                 matched_type = module_types.get(normalized)
 
-        # Check {module_path} compatibility
+        # Badge flags — purely informational, never block installation
         needs_module_path = matched_type and module_type_uses_module_path(matched_type)
-        module_path_blocked = needs_module_path and not supports_module_path()
-
-        # Check for nested module naming conflicts
-        name_conflict = (
+        # {module_path} used but NetBox version does not support it → "Upgrade NetBox" hint
+        netbox_upgrade_needed = bool(needs_module_path and not supports_module_path())
+        # End module still using old {module} when {module_path} is available → "Upgrade module-type" hint
+        suggest_type_upgrade = bool(
             matched_type
-            and matched_bay
-            and not module_path_blocked
-            and has_nested_name_conflict(matched_type, matched_bay)
+            and supports_module_path()
+            and module_type_is_end_module(matched_type)
+            and module_type_uses_module_token(matched_type)
         )
 
+        # Check for nested module naming conflicts
+        name_conflict = matched_type and matched_bay and has_nested_name_conflict(matched_type, matched_bay)
+
         # Determine status
-        status = self._determine_status(matched_bay, matched_type, serial, module_path_blocked)
+        status = self._determine_status(matched_bay, matched_type, serial)
 
         row = {
             "name": name,
@@ -665,11 +666,21 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             "has_installable_children": False,
         }
 
-        if module_path_blocked:
+        if netbox_upgrade_needed:
             row["row_class"] = "table-warning"
             row["module_path_warning"] = (
-                "This module type uses {module_path} in its interface template "
-                "but the running NetBox does not support it yet."
+                "This module type uses {module_path} in its interface templates. "
+                "The current NetBox version does not support {module_path} yet — "
+                "installation will proceed but interface naming may not work as expected. "
+                "Upgrade NetBox to enable full {module_path} support."
+            )
+
+        if suggest_type_upgrade:
+            row["module_type_upgrade_hint"] = (
+                "This module type uses {module} in its interface templates. "
+                "Since this NetBox version supports {module_path}, consider updating "
+                "the module type's interface templates to use {module_path} for "
+                "precise per-slot interface naming."
             )
 
         if name_conflict:
@@ -699,7 +710,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     status = "Installed"
                     row["row_class"] = "table-success"
                 row["status"] = status
-            elif matched_type and not module_path_blocked:
+            elif matched_type:
                 # Bay exists, type matched, no module installed → can install
                 row["can_install"] = True
 
@@ -708,10 +719,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         return row
 
-    def _determine_status(self, matched_bay, matched_type, serial, module_path_blocked=False):
+    def _determine_status(self, matched_bay, matched_type, serial):
         """Determine the sync status for an inventory item."""
-        if module_path_blocked:
-            return "Requires Upgrade"
         if matched_bay and matched_type:
             return "Matched"
         if not matched_bay:
@@ -743,18 +752,6 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Vi
 
         module_bay = get_object_or_404(ModuleBay, pk=module_bay_id, device=device)
         module_type = get_object_or_404(ModuleType, pk=module_type_id)
-
-        # Block install if module type uses {module_path} and NetBox doesn't support it
-        from netbox_librenms_plugin.utils import module_type_uses_module_path, supports_module_path
-
-        if module_type_uses_module_path(module_type) and not supports_module_path():
-            messages.error(
-                request,
-                f"Cannot install {module_type.model}: its interface templates use "
-                f"{{module_path}} which this NetBox version does not support.",
-            )
-            sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
-            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
         # Check if bay already has a module installed
         if hasattr(module_bay, "installed_module") and module_bay.installed_module:
@@ -914,11 +911,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         Scopes bay lookup to the correct parent module to handle duplicate bay names.
         """
         from netbox_librenms_plugin.models import ModuleBayMapping
-        from netbox_librenms_plugin.utils import (
-            apply_normalization_rules,
-            module_type_uses_module_path,
-            supports_module_path,
-        )
+        from netbox_librenms_plugin.utils import apply_normalization_rules
 
         model_name = (item.get("entPhysicalModelName") or "").strip()
         serial = (item.get("entPhysicalSerialNum") or "").strip()
@@ -933,10 +926,6 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
                 matched_type = module_types.get(normalized)
         if not matched_type:
             return {"status": "skipped", "name": name, "reason": "no matching type"}
-
-        # Check {module_path} compatibility
-        if module_type_uses_module_path(matched_type) and not supports_module_path():
-            return {"status": "skipped", "name": name, "reason": "requires {module_path}"}
 
         # Re-fetch module bays (parent install creates new child bays)
         bays = ModuleBay.objects.filter(device=device).select_related("installed_module__module_type")

@@ -565,6 +565,20 @@ def module_type_uses_module_path(module_type):
     return any("{module_path}" in t.name for t in module_type.interfacetemplates.all())
 
 
+def module_type_uses_module_token(module_type) -> bool:
+    """Check if a ModuleType has interface templates using the {module} token."""
+    try:
+        from dcim.constants import MODULE_TOKEN
+    except ImportError:
+        return False
+    return any(MODULE_TOKEN in t.name for t in module_type.interfacetemplates.all())
+
+
+def module_type_is_end_module(module_type) -> bool:
+    """Return True if this module type defines no module bays (i.e., it is a leaf/end module)."""
+    return not module_type.modulebays.exists()
+
+
 def has_nested_name_conflict(module_type, module_bay):
     """Check if installing this module type in a nested bay would cause a name conflict.
 
