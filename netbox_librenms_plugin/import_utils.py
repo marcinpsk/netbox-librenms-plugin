@@ -2227,7 +2227,8 @@ def _refresh_existing_device(validation: dict) -> None:
         if refreshed:
             validation["existing_device"] = refreshed
             if hasattr(refreshed, "role") and refreshed.role:
-                validation["device_role"] = {"found": True, "role": refreshed.role}
+                validation["device_role"]["found"] = True
+                validation["device_role"]["role"] = refreshed.role
         else:
             # Device was deleted since caching — recompute readiness
             validation["existing_device"] = None
