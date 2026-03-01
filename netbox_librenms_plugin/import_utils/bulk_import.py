@@ -383,7 +383,7 @@ def process_device_filters(
         except (BrokenPipeError, ConnectionError, IOError) as e:
             if request:
                 logger.info(f"Client disconnected during VC prefetch: {e}")
-                return []
+                return ([], False) if return_cache_status else []
             raise
 
     # Validate each device
@@ -403,13 +403,13 @@ def process_device_filters(
 
             if rq_job.is_failed or rq_job.is_stopped:
                 job.logger.warning("Job was already stopped before validation started")
-                return []
+                return ([], False) if return_cache_status else []
         except Exception:
             # Fall back to DB check if RQ check fails
             job.job.refresh_from_db()
             if job.job.status == JobStatusChoices.STATUS_FAILED:
                 job.logger.warning("Job was stopped before validation started")
-                return []
+                return ([], False) if return_cache_status else []
     else:
         logger.info(f"Validating {total} devices")
 
@@ -432,13 +432,13 @@ def process_device_filters(
                         job.logger.info(
                             f"Job stopped at device {idx}/{total} (RQ status: {rq_job.get_status()}). Exiting gracefully."
                         )
-                        return []
+                        return ([], False) if return_cache_status else []
                 except Exception:
                     # If we can't check RQ status, fall back to DB status check
                     job.job.refresh_from_db()
                     if job.job.status == JobStatusChoices.STATUS_FAILED:
                         job.logger.info(f"Job stopped at device {idx}/{total}. Exiting gracefully.")
-                        return []
+                        return ([], False) if return_cache_status else []
             elif request:
                 # Check for client disconnect
                 try:
@@ -446,7 +446,7 @@ def process_device_filters(
                         pass
                 except (BrokenPipeError, ConnectionError, IOError):
                     logger.info(f"Client disconnected during validation at device {idx}")
-                    return []
+                    return ([], False) if return_cache_status else []
 
         # Drop any cached validation/meta keys before recomputing
         device.pop("_validation", None)
@@ -493,7 +493,7 @@ def process_device_filters(
         except (BrokenPipeError, ConnectionError, IOError) as e:
             if request:
                 logger.info(f"Client disconnected during device validation: {e}")
-                return []
+                return ([], False) if return_cache_status else []
             raise
 
         # Set VC detection metadata
