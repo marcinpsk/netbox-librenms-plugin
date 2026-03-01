@@ -2466,7 +2466,18 @@ class TestDeviceNamingPreferences:
         """Duplicate detection should match against the resolved name, not raw hostname."""
         self._setup_no_existing(mocks)
 
-        mock_device = mocks[-2]  # Device
+        # Unpack using same order as _setup_no_existing / @patch decorators (bottom-up)
+        (
+            _mock_site,
+            _mock_rack,
+            _mock_cluster,
+            _mock_role,
+            _mock_hw,
+            _mock_platform,
+            _mock_find_site,
+            mock_device,
+            _mock_vm,
+        ) = mocks
         existing = MagicMock()
         existing.name = "core-switch"
         existing.serial = ""

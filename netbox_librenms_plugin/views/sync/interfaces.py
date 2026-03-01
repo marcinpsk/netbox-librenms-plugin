@@ -241,7 +241,7 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
                 else (admin_status.lower() == "up" if isinstance(admin_status, str) else bool(admin_status))
             )
 
-        if "mac_address" not in exclude_columns:
+        if "mac_address" not in exclude_columns and is_device_interface:
             ifPhysAddress = librenms_interface.get("ifPhysAddress")
             self.handle_mac_address(interface, ifPhysAddress)
 
