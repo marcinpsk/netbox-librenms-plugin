@@ -10,6 +10,7 @@ from .base.cables_view import BaseCableTableView, SingleCableVerifyView  # noqa:
 from .base.interfaces_view import BaseInterfaceTableView  # noqa: F401
 from .base.ip_addresses_view import BaseIPAddressTableView, SingleIPAddressVerifyView  # noqa: F401
 from .base.librenms_sync_view import BaseLibreNMSSyncView  # noqa: F401
+from .base.modules_view import InstallBranchView, InstallModuleView  # noqa: F401
 from .base.vlan_table_view import BaseVLANTableView  # noqa: F401
 from .imports import (  # noqa: F401
     BulkImportConfirmView,
@@ -24,6 +25,14 @@ from .imports import (  # noqa: F401
     SaveUserPrefView,
 )
 from .mapping_views import (  # noqa: F401
+    DeviceTypeMappingBulkDeleteView,
+    DeviceTypeMappingBulkImportView,
+    DeviceTypeMappingChangeLogView,
+    DeviceTypeMappingCreateView,
+    DeviceTypeMappingDeleteView,
+    DeviceTypeMappingEditView,
+    DeviceTypeMappingListView,
+    DeviceTypeMappingView,
     InterfaceTypeMappingBulkDeleteView,
     InterfaceTypeMappingBulkImportView,
     InterfaceTypeMappingChangeLogView,
@@ -32,12 +41,37 @@ from .mapping_views import (  # noqa: F401
     InterfaceTypeMappingEditView,
     InterfaceTypeMappingListView,
     InterfaceTypeMappingView,
+    ModuleBayMappingBulkDeleteView,
+    ModuleBayMappingBulkImportView,
+    ModuleBayMappingChangeLogView,
+    ModuleBayMappingCreateView,
+    ModuleBayMappingDeleteView,
+    ModuleBayMappingEditView,
+    ModuleBayMappingListView,
+    ModuleBayMappingView,
+    ModuleTypeMappingBulkDeleteView,
+    ModuleTypeMappingBulkImportView,
+    ModuleTypeMappingChangeLogView,
+    ModuleTypeMappingCreateView,
+    ModuleTypeMappingDeleteView,
+    ModuleTypeMappingEditView,
+    ModuleTypeMappingListView,
+    ModuleTypeMappingView,
+    NormalizationRuleBulkDeleteView,
+    NormalizationRuleBulkImportView,
+    NormalizationRuleChangeLogView,
+    NormalizationRuleCreateView,
+    NormalizationRuleDeleteView,
+    NormalizationRuleEditView,
+    NormalizationRuleListView,
+    NormalizationRuleView,
 )
 from .object_sync import (  # noqa: F401
     DeviceCableTableView,
     DeviceInterfaceTableView,
     DeviceIPAddressTableView,
     DeviceLibreNMSSyncView,
+    DeviceModuleTableView,
     DeviceVLANTableView,
     SaveVlanGroupOverridesView,
     SingleInterfaceVerifyView,

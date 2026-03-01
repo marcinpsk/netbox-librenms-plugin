@@ -31,6 +31,74 @@ menu = PluginMenu(
                         ),
                     ),
                 ),
+                PluginMenuItem(
+                    link="plugins:netbox_librenms_plugin:devicetypemapping_list",
+                    link_text="Device Type Mappings",
+                    permissions=[PERM_VIEW_PLUGIN],
+                    buttons=(
+                        PluginMenuButton(
+                            link="plugins:netbox_librenms_plugin:devicetypemapping_add",
+                            title="Add",
+                            icon_class="mdi mdi-plus-thick",
+                        ),
+                        PluginMenuButton(
+                            link="plugins:netbox_librenms_plugin:devicetypemapping_bulk_import",
+                            title="Import",
+                            icon_class="mdi mdi-upload",
+                        ),
+                    ),
+                ),
+                PluginMenuItem(
+                    link="plugins:netbox_librenms_plugin:moduletypemapping_list",
+                    link_text="Module Type Mappings",
+                    permissions=[PERM_VIEW_PLUGIN],
+                    buttons=(
+                        PluginMenuButton(
+                            link="plugins:netbox_librenms_plugin:moduletypemapping_add",
+                            title="Add",
+                            icon_class="mdi mdi-plus-thick",
+                        ),
+                        PluginMenuButton(
+                            link="plugins:netbox_librenms_plugin:moduletypemapping_bulk_import",
+                            title="Import",
+                            icon_class="mdi mdi-upload",
+                        ),
+                    ),
+                ),
+                PluginMenuItem(
+                    link="plugins:netbox_librenms_plugin:modulebaymapping_list",
+                    link_text="Module Bay Mappings",
+                    permissions=[PERM_VIEW_PLUGIN],
+                    buttons=(
+                        PluginMenuButton(
+                            link="plugins:netbox_librenms_plugin:modulebaymapping_add",
+                            title="Add",
+                            icon_class="mdi mdi-plus-thick",
+                        ),
+                        PluginMenuButton(
+                            link="plugins:netbox_librenms_plugin:modulebaymapping_bulk_import",
+                            title="Import",
+                            icon_class="mdi mdi-upload",
+                        ),
+                    ),
+                ),
+                PluginMenuItem(
+                    link="plugins:netbox_librenms_plugin:normalizationrule_list",
+                    link_text="Normalization Rules",
+                    permissions=[PERM_VIEW_PLUGIN],
+                    buttons=(
+                        PluginMenuButton(
+                            link="plugins:netbox_librenms_plugin:normalizationrule_add",
+                            title="Add",
+                            icon_class="mdi mdi-plus-thick",
+                        ),
+                        PluginMenuButton(
+                            link="plugins:netbox_librenms_plugin:normalizationrule_bulk_import",
+                            title="Import",
+                            icon_class="mdi mdi-upload",
+                        ),
+                    ),
+                ),
             ),
         ),
         (

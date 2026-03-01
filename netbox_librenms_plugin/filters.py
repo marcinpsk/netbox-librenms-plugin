@@ -1,6 +1,6 @@
 import django_filters
 
-from .models import InterfaceTypeMapping
+from .models import DeviceTypeMapping, InterfaceTypeMapping, ModuleBayMapping, ModuleTypeMapping, NormalizationRule
 
 
 class InterfaceTypeMappingFilterSet(django_filters.FilterSet):
@@ -11,3 +11,43 @@ class InterfaceTypeMappingFilterSet(django_filters.FilterSet):
 
         model = InterfaceTypeMapping
         fields = ["librenms_type", "librenms_speed", "netbox_type", "description"]
+
+
+class DeviceTypeMappingFilterSet(django_filters.FilterSet):
+    """Filter set for DeviceTypeMapping model."""
+
+    class Meta:
+        """Meta options for DeviceTypeMappingFilterSet."""
+
+        model = DeviceTypeMapping
+        fields = ["librenms_hardware", "description"]
+
+
+class ModuleTypeMappingFilterSet(django_filters.FilterSet):
+    """Filter set for ModuleTypeMapping model."""
+
+    class Meta:
+        """Meta options for ModuleTypeMappingFilterSet."""
+
+        model = ModuleTypeMapping
+        fields = ["librenms_model", "description"]
+
+
+class ModuleBayMappingFilterSet(django_filters.FilterSet):
+    """Filter set for ModuleBayMapping model."""
+
+    class Meta:
+        """Meta options for ModuleBayMappingFilterSet."""
+
+        model = ModuleBayMapping
+        fields = ["librenms_name", "librenms_class", "netbox_bay_name", "is_regex"]
+
+
+class NormalizationRuleFilterSet(django_filters.FilterSet):
+    """Filter set for NormalizationRule model."""
+
+    class Meta:
+        """Meta options for NormalizationRuleFilterSet."""
+
+        model = NormalizationRule
+        fields = ["scope", "manufacturer"]

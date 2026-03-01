@@ -1,4 +1,5 @@
 #!/bin/bash
+# netbox-librenms-plugin devcontainer script
 
 # Check if we should run in background or foreground
 BACKGROUND=false
@@ -18,7 +19,6 @@ if [ "$CODESPACES" = "true" ] && [ -n "$CODESPACE_NAME" ]; then
   echo "🔗 GitHub Codespaces detected"
 else
   ACCESS_URL="http://localhost:8000"
-  echo "🐛 Debug: ACCESS_URL is set to: $ACCESS_URL"
 fi
 
 # Load shared process management helpers

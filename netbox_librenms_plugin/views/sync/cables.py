@@ -1,3 +1,5 @@
+import logging
+
 from dcim.models import Cable, Device, Interface
 from django.contrib import messages
 from django.core.cache import cache
@@ -8,6 +10,8 @@ from django.urls import reverse
 from django.views import View
 
 from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
+
+logger = logging.getLogger(__name__)
 
 
 class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
@@ -42,7 +46,11 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Cache
         return cached_data.get("links", [])
 
     def create_cable(self, local_interface, remote_interface, request):
-        """Create a cable between local and remote interfaces."""
+        """Create a cable between local and remote interfaces.
+
+        Returns:
+            True on success, False on failure.
+        """
         try:
             Cable.objects.create(
                 a_terminations=[local_interface],
@@ -81,13 +89,12 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Cache
             link_data = next(link for link in cached_links if link["local_port"] == interface["interface"])
             return self.handle_cable_creation(link_data, interface)
         except StopIteration:
-            return {"status": "invalid"}
+            return {"status": "invalid", "interface": interface.get("interface", "")}
 
     def verify_cable_creation_requirements(self, link_data):
         """Return True if all required NetBox IDs are present in link data."""
         required_fields = [
             "netbox_local_interface_id",
-            "netbox_remote_device_id",
             "netbox_remote_interface_id",
         ]
 
@@ -113,13 +120,21 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Cache
             return {"status": "missing_remote", "interface": interface["interface"]}
 
     def process_interface_sync(self, selected_interfaces, cached_links):
-        """Process cable sync for all selected interfaces and return results."""
+        """Process cable sync for all selected interfaces and return results.
+
+        Each interface is processed in its own atomic block so individual
+        failures roll back only that cable without affecting others.
+        """
         results = {"valid": [], "invalid": [], "duplicate": [], "missing_remote": []}
 
-        with transaction.atomic():
-            for interface in selected_interfaces:
-                result = self.process_single_interface(interface, cached_links)
+        for interface in selected_interfaces:
+            try:
+                with transaction.atomic():
+                    result = self.process_single_interface(interface, cached_links)
                 results[result["status"]].append(result.get("interface", ""))
+            except Exception:
+                logger.exception("Failed to sync cable for interface %s", interface.get("interface", ""))
+                results["invalid"].append(interface.get("interface", ""))
 
         return results
 

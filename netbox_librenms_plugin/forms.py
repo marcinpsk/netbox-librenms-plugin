@@ -2,7 +2,7 @@
 import logging
 
 from dcim.choices import InterfaceTypeChoices
-from dcim.models import Device, DeviceRole, DeviceType, Location, Rack, Site
+from dcim.models import Device, DeviceRole, DeviceType, Location, Manufacturer, Rack, Site
 from django import forms
 from django.http import QueryDict
 from django.utils.translation import gettext_lazy as _
@@ -12,10 +12,22 @@ from netbox.forms import (
     NetBoxModelImportForm,
 )
 from netbox.plugins import get_plugin_config
-from utilities.forms.fields import CSVChoiceField, DynamicModelMultipleChoiceField
+from utilities.forms.fields import (
+    CSVChoiceField,
+    CSVModelChoiceField,
+    DynamicModelChoiceField,
+    DynamicModelMultipleChoiceField,
+)
 from virtualization.models import Cluster, VirtualMachine
 
-from .models import InterfaceTypeMapping, LibreNMSSettings
+from .models import (
+    DeviceTypeMapping,
+    InterfaceTypeMapping,
+    LibreNMSSettings,
+    ModuleBayMapping,
+    ModuleTypeMapping,
+    NormalizationRule,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,10 +63,23 @@ def _get_librenms_poller_group_choices():
     """
     Helper function to get poller group choices from LibreNMS API.
     Shared between AddToLIbreSNMPV1V2 and AddToLIbreSNMPV3 forms.
+    Results are cached to avoid repeated API calls on every form instantiation.
     """
+    from django.core.cache import cache
+
     from .librenms_api import LibreNMSAPI
 
     choices = [("0", "Default (0)")]
+
+    try:
+        api = LibreNMSAPI()
+        server_id = api.librenms_url.rstrip("/")
+        cache_key = f"librenms_poller_group_choices_{server_id}"
+    except Exception:
+        cache_key = "librenms_poller_group_choices"
+    cached_choices = cache.get(cache_key)
+    if cached_choices:
+        return cached_choices
 
     try:
         api = LibreNMSAPI()
@@ -72,6 +97,8 @@ def _get_librenms_poller_group_choices():
                     else:
                         label = f"{group_name} ({group_id})"
                     choices.append((group_id, label))
+
+            cache.set(cache_key, choices, timeout=api.cache_timeout)
     except Exception:
         logger.exception("Failed to fetch LibreNMS poller groups; using default choices")
 
@@ -90,10 +117,13 @@ class ServerConfigForm(NetBoxModelForm):
     )
 
     class Meta:
+        """Meta options for ServerConfigForm."""
+
         model = LibreNMSSettings
         fields = ["selected_server"]
 
     def __init__(self, *args, **kwargs):
+        """Initialize form and populate server choices."""
         super().__init__(*args, **kwargs)
         self.fields["selected_server"].choices = _get_librenms_server_choices()
 
@@ -131,6 +161,8 @@ class ImportSettingsForm(NetBoxModelForm):
     )
 
     class Meta:
+        """Meta options for ImportSettingsForm."""
+
         model = LibreNMSSettings
         fields = [
             "vc_member_name_pattern",
@@ -213,6 +245,8 @@ class InterfaceTypeMappingForm(NetBoxModelForm):
     """
 
     class Meta:
+        """Meta options for InterfaceTypeMappingForm."""
+
         model = InterfaceTypeMapping
         fields = ["librenms_type", "librenms_speed", "netbox_type", "description"]
 
@@ -230,6 +264,8 @@ class InterfaceTypeMappingImportForm(NetBoxModelImportForm):
     )
 
     class Meta:
+        """Meta options for InterfaceTypeMappingImportForm."""
+
         model = InterfaceTypeMapping
         fields = ["librenms_type", "librenms_speed", "netbox_type", "description"]
 
@@ -258,6 +294,163 @@ class InterfaceTypeMappingFilterForm(NetBoxModelFilterSetForm):
     )
 
     model = InterfaceTypeMapping
+
+
+class DeviceTypeMappingForm(NetBoxModelForm):
+    """Form for creating and editing device type mappings between LibreNMS and NetBox."""
+
+    netbox_device_type = forms.ModelChoiceField(
+        queryset=DeviceType.objects.all(),
+        label="NetBox Device Type",
+        widget=forms.Select(attrs={"class": "form-select"}),
+    )
+
+    class Meta:
+        """Meta options for DeviceTypeMappingForm."""
+
+        model = DeviceTypeMapping
+        fields = ["librenms_hardware", "netbox_device_type", "description"]
+
+
+class DeviceTypeMappingImportForm(NetBoxModelImportForm):
+    """Form for bulk importing device type mappings."""
+
+    class Meta:
+        """Meta options for DeviceTypeMappingImportForm."""
+
+        model = DeviceTypeMapping
+        fields = ["librenms_hardware", "netbox_device_type", "description"]
+
+
+class DeviceTypeMappingFilterForm(NetBoxModelFilterSetForm):
+    """Form for filtering device type mappings."""
+
+    librenms_hardware = forms.CharField(required=False, label="LibreNMS Hardware")
+    description = forms.CharField(
+        required=False,
+        label="Description",
+        help_text="Filter by description (partial match)",
+    )
+
+    model = DeviceTypeMapping
+
+
+class ModuleTypeMappingForm(NetBoxModelForm):
+    """Form for creating and editing module type mappings between LibreNMS and NetBox."""
+
+    class Meta:
+        """Meta options for ModuleTypeMappingForm."""
+
+        model = ModuleTypeMapping
+        fields = ["librenms_model", "netbox_module_type", "description"]
+
+
+class ModuleTypeMappingImportForm(NetBoxModelImportForm):
+    """Form for bulk importing module type mappings."""
+
+    class Meta:
+        """Meta options for ModuleTypeMappingImportForm."""
+
+        model = ModuleTypeMapping
+        fields = ["librenms_model", "netbox_module_type", "description"]
+
+
+class ModuleTypeMappingFilterForm(NetBoxModelFilterSetForm):
+    """Form for filtering module type mappings."""
+
+    librenms_model = forms.CharField(required=False, label="LibreNMS Model")
+    description = forms.CharField(
+        required=False,
+        label="Description",
+        help_text="Filter by description (partial match)",
+    )
+
+    model = ModuleTypeMapping
+
+
+class ModuleBayMappingForm(NetBoxModelForm):
+    """Form for creating and editing module bay mappings between LibreNMS and NetBox."""
+
+    class Meta:
+        """Meta options for ModuleBayMappingForm."""
+
+        model = ModuleBayMapping
+        fields = ["librenms_name", "librenms_class", "netbox_bay_name", "is_regex", "description"]
+
+
+class ModuleBayMappingImportForm(NetBoxModelImportForm):
+    """Form for bulk importing module bay mappings."""
+
+    class Meta:
+        """Meta options for ModuleBayMappingImportForm."""
+
+        model = ModuleBayMapping
+        fields = ["librenms_name", "librenms_class", "netbox_bay_name", "is_regex", "description"]
+
+
+class ModuleBayMappingFilterForm(NetBoxModelFilterSetForm):
+    """Form for filtering module bay mappings."""
+
+    librenms_name = forms.CharField(required=False, label="LibreNMS Name")
+    librenms_class = forms.CharField(required=False, label="LibreNMS Class")
+    netbox_bay_name = forms.CharField(required=False, label="NetBox Bay Name")
+    is_regex = forms.NullBooleanField(required=False, label="Regex")
+
+    model = ModuleBayMapping
+
+
+class NormalizationRuleForm(NetBoxModelForm):
+    """Form for creating and editing normalization rules."""
+
+    manufacturer = DynamicModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        required=False,
+        help_text="Optional: scope this rule to a specific manufacturer",
+    )
+
+    class Meta:
+        """Meta options for NormalizationRuleForm."""
+
+        model = NormalizationRule
+        fields = ["scope", "manufacturer", "match_pattern", "replacement", "priority", "description"]
+
+
+class NormalizationRuleImportForm(NetBoxModelImportForm):
+    """Form for bulk importing normalization rules."""
+
+    scope = CSVChoiceField(
+        choices=NormalizationRule.SCOPE_CHOICES,
+        help_text="Scope: module_type, device_type, or module_bay",
+    )
+    manufacturer = CSVModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        to_field_name="name",
+        required=False,
+        help_text="Optional manufacturer name (must already exist in NetBox)",
+    )
+
+    class Meta:
+        """Meta options for NormalizationRuleImportForm."""
+
+        model = NormalizationRule
+        fields = ["scope", "manufacturer", "match_pattern", "replacement", "priority", "description"]
+
+
+class NormalizationRuleFilterForm(NetBoxModelFilterSetForm):
+    """Form for filtering normalization rules."""
+
+    scope = forms.ChoiceField(
+        required=False,
+        choices=[("", "---------")] + NormalizationRule.SCOPE_CHOICES,
+        label="Scope",
+    )
+    manufacturer_id = DynamicModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        required=False,
+        label="Manufacturer",
+    )
+
+    model = NormalizationRule
 
 
 class AddToLIbreSNMPV1V2(forms.Form):
@@ -315,6 +508,7 @@ class AddToLIbreSNMPV1V2(forms.Form):
     )
 
     def __init__(self, *args, **kwargs):
+        """Initialize form and populate poller group choices."""
         super().__init__(*args, **kwargs)
         self.fields["poller_group"].choices = _get_librenms_poller_group_choices()
 
@@ -412,6 +606,7 @@ class AddToLIbreSNMPV3(forms.Form):
     )
 
     def __init__(self, *args, **kwargs):
+        """Initialize form and populate poller group choices."""
         super().__init__(*args, **kwargs)
         self.fields["poller_group"].choices = _get_librenms_poller_group_choices()
 
@@ -422,6 +617,7 @@ class DeviceStatusFilterForm(NetBoxModelFilterSetForm):
     """
 
     def __init__(self, *args, **kwargs):
+        """Initialize form and remove saved filter field."""
         super().__init__(*args, **kwargs)
         # Remove the saved filter field if it exists
         if "filter_id" in self.fields:
@@ -581,7 +777,9 @@ class LibreNMSImportFilterForm(forms.Form):
 
         try:
             # Use caching to avoid repeated API calls
-            cache_key = "librenms_locations_choices"
+            api = LibreNMSAPI()
+            server_id = api.librenms_url.rstrip("/")
+            cache_key = f"librenms_locations_choices:{server_id}"
             cached_choices = cache.get(cache_key)
 
             if cached_choices:
@@ -589,7 +787,6 @@ class LibreNMSImportFilterForm(forms.Form):
                 return
 
             # Fetch locations from LibreNMS
-            api = LibreNMSAPI()
             success, locations = api.get_locations()
 
             if success and locations:

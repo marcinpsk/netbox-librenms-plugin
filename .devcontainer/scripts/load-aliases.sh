@@ -1,4 +1,5 @@
 #!/bin/bash
+# netbox-librenms-plugin devcontainer script
 # Quick alias loader for current session
 # Usage: source .devcontainer/scripts/load-aliases.sh
 
