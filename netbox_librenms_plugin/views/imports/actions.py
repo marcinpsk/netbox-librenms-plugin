@@ -901,12 +901,10 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
 
         # Check for LibreNMS ID collision before any linking action
         if action in {"link", "update", "update_serial"}:
-            id_conflict = (
-                Device.objects.filter(custom_field_data__librenms_id=int(librenms_id))
-                .exclude(pk=existing_device.pk)
-                .first()
-            )
-            if id_conflict:
+            from netbox_librenms_plugin.utils import find_by_librenms_id
+
+            id_conflict = find_by_librenms_id(Device, librenms_id, self.librenms_api.server_key)
+            if id_conflict and id_conflict.pk != existing_device.pk:
                 return HttpResponse(
                     f"LibreNMS ID conflict: ID {librenms_id} is already assigned to device "
                     f"'{id_conflict.name}' (ID: {id_conflict.pk})",
@@ -1060,6 +1058,30 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
                 logger.info(f"Synced device type on '{existing_device.name}' to {hw_match['device_type']}")
             else:
                 return HttpResponse(f"No matching device type for '{hardware}'", status=400)
+
+        elif action == "migrate_librenms_id":
+            # Migrate legacy bare-integer librenms_id to the JSON dict format.
+            # Only safe when the integer matches the LibreNMS device ID for this server,
+            # confirmed by serial match (or explicit force).
+            from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
+
+            cf_value = existing_device.custom_field_data.get("librenms_id")
+            if not isinstance(cf_value, int):
+                return HttpResponse(
+                    "Device librenms_id is already in JSON format; no migration needed.",
+                    status=400,
+                )
+            if not validation.get("serial_confirmed") and not force:
+                return HttpResponse(
+                    "Serial number not confirmed. Check the force checkbox to migrate without serial verification.",
+                    status=400,
+                )
+            migrate_legacy_librenms_id(existing_device, self.librenms_api.server_key)
+            existing_device.save()
+            logger.info(
+                f"Migrated legacy librenms_id on '{existing_device.name}' "
+                f"to {{{self.librenms_api.server_key!r}: {cf_value}}}"
+            )
 
         else:
             return HttpResponse(f"Unknown action: {action}", status=400)

@@ -1614,6 +1614,151 @@ class TestSerialNumberMatching:
         assert result["device_type_mismatch"] is False
 
 
+class TestLegacyLibreNMSIdMigration:
+    """Test detection of legacy bare-integer librenms_id format during device validation."""
+
+    PATCHES = [
+        "netbox_librenms_plugin.import_utils.device_operations.Site",
+        "netbox_librenms_plugin.import_utils.device_operations.Rack",
+        "netbox_librenms_plugin.import_utils.device_operations.Cluster",
+        "netbox_librenms_plugin.import_utils.device_operations.DeviceRole",
+        "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type",
+        "netbox_librenms_plugin.import_utils.device_operations.find_matching_platform",
+        "netbox_librenms_plugin.import_utils.device_operations.find_matching_site",
+        "netbox_librenms_plugin.import_utils.device_operations.Device",
+        "virtualization.models.VirtualMachine",
+    ]
+
+    def setup_method(self):
+        self._patchers = [patch(p) for p in self.PATCHES]
+        mocks = [p.start() for p in self._patchers]
+        (
+            self.mock_site_model,
+            self.mock_rack,
+            self.mock_cluster,
+            self.mock_role,
+            self.mock_match_type,
+            self.mock_find_platform,
+            self.mock_find_site,
+            self.mock_device,
+            self.mock_vm,
+        ) = mocks
+
+        self.mock_find_site.return_value = {
+            "found": True,
+            "site": MagicMock(),
+            "match_type": "exact",
+            "confidence": 1.0,
+        }
+        self.mock_find_platform.return_value = {"found": False, "platform": None, "match_type": None}
+        self.mock_match_type.return_value = {"matched": False, "device_type": None, "match_type": None}
+        self.mock_role.objects.all.return_value = []
+        self.mock_cluster.objects.all.return_value = []
+        self.mock_rack.objects.filter.return_value = []
+        self.mock_site_model.objects.all.return_value = []
+        self.mock_vm.objects.filter.return_value.first.return_value = None
+
+    def teardown_method(self):
+        for p in self._patchers:
+            p.stop()
+
+    def _make_existing(self, librenms_id_value, serial="SN001"):
+        existing = MagicMock()
+        existing.name = "switch-01"
+        existing.serial = serial
+        existing.custom_field_data = {"librenms_id": librenms_id_value}
+        return existing
+
+    def _setup_device_filter(self, existing):
+        def device_filter(*args, **kwargs):
+            result = MagicMock()
+            q_has_librenms = any("librenms_id" in str(arg) for arg in args) or any(
+                k.startswith("custom_field_data__librenms_id") for k in kwargs
+            )
+            result.first.return_value = existing if q_has_librenms else None
+            return result
+
+        self.mock_device.objects.filter.side_effect = device_filter
+
+    def test_legacy_int_sets_needs_migration_flag(self):
+        """Device with bare-integer librenms_id sets librenms_id_needs_migration=True."""
+        existing = self._make_existing(librenms_id_value=42, serial="SN001")
+        self._setup_device_filter(existing)
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        result = validate_device_for_import(
+            {"device_id": 42, "hostname": "switch-01", "serial": "SN001"},
+            include_vc_detection=False,
+        )
+
+        assert result["existing_match_type"] == "librenms_id"
+        assert result["librenms_id_needs_migration"] is True
+        assert result["serial_confirmed"] is True
+
+    def test_legacy_int_no_serial_still_sets_flag(self):
+        """Legacy int format sets the migration flag even when serial is absent."""
+        existing = self._make_existing(librenms_id_value=42, serial="")
+        self._setup_device_filter(existing)
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        result = validate_device_for_import(
+            {"device_id": 42, "hostname": "switch-01"},
+            include_vc_detection=False,
+        )
+
+        assert result["librenms_id_needs_migration"] is True
+        assert result["serial_confirmed"] is False
+
+    def test_json_format_does_not_set_flag(self):
+        """Device with JSON librenms_id does NOT set librenms_id_needs_migration."""
+        existing = self._make_existing(librenms_id_value={"default": 42}, serial="SN001")
+        self._setup_device_filter(existing)
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        result = validate_device_for_import(
+            {"device_id": 42, "hostname": "switch-01", "serial": "SN001"},
+            include_vc_detection=False,
+        )
+
+        assert result["existing_match_type"] == "librenms_id"
+        assert result["librenms_id_needs_migration"] is False
+
+    def test_migrate_legacy_librenms_id_helper(self):
+        """migrate_legacy_librenms_id converts int to {server_key: int}."""
+        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": 42}
+        result = migrate_legacy_librenms_id(obj, "primary")
+
+        assert result is True
+        assert obj.custom_field_data["librenms_id"] == {"primary": 42}
+
+    def test_migrate_legacy_librenms_id_noop_for_json(self):
+        """migrate_legacy_librenms_id is a no-op when value is already a dict."""
+        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"primary": 42}}
+        result = migrate_legacy_librenms_id(obj, "primary")
+
+        assert result is False
+        assert obj.custom_field_data["librenms_id"] == {"primary": 42}
+
+    def test_migrate_legacy_librenms_id_noop_for_none(self):
+        """migrate_legacy_librenms_id is a no-op when librenms_id is absent."""
+        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {}
+        result = migrate_legacy_librenms_id(obj, "primary")
+
+        assert result is False
+
+
 class TestDeviceConflictActionView:
     """Test DeviceConflictActionView conflict resolution actions."""
 
@@ -1668,6 +1813,7 @@ class TestDeviceConflictActionView:
             patch("dcim.models.Device") as mock_device_cls,
         ):
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
@@ -1708,6 +1854,7 @@ class TestDeviceConflictActionView:
             patch("dcim.models.Device") as mock_device_cls,
         ):
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
@@ -1744,6 +1891,7 @@ class TestDeviceConflictActionView:
             patch("dcim.models.Device") as mock_device_cls,
         ):
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
@@ -1915,6 +2063,7 @@ class TestDeviceConflictActionView:
             patch("dcim.models.Device") as mock_device_cls,
         ):
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
@@ -1960,6 +2109,7 @@ class TestDeviceConflictActionView:
             patch("dcim.models.Device") as mock_device_cls,
         ):
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
@@ -2036,6 +2186,7 @@ class TestDeviceConflictActionView:
             patch("dcim.models.Device") as mock_device_cls,
         ):
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
