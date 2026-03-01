@@ -37,6 +37,10 @@ logger = logging.getLogger(__name__)
 
 def _resolve_naming_preferences(request) -> tuple[bool, bool]:
     """Resolve use_sysname/strip_domain: POST data → user pref → plugin settings."""
+    from netbox_librenms_plugin.models import LibreNMSSettings
+
+    settings = None
+
     if "use-sysname-toggle" in request.POST:
         use_sysname = request.POST.get("use-sysname-toggle") == "on"
     else:
@@ -44,8 +48,6 @@ def _resolve_naming_preferences(request) -> tuple[bool, bool]:
         if pref is not None:
             use_sysname = pref
         else:
-            from netbox_librenms_plugin.models import LibreNMSSettings
-
             settings = LibreNMSSettings.objects.first()
             use_sysname = getattr(settings, "use_sysname_default", True) if settings else True
 
@@ -56,9 +58,8 @@ def _resolve_naming_preferences(request) -> tuple[bool, bool]:
         if pref is not None:
             strip_domain = pref
         else:
-            from netbox_librenms_plugin.models import LibreNMSSettings
-
-            settings = LibreNMSSettings.objects.first()
+            if settings is None:
+                settings = LibreNMSSettings.objects.first()
             strip_domain = getattr(settings, "strip_domain_default", False) if settings else False
 
     return use_sysname, strip_domain
@@ -257,8 +258,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 status=400,
             )
 
-        use_sysname = request.POST.get("use-sysname-toggle") == "on"
-        strip_domain = request.POST.get("strip-domain-toggle") == "on"
+        use_sysname, strip_domain = _resolve_naming_preferences(request)
 
         devices = []
         errors = []
@@ -795,6 +795,8 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
                 librenms_device_type = hw_match["device_type"]
                 if not existing_device.device_type or existing_device.device_type.pk != librenms_device_type.pk:
                     device_type_synced = False
+            else:
+                device_type_synced = False
 
         all_synced = serial_synced and platform_synced and device_type_synced
 
@@ -874,9 +876,10 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
         if not libre_device:
             return HttpResponse("LibreNMS device not found", status=404)
 
-        # Require force flag when device type mismatches
+        # Require force flag when device type mismatches, but only for actions that use it
+        _FORCE_REQUIRED_ACTIONS = {"link", "update", "update_serial", "update_type"}
         force = request.POST.get("force") == "on"
-        if validation.get("device_type_mismatch") and not force:
+        if validation.get("device_type_mismatch") and action in _FORCE_REQUIRED_ACTIONS and not force:
             return HttpResponse(
                 "Device type mismatch detected. Check the force checkbox to proceed.",
                 status=400,
@@ -889,11 +892,32 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
 
         librenms_id = libre_device.get("device_id")
 
+        # Check for LibreNMS ID collision before any linking action
+        if action in {"link", "update", "update_serial"}:
+            id_conflict = (
+                Device.objects.filter(custom_field_data__librenms_id=int(librenms_id))
+                .exclude(pk=existing_device.pk)
+                .first()
+            )
+            if id_conflict:
+                return HttpResponse(
+                    f"LibreNMS ID conflict: ID {librenms_id} is already assigned to device "
+                    f"'{id_conflict.name}' (ID: {id_conflict.pk})",
+                    status=409,
+                )
+
         if action == "link":
             # Link to LibreNMS and update name from LibreNMS data
-            use_sysname = request.POST.get("use-sysname-toggle") == "on"
-            strip_domain = request.POST.get("strip-domain-toggle") == "on"
-            hostname = _determine_device_name(libre_device, use_sysname=use_sysname, strip_domain=strip_domain)
+            resolved_name = validation.get("resolved_name")
+            hostname = (
+                resolved_name
+                if resolved_name
+                else _determine_device_name(
+                    libre_device,
+                    use_sysname=request.POST.get("use-sysname-toggle") == "on",
+                    strip_domain=request.POST.get("strip-domain-toggle") == "on",
+                )
+            )
             existing_device.custom_field_data["librenms_id"] = int(librenms_id)
             existing_device.name = hostname
             if librenms_device_type:
@@ -903,10 +927,17 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
 
         elif action == "update":
             # Update hostname, serial, and link to LibreNMS
-            use_sysname = request.POST.get("use-sysname-toggle") == "on"
-            strip_domain = request.POST.get("strip-domain-toggle") == "on"
+            resolved_name = validation.get("resolved_name")
             incoming_serial = libre_device.get("serial") or ""
-            hostname = _determine_device_name(libre_device, use_sysname=use_sysname, strip_domain=strip_domain)
+            hostname = (
+                resolved_name
+                if resolved_name
+                else _determine_device_name(
+                    libre_device,
+                    use_sysname=request.POST.get("use-sysname-toggle") == "on",
+                    strip_domain=request.POST.get("strip-domain-toggle") == "on",
+                )
+            )
             existing_device.custom_field_data["librenms_id"] = int(librenms_id)
             if incoming_serial and incoming_serial != "-":
                 conflict_device = Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
@@ -949,9 +980,16 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
 
         elif action == "sync_name":
             # Sync device name from LibreNMS (e.g., IP → sysName)
-            use_sysname = request.POST.get("use-sysname-toggle") == "on"
-            strip_domain = request.POST.get("strip-domain-toggle") == "on"
-            hostname = _determine_device_name(libre_device, use_sysname=use_sysname, strip_domain=strip_domain)
+            resolved_name = validation.get("resolved_name")
+            hostname = (
+                resolved_name
+                if resolved_name
+                else _determine_device_name(
+                    libre_device,
+                    use_sysname=request.POST.get("use-sysname-toggle") == "on",
+                    strip_domain=request.POST.get("strip-domain-toggle") == "on",
+                )
+            )
             existing_device.name = hostname
             existing_device.save()
             logger.info(f"Synced name on device '{existing_device.name}' from LibreNMS")

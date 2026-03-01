@@ -1659,6 +1659,7 @@ class TestDeviceConflictActionView:
             patch("dcim.models.Device") as mock_device_cls,
         ):
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
@@ -2116,10 +2117,10 @@ class TestBuildSyncInfo:
         libre_device = {"serial": "ABC123", "os": "ios", "hardware": "Catalyst C4900M"}
 
         with (
-            patch("dcim.models.Platform") as mock_platform_cls,
+            patch("netbox_librenms_plugin.utils.find_matching_platform") as mock_platform_match,
             patch("netbox_librenms_plugin.utils.match_librenms_hardware_to_device_type") as mock_hw_match,
         ):
-            mock_platform_cls.objects.get.return_value = platform
+            mock_platform_match.return_value = {"found": True, "platform": platform}
             mock_hw_match.return_value = {"matched": True, "device_type": device_type}
 
             result = DeviceValidationDetailsView._build_sync_info(libre_device, existing)
@@ -2165,12 +2166,33 @@ class TestBuildSyncInfo:
 
         libre_device = {"serial": "ABC123", "os": "junos", "hardware": "-"}
 
-        with patch("dcim.models.Platform") as mock_platform_cls:
-            mock_platform_cls.objects.get.return_value = new_platform
+        with patch("netbox_librenms_plugin.utils.find_matching_platform") as mock_platform_match:
+            mock_platform_match.return_value = {"found": True, "platform": new_platform}
 
             result = DeviceValidationDetailsView._build_sync_info(libre_device, existing)
 
         assert result["platform_synced"] is False
+        assert result["all_synced"] is False
+
+    def test_hardware_no_match_device_type_out_of_sync(self):
+        """When hardware is present but no device type match found, device_type_synced is False."""
+        from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
+
+        existing = MagicMock()
+        existing.serial = "ABC123"
+        existing.platform = None
+        device_type = MagicMock()
+        device_type.pk = 5
+        existing.device_type = device_type
+
+        libre_device = {"serial": "ABC123", "os": "-", "hardware": "UnknownHardwareXYZ"}
+
+        with patch("netbox_librenms_plugin.utils.match_librenms_hardware_to_device_type") as mock_hw_match:
+            mock_hw_match.return_value = {"matched": False, "device_type": None}
+
+            result = DeviceValidationDetailsView._build_sync_info(libre_device, existing)
+
+        assert result["device_type_synced"] is False
         assert result["all_synced"] is False
 
 

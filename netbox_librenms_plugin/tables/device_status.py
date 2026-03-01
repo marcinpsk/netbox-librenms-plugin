@@ -463,7 +463,7 @@ class DeviceImportTable(tables.Table):
             match_type = validation.get("existing_match_type", "")
             serial_action = validation.get("serial_action")
             has_mismatch = validation.get("device_type_mismatch", False)
-            has_actions = match_type in ("hostname", "serial") and serial_action is not None
+            has_actions = match_type == "hostname" or (match_type == "serial" and serial_action is not None)
             has_name_sync = validation.get("name_sync_available", False)
             has_sync_needed = match_type == "librenms_id" and serial_action in ("update_serial", "conflict")
 
