@@ -378,7 +378,13 @@
   {% if validation.existing_device %}
     {% if validation.existing_match_type == 'librenms_id' %}
       <div class="alert alert-info py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
-        <span class="badge bg-info-lt me-1"><i class="mdi mdi-check-decagram"></i> Linked — ID {{ libre_device.device_id }}</span>
+        {% if existing_id_servers %}
+          {% for srv in existing_id_servers %}
+            <span class="badge bg-info-lt me-1"><i class="mdi mdi-check-decagram"></i> Linked — ID {{ srv.device_id }} @ {{ srv.display_name }}</span>
+          {% endfor %}
+        {% else %}
+          <span class="badge bg-info-lt me-1"><i class="mdi mdi-check-decagram"></i> Linked — ID {{ libre_device.device_id }}</span>
+        {% endif %}
         {% if validation.name_matches %}
           <span class="badge bg-success-lt me-1"><i class="mdi mdi-check-circle-outline"></i> Name match</span>
         {% elif validation.name_sync_available %}
