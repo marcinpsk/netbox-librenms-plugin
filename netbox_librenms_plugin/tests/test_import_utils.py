@@ -3136,3 +3136,77 @@ class TestBulkImportCancellation:
 
         count = self._run_bulk_import(mock_rq_job=rq_job, device_ids=[1, 2, 3])
         assert count == 3
+
+
+# ---------------------------------------------------------------------------
+# Tests for DeviceValidationDetailsView._build_id_server_info
+# ---------------------------------------------------------------------------
+
+
+class TestBuildIdServerInfo:
+    """Test DeviceValidationDetailsView._build_id_server_info method."""
+
+    def _make_device(self, librenms_id_value):
+        from unittest.mock import MagicMock
+
+        device = MagicMock()
+        device.custom_field_data = {"librenms_id": librenms_id_value}
+        return device
+
+    def test_returns_none_for_legacy_int(self):
+        from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
+
+        device = self._make_device(42)
+        result = DeviceValidationDetailsView._build_id_server_info(device)
+        assert result is None
+
+    def test_returns_none_for_missing_cf(self):
+        from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
+
+        device = self._make_device(None)
+        result = DeviceValidationDetailsView._build_id_server_info(device)
+        assert result is None
+
+    def test_single_server_resolves_display_name(self):
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
+
+        device = self._make_device({"production": 42})
+        plugins_cfg = {
+            "netbox_librenms_plugin": {
+                "servers": {
+                    "production": {"display_name": "Production LibreNMS", "librenms_url": "https://prod.example.com"},
+                }
+            }
+        }
+        with patch("django.conf.settings") as mock_settings:
+            mock_settings.PLUGINS_CONFIG = plugins_cfg
+            result = DeviceValidationDetailsView._build_id_server_info(device)
+
+        assert result is not None
+        assert len(result) == 1
+        assert result[0]["server_key"] == "production"
+        assert result[0]["display_name"] == "Production LibreNMS"
+        assert result[0]["device_id"] == 42
+
+    def test_unconfigured_server_uses_key_as_display_name(self):
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
+
+        device = self._make_device({"deleted-server": 77})
+        plugins_cfg = {"netbox_librenms_plugin": {"servers": {}}}
+        with patch("django.conf.settings") as mock_settings:
+            mock_settings.PLUGINS_CONFIG = plugins_cfg
+            result = DeviceValidationDetailsView._build_id_server_info(device)
+
+        assert result is not None
+        assert result[0]["display_name"] == "deleted-server"
+
+    def test_empty_dict_returns_none(self):
+        from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
+
+        device = self._make_device({})
+        result = DeviceValidationDetailsView._build_id_server_info(device)
+        assert result is None

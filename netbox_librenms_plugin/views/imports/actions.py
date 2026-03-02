@@ -782,6 +782,7 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
         existing = validation.get("existing_device")
         if existing:
             context["sync_info"] = self._build_sync_info(libre_device, existing)
+            context["existing_id_servers"] = self._build_id_server_info(existing)
 
         return render(
             request,
@@ -846,6 +847,29 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
             "device_type_synced": device_type_synced,
             "all_synced": all_synced,
         }
+
+    @staticmethod
+    def _build_id_server_info(existing_device):
+        """Return per-server ID mappings for the existing device's librenms_id custom field.
+
+        Returns a list of dicts with server_key, display_name, and device_id — one entry
+        per server the device is linked to. Returns None when the format is legacy (bare int)
+        or when the field is absent/invalid.
+        """
+        from django.conf import settings
+
+        cf_value = existing_device.custom_field_data.get("librenms_id")
+        if not isinstance(cf_value, dict):
+            return None
+
+        plugins_config = settings.PLUGINS_CONFIG.get("netbox_librenms_plugin", {})
+        servers_config = plugins_config.get("servers", {})
+        result = []
+        for sk, did in cf_value.items():
+            srv_cfg = servers_config.get(sk, {})
+            display_name = srv_cfg.get("display_name") or sk
+            result.append({"server_key": sk, "display_name": display_name, "device_id": did})
+        return result or None
 
 
 class DeviceRoleUpdateView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View):
