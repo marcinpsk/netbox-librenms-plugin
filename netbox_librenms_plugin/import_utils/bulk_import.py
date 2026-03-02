@@ -287,22 +287,23 @@ def _refresh_existing_device(validation: dict) -> None:
                 validation["device_role"]["found"] = True
                 validation["device_role"]["role"] = refreshed.role
         else:
-            # Device was deleted since caching — recompute readiness
+            # Device was deleted since caching — recompute readiness to match
+            # validate_device_for_import logic.
             validation["existing_device"] = None
             validation["existing_match_type"] = None
+            can_import = not bool(validation.get("issues"))
             if validation.get("import_as_vm"):
-                required_found = (
-                    validation.get("site", {}).get("found")
-                    and validation.get("cluster", {}).get("found")
-                    and validation.get("device_role", {}).get("found")
-                )
+                # VMs only require a cluster (site/role not mandatory)
+                is_ready = can_import and bool(validation.get("cluster", {}).get("found"))
             else:
-                required_found = (
-                    validation.get("site", {}).get("found")
-                    and validation.get("device_type", {}).get("found")
-                    and validation.get("device_role", {}).get("found")
+                is_ready = (
+                    can_import
+                    and bool(validation.get("site", {}).get("found"))
+                    and bool(validation.get("device_type", {}).get("found"))
+                    and bool(validation.get("device_role", {}).get("found"))
                 )
-            validation["can_import"] = validation["is_ready"] = bool(required_found and not validation.get("issues"))
+            validation["can_import"] = can_import
+            validation["is_ready"] = is_ready
     except Exception as e:
         existing_id = getattr(existing, "pk", "unknown") if existing else "none"
         logger.error(f"Failed to refresh existing device (pk={existing_id}): {e}")
