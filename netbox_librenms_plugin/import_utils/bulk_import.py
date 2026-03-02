@@ -268,7 +268,7 @@ def bulk_import_devices(
     )
 
 
-def _refresh_existing_device(validation: dict, libre_device: dict = None) -> None:
+def _refresh_existing_device(validation: dict, libre_device: dict = None, server_key: str = "default") -> None:
     """Refresh existing_device from DB to pick up changes made in NetBox since caching.
 
     When existing_device is None (wasn't found at cache time), re-check if the device
@@ -290,20 +290,23 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None) -> Non
                 if hasattr(refreshed, "role") and refreshed.role:
                     validation["device_role"] = {"found": True, "role": refreshed.role}
             else:
-                # Device was deleted since caching — recompute readiness
+                # Device was deleted since caching — recompute readiness to match
+                # validate_device_for_import logic.
                 validation["existing_device"] = None
                 validation["existing_match_type"] = None
-                validation["can_import"] = True
+                can_import = not bool(validation.get("issues"))
                 if validation.get("import_as_vm"):
-                    validation["is_ready"] = bool(
-                        validation.get("site", {}).get("found") and validation.get("device_role", {}).get("found")
-                    )
+                    # VMs only require a cluster (site/role not mandatory)
+                    is_ready = can_import and bool(validation.get("cluster", {}).get("found"))
                 else:
-                    validation["is_ready"] = bool(
-                        validation.get("site", {}).get("found")
-                        and validation.get("device_type", {}).get("found")
-                        and validation.get("device_role", {}).get("found")
+                    is_ready = (
+                        can_import
+                        and bool(validation.get("site", {}).get("found"))
+                        and bool(validation.get("device_type", {}).get("found"))
+                        and bool(validation.get("device_role", {}).get("found"))
                     )
+                validation["can_import"] = can_import
+                validation["is_ready"] = is_ready
         except Exception as e:
             existing_id = getattr(existing, "pk", "unknown") if existing else "none"
             logger.error(f"Failed to refresh existing device (pk={existing_id}): {e}")
@@ -318,7 +321,6 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None) -> Non
         librenms_id = libre_device.get("device_id")
         hostname = libre_device.get("hostname", "")
         sys_name = libre_device.get("sysName", "")
-        server_key = libre_device.get("_server_key")
 
         new_device = None
         match_type = None
@@ -513,7 +515,7 @@ def process_device_filters(
 
                 # Refresh existing_device from DB to avoid stale data
                 # (user may have changed role, name, etc. in NetBox)
-                _refresh_existing_device(device["_validation"], libre_device=device)
+                _refresh_existing_device(device["_validation"], libre_device=device, server_key=api.server_key)
 
                 # Apply exclude_existing filter if enabled
                 if exclude_existing:
