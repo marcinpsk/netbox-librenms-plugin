@@ -21,6 +21,11 @@ from .virtual_chassis import (
 logger = logging.getLogger(__name__)
 
 
+def _empty_return(return_cache_status: bool):
+    """Centralised empty-result return value for process_device_filters."""
+    return ([], False) if return_cache_status else []
+
+
 def bulk_import_devices_shared(
     device_ids: List[int],
     server_key: str = None,
@@ -432,7 +437,7 @@ def process_device_filters(
         except (BrokenPipeError, ConnectionError, IOError) as e:
             if request:
                 logger.info(f"Client disconnected during VC prefetch: {e}")
-                return ([], False) if return_cache_status else []
+                return _empty_return(return_cache_status)
             raise
 
     # Validate each device
@@ -452,13 +457,13 @@ def process_device_filters(
 
             if rq_job.is_failed or rq_job.is_stopped:
                 job.logger.warning("Job was already stopped before validation started")
-                return ([], False) if return_cache_status else []
+                return _empty_return(return_cache_status)
         except Exception:
             # Fall back to DB check if RQ check fails
             job.job.refresh_from_db()
             if job.job.status == JobStatusChoices.STATUS_FAILED:
                 job.logger.warning("Job was stopped before validation started")
-                return ([], False) if return_cache_status else []
+                return _empty_return(return_cache_status)
     else:
         logger.info(f"Validating {total} devices")
 
@@ -481,13 +486,13 @@ def process_device_filters(
                         job.logger.info(
                             f"Job stopped at device {idx}/{total} (RQ status: {rq_job.get_status()}). Exiting gracefully."
                         )
-                        return ([], False) if return_cache_status else []
+                        return _empty_return(return_cache_status)
                 except Exception:
                     # If we can't check RQ status, fall back to DB status check
                     job.job.refresh_from_db()
                     if job.job.status == JobStatusChoices.STATUS_FAILED:
                         job.logger.info(f"Job stopped at device {idx}/{total}. Exiting gracefully.")
-                        return ([], False) if return_cache_status else []
+                        return _empty_return(return_cache_status)
 
         # Drop any cached validation/meta keys before recomputing
         device.pop("_validation", None)
@@ -534,7 +539,7 @@ def process_device_filters(
         except (BrokenPipeError, ConnectionError, IOError) as e:
             if request:
                 logger.info(f"Client disconnected during device validation: {e}")
-                return ([], False) if return_cache_status else []
+                return _empty_return(return_cache_status)
             raise
 
         # Set VC detection metadata

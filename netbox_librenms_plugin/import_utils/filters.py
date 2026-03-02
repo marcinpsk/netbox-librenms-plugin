@@ -87,10 +87,15 @@ def get_librenms_devices_for_import(
         if filters:
             # Check for status filter first - it has special handling
             if filters.get("status") is not None:
+                # Normalize to int: form fields send strings ("1"/"0"), API may send ints
+                try:
+                    status_val = int(filters["status"])
+                except (ValueError, TypeError):
+                    status_val = None
                 # Status filter uses special types that don't need query param
-                if filters["status"] == 1:
+                if status_val == 1:
                     api_filters["type"] = "up"
-                elif filters["status"] == 0:
+                elif status_val == 0:
                     api_filters["type"] = "down"
 
                 # Save ALL other filters for client-side filtering when status is used
