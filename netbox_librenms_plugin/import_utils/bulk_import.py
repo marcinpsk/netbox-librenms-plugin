@@ -96,7 +96,7 @@ def bulk_import_devices_shared(
 
     for idx, device_id in enumerate(device_ids, start=1):
         # Check for job cancellation on the first device and every 5 devices thereafter
-        if job and (idx == 0 or idx % 5 == 0):
+        if job and (idx == 1 or idx % 5 == 0):
             # Refresh job from DB to get current status
             job.job.refresh_from_db()
             job_status = job.job.status
