@@ -16,7 +16,12 @@ from ..utils import (
     match_librenms_hardware_to_device_type,
 )
 from .cache import get_import_device_cache_key
-from .virtual_chassis import empty_virtual_chassis_data, get_virtual_chassis_data
+from .virtual_chassis import (
+    _generate_vc_member_name,
+    empty_virtual_chassis_data,
+    get_virtual_chassis_data,
+    update_vc_member_suggested_names,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +202,7 @@ def validate_device_for_import(
             "rack": None,
             "available_racks": [],
         },
+        "naming_criteria": None,  # Populated after resolved_name is set
     }
 
     try:
@@ -210,6 +216,13 @@ def validate_device_for_import(
             device_id=librenms_id,
         )
         result["resolved_name"] = hostname
+        result["naming_criteria"] = {
+            "use_sysname": use_sysname,
+            "strip_domain": strip_domain,
+            "raw_sysname": libre_device.get("sysName") or "",
+            "raw_hostname": libre_device.get("hostname") or "",
+            "source": "sysname" if use_sysname and libre_device.get("sysName") else "hostname",
+        }
         logger.debug(
             f"Checking for existing device/VM: "
             f"librenms_id={librenms_id} (type={type(librenms_id).__name__}), "
@@ -271,8 +284,19 @@ def validate_device_for_import(
                 if isinstance(existing_device.custom_field_data.get("librenms_id"), int):
                     result["librenms_id_needs_migration"] = True
 
-                # Check if name matches resolved name (accounts for use_sysname/strip_domain)
-                if hostname and existing_device.name == hostname:
+                # Check if name matches resolved name (VC-aware: compare against VC member name)
+                if hostname and existing_device.virtual_chassis and existing_device.vc_position:
+                    vc_expected_name = _generate_vc_member_name(
+                        hostname,
+                        existing_device.vc_position,
+                        serial=existing_device.serial or "",
+                    )
+                    if existing_device.name == vc_expected_name:
+                        result["name_matches"] = True
+                    else:
+                        result["name_sync_available"] = True
+                        result["suggested_name"] = vc_expected_name
+                elif hostname and existing_device.name == hostname:
                     result["name_matches"] = True
                 elif hostname and existing_device.name != hostname:
                     result["name_sync_available"] = True
@@ -537,6 +561,7 @@ def validate_device_for_import(
                                 f"Virtual chassis CONFIRMED for device {hostname}: "
                                 f"{vc_detection['member_count']} members"
                             )
+                            result["virtual_chassis"] = update_vc_member_suggested_names(vc_detection, hostname)
                 except Exception as e:
                     logger.exception(f"Exception during VC detection for device {hostname}: {e}")
                     result["virtual_chassis"]["detection_error"] = str(e)

@@ -252,8 +252,24 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
                 logger.error(f"Error getting device count: {e}")
                 device_count = 0
 
-            # Load settings for background job decision
+            # Load settings for background job decision; resolve naming preferences
             settings = None
+            try:
+                settings = LibreNMSSettings.objects.first()
+            except Exception:
+                pass
+            _use_sysname_pref = get_user_pref(request, "plugins.netbox_librenms_plugin.use_sysname")
+            _strip_domain_pref = get_user_pref(request, "plugins.netbox_librenms_plugin.strip_domain")
+            _use_sysname = (
+                _use_sysname_pref
+                if _use_sysname_pref is not None
+                else (getattr(settings, "use_sysname_default", True) if settings else True)
+            )
+            _strip_domain = (
+                _strip_domain_pref
+                if _strip_domain_pref is not None
+                else (getattr(settings, "strip_domain_default", False) if settings else False)
+            )
             # Decide whether to use background job
             # Skip background job if data is already cached
             if not devices_cached and self.should_use_background_job():
@@ -270,6 +286,8 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
                         show_disabled=bool(self._filter_form_data.get("show_disabled")),
                         exclude_existing=bool(self._filter_form_data.get("exclude_existing")),
                         server_key=self.librenms_api.server_key,
+                        use_sysname=_use_sysname,
+                        strip_domain=_strip_domain,
                     )
 
                     logger.info(
@@ -408,6 +426,24 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         show_disabled = bool(data_source.get("show_disabled"))
         exclude_existing = bool(data_source.get("exclude_existing"))
 
+        # Resolve naming preferences from form data / user pref / settings
+        use_sysname_pref = get_user_pref(self._request, "plugins.netbox_librenms_plugin.use_sysname")
+        strip_domain_pref = get_user_pref(self._request, "plugins.netbox_librenms_plugin.strip_domain")
+        try:
+            _settings = LibreNMSSettings.objects.first()
+        except Exception:
+            _settings = None
+        use_sysname = (
+            data_source.get("use_sysname_toggle", use_sysname_pref)
+            if use_sysname_pref is not None
+            else (getattr(_settings, "use_sysname_default", True) if _settings else True)
+        )
+        strip_domain = (
+            data_source.get("strip_domain_toggle", strip_domain_pref)
+            if strip_domain_pref is not None
+            else (getattr(_settings, "strip_domain_default", False) if _settings else False)
+        )
+
         validated_devices, from_cache = process_device_filters(
             api=self.librenms_api,
             filters=libre_filters,
@@ -417,6 +453,8 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             exclude_existing=exclude_existing,
             request=self._request,
             return_cache_status=True,
+            use_sysname=use_sysname,
+            strip_domain=strip_domain,
         )
 
         self._from_cache = from_cache
