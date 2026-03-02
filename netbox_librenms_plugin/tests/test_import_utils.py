@@ -2349,6 +2349,50 @@ class TestBuildSyncInfo:
         assert result["platform_synced"] is False
         assert result["all_synced"] is False
 
+    def test_platform_no_match_found_returns_bool(self):
+        """When find_matching_platform returns no match, platform_synced must be False (not None)."""
+        from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
+
+        existing = MagicMock()
+        existing.serial = "ABC123"
+        existing.platform = MagicMock()  # device has a platform set
+        device_type = MagicMock()
+        device_type.pk = 5
+        existing.device_type = device_type
+
+        libre_device = {"serial": "ABC123", "os": "ios", "hardware": "-"}
+
+        with patch("netbox_librenms_plugin.utils.find_matching_platform") as mock_platform_match:
+            mock_platform_match.return_value = {"found": False, "platform": None}
+
+            result = DeviceValidationDetailsView._build_sync_info(libre_device, existing)
+
+        # Without bool() cast this would be None; verify it's exactly False (type-stable)
+        assert result["platform_synced"] is False
+        assert isinstance(result["platform_synced"], bool)
+
+    def test_platform_synced_no_netbox_platform_returns_bool(self):
+        """When device has no platform in NetBox and os is non-dash, platform_synced must be bool."""
+        from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
+
+        existing = MagicMock()
+        existing.serial = "ABC123"
+        existing.platform = None  # no platform on device
+        device_type = MagicMock()
+        device_type.pk = 5
+        existing.device_type = device_type
+
+        libre_device = {"serial": "ABC123", "os": "eos", "hardware": "-"}
+
+        with patch("netbox_librenms_plugin.utils.find_matching_platform") as mock_platform_match:
+            mock_platform_match.return_value = {"found": True, "platform": MagicMock()}
+
+            result = DeviceValidationDetailsView._build_sync_info(libre_device, existing)
+
+        # None and ... returns None; bool() cast ensures False
+        assert result["platform_synced"] is False
+        assert isinstance(result["platform_synced"], bool)
+
     def test_hardware_no_match_device_type_out_of_sync(self):
         """When hardware is present but no device type match found, device_type_synced is False."""
         from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
@@ -2711,3 +2755,148 @@ class TestProcessDeviceFilters:
         # The resolved api.server_key ("resolved-key") must be passed, not None
         assert mock_import.call_args is not None
         assert mock_import.call_args.kwargs.get("server_key") == "resolved-key"
+
+
+class TestVCPositionHandling:
+    """Test VC position normalization and suggested name generation."""
+
+    def test_clone_vc_data_position_fallback_is_one_based(self):
+        """_clone_virtual_chassis_data fallback must be 1-based (idx+1, not idx)."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _clone_virtual_chassis_data
+
+        data = {"is_stack": True, "member_count": 2, "members": [{"serial": "S1"}, {"serial": "S2"}]}
+        result = _clone_virtual_chassis_data(data)
+        positions = [m["position"] for m in result["members"]]
+        # First member: idx=0 → position should be 1, not 0
+        assert positions[0] == 1
+        assert positions[1] == 2
+
+    def test_clone_vc_data_preserves_explicit_positions(self):
+        """_clone_virtual_chassis_data must preserve explicitly set positions."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _clone_virtual_chassis_data
+
+        data = {
+            "is_stack": True,
+            "member_count": 2,
+            "members": [{"serial": "S1", "position": 3}, {"serial": "S2", "position": 5}],
+        }
+        result = _clone_virtual_chassis_data(data)
+        assert result["members"][0]["position"] == 3
+        assert result["members"][1]["position"] == 5
+
+    def test_clone_vc_data_bad_position_falls_back_to_one_based(self):
+        """_clone_virtual_chassis_data falls back to idx+1 for non-int position."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _clone_virtual_chassis_data
+
+        data = {
+            "is_stack": True,
+            "member_count": 2,
+            "members": [{"serial": "S1", "position": "bad"}, {"serial": "S2", "position": None}],
+        }
+        result = _clone_virtual_chassis_data(data)
+        # idx=0 → fallback 1, idx=1 → fallback 2
+        assert result["members"][0]["position"] == 1
+        assert result["members"][1]["position"] == 2
+
+    def test_suggested_name_uses_position_directly(self):
+        """Suggested name generation must use position directly (not position+1).
+
+        This test verifies that _generate_vc_member_name is called with the
+        already-1-based position value, not position+1.
+        """
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
+
+        # position=1 should produce name with "1", not "2"
+        name = _generate_vc_member_name("switch-1", 1, pattern="-M{position}")
+        assert name == "switch-1-M1", f"Expected 'switch-1-M1', got '{name}'"
+
+        # position=2 should produce "2", not "3"
+        name = _generate_vc_member_name("switch-1", 2, pattern="-M{position}")
+        assert name == "switch-1-M2", f"Expected 'switch-1-M2', got '{name}'"
+
+
+class TestBulkImportCancellation:
+    """Test that bulk_import_devices_shared respects RQ and DB cancellation."""
+
+    def _run_bulk_import(self, mock_rq_job=None, db_status="running", device_ids=None):
+        """Helper: run bulk_import with provided mocks, return import call count."""
+        from unittest.mock import MagicMock, patch
+
+        if device_ids is None:
+            device_ids = [1, 2, 3, 4, 5, 6]
+
+        job = MagicMock()
+        job.job.job_id = "test-uuid"
+        job_status = MagicMock()
+        job_status.value = db_status
+        job.job.status = job_status
+        job.logger = MagicMock()
+
+        with (
+            patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI") as mock_api_cls,
+            patch("netbox_librenms_plugin.import_utils.bulk_import.import_single_device") as mock_import,
+            patch("netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import"),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions"),
+            # Inline imports in the loop use django_rq.get_queue / rq.job.Job directly
+            patch("django_rq.get_queue") as mock_get_queue,
+            patch("rq.job.Job") as mock_rqjob_cls,
+        ):
+            mock_api = MagicMock()
+            mock_api.server_key = "default"
+            mock_api.get_device_info.return_value = (True, {"device_id": 1, "hostname": "sw"})
+            mock_api_cls.return_value = mock_api
+            mock_import.return_value = {"success": True, "device": MagicMock(), "is_vm": False}
+
+            if mock_rq_job is not None:
+                mock_conn = MagicMock()
+                mock_queue = MagicMock()
+                mock_queue.connection = mock_conn
+                mock_get_queue.return_value = mock_queue
+                mock_rqjob_cls.fetch.return_value = mock_rq_job
+            else:
+                # Simulate RQ unavailable — get_queue raises, triggers DB fallback
+                mock_get_queue.side_effect = Exception("RQ unavailable")
+
+            from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+
+            bulk_import_devices_shared(device_ids, user=MagicMock(), server_key=None, job=job)
+
+            return mock_import.call_count
+
+    def test_rq_stopped_cancels_import_loop(self):
+        """When RQ job is_stopped, import loop should break early."""
+        rq_job = MagicMock()
+        rq_job.is_stopped = True
+        rq_job.is_failed = False
+        rq_job.get_status.return_value = "stopped"
+
+        # With 6 devices and RQ stopped on first check (idx=1), at most 1 device processed
+        count = self._run_bulk_import(mock_rq_job=rq_job, device_ids=[1, 2, 3, 4, 5, 6])
+        assert count == 0  # break before first import
+
+    def test_rq_failed_cancels_import_loop(self):
+        """When RQ job is_failed, import loop should break early."""
+        rq_job = MagicMock()
+        rq_job.is_stopped = False
+        rq_job.is_failed = True
+        rq_job.get_status.return_value = "failed"
+
+        count = self._run_bulk_import(mock_rq_job=rq_job, device_ids=[1, 2, 3, 4, 5, 6])
+        assert count == 0
+
+    def test_rq_unavailable_falls_back_to_db_check(self):
+        """When RQ is unavailable, DB status check is used as fallback."""
+        # mock_rq_job=None triggers the side_effect=Exception path
+        count = self._run_bulk_import(mock_rq_job=None, db_status="failed", device_ids=[1])
+        # With DB status "failed", import should not run
+        assert count == 0
+
+    def test_healthy_job_runs_all_devices(self):
+        """When job is healthy, all devices should be imported."""
+        rq_job = MagicMock()
+        rq_job.is_stopped = False
+        rq_job.is_failed = False
+        rq_job.get_status.return_value = "started"
+
+        count = self._run_bulk_import(mock_rq_job=rq_job, device_ids=[1, 2, 3])
+        assert count == 3

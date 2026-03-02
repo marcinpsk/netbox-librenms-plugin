@@ -94,20 +94,36 @@ def bulk_import_devices_shared(
     api = LibreNMSAPI(server_key=server_key)
 
     for idx, device_id in enumerate(device_ids, start=1):
-        # Check for job cancellation every 5 devices
-        if job and idx % 5 == 0:
-            # Refresh job from DB to get current status
-            job.job.refresh_from_db()
-            job_status = job.job.status
-            status_value = job_status.value if hasattr(job_status, "value") else job_status
-            if status_value in (JobStatusChoices.STATUS_FAILED, "failed", "errored"):
-                if job.logger:
-                    job.logger.warning(f"Import job cancelled at device {idx} of {total}")
-                else:
-                    logger.warning(f"Import cancelled at device {idx} of {total}")
-                break
-            # Log progress
-            if job.logger:
+        # Check for job cancellation on first iteration and every 5th thereafter.
+        # Check RQ/Redis state first (reflects stop API immediately); fall back to DB.
+        if job and (idx == 1 or idx % 5 == 0):
+            try:
+                from django_rq import get_queue
+                from rq.job import Job as RQJob
+
+                queue = get_queue("default")
+                rq_job = RQJob.fetch(str(job.job.job_id), connection=queue.connection)
+                if rq_job.is_failed or rq_job.is_stopped:
+                    if job.logger:
+                        job.logger.warning(
+                            f"Import job stopped at device {idx} of {total} (RQ status: {rq_job.get_status()})"
+                        )
+                    else:
+                        logger.warning(f"Import cancelled at device {idx} of {total}")
+                    break
+            except Exception:
+                # Fall back to DB check if RQ is unavailable
+                job.job.refresh_from_db()
+                job_status = job.job.status
+                status_value = job_status.value if hasattr(job_status, "value") else job_status
+                if status_value in (JobStatusChoices.STATUS_FAILED, "failed", "errored"):
+                    if job.logger:
+                        job.logger.warning(f"Import job cancelled at device {idx} of {total}")
+                    else:
+                        logger.warning(f"Import cancelled at device {idx} of {total}")
+                    break
+            # Log progress (only after first check)
+            if idx > 1 and job.logger:
                 job.logger.info(f"Imported device {idx} of {total}")
 
         try:
