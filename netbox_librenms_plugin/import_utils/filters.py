@@ -172,13 +172,14 @@ def get_librenms_devices_for_import(
             # We'll filter client-side if needed
 
         # Use caching to avoid repeated API calls
-        # Include both API and client filters in cache key (deterministic, cross-process stable)
+        # Include both API and client filters in cache key (deterministic, cross-process stable).
+        # Use api.server_key (always resolved) rather than the raw server_key arg (may differ).
         def _hash(d):
             return hashlib.sha256(
                 json.dumps(sorted(d.items()) if isinstance(d, dict) else d, sort_keys=True).encode()
             ).hexdigest()[:16]
 
-        cache_key = f"librenms_devices_import_{server_key}_{_hash(api_filters)}_{_hash(client_filters)}"
+        cache_key = f"librenms_devices_import_{api.server_key}_{_hash(api_filters)}_{_hash(client_filters)}"
         from_cache = False
 
         if force_refresh:

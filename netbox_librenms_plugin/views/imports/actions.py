@@ -880,6 +880,13 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
         if not libre_device:
             return HttpResponse("LibreNMS device not found", status=404)
 
+        # Verify the POSTed existing_device_id matches the validated conflict target.
+        # Without this check, an attacker could mutate an arbitrary device.
+        # Only enforce when validation has a known existing_device (conflict case).
+        validated_existing = validation.get("existing_device") if validation else None
+        if validated_existing is not None and validated_existing.pk != existing_device.pk:
+            return HttpResponse("Device ID mismatch: existing_device_id does not match validated device", status=400)
+
         # Require force flag when device type mismatches, but only for actions that use it
         _FORCE_REQUIRED_ACTIONS = {"link", "update", "update_serial", "update_type"}
         force = request.POST.get("force") == "on"
@@ -900,7 +907,10 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
         except (TypeError, ValueError):
             return HttpResponse("Invalid or missing LibreNMS device_id in payload", status=400)
 
-        # Check for LibreNMS ID collision before any linking action
+        # Check for LibreNMS ID collision before any linking action.
+        # find_by_librenms_id returns None or the *one* device matching the ID.
+        # Comparing .pk != existing_device.pk is equivalent to .exclude(pk=...).exists()
+        # for conflict detection — both find any *other* device with the same librenms_id.
         if action in {"link", "update", "update_serial"}:
             from netbox_librenms_plugin.utils import find_by_librenms_id
 
@@ -915,15 +925,11 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
         if action == "link":
             # Link to LibreNMS and update name from LibreNMS data
             resolved_name = validation.get("resolved_name")
-            hostname = (
-                resolved_name
-                if resolved_name
-                else _determine_device_name(
-                    libre_device,
-                    use_sysname=request.POST.get("use-sysname-toggle") == "on",
-                    strip_domain=request.POST.get("strip-domain-toggle") == "on",
-                )
-            )
+            if resolved_name:
+                hostname = resolved_name
+            else:
+                use_sysname, strip_domain = _resolve_naming_preferences(request)
+                hostname = _determine_device_name(libre_device, use_sysname=use_sysname, strip_domain=strip_domain)
             set_librenms_device_id(existing_device, librenms_id, self.librenms_api.server_key)
             existing_device.name = hostname
             if librenms_device_type:
@@ -935,21 +941,17 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
             # Update hostname, serial, and link to LibreNMS
             resolved_name = validation.get("resolved_name")
             incoming_serial = libre_device.get("serial") or ""
-            hostname = (
-                resolved_name
-                if resolved_name
-                else _determine_device_name(
-                    libre_device,
-                    use_sysname=request.POST.get("use-sysname-toggle") == "on",
-                    strip_domain=request.POST.get("strip-domain-toggle") == "on",
-                )
-            )
+            if resolved_name:
+                hostname = resolved_name
+            else:
+                use_sysname, strip_domain = _resolve_naming_preferences(request)
+                hostname = _determine_device_name(libre_device, use_sysname=use_sysname, strip_domain=strip_domain)
             if incoming_serial and incoming_serial != "-":
                 conflict_device = Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
                 if conflict_device:
                     return HttpResponse(
-                        f"Serial conflict: '{incoming_serial}' is already assigned to device "
-                        f"'{conflict_device.name}' (ID: {conflict_device.pk})",
+                        f"Serial conflict: '{escape(incoming_serial)}' is already assigned to device "
+                        f"'{escape(conflict_device.name)}' (ID: {conflict_device.pk})",
                         status=409,
                     )
                 existing_device.serial = incoming_serial
@@ -970,8 +972,8 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
                 conflict_device = Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
                 if conflict_device:
                     return HttpResponse(
-                        f"Serial conflict: '{incoming_serial}' is already assigned to device "
-                        f"'{conflict_device.name}' (ID: {conflict_device.pk})",
+                        f"Serial conflict: '{escape(incoming_serial)}' is already assigned to device "
+                        f"'{escape(conflict_device.name)}' (ID: {conflict_device.pk})",
                         status=409,
                     )
                 existing_device.serial = incoming_serial
@@ -987,15 +989,11 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
         elif action == "sync_name":
             # Sync device name from LibreNMS (e.g., IP → sysName)
             resolved_name = validation.get("resolved_name")
-            hostname = (
-                resolved_name
-                if resolved_name
-                else _determine_device_name(
-                    libre_device,
-                    use_sysname=request.POST.get("use-sysname-toggle") == "on",
-                    strip_domain=request.POST.get("strip-domain-toggle") == "on",
-                )
-            )
+            if resolved_name:
+                hostname = resolved_name
+            else:
+                use_sysname, strip_domain = _resolve_naming_preferences(request)
+                hostname = _determine_device_name(libre_device, use_sysname=use_sysname, strip_domain=strip_domain)
             existing_device.name = hostname
             existing_device.save()
             logger.info(f"Synced name on device '{existing_device.name}' from LibreNMS")
@@ -1021,8 +1019,8 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
                         f"'{conflict_device.name}' (pk={conflict_device.pk})"
                     )
                     return HttpResponse(
-                        f"Serial conflict: '{incoming_serial}' is already assigned to device "
-                        f"'{conflict_device.name}' (ID: {conflict_device.pk})",
+                        f"Serial conflict: '{escape(incoming_serial)}' is already assigned to device "
+                        f"'{escape(conflict_device.name)}' (ID: {conflict_device.pk})",
                         status=409,
                     )
                 existing_device.serial = incoming_serial

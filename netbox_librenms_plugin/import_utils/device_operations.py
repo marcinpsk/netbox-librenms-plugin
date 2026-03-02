@@ -234,7 +234,10 @@ def validate_device_for_import(
             result["import_as_vm"] = True  # Force VM mode since VM exists
             result["can_import"] = False
 
-            # Detect legacy bare-integer format so UI can offer a migration action
+            # Detect legacy bare-integer format so UI can offer a migration action.
+            # Direct access needed to detect legacy integer format for migration prompt:
+            # LibreNMSAPI.get_librenms_id() returns an int in both formats, so only the
+            # raw type check on custom_field_data reveals whether migration is needed.
             if isinstance(existing_vm.custom_field_data.get("librenms_id"), int):
                 result["librenms_id_needs_migration"] = True
 
@@ -261,7 +264,10 @@ def validate_device_for_import(
                 result["existing_match_type"] = "librenms_id"
                 result["can_import"] = False
 
-                # Detect legacy bare-integer format so UI can offer a migration action
+                # Detect legacy bare-integer format so UI can offer a migration action.
+                # Direct access needed to detect legacy integer format for migration prompt:
+                # LibreNMSAPI.get_librenms_id() returns an int in both formats, so only the
+                # raw type check on custom_field_data reveals whether migration is needed.
                 if isinstance(existing_device.custom_field_data.get("librenms_id"), int):
                     result["librenms_id_needs_migration"] = True
 
