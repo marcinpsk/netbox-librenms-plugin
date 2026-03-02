@@ -238,6 +238,7 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
                     devices_cached = devices_from_cache
                 except Exception:
                     # Cache check failed; proceed with background job decision based on device_count
+                    logger.debug("Cache check failed; proceeding without cached result")
                     pass
 
             # Get device count for background job decision
@@ -257,7 +258,7 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             try:
                 settings = LibreNMSSettings.objects.first()
             except Exception:
-                pass
+                logger.exception("Failed to load LibreNMSSettings for background job naming prefs")
             _use_sysname_pref = get_user_pref(request, "plugins.netbox_librenms_plugin.use_sysname")
             _strip_domain_pref = get_user_pref(request, "plugins.netbox_librenms_plugin.strip_domain")
             _use_sysname = (
@@ -323,6 +324,10 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         try:
             settings, _ = LibreNMSSettings.objects.get_or_create()
         except Exception:
+            logger.exception(
+                "Failed to get or create LibreNMSSettings during LibreNMS import for user %s",
+                getattr(request, "user", None),
+            )
             settings = None
 
         # User preference overrides for toggles (persisted per-user)
@@ -432,6 +437,7 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         try:
             _settings = LibreNMSSettings.objects.first()
         except Exception:
+            logger.exception("Failed to load LibreNMSSettings for naming preferences")
             _settings = None
         use_sysname = (
             data_source.get("use_sysname_toggle", use_sysname_pref)
