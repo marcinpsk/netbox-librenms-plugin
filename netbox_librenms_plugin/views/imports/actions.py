@@ -788,7 +788,7 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
 
         netbox_platform = platform_info["netbox_platform"]
         matching_platform = platform_info["matching_platform"]
-        platform_synced = librenms_os == "-" or (
+        platform_synced = librenms_os == "-" or bool(
             netbox_platform and matching_platform and netbox_platform.pk == matching_platform.pk
         )
 

@@ -32,11 +32,11 @@ def _clone_virtual_chassis_data(data: dict | None) -> dict:
     members = []
     for idx, member in enumerate(data.get("members", [])):
         member_copy = member.copy()
-        raw_position = member_copy.get("position", idx)
+        raw_position = member_copy.get("position", idx + 1)
         try:
             member_copy["position"] = int(raw_position)
         except (TypeError, ValueError):
-            member_copy["position"] = idx
+            member_copy["position"] = idx + 1  # 1-based fallback; position 0 is invalid
         members.append(member_copy)
 
     member_count = data.get("member_count") or len(members)
@@ -214,11 +214,12 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
                 "description": chassis.get("entPhysicalDescr", ""),
             }
 
-            # Generate suggested name if we have master name
+            # Generate suggested name if we have master name.
+            # position is already 1-based, so pass it directly (no +1).
             if master_name:
-                member_data["suggested_name"] = _generate_vc_member_name(master_name, position + 1)
+                member_data["suggested_name"] = _generate_vc_member_name(master_name, position)
             else:
-                member_data["suggested_name"] = f"Member-{position + 1}"
+                member_data["suggested_name"] = f"Member-{position}"
 
             members.append(member_data)
 
