@@ -90,8 +90,8 @@ def bulk_import_devices_shared(
     api = LibreNMSAPI(server_key=server_key)
 
     for idx, device_id in enumerate(device_ids, start=1):
-        # Check for job cancellation every 5 devices
-        if job and idx % 5 == 0:
+        # Check for job cancellation on the first device and every 5 devices thereafter
+        if job and (idx == 0 or idx % 5 == 0):
             # Refresh job from DB to get current status
             job.job.refresh_from_db()
             job_status = job.job.status
@@ -317,6 +317,10 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
         return
     try:
         from dcim.models import Device
+        from virtualization.models import VirtualMachine
+
+        import_as_vm = validation.get("import_as_vm", False)
+        Model = VirtualMachine if import_as_vm else Device
 
         librenms_id = libre_device.get("device_id")
         hostname = libre_device.get("hostname", "")
@@ -328,7 +332,7 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
         # Check by librenms_id custom field first (JSON multi-server format + legacy)
         if librenms_id:
             try:
-                new_device = find_by_librenms_id(Device, int(librenms_id), server_key)
+                new_device = find_by_librenms_id(Model, int(librenms_id), server_key)
                 if new_device:
                     match_type = "librenms_id"
             except (ValueError, TypeError):
@@ -336,9 +340,9 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
 
         # Fall back to hostname match
         if not new_device and hostname:
-            new_device = Device.objects.filter(name__iexact=hostname).first()
+            new_device = Model.objects.filter(name__iexact=hostname).first()
             if not new_device and sys_name:
-                new_device = Device.objects.filter(name__iexact=sys_name).first()
+                new_device = Model.objects.filter(name__iexact=sys_name).first()
             if new_device:
                 match_type = "hostname"
 
@@ -347,7 +351,7 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             validation["existing_match_type"] = match_type
             validation["can_import"] = False
             validation["is_ready"] = False
-            if hasattr(new_device, "role") and new_device.role:
+            if not import_as_vm and hasattr(new_device, "role") and new_device.role:
                 validation["device_role"] = {"found": True, "role": new_device.role}
     except Exception as e:
         logger.error(f"Failed to check for newly imported device: {e}")
