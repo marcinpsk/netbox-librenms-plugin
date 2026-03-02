@@ -198,11 +198,13 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
         # Step 5: Extract member info
         members = []
         for idx, chassis in enumerate(chassis_items):
-            raw_position = chassis.get("entPhysicalParentRelPos", idx)
+            # entPhysicalParentRelPos is 1-based; fall back to idx+1 (not idx) so
+            # position 0 is never produced — VC positions must be ≥ 1.
+            raw_position = chassis.get("entPhysicalParentRelPos", idx + 1)
             try:
                 position = int(raw_position)
             except (TypeError, ValueError):
-                position = idx
+                position = idx + 1
             member_data = {
                 "serial": chassis.get("entPhysicalSerialNum", ""),
                 "position": position,
@@ -402,15 +404,22 @@ def create_virtual_chassis_with_members(master_device: Device, members_info: lis
                     logger.warning(f"Device with serial '{serial}' already exists, skipping VC member creation")
                     continue
 
-                # Prefer the discovered SNMP position; fall back to sequential counter
+                # Prefer the discovered SNMP position; fall back to sequential counter.
+                # Normalize discovered_pos: 0 is not a valid VC position, treat as absent.
                 try:
                     discovered_pos = int(member.get("position")) if member.get("position") is not None else None
                 except (TypeError, ValueError):
                     discovered_pos = None
+                if discovered_pos is not None and discovered_pos < 1:
+                    discovered_pos = None  # 0 is invalid for vc_position; fall back to counter
                 chosen_pos = discovered_pos if discovered_pos is not None else position
-                # Advance sequential counter only when it was consumed as a fallback
+                # Advance the sequential counter:
+                # - if discovered_pos was used, advance counter past it to avoid future reuse;
+                # - if counter was consumed as fallback, increment it normally.
                 if discovered_pos is None:
                     position += 1
+                else:
+                    position = max(position, discovered_pos + 1)
 
                 member_name = _generate_vc_member_name(master_base_name, chosen_pos, serial=serial, pattern=vc_pattern)
 
