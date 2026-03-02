@@ -6,6 +6,7 @@ import logging
 from django.contrib import messages
 from django.core.cache import cache
 from django.core.exceptions import PermissionDenied
+from django.db import transaction
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.utils.html import escape
@@ -31,9 +32,12 @@ from netbox_librenms_plugin.import_validation_helpers import (
 )
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 from netbox_librenms_plugin.utils import get_user_pref, save_user_pref, set_librenms_device_id
-from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
+from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
 logger = logging.getLogger(__name__)
+
+# Actions that require the force checkbox when a device-type mismatch is detected.
+_FORCE_REQUIRED_ACTIONS = frozenset({"link", "update", "update_serial", "update_type"})
 
 
 def _resolve_naming_preferences(request) -> tuple[bool, bool]:
@@ -309,7 +313,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             vc_requested = request.GET.get("enable_vc_detection") == "true"
             validation["_vc_detection_enabled"] = vc_requested
 
-            device_name = validation["resolved_name"]
+            device_name = validation.get("resolved_name")
 
             if validation.get("virtual_chassis", {}).get("is_stack") and device_name:
                 validation["virtual_chassis"] = update_vc_member_suggested_names(
@@ -855,7 +859,9 @@ class DeviceRackUpdateView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImpo
         return self.render_device_row(request, libre_device, validation, selections)
 
 
-class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View):
+class DeviceConflictActionView(
+    LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View
+):
     """HTMX view to resolve device conflicts (link, update, update serial)."""
 
     def post(self, request, device_id):
@@ -876,6 +882,11 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
         except (Device.DoesNotExist, ValueError):
             return HttpResponse("Existing device not found", status=404)
 
+        # Object-level change permission for the specific device being mutated.
+        self.required_object_permissions = {"POST": [("change", Device)]}
+        if error := self.require_object_permissions("POST"):
+            return error
+
         libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
         if not libre_device:
             return HttpResponse("LibreNMS device not found", status=404)
@@ -890,7 +901,6 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
             return HttpResponse("Device ID mismatch: existing_device_id does not match validated device", status=400)
 
         # Require force flag when device type mismatches, but only for actions that use it
-        _FORCE_REQUIRED_ACTIONS = {"link", "update", "update_serial", "update_type"}
         force = request.POST.get("force") == "on"
         if validation.get("device_type_mismatch") and action in _FORCE_REQUIRED_ACTIONS and not force:
             return HttpResponse(
@@ -909,89 +919,98 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
         except (TypeError, ValueError):
             return HttpResponse("Invalid or missing LibreNMS device_id in payload", status=400)
 
-        # Check for LibreNMS ID collision before any linking action: detect any *other*
-        # Device that already carries the same librenms_id, excluding the current target.
+        # Wrap the LibreNMS-ID collision check and subsequent write in a single
+        # transaction so the read-then-write is atomic for link/update/update_serial.
         if action in {"link", "update", "update_serial"}:
             from django.db.models import Q
 
-            server_key = self.librenms_api.server_key
-            conflict_exists = (
-                Device.objects.filter(
-                    Q(**{f"custom_field_data__librenms_id__{server_key}": librenms_id})
-                    | Q(custom_field_data__librenms_id=librenms_id)
+            with transaction.atomic():
+                server_key = self.librenms_api.server_key
+                conflict_exists = (
+                    Device.objects.filter(
+                        Q(**{f"custom_field_data__librenms_id__{server_key}": librenms_id})
+                        | Q(custom_field_data__librenms_id=librenms_id)
+                    )
+                    .exclude(pk=existing_device.pk)
+                    .exists()
                 )
-                .exclude(pk=existing_device.pk)
-                .exists()
-            )
-            if conflict_exists:
-                return HttpResponse(
-                    f"LibreNMS ID conflict: ID {librenms_id} is already assigned to another device.",
-                    status=409,
-                )
-
-        if action == "link":
-            # Link to LibreNMS and update name from LibreNMS data
-            resolved_name = validation.get("resolved_name")
-            if resolved_name:
-                hostname = resolved_name
-            else:
-                use_sysname, strip_domain = _resolve_naming_preferences(request)
-                hostname = _determine_device_name(libre_device, use_sysname=use_sysname, strip_domain=strip_domain)
-            set_librenms_device_id(existing_device, librenms_id, self.librenms_api.server_key)
-            existing_device.name = hostname
-            if librenms_device_type:
-                existing_device.device_type = librenms_device_type
-            existing_device.save()
-            logger.info(f"Linked device '{existing_device.name}' to LibreNMS ID {librenms_id}")
-
-        elif action == "update":
-            # Update hostname, serial, and link to LibreNMS
-            resolved_name = validation.get("resolved_name")
-            incoming_serial = libre_device.get("serial") or ""
-            if resolved_name:
-                hostname = resolved_name
-            else:
-                use_sysname, strip_domain = _resolve_naming_preferences(request)
-                hostname = _determine_device_name(libre_device, use_sysname=use_sysname, strip_domain=strip_domain)
-            if incoming_serial and incoming_serial != "-":
-                conflict_device = Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
-                if conflict_device:
+                if conflict_exists:
                     return HttpResponse(
-                        f"Serial conflict: '{escape(incoming_serial)}' is already assigned to device "
-                        f"'{escape(conflict_device.name)}' (ID: {conflict_device.pk})",
+                        f"LibreNMS ID conflict: ID {librenms_id} is already assigned to another device.",
                         status=409,
                     )
-                existing_device.serial = incoming_serial
-            existing_device.name = hostname
-            if librenms_device_type:
-                existing_device.device_type = librenms_device_type
-            set_librenms_device_id(existing_device, librenms_id, self.librenms_api.server_key)
-            existing_device.save()
-            logger.info(
-                f"Updated device '{existing_device.name}': serial={incoming_serial}, "
-                f"linked to LibreNMS ID {librenms_id}"
-            )
 
-        elif action == "update_serial":
-            # Update only the serial and link to LibreNMS
-            incoming_serial = libre_device.get("serial") or ""
-            if incoming_serial and incoming_serial != "-":
-                conflict_device = Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
-                if conflict_device:
-                    return HttpResponse(
-                        f"Serial conflict: '{escape(incoming_serial)}' is already assigned to device "
-                        f"'{escape(conflict_device.name)}' (ID: {conflict_device.pk})",
-                        status=409,
+                if action == "link":
+                    # Link to LibreNMS and update name from LibreNMS data
+                    resolved_name = validation.get("resolved_name")
+                    if resolved_name:
+                        hostname = resolved_name
+                    else:
+                        use_sysname, strip_domain = _resolve_naming_preferences(request)
+                        hostname = _determine_device_name(
+                            libre_device, use_sysname=use_sysname, strip_domain=strip_domain
+                        )
+                    set_librenms_device_id(existing_device, librenms_id, self.librenms_api.server_key)
+                    existing_device.name = hostname
+                    if librenms_device_type:
+                        existing_device.device_type = librenms_device_type
+                    existing_device.save()
+                    logger.info(f"Linked device '{existing_device.name}' to LibreNMS ID {librenms_id}")
+
+                elif action == "update":
+                    # Update hostname, serial, and link to LibreNMS
+                    resolved_name = validation.get("resolved_name")
+                    incoming_serial = libre_device.get("serial") or ""
+                    if resolved_name:
+                        hostname = resolved_name
+                    else:
+                        use_sysname, strip_domain = _resolve_naming_preferences(request)
+                        hostname = _determine_device_name(
+                            libre_device, use_sysname=use_sysname, strip_domain=strip_domain
+                        )
+                    if incoming_serial and incoming_serial != "-":
+                        conflict_device = (
+                            Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
+                        )
+                        if conflict_device:
+                            return HttpResponse(
+                                f"Serial conflict: '{escape(incoming_serial)}' is already assigned to device "
+                                f"'{escape(conflict_device.name)}' (ID: {conflict_device.pk})",
+                                status=409,
+                            )
+                        existing_device.serial = incoming_serial
+                    existing_device.name = hostname
+                    if librenms_device_type:
+                        existing_device.device_type = librenms_device_type
+                    set_librenms_device_id(existing_device, librenms_id, self.librenms_api.server_key)
+                    existing_device.save()
+                    logger.info(
+                        f"Updated device '{existing_device.name}': serial={incoming_serial}, "
+                        f"linked to LibreNMS ID {librenms_id}"
                     )
-                existing_device.serial = incoming_serial
-            if librenms_device_type:
-                existing_device.device_type = librenms_device_type
-            set_librenms_device_id(existing_device, librenms_id, self.librenms_api.server_key)
-            existing_device.save()
-            logger.info(
-                f"Updated serial on device '{existing_device.name}' to {incoming_serial}, "
-                f"linked to LibreNMS ID {librenms_id}"
-            )
+
+                elif action == "update_serial":
+                    # Update only the serial and link to LibreNMS
+                    incoming_serial = libre_device.get("serial") or ""
+                    if incoming_serial and incoming_serial != "-":
+                        conflict_device = (
+                            Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
+                        )
+                        if conflict_device:
+                            return HttpResponse(
+                                f"Serial conflict: '{escape(incoming_serial)}' is already assigned to device "
+                                f"'{escape(conflict_device.name)}' (ID: {conflict_device.pk})",
+                                status=409,
+                            )
+                        existing_device.serial = incoming_serial
+                    if librenms_device_type:
+                        existing_device.device_type = librenms_device_type
+                    set_librenms_device_id(existing_device, librenms_id, self.librenms_api.server_key)
+                    existing_device.save()
+                    logger.info(
+                        f"Updated serial on device '{existing_device.name}' to {incoming_serial}, "
+                        f"linked to LibreNMS ID {librenms_id}"
+                    )
 
         elif action == "sync_name":
             # Sync device name from LibreNMS (e.g., IP → sysName)

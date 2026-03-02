@@ -1215,7 +1215,7 @@ class TestSerialNumberMatching:
 
         assert result["serial_action"] == "hostname_differs"
         assert result["existing_match_type"] == "serial"
-        assert "reinstalled" in result["warnings"][0]
+        assert "hostname differs" in result["warnings"][0]
 
     def test_hostname_match_diff_serial_offers_update(self):
         """Hostname matches but serial differs offers update_serial action."""
@@ -1797,7 +1797,9 @@ class TestDeviceConflictActionView:
             patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
             patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
             patch("dcim.models.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx,
         ):
+            mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
@@ -1839,7 +1841,9 @@ class TestDeviceConflictActionView:
             patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
             patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
             patch("dcim.models.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx,
         ):
+            mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
@@ -1877,7 +1881,9 @@ class TestDeviceConflictActionView:
             patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
             patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
             patch("dcim.models.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx,
         ):
+            mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
@@ -1916,8 +1922,11 @@ class TestDeviceConflictActionView:
             patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
             patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
             patch("dcim.models.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx,
         ):
+            mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
@@ -1943,14 +1952,18 @@ class TestDeviceConflictActionView:
         request = self._create_request("invalid_action", 42)
 
         existing_device = MagicMock()
+        existing_device.pk = 42
         libre_device = {"device_id": 10, "hostname": "switch-01", "serial": "ABC"}
 
         with (
             patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
+            patch.object(DeviceConflictActionView, "require_object_permissions", return_value=None),
             patch("dcim.models.Device") as mock_device_cls,
         ):
             mock_device_cls.objects.get.return_value = existing_device
-            mock_validate.return_value = (libre_device, {}, {})
+            # Include existing_device so the validated-conflict-target guard passes;
+            # we want to exercise the unknown-action branch, not the missing-device guard.
+            mock_validate.return_value = (libre_device, {"existing_device": existing_device}, {})
 
             response = view.post(request, device_id=10)
 
@@ -2050,7 +2063,9 @@ class TestDeviceConflictActionView:
             patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
             patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
             patch("dcim.models.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx,
         ):
+            mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
@@ -2098,7 +2113,9 @@ class TestDeviceConflictActionView:
             patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
             patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
             patch("dcim.models.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx,
         ):
+            mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
@@ -2529,3 +2546,168 @@ class TestDeviceNamingPreferences:
         result = validate_device_for_import(device_data, include_vc_detection=False)
         assert "resolved_name" in result
         assert result["resolved_name"] == "switch-01"
+
+
+class TestProcessDeviceFilters:
+    """Tests for process_device_filters and related bulk_import utilities."""
+
+    def test_show_disabled_filters_integer_status_1(self):
+        """show_disabled=False should keep devices with status==1 (int)."""
+        from unittest.mock import MagicMock, patch
+
+        devices = [
+            {"device_id": 1, "hostname": "a", "status": 1},
+            {"device_id": 2, "hostname": "b", "status": 0},
+        ]
+        with (
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.get_librenms_devices_for_import",
+                return_value=(devices, False),
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import",
+                side_effect=lambda d, **kw: {
+                    "resolved_name": d["hostname"],
+                    "is_ready": True,
+                    "can_import": True,
+                    "status": "active",
+                    "existing_device": None,
+                    "import_as_vm": False,
+                    "existing_match_type": None,
+                },
+            ),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.prefetch_vc_data_for_devices"),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.cache"),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.get_cache_metadata_key", return_value="key"),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.get_validated_device_cache_key", return_value="vkey"
+            ),
+        ):
+            from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
+
+            api = MagicMock()
+            api.server_key = "default"
+            result = process_device_filters(
+                api, filters={}, vc_detection_enabled=False, clear_cache=False, show_disabled=False
+            )
+
+        # Only device with status==1 should be processed; disabled device excluded before validation
+        assert len(result) == 1
+        assert result[0]["hostname"] == "a"
+
+    def test_show_disabled_filters_string_status_1(self):
+        """show_disabled=False should keep devices with status=='1' (string from API)."""
+        from unittest.mock import MagicMock, patch
+
+        devices = [
+            {"device_id": 1, "hostname": "a", "status": "1"},
+            {"device_id": 2, "hostname": "b", "status": "0"},
+        ]
+        with (
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.get_librenms_devices_for_import",
+                return_value=(devices, False),
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import",
+                side_effect=lambda d, **kw: {
+                    "resolved_name": d["hostname"],
+                    "is_ready": True,
+                    "can_import": True,
+                    "status": "active",
+                    "existing_device": None,
+                    "import_as_vm": False,
+                    "existing_match_type": None,
+                },
+            ),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.prefetch_vc_data_for_devices"),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.cache"),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.get_cache_metadata_key", return_value="key"),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.get_validated_device_cache_key", return_value="vkey"
+            ),
+        ):
+            from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
+
+            api = MagicMock()
+            api.server_key = "default"
+            result = process_device_filters(
+                api, filters={}, vc_detection_enabled=False, clear_cache=False, show_disabled=False
+            )
+
+        assert len(result) == 1
+        assert result[0]["hostname"] == "a"
+
+    def test_show_disabled_true_includes_all(self):
+        """show_disabled=True should include both active and inactive devices."""
+        from unittest.mock import MagicMock, patch
+
+        devices = [
+            {"device_id": 1, "hostname": "a", "status": 1},
+            {"device_id": 2, "hostname": "b", "status": 0},
+        ]
+        with (
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.get_librenms_devices_for_import",
+                return_value=(devices, False),
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import",
+                side_effect=lambda d, **kw: {
+                    "resolved_name": d["hostname"],
+                    "is_ready": True,
+                    "can_import": True,
+                    "status": "active",
+                    "existing_device": None,
+                    "import_as_vm": False,
+                    "existing_match_type": None,
+                },
+            ),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.prefetch_vc_data_for_devices"),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.cache"),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.get_cache_metadata_key", return_value="key"),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.get_validated_device_cache_key", return_value="vkey"
+            ),
+        ):
+            from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
+
+            api = MagicMock()
+            api.server_key = "default"
+            result = process_device_filters(
+                api, filters={}, vc_detection_enabled=False, clear_cache=False, show_disabled=True
+            )
+
+        assert len(result) == 2
+
+    def test_empty_return_helper(self):
+        """_empty_return should return ([], False) when return_cache_status=True, else []."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _empty_return
+
+        assert _empty_return(True) == ([], False)
+        assert _empty_return(False) == []
+
+    def test_bulk_import_devices_uses_resolved_server_key(self):
+        """bulk_import_devices_shared should pass api.server_key to import_single_device."""
+        from unittest.mock import MagicMock, patch
+
+        with (
+            patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI") as mock_api_cls,
+            patch("netbox_librenms_plugin.import_utils.bulk_import.import_single_device") as mock_import,
+            patch("netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import"),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions"),
+        ):
+            mock_api = MagicMock()
+            mock_api.server_key = "resolved-key"
+            mock_api.get_device_info.return_value = (True, {"device_id": 1, "hostname": "sw"})
+            mock_api_cls.return_value = mock_api
+            mock_import.return_value = {"success": True, "device": MagicMock(), "is_vm": False}
+
+            user = MagicMock()
+            from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+
+            bulk_import_devices_shared([1], user=user, server_key=None)
+
+        # The resolved api.server_key ("resolved-key") must be passed, not None
+        assert mock_import.call_args is not None
+        assert mock_import.call_args.kwargs.get("server_key") == "resolved-key"

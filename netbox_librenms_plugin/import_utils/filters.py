@@ -35,9 +35,17 @@ def get_device_count_for_filters(
     """
     devices = get_librenms_devices_for_import(api, filters=filters, force_refresh=clear_cache)
 
-    # Filter out disabled devices if requested
+    # Filter out disabled devices if requested; normalize status to int to handle
+    # both integer (1) and string ("1") responses from the LibreNMS API.
     if not show_disabled:
-        devices = [d for d in devices if d.get("status") == 1]
+
+        def _is_active(d):
+            try:
+                return int(d.get("status", 0)) == 1
+            except (TypeError, ValueError):
+                return False
+
+        devices = [d for d in devices if _is_active(d)]
 
     return len(devices)
 

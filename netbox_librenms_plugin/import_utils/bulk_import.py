@@ -154,7 +154,7 @@ def bulk_import_devices_shared(
 
             result = import_single_device(
                 device_id,
-                server_key=server_key,
+                server_key=api.server_key,  # use resolved key, not raw parameter (may be None)
                 sync_options=sync_options,
                 manual_mappings=device_mappings if device_mappings else None,
                 libre_device=libre_device,
@@ -363,9 +363,17 @@ def process_device_filters(
         return_cache_status=True,
     )
 
-    # Filter out disabled devices if requested
+    # Filter out disabled devices if requested; normalize status to int to handle
+    # both integer (1) and string ("1") responses from the LibreNMS API.
     if not show_disabled:
-        libre_devices = [d for d in libre_devices if d.get("status") == 1]
+
+        def _is_active(d):
+            try:
+                return int(d.get("status", 0)) == 1
+            except (TypeError, ValueError):
+                return False
+
+        libre_devices = [d for d in libre_devices if _is_active(d)]
 
     if job:
         job.logger.info(f"Found {len(libre_devices)} devices to process")
