@@ -384,3 +384,41 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
             messages.info(request, "No serial assignments were made")
 
         return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+
+
+class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
+    """Remove a single server entry from the device's librenms_id custom field dict."""
+
+    required_object_permissions = {
+        "POST": [("change", Device)],
+    }
+
+    def post(self, request, pk):
+        if error := self.require_all_permissions("POST"):
+            return error
+
+        device = get_object_or_404(Device, pk=pk)
+        server_key = request.POST.get("server_key", "").strip()
+
+        if not server_key:
+            messages.error(request, "No server_key provided.")
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+
+        cf_value = device.custom_field_data.get("librenms_id")
+        if not isinstance(cf_value, dict) or server_key not in cf_value:
+            messages.warning(request, f"No mapping found for server '{server_key}'.")
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+
+        with transaction.atomic():
+            device_locked = Device.objects.select_for_update().get(pk=pk)
+            cf = device_locked.custom_field_data.get("librenms_id", {})
+            if isinstance(cf, dict) and server_key in cf:
+                del cf[server_key]
+                device_locked.custom_field_data["librenms_id"] = cf if cf else None
+                device_locked.full_clean()
+                device_locked.save()
+                messages.success(request, f"Removed LibreNMS mapping for server '{server_key}'.")
+            else:
+                messages.warning(request, f"Mapping for server '{server_key}' was already removed.")
+
+        return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)

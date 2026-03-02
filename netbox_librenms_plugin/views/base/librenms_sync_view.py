@@ -1,5 +1,6 @@
 import re
 
+from django.conf import settings as django_settings
 from django.shortcuts import get_object_or_404, render
 from netbox.views import generic
 
@@ -116,6 +117,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 "platform_info": platform_info,
                 "vc_inventory_serials": librenms_info["librenms_device_details"].get("vc_inventory_serials", []),
                 "manufacturers": manufacturers,
+                "all_server_mappings": self._build_all_server_mappings(obj, self.librenms_api.server_key),
             }
         )
 
@@ -277,6 +279,54 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         Subclasses should override this method if applicable.
         """
         return None
+
+    @staticmethod
+    def _build_all_server_mappings(obj, active_server_key):
+        """Build a list of all LibreNMS server mappings for the given device.
+
+        Each entry describes one server<->ID mapping stored in the ``librenms_id``
+        custom field:
+
+        * ``server_key``   – the key as stored in the CF dict (or ``"legacy"``).
+        * ``display_name`` – human-readable name from PLUGINS_CONFIG, or the key.
+        * ``librenms_url`` – base URL of that server (``None`` when not configured).
+        * ``device_id``    – the integer device ID on that server.
+        * ``device_url``   – direct URL to the device page on that server (or ``None``).
+        * ``is_configured``– True when the server key exists in current plugin config.
+        * ``is_active``    – True when this is the currently active server.
+
+        Returns ``None`` for legacy bare-int format (no per-server info to show)
+        and ``None`` when the CF is absent/invalid.
+        """
+        cf_value = obj.custom_field_data.get("librenms_id")
+        if not isinstance(cf_value, dict) or not cf_value:
+            return None
+
+        plugins_cfg = django_settings.PLUGINS_CONFIG.get("netbox_librenms_plugin", {})
+        servers_config = plugins_cfg.get("servers", {})
+
+        result = []
+        for sk, did in cf_value.items():
+            srv_cfg = servers_config.get(sk)
+            is_configured = srv_cfg is not None
+            librenms_url = srv_cfg.get("librenms_url") if srv_cfg else None
+            display_name = (srv_cfg.get("display_name") or sk) if srv_cfg else sk
+            device_url = f"{librenms_url}/device/device={did}/" if librenms_url else None
+            result.append(
+                {
+                    "server_key": sk,
+                    "display_name": display_name,
+                    "librenms_url": librenms_url,
+                    "device_id": did,
+                    "device_url": device_url,
+                    "is_configured": is_configured,
+                    "is_active": sk == active_server_key,
+                }
+            )
+
+        # Sort: active first, then configured, then orphaned
+        result.sort(key=lambda e: (0 if e["is_active"] else (1 if e["is_configured"] else 2)))
+        return result or None
 
     @staticmethod
     def _strip_vc_pattern(name):
