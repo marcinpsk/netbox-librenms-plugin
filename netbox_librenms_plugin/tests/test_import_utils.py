@@ -1788,7 +1788,7 @@ class TestDeviceConflictActionView:
             "sysName": "switch-01.example.com",
             "serial": "ABC123",
         }
-        validation = {"can_import": False}
+        validation = {"can_import": False, "existing_device": existing_device}
         selections = {}
 
         request = self._create_request("link", 42, use_sysname=True)
@@ -1801,6 +1801,7 @@ class TestDeviceConflictActionView:
             mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+            mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
@@ -1829,7 +1830,7 @@ class TestDeviceConflictActionView:
             "sysName": "new-name.example.com",
             "serial": "NEW-SERIAL",
         }
-        validation = {"can_import": False}
+        validation = {"can_import": False, "existing_device": existing_device}
         selections = {}
 
         request = self._create_request("update", 42, use_sysname=True)
@@ -1842,6 +1843,7 @@ class TestDeviceConflictActionView:
             mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+            mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
@@ -1866,7 +1868,7 @@ class TestDeviceConflictActionView:
         existing_device.serial = "OLD-SERIAL"
 
         libre_device = {"device_id": 10, "hostname": "switch-01", "serial": "NEW-SERIAL"}
-        validation = {"can_import": False}
+        validation = {"can_import": False, "existing_device": existing_device}
         selections = {}
 
         request = self._create_request("update_serial", 42)
@@ -1879,6 +1881,7 @@ class TestDeviceConflictActionView:
             mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+            mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
@@ -1904,7 +1907,7 @@ class TestDeviceConflictActionView:
         existing_device.serial = "EXISTING"
 
         libre_device = {"device_id": 10, "hostname": "switch-01", "serial": "-"}
-        validation = {"can_import": False}
+        validation = {"can_import": False, "existing_device": existing_device}
         selections = {}
 
         request = self._create_request("update_serial", 42)
@@ -1971,7 +1974,7 @@ class TestDeviceConflictActionView:
             "sysName": "switch-01.example.com",
             "serial": "ABC123",
         }
-        validation = {"can_import": False}
+        validation = {"can_import": False, "existing_device": existing_device}
         selections = {}
 
         request = self._create_request("sync_name", 42, use_sysname=True)
@@ -2002,7 +2005,7 @@ class TestDeviceConflictActionView:
         existing_device.custom_field_data = {}
 
         libre_device = {"device_id": 10, "hostname": "switch-01", "serial": "ABC123"}
-        validation = {"can_import": False, "device_type_mismatch": True}
+        validation = {"can_import": False, "device_type_mismatch": True, "existing_device": existing_device}
         selections = {}
 
         request = self._create_request("link", 42, use_sysname=True)
@@ -2037,7 +2040,7 @@ class TestDeviceConflictActionView:
             "sysName": "switch-01.example.com",
             "serial": "ABC123",
         }
-        validation = {"can_import": False, "device_type_mismatch": True}
+        validation = {"can_import": False, "device_type_mismatch": True, "existing_device": existing_device}
         selections = {}
 
         request = self._create_request("link", 42, use_sysname=True)
@@ -2051,6 +2054,7 @@ class TestDeviceConflictActionView:
             mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+            mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
@@ -2083,6 +2087,7 @@ class TestDeviceConflictActionView:
             "can_import": False,
             "device_type_mismatch": True,
             "device_type": {"device_type": librenms_device_type},
+            "existing_device": existing_device,
         }
         selections = {}
 
@@ -2097,6 +2102,7 @@ class TestDeviceConflictActionView:
             mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+            mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
@@ -2131,6 +2137,7 @@ class TestDeviceConflictActionView:
             "can_import": False,
             "device_type_mismatch": True,
             "device_type": {"device_type": new_device_type},
+            "existing_device": existing_device,
         }
         selections = {}
 
@@ -2174,6 +2181,7 @@ class TestDeviceConflictActionView:
             mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+            mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
@@ -2202,13 +2210,12 @@ class TestDeviceConflictActionView:
             patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
             patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
             patch("dcim.models.Device") as mock_device_cls,
-            # Patch at dcim.models level: find_matching_platform uses an inline
-            # 'from dcim.models import Platform' so patching dcim.models.Platform
-            # correctly intercepts the binding at call time.
-            patch("dcim.models.Platform") as mock_platform_cls,
+            # Patch find_matching_platform at the utility module level — the action imports
+            # it from netbox_librenms_plugin.utils, so that is the correct seam to mock.
+            patch("netbox_librenms_plugin.utils.find_matching_platform") as mock_find_platform,
         ):
             mock_device_cls.objects.get.return_value = existing_device
-            mock_platform_cls.objects.get.return_value = mock_platform
+            mock_find_platform.return_value = {"found": True, "platform": mock_platform, "match_type": "exact"}
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 

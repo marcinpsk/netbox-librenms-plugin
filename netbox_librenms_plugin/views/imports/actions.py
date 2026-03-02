@@ -881,10 +881,12 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
             return HttpResponse("LibreNMS device not found", status=404)
 
         # Verify the POSTed existing_device_id matches the validated conflict target.
-        # Without this check, an attacker could mutate an arbitrary device.
-        # Only enforce when validation has a known existing_device (conflict case).
+        # Require a confirmed conflict target: if validation has no existing_device, the
+        # LibreNMS device was not validated against this NetBox device, so mutations are unsafe.
         validated_existing = validation.get("existing_device") if validation else None
-        if validated_existing is not None and validated_existing.pk != existing_device.pk:
+        if validated_existing is None:
+            return HttpResponse("Missing validated conflict target", status=400)
+        if validated_existing.pk != existing_device.pk:
             return HttpResponse("Device ID mismatch: existing_device_id does not match validated device", status=400)
 
         # Require force flag when device type mismatches, but only for actions that use it
@@ -907,18 +909,23 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
         except (TypeError, ValueError):
             return HttpResponse("Invalid or missing LibreNMS device_id in payload", status=400)
 
-        # Check for LibreNMS ID collision before any linking action.
-        # find_by_librenms_id returns None or the *one* device matching the ID.
-        # Comparing .pk != existing_device.pk is equivalent to .exclude(pk=...).exists()
-        # for conflict detection — both find any *other* device with the same librenms_id.
+        # Check for LibreNMS ID collision before any linking action: detect any *other*
+        # Device that already carries the same librenms_id, excluding the current target.
         if action in {"link", "update", "update_serial"}:
-            from netbox_librenms_plugin.utils import find_by_librenms_id
+            from django.db.models import Q
 
-            id_conflict = find_by_librenms_id(Device, librenms_id, self.librenms_api.server_key)
-            if id_conflict and id_conflict.pk != existing_device.pk:
+            server_key = self.librenms_api.server_key
+            conflict_exists = (
+                Device.objects.filter(
+                    Q(**{f"custom_field_data__librenms_id__{server_key}": librenms_id})
+                    | Q(custom_field_data__librenms_id=librenms_id)
+                )
+                .exclude(pk=existing_device.pk)
+                .exists()
+            )
+            if conflict_exists:
                 return HttpResponse(
-                    f"LibreNMS ID conflict: ID {librenms_id} is already assigned to device "
-                    f"'{escape(id_conflict.name)}' (ID: {id_conflict.pk})",
+                    f"LibreNMS ID conflict: ID {librenms_id} is already assigned to another device.",
                     status=409,
                 )
 
@@ -1064,10 +1071,21 @@ class DeviceConflictActionView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Device
             # confirmed by serial match (or explicit force).
             from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
 
+            # Direct access needed to detect legacy integer format for migration prompt:
+            # LibreNMSAPI.get_librenms_id() returns an int in both formats; only the raw
+            # type check on custom_field_data reveals whether migration is needed.
             cf_value = existing_device.custom_field_data.get("librenms_id")
             if not isinstance(cf_value, int):
                 return HttpResponse(
                     "Device librenms_id is already in JSON format; no migration needed.",
+                    status=400,
+                )
+            # Verify the stored legacy ID matches the active LibreNMS device_id so we don't
+            # migrate a stale/incorrect association to the wrong server mapping.
+            if cf_value != librenms_id:
+                return HttpResponse(
+                    f"Legacy librenms_id ({cf_value}) does not match the active device ID "
+                    f"({librenms_id}); cannot migrate safely.",
                     status=400,
                 )
             if not validation.get("serial_confirmed") and not force:

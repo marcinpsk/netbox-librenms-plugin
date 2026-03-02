@@ -402,7 +402,17 @@ def create_virtual_chassis_with_members(master_device: Device, members_info: lis
                     logger.warning(f"Device with serial '{serial}' already exists, skipping VC member creation")
                     continue
 
-                member_name = _generate_vc_member_name(master_base_name, position, serial=serial, pattern=vc_pattern)
+                # Prefer the discovered SNMP position; fall back to sequential counter
+                try:
+                    discovered_pos = int(member.get("position")) if member.get("position") is not None else None
+                except (TypeError, ValueError):
+                    discovered_pos = None
+                chosen_pos = discovered_pos if discovered_pos is not None else position
+                # Advance sequential counter only when it was consumed as a fallback
+                if discovered_pos is None:
+                    position += 1
+
+                member_name = _generate_vc_member_name(master_base_name, chosen_pos, serial=serial, pattern=vc_pattern)
 
                 # Check for duplicate name
                 if Device.objects.filter(name=member_name).exists():
@@ -419,12 +429,11 @@ def create_virtual_chassis_with_members(master_device: Device, members_info: lis
                     platform=master_device.platform,
                     serial=serial,
                     virtual_chassis=vc,
-                    vc_position=position,
+                    vc_position=chosen_pos,
                     comments=f"VC member (LibreNMS: {member.get('name', 'Unknown')})\n"
                     f"Auto-created from stack inventory",
                 )
                 members_created += 1
-                position += 1
 
             # Validate member count
             expected_members = len(

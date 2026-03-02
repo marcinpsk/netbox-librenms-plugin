@@ -140,7 +140,7 @@ def get_validated_device_cache_key(server_key: str, filters: dict, device_id: in
     Example:
         >>> key = get_validated_device_cache_key('default', {'location': 'NYC'}, 123, True)
         >>> key
-        'validated_device_default_-e3b0c44298fc1c14_123_vc'
+        'validated_device_default_e3b0c44298fc1c14_123_vc'
     """
     # Sort filters for a deterministic, cross-process stable hash
     filter_hash = hashlib.sha256(json.dumps(sorted(filters.items()), sort_keys=True).encode()).hexdigest()[:16]
