@@ -388,6 +388,8 @@ def process_device_filters(
     job=None,
     request=None,
     return_cache_status: bool = False,
+    use_sysname: bool = True,
+    strip_domain: bool = False,
 ) -> List[dict] | tuple[List[dict], bool]:
     """
     Process LibreNMS device filters and return validated devices.
@@ -406,6 +408,8 @@ def process_device_filters(
         job: Optional JobRunner instance for logging job events
         request: Optional Django request for client disconnect detection (synchronous only)
         return_cache_status: When True, returns (devices, from_cache) tuple
+        use_sysname: If True, prefer sysName over hostname for device name resolution
+        strip_domain: If True, strip domain suffix from device name
 
     Returns:
         List[dict]: Validated devices with _validation key, or tuple of (devices, from_cache)
@@ -559,6 +563,8 @@ def process_device_filters(
                 include_vc_detection=vc_detection_enabled,
                 force_vc_refresh=clear_cache,
                 server_key=api.server_key,
+                use_sysname=use_sysname,
+                strip_domain=strip_domain,
             )
         except (BrokenPipeError, ConnectionError, IOError) as e:
             if request:

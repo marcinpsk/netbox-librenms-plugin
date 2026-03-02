@@ -5,7 +5,7 @@ import logging
 
 from django.contrib import messages
 from django.core.cache import cache
-from django.core.exceptions import PermissionDenied
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
@@ -41,13 +41,16 @@ _FORCE_REQUIRED_ACTIONS = frozenset({"link", "update", "update_serial", "update_
 
 
 def _resolve_naming_preferences(request) -> tuple[bool, bool]:
-    """Resolve use_sysname/strip_domain: POST data → user pref → plugin settings."""
+    """Resolve use_sysname/strip_domain: POST/GET data → user pref → plugin settings."""
     from netbox_librenms_plugin.models import LibreNMSSettings
 
     settings = None
 
+    # Check POST first (form submissions), then GET (HTMX hx-include on hx-get)
     if "use-sysname-toggle" in request.POST:
         use_sysname = request.POST.get("use-sysname-toggle") == "on"
+    elif "use-sysname-toggle" in request.GET:
+        use_sysname = request.GET.get("use-sysname-toggle") == "on"
     else:
         pref = get_user_pref(request, "plugins.netbox_librenms_plugin.use_sysname")
         if pref is not None:
@@ -58,6 +61,8 @@ def _resolve_naming_preferences(request) -> tuple[bool, bool]:
 
     if "strip-domain-toggle" in request.POST:
         strip_domain = request.POST.get("strip-domain-toggle") == "on"
+    elif "strip-domain-toggle" in request.GET:
+        strip_domain = request.GET.get("strip-domain-toggle") == "on"
     else:
         pref = get_user_pref(request, "plugins.netbox_librenms_plugin.strip_domain")
         if pref is not None:
@@ -68,6 +73,21 @@ def _resolve_naming_preferences(request) -> tuple[bool, bool]:
             strip_domain = getattr(settings, "strip_domain_default", False) if settings else False
 
     return use_sysname, strip_domain
+
+
+def _save_device(device) -> HttpResponse | None:
+    """Call full_clean() then save(). Return an HttpResponse on failure, None on success."""
+    from django.db import IntegrityError
+
+    try:
+        device.full_clean()
+    except ValidationError as exc:
+        return HttpResponse(f"Validation error: {escape(str(exc))}", status=400)
+    try:
+        device.save()
+    except IntegrityError as exc:
+        return HttpResponse(f"Integrity error: {escape(str(exc))}", status=409)
+    return None
 
 
 class DeviceImportHelperMixin:
@@ -745,9 +765,13 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
                 status=404,
             )
 
+        use_sysname, strip_domain = _resolve_naming_preferences(request)
+
         context = {
             "libre_device": libre_device,
             "validation": validation,
+            "use_sysname": use_sysname,
+            "strip_domain": strip_domain,
         }
 
         # Add sync comparison data for existing devices
@@ -954,7 +978,8 @@ class DeviceConflictActionView(
                     existing_device.name = hostname
                     if librenms_device_type:
                         existing_device.device_type = librenms_device_type
-                    existing_device.save()
+                    if err := _save_device(existing_device):
+                        return err
                     logger.info(f"Linked device '{existing_device.name}' to LibreNMS ID {librenms_id}")
 
                 elif action == "update":
@@ -983,7 +1008,8 @@ class DeviceConflictActionView(
                     if librenms_device_type:
                         existing_device.device_type = librenms_device_type
                     set_librenms_device_id(existing_device, librenms_id, self.librenms_api.server_key)
-                    existing_device.save()
+                    if err := _save_device(existing_device):
+                        return err
                     logger.info(
                         f"Updated device '{existing_device.name}': serial={incoming_serial}, "
                         f"linked to LibreNMS ID {librenms_id}"
@@ -1006,7 +1032,8 @@ class DeviceConflictActionView(
                     if librenms_device_type:
                         existing_device.device_type = librenms_device_type
                     set_librenms_device_id(existing_device, librenms_id, self.librenms_api.server_key)
-                    existing_device.save()
+                    if err := _save_device(existing_device):
+                        return err
                     logger.info(
                         f"Updated serial on device '{existing_device.name}' to {incoming_serial}, "
                         f"linked to LibreNMS ID {librenms_id}"
@@ -1021,14 +1048,16 @@ class DeviceConflictActionView(
                 use_sysname, strip_domain = _resolve_naming_preferences(request)
                 hostname = _determine_device_name(libre_device, use_sysname=use_sysname, strip_domain=strip_domain)
             existing_device.name = hostname
-            existing_device.save()
+            if err := _save_device(existing_device):
+                return err
             logger.info(f"Synced name on device '{existing_device.name}' from LibreNMS")
 
         elif action == "update_type":
             # Update device type from LibreNMS (requires force for mismatch)
             if librenms_device_type:
                 existing_device.device_type = librenms_device_type
-                existing_device.save()
+                if err := _save_device(existing_device):
+                    return err
                 logger.info(f"Updated device type on '{existing_device.name}' to {librenms_device_type}")
             else:
                 return HttpResponse("No LibreNMS device type available to update", status=400)
@@ -1050,7 +1079,8 @@ class DeviceConflictActionView(
                         status=409,
                     )
                 existing_device.serial = incoming_serial
-                existing_device.save()
+                if err := _save_device(existing_device):
+                    return err
                 logger.info(f"Synced serial on '{existing_device.name}' to {incoming_serial}")
             else:
                 return HttpResponse("No valid serial from LibreNMS", status=400)
@@ -1064,7 +1094,8 @@ class DeviceConflictActionView(
                 match_result = find_matching_platform(librenms_os)
                 if match_result["found"]:
                     existing_device.platform = match_result["platform"]
-                    existing_device.save()
+                    if err := _save_device(existing_device):
+                        return err
                     logger.info(f"Synced platform on '{existing_device.name}' to {match_result['platform']}")
                 else:
                     return HttpResponse(f"Platform '{escape(librenms_os)}' not found in NetBox", status=400)
@@ -1079,7 +1110,8 @@ class DeviceConflictActionView(
             hw_match = match_librenms_hardware_to_device_type(hardware)
             if hw_match.get("matched"):
                 existing_device.device_type = hw_match["device_type"]
-                existing_device.save()
+                if err := _save_device(existing_device):
+                    return err
                 logger.info(f"Synced device type on '{existing_device.name}' to {hw_match['device_type']}")
             else:
                 return HttpResponse(f"No matching device type for '{escape(hardware)}'", status=400)
@@ -1113,7 +1145,8 @@ class DeviceConflictActionView(
                     status=400,
                 )
             migrate_legacy_librenms_id(existing_device, self.librenms_api.server_key)
-            existing_device.save()
+            if err := _save_device(existing_device):
+                return err
             logger.info(
                 f"Migrated legacy librenms_id on '{existing_device.name}' "
                 f"to {{{self.librenms_api.server_key!r}: {cf_value}}}"

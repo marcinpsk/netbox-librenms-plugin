@@ -1331,6 +1331,8 @@ class TestSerialNumberMatching:
         existing = MagicMock()
         existing.name = "switch-01"
         existing.serial = "ABC123"
+        existing.virtual_chassis = None  # Not a VC member → use plain hostname comparison
+        existing.vc_position = None
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
@@ -1373,6 +1375,8 @@ class TestSerialNumberMatching:
         existing = MagicMock()
         existing.name = "switch-01"
         existing.serial = "OLD_SERIAL"
+        existing.virtual_chassis = None
+        existing.vc_position = None
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
@@ -1417,6 +1421,8 @@ class TestSerialNumberMatching:
         existing = MagicMock()
         existing.name = "switch-01"
         existing.serial = ""
+        existing.virtual_chassis = None
+        existing.vc_position = None
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
@@ -1459,6 +1465,8 @@ class TestSerialNumberMatching:
         existing = MagicMock()
         existing.name = "switch-01"
         existing.serial = "ABC123"
+        existing.virtual_chassis = None
+        existing.vc_position = None
         mock_existing_role = MagicMock()
         mock_existing_role.name = "Access Switch"
         existing.role = mock_existing_role
@@ -1504,6 +1512,8 @@ class TestSerialNumberMatching:
         existing = MagicMock()
         existing.name = "switch-01"
         existing.serial = "ABC123"
+        existing.virtual_chassis = None
+        existing.vc_position = None
         existing_device_type = MagicMock()
         existing_device_type.pk = 1
         existing_device_type.__str__ = lambda self: "Old Type"
@@ -1558,6 +1568,8 @@ class TestSerialNumberMatching:
         existing = MagicMock()
         existing.name = "switch-01"
         existing.serial = "ABC123"
+        existing.virtual_chassis = None
+        existing.vc_position = None
         same_device_type = MagicMock()
         same_device_type.pk = 1
         existing.device_type = same_device_type
@@ -1596,6 +1608,226 @@ class TestSerialNumberMatching:
             result = validate_device_for_import(device_data, include_vc_detection=False)
 
         assert result["device_type_mismatch"] is False
+
+
+class TestNameMatchesWithNamingPreferences:
+    """Test VC-aware name matching with use_sysname/strip_domain preferences."""
+
+    PATCHES = [
+        "netbox_librenms_plugin.import_utils.device_operations.Site",
+        "netbox_librenms_plugin.import_utils.device_operations.Rack",
+        "netbox_librenms_plugin.import_utils.device_operations.Cluster",
+        "netbox_librenms_plugin.import_utils.device_operations.DeviceRole",
+        "netbox_librenms_plugin.import_utils.device_operations.DeviceType",
+        "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type",
+        "netbox_librenms_plugin.import_utils.device_operations.find_matching_platform",
+        "netbox_librenms_plugin.import_utils.device_operations.find_matching_site",
+        "netbox_librenms_plugin.import_utils.device_operations.Device",
+        "virtualization.models.VirtualMachine",
+    ]
+
+    def setup_method(self):
+        self._patchers = [patch(p) for p in self.PATCHES]
+        mocks = [p.start() for p in self._patchers]
+        (
+            self.mock_site,
+            self.mock_rack,
+            self.mock_cluster,
+            self.mock_role,
+            self.mock_device_type,
+            self.mock_match_type,
+            self.mock_find_platform,
+            self.mock_find_site,
+            self.mock_device,
+            self.mock_vm,
+        ) = mocks
+        self.mock_device_type.objects.all.return_value = []
+        self.mock_vm.objects.filter.return_value.first.return_value = None
+        self.mock_find_site.return_value = {
+            "found": True,
+            "site": MagicMock(),
+            "match_type": "exact",
+            "confidence": 1.0,
+        }
+        self.mock_find_platform.return_value = {"found": False, "platform": None, "match_type": None}
+        self.mock_match_type.return_value = {"matched": False, "device_type": None, "match_type": None}
+        self.mock_role.objects.all.return_value = []
+        self.mock_cluster.objects.all.return_value = []
+        self.mock_site.objects.all.return_value = []
+
+    def teardown_method(self):
+        for p in self._patchers:
+            p.stop()
+
+    def _make_existing(self, name, serial="SN001", virtual_chassis=None, vc_position=None):
+        existing = MagicMock()
+        existing.name = name
+        existing.serial = serial
+        existing.virtual_chassis = virtual_chassis
+        existing.vc_position = vc_position
+        existing.custom_field_data = {"librenms_id": {"default": 42}}
+        return existing
+
+    def _setup_librenms_id_filter(self, existing):
+        def device_filter(*args, **kwargs):
+            result = MagicMock()
+            q_has_librenms = any("librenms_id" in str(arg) for arg in args) or any(
+                k.startswith("custom_field_data__librenms_id") for k in kwargs
+            )
+            result.first.return_value = existing if q_has_librenms else None
+            result.exclude.return_value.first.return_value = None
+            return result
+
+        self.mock_device.objects.filter.side_effect = device_filter
+
+    def test_strip_domain_name_matches(self):
+        """strip_domain=True resolves 'switch-01.example.com' to 'switch-01', matching existing device."""
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        existing = self._make_existing("switch-01")
+        self._setup_librenms_id_filter(existing)
+
+        device_data = {
+            "device_id": 42,
+            "hostname": "switch-01.example.com",
+            "sysName": "switch-01.example.com",
+            "serial": "SN001",
+        }
+        result = validate_device_for_import(device_data, include_vc_detection=False, strip_domain=True)
+        assert result["name_matches"] is True
+        assert result["name_sync_available"] is False
+
+    def test_sysname_disabled_uses_hostname(self):
+        """use_sysname=False falls back to hostname for name comparison."""
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        existing = self._make_existing("switch-hostname")
+        self._setup_librenms_id_filter(existing)
+
+        device_data = {
+            "device_id": 42,
+            "hostname": "switch-hostname",
+            "sysName": "switch-sysname",
+            "serial": "SN001",
+        }
+        result = validate_device_for_import(device_data, include_vc_detection=False, use_sysname=False)
+        assert result["name_matches"] is True
+        assert result["resolved_name"] == "switch-hostname"
+
+    def test_name_mismatch_offers_sync(self):
+        """When resolved name differs from existing device name, name_sync_available is set."""
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        existing = self._make_existing("old-name")
+        self._setup_librenms_id_filter(existing)
+
+        device_data = {
+            "device_id": 42,
+            "hostname": "new-name",
+            "sysName": "new-name",
+            "serial": "SN001",
+        }
+        result = validate_device_for_import(device_data, include_vc_detection=False)
+        assert result["name_matches"] is False
+        assert result["name_sync_available"] is True
+        assert result["suggested_name"] == "new-name"
+
+    def test_vc_member_name_matches(self):
+        """Existing VC member name is compared against vc_member_name(hostname, vc_position)."""
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
+
+        mock_vc = MagicMock()
+        expected_name = _generate_vc_member_name("stack-master", 2, serial="SN001")
+        existing = self._make_existing(expected_name, serial="SN001", virtual_chassis=mock_vc, vc_position=2)
+        self._setup_librenms_id_filter(existing)
+
+        device_data = {
+            "device_id": 42,
+            "hostname": "stack-master",
+            "sysName": "stack-master",
+            "serial": "SN001",
+        }
+        result = validate_device_for_import(device_data, include_vc_detection=False)
+        assert result["name_matches"] is True
+
+    def test_vc_member_name_mismatch_suggests_vc_name(self):
+        """When VC member name differs, suggested_name is the expected VC member name."""
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
+
+        mock_vc = MagicMock()
+        existing = self._make_existing("wrong-name", serial="SN001", virtual_chassis=mock_vc, vc_position=2)
+        self._setup_librenms_id_filter(existing)
+
+        device_data = {
+            "device_id": 42,
+            "hostname": "stack-master",
+            "sysName": "stack-master",
+            "serial": "SN001",
+        }
+        result = validate_device_for_import(device_data, include_vc_detection=False)
+        expected_name = _generate_vc_member_name("stack-master", 2, serial="SN001")
+        assert result["name_matches"] is False
+        assert result["name_sync_available"] is True
+        assert result["suggested_name"] == expected_name
+
+    def test_vc_member_with_strip_domain(self):
+        """strip_domain applies before VC member name comparison."""
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
+
+        mock_vc = MagicMock()
+        expected_name = _generate_vc_member_name("stack", 1, serial="SN001")
+        existing = self._make_existing(expected_name, serial="SN001", virtual_chassis=mock_vc, vc_position=1)
+        self._setup_librenms_id_filter(existing)
+
+        device_data = {
+            "device_id": 42,
+            "hostname": "stack.example.com",
+            "sysName": "stack.example.com",
+            "serial": "SN001",
+        }
+        result = validate_device_for_import(device_data, include_vc_detection=False, strip_domain=True)
+        assert result["name_matches"] is True
+
+    def test_naming_criteria_populated(self):
+        """naming_criteria dict is set in result with use_sysname/strip_domain/source."""
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        self.mock_device.objects.filter.return_value.first.return_value = None
+
+        device_data = {
+            "device_id": 99,
+            "hostname": "router-01",
+            "sysName": "router-sysname",
+        }
+        result = validate_device_for_import(
+            device_data, include_vc_detection=False, use_sysname=True, strip_domain=False
+        )
+        criteria = result["naming_criteria"]
+        assert criteria is not None
+        assert criteria["use_sysname"] is True
+        assert criteria["strip_domain"] is False
+        assert criteria["raw_sysname"] == "router-sysname"
+        assert criteria["raw_hostname"] == "router-01"
+        assert criteria["source"] == "sysname"
+
+    def test_naming_criteria_source_hostname_when_sysname_disabled(self):
+        """naming_criteria source is 'hostname' when use_sysname=False."""
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        self.mock_device.objects.filter.return_value.first.return_value = None
+
+        device_data = {
+            "device_id": 99,
+            "hostname": "router-01",
+            "sysName": "router-sysname",
+        }
+        result = validate_device_for_import(
+            device_data, include_vc_detection=False, use_sysname=False, strip_domain=False
+        )
+        assert result["naming_criteria"]["source"] == "hostname"
 
 
 class TestLegacyLibreNMSIdMigration:
@@ -1649,6 +1881,8 @@ class TestLegacyLibreNMSIdMigration:
         existing = MagicMock()
         existing.name = "switch-01"
         existing.serial = serial
+        existing.virtual_chassis = None
+        existing.vc_position = None
         existing.custom_field_data = {"librenms_id": librenms_id_value}
         return existing
 
@@ -2555,6 +2789,8 @@ class TestDeviceNamingPreferences:
         existing = MagicMock()
         existing.name = "core-switch"
         existing.serial = ""
+        existing.virtual_chassis = None
+        existing.vc_position = None
         mock_device.objects.filter.return_value.first.side_effect = [None, existing]
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
