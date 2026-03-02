@@ -1759,11 +1759,14 @@ class TestDeviceConflictActionView:
     def _create_request(self, action, existing_device_id, use_sysname=False, strip_domain=False):
         """Create a mock request with POST data."""
         request = MagicMock()
-        post_data = {"action": action, "existing_device_id": str(existing_device_id)}
-        if use_sysname:
-            post_data["use-sysname-toggle"] = "on"
-        if strip_domain:
-            post_data["strip-domain-toggle"] = "on"
+        # Always include both toggles so _resolve_naming_preferences never falls through
+        # to the user-pref/settings DB path, which would hit the real database.
+        post_data = {
+            "action": action,
+            "existing_device_id": str(existing_device_id),
+            "use-sysname-toggle": "on" if use_sysname else "off",
+            "strip-domain-toggle": "on" if strip_domain else "off",
+        }
         request.POST = post_data
         return request
 
@@ -2199,6 +2202,9 @@ class TestDeviceConflictActionView:
             patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
             patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
             patch("dcim.models.Device") as mock_device_cls,
+            # Patch at dcim.models level: find_matching_platform uses an inline
+            # 'from dcim.models import Platform' so patching dcim.models.Platform
+            # correctly intercepts the binding at call time.
             patch("dcim.models.Platform") as mock_platform_cls,
         ):
             mock_device_cls.objects.get.return_value = existing_device

@@ -484,14 +484,6 @@ def process_device_filters(
                     if job.job.status == JobStatusChoices.STATUS_FAILED:
                         job.logger.info(f"Job stopped at device {idx}/{total}. Exiting gracefully.")
                         return ([], False) if return_cache_status else []
-            elif request:
-                # Check for client disconnect
-                try:
-                    if hasattr(request, "META") and request.META.get("wsgi.input"):
-                        pass
-                except (BrokenPipeError, ConnectionError, IOError):
-                    logger.info(f"Client disconnected during validation at device {idx}")
-                    return ([], False) if return_cache_status else []
 
         # Drop any cached validation/meta keys before recomputing
         device.pop("_validation", None)

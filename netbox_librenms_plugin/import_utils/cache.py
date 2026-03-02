@@ -21,8 +21,9 @@ def get_cache_metadata_key(server_key: str, filters: dict, vc_enabled: bool) -> 
     Returns:
         str: Consistent cache key for metadata
     """
-    # Sort filter items to ensure consistent key generation
-    filter_parts = "_".join(f"{k}={v}" for k, v in sorted(filters.items()) if v)
+    # Sort filter items to ensure consistent key generation; use "is not None" to preserve
+    # valid falsy values like 0 and False (filtering only None/missing entries).
+    filter_parts = "_".join(f"{k}={v}" for k, v in sorted(filters.items()) if v is not None)
     return f"librenms_filter_cache_metadata_{server_key}_{filter_parts}_{vc_enabled}"
 
 
@@ -80,6 +81,9 @@ def get_active_cached_searches(server_key: str) -> list[dict]:
                 cached_at = (
                     datetime.fromisoformat(cached_at_raw) if cached_at_raw else datetime.fromtimestamp(0, timezone.utc)
                 )
+                # Normalize naive datetimes (e.g., stored without tzinfo) to UTC
+                if cached_at.tzinfo is None:
+                    cached_at = cached_at.replace(tzinfo=timezone.utc)
             except (ValueError, TypeError):
                 cached_at = datetime.fromtimestamp(0, timezone.utc)
             age_seconds = (now - cached_at).total_seconds()
@@ -136,7 +140,7 @@ def get_validated_device_cache_key(server_key: str, filters: dict, device_id: in
     Example:
         >>> key = get_validated_device_cache_key('default', {'location': 'NYC'}, 123, True)
         >>> key
-        'validated_device_default_-1234567890_123_vc'
+        'validated_device_default_-e3b0c44298fc1c14_123_vc'
     """
     # Sort filters for a deterministic, cross-process stable hash
     filter_hash = hashlib.sha256(json.dumps(sorted(filters.items()), sort_keys=True).encode()).hexdigest()[:16]
