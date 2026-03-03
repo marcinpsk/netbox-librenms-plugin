@@ -2061,6 +2061,7 @@ class TestDeviceConflictActionView:
             mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
@@ -2106,6 +2107,7 @@ class TestDeviceConflictActionView:
             mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
@@ -2147,6 +2149,7 @@ class TestDeviceConflictActionView:
             mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
@@ -2189,6 +2192,7 @@ class TestDeviceConflictActionView:
             mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
@@ -2225,6 +2229,7 @@ class TestDeviceConflictActionView:
         ):
             mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
             # Include existing_device so the validated-conflict-target guard passes;
             # we want to exercise the unknown-action branch, not the missing-device guard.
             mock_validate.return_value = (libre_device, {"existing_device": existing_device}, {})
@@ -2263,6 +2268,7 @@ class TestDeviceConflictActionView:
         ):
             mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
@@ -2294,6 +2300,7 @@ class TestDeviceConflictActionView:
         ):
             mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
             mock_validate.return_value = (libre_device, validation, selections)
 
             response = view.post(request, device_id=10)
@@ -2334,6 +2341,7 @@ class TestDeviceConflictActionView:
             mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
@@ -2385,6 +2393,7 @@ class TestDeviceConflictActionView:
             mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
@@ -2436,6 +2445,7 @@ class TestDeviceConflictActionView:
         ):
             mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
@@ -2468,6 +2478,7 @@ class TestDeviceConflictActionView:
             mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
@@ -2505,6 +2516,7 @@ class TestDeviceConflictActionView:
         ):
             mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
             mock_find_platform.return_value = {"found": True, "platform": mock_platform, "match_type": "exact"}
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
@@ -2537,6 +2549,7 @@ class TestDeviceConflictActionView:
         ):
             mock_device_cls.objects.get.return_value = existing_device
             mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
             mock_hw_match.return_value = {"matched": True, "device_type": new_device_type}
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()

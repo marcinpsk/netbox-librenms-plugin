@@ -1036,3 +1036,43 @@ class TestRemoveServerMappingViewErrorHandling:
 
         mock_messages.error.assert_called_once()
         assert "Cannot remove" in mock_messages.error.call_args[0][1]
+
+    def test_successful_removal_mutates_and_saves(self):
+        """Successful removal deletes the key from custom_field_data and saves the device."""
+        from unittest.mock import MagicMock, patch
+
+        view, request = self._make_view(server_key="orphan-server")
+
+        mock_device = MagicMock()
+        mock_device.custom_field_data = {"librenms_id": {"orphan-server": 42, "other-server": 7}}
+
+        mock_locked = MagicMock()
+        mock_locked.custom_field_data = {"librenms_id": {"orphan-server": 42, "other-server": 7}}
+        mock_locked.full_clean = MagicMock()
+        mock_locked.save = MagicMock()
+
+        plugins_cfg = {"netbox_librenms_plugin": {"servers": {}}}  # orphan-server NOT configured
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device),
+            patch("netbox_librenms_plugin.views.sync.device_fields.Device") as mock_Device_cls,
+            patch("django.conf.settings") as mock_settings,
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_messages,
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.transaction") as mock_tx,
+        ):
+            mock_settings.PLUGINS_CONFIG = plugins_cfg
+            mock_Device_cls.objects.select_for_update.return_value.get.return_value = mock_locked
+
+            mock_tx.atomic.return_value.__enter__ = lambda s: None
+            mock_tx.atomic.return_value.__exit__ = lambda s, *a: None
+            mock_tx.set_rollback = MagicMock()
+
+            view.post(request, pk=1)
+
+        # The "orphan-server" key should have been removed and the device saved
+        remaining = mock_locked.custom_field_data["librenms_id"]
+        assert "orphan-server" not in remaining
+        assert remaining.get("other-server") == 7  # sibling key preserved
+        mock_locked.save.assert_called_once()
+        mock_messages.success.assert_called_once()

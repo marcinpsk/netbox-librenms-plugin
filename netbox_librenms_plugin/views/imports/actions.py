@@ -47,10 +47,11 @@ def _resolve_naming_preferences(request) -> tuple[bool, bool]:
     settings = None
 
     # Check POST first (form submissions), then GET (HTMX hx-include on hx-get).
-    # Support both hyphenated ("use-sysname-toggle") and underscored ("use_sysname-toggle")
-    # key variants so different form/hidden-input implementations are handled uniformly.
-    _USE_SYSNAME_KEYS = ("use-sysname-toggle", "use_sysname-toggle")
-    _STRIP_DOMAIN_KEYS = ("strip-domain-toggle", "strip_domain-toggle")
+    # Support hyphenated ("use-sysname-toggle"), underscored ("use_sysname-toggle"),
+    # and plain canonical ("use_sysname") key variants for compatibility across
+    # different form/hidden-input implementations.
+    _USE_SYSNAME_KEYS = ("use-sysname-toggle", "use_sysname-toggle", "use_sysname")
+    _STRIP_DOMAIN_KEYS = ("strip-domain-toggle", "strip_domain-toggle", "strip_domain")
 
     _use_sysname_post = next((request.POST.get(k) for k in _USE_SYSNAME_KEYS if k in request.POST), None)
     _use_sysname_get = next((request.GET.get(k) for k in _USE_SYSNAME_KEYS if k in request.GET), None)
@@ -1013,7 +1014,13 @@ class DeviceConflictActionView(
                 # device are serialized.  The conflict check below is still a
                 # best-effort guard for different devices; a DB unique constraint
                 # would be needed for full protection.
-                existing_device = Device.objects.select_for_update().get(pk=existing_device.pk)
+                try:
+                    existing_device = Device.objects.select_for_update().get(pk=existing_device.pk)
+                except Device.DoesNotExist:
+                    return HttpResponse(
+                        "Device no longer exists; it may have been deleted concurrently.",
+                        status=409,
+                    )
                 conflict_exists = (
                     Device.objects.filter(
                         Q(**{f"custom_field_data__librenms_id__{server_key}": librenms_id})
@@ -1044,8 +1051,14 @@ class DeviceConflictActionView(
                     hostname = _get_hostname_for_action(request, validation, libre_device)
                     incoming_serial = libre_device.get("serial") or ""
                     if incoming_serial and incoming_serial != "-":
+                        # Lock any conflicting device under the same transaction to reduce
+                        # the serial-assignment race window (best-effort; a DB unique
+                        # constraint on serial would give full protection).
                         conflict_device = (
-                            Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
+                            Device.objects.select_for_update()
+                            .filter(serial=incoming_serial)
+                            .exclude(pk=existing_device.pk)
+                            .first()
                         )
                         if conflict_device:
                             return HttpResponse(
@@ -1069,8 +1082,14 @@ class DeviceConflictActionView(
                     # Update only the serial and link to LibreNMS
                     incoming_serial = libre_device.get("serial") or ""
                     if incoming_serial and incoming_serial != "-":
+                        # Lock any conflicting device under the same transaction to reduce
+                        # the serial-assignment race window (best-effort; a DB unique
+                        # constraint on serial would give full protection).
                         conflict_device = (
-                            Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
+                            Device.objects.select_for_update()
+                            .filter(serial=incoming_serial)
+                            .exclude(pk=existing_device.pk)
+                            .first()
                         )
                         if conflict_device:
                             return HttpResponse(
@@ -1114,7 +1133,13 @@ class DeviceConflictActionView(
             incoming_serial = libre_device.get("serial") or ""
             if incoming_serial and incoming_serial != "-":
                 with transaction.atomic():
-                    locked_device = Device.objects.select_for_update().get(pk=existing_device.pk)
+                    try:
+                        locked_device = Device.objects.select_for_update().get(pk=existing_device.pk)
+                    except Device.DoesNotExist:
+                        return HttpResponse(
+                            "Device no longer exists; it may have been deleted concurrently.",
+                            status=409,
+                        )
                     # Re-check for serial ownership conflict under lock
                     conflict_device = Device.objects.filter(serial=incoming_serial).exclude(pk=locked_device.pk).first()
                     if conflict_device:
