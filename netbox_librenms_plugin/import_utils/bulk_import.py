@@ -359,11 +359,13 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             except (ValueError, TypeError):
                 pass
 
-        # Fall back to hostname match
+        # Fall back to hostname match, then sys_name independently
         if not new_device and hostname:
             new_device = Model.objects.filter(name__iexact=hostname).first()
-            if not new_device and sys_name:
-                new_device = Model.objects.filter(name__iexact=sys_name).first()
+            if new_device:
+                match_type = "hostname"
+        if not new_device and sys_name:
+            new_device = Model.objects.filter(name__iexact=sys_name).first()
             if new_device:
                 match_type = "hostname"
 
@@ -487,7 +489,7 @@ def process_device_filters(
         except Exception:
             # Fall back to DB check if RQ check fails
             job.job.refresh_from_db()
-            if job.job.status == JobStatusChoices.STATUS_FAILED:
+            if job.job.status in (JobStatusChoices.STATUS_FAILED, JobStatusChoices.STATUS_ERRORED):
                 job.logger.warning("Job was stopped before validation started")
                 return _empty_return(return_cache_status)
     else:
@@ -516,7 +518,7 @@ def process_device_filters(
                 except Exception:
                     # If we can't check RQ status, fall back to DB status check
                     job.job.refresh_from_db()
-                    if job.job.status == JobStatusChoices.STATUS_FAILED:
+                    if job.job.status in (JobStatusChoices.STATUS_FAILED, JobStatusChoices.STATUS_ERRORED):
                         job.logger.info(f"Job stopped at device {idx}/{total}. Exiting gracefully.")
                         return _empty_return(return_cache_status)
 
@@ -530,6 +532,8 @@ def process_device_filters(
             filters=filters,
             device_id=device_id,
             vc_enabled=vc_detection_enabled,
+            use_sysname=use_sysname,
+            strip_domain=strip_domain,
         )
 
         # Check if we already have cached validation for this device
@@ -601,7 +605,11 @@ def process_device_filters(
         from datetime import datetime, timezone
 
         cache_metadata_key = get_cache_metadata_key(
-            server_key=api.server_key, filters=filters, vc_enabled=vc_detection_enabled
+            server_key=api.server_key,
+            filters=filters,
+            vc_enabled=vc_detection_enabled,
+            use_sysname=use_sysname,
+            strip_domain=strip_domain,
         )
 
         # Check if metadata already exists to preserve original timestamp

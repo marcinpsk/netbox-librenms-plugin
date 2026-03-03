@@ -47,9 +47,9 @@
               <tr>
                 <th style="padding-left: 0.75rem;">Status</th>
                 <td>
-                  {% if libre_device.status == 1 %}
+                  {% if libre_device.status == 1 or libre_device.status == "1" %}
                     <span class="badge bg-success text-white"><i class="mdi mdi-check"></i> Up</span>
-                  {% elif libre_device.status == 0 %}
+                  {% elif libre_device.status == 0 or libre_device.status == "0" %}
                     <span class="badge bg-danger text-white"><i class="mdi mdi-close"></i> Down</span>
                   {% else %}
                     <span class="badge bg-secondary text-white"><i class="mdi mdi-help"></i> Unknown</span>

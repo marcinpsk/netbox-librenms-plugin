@@ -64,6 +64,31 @@ class TestCacheKeyGeneration:
         assert "secondary" in key
         assert "456" in key
 
+    def test_validated_device_cache_key_unique_per_naming_mode(self):
+        """Different naming preferences produce different cache keys."""
+        from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
+
+        base_args = dict(server_key="default", filters={}, device_id=123, vc_enabled=False)
+        key_default = get_validated_device_cache_key(**base_args)
+        key_no_sysname = get_validated_device_cache_key(**base_args, use_sysname=False)
+        key_strip = get_validated_device_cache_key(**base_args, strip_domain=True)
+
+        assert key_default != key_no_sysname
+        assert key_default != key_strip
+        assert key_no_sysname != key_strip
+
+    def test_cache_metadata_key_unique_per_naming_mode(self):
+        """Different naming preferences produce different metadata cache keys."""
+        from netbox_librenms_plugin.import_utils import get_cache_metadata_key
+
+        base_args = dict(server_key="default", filters={}, vc_enabled=False)
+        key_default = get_cache_metadata_key(**base_args)
+        key_no_sysname = get_cache_metadata_key(**base_args, use_sysname=False)
+        key_strip = get_cache_metadata_key(**base_args, strip_domain=True)
+
+        assert key_default != key_no_sysname
+        assert key_default != key_strip
+
 
 # =============================================================================
 # TestDeviceNameDetermination - 6 tests
@@ -3127,6 +3152,11 @@ class TestBulkImportCancellation:
         # With DB status "failed", import should not run
         assert count == 0
 
+    def test_db_errored_status_also_terminates_loop(self):
+        """When DB job status is 'errored', import loop should terminate early."""
+        count = self._run_bulk_import(mock_rq_job=None, db_status="errored", device_ids=[1, 2, 3])
+        assert count == 0
+
     def test_healthy_job_runs_all_devices(self):
         """When job is healthy, all devices should be imported."""
         rq_job = MagicMock()
@@ -3210,3 +3240,146 @@ class TestBuildIdServerInfo:
         device = self._make_device({})
         result = DeviceValidationDetailsView._build_id_server_info(device)
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Tests for _refresh_existing_device sys_name fallback fix
+# ---------------------------------------------------------------------------
+
+
+class TestRefreshExistingDeviceSysNameFallback:
+    """Test that _refresh_existing_device tries sys_name even when hostname is empty."""
+
+    def test_sysname_used_when_hostname_empty(self):
+        """When hostname is empty but sys_name matches, the device is found in validation."""
+        from unittest.mock import MagicMock, patch
+
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        mock_device = MagicMock()
+        mock_device.pk = 99
+        mock_device.name = "router-01"
+        mock_device.custom_field_data = {"librenms_id": None}
+
+        libre_device = {
+            "device_id": 55,
+            "hostname": "",  # empty hostname
+            "sysName": "router-01",
+            "serial": "SN-MATCH",
+        }
+        validation = {
+            "existing_device": None,
+            "existing_vm": None,
+            "import_as_vm": False,
+            "is_ready": False,
+            "can_import": False,
+        }
+
+        # sys_name lookup: filter(name__iexact="router-01") returns mock_device
+        # hostname lookup: filter(name__iexact="") returns None
+        def make_qs(return_val):
+            qs = MagicMock()
+            qs.first.return_value = return_val
+            return qs
+
+        with patch("netbox_librenms_plugin.import_utils.bulk_import.find_by_librenms_id", return_value=None):
+            import dcim.models as dcim_models
+            import virtualization.models as virt_models
+
+            with (
+                patch.object(
+                    dcim_models.Device.objects,
+                    "filter",
+                    side_effect=lambda **kw: make_qs(mock_device if kw.get("name__iexact") == "router-01" else None),
+                ),
+                patch.object(virt_models.VirtualMachine.objects, "filter", return_value=make_qs(None)),
+            ):
+                _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert validation["existing_device"] is mock_device
+
+    def test_hostname_lookup_succeeds_without_sysname(self):
+        """When hostname is non-empty and matches, validation is updated correctly."""
+        from unittest.mock import MagicMock, patch
+
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        mock_device = MagicMock()
+        mock_device.pk = 10
+        mock_device.name = "sw-01"
+        mock_device.custom_field_data = {"librenms_id": None}
+
+        libre_device = {
+            "device_id": 10,
+            "hostname": "sw-01",
+            "sysName": "sw-01-sysname",
+            "serial": "",
+        }
+        validation = {
+            "existing_device": None,
+            "existing_vm": None,
+            "import_as_vm": False,
+            "is_ready": False,
+            "can_import": False,
+        }
+
+        def make_qs(return_val):
+            qs = MagicMock()
+            qs.first.return_value = return_val
+            return qs
+
+        with patch("netbox_librenms_plugin.import_utils.bulk_import.find_by_librenms_id", return_value=None):
+            import dcim.models as dcim_models
+            import virtualization.models as virt_models
+
+            with (
+                patch.object(
+                    dcim_models.Device.objects,
+                    "filter",
+                    side_effect=lambda **kw: make_qs(mock_device if kw.get("name__iexact") == "sw-01" else None),
+                ),
+                patch.object(virt_models.VirtualMachine.objects, "filter", return_value=make_qs(None)),
+            ):
+                _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert validation["existing_device"] is mock_device
+
+
+# ---------------------------------------------------------------------------
+# Tests for _get_hostname_for_action helper
+# ---------------------------------------------------------------------------
+
+
+class TestGetHostnameForAction:
+    """Test _get_hostname_for_action helper in actions.py."""
+
+    def test_returns_resolved_name_when_set(self):
+        from unittest.mock import MagicMock
+
+        from netbox_librenms_plugin.views.imports.actions import _get_hostname_for_action
+
+        request = MagicMock()
+        validation = {"resolved_name": "cached-name"}
+        libre_device = {"hostname": "raw-hostname", "sysName": "raw-sysname"}
+
+        result = _get_hostname_for_action(request, validation, libre_device)
+        assert result == "cached-name"
+
+    def test_falls_back_to_determine_device_name(self):
+        from unittest.mock import MagicMock, patch
+
+        from netbox_librenms_plugin.views.imports.actions import _get_hostname_for_action
+
+        request = MagicMock()
+        validation = {}  # no resolved_name
+        libre_device = {"hostname": "host.example.com", "sysName": "host"}
+
+        with patch("netbox_librenms_plugin.views.imports.actions._resolve_naming_preferences") as mock_prefs:
+            mock_prefs.return_value = (False, False)  # use_sysname=False, strip_domain=False
+            with patch("netbox_librenms_plugin.views.imports.actions._determine_device_name") as mock_name:
+                mock_name.return_value = "host.example.com"
+                result = _get_hostname_for_action(request, validation, libre_device)
+
+        assert result == "host.example.com"
+        mock_prefs.assert_called_once_with(request)
+        mock_name.assert_called_once()
