@@ -68,11 +68,9 @@ def get_active_cached_searches(server_key: str) -> list[dict]:
         "other": "Other",
     }
 
-    # Get cached location choices for enrichment.
-    # TODO: scope this key by server_key (e.g. f"librenms_locations_choices:{server_key}") so
-    # searches from different servers don't cross-contaminate the displayed location labels.
-    # Deferred to a future PR; functional impact is cosmetic (wrong label in the filter summary).
-    location_cache_key = "librenms_locations_choices"
+    # Get cached location choices for enrichment; scoped by server_key so labels
+    # from different LibreNMS servers don't bleed into each other's filter summaries.
+    location_cache_key = f"librenms_locations_choices:{server_key}"
     cached_locations = cache.get(location_cache_key)
     if cached_locations:
         location_choices = dict(cached_locations)

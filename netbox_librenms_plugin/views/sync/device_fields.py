@@ -411,11 +411,14 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
 
         # Refuse to remove mappings for servers that are still configured in the plugin.
         # Only orphaned (unconfigured) mappings may be removed via this endpoint.
+        # Guard both multi-server mode (servers dict) and legacy single-server mode
+        # (top-level librenms_url in plugin config, which implicitly defines "default").
         from django.conf import settings as django_settings
 
         plugins_cfg = django_settings.PLUGINS_CONFIG.get("netbox_librenms_plugin", {})
         configured_servers = plugins_cfg.get("servers", {})
-        if server_key in configured_servers:
+        legacy_url_configured = bool(plugins_cfg.get("librenms_url"))
+        if server_key in configured_servers or (legacy_url_configured and server_key == "default"):
             messages.error(
                 request,
                 f"Cannot remove mapping for configured server '{server_key}'. "
@@ -424,10 +427,15 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         with transaction.atomic():
-            device_locked = Device.objects.select_for_update().get(pk=pk)
+            try:
+                device_locked = Device.objects.select_for_update().get(pk=pk)
+            except Device.DoesNotExist:
+                messages.error(request, "Device no longer exists.")
+                return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
             cf = device_locked.custom_field_data.get("librenms_id", {})
-            # Re-check after acquiring lock
-            if isinstance(cf, dict) and server_key in cf and server_key not in configured_servers:
+            # Re-check after acquiring lock; mirror the pre-transaction protection logic
+            _is_protected = server_key in configured_servers or (legacy_url_configured and server_key == "default")
+            if isinstance(cf, dict) and server_key in cf and not _is_protected:
                 del cf[server_key]
                 device_locked.custom_field_data["librenms_id"] = cf if cf else None
                 try:

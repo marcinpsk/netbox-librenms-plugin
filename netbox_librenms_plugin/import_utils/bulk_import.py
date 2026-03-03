@@ -123,9 +123,6 @@ def bulk_import_devices_shared(
                     else:
                         logger.warning(f"Import cancelled at device {idx} of {total}")
                     break
-            # Log progress (only after first check)
-            if idx > 1 and job.logger:
-                job.logger.info(f"Imported device {idx} of {total}")
 
         try:
             # Use cached device data if available to avoid redundant API calls
@@ -185,6 +182,9 @@ def bulk_import_devices_shared(
                         "message": result["message"],
                     }
                 )
+                # Log progress after each successful import
+                if job and job.logger:
+                    job.logger.info(f"Imported device {idx + 1} of {total}")
 
                 # Handle virtual chassis creation for stacks
                 vc_data = validation.get("virtual_chassis", {})

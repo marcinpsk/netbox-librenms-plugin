@@ -240,10 +240,9 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
                         return_cache_status=True,
                     )
                     devices_cached = devices_from_cache
-                except Exception:
+                except Exception as e:
                     # Cache check failed; proceed with background job decision based on device_count
-                    logger.debug("Cache check failed; proceeding without cached result")
-                    pass
+                    logger.debug("Cache check failed; proceeding without cached result: %s", e, exc_info=True)
 
             # Get device count for background job decision
             try:
@@ -333,9 +332,10 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         try:
             settings, _ = LibreNMSSettings.objects.get_or_create()
         except Exception:
+            _user = getattr(request, "user", None)
             logger.exception(
                 "Failed to get or create LibreNMSSettings during LibreNMS import for user %s",
-                getattr(request, "user", None),
+                getattr(_user, "username", str(_user)),
             )
             settings = None
 
@@ -440,7 +440,8 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         show_disabled = bool(data_source.get("show_disabled"))
         exclude_existing = bool(data_source.get("exclude_existing"))
 
-        # Resolve naming preferences from form data / user pref / settings
+        # Resolve naming preferences: submitted form toggle → user pref → settings default.
+        # When pref is None (first-time user) any explicit toggle in data_source should still win.
         use_sysname_pref = get_user_pref(self._request, "plugins.netbox_librenms_plugin.use_sysname")
         strip_domain_pref = get_user_pref(self._request, "plugins.netbox_librenms_plugin.strip_domain")
         try:
@@ -448,13 +449,19 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         except Exception:
             logger.exception("Failed to load LibreNMSSettings for naming preferences")
             _settings = None
+        _use_sysname_toggle = data_source.get("use_sysname_toggle")
         use_sysname = (
-            data_source.get("use_sysname_toggle", use_sysname_pref)
+            _use_sysname_toggle
+            if _use_sysname_toggle is not None
+            else use_sysname_pref
             if use_sysname_pref is not None
             else (getattr(_settings, "use_sysname_default", True) if _settings else True)
         )
+        _strip_domain_toggle = data_source.get("strip_domain_toggle")
         strip_domain = (
-            data_source.get("strip_domain_toggle", strip_domain_pref)
+            _strip_domain_toggle
+            if _strip_domain_toggle is not None
+            else strip_domain_pref
             if strip_domain_pref is not None
             else (getattr(_settings, "strip_domain_default", False) if _settings else False)
         )
