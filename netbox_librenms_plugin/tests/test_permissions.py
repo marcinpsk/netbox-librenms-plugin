@@ -1070,7 +1070,9 @@ class TestRemoveServerMappingViewErrorHandling:
 
             view.post(request, pk=1)
 
-        # The "orphan-server" key should have been removed and the device saved
+        # The "orphan-server" key should have been removed and the device saved.
+        # Assert the exact shape of custom_field_data so misspelled keys are caught.
+        assert mock_locked.custom_field_data == {"librenms_id": {"other-server": 7}}
         remaining = mock_locked.custom_field_data["librenms_id"]
         assert "orphan-server" not in remaining
         assert remaining.get("other-server") == 7  # sibling key preserved

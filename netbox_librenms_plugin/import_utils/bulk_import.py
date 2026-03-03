@@ -184,7 +184,7 @@ def bulk_import_devices_shared(
                 )
                 # Log progress after each successful import
                 if job and job.logger:
-                    job.logger.info(f"Imported device {idx + 1} of {total}")
+                    job.logger.info(f"Imported device {idx} of {total}")
 
                 # Handle virtual chassis creation for stacks
                 vc_data = validation.get("virtual_chassis", {})
@@ -439,17 +439,11 @@ def process_device_filters(
         return_cache_status=True,
     )
 
-    # Filter out disabled devices if requested; normalize status to int to handle
-    # both integer (1) and string ("1") responses from the LibreNMS API.
+    # Filter out disabled devices if requested. LibreNMS's "disabled" field (1=disabled,
+    # 0=enabled) reflects manual device disablement; "status" reflects SNMP reachability.
+    # show_disabled controls the former: hidden when disabled==1, shown regardless of status.
     if not show_disabled:
-
-        def _is_active(d):
-            try:
-                return int(d.get("status", 0)) == 1
-            except (TypeError, ValueError):
-                return False
-
-        libre_devices = [d for d in libre_devices if _is_active(d)]
+        libre_devices = [d for d in libre_devices if int(d.get("disabled", 0)) != 1]
 
     if job:
         job.logger.info(f"Found {len(libre_devices)} devices to process")

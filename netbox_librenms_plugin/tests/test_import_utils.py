@@ -252,11 +252,11 @@ class TestDeviceRetrieval:
 
     @patch("netbox_librenms_plugin.import_utils.filters.cache")
     def test_get_device_count_excludes_disabled(self, mock_cache):
-        """Count respects show_disabled filter parameter."""
+        """Count respects show_disabled filter parameter: disabled==1 devices excluded."""
         mock_cache.get.return_value = [
-            {"device_id": 1, "hostname": "switch-01", "status": 1},
-            {"device_id": 2, "hostname": "switch-02", "status": 1},
-            {"device_id": 3, "hostname": "switch-03", "status": 0},  # disabled
+            {"device_id": 1, "hostname": "switch-01", "disabled": 0, "status": 1},
+            {"device_id": 2, "hostname": "switch-02", "disabled": 0, "status": 0},
+            {"device_id": 3, "hostname": "switch-03", "disabled": 1, "status": 1},  # disabled in LibreNMS
         ]
         mock_api = MagicMock()
 
@@ -2884,13 +2884,13 @@ class TestDeviceNamingPreferences:
 class TestProcessDeviceFilters:
     """Tests for process_device_filters and related bulk_import utilities."""
 
-    def test_show_disabled_filters_integer_status_1(self):
-        """show_disabled=False should keep devices with status==1 (int)."""
+    def test_show_disabled_filters_integer_disabled_1(self):
+        """show_disabled=False should exclude devices with disabled==1 (int)."""
         from unittest.mock import MagicMock, patch
 
         devices = [
-            {"device_id": 1, "hostname": "a", "status": 1},
-            {"device_id": 2, "hostname": "b", "status": 0},
+            {"device_id": 1, "hostname": "a", "disabled": 0, "status": 1},
+            {"device_id": 2, "hostname": "b", "disabled": 1, "status": 1},  # disabled in LibreNMS
         ]
         with (
             patch(
@@ -2924,17 +2924,17 @@ class TestProcessDeviceFilters:
                 api, filters={}, vc_detection_enabled=False, clear_cache=False, show_disabled=False
             )
 
-        # Only device with status==1 should be processed; disabled device excluded before validation
+        # Only enabled device (disabled==0) should be processed
         assert len(result) == 1
         assert result[0]["hostname"] == "a"
 
-    def test_show_disabled_filters_string_status_1(self):
-        """show_disabled=False should keep devices with status=='1' (string from API)."""
+    def test_show_disabled_keeps_unreachable_enabled_device(self):
+        """show_disabled=False should keep devices that are enabled (disabled==0) even if status==0."""
         from unittest.mock import MagicMock, patch
 
         devices = [
-            {"device_id": 1, "hostname": "a", "status": "1"},
-            {"device_id": 2, "hostname": "b", "status": "0"},
+            {"device_id": 1, "hostname": "a", "disabled": 0, "status": 0},  # down but enabled
+            {"device_id": 2, "hostname": "b", "disabled": 1, "status": 0},  # down and disabled
         ]
         with (
             patch(
@@ -2968,6 +2968,7 @@ class TestProcessDeviceFilters:
                 api, filters={}, vc_detection_enabled=False, clear_cache=False, show_disabled=False
             )
 
+        # Device a is enabled (disabled==0) and should be kept even though status==0
         assert len(result) == 1
         assert result[0]["hostname"] == "a"
 
@@ -3486,6 +3487,30 @@ class TestResolveNamingPreferencesKeys:
         with patch("netbox_librenms_plugin.views.imports.actions.get_user_pref", return_value=True):
             use_sysname, _ = _resolve_naming_preferences(request)
         assert use_sysname is False
+
+    def test_truthy_string_true_value(self):
+        """'true' and '1' (in addition to 'on') should be treated as True."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.imports.actions import _resolve_naming_preferences
+
+        for truthy_val in ("true", "True", "TRUE", "1"):
+            request = self._make_request(post={"use-sysname-toggle": truthy_val, "strip-domain-toggle": "off"})
+            with patch("netbox_librenms_plugin.views.imports.actions.get_user_pref", return_value=None):
+                use_sysname, _ = _resolve_naming_preferences(request)
+            assert use_sysname is True, f"Expected True for value {truthy_val!r}"
+
+    def test_falsy_string_false_value(self):
+        """Unrecognised strings should be treated as False."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.imports.actions import _resolve_naming_preferences
+
+        for falsy_val in ("off", "false", "0", "", "no"):
+            request = self._make_request(post={"use-sysname-toggle": falsy_val, "strip-domain-toggle": "off"})
+            with patch("netbox_librenms_plugin.views.imports.actions.get_user_pref", return_value=None):
+                use_sysname, _ = _resolve_naming_preferences(request)
+            assert use_sysname is False, f"Expected False for value {falsy_val!r}"
 
 
 # ---------------------------------------------------------------------------

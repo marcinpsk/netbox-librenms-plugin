@@ -52,14 +52,18 @@ def _resolve_naming_preferences(request) -> tuple[bool, bool]:
     # different form/hidden-input implementations.
     _USE_SYSNAME_KEYS = ("use-sysname-toggle", "use_sysname-toggle", "use_sysname")
     _STRIP_DOMAIN_KEYS = ("strip-domain-toggle", "strip_domain-toggle", "strip_domain")
+    _TRUTHY = frozenset({"on", "true", "1"})
+
+    def _is_truthy(val):
+        return val.lower() in _TRUTHY if val is not None else False
 
     _use_sysname_post = next((request.POST.get(k) for k in _USE_SYSNAME_KEYS if k in request.POST), None)
     _use_sysname_get = next((request.GET.get(k) for k in _USE_SYSNAME_KEYS if k in request.GET), None)
 
     if _use_sysname_post is not None:
-        use_sysname = _use_sysname_post == "on"
+        use_sysname = _is_truthy(_use_sysname_post)
     elif _use_sysname_get is not None:
-        use_sysname = _use_sysname_get == "on"
+        use_sysname = _is_truthy(_use_sysname_get)
     else:
         pref = get_user_pref(request, "plugins.netbox_librenms_plugin.use_sysname")
         if pref is not None:
@@ -72,9 +76,9 @@ def _resolve_naming_preferences(request) -> tuple[bool, bool]:
     _strip_domain_get = next((request.GET.get(k) for k in _STRIP_DOMAIN_KEYS if k in request.GET), None)
 
     if _strip_domain_post is not None:
-        strip_domain = _strip_domain_post == "on"
+        strip_domain = _is_truthy(_strip_domain_post)
     elif _strip_domain_get is not None:
-        strip_domain = _strip_domain_get == "on"
+        strip_domain = _is_truthy(_strip_domain_get)
     else:
         pref = get_user_pref(request, "plugins.netbox_librenms_plugin.strip_domain")
         if pref is not None:

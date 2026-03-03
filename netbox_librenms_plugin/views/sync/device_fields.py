@@ -4,9 +4,12 @@ from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.shortcuts import get_object_or_404, redirect
 from django.views import View
+import logging
 
 from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
+
+logger = logging.getLogger(__name__)
 
 
 class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
@@ -278,26 +281,41 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 pass
 
         try:
-            platform = Platform.objects.create(
-                name=platform_name,
-                manufacturer=manufacturer,
+            with transaction.atomic():
+                platform = Platform.objects.create(
+                    name=platform_name,
+                    manufacturer=manufacturer,
+                )
+
+                device.platform = platform
+                device.full_clean()
+                device.save()
+        except IntegrityError as e:
+            error_str = str(e)
+            logger.error(
+                f"IntegrityError creating platform '{platform_name}' for device pk={pk}: {e}",
+                exc_info=True,
             )
-        except IntegrityError:
+            if "platform" in error_str.lower() or "slug" in error_str.lower():
+                messages.error(
+                    request,
+                    f"Platform '{platform_name}' could not be created (slug collision). Try a different name.",
+                )
+            else:
+                messages.error(
+                    request,
+                    f"Failed to assign platform '{platform_name}'. Please contact an administrator.",
+                )
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+        except ValidationError as e:
+            logger.error(
+                f"ValidationError assigning platform '{platform_name}' to device pk={pk}: {e}",
+                exc_info=True,
+            )
             messages.error(
                 request,
-                f"Platform '{platform_name}' could not be created (slug collision). Try a different name.",
+                f"Failed to assign platform '{platform_name}'. Please contact an administrator.",
             )
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
-
-        old_platform = device.platform
-        device.platform = platform
-        try:
-            device.full_clean()
-            device.save()
-        except (ValidationError, IntegrityError) as e:
-            device.platform = old_platform
-            error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
-            messages.error(request, f"Failed to assign platform '{platform}': {error_msg}")
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         messages.success(

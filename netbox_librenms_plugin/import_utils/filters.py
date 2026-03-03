@@ -35,17 +35,11 @@ def get_device_count_for_filters(
     """
     devices = get_librenms_devices_for_import(api, filters=filters, force_refresh=clear_cache)
 
-    # Filter out disabled devices if requested; normalize status to int to handle
-    # both integer (1) and string ("1") responses from the LibreNMS API.
+    # Filter out disabled devices if requested. LibreNMS's "disabled" field (1=disabled,
+    # 0=enabled) reflects manual device disablement; "status" reflects SNMP reachability.
+    # show_disabled controls the former: hidden when disabled==1, shown regardless of status.
     if not show_disabled:
-
-        def _is_active(d):
-            try:
-                return int(d.get("status", 0)) == 1
-            except (TypeError, ValueError):
-                return False
-
-        devices = [d for d in devices if _is_active(d)]
+        devices = [d for d in devices if int(d.get("disabled", 0)) != 1]
 
     return len(devices)
 
