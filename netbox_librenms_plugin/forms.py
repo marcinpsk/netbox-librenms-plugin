@@ -2,7 +2,7 @@
 import logging
 
 from dcim.choices import InterfaceTypeChoices
-from dcim.models import Device, DeviceRole, DeviceType, Location, Manufacturer, Rack, Site
+from dcim.models import Device, DeviceRole, DeviceType, Location, Manufacturer, ModuleType, Rack, Site
 from django import forms
 from django.http import QueryDict
 from django.utils.translation import gettext_lazy as _
@@ -315,6 +315,12 @@ class DeviceTypeMappingForm(NetBoxModelForm):
 class DeviceTypeMappingImportForm(NetBoxModelImportForm):
     """Form for bulk importing device type mappings."""
 
+    netbox_device_type = CSVModelChoiceField(
+        queryset=DeviceType.objects.all(),
+        to_field_name="model",
+        help_text="NetBox device type model name",
+    )
+
     class Meta:
         """Meta options for DeviceTypeMappingImportForm."""
 
@@ -347,6 +353,12 @@ class ModuleTypeMappingForm(NetBoxModelForm):
 
 class ModuleTypeMappingImportForm(NetBoxModelImportForm):
     """Form for bulk importing module type mappings."""
+
+    netbox_module_type = CSVModelChoiceField(
+        queryset=ModuleType.objects.all(),
+        to_field_name="model",
+        help_text="NetBox module type model name",
+    )
 
     class Meta:
         """Meta options for ModuleTypeMappingImportForm."""

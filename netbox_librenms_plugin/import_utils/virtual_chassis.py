@@ -348,10 +348,8 @@ def create_virtual_chassis_with_members(master_device: Device, members_info: lis
         ]
     """
 
-    # Store original master device state for rollback
+    # original_master_name is still referenced in warning messages inside the atomic block.
     original_master_name = master_device.name
-    original_vc = master_device.virtual_chassis
-    original_vc_position = master_device.vc_position
 
     try:
         with transaction.atomic():
@@ -374,7 +372,7 @@ def create_virtual_chassis_with_members(master_device: Device, members_info: lis
             vc = VirtualChassis.objects.create(
                 name=vc_name,
                 master=master_device,
-                domain=f"librenms-{libre_device['device_id']}",
+                domain=f"librenms-{libre_device.get('device_id', master_device.pk)}",
             )
 
             # Update master device
@@ -463,12 +461,10 @@ def create_virtual_chassis_with_members(master_device: Device, members_info: lis
             return vc
 
     except Exception as e:
-        # Rollback master device to original state
+        # The transaction.atomic() block above will roll back all DB changes automatically.
+        # Manual state restoration is redundant and the save() would fail in a broken transaction.
         logger.error(
-            f"Virtual Chassis creation failed for device {master_device.name}: {e}. Rolling back master device changes."
+            f"Virtual Chassis creation failed for device {master_device.name}: {e}",
+            exc_info=True,
         )
-        master_device.name = original_master_name
-        master_device.virtual_chassis = original_vc
-        master_device.vc_position = original_vc_position
-        master_device.save()
         raise
