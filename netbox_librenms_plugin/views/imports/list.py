@@ -257,7 +257,12 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
                 logger.error(f"Error getting device count: {e}")
                 device_count = 0
 
-            # Load settings for background job decision; resolve naming preferences
+            # Load settings for background job decision; resolve naming preferences.
+            # We intentionally read user_pref here rather than request.GET because the
+            # naming toggles (use-sysname-toggle, strip-domain-toggle) live OUTSIDE the
+            # filter form (method="get") and are not submitted with it.  Instead, each
+            # toggle fires a savePref() AJAX call on change, so the user_pref is always
+            # up-to-date by the time the filter form is submitted.
             settings = None
             try:
                 settings = LibreNMSSettings.objects.first()

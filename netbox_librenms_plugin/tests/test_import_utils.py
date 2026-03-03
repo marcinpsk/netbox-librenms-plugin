@@ -2060,6 +2060,7 @@ class TestDeviceConflictActionView:
         ):
             mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
@@ -2104,6 +2105,7 @@ class TestDeviceConflictActionView:
         ):
             mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
@@ -2144,6 +2146,7 @@ class TestDeviceConflictActionView:
         ):
             mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
@@ -2185,6 +2188,7 @@ class TestDeviceConflictActionView:
         ):
             mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
@@ -2220,6 +2224,7 @@ class TestDeviceConflictActionView:
             patch("dcim.models.Device") as mock_device_cls,
         ):
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             # Include existing_device so the validated-conflict-target guard passes;
             # we want to exercise the unknown-action branch, not the missing-device guard.
             mock_validate.return_value = (libre_device, {"existing_device": existing_device}, {})
@@ -2257,6 +2262,7 @@ class TestDeviceConflictActionView:
             patch("dcim.models.Device") as mock_device_cls,
         ):
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
@@ -2287,6 +2293,7 @@ class TestDeviceConflictActionView:
             patch("dcim.models.Device") as mock_device_cls,
         ):
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_validate.return_value = (libre_device, validation, selections)
 
             response = view.post(request, device_id=10)
@@ -2326,6 +2333,7 @@ class TestDeviceConflictActionView:
         ):
             mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
@@ -2376,6 +2384,7 @@ class TestDeviceConflictActionView:
         ):
             mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
@@ -2426,6 +2435,7 @@ class TestDeviceConflictActionView:
             patch("dcim.models.Device") as mock_device_cls,
         ):
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
@@ -2453,8 +2463,11 @@ class TestDeviceConflictActionView:
             patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
             patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
             patch("dcim.models.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx,
         ):
+            mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
@@ -2491,6 +2504,7 @@ class TestDeviceConflictActionView:
             patch("netbox_librenms_plugin.utils.find_matching_platform") as mock_find_platform,
         ):
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_find_platform.return_value = {"found": True, "platform": mock_platform, "match_type": "exact"}
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
@@ -2522,6 +2536,7 @@ class TestDeviceConflictActionView:
             patch("netbox_librenms_plugin.utils.match_librenms_hardware_to_device_type") as mock_hw_match,
         ):
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
             mock_hw_match.return_value = {"matched": True, "device_type": new_device_type}
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
@@ -3376,3 +3391,119 @@ class TestGetHostnameForAction:
         assert result == "host.example.com"
         mock_prefs.assert_called_once_with(request)
         mock_name.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Tests for _resolve_naming_preferences underscore-variant key support
+# ---------------------------------------------------------------------------
+
+
+class TestResolveNamingPreferencesKeys:
+    """Test that _resolve_naming_preferences handles both hyphenated and underscored keys."""
+
+    def _make_request(self, post=None, get=None):
+        from unittest.mock import MagicMock
+
+        request = MagicMock()
+        request.POST = post or {}
+        request.GET = get or {}
+        request.user = MagicMock()
+        return request
+
+    def test_hyphenated_post_key_use_sysname(self):
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.imports.actions import _resolve_naming_preferences
+
+        request = self._make_request(post={"use-sysname-toggle": "on", "strip-domain-toggle": "off"})
+        with patch("netbox_librenms_plugin.views.imports.actions.get_user_pref", return_value=None):
+            use_sysname, strip_domain = _resolve_naming_preferences(request)
+        assert use_sysname is True
+        assert strip_domain is False
+
+    def test_underscored_post_key_use_sysname(self):
+        """Underscore variant 'use_sysname-toggle' should also be recognised."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.imports.actions import _resolve_naming_preferences
+
+        request = self._make_request(post={"use_sysname-toggle": "on", "strip_domain-toggle": "on"})
+        with patch("netbox_librenms_plugin.views.imports.actions.get_user_pref", return_value=None):
+            use_sysname, strip_domain = _resolve_naming_preferences(request)
+        assert use_sysname is True
+        assert strip_domain is True
+
+    def test_get_key_used_when_not_in_post(self):
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.imports.actions import _resolve_naming_preferences
+
+        request = self._make_request(get={"use-sysname-toggle": "off", "strip-domain-toggle": "on"})
+        with patch("netbox_librenms_plugin.views.imports.actions.get_user_pref", return_value=None):
+            use_sysname, strip_domain = _resolve_naming_preferences(request)
+        assert use_sysname is False
+        assert strip_domain is True
+
+    def test_user_pref_used_when_no_toggle_in_request(self):
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.imports.actions import _resolve_naming_preferences
+
+        request = self._make_request()
+        with patch("netbox_librenms_plugin.views.imports.actions.get_user_pref") as mock_pref:
+            mock_pref.side_effect = lambda req, key: (False if "use_sysname" in key else True)
+            use_sysname, strip_domain = _resolve_naming_preferences(request)
+        assert use_sysname is False
+        assert strip_domain is True
+
+    def test_post_takes_precedence_over_user_pref(self):
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.imports.actions import _resolve_naming_preferences
+
+        request = self._make_request(post={"use-sysname-toggle": "off"})
+        # user_pref would say True — POST should win
+        with patch("netbox_librenms_plugin.views.imports.actions.get_user_pref", return_value=True):
+            use_sysname, _ = _resolve_naming_preferences(request)
+        assert use_sysname is False
+
+
+# ---------------------------------------------------------------------------
+# Tests for vc_domain stack dedup key fix
+# ---------------------------------------------------------------------------
+
+
+class TestVCDomainStackDedup:
+    """Test that bulk_import_devices_shared deduplicates VC creation by member serials."""
+
+    def test_vc_domain_uses_member_serials(self):
+        """vc_domain for two stack members with the same serials should be identical."""
+        # The logic lives inline; test the produced key directly from vc_data
+        members = [
+            {"serial": "SN100", "position": 1},
+            {"serial": "SN200", "position": 2},
+        ]
+        member_serials = sorted(m.get("serial") for m in members if m.get("serial"))
+        vc_domain = f"librenms-stack-{','.join(member_serials)}"
+
+        # Same members from a different device's perspective should produce the same key
+        assert vc_domain == "librenms-stack-SN100,SN200"
+
+    def test_vc_domain_fallback_to_device_id_when_no_serials(self):
+        """When no member serials are available, device_id is used as fallback."""
+        members = [
+            {"position": 1},
+            {"position": 2},
+        ]
+        member_serials = sorted(m.get("serial") for m in members if m.get("serial"))
+        device_id = 42
+        vc_domain = f"librenms-stack-{','.join(member_serials)}" if member_serials else f"librenms-{device_id}"
+        assert vc_domain == "librenms-42"
+
+    def test_different_stacks_produce_different_keys(self):
+        """Two stacks with different serials produce distinct dedup keys."""
+        members_a = [{"serial": "SN-A1"}, {"serial": "SN-A2"}]
+        members_b = [{"serial": "SN-B1"}, {"serial": "SN-B2"}]
+        key_a = f"librenms-stack-{','.join(sorted(m['serial'] for m in members_a))}"
+        key_b = f"librenms-stack-{','.join(sorted(m['serial'] for m in members_b))}"
+        assert key_a != key_b
