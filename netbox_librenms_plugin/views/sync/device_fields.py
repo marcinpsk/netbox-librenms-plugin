@@ -409,10 +409,25 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
             messages.warning(request, f"No mapping found for server '{server_key}'.")
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
+        # Refuse to remove mappings for servers that are still configured in the plugin.
+        # Only orphaned (unconfigured) mappings may be removed via this endpoint.
+        from django.conf import settings as django_settings
+
+        plugins_cfg = django_settings.PLUGINS_CONFIG.get("netbox_librenms_plugin", {})
+        configured_servers = plugins_cfg.get("servers", {})
+        if server_key in configured_servers:
+            messages.error(
+                request,
+                f"Cannot remove mapping for configured server '{server_key}'. "
+                "Remove the server from plugin configuration first, then retry.",
+            )
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+
         with transaction.atomic():
             device_locked = Device.objects.select_for_update().get(pk=pk)
             cf = device_locked.custom_field_data.get("librenms_id", {})
-            if isinstance(cf, dict) and server_key in cf:
+            # Re-check after acquiring lock
+            if isinstance(cf, dict) and server_key in cf and server_key not in configured_servers:
                 del cf[server_key]
                 device_locked.custom_field_data["librenms_id"] = cf if cf else None
                 device_locked.full_clean()

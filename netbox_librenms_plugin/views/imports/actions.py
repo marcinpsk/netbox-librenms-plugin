@@ -75,6 +75,20 @@ def _resolve_naming_preferences(request) -> tuple[bool, bool]:
     return use_sysname, strip_domain
 
 
+def _get_hostname_for_action(request, validation: dict, libre_device: dict) -> str:
+    """Return the resolved hostname to use when updating a device during a conflict action.
+
+    Prefer the cached ``resolved_name`` from validation (already computed with the
+    user's naming prefs at validation time). Fall back to computing it fresh from
+    the current request's naming preferences.
+    """
+    resolved = validation.get("resolved_name")
+    if resolved:
+        return resolved
+    use_sysname, strip_domain = _resolve_naming_preferences(request)
+    return _determine_device_name(libre_device, use_sysname=use_sysname, strip_domain=strip_domain)
+
+
 def _save_device(device) -> HttpResponse | None:
     """Call full_clean() then save(). Return an HttpResponse on failure, None on success."""
     from django.db import IntegrityError
@@ -994,14 +1008,7 @@ class DeviceConflictActionView(
 
                 if action == "link":
                     # Link to LibreNMS and update name from LibreNMS data
-                    resolved_name = validation.get("resolved_name")
-                    if resolved_name:
-                        hostname = resolved_name
-                    else:
-                        use_sysname, strip_domain = _resolve_naming_preferences(request)
-                        hostname = _determine_device_name(
-                            libre_device, use_sysname=use_sysname, strip_domain=strip_domain
-                        )
+                    hostname = _get_hostname_for_action(request, validation, libre_device)
                     set_librenms_device_id(existing_device, librenms_id, self.librenms_api.server_key)
                     existing_device.name = hostname
                     if librenms_device_type:
@@ -1012,15 +1019,8 @@ class DeviceConflictActionView(
 
                 elif action == "update":
                     # Update hostname, serial, and link to LibreNMS
-                    resolved_name = validation.get("resolved_name")
+                    hostname = _get_hostname_for_action(request, validation, libre_device)
                     incoming_serial = libre_device.get("serial") or ""
-                    if resolved_name:
-                        hostname = resolved_name
-                    else:
-                        use_sysname, strip_domain = _resolve_naming_preferences(request)
-                        hostname = _determine_device_name(
-                            libre_device, use_sysname=use_sysname, strip_domain=strip_domain
-                        )
                     if incoming_serial and incoming_serial != "-":
                         conflict_device = (
                             Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
@@ -1069,12 +1069,7 @@ class DeviceConflictActionView(
 
         elif action == "sync_name":
             # Sync device name from LibreNMS (e.g., IP → sysName)
-            resolved_name = validation.get("resolved_name")
-            if resolved_name:
-                hostname = resolved_name
-            else:
-                use_sysname, strip_domain = _resolve_naming_preferences(request)
-                hostname = _determine_device_name(libre_device, use_sysname=use_sysname, strip_domain=strip_domain)
+            hostname = _get_hostname_for_action(request, validation, libre_device)
             existing_device.name = hostname
             if err := _save_device(existing_device):
                 return err
