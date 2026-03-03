@@ -428,8 +428,17 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
             if isinstance(cf, dict) and server_key in cf and server_key not in configured_servers:
                 del cf[server_key]
                 device_locked.custom_field_data["librenms_id"] = cf if cf else None
-                device_locked.full_clean()
-                device_locked.save()
+                try:
+                    device_locked.full_clean()
+                    device_locked.save()
+                except ValidationError as exc:
+                    transaction.set_rollback(True)
+                    messages.error(request, f"Validation error removing mapping: {exc}")
+                    return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+                except Exception as exc:
+                    transaction.set_rollback(True)
+                    messages.error(request, f"Error removing mapping for server '{server_key}': {exc}")
+                    return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
                 messages.success(request, f"Removed LibreNMS mapping for server '{server_key}'.")
             else:
                 messages.warning(request, f"Mapping for server '{server_key}' was already removed.")
