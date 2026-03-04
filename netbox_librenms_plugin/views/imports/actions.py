@@ -1222,9 +1222,24 @@ class DeviceConflictActionView(
                     "Serial number not confirmed. Check the force checkbox to migrate without serial verification.",
                     status=400,
                 )
-            migrate_legacy_librenms_id(existing_device, self.librenms_api.server_key)
-            if err := _save_device(existing_device):
-                return err
+            with transaction.atomic():
+                try:
+                    locked_device = Device.objects.select_for_update().get(pk=existing_device.pk)
+                except Device.DoesNotExist:
+                    return HttpResponse(
+                        "Device no longer exists; it may have been deleted concurrently.",
+                        status=409,
+                    )
+                # Re-check under lock — another request may have already migrated it
+                cf_locked = locked_device.custom_field_data.get("librenms_id")
+                if not isinstance(cf_locked, int):
+                    return HttpResponse(
+                        "Device librenms_id is already in JSON format; no migration needed.",
+                        status=400,
+                    )
+                migrate_legacy_librenms_id(locked_device, self.librenms_api.server_key)
+                if err := _save_device(locked_device):
+                    return err
             logger.info(
                 f"Migrated legacy librenms_id on '{existing_device.name}' "
                 f"to {{{self.librenms_api.server_key!r}: {cf_value}}}"

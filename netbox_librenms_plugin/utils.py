@@ -500,7 +500,15 @@ def set_librenms_device_id(obj, device_id, server_key: str = "default"):
             obj,
         )
         cf_value = {}
-    cf_value[server_key] = device_id
+    try:
+        cf_value[server_key] = int(device_id)
+    except (TypeError, ValueError):
+        logger.warning(
+            "librenms_id device_id %r is not a valid integer on %r; storing as-is.",
+            device_id,
+            obj,
+        )
+        cf_value[server_key] = device_id
     obj.custom_field_data["librenms_id"] = cf_value
 
 

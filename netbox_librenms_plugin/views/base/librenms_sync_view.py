@@ -149,6 +149,15 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         result = []
         for sk, did in cf_value.items():
             srv_cfg = servers_config.get(sk)
+            # Legacy single-server config: "default" key with no matching servers entry —
+            # fall back to root-level librenms_url/display_name in plugins_cfg.
+            if srv_cfg is None and sk == "default":
+                legacy_url = plugins_cfg.get("librenms_url")
+                if legacy_url:
+                    srv_cfg = {
+                        "librenms_url": legacy_url,
+                        "display_name": plugins_cfg.get("display_name") or sk,
+                    }
             is_configured = srv_cfg is not None
             librenms_url = srv_cfg.get("librenms_url") if srv_cfg else None
             display_name = (srv_cfg.get("display_name") or sk) if srv_cfg else sk

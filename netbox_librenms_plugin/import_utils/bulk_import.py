@@ -21,6 +21,15 @@ from .virtual_chassis import (
 logger = logging.getLogger(__name__)
 
 
+def _safe_disabled(device: dict) -> int:
+    """Return 1 if the device is disabled, 0 otherwise. Tolerates None/non-numeric values."""
+    val = device.get("disabled", 0)
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return 0
+
+
 def bulk_import_devices_shared(
     device_ids: List[int],
     server_key: str = None,
@@ -312,7 +321,7 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             if refreshed:
                 validation["existing_device"] = refreshed
                 if hasattr(refreshed, "role") and refreshed.role:
-                    validation["device_role"] = {"found": True, "role": refreshed.role}
+                    validation.setdefault("device_role", {}).update({"found": True, "role": refreshed.role})
             else:
                 # Device was deleted since caching — recompute readiness to match
                 # validate_device_for_import logic.
@@ -370,7 +379,7 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
         if not new_device and sys_name:
             new_device = Model.objects.filter(name__iexact=sys_name).first()
             if new_device:
-                match_type = "hostname"
+                match_type = "sysname"
 
         if new_device:
             validation["existing_device"] = new_device
@@ -443,7 +452,7 @@ def process_device_filters(
     # 0=enabled) reflects manual device disablement; "status" reflects SNMP reachability.
     # show_disabled controls the former: hidden when disabled==1, shown regardless of status.
     if not show_disabled:
-        libre_devices = [d for d in libre_devices if int(d.get("disabled", 0)) != 1]
+        libre_devices = [d for d in libre_devices if _safe_disabled(d) != 1]
 
     if job:
         job.logger.info(f"Found {len(libre_devices)} devices to process")

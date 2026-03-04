@@ -459,11 +459,13 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
                     device_locked.save()
                 except ValidationError as exc:
                     transaction.set_rollback(True)
-                    messages.error(request, f"Validation error removing mapping: {exc}")
+                    logger.error("Validation error removing LibreNMS mapping for server %r: %s", server_key, exc)
+                    messages.error(request, "Validation error removing LibreNMS mapping.")
                     return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
-                except Exception as exc:
+                except Exception:
                     transaction.set_rollback(True)
-                    messages.error(request, f"Error removing mapping for server '{server_key}': {exc}")
+                    logger.exception("Unexpected error removing LibreNMS mapping for server %r", server_key)
+                    messages.error(request, "An unexpected error occurred while removing the LibreNMS mapping.")
                     return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
                 messages.success(request, f"Removed LibreNMS mapping for server '{server_key}'.")
             else:

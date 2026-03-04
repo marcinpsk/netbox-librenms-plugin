@@ -105,11 +105,11 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
 
         # Create maps for efficient lookups
         server_key = self.librenms_api.server_key
-        interfaces_by_librenms_id = {
-            get_librenms_device_id(interface, server_key): interface
-            for interface in all_interfaces
-            if get_librenms_device_id(interface, server_key)
-        }
+        interfaces_by_librenms_id = {}
+        for interface in all_interfaces:
+            lib_id = get_librenms_device_id(interface, server_key)
+            if lib_id:
+                interfaces_by_librenms_id[lib_id] = interface
 
         interfaces_by_name = {interface.name: interface for interface in all_interfaces}
 

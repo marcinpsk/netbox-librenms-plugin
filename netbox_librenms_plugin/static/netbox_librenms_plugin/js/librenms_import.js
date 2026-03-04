@@ -1095,17 +1095,11 @@
 
             // Initialize Bootstrap tooltips inside the freshly-swapped modal content
             if (typeof bootstrap !== 'undefined' && bootstrap.Tooltip) {
-                const tooltips = modalContent.querySelectorAll('[data-bs-toggle="tooltip"]');
-                [...tooltips].forEach(el => new bootstrap.Tooltip(el));
+                const tooltipEls = modalContent.querySelectorAll('[data-bs-toggle="tooltip"]');
+                tooltipEls.forEach(el => bootstrap.Tooltip.getOrCreateInstance(el));
             }
 
             showModal(modalElement, fallbackBackdropRef);
-
-            // Re-initialize tooltips for newly swapped modal content
-            if (typeof bootstrap !== 'undefined' && bootstrap.Tooltip) {
-                const tooltipEls = modalContent.querySelectorAll('[data-bs-toggle="tooltip"]');
-                [...tooltipEls].map(el => new bootstrap.Tooltip(el));
-            }
         }
 
         document.body.addEventListener('htmx:afterSwap', ensureModalVisible);
