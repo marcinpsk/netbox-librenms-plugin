@@ -75,7 +75,7 @@
                     <form method="post"
                           action="{% url 'plugins:netbox_librenms_plugin:remove_server_mapping' pk=object.pk %}"
                           style="display:inline"
-                          onsubmit="return confirm('Remove mapping for server \'{{ mapping.server_key }}\'? This cannot be undone.');">
+                          onsubmit="return confirm('Remove mapping for server \'{{ mapping.server_key|escapejs }}\'? This cannot be undone.');">
                         {% csrf_token %}
                         <input type="hidden" name="server_key" value="{{ mapping.server_key }}">
                         <button type="submit" class="btn btn-sm btn-danger"

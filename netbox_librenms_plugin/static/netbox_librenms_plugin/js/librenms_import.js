@@ -1096,7 +1096,7 @@
             // Initialize Bootstrap tooltips inside the freshly-swapped modal content
             if (typeof bootstrap !== 'undefined' && bootstrap.Tooltip) {
                 const tooltipEls = modalContent.querySelectorAll('[data-bs-toggle="tooltip"]');
-                tooltipEls.forEach(el => bootstrap.Tooltip.getOrCreateInstance(el));
+                for (const el of tooltipEls) { bootstrap.Tooltip.getOrCreateInstance(el); }
             }
 
             showModal(modalElement, fallbackBackdropRef);

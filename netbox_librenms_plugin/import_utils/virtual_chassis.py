@@ -34,7 +34,8 @@ def _clone_virtual_chassis_data(data: dict | None) -> dict:
         member_copy = member.copy()
         raw_position = member_copy.get("position", idx + 1)
         try:
-            member_copy["position"] = int(raw_position)
+            pos = int(raw_position)
+            member_copy["position"] = pos if pos > 0 else idx + 1
         except (TypeError, ValueError):
             member_copy["position"] = idx + 1  # 1-based fallback; position 0 is invalid
         members.append(member_copy)
@@ -307,13 +308,16 @@ def update_vc_member_suggested_names(vc_data: dict, master_name: str) -> dict:
     # Load naming pattern once to avoid a DB query per member
     vc_pattern = _load_vc_member_name_pattern()
     for idx, member in enumerate(vc_data.get("members", [])):
-        raw_position = member.get("position", idx)
+        # Positions are stored as 1-based (from entPhysicalParentRelPos or idx+1 fallback).
+        # Use them directly for name generation; only replace 0/negative with 1-based fallback.
+        raw_position = member.get("position", idx + 1)
         try:
-            base_position = int(raw_position)
+            position = int(raw_position)
+            if position <= 0:
+                position = idx + 1
         except (TypeError, ValueError):
-            base_position = idx
-        position = base_position + 1  # Convert to 1-based position
-        member["position"] = base_position
+            position = idx + 1
+        member["position"] = position
         member["suggested_name"] = _generate_vc_member_name(
             master_name, position, serial=member.get("serial"), pattern=vc_pattern
         )
