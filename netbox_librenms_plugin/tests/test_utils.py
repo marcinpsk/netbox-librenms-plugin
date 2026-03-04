@@ -15,9 +15,12 @@ from unittest.mock import MagicMock, patch
 class TestDeviceTypeMatching:
     """Test device type matching logic."""
 
+    @patch("netbox_librenms_plugin.models.DeviceTypeMapping")
     @patch("dcim.models.DeviceType")
-    def test_match_device_type_exact_match_by_part_number(self, mock_device_type):
+    def test_match_device_type_exact_match_by_part_number(self, mock_device_type, mock_mapping):
         """Exact part_number string should match."""
+        mock_mapping.DoesNotExist = Exception
+        mock_mapping.objects.get.side_effect = mock_mapping.DoesNotExist
         mock_dt = MagicMock(id=1, model="C9300-48P")
         mock_device_type.objects.get.return_value = mock_dt
 
@@ -29,9 +32,12 @@ class TestDeviceTypeMatching:
         assert result["device_type"] == mock_dt
         assert result["match_type"] == "exact"
 
+    @patch("netbox_librenms_plugin.models.DeviceTypeMapping")
     @patch("dcim.models.DeviceType")
-    def test_match_device_type_exact_match_by_model(self, mock_device_type):
+    def test_match_device_type_exact_match_by_model(self, mock_device_type, mock_mapping):
         """Exact model string should match when part_number fails."""
+        mock_mapping.DoesNotExist = Exception
+        mock_mapping.objects.get.side_effect = mock_mapping.DoesNotExist
         mock_dt = MagicMock(id=1, model="WS-C3750X-48P")
         # Part number lookup fails, model lookup succeeds
         mock_device_type.DoesNotExist = Exception
@@ -48,9 +54,12 @@ class TestDeviceTypeMatching:
         assert result["device_type"] == mock_dt
         assert result["match_type"] == "exact"
 
+    @patch("netbox_librenms_plugin.models.DeviceTypeMapping")
     @patch("dcim.models.DeviceType")
-    def test_match_device_type_not_found(self, mock_device_type):
+    def test_match_device_type_not_found(self, mock_device_type, mock_mapping):
         """Returns None when no match found."""
+        mock_mapping.DoesNotExist = Exception
+        mock_mapping.objects.get.side_effect = mock_mapping.DoesNotExist
         mock_device_type.DoesNotExist = Exception
         mock_device_type.objects.get.side_effect = mock_device_type.DoesNotExist
 
@@ -61,6 +70,22 @@ class TestDeviceTypeMatching:
         assert result["matched"] is False
         assert result["device_type"] is None
         assert result["match_type"] is None
+
+    @patch("netbox_librenms_plugin.models.DeviceTypeMapping")
+    def test_match_device_type_mapping_match(self, mock_mapping):
+        """DeviceTypeMapping entry should be used before part_number/model fallback."""
+        mock_dt = MagicMock(id=1, model="MX480")
+        mock_mapping_obj = MagicMock(netbox_device_type=mock_dt)
+        mock_mapping.DoesNotExist = Exception
+        mock_mapping.objects.get.return_value = mock_mapping_obj
+
+        from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
+
+        result = match_librenms_hardware_to_device_type("Juniper MX480 Internet Backbone Router")
+
+        assert result["matched"] is True
+        assert result["device_type"] == mock_dt
+        assert result["match_type"] == "mapping"
 
     def test_match_device_type_empty_hardware(self):
         """Empty string returns None."""

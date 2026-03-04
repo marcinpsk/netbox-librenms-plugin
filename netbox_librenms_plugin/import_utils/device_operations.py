@@ -26,6 +26,44 @@ from .virtual_chassis import (
 logger = logging.getLogger(__name__)
 
 
+def _try_chassis_device_type_match(api, device_id):
+    """
+    Attempt device type matching using chassis inventory fields.
+
+    When the LibreNMS hardware string doesn't match any NetBox device type,
+    the chassis entity often contains a more standardized identifier
+    (e.g., entPhysicalName 'CHAS-BP-MX480-S' or entPhysicalModelName '710-017414')
+    that matches a DeviceType part_number or model.
+
+    Tries entPhysicalName first (typically the chassis part number),
+    then entPhysicalModelName as fallback.
+
+    Returns:
+        dict with matched/device_type/match_type keys, or None on failure.
+    """
+    skip_values = {"", "-", "Unspecified", "BUILTIN", "None"}
+
+    try:
+        success, inventory = api.get_inventory_filtered(device_id, ent_physical_class="chassis")
+        if not success or not inventory:
+            return None
+
+        for item in inventory:
+            # Try entPhysicalName first (often the chassis part number like CHAS-BP-MX480-S)
+            for field in ("entPhysicalName", "entPhysicalModelName"):
+                value = item.get(field) or ""
+                if value and value not in skip_values:
+                    chassis_match = match_librenms_hardware_to_device_type(value)
+                    if chassis_match["matched"]:
+                        chassis_match["match_type"] = "chassis"
+                        chassis_match["chassis_model"] = value
+                        return chassis_match
+    except Exception:
+        logger.debug(f"Chassis inventory fallback failed for device {device_id}", exc_info=True)
+
+    return None
+
+
 def _determine_device_name(
     libre_device: dict,
     use_sysname: bool = True,
@@ -470,12 +508,23 @@ def validate_device_for_import(
             # 3. Validate DeviceType (required)
             hardware = libre_device.get("hardware", "")
             dt_match = match_librenms_hardware_to_device_type(hardware)
+
+            # Chassis inventory fallback: when hardware doesn't match,
+            # try the chassis entPhysicalModelName as an additional lookup source
+            if not dt_match["matched"] and api:
+                device_id = libre_device.get("device_id")
+                if device_id:
+                    chassis_match = _try_chassis_device_type_match(api, device_id)
+                    if chassis_match and chassis_match["matched"]:
+                        dt_match = chassis_match
+
             # Update result keys individually to preserve the existing schema (especially "found")
             result["device_type"]["found"] = dt_match["matched"]
             result["device_type"]["device_type"] = dt_match.get("device_type")
             result["device_type"]["match_type"] = dt_match.get("match_type")
 
             if not dt_match["matched"]:
+                result["device_type"]["found"] = False
                 result["issues"].append(f"No matching device type found for hardware: '{hardware}'")
                 # Get some device types for user to choose from
                 all_device_types = DeviceType.objects.all()[:10]

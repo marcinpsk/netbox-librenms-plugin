@@ -3472,7 +3472,7 @@ class TestResolveNamingPreferencesKeys:
 
         request = self._make_request()
         with patch("netbox_librenms_plugin.views.imports.actions.get_user_pref") as mock_pref:
-            mock_pref.side_effect = lambda req, key: (False if "use_sysname" in key else True)
+            mock_pref.side_effect = lambda req, key: False if "use_sysname" in key else True
             use_sysname, strip_domain = _resolve_naming_preferences(request)
         assert use_sysname is False
         assert strip_domain is True

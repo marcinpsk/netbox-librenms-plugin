@@ -1,4 +1,5 @@
 #!/bin/bash
+# netbox-librenms-plugin devcontainer script
 
 # Ensure aliases are available in the postAttach terminal session
 source "$(dirname "$0")/load-aliases.sh" 2>/dev/null
@@ -44,7 +45,7 @@ if [ -n "$CODESPACES" ]; then
   echo "   💡 Click the link in the Ports panel or look for the 'Open in Browser' button"
 else
   echo "🖥️  Local Development Environment:"
-  echo "   NetBox will be available at: http://localhost:8000 (paste into you browser)"
+  echo "   NetBox will be available at: http://localhost:8000 (paste into your browser)"
 fi
 
 echo ""

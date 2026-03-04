@@ -87,6 +87,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         cable_context = self.get_cable_context(request, obj)
         ip_context = self.get_ip_context(request, obj)
         vlan_context = self.get_vlan_context(request, obj)
+        module_context = self.get_module_context(request, obj)
 
         interface_name_field = get_interface_name_field(request)
 
@@ -104,6 +105,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 "cable_sync": cable_context,
                 "ip_sync": ip_context,
                 "vlan_sync": vlan_context,
+                "module_sync": module_context,
                 "v1v2form": AddToLIbreSNMPV1V2(prefix="v1v2"),
                 "v3form": AddToLIbreSNMPV3(prefix="v3"),
                 "librenms_device_id": self.librenms_id,
@@ -166,7 +168,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
             )
 
         # Sort: active first, then configured, then orphaned
-        result.sort(key=lambda e: (0 if e["is_active"] else (1 if e["is_configured"] else 2)))
+        result.sort(key=lambda e: 0 if e["is_active"] else (1 if e["is_configured"] else 2))
         return result or None
 
     def get_librenms_device_info(self, obj):
@@ -280,6 +282,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 if netbox_identities & librenms_identities:
                     mismatched_device = False
                 else:
+                    # Device is still found (we have librenms_id), just mismatched
                     mismatched_device = True
 
                 librenms_device_details["netbox_dns_name"] = netbox_dns_name or "-"
@@ -317,6 +320,61 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         Subclasses should override this method.
         """
         return None
+
+    def get_module_context(self, request, obj):
+        """
+        Get the context data for module sync.
+        Subclasses should override this method if applicable.
+        """
+        return None
+
+    @staticmethod
+    def _build_all_server_mappings(obj, active_server_key):
+        """Build a list of all LibreNMS server mappings for the given device.
+
+        Each entry describes one server<->ID mapping stored in the ``librenms_id``
+        custom field:
+
+        * ``server_key``   – the key as stored in the CF dict (or ``"legacy"``).
+        * ``display_name`` – human-readable name from PLUGINS_CONFIG, or the key.
+        * ``librenms_url`` – base URL of that server (``None`` when not configured).
+        * ``device_id``    – the integer device ID on that server.
+        * ``device_url``   – direct URL to the device page on that server (or ``None``).
+        * ``is_configured``– True when the server key exists in current plugin config.
+        * ``is_active``    – True when this is the currently active server.
+
+        Returns ``None`` for legacy bare-int format (no per-server info to show)
+        and ``None`` when the CF is absent/invalid.
+        """
+        cf_value = obj.custom_field_data.get("librenms_id")
+        if not isinstance(cf_value, dict) or not cf_value:
+            return None
+
+        plugins_cfg = django_settings.PLUGINS_CONFIG.get("netbox_librenms_plugin", {})
+        servers_config = plugins_cfg.get("servers", {})
+
+        result = []
+        for sk, did in cf_value.items():
+            srv_cfg = servers_config.get(sk)
+            is_configured = srv_cfg is not None
+            librenms_url = srv_cfg.get("librenms_url") if srv_cfg else None
+            display_name = (srv_cfg.get("display_name") or sk) if srv_cfg else sk
+            device_url = f"{librenms_url}/device/device={did}/" if librenms_url else None
+            result.append(
+                {
+                    "server_key": sk,
+                    "display_name": display_name,
+                    "librenms_url": librenms_url,
+                    "device_id": did,
+                    "device_url": device_url,
+                    "is_configured": is_configured,
+                    "is_active": sk == active_server_key,
+                }
+            )
+
+        # Sort: active first, then configured, then orphaned
+        result.sort(key=lambda e: 0 if e["is_active"] else (1 if e["is_configured"] else 2))
+        return result or None
 
     @staticmethod
     def _strip_vc_pattern(name):
