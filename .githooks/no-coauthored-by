@@ -1,0 +1,5 @@
+#!/bin/sh
+if grep -qiE "^Co-authored-by:" "$1"; then
+    echo "ERROR: Remove 'Co-authored-by' trailer from commit message." >&2
+    exit 1
+fi
