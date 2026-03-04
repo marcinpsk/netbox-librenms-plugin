@@ -53,6 +53,7 @@ from .sync.cables import SyncCablesView  # noqa: F401
 from .sync.device_fields import (  # noqa: F401
     AssignVCSerialView,
     CreateAndAssignPlatformView,
+    RemoveServerMappingView,
     UpdateDeviceNameView,
     UpdateDevicePlatformView,
     UpdateDeviceSerialView,

@@ -686,6 +686,8 @@ class TestLoadJobResults:
             "vc_detection_enabled": True,
             "cached_at": "2026-01-20T10:00:00Z",
             "cache_timeout": 600,
+            "use_sysname": True,
+            "strip_domain": False,
         }
         mock_job_class.objects.get.return_value = mock_job
 
@@ -708,12 +710,16 @@ class TestLoadJobResults:
             filters={"location": "dc1"},
             device_id=1,
             vc_enabled=True,
+            use_sysname=True,
+            strip_domain=False,
         )
         mock_get_key.assert_any_call(
             server_key="primary",
             filters={"location": "dc1"},
             device_id=2,
             vc_enabled=True,
+            use_sysname=True,
+            strip_domain=False,
         )
 
         assert len(results) == 2
@@ -734,6 +740,8 @@ class TestLoadJobResults:
             "vc_detection_enabled": False,
             "cached_at": "2026-01-20T10:00:00Z",
             "cache_timeout": 300,
+            "use_sysname": True,
+            "strip_domain": False,
         }
         mock_job_class.objects.get.return_value = mock_job
         mock_get_key.return_value = "test_key"
@@ -748,6 +756,8 @@ class TestLoadJobResults:
             filters={"location": "dc2", "type": "router"},
             device_id=1,
             vc_enabled=False,
+            use_sysname=True,
+            strip_domain=False,
         )
 
     @patch("netbox_librenms_plugin.views.imports.list.cache")

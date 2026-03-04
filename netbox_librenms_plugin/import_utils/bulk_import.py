@@ -1,4 +1,4 @@
-"""Bulk import orchestration and filter processing."""
+"""Bulk import orchestration for devices and filter processing."""
 
 import logging
 from typing import List
@@ -7,6 +7,7 @@ from core.choices import JobStatusChoices
 from django.core.cache import cache
 
 from ..librenms_api import LibreNMSAPI
+from ..utils import find_by_librenms_id
 from .cache import get_cache_metadata_key, get_import_device_cache_key, get_validated_device_cache_key
 from .device_operations import import_single_device, validate_device_for_import
 from .filters import get_librenms_devices_for_import
@@ -18,6 +19,11 @@ from .virtual_chassis import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _empty_return(return_cache_status: bool):
+    """Centralised empty-result return value for process_device_filters."""
+    return ([], False) if return_cache_status else []
 
 
 def bulk_import_devices_shared(
@@ -89,21 +95,34 @@ def bulk_import_devices_shared(
     api = LibreNMSAPI(server_key=server_key)
 
     for idx, device_id in enumerate(device_ids, start=1):
-        # Check for job cancellation every 5 devices
-        if job and idx % 5 == 0:
-            # Refresh job from DB to get current status
-            job.job.refresh_from_db()
-            job_status = job.job.status
-            status_value = job_status.value if hasattr(job_status, "value") else job_status
-            if status_value in (JobStatusChoices.STATUS_FAILED, "failed", "errored"):
-                if job.logger:
-                    job.logger.warning(f"Import job cancelled at device {idx} of {total}")
-                else:
-                    logger.warning(f"Import cancelled at device {idx} of {total}")
-                break
-            # Log progress
-            if job.logger:
-                job.logger.info(f"Imported device {idx} of {total}")
+        # Check for job cancellation on first iteration and every 5th thereafter.
+        # Check RQ/Redis state first (reflects stop API immediately); fall back to DB.
+        if job and (idx == 1 or idx % 5 == 0):
+            try:
+                from django_rq import get_queue
+                from rq.job import Job as RQJob
+
+                queue = get_queue("default")
+                rq_job = RQJob.fetch(str(job.job.job_id), connection=queue.connection)
+                if rq_job.is_failed or rq_job.is_stopped:
+                    if job.logger:
+                        job.logger.warning(
+                            f"Import job stopped at device {idx} of {total} (RQ status: {rq_job.get_status()})"
+                        )
+                    else:
+                        logger.warning(f"Import cancelled at device {idx} of {total}")
+                    break
+            except Exception:
+                # Fall back to DB check if RQ is unavailable
+                job.job.refresh_from_db()
+                job_status = job.job.status
+                status_value = job_status.value if hasattr(job_status, "value") else job_status
+                if status_value in (JobStatusChoices.STATUS_FAILED, "failed", "errored"):
+                    if job.logger:
+                        job.logger.warning(f"Import job cancelled at device {idx} of {total}")
+                    else:
+                        logger.warning(f"Import cancelled at device {idx} of {total}")
+                    break
 
         try:
             # Use cached device data if available to avoid redundant API calls
@@ -129,6 +148,7 @@ def bulk_import_devices_shared(
                 api=api,
                 use_sysname=use_sysname_opt,
                 strip_domain=strip_domain_opt,
+                server_key=api.server_key,
             )
 
             # Build manual mappings from validation + any provided overrides
@@ -148,7 +168,7 @@ def bulk_import_devices_shared(
 
             result = import_single_device(
                 device_id,
-                server_key=server_key,
+                server_key=api.server_key,  # use resolved key, not raw parameter (may be None)
                 sync_options=sync_options,
                 manual_mappings=device_mappings if device_mappings else None,
                 libre_device=libre_device,
@@ -162,11 +182,22 @@ def bulk_import_devices_shared(
                         "message": result["message"],
                     }
                 )
+                # Log progress after each successful import
+                if job and job.logger:
+                    job.logger.info(f"Imported device {idx} of {total}")
 
                 # Handle virtual chassis creation for stacks
                 vc_data = validation.get("virtual_chassis", {})
                 if vc_data.get("is_stack", False):
-                    vc_domain = f"librenms-{device_id}"
+                    # Derive a stack-level dedup key from member serials so that all
+                    # LibreNMS devices belonging to the same physical stack (e.g. each
+                    # switch in a stacked chassis that appears as a separate device in
+                    # LibreNMS) share the same key and VC creation is triggered only once.
+                    # Fall back to device_id when no member serials are available.
+                    member_serials = sorted(m.get("serial") for m in vc_data.get("members", []) if m.get("serial"))
+                    vc_domain = (
+                        f"librenms-stack-{','.join(member_serials)}" if member_serials else f"librenms-{device_id}"
+                    )
 
                     # Only create VC if we haven't processed this stack yet
                     # Add to set BEFORE attempting creation to prevent race condition
@@ -266,45 +297,93 @@ def bulk_import_devices(
     )
 
 
-def _refresh_existing_device(validation: dict) -> None:
-    """Refresh existing_device from DB to pick up changes made in NetBox since caching."""
+def _refresh_existing_device(validation: dict, libre_device: dict = None, server_key: str = "default") -> None:
+    """Refresh existing_device from DB to pick up changes made in NetBox since caching.
+
+    When existing_device is None (wasn't found at cache time), re-check if the device
+    was imported since caching by looking up librenms_id or hostname.
+    """
     existing = validation.get("existing_device")
-    if not existing or not hasattr(existing, "pk"):
+    if existing and hasattr(existing, "pk"):
+        try:
+            from dcim.models import Device
+            from virtualization.models import VirtualMachine
+
+            if validation.get("import_as_vm"):
+                refreshed = VirtualMachine.objects.filter(pk=existing.pk).first()
+            else:
+                refreshed = Device.objects.filter(pk=existing.pk).first()
+
+            if refreshed:
+                validation["existing_device"] = refreshed
+                if hasattr(refreshed, "role") and refreshed.role:
+                    validation["device_role"] = {"found": True, "role": refreshed.role}
+            else:
+                # Device was deleted since caching — recompute readiness to match
+                # validate_device_for_import logic.
+                validation["existing_device"] = None
+                validation["existing_match_type"] = None
+                can_import = not bool(validation.get("issues"))
+                if validation.get("import_as_vm"):
+                    # VMs only require a cluster (site/role not mandatory)
+                    is_ready = can_import and bool(validation.get("cluster", {}).get("found"))
+                else:
+                    is_ready = (
+                        can_import
+                        and bool(validation.get("site", {}).get("found"))
+                        and bool(validation.get("device_type", {}).get("found"))
+                        and bool(validation.get("device_role", {}).get("found"))
+                    )
+                validation["can_import"] = can_import
+                validation["is_ready"] = is_ready
+        except Exception as e:
+            existing_id = getattr(existing, "pk", "unknown") if existing else "none"
+            logger.error(f"Failed to refresh existing device (pk={existing_id}): {e}")
+        return
+
+    # existing_device was None at cache time — check if device was imported since
+    if not libre_device:
         return
     try:
         from dcim.models import Device
         from virtualization.models import VirtualMachine
 
-        if validation.get("import_as_vm"):
-            refreshed = VirtualMachine.objects.filter(pk=existing.pk).first()
-        else:
-            refreshed = Device.objects.filter(pk=existing.pk).first()
+        import_as_vm = validation.get("import_as_vm", False)
+        Model = VirtualMachine if import_as_vm else Device
 
-        if refreshed:
-            validation["existing_device"] = refreshed
-            if hasattr(refreshed, "role") and refreshed.role:
-                validation["device_role"]["found"] = True
-                validation["device_role"]["role"] = refreshed.role
-        else:
-            # Device was deleted since caching — recompute readiness
-            validation["existing_device"] = None
-            validation["existing_match_type"] = None
-            if validation.get("import_as_vm"):
-                required_found = (
-                    validation.get("site", {}).get("found")
-                    and validation.get("cluster", {}).get("found")
-                    and validation.get("device_role", {}).get("found")
-                )
-            else:
-                required_found = (
-                    validation.get("site", {}).get("found")
-                    and validation.get("device_type", {}).get("found")
-                    and validation.get("device_role", {}).get("found")
-                )
-            validation["can_import"] = validation["is_ready"] = bool(required_found and not validation.get("issues"))
+        librenms_id = libre_device.get("device_id")
+        hostname = libre_device.get("hostname", "")
+        sys_name = libre_device.get("sysName", "")
+
+        new_device = None
+        match_type = None
+
+        # Check by librenms_id custom field first (JSON multi-server format + legacy)
+        if librenms_id:
+            try:
+                new_device = find_by_librenms_id(Model, int(librenms_id), server_key)
+                if new_device:
+                    match_type = "librenms_id"
+            except (ValueError, TypeError):
+                pass
+
+        # Fall back to hostname match, then sys_name independently
+        if not new_device and hostname:
+            new_device = Model.objects.filter(name__iexact=hostname).first()
+            if new_device:
+                match_type = "hostname"
+        if not new_device and sys_name:
+            new_device = Model.objects.filter(name__iexact=sys_name).first()
+            if new_device:
+                match_type = "hostname"
+
+        if new_device:
+            validation["existing_device"] = new_device
+            validation["existing_match_type"] = match_type
+            validation["can_import"] = False
+            validation["is_ready"] = False
     except Exception as e:
-        existing_id = getattr(existing, "pk", "unknown") if existing else "none"
-        logger.error(f"Failed to refresh existing device (pk={existing_id}): {e}")
+        logger.error(f"Failed to re-check for imported device: {e}")
 
 
 def process_device_filters(
@@ -338,7 +417,7 @@ def process_device_filters(
         request: Optional Django request for client disconnect detection (synchronous only)
         return_cache_status: When True, returns (devices, from_cache) tuple
         use_sysname: If True, prefer sysName over hostname for device name resolution
-        strip_domain: If True, strip domain suffix from device names
+        strip_domain: If True, strip domain suffix from device name
 
     Returns:
         List[dict]: Validated devices with _validation key, or tuple of (devices, from_cache)
@@ -360,9 +439,11 @@ def process_device_filters(
         return_cache_status=True,
     )
 
-    # Filter out disabled devices if requested
+    # Filter out disabled devices if requested. LibreNMS's "disabled" field (1=disabled,
+    # 0=enabled) reflects manual device disablement; "status" reflects SNMP reachability.
+    # show_disabled controls the former: hidden when disabled==1, shown regardless of status.
     if not show_disabled:
-        libre_devices = [d for d in libre_devices if d.get("status") == 1]
+        libre_devices = [d for d in libre_devices if int(d.get("disabled", 0)) != 1]
 
     if job:
         job.logger.info(f"Found {len(libre_devices)} devices to process")
@@ -386,7 +467,7 @@ def process_device_filters(
         except (BrokenPipeError, ConnectionError, IOError) as e:
             if request:
                 logger.info(f"Client disconnected during VC prefetch: {e}")
-                return []
+                return _empty_return(return_cache_status)
             raise
 
     # Validate each device
@@ -406,13 +487,13 @@ def process_device_filters(
 
             if rq_job.is_failed or rq_job.is_stopped:
                 job.logger.warning("Job was already stopped before validation started")
-                return []
+                return _empty_return(return_cache_status)
         except Exception:
             # Fall back to DB check if RQ check fails
             job.job.refresh_from_db()
-            if job.job.status == JobStatusChoices.STATUS_FAILED:
+            if job.job.status in (JobStatusChoices.STATUS_FAILED, JobStatusChoices.STATUS_ERRORED):
                 job.logger.warning("Job was stopped before validation started")
-                return []
+                return _empty_return(return_cache_status)
     else:
         logger.info(f"Validating {total} devices")
 
@@ -435,21 +516,13 @@ def process_device_filters(
                         job.logger.info(
                             f"Job stopped at device {idx}/{total} (RQ status: {rq_job.get_status()}). Exiting gracefully."
                         )
-                        return []
+                        return _empty_return(return_cache_status)
                 except Exception:
                     # If we can't check RQ status, fall back to DB status check
                     job.job.refresh_from_db()
-                    if job.job.status == JobStatusChoices.STATUS_FAILED:
+                    if job.job.status in (JobStatusChoices.STATUS_FAILED, JobStatusChoices.STATUS_ERRORED):
                         job.logger.info(f"Job stopped at device {idx}/{total}. Exiting gracefully.")
-                        return []
-            elif request:
-                # Check for client disconnect
-                try:
-                    if hasattr(request, "META") and request.META.get("wsgi.input"):
-                        pass
-                except (BrokenPipeError, ConnectionError, IOError):
-                    logger.info(f"Client disconnected during validation at device {idx}")
-                    return []
+                        return _empty_return(return_cache_status)
 
         # Drop any cached validation/meta keys before recomputing
         device.pop("_validation", None)
@@ -461,6 +534,8 @@ def process_device_filters(
             filters=filters,
             device_id=device_id,
             vc_enabled=vc_detection_enabled,
+            use_sysname=use_sysname,
+            strip_domain=strip_domain,
         )
 
         # Check if we already have cached validation for this device
@@ -473,7 +548,7 @@ def process_device_filters(
 
                 # Refresh existing_device from DB to avoid stale data
                 # (user may have changed role, name, etc. in NetBox)
-                _refresh_existing_device(device["_validation"])
+                _refresh_existing_device(device["_validation"], libre_device=device, server_key=api.server_key)
 
                 # Apply exclude_existing filter if enabled
                 if exclude_existing:
@@ -491,13 +566,14 @@ def process_device_filters(
                 api=api_for_validation,
                 include_vc_detection=vc_detection_enabled,
                 force_vc_refresh=clear_cache,
+                server_key=api.server_key,
                 use_sysname=use_sysname,
                 strip_domain=strip_domain,
             )
         except (BrokenPipeError, ConnectionError, IOError) as e:
             if request:
                 logger.info(f"Client disconnected during device validation: {e}")
-                return []
+                return _empty_return(return_cache_status)
             raise
 
         # Set VC detection metadata
@@ -531,7 +607,11 @@ def process_device_filters(
         from datetime import datetime, timezone
 
         cache_metadata_key = get_cache_metadata_key(
-            server_key=api.server_key, filters=filters, vc_enabled=vc_detection_enabled
+            server_key=api.server_key,
+            filters=filters,
+            vc_enabled=vc_detection_enabled,
+            use_sysname=use_sysname,
+            strip_domain=strip_domain,
         )
 
         # Check if metadata already exists to preserve original timestamp

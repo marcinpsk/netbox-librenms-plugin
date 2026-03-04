@@ -11,7 +11,7 @@ from ipam.models import VRF, IPAddress
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
-from netbox_librenms_plugin.utils import get_interface_name_field
+from netbox_librenms_plugin.utils import get_interface_name_field, get_librenms_device_id
 from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 
@@ -104,10 +104,11 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         all_interfaces = list(obj.interfaces.all())
 
         # Create maps for efficient lookups
+        server_key = self.librenms_api.server_key
         interfaces_by_librenms_id = {
-            interface.custom_field_data.get("librenms_id"): interface
+            get_librenms_device_id(interface, server_key): interface
             for interface in all_interfaces
-            if interface.custom_field_data.get("librenms_id")
+            if get_librenms_device_id(interface, server_key)
         }
 
         interfaces_by_name = {interface.name: interface for interface in all_interfaces}
