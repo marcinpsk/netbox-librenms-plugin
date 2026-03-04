@@ -30,6 +30,7 @@ from .views import (
     InterfaceTypeMappingView,
     LibreNMSImportView,
     LibreNMSSettingsView,
+    RemoveServerMappingView,
     SaveUserPrefView,
     SingleCableVerifyView,
     SingleInterfaceVerifyView,
@@ -220,6 +221,11 @@ urlpatterns = [
         "devices/<int:pk>/assign-vc-serial/",
         AssignVCSerialView.as_view(),
         name="assign_vc_serial",
+    ),
+    path(
+        "devices/<int:pk>/remove-server-mapping/",
+        RemoveServerMappingView.as_view(),
+        name="remove_server_mapping",
     ),
     path(
         "device-status/",

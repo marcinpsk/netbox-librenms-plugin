@@ -1,5 +1,7 @@
-"""Cache key generation and search management for device import operations."""
+"""Cache key generation and management for device import operations."""
 
+import hashlib
+import json
 import logging
 
 from django.core.cache import cache
@@ -7,7 +9,9 @@ from django.core.cache import cache
 logger = logging.getLogger(__name__)
 
 
-def get_cache_metadata_key(server_key: str, filters: dict, vc_enabled: bool) -> str:
+def get_cache_metadata_key(
+    server_key: str, filters: dict, vc_enabled: bool, use_sysname: bool = True, strip_domain: bool = False
+) -> str:
     """
     Generate a consistent cache metadata key from filter parameters.
 
@@ -15,13 +19,16 @@ def get_cache_metadata_key(server_key: str, filters: dict, vc_enabled: bool) -> 
         server_key: LibreNMS server identifier
         filters: Filter dictionary
         vc_enabled: Whether VC detection is enabled
+        use_sysname: Whether sysName is preferred over hostname for device naming
+        strip_domain: Whether domain suffix is stripped from device names
 
     Returns:
         str: Consistent cache key for metadata
     """
-    # Sort filter items to ensure consistent key generation
-    filter_parts = "_".join(f"{k}={v}" for k, v in sorted(filters.items()) if v)
-    return f"librenms_filter_cache_metadata_{server_key}_{filter_parts}_{vc_enabled}"
+    # Sort filter items to ensure consistent key generation; use "is not None" to preserve
+    # valid falsy values like 0 and False (filtering only None/missing entries).
+    filter_parts = "_".join(f"{k}={v}" for k, v in sorted(filters.items()) if v is not None)
+    return f"librenms_filter_cache_metadata_{server_key}_{filter_parts}_{vc_enabled}_sysname={use_sysname}_strip={strip_domain}"
 
 
 def get_active_cached_searches(server_key: str) -> list[dict]:
@@ -61,8 +68,9 @@ def get_active_cached_searches(server_key: str) -> list[dict]:
         "other": "Other",
     }
 
-    # Get cached location choices for enrichment
-    location_cache_key = "librenms_locations_choices"
+    # Get cached location choices for enrichment; scoped by server_key so labels
+    # from different LibreNMS servers don't bleed into each other's filter summaries.
+    location_cache_key = f"librenms_locations_choices:{server_key}"
     cached_locations = cache.get(location_cache_key)
     if cached_locations:
         location_choices = dict(cached_locations)
@@ -71,9 +79,18 @@ def get_active_cached_searches(server_key: str) -> list[dict]:
         metadata = cache.get(cache_key)
         if metadata:
             # Cache still exists, calculate time remaining
-            cached_at = datetime.fromisoformat(metadata.get("cached_at"))
             cache_timeout = metadata.get("cache_timeout", 300)
             now = datetime.now(timezone.utc)
+            try:
+                cached_at_raw = metadata.get("cached_at")
+                cached_at = (
+                    datetime.fromisoformat(cached_at_raw) if cached_at_raw else datetime.fromtimestamp(0, timezone.utc)
+                )
+                # Normalize naive datetimes (e.g., stored without tzinfo) to UTC
+                if cached_at.tzinfo is None:
+                    cached_at = cached_at.replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                cached_at = datetime.fromtimestamp(0, timezone.utc)
             age_seconds = (now - cached_at).total_seconds()
             remaining_seconds = max(0, cache_timeout - age_seconds)
 
@@ -109,7 +126,14 @@ def get_active_cached_searches(server_key: str) -> list[dict]:
     return active_searches
 
 
-def get_validated_device_cache_key(server_key: str, filters: dict, device_id: int | str, vc_enabled: bool) -> str:
+def get_validated_device_cache_key(
+    server_key: str,
+    filters: dict,
+    device_id: int | str,
+    vc_enabled: bool,
+    use_sysname: bool = True,
+    strip_domain: bool = False,
+) -> str:
     """
     Generate a consistent cache key for validated device data.
 
@@ -121,6 +145,8 @@ def get_validated_device_cache_key(server_key: str, filters: dict, device_id: in
         filters: Filter dict with location, type, os, hostname, sysname, hardware keys
         device_id: LibreNMS device ID
         vc_enabled: Whether virtual chassis detection was enabled
+        use_sysname: Whether sysName is preferred over hostname for device naming
+        strip_domain: Whether domain suffix is stripped from device names
 
     Returns:
         str: Cache key for the validated device
@@ -128,12 +154,14 @@ def get_validated_device_cache_key(server_key: str, filters: dict, device_id: in
     Example:
         >>> key = get_validated_device_cache_key('default', {'location': 'NYC'}, 123, True)
         >>> key
-        'validated_device_default_-1234567890_123_vc'
+        'validated_device_default_e3b0c44298fc1c14_123_vc'
     """
-    # Sort filters for consistent hashing
-    filter_hash = hash(str(sorted(filters.items())))
+    # Sort filters for a deterministic, cross-process stable hash
+    filter_hash = hashlib.sha256(json.dumps(sorted(filters.items()), sort_keys=True).encode()).hexdigest()[:16]
     vc_part = "vc" if vc_enabled else "novc"
-    return f"validated_device_{server_key}_{filter_hash}_{device_id}_{vc_part}"
+    return (
+        f"validated_device_{server_key}_{filter_hash}_{device_id}_{vc_part}_sysname={use_sysname}_strip={strip_domain}"
+    )
 
 
 def get_import_device_cache_key(device_id: int | str, server_key: str = "default") -> str:
