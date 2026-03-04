@@ -184,3 +184,29 @@ def get_import_device_cache_key(device_id: int | str, server_key: str = "default
         'import_device_data_production_123'
     """
     return f"import_device_data_{server_key}_{device_id}"
+
+
+def get_import_search_cache_key(server_key: str, api_filters: dict, client_filters: dict) -> str:
+    """
+    Generate a deterministic cache key for a LibreNMS device search result.
+
+    The key encodes the server, API-side filters, and client-side filters so
+    that different filter combinations produce distinct cache entries.
+
+    Args:
+        server_key: Resolved LibreNMS server key (use ``api.server_key``).
+        api_filters: Filters forwarded to the LibreNMS API.
+        client_filters: Filters applied client-side after the API response.
+
+    Returns:
+        str: Cache key for the import search result.
+    """
+    import hashlib
+    import json
+
+    def _hash(d):
+        return hashlib.sha256(
+            json.dumps(sorted(d.items()) if isinstance(d, dict) else d, sort_keys=True).encode()
+        ).hexdigest()[:16]
+
+    return f"librenms_devices_import_{server_key}_{_hash(api_filters)}_{_hash(client_filters)}"

@@ -1,15 +1,24 @@
 """Device filtering and retrieval from LibreNMS."""
 
-import hashlib
-import json
 import logging
 from typing import List
 
 from django.core.cache import cache
 
+from .cache import get_import_search_cache_key
+
 from ..librenms_api import LibreNMSAPI
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_disabled(device: dict) -> int:
+    """Return 1 if the device is disabled, 0 otherwise. Tolerates None/non-numeric values."""
+    val = device.get("disabled", 0)
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return 0
 
 
 def get_device_count_for_filters(
@@ -39,7 +48,7 @@ def get_device_count_for_filters(
     # 0=enabled) reflects manual device disablement; "status" reflects SNMP reachability.
     # show_disabled controls the former: hidden when disabled==1, shown regardless of status.
     if not show_disabled:
-        devices = [d for d in devices if int(d.get("disabled", 0)) != 1]
+        devices = [d for d in devices if _safe_disabled(d) != 1]
 
     return len(devices)
 
@@ -181,12 +190,7 @@ def get_librenms_devices_for_import(
         # Use caching to avoid repeated API calls
         # Include both API and client filters in cache key (deterministic, cross-process stable).
         # Use api.server_key (always resolved) rather than the raw server_key arg (may differ).
-        def _hash(d):
-            return hashlib.sha256(
-                json.dumps(sorted(d.items()) if isinstance(d, dict) else d, sort_keys=True).encode()
-            ).hexdigest()[:16]
-
-        cache_key = f"librenms_devices_import_{api.server_key}_{_hash(api_filters)}_{_hash(client_filters)}"
+        cache_key = get_import_search_cache_key(api.server_key, api_filters, client_filters)
         from_cache = False
 
         if force_refresh:
