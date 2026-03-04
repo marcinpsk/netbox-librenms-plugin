@@ -1,6 +1,7 @@
 """Device validation, import, and fetch operations."""
 
 import logging
+from types import SimpleNamespace
 
 from dcim.models import Device, DeviceRole, DeviceType, Rack, Site
 from django.core.cache import cache
@@ -14,6 +15,7 @@ from ..utils import (
     find_matching_platform,
     find_matching_site,
     match_librenms_hardware_to_device_type,
+    set_librenms_device_id,
 )
 from .cache import get_import_device_cache_key
 from .virtual_chassis import (
@@ -817,6 +819,8 @@ def import_single_device(
             # Generate import timestamp comment
             import_time = timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")
 
+            _cf_proxy = SimpleNamespace(custom_field_data={})
+            set_librenms_device_id(_cf_proxy, device_id, api.server_key)
             device_data = {
                 "name": device_name,
                 "site": site,
@@ -824,7 +828,7 @@ def import_single_device(
                 "role": device_role,
                 "status": "active" if libre_device.get("status") == 1 else "offline",
                 "comments": f"Imported from LibreNMS by netbox-librenms-plugin on {import_time}",
-                "custom_field_data": {"librenms_id": {api.server_key: int(device_id)}},
+                "custom_field_data": _cf_proxy.custom_field_data,
             }
 
             # Add optional fields
