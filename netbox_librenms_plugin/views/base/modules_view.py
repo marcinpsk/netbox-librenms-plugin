@@ -199,7 +199,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 sub_row = self._build_row(sub_item, index_map, scope_bays, module_types, depth=depth)
                 table_data.append(sub_row)
 
-                # If this sub-item matched an installed module, deeper items use its bays
+                # Update bay scope for children of this sub-item.
+                # Must always set bays_by_depth[depth+1] when a bay was matched to
+                # prevent stale scope from a previously-processed sibling at the
+                # same depth leaking into this item's children.
                 if sub_row.get("module_bay_id"):
                     matched_sub_bay = scope_bays.get(sub_row["module_bay"])
                     if (
@@ -209,6 +212,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     ):
                         sub_module_id = matched_sub_bay.installed_module.pk
                         bays_by_depth[depth + 1] = module_scoped_bays.get(sub_module_id, {})
+                    else:
+                        # Bay matched but not yet installed: reset child scope so
+                        # items under this uninstalled module don't accidentally
+                        # inherit bays from a previously-processed installed sibling.
+                        bays_by_depth[depth + 1] = {}
 
                 # Mark parent if any child is installable
                 if sub_row.get("can_install"):
