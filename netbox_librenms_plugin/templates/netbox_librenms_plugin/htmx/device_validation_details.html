@@ -190,7 +190,7 @@
                       <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                     {% endif %}
                   {% elif validation.device_type.device_type %}
-                    <span {% if validation.device_type.match_type == 'chassis' %}title="Matched via chassis inventory ({{ validation.device_type.chassis_model }})" data-bs-toggle="tooltip"{% elif validation.device_type.match_type == 'mapping' %}title="Matched via device type mapping" data-bs-toggle="tooltip"{% endif %}>
+                    <span {% if validation.device_type.match_type == 'chassis' %}title="Matched via chassis inventory ({{ validation.device_type.chassis_model }})"{% elif validation.device_type.match_type == 'mapping' %}title="Matched via device type mapping"{% endif %}>
                       {{ validation.device_type.device_type }}
                       <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                     </span>

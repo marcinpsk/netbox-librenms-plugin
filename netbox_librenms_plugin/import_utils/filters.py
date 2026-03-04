@@ -13,8 +13,20 @@ logger = logging.getLogger(__name__)
 
 
 def _safe_disabled(device: dict) -> int:
-    """Return 1 if the device is disabled, 0 otherwise. Tolerates None/non-numeric values."""
+    """Return 1 if the device is disabled, 0 otherwise.
+
+    Handles None, booleans, numeric strings, and common truthy/falsy tokens
+    (e.g. "true"/"yes"/"on" → 1, "false"/"no"/"off" → 0) without raising.
+    """
     val = device.get("disabled", 0)
+    if isinstance(val, bool):
+        return int(val)
+    if isinstance(val, str):
+        normalized = val.strip().lower()
+        if normalized in ("1", "true", "yes", "on"):
+            return 1
+        if normalized in ("0", "false", "no", "off", ""):
+            return 0
     try:
         return int(val)
     except (TypeError, ValueError):

@@ -1144,7 +1144,13 @@ class DeviceConflictActionView(
                             "Device no longer exists; it may have been deleted concurrently.",
                             status=409,
                         )
-                    # Re-check for serial ownership conflict under lock
+                    # Re-check for serial ownership conflict under lock.
+                    # Note: We intentionally do NOT enforce a DB-level uniqueness constraint on
+                    # Device.serial. During device moves/replacements, multiple devices may
+                    # temporarily share a serial (old record gets updated later). A unique
+                    # constraint would block those valid workflows. Instead, we rely on this
+                    # in-transaction row-lock check to guard concurrent sync of the SAME serial,
+                    # and flag conflicts via a 409 response for the user to resolve manually.
                     conflict_device = Device.objects.filter(serial=incoming_serial).exclude(pk=locked_device.pk).first()
                     if conflict_device:
                         logger.warning(
@@ -1235,6 +1241,11 @@ class DeviceConflictActionView(
                 if not isinstance(cf_locked, int):
                     return HttpResponse(
                         "Device librenms_id is already in JSON format; no migration needed.",
+                        status=400,
+                    )
+                if cf_locked != librenms_id:
+                    return HttpResponse(
+                        f"Legacy librenms_id changed under lock ({cf_locked} != {librenms_id}); cannot migrate safely.",
                         status=400,
                     )
                 migrate_legacy_librenms_id(locked_device, self.librenms_api.server_key)
