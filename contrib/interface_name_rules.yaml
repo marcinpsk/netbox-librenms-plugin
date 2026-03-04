@@ -1,0 +1,200 @@
+# Interface Name Rules
+#
+# Post-install interface rename rules for module types where NetBox's
+# position-based naming can't produce the correct interface name.
+#
+# Covers two scenarios:
+#   1. Converter offset — e.g., GLC-T inside CVR-X2-SFP needs port numbering
+#      that accounts for the converter's position in the parent module bay.
+#   2. Breakout channels — e.g., QSFP+ 4x10G produces multiple sub-interfaces
+#      from a single physical port.
+#
+# Template variables:
+#   {slot}                — Top-level slot/module bay position
+#   {bay_position}        — Position of the bay this module is installed into (raw)
+#   {bay_position_num}    — Numeric suffix of bay position (e.g., "swp1" → "1")
+#   {parent_bay_position} — Position of the parent module's bay
+#   {sfp_slot}            — Numeric sub-bay index within the parent module
+#   {base}                — Original interface name from the NetBox module template
+#   {channel}             — Breakout channel number (iterated)
+#
+# Arithmetic expressions are supported inside braces:
+#   {8 + ({parent_bay_position} - 1) * 2 + {sfp_slot}}
+#
+# Bulk import via: LibreNMS Plugin > Settings > Interface Name Rules > Import
+
+# --- Converter Offset Examples ---
+
+# SFP-1G-T (1G copper SFP, covers GLC-T/GLC-TE) in CVR-X2-SFP converter
+# X2 bays are numbered 1-N; each converter holds 2 SFP slots
+# Resulting interface: GigabitEthernet<slot>/<computed_port>
+- module_type: SFP-1G-T
+  parent_module_type: CVR-X2-SFP
+  name_template: "GigabitEthernet{slot}/{8 + ({parent_bay_position} - 1) * 2 + {sfp_slot}}"
+  channel_count: 0
+  channel_start: 0
+  description: "SFP-1G-T in CVR-X2-SFP: offset port numbering for X2-to-SFP conversion"
+
+# --- Breakout Channel Examples ---
+
+# QSFP-4X10G-LR breakout — Juniper-style (channels start at 0)
+- module_type: QSFP-4X10G-LR
+  name_template: "{base}:{channel}"
+  channel_count: 4
+  channel_start: 0
+  description: "QSFP+ 4x10G-LR breakout with Juniper-style channel numbering (0-3)"
+
+# QSFP-4X10G-SR breakout — Juniper-style (channels start at 0)
+- module_type: QSFP-4X10G-SR
+  name_template: "{base}:{channel}"
+  channel_count: 4
+  channel_start: 0
+  description: "QSFP+ 4x10G-SR breakout with Juniper-style channel numbering (0-3)"
+
+# --- Commented Examples ---
+
+# QSFP+ 4x10G breakout — Cisco-style (channels start at 1)
+# - module_type: QSFP-4X10G-LR
+#   name_template: "{base}:{channel}"
+#   channel_count: 4
+#   channel_start: 1
+#   description: "QSFP+ 4x10G breakout with Cisco-style channel numbering (1-4)"
+
+# --- UfiSpace/Arcos Breakout Rules ---
+# UfiSpace switches use swpNsC naming for breakout interfaces.
+# bay_position_num extracts the numeric suffix from the bay name (e.g., "swp1" → "1").
+# Channels start at 1, with 2 channels per 100G QSFP28 (2x100G breakout).
+
+# S9610-36D breakout rules
+- module_type: QSFP-100G-LR4
+  device_type: S9610-36D
+  name_template: "swp{bay_position_num}s{channel}"
+  channel_count: 2
+  channel_start: 1
+  description: "UfiSpace QSFP28 2x100G breakout"
+- module_type: QSFP-100G-SR4
+  device_type: S9610-36D
+  name_template: "swp{bay_position_num}s{channel}"
+  channel_count: 2
+  channel_start: 1
+  description: "UfiSpace QSFP28 2x100G breakout"
+- module_type: QSFP-100G-SWDM4
+  device_type: S9610-36D
+  name_template: "swp{bay_position_num}s{channel}"
+  channel_count: 2
+  channel_start: 1
+  description: "UfiSpace QSFP28 2x100G breakout"
+- module_type: QSFP-100G-ZR
+  device_type: S9610-36D
+  name_template: "swp{bay_position_num}s{channel}"
+  channel_count: 2
+  channel_start: 1
+  description: "UfiSpace QSFP28 2x100G breakout"
+
+# S9610-46DX breakout rules
+- module_type: QSFP-100G-LR4
+  device_type: S9610-46DX
+  name_template: "swp{bay_position_num}s{channel}"
+  channel_count: 2
+  channel_start: 1
+  description: "UfiSpace QSFP28 2x100G breakout"
+- module_type: QSFP-100G-SR4
+  device_type: S9610-46DX
+  name_template: "swp{bay_position_num}s{channel}"
+  channel_count: 2
+  channel_start: 1
+  description: "UfiSpace QSFP28 2x100G breakout"
+- module_type: QSFP-100G-SWDM4
+  device_type: S9610-46DX
+  name_template: "swp{bay_position_num}s{channel}"
+  channel_count: 2
+  channel_start: 1
+  description: "UfiSpace QSFP28 2x100G breakout"
+- module_type: QSFP-100G-ZR
+  device_type: S9610-46DX
+  name_template: "swp{bay_position_num}s{channel}"
+  channel_count: 2
+  channel_start: 1
+  description: "UfiSpace QSFP28 2x100G breakout"
+
+# S9700-53DX breakout rules
+- module_type: QSFP-100G-LR4
+  device_type: S9700-53DX
+  name_template: "swp{bay_position_num}s{channel}"
+  channel_count: 2
+  channel_start: 1
+  description: "UfiSpace QSFP28 2x100G breakout"
+- module_type: QSFP-100G-SR4
+  device_type: S9700-53DX
+  name_template: "swp{bay_position_num}s{channel}"
+  channel_count: 2
+  channel_start: 1
+  description: "UfiSpace QSFP28 2x100G breakout"
+- module_type: QSFP-100G-SWDM4
+  device_type: S9700-53DX
+  name_template: "swp{bay_position_num}s{channel}"
+  channel_count: 2
+  channel_start: 1
+  description: "UfiSpace QSFP28 2x100G breakout"
+- module_type: QSFP-100G-ZR
+  device_type: S9700-53DX
+  name_template: "swp{bay_position_num}s{channel}"
+  channel_count: 2
+  channel_start: 1
+  description: "UfiSpace QSFP28 2x100G breakout"
+
+# --- Juniper ACX7024 Platform-Specific Rules ---
+# These rules are scoped to the ACX7024 device type and use bay_position
+# to generate Juniper-style interface names with FPC/PIC/port notation.
+
+# 100GE QSFP28 transceivers -> et-0/0/{port}
+- module_type: QSFP-100G-LR4
+  device_type: ACX7024
+  name_template: "et-0/0/{bay_position}"
+  channel_count: 0
+  channel_start: 0
+  description: "Juniper ACX7024 100GE QSFP28 naming"
+
+- module_type: QSFP-100G-SR4
+  device_type: ACX7024
+  name_template: "et-0/0/{bay_position}"
+  channel_count: 0
+  channel_start: 0
+  description: "Juniper ACX7024 100GE QSFP28 naming"
+
+- module_type: QSFP-100G-SWDM4
+  device_type: ACX7024
+  name_template: "et-0/0/{bay_position}"
+  channel_count: 0
+  channel_start: 0
+  description: "Juniper ACX7024 100GE QSFP28 naming"
+
+# 10GE SFP+ transceivers -> xe-0/0/{port}
+- module_type: SFP-10G-SR
+  device_type: ACX7024
+  name_template: "xe-0/0/{bay_position}"
+  channel_count: 0
+  channel_start: 0
+  description: "Juniper ACX7024 10GE SFP+ naming"
+
+- module_type: SFP-10G-LR
+  device_type: ACX7024
+  name_template: "xe-0/0/{bay_position}"
+  channel_count: 0
+  channel_start: 0
+  description: "Juniper ACX7024 10GE SFP+ naming"
+
+# 1GE SFP transceivers -> ge-0/0/{port}
+- module_type: SFP-1G-T
+  device_type: ACX7024
+  name_template: "ge-0/0/{bay_position}"
+  channel_count: 0
+  channel_start: 0
+  description: "Juniper ACX7024 1GE SFP naming"
+
+- module_type: SFP-1G-LX
+  device_type: ACX7024
+  name_template: "ge-0/0/{bay_position}"
+  channel_count: 0
+  channel_start: 0
+  description: "Juniper ACX7024 1GE SFP naming"

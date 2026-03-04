@@ -377,8 +377,15 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             validation["existing_match_type"] = match_type
             validation["can_import"] = False
             validation["is_ready"] = False
+            if not import_as_vm and hasattr(new_device, "role") and new_device.role:
+                validation["device_role"] = {"found": True, "role": new_device.role}
     except Exception as e:
-        logger.error(f"Failed to re-check for imported device: {e}")
+        logger.error(f"Failed to check for newly imported device: {e}")
+
+
+def _empty_return(return_cache_status: bool):
+    """Centralised empty-result return value for process_device_filters."""
+    return ([], False) if return_cache_status else []
 
 
 def _empty_return(return_cache_status: bool):

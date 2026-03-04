@@ -311,7 +311,7 @@
                                 <div class="d-flex align-items-center">
                                     <div>{{ object.name }}</div>
                                     <div class="ms-3">
-                                        {% if sysName and sysName != object.name %}
+                                        {% if sysName and sysName != "-" and sysName != object.name %}
                                         <form method="post"
                                               action="{% url 'plugins:netbox_librenms_plugin:update_device_name' pk=object.pk %}"
                                               style="display: inline;">
@@ -321,7 +321,7 @@
                                                 <i class="mdi mdi-sync"></i> Sync to NetBox
                                             </button>
                                         </form>
-                                        {% elif sysName %}
+                                        {% elif sysName and sysName != "-" %}
                                         <span class="text-success" title="Name matches LibreNMS">
                                             <i class="mdi mdi-check-circle"></i>
                                         </span>
@@ -597,6 +597,14 @@
         </li>
         {% endif %}
         {% endwith %}
+        {% if module_sync %}
+        <li class="nav-item" role="presentation">
+            <button class="nav-link" id="modules-tab" data-tab="modules" data-bs-toggle="tab"
+                data-bs-target="#modules" type="button" role="tab" aria-controls="modules">
+                Modules
+            </button>
+        </li>
+        {% endif %}
     </ul>
     <div class="btn-group btn-group-sm mt-3" role="group" data-bs-toggle="tooltip" data-bs-placement="top"
         title="Select preferred interface name field"
@@ -625,6 +633,13 @@
         data-tab-id="ipaddresses">
         {% include 'netbox_librenms_plugin/_ipaddress_sync.html' %}
     </div>
+
+    {% if module_sync %}
+    <div class="tab-pane fade" id="modules" role="tabpanel" aria-labelledby="modules-tab"
+        data-tab-id="modules">
+        {% include 'netbox_librenms_plugin/inc/_module_sync.html' %}
+    </div>
+    {% endif %}
 
     {% with model_name=object|meta:"model_name" %}
     {% if model_name == "device" %}
