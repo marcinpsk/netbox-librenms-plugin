@@ -1,5 +1,7 @@
-"""Device filtering and API queries for LibreNMS devices."""
+"""Device filtering and retrieval from LibreNMS."""
 
+import hashlib
+import json
 import logging
 from typing import List
 
@@ -33,9 +35,11 @@ def get_device_count_for_filters(
     """
     devices = get_librenms_devices_for_import(api, filters=filters, force_refresh=clear_cache)
 
-    # Filter out disabled devices if requested
+    # Filter out disabled devices if requested. LibreNMS's "disabled" field (1=disabled,
+    # 0=enabled) reflects manual device disablement; "status" reflects SNMP reachability.
+    # show_disabled controls the former: hidden when disabled==1, shown regardless of status.
     if not show_disabled:
-        devices = [d for d in devices if d.get("status") == 1]
+        devices = [d for d in devices if int(d.get("disabled", 0)) != 1]
 
     return len(devices)
 
@@ -85,10 +89,15 @@ def get_librenms_devices_for_import(
         if filters:
             # Check for status filter first - it has special handling
             if filters.get("status") is not None:
+                # Normalize to int: form fields send strings ("1"/"0"), API may send ints
+                try:
+                    status_val = int(filters["status"])
+                except (ValueError, TypeError):
+                    status_val = None
                 # Status filter uses special types that don't need query param
-                if filters["status"] == 1:
+                if status_val == 1:
                     api_filters["type"] = "up"
-                elif filters["status"] == 0:
+                elif status_val == 0:
                     api_filters["type"] = "down"
 
                 # Save ALL other filters for client-side filtering when status is used
@@ -170,8 +179,14 @@ def get_librenms_devices_for_import(
             # We'll filter client-side if needed
 
         # Use caching to avoid repeated API calls
-        # Include both API and client filters in cache key
-        cache_key = f"librenms_devices_import_{server_key}_{hash(str(api_filters))}_{hash(str(client_filters))}"
+        # Include both API and client filters in cache key (deterministic, cross-process stable).
+        # Use api.server_key (always resolved) rather than the raw server_key arg (may differ).
+        def _hash(d):
+            return hashlib.sha256(
+                json.dumps(sorted(d.items()) if isinstance(d, dict) else d, sort_keys=True).encode()
+            ).hexdigest()[:16]
+
+        cache_key = f"librenms_devices_import_{api.server_key}_{_hash(api_filters)}_{_hash(client_filters)}"
         from_cache = False
 
         if force_refresh:

@@ -1,12 +1,15 @@
 from dcim.models import Device, Manufacturer, Platform
 from django.contrib import messages
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.shortcuts import get_object_or_404, redirect
 from django.views import View
+import logging
 
 from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
+
+logger = logging.getLogger(__name__)
 
 
 class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
@@ -278,26 +281,41 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 pass
 
         try:
-            platform = Platform.objects.create(
-                name=platform_name,
-                manufacturer=manufacturer,
+            with transaction.atomic():
+                platform = Platform.objects.create(
+                    name=platform_name,
+                    manufacturer=manufacturer,
+                )
+
+                device.platform = platform
+                device.full_clean()
+                device.save()
+        except IntegrityError as e:
+            error_str = str(e)
+            logger.error(
+                f"IntegrityError creating platform '{platform_name}' for device pk={pk}: {e}",
+                exc_info=True,
             )
-        except IntegrityError:
+            if "platform" in error_str.lower() or "slug" in error_str.lower():
+                messages.error(
+                    request,
+                    f"Platform '{platform_name}' could not be created (slug collision). Try a different name.",
+                )
+            else:
+                messages.error(
+                    request,
+                    f"Failed to assign platform '{platform_name}'. Please contact an administrator.",
+                )
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+        except ValidationError as e:
+            logger.error(
+                f"ValidationError assigning platform '{platform_name}' to device pk={pk}: {e}",
+                exc_info=True,
+            )
             messages.error(
                 request,
-                f"Platform '{platform_name}' could not be created (slug collision). Try a different name.",
+                f"Failed to assign platform '{platform_name}'. Please contact an administrator.",
             )
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
-
-        old_platform = device.platform
-        device.platform = platform
-        try:
-            device.full_clean()
-            device.save()
-        except (ValidationError, IntegrityError) as e:
-            device.platform = old_platform
-            error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
-            messages.error(request, f"Failed to assign platform '{platform}': {error_msg}")
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         messages.success(
@@ -380,5 +398,75 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
 
         if assignments_made == 0 and not errors:
             messages.info(request, "No serial assignments were made")
+
+        return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+
+
+class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
+    """Remove a single server entry from the device's librenms_id custom field dict."""
+
+    required_object_permissions = {
+        "POST": [("change", Device)],
+    }
+
+    def post(self, request, pk):
+        if error := self.require_all_permissions("POST"):
+            return error
+
+        device = get_object_or_404(Device, pk=pk)
+        server_key = request.POST.get("server_key", "").strip()
+
+        if not server_key:
+            messages.error(request, "No server_key provided.")
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+
+        cf_value = device.custom_field_data.get("librenms_id")
+        if not isinstance(cf_value, dict) or server_key not in cf_value:
+            messages.warning(request, f"No mapping found for server '{server_key}'.")
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+
+        # Refuse to remove mappings for servers that are still configured in the plugin.
+        # Only orphaned (unconfigured) mappings may be removed via this endpoint.
+        # Guard both multi-server mode (servers dict) and legacy single-server mode
+        # (top-level librenms_url in plugin config, which implicitly defines "default").
+        from django.conf import settings as django_settings
+
+        plugins_cfg = django_settings.PLUGINS_CONFIG.get("netbox_librenms_plugin", {})
+        configured_servers = plugins_cfg.get("servers", {})
+        legacy_url_configured = bool(plugins_cfg.get("librenms_url"))
+        if server_key in configured_servers or (legacy_url_configured and server_key == "default"):
+            messages.error(
+                request,
+                f"Cannot remove mapping for configured server '{server_key}'. "
+                "Remove the server from plugin configuration first, then retry.",
+            )
+            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+
+        with transaction.atomic():
+            try:
+                device_locked = Device.objects.select_for_update().get(pk=pk)
+            except Device.DoesNotExist:
+                messages.error(request, "Device no longer exists.")
+                return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            cf = device_locked.custom_field_data.get("librenms_id", {})
+            # Re-check after acquiring lock; mirror the pre-transaction protection logic
+            _is_protected = server_key in configured_servers or (legacy_url_configured and server_key == "default")
+            if isinstance(cf, dict) and server_key in cf and not _is_protected:
+                del cf[server_key]
+                device_locked.custom_field_data["librenms_id"] = cf if cf else None
+                try:
+                    device_locked.full_clean()
+                    device_locked.save()
+                except ValidationError as exc:
+                    transaction.set_rollback(True)
+                    messages.error(request, f"Validation error removing mapping: {exc}")
+                    return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+                except Exception as exc:
+                    transaction.set_rollback(True)
+                    messages.error(request, f"Error removing mapping for server '{server_key}': {exc}")
+                    return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+                messages.success(request, f"Removed LibreNMS mapping for server '{server_key}'.")
+            else:
+                messages.warning(request, f"Mapping for server '{server_key}' was already removed.")
 
         return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)

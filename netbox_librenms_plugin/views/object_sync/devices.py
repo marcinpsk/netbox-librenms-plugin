@@ -79,13 +79,22 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
 
     def get_table(self, data, obj, interface_name_field, vlan_groups=None):
         """Return the appropriate interface table, selecting VC variant if needed."""
+        server_key = self.librenms_api.server_key
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
             table = VCInterfaceTable(
-                data, device=obj, interface_name_field=interface_name_field, vlan_groups=vlan_groups
+                data,
+                device=obj,
+                interface_name_field=interface_name_field,
+                vlan_groups=vlan_groups,
+                server_key=server_key,
             )
         else:
             table = LibreNMSInterfaceTable(
-                data, device=obj, interface_name_field=interface_name_field, vlan_groups=vlan_groups
+                data,
+                device=obj,
+                interface_name_field=interface_name_field,
+                vlan_groups=vlan_groups,
+                server_key=server_key,
             )
         table.htmx_url = f"{self.request.path}?tab=interfaces"
         return table

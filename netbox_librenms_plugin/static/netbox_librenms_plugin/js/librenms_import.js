@@ -1100,6 +1100,12 @@
             }
 
             showModal(modalElement, fallbackBackdropRef);
+
+            // Re-initialize tooltips for newly swapped modal content
+            if (typeof bootstrap !== 'undefined' && bootstrap.Tooltip) {
+                const tooltipEls = modalContent.querySelectorAll('[data-bs-toggle="tooltip"]');
+                [...tooltipEls].map(el => new bootstrap.Tooltip(el));
+            }
         }
 
         document.body.addEventListener('htmx:afterSwap', ensureModalVisible);

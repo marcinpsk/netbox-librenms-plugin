@@ -318,3 +318,112 @@ class TestMismatchDetection:
         result = view.get_librenms_device_info(obj)
 
         assert result["mismatched_device"] is True
+
+
+# ---------------------------------------------------------------------------
+# Tests for _build_all_server_mappings
+# ---------------------------------------------------------------------------
+
+
+class TestBuildAllServerMappings:
+    """Tests for BaseLibreNMSSyncView._build_all_server_mappings."""
+
+    def _make_obj(self, cf_librenms_id):
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": cf_librenms_id}
+        return obj
+
+    def test_returns_none_for_legacy_int(self):
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+        obj = self._make_obj(42)
+        result = BaseLibreNMSSyncView._build_all_server_mappings(obj, "production")
+        assert result is None
+
+    def test_returns_none_for_missing_cf(self):
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+        obj = self._make_obj(None)
+        result = BaseLibreNMSSyncView._build_all_server_mappings(obj, "production")
+        assert result is None
+
+    def test_single_configured_server(self):
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+        obj = self._make_obj({"production": 42})
+        plugins_cfg = {
+            "netbox_librenms_plugin": {
+                "servers": {
+                    "production": {
+                        "display_name": "Production LibreNMS",
+                        "librenms_url": "https://librenms.example.com",
+                    },
+                }
+            }
+        }
+        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings") as mock_settings:
+            mock_settings.PLUGINS_CONFIG = plugins_cfg
+            result = BaseLibreNMSSyncView._build_all_server_mappings(obj, "production")
+
+        assert result is not None
+        assert len(result) == 1
+        entry = result[0]
+        assert entry["server_key"] == "production"
+        assert entry["device_id"] == 42
+        assert entry["display_name"] == "Production LibreNMS"
+        assert entry["is_configured"] is True
+        assert entry["is_active"] is True
+        assert entry["device_url"] == "https://librenms.example.com/device/device=42/"
+
+    def test_orphaned_server_is_not_configured(self):
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+        obj = self._make_obj({"deleted-server": 77})
+        plugins_cfg = {"netbox_librenms_plugin": {"servers": {}}}
+        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings") as mock_settings:
+            mock_settings.PLUGINS_CONFIG = plugins_cfg
+            result = BaseLibreNMSSyncView._build_all_server_mappings(obj, "production")
+
+        assert result is not None
+        assert len(result) == 1
+        entry = result[0]
+        assert entry["server_key"] == "deleted-server"
+        assert entry["device_id"] == 77
+        assert entry["is_configured"] is False
+        assert entry["is_active"] is False
+        assert entry["device_url"] is None
+
+    def test_multiple_servers_sorted_active_first(self):
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+        obj = self._make_obj({"mock-dev": 99, "production": 42, "old-server": 11})
+        plugins_cfg = {
+            "netbox_librenms_plugin": {
+                "servers": {
+                    "production": {"display_name": "Production", "librenms_url": "https://prod.example.com"},
+                    "mock-dev": {"display_name": "Mock", "librenms_url": "http://mock.example.com"},
+                }
+            }
+        }
+        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings") as mock_settings:
+            mock_settings.PLUGINS_CONFIG = plugins_cfg
+            result = BaseLibreNMSSyncView._build_all_server_mappings(obj, "production")
+
+        assert result is not None
+        assert len(result) == 3
+        # Active (production) first
+        assert result[0]["server_key"] == "production"
+        assert result[0]["is_active"] is True
+        # Configured (mock-dev) second
+        assert result[1]["server_key"] == "mock-dev"
+        assert result[1]["is_configured"] is True
+        assert result[1]["is_active"] is False
+        # Orphaned last
+        assert result[2]["server_key"] == "old-server"
+        assert result[2]["is_configured"] is False
