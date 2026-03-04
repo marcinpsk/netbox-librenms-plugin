@@ -3220,6 +3220,774 @@ class TestVCPositionHandling:
         assert positions[1] == 2, f"Negative position must fall back to 2 (idx+1), got {positions[1]}"
 
 
+# ---------------------------------------------------------------------------
+# Additional virtual_chassis.py coverage
+# ---------------------------------------------------------------------------
+
+
+class TestEmptyVirtualChassisData:
+    """Tests for empty_virtual_chassis_data helper."""
+
+    def test_returns_expected_structure(self):
+        from netbox_librenms_plugin.import_utils.virtual_chassis import empty_virtual_chassis_data
+
+        result = empty_virtual_chassis_data()
+        assert result["is_stack"] is False
+        assert result["member_count"] == 0
+        assert result["members"] == []
+        assert result["detection_error"] is None
+
+    def test_returns_new_dict_each_call(self):
+        """Each call returns an independent dict (not a shared reference)."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import empty_virtual_chassis_data
+
+        a = empty_virtual_chassis_data()
+        b = empty_virtual_chassis_data()
+        a["members"].append("x")
+        assert b["members"] == []
+
+
+class TestCloneVirtualChassisDataAdditional:
+    """Additional _clone_virtual_chassis_data edge cases."""
+
+    def test_none_input_returns_empty(self):
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _clone_virtual_chassis_data
+
+        result = _clone_virtual_chassis_data(None)
+        assert result["is_stack"] is False
+        assert result["members"] == []
+
+    def test_empty_dict_returns_empty(self):
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _clone_virtual_chassis_data
+
+        result = _clone_virtual_chassis_data({})
+        assert result["is_stack"] is False
+        assert result["members"] == []
+
+    def test_full_data_defensive_copy(self):
+        """Members list is a new list; mutating it does not affect the source."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _clone_virtual_chassis_data
+
+        data = {
+            "is_stack": True,
+            "member_count": 1,
+            "members": [{"serial": "SN1", "position": 1}],
+            "detection_error": None,
+        }
+        result = _clone_virtual_chassis_data(data)
+        result["members"].append({"serial": "SN-NEW", "position": 2})
+        assert len(data["members"]) == 1  # original untouched
+
+    def test_detection_error_preserved(self):
+        """detection_error field from source data is preserved."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _clone_virtual_chassis_data
+
+        data = {
+            "is_stack": True,
+            "member_count": 1,
+            "members": [],
+            "detection_error": "Some error",
+        }
+        result = _clone_virtual_chassis_data(data)
+        assert result["detection_error"] == "Some error"
+
+    def test_member_with_zero_position_replaced_by_one_based(self):
+        """A member with position=0 is replaced by idx+1 (1-based)."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _clone_virtual_chassis_data
+
+        data = {
+            "is_stack": True,
+            "member_count": 2,
+            "members": [{"serial": "S0", "position": 0}, {"serial": "S2", "position": 2}],
+        }
+        result = _clone_virtual_chassis_data(data)
+        assert result["members"][0]["position"] == 1  # 0 → idx+1 = 1
+        assert result["members"][1]["position"] == 2  # kept as-is
+
+    def test_member_count_falls_back_to_len_when_zero(self):
+        """member_count=0 in source is replaced by len(members)."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _clone_virtual_chassis_data
+
+        data = {
+            "is_stack": True,
+            "member_count": 0,
+            "members": [{"serial": "S1", "position": 1}, {"serial": "S2", "position": 2}],
+        }
+        result = _clone_virtual_chassis_data(data)
+        assert result["member_count"] == 2
+
+
+class TestVCCacheKey:
+    """Tests for _vc_cache_key."""
+
+    def test_cache_key_format(self):
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key
+
+        mock_api = MagicMock()
+        mock_api.server_key = "default"
+        key = _vc_cache_key(mock_api, 42)
+        assert "librenms_vc_detection" in key
+        assert "default" in key
+        assert "42" in key
+
+    def test_cache_key_includes_server_key(self):
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key
+
+        api_a = MagicMock()
+        api_a.server_key = "server-a"
+        api_b = MagicMock()
+        api_b.server_key = "server-b"
+        assert _vc_cache_key(api_a, 1) != _vc_cache_key(api_b, 1)
+
+    def test_cache_key_differs_for_different_device_ids(self):
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key
+
+        mock_api = MagicMock()
+        mock_api.server_key = "default"
+        assert _vc_cache_key(mock_api, 1) != _vc_cache_key(mock_api, 2)
+
+    def test_missing_server_key_falls_back_to_default(self):
+        """api without server_key attribute uses 'default' as fallback."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key
+
+        mock_api = MagicMock(spec=[])  # no attributes
+        key = _vc_cache_key(mock_api, 10)
+        assert "default" in key
+
+
+class TestGetVirtualChassisData:
+    """Tests for get_virtual_chassis_data."""
+
+    def test_none_api_returns_empty(self):
+        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+
+        result = get_virtual_chassis_data(None, 1)
+        assert result["is_stack"] is False
+        assert result["members"] == []
+
+    def test_none_device_id_returns_empty(self):
+        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+
+        mock_api = MagicMock()
+        result = get_virtual_chassis_data(mock_api, None)
+        assert result["is_stack"] is False
+
+    def test_cache_hit_returns_cloned_data(self):
+        """Cached data is returned without calling detect_virtual_chassis_from_inventory."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+
+        mock_api = MagicMock()
+        mock_api.server_key = "default"
+        cached = {
+            "is_stack": True,
+            "member_count": 2,
+            "members": [{"serial": "S1", "position": 1}, {"serial": "S2", "position": 2}],
+            "detection_error": None,
+        }
+
+        with (
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis.cache") as mock_cache,
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis.detect_virtual_chassis_from_inventory"
+            ) as mock_detect,
+        ):
+            mock_cache.get.return_value = cached
+            result = get_virtual_chassis_data(mock_api, 42)
+
+        assert result["is_stack"] is True
+        assert result["member_count"] == 2
+        mock_detect.assert_not_called()
+
+    def test_cache_miss_calls_detect_and_stores_result(self):
+        """On cache miss, detect_virtual_chassis_from_inventory is called and result cached."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+
+        mock_api = MagicMock()
+        mock_api.server_key = "default"
+        mock_api.cache_timeout = 300
+
+        detection_result = {"is_stack": False, "member_count": 0, "members": []}
+
+        with (
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis.cache") as mock_cache,
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis.detect_virtual_chassis_from_inventory",
+                return_value=detection_result,
+            ) as mock_detect,
+        ):
+            mock_cache.get.return_value = None  # cache miss
+            result = get_virtual_chassis_data(mock_api, 42)
+
+        mock_detect.assert_called_once_with(mock_api, 42)
+        mock_cache.set.assert_called_once()
+        assert result["is_stack"] is False
+
+    def test_cache_miss_detect_returns_none_stores_empty(self):
+        """When detect returns None, empty VC data is stored and returned."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+
+        mock_api = MagicMock()
+        mock_api.server_key = "default"
+        mock_api.cache_timeout = 300
+
+        with (
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis.cache") as mock_cache,
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis.detect_virtual_chassis_from_inventory",
+                return_value=None,
+            ),
+        ):
+            mock_cache.get.return_value = None
+            result = get_virtual_chassis_data(mock_api, 99)
+
+        mock_cache.set.assert_called_once()
+        assert result["is_stack"] is False
+
+    def test_force_refresh_bypasses_cache(self):
+        """force_refresh=True skips the cache.get check."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+
+        mock_api = MagicMock()
+        mock_api.server_key = "default"
+        mock_api.cache_timeout = 300
+
+        with (
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis.cache") as mock_cache,
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis.detect_virtual_chassis_from_inventory",
+                return_value=None,
+            ),
+        ):
+            mock_cache.get.return_value = {"is_stack": True, "member_count": 1, "members": [], "detection_error": None}
+            get_virtual_chassis_data(mock_api, 1, force_refresh=True)
+
+        # cache.get should NOT have been consulted
+        mock_cache.get.assert_not_called()
+
+
+class TestPrefetchVCData:
+    """Tests for prefetch_vc_data_for_devices."""
+
+    def test_none_api_returns_immediately(self):
+        """None api causes early return without touching get_virtual_chassis_data."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import prefetch_vc_data_for_devices
+
+        with patch("netbox_librenms_plugin.import_utils.virtual_chassis.get_virtual_chassis_data") as mock_get:
+            prefetch_vc_data_for_devices(None, [1, 2, 3])
+
+        mock_get.assert_not_called()
+
+    def test_empty_device_ids_returns_immediately(self):
+        """Empty device_ids list causes early return."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import prefetch_vc_data_for_devices
+
+        mock_api = MagicMock()
+
+        with patch("netbox_librenms_plugin.import_utils.virtual_chassis.get_virtual_chassis_data") as mock_get:
+            prefetch_vc_data_for_devices(mock_api, [])
+
+        mock_get.assert_not_called()
+
+    def test_connection_error_stops_processing(self):
+        """BrokenPipeError / ConnectionError stops the loop (return, not continue)."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import prefetch_vc_data_for_devices
+
+        mock_api = MagicMock()
+
+        with patch(
+            "netbox_librenms_plugin.import_utils.virtual_chassis.get_virtual_chassis_data",
+            side_effect=ConnectionError("Connection reset"),
+        ) as mock_get:
+            prefetch_vc_data_for_devices(mock_api, [1, 2, 3])
+
+        # Only the first call fires before the connection error stops processing
+        assert mock_get.call_count == 1
+
+    def test_broken_pipe_error_stops_processing(self):
+        """BrokenPipeError is treated the same as ConnectionError."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import prefetch_vc_data_for_devices
+
+        mock_api = MagicMock()
+
+        with patch(
+            "netbox_librenms_plugin.import_utils.virtual_chassis.get_virtual_chassis_data",
+            side_effect=BrokenPipeError("Pipe broken"),
+        ) as mock_get:
+            prefetch_vc_data_for_devices(mock_api, [10, 20])
+
+        assert mock_get.call_count == 1
+
+    def test_generic_exception_continues_to_next_device(self):
+        """Non-connection exceptions are logged but processing continues."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import prefetch_vc_data_for_devices
+
+        mock_api = MagicMock()
+
+        with patch(
+            "netbox_librenms_plugin.import_utils.virtual_chassis.get_virtual_chassis_data",
+            side_effect=ValueError("Unexpected"),
+        ) as mock_get:
+            prefetch_vc_data_for_devices(mock_api, [1, 2, 3])
+
+        # All devices attempted despite the error
+        assert mock_get.call_count == 3
+
+    def test_success_calls_get_for_each_device(self):
+        """All device IDs are prefetched when no errors occur."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import prefetch_vc_data_for_devices
+
+        mock_api = MagicMock()
+
+        with patch("netbox_librenms_plugin.import_utils.virtual_chassis.get_virtual_chassis_data") as mock_get:
+            prefetch_vc_data_for_devices(mock_api, [10, 20, 30])
+
+        assert mock_get.call_count == 3
+
+
+class TestDetectVirtualChassisFromInventory:
+    """Tests for detect_virtual_chassis_from_inventory."""
+
+    def test_no_root_items_returns_none(self):
+        """Returns None when get_inventory_filtered returns no root items."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
+
+        mock_api = MagicMock()
+        mock_api.get_device_info.return_value = (True, {"sysName": "sw1"})
+        mock_api.get_inventory_filtered.return_value = (False, None)
+
+        result = detect_virtual_chassis_from_inventory(mock_api, 1)
+        assert result is None
+
+    def test_empty_root_items_returns_none(self):
+        """Returns None when root items list is empty."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
+
+        mock_api = MagicMock()
+        mock_api.get_device_info.return_value = (True, {"sysName": "sw1"})
+        mock_api.get_inventory_filtered.return_value = (True, [])
+
+        result = detect_virtual_chassis_from_inventory(mock_api, 1)
+        assert result is None
+
+    def test_no_stack_or_chassis_parent_returns_none(self):
+        """Returns None when no root item has class 'stack' or 'chassis'."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
+
+        mock_api = MagicMock()
+        mock_api.get_device_info.return_value = (True, {"sysName": "sw1"})
+        mock_api.get_inventory_filtered.return_value = (
+            True,
+            [{"entPhysicalClass": "other", "entPhysicalIndex": 1}],
+        )
+
+        result = detect_virtual_chassis_from_inventory(mock_api, 1)
+        assert result is None
+
+    def test_single_child_chassis_returns_none(self):
+        """Returns None when only one child chassis is found (not a stack)."""
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
+
+        mock_api = MagicMock()
+        mock_api.get_device_info.return_value = (True, {"sysName": "sw1"})
+        mock_api.get_inventory_filtered.side_effect = [
+            (True, [{"entPhysicalClass": "stack", "entPhysicalIndex": 100}]),
+            (True, [{"entPhysicalClass": "chassis", "entPhysicalIndex": 200}]),
+        ]
+
+        result = detect_virtual_chassis_from_inventory(mock_api, 1)
+        assert result is None
+
+    def test_stack_detected_with_two_chassis(self):
+        """Returns stack dict when two or more chassis are found under the parent."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
+
+        mock_api = MagicMock()
+        mock_api.get_device_info.return_value = (True, {"sysName": "sw1"})
+        mock_api.get_inventory_filtered.side_effect = [
+            (True, [{"entPhysicalClass": "stack", "entPhysicalIndex": 100}]),
+            (
+                True,
+                [
+                    {
+                        "entPhysicalClass": "chassis",
+                        "entPhysicalIndex": 201,
+                        "entPhysicalParentRelPos": 1,
+                        "entPhysicalSerialNum": "SN1",
+                        "entPhysicalModelName": "C9300-48P",
+                        "entPhysicalName": "Switch 1",
+                        "entPhysicalDescr": "Cisco Catalyst 9300",
+                    },
+                    {
+                        "entPhysicalClass": "chassis",
+                        "entPhysicalIndex": 202,
+                        "entPhysicalParentRelPos": 2,
+                        "entPhysicalSerialNum": "SN2",
+                        "entPhysicalModelName": "C9300-48P",
+                        "entPhysicalName": "Switch 2",
+                        "entPhysicalDescr": "Cisco Catalyst 9300",
+                    },
+                ],
+            ),
+        ]
+
+        with patch(
+            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+            return_value="-M{position}",
+        ):
+            result = detect_virtual_chassis_from_inventory(mock_api, 1)
+
+        assert result is not None
+        assert result["is_stack"] is True
+        assert result["member_count"] == 2
+        assert len(result["members"]) == 2
+        assert result["members"][0]["serial"] == "SN1"
+        assert result["members"][1]["serial"] == "SN2"
+
+    def test_stack_members_sorted_by_position(self):
+        """Members are sorted by position ascending."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
+
+        mock_api = MagicMock()
+        mock_api.get_device_info.return_value = (True, {"sysName": "sw1"})
+        mock_api.get_inventory_filtered.side_effect = [
+            (True, [{"entPhysicalClass": "stack", "entPhysicalIndex": 100}]),
+            (
+                True,
+                [
+                    {"entPhysicalClass": "chassis", "entPhysicalParentRelPos": 3, "entPhysicalIndex": 203},
+                    {"entPhysicalClass": "chassis", "entPhysicalParentRelPos": 1, "entPhysicalIndex": 201},
+                    {"entPhysicalClass": "chassis", "entPhysicalParentRelPos": 2, "entPhysicalIndex": 202},
+                ],
+            ),
+        ]
+
+        with patch(
+            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+            return_value="-M{position}",
+        ):
+            result = detect_virtual_chassis_from_inventory(mock_api, 1)
+
+        positions = [m["position"] for m in result["members"]]
+        assert positions == [1, 2, 3]
+
+    def test_zero_position_replaced_by_one_based_index(self):
+        """entPhysicalParentRelPos=0 is replaced by idx+1."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
+
+        mock_api = MagicMock()
+        mock_api.get_device_info.return_value = (True, {"sysName": "sw1"})
+        mock_api.get_inventory_filtered.side_effect = [
+            (True, [{"entPhysicalClass": "stack", "entPhysicalIndex": 100}]),
+            (
+                True,
+                [
+                    {"entPhysicalClass": "chassis", "entPhysicalParentRelPos": 0, "entPhysicalIndex": 201},
+                    {"entPhysicalClass": "chassis", "entPhysicalParentRelPos": 2, "entPhysicalIndex": 202},
+                ],
+            ),
+        ]
+
+        with patch(
+            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+            return_value="-M{position}",
+        ):
+            result = detect_virtual_chassis_from_inventory(mock_api, 1)
+
+        positions = [m["position"] for m in result["members"]]
+        assert 0 not in positions
+        assert 1 in positions
+
+    def test_no_master_name_uses_member_prefix(self):
+        """When device_info has no sysName/hostname, suggested_name uses 'Member-N'."""
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
+
+        mock_api = MagicMock()
+        mock_api.get_device_info.return_value = (False, None)  # no master name
+        mock_api.get_inventory_filtered.side_effect = [
+            (True, [{"entPhysicalClass": "stack", "entPhysicalIndex": 100}]),
+            (
+                True,
+                [
+                    {"entPhysicalClass": "chassis", "entPhysicalParentRelPos": 1, "entPhysicalIndex": 201},
+                    {"entPhysicalClass": "chassis", "entPhysicalParentRelPos": 2, "entPhysicalIndex": 202},
+                ],
+            ),
+        ]
+
+        result = detect_virtual_chassis_from_inventory(mock_api, 1)
+
+        assert result is not None
+        assert result["members"][0]["suggested_name"].startswith("Member-")
+
+    def test_child_items_fetch_fails_returns_none(self):
+        """Returns None when the second get_inventory_filtered call fails."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
+
+        mock_api = MagicMock()
+        mock_api.get_device_info.return_value = (True, {"sysName": "sw1"})
+        mock_api.get_inventory_filtered.side_effect = [
+            (True, [{"entPhysicalClass": "stack", "entPhysicalIndex": 100}]),
+            (False, None),  # child fetch fails
+        ]
+
+        result = detect_virtual_chassis_from_inventory(mock_api, 1)
+        assert result is None
+
+    def test_exception_returns_none(self):
+        """Unhandled exception inside the function returns None."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
+
+        mock_api = MagicMock()
+        mock_api.get_device_info.side_effect = RuntimeError("Unexpected")
+
+        result = detect_virtual_chassis_from_inventory(mock_api, 1)
+        assert result is None
+
+
+class TestLoadVCMemberNamePattern:
+    """Tests for _load_vc_member_name_pattern."""
+
+    def test_returns_pattern_from_settings(self):
+        """Returns vc_member_name_pattern from LibreNMSSettings when found."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _load_vc_member_name_pattern
+
+        mock_settings = MagicMock()
+        mock_settings.vc_member_name_pattern = "-SW{position}"
+
+        with patch("netbox_librenms_plugin.models.LibreNMSSettings") as mock_cls:
+            mock_cls.objects.first.return_value = mock_settings
+            result = _load_vc_member_name_pattern()
+
+        assert result == "-SW{position}"
+
+    def test_no_settings_returns_default(self):
+        """Returns '-M{position}' when LibreNMSSettings.objects.first() returns None."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _load_vc_member_name_pattern
+
+        with patch("netbox_librenms_plugin.models.LibreNMSSettings") as mock_cls:
+            mock_cls.objects.first.return_value = None
+            result = _load_vc_member_name_pattern()
+
+        assert result == "-M{position}"
+
+    def test_exception_returns_default(self):
+        """Returns '-M{position}' when the DB query raises an exception."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _load_vc_member_name_pattern
+
+        with patch("netbox_librenms_plugin.models.LibreNMSSettings") as mock_cls:
+            mock_cls.objects.first.side_effect = Exception("DB offline")
+            result = _load_vc_member_name_pattern()
+
+        assert result == "-M{position}"
+
+
+class TestGenerateVCMemberNameAdditional:
+    """Additional tests for _generate_vc_member_name."""
+
+    def test_with_serial_in_pattern(self):
+        """Pattern using {serial} placeholder substitutes the serial number."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
+
+        name = _generate_vc_member_name("switch-1", 2, serial="ABC123", pattern=" [{serial}]")
+        assert name == "switch-1 [ABC123]"
+
+    def test_empty_serial_produces_empty_brackets(self):
+        """Empty serial with {serial} pattern results in empty brackets."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
+
+        name = _generate_vc_member_name("switch-1", 1, serial="", pattern=" [{serial}]")
+        assert name == "switch-1 []"
+
+    def test_invalid_placeholder_falls_back_to_default(self):
+        """A KeyError from an unknown placeholder triggers the '-M{position}' fallback."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
+
+        name = _generate_vc_member_name("switch-1", 3, pattern="-{nonexistent_key}")
+        assert name == "switch-1-M3"
+
+    def test_none_pattern_loads_from_settings(self):
+        """When pattern=None, _load_vc_member_name_pattern is called to fetch the pattern."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
+
+        with patch(
+            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+            return_value="-M{position}",
+        ) as mock_load:
+            name = _generate_vc_member_name("router", 5, pattern=None)
+
+        mock_load.assert_called_once()
+        assert name == "router-M5"
+
+    def test_master_name_placeholder(self):
+        """Pattern can also reference {master_name}."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
+
+        name = _generate_vc_member_name("sw", 2, pattern="-{master_name}-pos{position}")
+        assert name == "sw-sw-pos2"
+
+
+class TestUpdateVCMemberSuggestedNamesAdditional:
+    """Additional tests for update_vc_member_suggested_names."""
+
+    def test_not_stack_returns_vc_data_unchanged(self):
+        """When is_stack=False, the function returns immediately without modifying members."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import update_vc_member_suggested_names
+
+        vc_data = {
+            "is_stack": False,
+            "members": [{"serial": "S1", "position": 1, "suggested_name": "old-name"}],
+        }
+        result = update_vc_member_suggested_names(vc_data, "sw")
+        # suggested_name must not be regenerated
+        assert result["members"][0]["suggested_name"] == "old-name"
+
+    def test_none_vc_data_returns_none(self):
+        """None input is returned as-is (falsy guard)."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import update_vc_member_suggested_names
+
+        result = update_vc_member_suggested_names(None, "sw")
+        assert result is None
+
+    def test_no_members_returns_empty_members(self):
+        """is_stack=True with empty members list processes without error."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import update_vc_member_suggested_names
+
+        vc_data = {"is_stack": True, "members": []}
+
+        with patch(
+            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+            return_value="-M{position}",
+        ):
+            result = update_vc_member_suggested_names(vc_data, "sw")
+
+        assert result["members"] == []
+
+
+class TestCreateVirtualChassisWithMembers:
+    """Tests for create_virtual_chassis_with_members."""
+
+    def test_raises_when_vc_create_fails(self):
+        """Exception from VirtualChassis.objects.create is re-raised to the caller."""
+        from contextlib import contextmanager
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+
+        master_device = MagicMock()
+        master_device.name = "sw1"
+        master_device.pk = 1
+        master_device.serial = ""
+
+        @contextmanager
+        def mock_atomic():
+            yield
+
+        with (
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis.transaction.atomic",
+                mock_atomic,
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._generate_vc_member_name",
+                return_value="sw1-M1",
+            ),
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis.VirtualChassis") as mock_vc_cls,
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+                return_value="-M{position}",
+            ),
+        ):
+            mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
+            mock_vc_cls.objects.create.side_effect = Exception("DB error")
+
+            import pytest
+
+            with pytest.raises(Exception, match="DB error"):
+                create_virtual_chassis_with_members(master_device, [], {"device_id": 1})
+
+    def test_success_with_no_members(self):
+        """Happy path with empty members_info creates VC and returns it."""
+        from contextlib import contextmanager
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+
+        master_device = MagicMock()
+        master_device.name = "sw1"
+        master_device.pk = 1
+        master_device.serial = ""
+
+        mock_vc = MagicMock()
+        mock_vc.members.count.return_value = 1
+
+        @contextmanager
+        def mock_atomic():
+            yield
+
+        with (
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis.transaction.atomic",
+                mock_atomic,
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._generate_vc_member_name",
+                return_value="sw1-M1",
+            ),
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis.VirtualChassis") as mock_vc_cls,
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+                return_value="-M{position}",
+            ),
+        ):
+            mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
+            mock_vc_cls.objects.create.return_value = mock_vc
+
+            result = create_virtual_chassis_with_members(master_device, [], {"device_id": 1})
+
+        assert result == mock_vc
+        mock_vc_cls.objects.create.assert_called_once()
+
+
 class TestBulkImportCancellation:
     """Test that bulk_import_devices_shared respects RQ and DB cancellation."""
 
@@ -3667,3 +4435,469 @@ class TestVCDomainStackDedup:
         key_a = f"librenms-stack-{','.join(sorted(m['serial'] for m in members_a))}"
         key_b = f"librenms-stack-{','.join(sorted(m['serial'] for m in members_b))}"
         assert key_a != key_b
+
+
+class TestVirtualChassisEdgeBranches:
+    """Targeted tests for exception branches not covered by main tests."""
+
+    def test_detect_vc_invalid_position_string_falls_back(self):
+        """When entPhysicalParentRelPos is a non-numeric string, position falls back to idx+1."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
+
+        mock_api = MagicMock()
+        mock_api.get_device_info.return_value = (True, {"sysName": "sw1"})
+        mock_api.get_inventory_filtered.side_effect = [
+            (True, [{"entPhysicalClass": "stack", "entPhysicalIndex": 100}]),
+            (
+                True,
+                [
+                    {"entPhysicalClass": "chassis", "entPhysicalParentRelPos": "bad", "entPhysicalIndex": 201},
+                    {"entPhysicalClass": "chassis", "entPhysicalParentRelPos": "invalid", "entPhysicalIndex": 202},
+                ],
+            ),
+        ]
+
+        with patch(
+            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+            return_value="-M{position}",
+        ):
+            result = detect_virtual_chassis_from_inventory(mock_api, 1)
+
+        # invalid string → idx+1 fallback (1-based: idx=0→1, idx=1→2)
+        positions = sorted(m["position"] for m in result["members"])
+        assert positions == [1, 2]
+
+    def test_update_vc_suggested_names_invalid_position_string_falls_back(self):
+        """Non-numeric position string in member triggers except branch → idx+1 fallback."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import update_vc_member_suggested_names
+
+        vc_data = {
+            "is_stack": True,
+            "member_count": 2,
+            "members": [{"serial": "S1", "position": "bad"}, {"serial": "S2", "position": None}],
+        }
+
+        with patch(
+            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+            return_value="-M{position}",
+        ):
+            result = update_vc_member_suggested_names(vc_data, "sw")
+
+        positions = [m["position"] for m in result["members"]]
+        assert positions[0] == 1  # idx=0 → 1
+        assert positions[1] == 2  # idx=1 → 2
+
+    def _make_atomic(self):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _atomic():
+            yield
+
+        return _atomic
+
+    def _base_patches(self):
+        from unittest.mock import patch
+
+        return [
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis.transaction.atomic",
+                self._make_atomic(),
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+                return_value="-M{position}",
+            ),
+        ]
+
+    def test_create_vc_master_name_conflict_keeps_original(self):
+        """When the renamed master clashes, master_base_name stays as original."""
+        from contextlib import contextmanager
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+
+        master_device = MagicMock()
+        master_device.name = "sw1"
+        master_device.pk = 1
+        master_device.serial = ""
+        master_device.rack = None
+        master_device.location = None
+
+        mock_vc = MagicMock()
+        mock_vc.members.count.return_value = 1
+
+        @contextmanager
+        def mock_atomic():
+            yield
+
+        with (
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis.transaction.atomic",
+                mock_atomic,
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._generate_vc_member_name",
+                return_value="sw1-M1",
+            ),
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis.VirtualChassis") as mock_vc_cls,
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+                return_value="-M{position}",
+            ),
+        ):
+            # Name conflict: renamed master already exists
+            mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = True
+            mock_vc_cls.objects.create.return_value = mock_vc
+
+            result = create_virtual_chassis_with_members(master_device, [], {"device_id": 1})
+
+        # VC still created; master.name was NOT changed (conflict)
+        assert result == mock_vc
+        assert master_device.name == "sw1"
+
+    def test_create_vc_member_serial_matches_master_skipped(self):
+        """Member whose serial equals master serial is skipped."""
+        from contextlib import contextmanager
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+
+        master_device = MagicMock()
+        master_device.name = "sw1"
+        master_device.pk = 1
+        master_device.serial = "SERIAL-MASTER"
+        master_device.rack = None
+        master_device.location = None
+
+        mock_vc = MagicMock()
+        mock_vc.members.count.return_value = 1
+
+        @contextmanager
+        def mock_atomic():
+            yield
+
+        with (
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis.transaction.atomic",
+                mock_atomic,
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._generate_vc_member_name",
+                return_value="sw1-M1",
+            ),
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis.VirtualChassis") as mock_vc_cls,
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+                return_value="-M{position}",
+            ),
+        ):
+            mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
+            mock_device_cls.objects.filter.return_value.exists.return_value = False
+            mock_vc_cls.objects.create.return_value = mock_vc
+
+            # One member with same serial as master → should be skipped
+            members_info = [{"serial": "SERIAL-MASTER", "position": 2, "name": "sw1-2"}]
+            create_virtual_chassis_with_members(master_device, members_info, {"device_id": 1})
+
+        # Device.objects.create should NOT be called (member skipped)
+        mock_device_cls.objects.create.assert_not_called()
+
+    def test_create_vc_member_duplicate_serial_skipped(self):
+        """Member with a serial that already exists in DB is skipped."""
+        from contextlib import contextmanager
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+
+        master_device = MagicMock()
+        master_device.name = "sw1"
+        master_device.pk = 1
+        master_device.serial = ""
+        master_device.rack = None
+        master_device.location = None
+
+        mock_vc = MagicMock()
+        mock_vc.members.count.return_value = 1
+
+        @contextmanager
+        def mock_atomic():
+            yield
+
+        def _filter_exists(*args, **kwargs):
+            # First call: check renamed master name conflict (exclude().exists()) → False
+            # Subsequent calls: check duplicate serial → True (for serial)
+            mock = MagicMock()
+            mock.exclude.return_value.exists.return_value = False
+            mock.exists.return_value = True  # serial already exists
+            return mock
+
+        with (
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis.transaction.atomic",
+                mock_atomic,
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._generate_vc_member_name",
+                return_value="sw1-M2",
+            ),
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis.VirtualChassis") as mock_vc_cls,
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+                return_value="-M{position}",
+            ),
+        ):
+            mock_device_cls.objects.filter.side_effect = _filter_exists
+            mock_vc_cls.objects.create.return_value = mock_vc
+
+            members_info = [{"serial": "DUP-SERIAL", "position": 2, "name": "sw1-2"}]
+            create_virtual_chassis_with_members(master_device, members_info, {"device_id": 1})
+
+        mock_device_cls.objects.create.assert_not_called()
+
+    def test_create_vc_member_created_successfully(self):
+        """Normal member (no duplicate serial/name) is created via Device.objects.create."""
+        from contextlib import contextmanager
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+
+        master_device = MagicMock()
+        master_device.name = "sw1"
+        master_device.pk = 1
+        master_device.serial = ""
+        master_device.rack = None
+        master_device.location = None
+        master_device.platform = None
+        master_device.role = MagicMock()
+        master_device.device_type = MagicMock()
+        master_device.site = MagicMock()
+
+        mock_vc = MagicMock()
+        mock_vc.members.count.return_value = 2
+
+        @contextmanager
+        def mock_atomic():
+            yield
+
+        def _filter_side_effect(*args, **kwargs):
+            mock = MagicMock()
+            mock.exclude.return_value.exists.return_value = False  # no name conflict
+            mock.exists.return_value = False  # no duplicate serial or name
+            return mock
+
+        with (
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis.transaction.atomic",
+                mock_atomic,
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._generate_vc_member_name",
+                return_value="sw1-M2",
+            ),
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis.VirtualChassis") as mock_vc_cls,
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+                return_value="-M{position}",
+            ),
+        ):
+            mock_device_cls.objects.filter.side_effect = _filter_side_effect
+            mock_vc_cls.objects.create.return_value = mock_vc
+
+            members_info = [{"serial": "NEW-SERIAL", "position": 2, "name": "sw1-2"}]
+            result = create_virtual_chassis_with_members(master_device, members_info, {"device_id": 1})
+
+        mock_device_cls.objects.create.assert_called_once()
+        assert result == mock_vc
+
+    def test_create_vc_member_count_warning_when_fewer_created(self):
+        """Warning is logged when members_created < expected_members."""
+        from contextlib import contextmanager
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+
+        master_device = MagicMock()
+        master_device.name = "sw1"
+        master_device.pk = 1
+        master_device.serial = ""
+        master_device.rack = None
+        master_device.location = None
+
+        mock_vc = MagicMock()
+        mock_vc.members.count.return_value = 1
+
+        @contextmanager
+        def mock_atomic():
+            yield
+
+        def _filter_side_effect(*args, **kwargs):
+            mock = MagicMock()
+            mock.exclude.return_value.exists.return_value = False
+            # serial check: True → member skipped
+            mock.exists.return_value = True
+            return mock
+
+        with (
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis.transaction.atomic",
+                mock_atomic,
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._generate_vc_member_name",
+                return_value="sw1-M2",
+            ),
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis.VirtualChassis") as mock_vc_cls,
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+                return_value="-M{position}",
+            ),
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis.logger") as mock_logger,
+        ):
+            mock_device_cls.objects.filter.side_effect = _filter_side_effect
+            mock_vc_cls.objects.create.return_value = mock_vc
+
+            # 2 members expected, both skipped → warning
+            members_info = [
+                {"serial": "S1", "position": 2, "name": "sw1-2"},
+                {"serial": "S2", "position": 3, "name": "sw1-3"},
+            ]
+            create_virtual_chassis_with_members(master_device, members_info, {"device_id": 1})
+
+        # Warning should be called for count mismatch
+        mock_logger.warning.assert_called()
+
+    def test_create_vc_member_zero_position_and_name_conflict(self):
+        """Member position=0 → discovered_pos=None, and name conflict → skip."""
+        from contextlib import contextmanager
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+
+        master_device = MagicMock()
+        master_device.name = "sw1"
+        master_device.pk = 1
+        master_device.serial = ""
+        master_device.rack = None
+        master_device.location = None
+        master_device.platform = None
+        master_device.role = MagicMock()
+        master_device.device_type = MagicMock()
+        master_device.site = MagicMock()
+
+        mock_vc = MagicMock()
+        mock_vc.members.count.return_value = 1
+
+        @contextmanager
+        def mock_atomic():
+            yield
+
+        filter_call_count = [0]
+
+        def _filter_side_effect(*args, **kwargs):
+            mock = MagicMock()
+            mock.exclude.return_value.exists.return_value = False  # no renamed-master conflict
+            filter_call_count[0] += 1
+            # call 1: renamed-master name conflict check (.exclude().exists()) → handled above
+            # call 2: serial duplicate check (.exists()) → False (serial doesn't exist)
+            # call 3: member name conflict check (.exists()) → True (name already taken)
+            mock.exists.return_value = filter_call_count[0] == 3
+            return mock
+
+        with (
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis.transaction.atomic",
+                mock_atomic,
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._generate_vc_member_name",
+                return_value="sw1-M2",
+            ),
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis.VirtualChassis") as mock_vc_cls,
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+                return_value="-M{position}",
+            ),
+        ):
+            mock_device_cls.objects.filter.side_effect = _filter_side_effect
+            mock_vc_cls.objects.create.return_value = mock_vc
+
+            # position=0 → discovered_pos normalized to None; serial present but name conflicts
+            members_info = [{"serial": "S-UNIQUE", "position": 0, "name": "sw1-2"}]
+            create_virtual_chassis_with_members(master_device, members_info, {"device_id": 1})
+
+        # Member skipped due to name conflict (not created)
+        mock_device_cls.objects.create.assert_not_called()
+
+    def test_create_vc_member_invalid_position_string_uses_sequential(self):
+        """Member with position='abc' (non-int) triggers except branch → uses sequential counter."""
+        from contextlib import contextmanager
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+
+        master_device = MagicMock()
+        master_device.name = "sw1"
+        master_device.pk = 1
+        master_device.serial = ""
+        master_device.rack = None
+        master_device.location = None
+        master_device.platform = None
+        master_device.role = MagicMock()
+        master_device.device_type = MagicMock()
+        master_device.site = MagicMock()
+
+        mock_vc = MagicMock()
+        mock_vc.members.count.return_value = 2
+
+        created_positions = []
+
+        @contextmanager
+        def mock_atomic():
+            yield
+
+        def _filter_side_effect(*args, **kwargs):
+            mock = MagicMock()
+            mock.exclude.return_value.exists.return_value = False
+            mock.exists.return_value = False
+            return mock
+
+        def _capture_create(**kwargs):
+            created_positions.append(kwargs.get("vc_position"))
+            return MagicMock()
+
+        with (
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis.transaction.atomic",
+                mock_atomic,
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._generate_vc_member_name",
+                return_value="sw1-M2",
+            ),
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.import_utils.virtual_chassis.VirtualChassis") as mock_vc_cls,
+            patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+                return_value="-M{position}",
+            ),
+        ):
+            mock_device_cls.objects.filter.side_effect = _filter_side_effect
+            mock_device_cls.objects.create.side_effect = _capture_create
+            mock_vc_cls.objects.create.return_value = mock_vc
+
+            # "abc" position → except branch → sequential fallback (position=2, then +=1)
+            members_info = [{"serial": "S1", "position": "abc", "name": "m1"}]
+            create_virtual_chassis_with_members(master_device, members_info, {"device_id": 1})
+
+        assert mock_device_cls.objects.create.call_count == 1
