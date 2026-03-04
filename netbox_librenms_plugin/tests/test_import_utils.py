@@ -1854,6 +1854,41 @@ class TestNameMatchesWithNamingPreferences:
         )
         assert result["naming_criteria"]["source"] == "hostname"
 
+    def test_naming_criteria_source_sysname_when_sysname_disabled_but_hostname_empty(self):
+        """When use_sysname=False and hostname is empty, source falls back to 'sysname'.
+
+        Before the fix, source was incorrectly reported as 'hostname' even
+        though the resolved name actually came from sysName.
+        """
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        self.mock_device.objects.filter.return_value.first.return_value = None
+
+        device_data = {
+            "device_id": 99,
+            "hostname": "",
+            "sysName": "router-sysname",
+        }
+        result = validate_device_for_import(
+            device_data, include_vc_detection=False, use_sysname=False, strip_domain=False
+        )
+        assert result["naming_criteria"]["source"] == "sysname", (
+            "When hostname is empty, source must be 'sysname', not 'hostname'"
+        )
+
+    def test_naming_criteria_source_hostname_fallback_when_both_empty(self):
+        """When both hostname and sysName are empty, source is 'hostname' (final fallback)."""
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        self.mock_device.objects.filter.return_value.first.return_value = None
+
+        device_data = {"device_id": 99, "hostname": "", "sysName": ""}
+        result = validate_device_for_import(
+            device_data, include_vc_detection=False, use_sysname=False, strip_domain=False
+        )
+        # Both empty → final fallback is 'hostname'
+        assert result["naming_criteria"]["source"] == "hostname"
+
 
 class TestLegacyLibreNMSIdMigration:
     """Test detection of legacy bare-integer librenms_id format during device validation."""
@@ -3103,6 +3138,86 @@ class TestVCPositionHandling:
         # position=2 should produce "2", not "3"
         name = _generate_vc_member_name("switch-1", 2, pattern="-M{position}")
         assert name == "switch-1-M2", f"Expected 'switch-1-M2', got '{name}'"
+
+    def test_update_vc_member_suggested_names_no_off_by_one(self):
+        """update_vc_member_suggested_names must use stored 1-based positions directly.
+
+        Previously bays_by_depth applied an extra +1 to positions that were
+        already 1-based, producing suggested names like "switch-M2" for position 1.
+        """
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import (
+            update_vc_member_suggested_names,
+        )
+
+        vc_data = {
+            "is_stack": True,
+            "member_count": 2,
+            "members": [
+                {"serial": "S1", "position": 1},
+                {"serial": "S2", "position": 2},
+            ],
+        }
+
+        with patch(
+            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+            return_value="-M{position}",
+        ):
+            result = update_vc_member_suggested_names(vc_data, "switch-01")
+
+        names = [m["suggested_name"] for m in result["members"]]
+        # Position 1 → "switch-01-M1", NOT "switch-01-M2"
+        assert names[0] == "switch-01-M1", f"Expected 'switch-01-M1' but got {names[0]!r} — off-by-one regression"
+        assert names[1] == "switch-01-M2", f"Expected 'switch-01-M2' but got {names[1]!r} — off-by-one regression"
+
+    def test_update_vc_member_suggested_names_preserves_position(self):
+        """update_vc_member_suggested_names must write final position back to member dict."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import (
+            update_vc_member_suggested_names,
+        )
+
+        vc_data = {
+            "is_stack": True,
+            "member_count": 1,
+            "members": [{"serial": "S1", "position": 3}],
+        }
+
+        with patch(
+            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+            return_value="-M{position}",
+        ):
+            result = update_vc_member_suggested_names(vc_data, "router")
+
+        member = result["members"][0]
+        assert member["position"] == 3
+        assert member["suggested_name"] == "router-M3"
+
+    def test_update_vc_member_suggested_names_fallback_for_zero_position(self):
+        """Position 0 must be replaced with 1-based fallback (idx+1)."""
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import (
+            update_vc_member_suggested_names,
+        )
+
+        vc_data = {
+            "is_stack": True,
+            "member_count": 2,
+            "members": [{"serial": "S1", "position": 0}, {"serial": "S2", "position": -1}],
+        }
+
+        with patch(
+            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+            return_value="-M{position}",
+        ):
+            result = update_vc_member_suggested_names(vc_data, "sw")
+
+        positions = [m["position"] for m in result["members"]]
+        assert positions[0] == 1, f"Zero position must fall back to 1, got {positions[0]}"
+        assert positions[1] == 2, f"Negative position must fall back to 2 (idx+1), got {positions[1]}"
 
 
 class TestBulkImportCancellation:
