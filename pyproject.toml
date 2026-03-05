@@ -67,6 +67,4 @@ ignore = [
 "__init__.py" = ["F401"]
 
 [dependency-groups]
-dev = [
-    "mkdocs-material>=9.7.4",
-]
+dev = []
