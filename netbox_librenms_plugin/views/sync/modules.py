@@ -55,6 +55,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Vi
                 module.full_clean()
                 module.save()
 
+            cache.delete(f"librenms_inventory_device_{device.pk}")
             messages.success(
                 request, f"Installed {module_type.model} in {module_bay.name} (serial: {serial or 'N/A'})."
             )
@@ -139,6 +140,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
 
         # Report results
         if installed:
+            cache.delete(self.get_cache_key(device, "inventory"))
             messages.success(request, f"Installed {len(installed)} module(s): {', '.join(installed)}")
         if skipped:
             messages.info(request, f"Skipped {len(skipped)}: {'; '.join(skipped)}")
