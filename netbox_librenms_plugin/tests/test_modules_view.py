@@ -54,11 +54,10 @@ def _run_build_context(view, inventory_data, device_bays, module_scoped_bays, mo
         patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping,
     ):
         mock_cache.ttl = MagicMock(return_value=None)
-        mock_mapping.objects.filter.return_value.first.return_value = None
-        mock_mapping.objects.filter.return_value.__iter__ = lambda s: iter([])
-        mock_mapping.objects.filter.return_value.__list__ = lambda s: []
-        # list() is called on the queryset for regex mappings
-        mock_mapping.objects.filter.return_value.__class__ = list
+        mock_qs = MagicMock()
+        mock_qs.__iter__ = lambda s: iter([])
+        mock_qs.first.return_value = None
+        mock_mapping.objects.filter.return_value = mock_qs
 
         # Inline import: patch ModuleBayMapping inside models module
         view._build_context(MagicMock(), MagicMock(), inventory_data)

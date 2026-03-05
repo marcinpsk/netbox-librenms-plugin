@@ -1414,7 +1414,7 @@ function handleInstallSelectedSubmit() {
     // Remove any previously-injected hidden inputs to avoid duplicates
     const form = document.getElementById('install-selected-form');
     if (!form) return;
-    form.querySelectorAll('input[data-injected-select]').forEach(el => el.remove());
+    form.querySelectorAll('input[data-injected-select]').forEach(el => { el.remove(); });
 
     const table = document.getElementById('librenms-module-table');
     if (!table) return;

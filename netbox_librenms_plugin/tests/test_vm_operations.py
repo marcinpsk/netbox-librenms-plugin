@@ -544,6 +544,7 @@ class TestBulkImportVms:
         call_kwargs = mock_validate.call_args[1]
         assert call_kwargs["use_sysname"] is False
         assert call_kwargs["strip_domain"] is True
+        assert call_kwargs["server_key"] == mock_api.server_key
 
     def test_no_cluster_id_skips_cluster_lookup(self):
         """Cluster lookup is skipped when cluster_id is absent from vm_mappings."""

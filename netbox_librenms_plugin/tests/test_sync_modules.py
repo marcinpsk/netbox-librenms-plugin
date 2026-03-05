@@ -997,3 +997,55 @@ class TestParentRowIdxVsEntityIndex:
             "has_installable_children must be set on table row 0 (parent_row_idx), "
             "not at entity index 8_000_000 which would cause IndexError"
         )
+
+
+# ---------------------------------------------------------------------------
+# Regression: install views must NOT delete the LibreNMS inventory cache
+# ---------------------------------------------------------------------------
+
+
+class TestInstallViewsDoNotDeleteCache:
+    """Install views must not call cache.delete after a successful install.
+
+    The LibreNMS inventory cache stores what LibreNMS reports (hardware list).
+    It is unaffected by NetBox module installs; _get_module_bays() is a live DB
+    query so the next render correctly shows the "Installed" state without any
+    cache invalidation.  Deleting the cache after install caused an empty modules
+    tab (regression).
+    """
+
+    def test_install_module_view_no_cache_delete_in_source(self):
+        """InstallModuleView.post body must not contain a cache.delete call."""
+        import inspect
+
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        source = inspect.getsource(InstallModuleView.post)
+        assert "cache.delete" not in source, (
+            "InstallModuleView.post must not call cache.delete — "
+            "deleting the inventory cache after install causes an empty modules tab."
+        )
+
+    def test_install_branch_view_no_cache_delete_in_source(self):
+        """InstallBranchView.post body must not contain a cache.delete call."""
+        import inspect
+
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        source = inspect.getsource(InstallBranchView.post)
+        assert "cache.delete" not in source, (
+            "InstallBranchView.post must not call cache.delete — "
+            "deleting the inventory cache after install causes an empty modules tab."
+        )
+
+    def test_install_selected_view_no_cache_delete_in_source(self):
+        """InstallSelectedView.post body must not contain a cache.delete call."""
+        import inspect
+
+        from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
+
+        source = inspect.getsource(InstallSelectedView.post)
+        assert "cache.delete" not in source, (
+            "InstallSelectedView.post must not call cache.delete — "
+            "deleting the inventory cache after install causes an empty modules tab."
+        )

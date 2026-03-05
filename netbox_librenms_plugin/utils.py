@@ -657,6 +657,26 @@ def has_nested_name_conflict(module_type, module_bay):
     return sibling_count > 1
 
 
+def get_module_types_indexed() -> dict:
+    """Return all NetBox module types indexed by model (and part_number), with ModuleTypeMapping applied.
+
+    ModuleTypeMapping entries take priority over the base model/part_number keys so that
+    explicit overrides win when the same string appears in both.
+    """
+    from dcim.models import ModuleType
+
+    from netbox_librenms_plugin.models import ModuleTypeMapping
+
+    result: dict = {}
+    for mt in ModuleType.objects.all().select_related("manufacturer"):
+        result[mt.model] = mt
+        if mt.part_number and mt.part_number != mt.model:
+            result[mt.part_number] = mt
+    for mapping in ModuleTypeMapping.objects.select_related("netbox_module_type__manufacturer"):
+        result[mapping.librenms_model] = mapping.netbox_module_type
+    return result
+
+
 def apply_normalization_rules(value: str, scope: str, manufacturer=None) -> str:
     """Apply NormalizationRule chain to transform a string before matching.
 

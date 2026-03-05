@@ -98,6 +98,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Skip items with missing entPhysicalIndex to avoid KeyError on malformed data.
         index_map = {idx: item for item in inventory_data if (idx := item.get("entPhysicalIndex")) is not None}
 
+        # Precompute parent→children map once so _get_sub_components runs in O(n) total.
+        children_by_parent: dict = {}
+        for item in inventory_data:
+            p = item.get("entPhysicalContainedIn")
+            if p is not None:
+                children_by_parent.setdefault(p, []).append(item)
+
         # Store manufacturer for normalization rules in _build_row
         self._device_manufacturer = getattr(getattr(obj, "device_type", None), "manufacturer", None)
 
@@ -201,7 +208,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             parent_ent_idx = item.get("entPhysicalIndex")
             if parent_ent_idx is None:
                 continue
-            sub_items = self._get_sub_components(parent_ent_idx, inventory_data)
+            sub_items = self._get_sub_components(parent_ent_idx, children_by_parent)
             for depth, sub_item in sub_items:
                 scope_bays = bays_by_depth.get(depth, child_bays)
                 sub_row = self._build_row(sub_item, index_map, scope_bays, module_types, depth=depth)
@@ -378,18 +385,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if p.get("port_id") in port_ids and p.get("ifName")
         }
 
-    def _get_sub_components(self, parent_idx, inventory_data):
+    def _get_sub_components(self, parent_idx, children_by_parent):
         """Find descendant items with a model name (real hardware, not empty containers).
 
         Returns list of (depth, item) tuples.
         """
-        # Precompute children_by_parent once to avoid O(n²) linear scans per recursion
-        children_by_parent: dict = {}
-        for item in inventory_data:
-            p = item.get("entPhysicalContainedIn")
-            if p is not None:
-                children_by_parent.setdefault(p, []).append(item)
-
         results = []
         self._collect_descendants(parent_idx, children_by_parent, depth=1, results=results, visited={parent_idx})
         return results
@@ -459,33 +459,26 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         return device_bays, module_scoped_bays
 
     def _get_module_types(self):
-        """Get all module types, indexed by model (part_number), with ModuleTypeMapping checked first."""
-        from dcim.models import ModuleType
+        """Get all module types indexed by model/part_number, with ModuleTypeMapping applied."""
+        from netbox_librenms_plugin.utils import get_module_types_indexed
 
-        from netbox_librenms_plugin.models import ModuleTypeMapping
-
-        # Build base lookup from NetBox module types
-        types = ModuleType.objects.all().select_related("manufacturer")
-        result = {}
-        for mt in types:
-            result[mt.model] = mt
-            if mt.part_number and mt.part_number != mt.model:
-                result[mt.part_number] = mt
-
-        # Overlay with explicit ModuleTypeMapping entries (take priority)
-        for mapping in ModuleTypeMapping.objects.select_related("netbox_module_type__manufacturer"):
-            result[mapping.librenms_model] = mapping.netbox_module_type
-
-        return result
+        return get_module_types_indexed()
 
     def _find_parent_container_name(self, item, index_map):
-        """Resolve the parent container name for an inventory item."""
+        """Resolve the nearest ancestor container name by walking up the containment chain.
+
+        Skips ancestors with an empty entPhysicalName and continues upward until a
+        non-empty name is found or the chain is exhausted.
+        """
         contained_in = item.get("entPhysicalContainedIn", 0)
-        if contained_in == 0:
-            return None
-        parent = index_map.get(contained_in)
-        if parent:
-            return parent.get("entPhysicalName", "")
+        visited: set = set()
+        while contained_in and contained_in in index_map and contained_in not in visited:
+            visited.add(contained_in)
+            parent = index_map[contained_in]
+            name = parent.get("entPhysicalName", "")
+            if name:
+                return name
+            contained_in = parent.get("entPhysicalContainedIn", 0)
         return None
 
     def _match_module_bay(self, item, index_map, module_bays):

@@ -34,8 +34,6 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
             sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
             return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
-        server_key = request.POST.get("server_key") or None
-
         module_bay = get_object_or_404(ModuleBay, pk=module_bay_id, device=device)
         module_type = get_object_or_404(ModuleType, pk=module_type_id)
 
@@ -57,7 +55,6 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
                 module.full_clean()
                 module.save()
 
-            cache.delete(self.get_cache_key(device, "inventory", server_key=server_key))
             messages.success(
                 request, f"Installed {module_type.model} in {module_bay.name} (serial: {serial or 'N/A'})."
             )
@@ -152,7 +149,6 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
 
         # Report results
         if installed:
-            cache.delete(self.get_cache_key(device, "inventory", server_key=server_key))
             messages.success(request, f"Installed {len(installed)} module(s): {', '.join(installed)}")
         if skipped:
             messages.info(request, f"Skipped {len(skipped)}: {'; '.join(skipped)}")
@@ -196,19 +192,9 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
 
     def _get_module_types(self):
         """Get all module types indexed by model, with mappings applied."""
-        from dcim.models import ModuleType
+        from netbox_librenms_plugin.utils import get_module_types_indexed
 
-        from netbox_librenms_plugin.models import ModuleTypeMapping
-
-        types = ModuleType.objects.all().select_related("manufacturer")
-        result = {}
-        for mt in types:
-            result[mt.model] = mt
-            if mt.part_number and mt.part_number != mt.model:
-                result[mt.part_number] = mt
-        for mapping in ModuleTypeMapping.objects.select_related("netbox_module_type__manufacturer"):
-            result[mapping.librenms_model] = mapping.netbox_module_type
-        return result
+        return get_module_types_indexed()
 
     def _install_single(
         self,
@@ -501,7 +487,6 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
         if installed:
-            cache.delete(self.get_cache_key(device, "inventory", server_key=server_key))
             messages.success(request, f"Installed {len(installed)} module(s): {', '.join(installed)}")
         if skipped:
             messages.info(request, f"Skipped {len(skipped)}: {'; '.join(skipped)}")
