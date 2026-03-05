@@ -3785,19 +3785,19 @@ class TestLoadVCMemberNamePattern:
         mock_settings.vc_member_name_pattern = "-SW{position}"
 
         with patch("netbox_librenms_plugin.models.LibreNMSSettings") as mock_cls:
-            mock_cls.objects.first.return_value = mock_settings
+            mock_cls.objects.order_by.return_value.first.return_value = mock_settings
             result = _load_vc_member_name_pattern()
 
         assert result == "-SW{position}"
 
     def test_no_settings_returns_default(self):
-        """Returns '-M{position}' when LibreNMSSettings.objects.first() returns None."""
+        """Returns '-M{position}' when LibreNMSSettings.objects.order_by().first() returns None."""
         from unittest.mock import patch
 
         from netbox_librenms_plugin.import_utils.virtual_chassis import _load_vc_member_name_pattern
 
         with patch("netbox_librenms_plugin.models.LibreNMSSettings") as mock_cls:
-            mock_cls.objects.first.return_value = None
+            mock_cls.objects.order_by.return_value.first.return_value = None
             result = _load_vc_member_name_pattern()
 
         assert result == "-M{position}"
@@ -3809,7 +3809,7 @@ class TestLoadVCMemberNamePattern:
         from netbox_librenms_plugin.import_utils.virtual_chassis import _load_vc_member_name_pattern
 
         with patch("netbox_librenms_plugin.models.LibreNMSSettings") as mock_cls:
-            mock_cls.objects.first.side_effect = Exception("DB offline")
+            mock_cls.objects.order_by.side_effect = Exception("DB offline")
             result = _load_vc_member_name_pattern()
 
         assert result == "-M{position}"

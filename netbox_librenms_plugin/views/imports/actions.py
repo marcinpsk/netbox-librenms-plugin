@@ -1248,6 +1248,18 @@ class DeviceConflictActionView(
                         f"Legacy librenms_id changed under lock ({cf_locked} != {librenms_id}); cannot migrate safely.",
                         status=400,
                     )
+                # Check that no other device already owns this ID on this server
+                server_key = self.librenms_api.server_key
+                conflict = (
+                    Device.objects.filter(**{f"custom_field_data__librenms_id__{server_key}": cf_locked})
+                    .exclude(pk=locked_device.pk)
+                    .exists()
+                )
+                if conflict:
+                    return HttpResponse(
+                        f"Another device already has librenms_id {cf_locked} for server '{server_key}'; cannot migrate.",
+                        status=409,
+                    )
                 migrate_legacy_librenms_id(locked_device, self.librenms_api.server_key)
                 if err := _save_device(locked_device):
                     return err

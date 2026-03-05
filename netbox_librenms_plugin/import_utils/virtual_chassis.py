@@ -245,7 +245,7 @@ def _load_vc_member_name_pattern() -> str:
     from ..models import LibreNMSSettings
 
     try:
-        settings = LibreNMSSettings.objects.first()
+        settings = LibreNMSSettings.objects.order_by("pk").first()
         return settings.vc_member_name_pattern if settings else "-M{position}"
     except Exception as e:
         logger.warning(f"Could not load VC member name pattern from settings: {e}. Using default.")
@@ -361,8 +361,12 @@ def create_virtual_chassis_with_members(master_device: Device, members_info: lis
 
     try:
         with transaction.atomic():
+            # Load naming pattern once to avoid a DB query per member
+            vc_pattern = _load_vc_member_name_pattern()
             # Rename master device to include position 1 pattern
-            master_device_new_name = _generate_vc_member_name(original_master_name, 1, serial=master_device.serial)
+            master_device_new_name = _generate_vc_member_name(
+                original_master_name, 1, serial=master_device.serial, pattern=vc_pattern
+            )
 
             # Check if renamed master conflicts with existing device
             if Device.objects.filter(name=master_device_new_name).exclude(pk=master_device.pk).exists():
@@ -380,7 +384,7 @@ def create_virtual_chassis_with_members(master_device: Device, members_info: lis
             vc = VirtualChassis.objects.create(
                 name=vc_name,
                 master=master_device,
-                domain=f"librenms-{libre_device.get('device_id', master_device.pk)}",
+                domain=f"librenms-{libre_device.get('device_id') or master_device.pk}",
             )
 
             # Update master device
@@ -392,8 +396,6 @@ def create_virtual_chassis_with_members(master_device: Device, members_info: lis
             position = 2  # Start at 2 (master is 1)
             used_positions = {1}  # Master occupies position 1
             members_created = 0
-            # Load naming pattern once to avoid a DB query per member
-            vc_pattern = _load_vc_member_name_pattern()
 
             for member in members_info:
                 # Skip if this is the master's serial (only when both serials are non-empty)

@@ -263,12 +263,17 @@ class NormalizationRule(NetBoxModel):
     )
 
     def clean(self):
-        """Validate that match_pattern compiles as a regex."""
+        """Validate that match_pattern compiles as a regex and replacement is a valid template."""
         super().clean()
         try:
-            re.compile(self.match_pattern)
+            compiled = re.compile(self.match_pattern)
         except re.error as e:
             raise ValidationError({"match_pattern": f"Invalid regex: {e}"})
+        # Validate the replacement template by running a dummy substitution
+        try:
+            compiled.sub(self.replacement, "")
+        except re.error as e:
+            raise ValidationError({"replacement": f"Invalid replacement template: {e}"})
 
     def get_absolute_url(self):
         """Return the URL for this rule's detail page."""

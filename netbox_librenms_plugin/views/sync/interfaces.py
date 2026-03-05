@@ -193,7 +193,8 @@ class SyncInterfacesView(
                 mac_obj = MACAddress.objects.create(mac_address=ifPhysAddress)
 
             interface.mac_addresses.add(mac_obj)
-            interface.primary_mac_address = mac_obj
+            if hasattr(interface, "primary_mac_address"):
+                interface.primary_mac_address = mac_obj
 
     def update_interface_attributes(
         self,
@@ -244,7 +245,7 @@ class SyncInterfacesView(
                 else (admin_status.lower() == "up" if isinstance(admin_status, str) else bool(admin_status))
             )
 
-        if "mac_address" not in exclude_columns and is_device_interface:
+        if "mac_address" not in exclude_columns:
             ifPhysAddress = librenms_interface.get("ifPhysAddress")
             self.handle_mac_address(interface, ifPhysAddress)
 

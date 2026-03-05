@@ -1,6 +1,6 @@
 import django_tables2 as tables
 from django.urls import reverse
-from django.utils.html import format_html
+from django.utils.html import format_html, mark_safe
 from utilities.paginator import EnhancedPaginator
 
 from netbox_librenms_plugin.utils import get_table_paginate_count
@@ -198,4 +198,4 @@ class LibreNMSModuleTable(tables.Table):
                 )
             )
 
-        return format_html("{}", format_html("".join(str(b) for b in buttons))) if buttons else ""
+        return format_html("{}", mark_safe("".join(str(b) for b in buttons))) if buttons else ""
