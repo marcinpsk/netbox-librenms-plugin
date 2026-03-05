@@ -149,3 +149,79 @@ class TestLibreNMSAPIAddDevice:
         )
 
         assert success is False
+
+
+class TestLibreNMSAPIInventory:
+    """LibreNMSAPI.get_device_inventory() correctly parses mock server responses."""
+
+    def test_returns_inventory_list(self, mock_server):
+        inventory = [
+            {
+                "entPhysicalIndex": 1,
+                "entPhysicalDescr": "Chassis",
+                "entPhysicalClass": "chassis",
+                "entPhysicalSerialNum": "SN-CHASSIS-001",
+                "entPhysicalModelName": "WS-C4900M",
+                "entPhysicalName": "Chassis 1",
+                "entPhysicalContainedIn": 0,
+            },
+            {
+                "entPhysicalIndex": 2,
+                "entPhysicalDescr": "Linecard",
+                "entPhysicalClass": "module",
+                "entPhysicalSerialNum": "SN-CARD-002",
+                "entPhysicalModelName": "WS-X4748-RJ45V+E",
+                "entPhysicalName": "Slot 1",
+                "entPhysicalContainedIn": 1,
+            },
+        ]
+        mock_server.register("/api/v0/inventory/7/all", {"status": "ok", "inventory": inventory})
+        api = _make_api(mock_server.url)
+
+        success, data = api.get_device_inventory(7)
+
+        assert success is True
+        assert isinstance(data, list)
+        assert len(data) == 2
+        assert data[0]["entPhysicalClass"] == "chassis"
+        assert data[1]["entPhysicalModelName"] == "WS-X4748-RJ45V+E"
+
+    def test_returns_empty_list_when_no_inventory(self, mock_server):
+        mock_server.register("/api/v0/inventory/99/all", {"status": "ok", "inventory": []})
+        api = _make_api(mock_server.url)
+
+        success, data = api.get_device_inventory(99)
+
+        assert success is True
+        assert data == []
+
+    def test_returns_false_on_network_error(self, mock_server):
+        # Unregistered path → 404 → raise_for_status → RequestException
+        api = _make_api(mock_server.url)
+
+        success, _ = api.get_device_inventory(404)
+
+        assert success is False
+
+    def test_inventory_items_preserve_all_fields(self, mock_server):
+        inventory = [
+            {
+                "entPhysicalIndex": 5,
+                "entPhysicalDescr": "10 Gigabit Ethernet Module",
+                "entPhysicalClass": "module",
+                "entPhysicalSerialNum": "JAE123XYZ",
+                "entPhysicalModelName": "X2-10GB-LR",
+                "entPhysicalName": "TenGigabitEthernet1/1",
+                "entPhysicalContainedIn": 1,
+                "entPhysicalParentRelPos": 1,
+            }
+        ]
+        mock_server.register("/api/v0/inventory/3/all", {"status": "ok", "inventory": inventory})
+        api = _make_api(mock_server.url)
+
+        success, data = api.get_device_inventory(3)
+
+        assert success is True
+        item = data[0]
+        assert item["entPhysicalParentRelPos"] == 1
+        assert item["entPhysicalSerialNum"] == "JAE123XYZ"

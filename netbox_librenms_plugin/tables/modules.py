@@ -1,6 +1,7 @@
 import django_tables2 as tables
 from django.urls import reverse
 from django.utils.html import format_html, mark_safe
+from netbox.tables.columns import ToggleColumn
 from utilities.paginator import EnhancedPaginator
 
 from netbox_librenms_plugin.utils import get_table_paginate_count
@@ -9,6 +10,11 @@ from netbox_librenms_plugin.utils import get_table_paginate_count
 class LibreNMSModuleTable(tables.Table):
     """Table for displaying LibreNMS inventory items mapped to NetBox modules."""
 
+    selection = ToggleColumn(
+        orderable=False,
+        visible=True,
+        attrs={"td": {"data-col": "selection"}, "input": {"name": "select"}},
+    )
     name = tables.Column(
         verbose_name="Name",
         attrs={

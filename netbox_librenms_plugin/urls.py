@@ -31,6 +31,7 @@ from .views import (
     DeviceVLANTableView,
     InstallBranchView,
     InstallModuleView,
+    InstallSelectedView,
     InterfaceTypeMappingBulkDeleteView,
     InterfaceTypeMappingBulkImportView,
     InterfaceTypeMappingChangeLogView,
@@ -121,6 +122,11 @@ urlpatterns = [
         "devices/<int:pk>/install-branch/",
         InstallBranchView.as_view(),
         name="install_branch",
+    ),
+    path(
+        "devices/<int:pk>/install-selected/",
+        InstallSelectedView.as_view(),
+        name="install_selected",
     ),
     path(
         "devices/<int:pk>/ipaddress-sync/",

@@ -354,3 +354,82 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
 
         # Positional fallback for items inside converters
         return BaseModuleTableView._match_bay_by_position(item, index_map, module_bays)
+
+
+class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
+    """Install a user-selected set of inventory items by their entPhysicalIndex values.
+
+    Reuses InstallBranchView._install_single for each selected item so every item
+    goes through the same type/bay/serial resolution pipeline as a branch install.
+    Only items where a matching bay *and* module type are found will be installed;
+    items with no bay or no type are silently skipped (same behaviour as branch).
+    """
+
+    def post(self, request, pk):
+        from dcim.models import Device, Module, ModuleBay, ModuleType
+
+        self.required_object_permissions = {"POST": [("add", Module)]}
+        if error := self.require_all_permissions_json("POST"):
+            return error
+
+        device = get_object_or_404(Device, pk=pk)
+
+        selected_indices = request.POST.getlist("select")
+        if not selected_indices:
+            messages.warning(request, "No modules selected.")
+            sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+
+        cached_data = cache.get(self.get_cache_key(device, "inventory"))
+        if not cached_data:
+            messages.error(request, "No cached inventory data. Please refresh modules first.")
+            sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+
+        try:
+            selected_set = {int(i) for i in selected_indices}
+        except ValueError:
+            messages.error(request, "Invalid selection.")
+            sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+
+        index_map = {item["entPhysicalIndex"]: item for item in cached_data}
+        items = [index_map[idx] for idx in selected_set if idx in index_map]
+
+        if not items:
+            messages.warning(request, "None of the selected indices matched cached inventory.")
+            sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+
+        helper = InstallBranchView()
+        module_types = helper._get_module_types()
+
+        installed, skipped, failed = [], [], []
+
+        try:
+            with transaction.atomic():
+                for item in items:
+                    result = helper._install_single(
+                        device, item, index_map, module_types, ModuleBay, ModuleType, Module
+                    )
+                    if result["status"] == "installed":
+                        installed.append(result["name"])
+                    elif result["status"] == "skipped":
+                        skipped.append(f"{result['name']}: {result['reason']}")
+                    else:
+                        failed.append(f"{result['name']}: {result['reason']}")
+        except Exception as e:
+            messages.error(request, f"Install failed: {e}")
+            sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+
+        if installed:
+            cache.delete(self.get_cache_key(device, "inventory"))
+            messages.success(request, f"Installed {len(installed)} module(s): {', '.join(installed)}")
+        if skipped:
+            messages.info(request, f"Skipped {len(skipped)}: {'; '.join(skipped)}")
+        if failed:
+            messages.warning(request, f"Failed {len(failed)}: {'; '.join(failed)}")
+
+        sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+        return redirect(f"{sync_url}?tab=modules#librenms-module-table")
