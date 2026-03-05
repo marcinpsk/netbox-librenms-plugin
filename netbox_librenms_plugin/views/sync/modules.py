@@ -110,6 +110,13 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         # Load module types (with mappings)
         module_types = self._get_module_types()
 
+        # Preload all ModuleBayMappings once to avoid N+1 per-item queries
+        from netbox_librenms_plugin.models import ModuleBayMapping
+
+        all_mappings = list(ModuleBayMapping.objects.all())
+        exact_mappings = [m for m in all_mappings if not m.is_regex]
+        regex_mappings = [m for m in all_mappings if m.is_regex]
+
         # Install top-down: each install may create new child bays
         installed = []
         skipped = []
@@ -126,6 +133,8 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
                         ModuleBay,
                         ModuleType,
                         Module,
+                        exact_mappings=exact_mappings,
+                        regex_mappings=regex_mappings,
                     )
                     if result["status"] == "installed":
                         installed.append(result["name"])
@@ -156,7 +165,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         Returns items in install order (parent before children).
         """
         items = []
-        parent = next((i for i in inventory_data if i["entPhysicalIndex"] == parent_index), None)
+        parent = next((i for i in inventory_data if i.get("entPhysicalIndex") == parent_index), None)
         if parent:
             model = (parent.get("entPhysicalModelName") or "").strip()
             if model:
@@ -170,7 +179,9 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
             visited = set()
         children = [i for i in inventory_data if i.get("entPhysicalContainedIn") == parent_idx]
         for child in children:
-            child_idx = child["entPhysicalIndex"]
+            child_idx = child.get("entPhysicalIndex")
+            if child_idx is None:
+                continue
             if child_idx in visited:
                 continue
             visited.add(child_idx)
@@ -196,13 +207,23 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
             result[mapping.librenms_model] = mapping.netbox_module_type
         return result
 
-    def _install_single(self, device, item, index_map, module_types, ModuleBay, ModuleType, Module):
+    def _install_single(
+        self,
+        device,
+        item,
+        index_map,
+        module_types,
+        ModuleBay,
+        ModuleType,
+        Module,
+        exact_mappings=None,
+        regex_mappings=None,
+    ):
         """Try to install a single inventory item.
 
         Re-fetches module bays each time since parent installs create new ones.
         Scopes bay lookup to the correct parent module to handle duplicate bay names.
         """
-        from netbox_librenms_plugin.models import ModuleBayMapping
         from netbox_librenms_plugin.utils import apply_normalization_rules
 
         model_name = (item.get("entPhysicalModelName") or "").strip()
@@ -222,8 +243,15 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         # Re-fetch module bays (parent install creates new child bays)
         bays = ModuleBay.objects.filter(device=device).select_related("installed_module__module_type")
 
-        # Pre-fetch all bay mappings once to avoid N+1 queries in _find_parent_module_id
-        bay_mappings = list(ModuleBayMapping.objects.all())
+        # Use preloaded mappings if provided, otherwise load from DB
+        if exact_mappings is None or regex_mappings is None:
+            from netbox_librenms_plugin.models import ModuleBayMapping
+
+            all_mappings = list(ModuleBayMapping.objects.all())
+            exact_mappings = [m for m in all_mappings if not m.is_regex]
+            regex_mappings = [m for m in all_mappings if m.is_regex]
+
+        bay_mappings = exact_mappings + regex_mappings
 
         # Determine if this item belongs under an installed module
         # by tracing its LibreNMS parent hierarchy to an installed item
@@ -234,8 +262,8 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         else:
             bay_dict = {bay.name: bay for bay in bays if not bay.module_id}
 
-        # Match module bay using mapping table
-        matched_bay = self._match_bay(item, index_map, bay_dict, ModuleBayMapping)
+        # Match module bay using preloaded mapping data
+        matched_bay = self._match_bay(item, index_map, bay_dict, exact_mappings, regex_mappings)
         if not matched_bay:
             return {"status": "skipped", "name": name, "reason": "no matching bay"}
 
@@ -293,10 +321,14 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
             if m.librenms_name not in mapping_by_name:
                 mapping_by_name[m.librenms_name] = m
 
-        for _ in range(10):  # max depth guard
+        visited = set()
+        while True:
             parent_idx = current.get("entPhysicalContainedIn", 0)
             if not parent_idx or parent_idx not in index_map:
                 return None
+            if parent_idx in visited:
+                return None
+            visited.add(parent_idx)
             parent = index_map[parent_idx]
             parent_name = parent.get("entPhysicalName", "")
             parent_descr = parent.get("entPhysicalDescr", "")
@@ -318,22 +350,30 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
                         return bay.installed_module.pk
 
             current = parent
-        return None
 
     @staticmethod
-    def _match_bay(item, index_map, module_bays, ModuleBayMapping):
+    def _match_bay(item, index_map, module_bays, exact_mappings, regex_mappings):
         """Match an inventory item to a module bay (same logic as BaseModuleTableView)."""
         import re
 
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        # Resolve parent name
+        # Resolve parent name by walking up the containment hierarchy
         contained_in = item.get("entPhysicalContainedIn", 0)
         parent_name = None
         if contained_in:
-            parent = index_map.get(contained_in)
-            if parent:
-                parent_name = parent.get("entPhysicalName", "")
+            visited_anc = set()
+            current_idx = contained_in
+            while current_idx and current_idx not in visited_anc:
+                visited_anc.add(current_idx)
+                ancestor = index_map.get(current_idx)
+                if not ancestor:
+                    break
+                ancestor_name = ancestor.get("entPhysicalName", "")
+                if ancestor_name:
+                    parent_name = ancestor_name
+                    break
+                current_idx = ancestor.get("entPhysicalContainedIn", 0)
 
         item_name = item.get("entPhysicalName", "")
         item_descr = item.get("entPhysicalDescr", "")
@@ -342,20 +382,23 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         # Build candidate names: parent, item name, item description
         candidate_names = [n for n in [parent_name, item_name, item_descr] if n]
 
-        # Check mapping for each candidate (exact match)
+        # Check mapping for each candidate (exact match, in-memory lookup)
+        # Group exact_mappings by (librenms_name, librenms_class) for O(1) lookup
+        exact_by_name: dict = {}
+        for m in exact_mappings:
+            exact_by_name.setdefault(m.librenms_name, []).append(m)
+
         for name in candidate_names:
-            filters = {"librenms_name": name, "is_regex": False}
+            candidates_for_name = exact_by_name.get(name, [])
+            mapping = None
             if phys_class:
-                mapping = ModuleBayMapping.objects.filter(**filters, librenms_class=phys_class).first()
-                if not mapping:
-                    mapping = ModuleBayMapping.objects.filter(**filters, librenms_class="").first()
-            else:
-                mapping = ModuleBayMapping.objects.filter(**filters, librenms_class="").first()
+                mapping = next((m for m in candidates_for_name if m.librenms_class == phys_class), None)
+            if not mapping:
+                mapping = next((m for m in candidates_for_name if m.librenms_class == ""), None)
             if mapping and mapping.netbox_bay_name in module_bays:
                 return module_bays[mapping.netbox_bay_name]
 
-        # Regex pattern matching on all candidate names (preload once to avoid N+1)
-        regex_mappings = list(ModuleBayMapping.objects.filter(is_regex=True))
+        # Regex pattern matching using preloaded list
         for name in candidate_names:
             bay = BaseModuleTableView._lookup_regex_bay_mapping(re, name, phys_class, module_bays, regex_mappings)
             if bay:
@@ -419,13 +462,28 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         helper = InstallBranchView()
         module_types = helper._get_module_types()
 
+        # Preload all ModuleBayMappings once to avoid N+1 per-item queries
+        from netbox_librenms_plugin.models import ModuleBayMapping
+
+        all_mappings = list(ModuleBayMapping.objects.all())
+        exact_mappings = [m for m in all_mappings if not m.is_regex]
+        regex_mappings = [m for m in all_mappings if m.is_regex]
+
         installed, skipped, failed = [], [], []
 
         try:
             with transaction.atomic():
                 for item in items:
                     result = helper._install_single(
-                        device, item, index_map, module_types, ModuleBay, ModuleType, Module
+                        device,
+                        item,
+                        index_map,
+                        module_types,
+                        ModuleBay,
+                        ModuleType,
+                        Module,
+                        exact_mappings=exact_mappings,
+                        regex_mappings=regex_mappings,
                     )
                     if result["status"] == "installed":
                         installed.append(result["name"])

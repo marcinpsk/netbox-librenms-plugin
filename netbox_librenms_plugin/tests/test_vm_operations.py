@@ -288,6 +288,8 @@ class TestBulkImportVms:
         mock_vm = MagicMock()
         mock_vm.name = "new-vm"
 
+        mock_create_vm = MagicMock(return_value=mock_vm)
+
         with (
             patch("netbox_librenms_plugin.import_utils.vm_operations.require_permissions"),
             patch(
@@ -304,7 +306,7 @@ class TestBulkImportVms:
             ),
             patch(
                 "netbox_librenms_plugin.import_utils.vm_operations.create_vm_from_librenms",
-                return_value=mock_vm,
+                mock_create_vm,
             ),
             patch("netbox_librenms_plugin.import_utils.vm_operations.Cluster"),
             patch("netbox_librenms_plugin.import_utils.vm_operations.DeviceRole"),
@@ -318,6 +320,9 @@ class TestBulkImportVms:
         assert result["success"][0]["device"] == mock_vm
         assert len(result["failed"]) == 0
         assert len(result["skipped"]) == 0
+        # Verify api.server_key is forwarded to create_vm_from_librenms
+        call_kwargs = mock_create_vm.call_args[1]
+        assert call_kwargs.get("server_key") == mock_api.server_key
 
     def test_cluster_assignment_applied(self):
         """apply_cluster_to_validation is called when cluster_id is provided and found."""

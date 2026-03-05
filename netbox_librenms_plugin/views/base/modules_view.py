@@ -170,7 +170,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             # that share the same name as a device bay.
             item_bays = all_bays if item.get("_from_transceiver_api") else device_bays
             row = self._build_row(item, index_map, item_bays, module_types, depth=0)
-            parent_idx = len(table_data)
+            parent_row_idx = len(table_data)
             table_data.append(row)
 
             # Determine which bays sub-components should match against:
@@ -198,10 +198,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             # Find sub-components with a model name (transceivers, converters, etc.)
             # Track bay scope per depth level so nested modules use correct bays
             bays_by_depth = {0: child_bays}
-            parent_idx = item.get("entPhysicalIndex")
-            if parent_idx is None:
+            parent_ent_idx = item.get("entPhysicalIndex")
+            if parent_ent_idx is None:
                 continue
-            sub_items = self._get_sub_components(parent_idx, inventory_data)
+            sub_items = self._get_sub_components(parent_ent_idx, inventory_data)
             for depth, sub_item in sub_items:
                 scope_bays = bays_by_depth.get(depth, child_bays)
                 sub_row = self._build_row(sub_item, index_map, scope_bays, module_types, depth=depth)
@@ -228,7 +228,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
                 # Mark parent if any child is installable
                 if sub_row.get("can_install"):
-                    table_data[parent_idx]["has_installable_children"] = True
+                    table_data[parent_row_idx]["has_installable_children"] = True
 
             # When parent is installable but children can't match bays yet
             # (parent module not installed), enable "Install Branch" if any child
@@ -236,7 +236,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if (
                 parent_bay_matched_but_uninstalled
                 and row.get("can_install")
-                and not table_data[parent_idx].get("has_installable_children")
+                and not table_data[parent_row_idx].get("has_installable_children")
             ):
                 for _depth, sub_item in sub_items:
                     sub_model = (sub_item.get("entPhysicalModelName") or "").strip()
@@ -251,7 +251,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                         )
                         matched = module_types.get(normalized)
                     if matched:
-                        table_data[parent_idx]["has_installable_children"] = True
+                        table_data[parent_row_idx]["has_installable_children"] = True
                         break
 
         # Sort top-level groups by status, keeping children after their parent
@@ -286,7 +286,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             return inventory_data
 
         # Build lookup of existing inventory items by index and serial
-        inv_by_index = {item["entPhysicalIndex"]: item for item in inventory_data}
+        inv_by_index = {idx: item for item in inventory_data if (idx := item.get("entPhysicalIndex")) is not None}
         inv_serials = {
             (item.get("entPhysicalSerialNum") or "").strip()
             for item in inventory_data
@@ -386,7 +386,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             visited = set()
         children = [i for i in inventory_data if i.get("entPhysicalContainedIn") == parent_idx]
         for child in children:
-            child_idx = child["entPhysicalIndex"]
+            child_idx = child.get("entPhysicalIndex")
+            if child_idx is None:
+                continue
             if child_idx in visited:
                 continue
             visited.add(child_idx)
