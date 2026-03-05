@@ -99,7 +99,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
             return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
         # Build index map and collect the branch to install
-        index_map = {item["entPhysicalIndex"]: item for item in cached_data}
+        index_map = {idx: item for item in cached_data if (idx := item.get("entPhysicalIndex")) is not None}
         branch_items = self._collect_branch(parent_index, cached_data)
 
         if not branch_items:
@@ -354,9 +354,10 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
             if mapping and mapping.netbox_bay_name in module_bays:
                 return module_bays[mapping.netbox_bay_name]
 
-        # Regex pattern matching on all candidate names
+        # Regex pattern matching on all candidate names (preload once to avoid N+1)
+        regex_mappings = list(ModuleBayMapping.objects.filter(is_regex=True))
         for name in candidate_names:
-            bay = BaseModuleTableView._lookup_regex_bay_mapping(re, name, phys_class, module_bays, ModuleBayMapping)
+            bay = BaseModuleTableView._lookup_regex_bay_mapping(re, name, phys_class, module_bays, regex_mappings)
             if bay:
                 return bay
 

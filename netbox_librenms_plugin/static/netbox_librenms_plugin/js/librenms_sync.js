@@ -1408,27 +1408,33 @@ function initializeSyncFormSpinners() {
  * Wire the "Install Selected" form to collect checked module-table rows before submit.
  * The form is separate from the table (to avoid nested forms), so we copy the
  * selected checkbox values into hidden inputs just before the form is submitted.
+ * Guard against duplicate listeners on repeated HTMX swaps via a data attribute.
  */
+function handleInstallSelectedSubmit() {
+    // Remove any previously-injected hidden inputs to avoid duplicates
+    const form = document.getElementById('install-selected-form');
+    if (!form) return;
+    form.querySelectorAll('input[data-injected-select]').forEach(el => el.remove());
+
+    const table = document.getElementById('librenms-module-table');
+    if (!table) return;
+
+    table.querySelectorAll('input[name="select"]:checked').forEach(cb => {
+        const hidden = document.createElement('input');
+        hidden.type = 'hidden';
+        hidden.name = 'select';
+        hidden.value = cb.value;
+        hidden.dataset.injectedSelect = '1';
+        form.appendChild(hidden);
+    });
+}
+
 function initializeInstallSelectedForm() {
     const form = document.getElementById('install-selected-form');
     if (!form) return;
-
-    form.addEventListener('submit', function () {
-        // Remove any previously-injected hidden inputs to avoid duplicates
-        form.querySelectorAll('input[data-injected-select]').forEach(el => el.remove());
-
-        const table = document.getElementById('librenms-module-table');
-        if (!table) return;
-
-        table.querySelectorAll('input[name="select"]:checked').forEach(cb => {
-            const hidden = document.createElement('input');
-            hidden.type = 'hidden';
-            hidden.name = 'select';
-            hidden.value = cb.value;
-            hidden.dataset.injectedSelect = '1';
-            form.appendChild(hidden);
-        });
-    });
+    if (form.dataset.installInit) return;
+    form.dataset.installInit = 'true';
+    form.addEventListener('submit', handleInstallSelectedSubmit);
 }
 
 function initializeScripts() {

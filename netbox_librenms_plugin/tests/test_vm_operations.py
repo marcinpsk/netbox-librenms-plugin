@@ -11,6 +11,18 @@ from unittest.mock import MagicMock, patch
 class TestCreateVmFromLibrenms:
     """Tests for create_vm_from_librenms function."""
 
+    @pytest.fixture(autouse=True)
+    def _patch_atomic(self):
+        """transaction.atomic() is a no-op; tests mock all DB interactions."""
+        from contextlib import contextmanager
+
+        @contextmanager
+        def noop_atomic():
+            yield
+
+        with patch("netbox_librenms_plugin.import_utils.vm_operations.transaction.atomic", noop_atomic):
+            yield
+
     def test_success_with_computed_name(self):
         """VM is created using pre-computed _computed_name when present."""
         from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms

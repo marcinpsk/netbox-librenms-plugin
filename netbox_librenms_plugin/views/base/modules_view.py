@@ -198,7 +198,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             # Find sub-components with a model name (transceivers, converters, etc.)
             # Track bay scope per depth level so nested modules use correct bays
             bays_by_depth = {0: child_bays}
-            sub_items = self._get_sub_components(item["entPhysicalIndex"], inventory_data)
+            parent_idx = item.get("entPhysicalIndex")
+            if parent_idx is None:
+                continue
+            sub_items = self._get_sub_components(parent_idx, inventory_data)
             for depth, sub_item in sub_items:
                 scope_bays = bays_by_depth.get(depth, child_bays)
                 sub_row = self._build_row(sub_item, index_map, scope_bays, module_types, depth=depth)
@@ -595,12 +598,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         nearest ancestor with a model, count which container slot the item
         occupies, and match to the bay by number (e.g., SFP 1, SFP 2).
         """
-        # Walk up through modelless containers to find the parent with a model
+        # Walk up through modelless containers to find the parent with a model.
+        # Use a visited set to detect cycles and avoid infinite loops.
         current_idx = item.get("entPhysicalContainedIn", 0)
         container_idx = None
-        for _ in range(5):
-            if not current_idx or current_idx not in index_map:
-                return None
+        visited = set()
+        while current_idx and current_idx in index_map and current_idx not in visited:
+            visited.add(current_idx)
             ancestor = index_map[current_idx]
             model = (ancestor.get("entPhysicalModelName") or "").strip()
             if model:
