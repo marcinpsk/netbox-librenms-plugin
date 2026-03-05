@@ -3,6 +3,7 @@
 import logging
 
 from dcim.models import DeviceRole
+from django.db import transaction
 from django.utils import timezone
 from virtualization.models import Cluster
 
@@ -54,19 +55,24 @@ def create_vm_from_librenms(
     # Generate import timestamp comment
     import_time = timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")
 
-    # Create the VM with librenms_id custom field
-    vm = VirtualMachine.objects.create(
-        name=vm_name,
-        cluster=cluster,
-        role=role,  # Optional VM role
-        platform=platform,
-        comments=f"Imported from LibreNMS by netbox-librenms-plugin on {import_time}",
-    )
+    # Validate device_id before creating the VM so a missing/invalid value
+    # never leaves a VM without a librenms_id (partial persistence).
+    librenms_device_id = int(libre_device["device_id"])
 
     from ..utils import set_librenms_device_id
 
-    set_librenms_device_id(vm, int(libre_device["device_id"]), server_key)
-    vm.save()
+    # Create the VM and assign its LibreNMS ID atomically so a failure in
+    # set_librenms_device_id never leaves a VM without a mapping.
+    with transaction.atomic():
+        vm = VirtualMachine.objects.create(
+            name=vm_name,
+            cluster=cluster,
+            role=role,  # Optional VM role
+            platform=platform,
+            comments=f"Imported from LibreNMS (device_id={librenms_device_id}) by netbox-librenms-plugin on {import_time}",
+        )
+        set_librenms_device_id(vm, librenms_device_id, server_key)
+        vm.save()
 
     logger.info(f"Created VM {vm.name} (ID: {vm.pk}) from LibreNMS device {libre_device['device_id']}")
     return vm

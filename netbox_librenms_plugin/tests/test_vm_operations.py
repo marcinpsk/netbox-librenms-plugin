@@ -31,7 +31,10 @@ class TestCreateVmFromLibrenms:
         mock_vm.name = "vm01-computed"
         mock_vm.pk = 10
 
-        with patch("virtualization.models.VirtualMachine") as mock_vm_class:
+        with (
+            patch("django.db.transaction.atomic"),
+            patch("virtualization.models.VirtualMachine") as mock_vm_class,
+        ):
             mock_vm_class.objects.create.return_value = mock_vm
             result = create_vm_from_librenms(libre_device, validation)
 
@@ -60,6 +63,7 @@ class TestCreateVmFromLibrenms:
                 "netbox_librenms_plugin.import_utils.vm_operations._determine_device_name",
                 return_value="vm02-determined",
             ) as mock_det,
+            patch("django.db.transaction.atomic"),
             patch("virtualization.models.VirtualMachine") as mock_vm_class,
         ):
             mock_vm_class.objects.create.return_value = mock_vm
@@ -101,9 +105,10 @@ class TestCreateVmFromLibrenms:
         mock_vm.custom_field_data = {}
 
         with patch("virtualization.models.VirtualMachine") as mock_vm_class:
-            with patch("netbox_librenms_plugin.utils.set_librenms_device_id") as mock_setter:
-                mock_vm_class.objects.create.return_value = mock_vm
-                create_vm_from_librenms(libre_device, validation, server_key="secondary")
+            with patch("django.db.transaction.atomic"):
+                with patch("netbox_librenms_plugin.utils.set_librenms_device_id") as mock_setter:
+                    mock_vm_class.objects.create.return_value = mock_vm
+                    create_vm_from_librenms(libre_device, validation, server_key="secondary")
 
         mock_setter.assert_called_once_with(mock_vm, 5, "secondary")
         mock_vm.save.assert_called_once()
@@ -123,7 +128,10 @@ class TestCreateVmFromLibrenms:
         mock_vm.name = "vm06"
         mock_vm.pk = 60
 
-        with patch("virtualization.models.VirtualMachine") as mock_vm_class:
+        with (
+            patch("django.db.transaction.atomic"),
+            patch("virtualization.models.VirtualMachine") as mock_vm_class,
+        ):
             mock_vm_class.objects.create.return_value = mock_vm
             create_vm_from_librenms(libre_device, validation, role=mock_role)
 
@@ -144,7 +152,10 @@ class TestCreateVmFromLibrenms:
         mock_vm.name = "vm07"
         mock_vm.pk = 70
 
-        with patch("virtualization.models.VirtualMachine") as mock_vm_class:
+        with (
+            patch("django.db.transaction.atomic"),
+            patch("virtualization.models.VirtualMachine") as mock_vm_class,
+        ):
             mock_vm_class.objects.create.return_value = mock_vm
             create_vm_from_librenms(libre_device, validation)
 
@@ -152,7 +163,7 @@ class TestCreateVmFromLibrenms:
         assert call_kwargs["platform"] is None
 
     def test_import_comment_contains_device_id(self):
-        """The comments field contains a reference to LibreNMS."""
+        """The comments field contains a reference to LibreNMS and device_id."""
         from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
 
         libre_device = {"device_id": 8, "hostname": "vm08", "_computed_name": "vm08"}
@@ -165,13 +176,16 @@ class TestCreateVmFromLibrenms:
         mock_vm.name = "vm08"
         mock_vm.pk = 80
 
-        with patch("virtualization.models.VirtualMachine") as mock_vm_class:
+        with (
+            patch("django.db.transaction.atomic"),
+            patch("virtualization.models.VirtualMachine") as mock_vm_class,
+        ):
             mock_vm_class.objects.create.return_value = mock_vm
             create_vm_from_librenms(libre_device, validation)
 
         call_kwargs = mock_vm_class.objects.create.call_args[1]
         assert "LibreNMS" in call_kwargs["comments"]
-        assert "netbox-librenms-plugin" in call_kwargs["comments"]
+        assert str(libre_device["device_id"]) in call_kwargs["comments"]
 
 
 class TestBulkImportVms:
