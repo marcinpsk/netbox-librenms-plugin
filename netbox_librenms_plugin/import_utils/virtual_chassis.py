@@ -287,7 +287,7 @@ def _generate_vc_member_name(master_name: str, position: int, serial: str = None
     try:
         formatted_suffix = pattern.format(**format_vars)
         return f"{master_name}{formatted_suffix}"
-    except KeyError as e:
+    except (KeyError, ValueError, IndexError) as e:
         logger.error(f"Invalid placeholder in VC naming pattern '{pattern}': {e}. Using default.")
         return f"{master_name}-M{position}"
 
@@ -390,6 +390,7 @@ def create_virtual_chassis_with_members(master_device: Device, members_info: lis
 
             # Create member devices for remaining positions
             position = 2  # Start at 2 (master is 1)
+            used_positions = {1}  # Master occupies position 1
             members_created = 0
             # Load naming pattern once to avoid a DB query per member
             vc_pattern = _load_vc_member_name_pattern()
@@ -419,14 +420,20 @@ def create_virtual_chassis_with_members(master_device: Device, members_info: lis
                     discovered_pos = None
                 if discovered_pos is not None and discovered_pos < 1:
                     discovered_pos = None  # 0 is invalid for vc_position; fall back to counter
-                chosen_pos = discovered_pos if discovered_pos is not None else position
-                # Advance the sequential counter:
-                # - if discovered_pos was used, advance counter past it to avoid future reuse;
-                # - if counter was consumed as fallback, increment it normally.
+                # If discovered_pos is already taken by another member, treat as absent.
+                if discovered_pos is not None and discovered_pos in used_positions:
+                    discovered_pos = None
+                # Consume next free sequential slot when no valid discovered_pos.
                 if discovered_pos is None:
+                    while position in used_positions:
+                        position += 1
+                    chosen_pos = position
                     position += 1
                 else:
-                    position = max(position, discovered_pos + 1)
+                    chosen_pos = discovered_pos
+                    # Advance sequential counter past chosen position.
+                    position = max(position, chosen_pos + 1)
+                used_positions.add(chosen_pos)
 
                 member_name = _generate_vc_member_name(master_base_name, chosen_pos, serial=serial, pattern=vc_pattern)
 
