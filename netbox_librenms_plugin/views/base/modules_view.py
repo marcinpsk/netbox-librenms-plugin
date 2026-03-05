@@ -366,7 +366,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         Returns list of (depth, item) tuples.
         """
         results = []
-        self._collect_descendants(parent_idx, inventory_data, depth=1, results=results, visited=set())
+        self._collect_descendants(parent_idx, inventory_data, depth=1, results=results, visited={parent_idx})
         return results
 
     def _collect_descendants(self, parent_idx, inventory_data, depth, results, visited=None):

@@ -1249,9 +1249,13 @@ class DeviceConflictActionView(
                         status=400,
                     )
                 # Check that no other device already owns this ID on this server
+                # (both new namespaced format and legacy integer format)
                 server_key = self.librenms_api.server_key
                 conflict = (
-                    Device.objects.filter(**{f"custom_field_data__librenms_id__{server_key}": cf_locked})
+                    Device.objects.filter(
+                        Q(**{f"custom_field_data__librenms_id__{server_key}": cf_locked})
+                        | Q(custom_field_data__librenms_id=cf_locked)
+                    )
                     .exclude(pk=locked_device.pk)
                     .exists()
                 )

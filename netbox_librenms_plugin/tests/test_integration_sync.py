@@ -35,9 +35,6 @@ def _make_api(url, token="test-token"):
     with patch("netbox_librenms_plugin.librenms_api.get_plugin_config") as mock_cfg:
         mock_cfg.side_effect = lambda _plugin, key: servers_config if key == "servers" else None
         api = LibreNMSAPI(server_key="test")
-
-    api.librenms_url = url
-    api.api_token = token
     return api
 
 

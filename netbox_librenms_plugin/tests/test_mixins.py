@@ -167,7 +167,7 @@ class TestCacheMixinKeyGeneration:
         obj._meta.model_name = "device"
         obj.pk = 7
 
-        if hasattr(mixin, "get_vlan_overrides_key"):
-            vlan_key = mixin.get_vlan_overrides_key(obj)
-            data_key = mixin.get_cache_key(obj, "vlans")
-            assert vlan_key != data_key
+        assert hasattr(mixin, "get_vlan_overrides_key"), "CacheMixin must implement get_vlan_overrides_key"
+        vlan_key = mixin.get_vlan_overrides_key(obj)
+        data_key = mixin.get_cache_key(obj, "vlans")
+        assert vlan_key != data_key

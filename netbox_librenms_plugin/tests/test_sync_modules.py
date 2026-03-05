@@ -123,27 +123,21 @@ class TestInstallBranchViewGetModuleTypes:
         mock_mapping.librenms_model = "libre-model-a"
         mock_mapping.netbox_module_type = mt1
 
-        with patch("dcim.models.ModuleType") as mock_mt_cls:
-            with patch("netbox_librenms_plugin.models.ModuleTypeMapping") as mock_map_cls:
-                mock_mt_cls.objects.all.return_value.select_related.return_value = [mt1, mt2]
-                mock_map_cls.objects.select_related.return_value = [mock_mapping]
+        mock_mt_cls = MagicMock()
+        mock_mt_cls.objects.all.return_value.select_related.return_value = [mt1, mt2]
 
-                # _get_module_types imports inline, so patch at source
-                with patch.dict(
-                    "sys.modules",
-                    {
-                        "dcim.models": type("m", (), {"ModuleType": mock_mt_cls})(),
-                    },
-                ):
-                    pass  # skip the complex mock — test the data structure instead
+        mock_map_cls = MagicMock()
+        mock_map_cls.objects.select_related.return_value = [mock_mapping]
 
-        # Test the indexing logic directly using a simplified version
-        result = {}
-        for mt in [mt1, mt2]:
-            result[mt.model] = mt
-            if mt.part_number and mt.part_number != mt.model:
-                result[mt.part_number] = mt
-        result[mock_mapping.librenms_model] = mock_mapping.netbox_module_type
+        with patch.dict(
+            "sys.modules",
+            {
+                "dcim.models": type("m", (), {"ModuleType": mock_mt_cls})(),
+            },
+        ):
+            with patch("netbox_librenms_plugin.models.ModuleTypeMapping", mock_map_cls):
+                view = _make_install_branch_view()
+                result = view._get_module_types()
 
         assert result["WS-X4748"] is mt1
         assert result["ALT-PART-4748"] is mt1
@@ -682,11 +676,13 @@ class TestInstallSingleStatus:
 
         with patch("netbox_librenms_plugin.views.sync.modules.transaction.atomic", noop_atomic):
             with patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="WS-X4748"):
-                with patch.object(view, "_find_parent_module_id", return_value=None):
-                    with patch.object(view, "_match_bay", return_value=bay):
-                        result = view._install_single(
-                            device, item, index_map, module_types, ModuleBay, ModuleType, Module
-                        )
+                with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls:
+                    mock_mapping_cls.objects.all.return_value = []
+                    with patch.object(view, "_find_parent_module_id", return_value=None):
+                        with patch.object(view, "_match_bay", return_value=bay):
+                            result = view._install_single(
+                                device, item, index_map, module_types, ModuleBay, ModuleType, Module
+                            )
 
         assert result["status"] == "installed"
         assert "WS-X4748" in result["name"]
@@ -715,9 +711,13 @@ class TestInstallSingleStatus:
         device, item, index_map, module_types, ModuleBay, ModuleType, Module, bay, mt = self._make_args()
 
         with patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="WS-X4748"):
-            with patch.object(view, "_find_parent_module_id", return_value=None):
-                with patch.object(view, "_match_bay", return_value=None):
-                    result = view._install_single(device, item, index_map, module_types, ModuleBay, ModuleType, Module)
+            with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls:
+                mock_mapping_cls.objects.all.return_value = []
+                with patch.object(view, "_find_parent_module_id", return_value=None):
+                    with patch.object(view, "_match_bay", return_value=None):
+                        result = view._install_single(
+                            device, item, index_map, module_types, ModuleBay, ModuleType, Module
+                        )
 
         assert result["status"] == "skipped"
         assert "no matching bay" in result["reason"]
@@ -728,9 +728,13 @@ class TestInstallSingleStatus:
         bay.installed_module = _module()  # occupied!
 
         with patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="WS-X4748"):
-            with patch.object(view, "_find_parent_module_id", return_value=None):
-                with patch.object(view, "_match_bay", return_value=bay):
-                    result = view._install_single(device, item, index_map, module_types, ModuleBay, ModuleType, Module)
+            with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls:
+                mock_mapping_cls.objects.all.return_value = []
+                with patch.object(view, "_find_parent_module_id", return_value=None):
+                    with patch.object(view, "_match_bay", return_value=bay):
+                        result = view._install_single(
+                            device, item, index_map, module_types, ModuleBay, ModuleType, Module
+                        )
 
         assert result["status"] == "skipped"
         assert "already occupied" in result["reason"]
@@ -748,10 +752,12 @@ class TestInstallSingleStatus:
 
         with patch("netbox_librenms_plugin.views.sync.modules.transaction.atomic", noop_atomic):
             with patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="WS-X4748"):
-                with patch.object(view, "_find_parent_module_id", return_value=None):
-                    with patch.object(view, "_match_bay", return_value=bay):
-                        result = view._install_single(
-                            device, item, index_map, module_types, ModuleBay, ModuleType, Module
-                        )
+                with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls:
+                    mock_mapping_cls.objects.all.return_value = []
+                    with patch.object(view, "_find_parent_module_id", return_value=None):
+                        with patch.object(view, "_match_bay", return_value=bay):
+                            result = view._install_single(
+                                device, item, index_map, module_types, ModuleBay, ModuleType, Module
+                            )
 
         assert result["status"] == "failed"

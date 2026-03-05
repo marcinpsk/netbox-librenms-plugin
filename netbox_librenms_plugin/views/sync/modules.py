@@ -14,7 +14,7 @@ from netbox_librenms_plugin.views.mixins import (
 )
 
 
-class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
+class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
     """Install a NetBox Module into a ModuleBay from LibreNMS inventory data."""
 
     def post(self, request, pk):
@@ -55,7 +55,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Vi
                 module.full_clean()
                 module.save()
 
-            cache.delete(f"librenms_inventory_device_{device.pk}")
+            cache.delete(self.get_cache_key(device, "inventory"))
             messages.success(
                 request, f"Installed {module_type.model} in {module_bay.name} (serial: {serial or 'N/A'})."
             )
@@ -222,9 +222,12 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         # Re-fetch module bays (parent install creates new child bays)
         bays = ModuleBay.objects.filter(device=device).select_related("installed_module__module_type")
 
+        # Pre-fetch all bay mappings once to avoid N+1 queries in _find_parent_module_id
+        bay_mappings = list(ModuleBayMapping.objects.all())
+
         # Determine if this item belongs under an installed module
         # by tracing its LibreNMS parent hierarchy to an installed item
-        parent_module_id = self._find_parent_module_id(item, index_map, device, ModuleBay)
+        parent_module_id = self._find_parent_module_id(item, index_map, bays, bay_mappings)
 
         if parent_module_id:
             bay_dict = {bay.name: bay for bay in bays if bay.module_id == parent_module_id}
@@ -265,15 +268,31 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         return {"status": "installed", "name": f"{matched_type.model} → {matched_bay.name}"}
 
     @staticmethod
-    def _find_parent_module_id(item, index_map, device, ModuleBay):
+    def _find_parent_module_id(item, index_map, device_bays, bay_mappings):
         """Find the NetBox module ID for the installed parent of this inventory item.
 
         Walks up the LibreNMS hierarchy to find an ancestor whose name matches
         an installed module bay on the device.
+
+        Args:
+            item: The inventory item dict.
+            index_map: Dict mapping entPhysicalIndex to inventory item.
+            device_bays: Pre-fetched queryset/list of ModuleBay objects for the device.
+            bay_mappings: Pre-fetched list of all ModuleBayMapping objects.
         """
-        from netbox_librenms_plugin.models import ModuleBayMapping
 
         current = item
+        # Build bay name->bay dict from pre-fetched bays for fast lookup
+        bay_by_name = {}
+        for bay in device_bays:
+            if bay.name not in bay_by_name:
+                bay_by_name[bay.name] = bay
+        # Build mapping dict keyed by librenms_name for fast lookup
+        mapping_by_name = {}
+        for m in bay_mappings:
+            if m.librenms_name not in mapping_by_name:
+                mapping_by_name[m.librenms_name] = m
+
         for _ in range(10):  # max depth guard
             parent_idx = current.get("entPhysicalContainedIn", 0)
             if not parent_idx or parent_idx not in index_map:
@@ -283,24 +302,18 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
             parent_descr = parent.get("entPhysicalDescr", "")
 
             # Check if this parent matches an installed module bay on the device
-            device_bays = ModuleBay.objects.filter(device=device).select_related("installed_module")
-
             for bay in device_bays:
                 if hasattr(bay, "installed_module") and bay.installed_module:
                     if bay.name == parent_name or (parent_descr and bay.name == parent_descr):
                         return bay.installed_module.pk
 
-            # Also check ModuleBayMapping for indirect matches
+            # Also check ModuleBayMapping for indirect matches using pre-fetched data
             for name in [parent_name, parent_descr]:
                 if not name:
                     continue
-                mapping = ModuleBayMapping.objects.filter(librenms_name=name).first()
+                mapping = mapping_by_name.get(name)
                 if mapping:
-                    bay = (
-                        ModuleBay.objects.filter(device=device, name=mapping.netbox_bay_name)
-                        .select_related("installed_module")
-                        .first()
-                    )
+                    bay = bay_by_name.get(mapping.netbox_bay_name)
                     if bay and hasattr(bay, "installed_module") and bay.installed_module:
                         return bay.installed_module.pk
 
