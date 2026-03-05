@@ -388,6 +388,12 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             except (ValueError, TypeError):
                 pass
 
+        # Fall back to resolved_name first (accounts for use_sysname/strip_domain naming options)
+        resolved_name = validation.get("resolved_name")
+        if not new_device and resolved_name:
+            new_device = Model.objects.filter(name__iexact=resolved_name).first()
+            if new_device:
+                match_type = "resolved_name"
         # Fall back to hostname match, then sys_name independently
         if not new_device and hostname:
             new_device = Model.objects.filter(name__iexact=hostname).first()
