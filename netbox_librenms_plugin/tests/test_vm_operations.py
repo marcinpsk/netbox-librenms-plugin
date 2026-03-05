@@ -84,7 +84,9 @@ class TestCreateVmFromLibrenms:
             create_vm_from_librenms(libre_device, validation)
 
     def test_server_key_stored_in_custom_field(self):
-        """librenms_id custom field uses the provided server_key."""
+        """librenms_id custom field uses the provided server_key via set_librenms_device_id."""
+        from unittest.mock import patch
+
         from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
 
         libre_device = {"device_id": 5, "hostname": "vm05", "_computed_name": "vm05"}
@@ -96,13 +98,15 @@ class TestCreateVmFromLibrenms:
         mock_vm = MagicMock()
         mock_vm.name = "vm05"
         mock_vm.pk = 50
+        mock_vm.custom_field_data = {}
 
         with patch("virtualization.models.VirtualMachine") as mock_vm_class:
-            mock_vm_class.objects.create.return_value = mock_vm
-            create_vm_from_librenms(libre_device, validation, server_key="secondary")
+            with patch("netbox_librenms_plugin.utils.set_librenms_device_id") as mock_setter:
+                mock_vm_class.objects.create.return_value = mock_vm
+                create_vm_from_librenms(libre_device, validation, server_key="secondary")
 
-        call_kwargs = mock_vm_class.objects.create.call_args[1]
-        assert call_kwargs["custom_field_data"] == {"librenms_id": {"secondary": 5}}
+        mock_setter.assert_called_once_with(mock_vm, 5, "secondary")
+        mock_vm.save.assert_called_once()
 
     def test_role_is_passed_to_create(self):
         """Optional role parameter is forwarded to VirtualMachine.objects.create."""

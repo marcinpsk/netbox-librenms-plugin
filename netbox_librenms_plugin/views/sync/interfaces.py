@@ -167,14 +167,8 @@ class SyncInterfacesView(
         )
 
         # Sync VLANs if not excluded
-        vlan_synced = False
         if "vlans" not in exclude_columns:
             self._sync_interface_vlans(interface, librenms_interface, interface_name)
-            vlan_synced = True
-
-        # Skip redundant save when _sync_interface_vlans already saved (via _update_interface_vlan_assignment)
-        if not vlan_synced:
-            interface.save()
 
     def get_netbox_interface_type(self, librenms_interface):
         """Return the NetBox interface type mapped from LibreNMS type and speed."""
@@ -199,7 +193,8 @@ class SyncInterfacesView(
                 mac_obj = MACAddress.objects.create(mac_address=ifPhysAddress)
 
             interface.mac_addresses.add(mac_obj)
-            interface.primary_mac_address = mac_obj
+            if hasattr(interface, "primary_mac_address"):
+                interface.primary_mac_address = mac_obj
 
     def update_interface_attributes(
         self,
@@ -250,7 +245,7 @@ class SyncInterfacesView(
                 else (admin_status.lower() == "up" if isinstance(admin_status, str) else bool(admin_status))
             )
 
-        if "mac_address" not in exclude_columns and is_device_interface:
+        if "mac_address" not in exclude_columns:
             ifPhysAddress = librenms_interface.get("ifPhysAddress")
             self.handle_mac_address(interface, ifPhysAddress)
 

@@ -61,8 +61,12 @@ def create_vm_from_librenms(
         role=role,  # Optional VM role
         platform=platform,
         comments=f"Imported from LibreNMS by netbox-librenms-plugin on {import_time}",
-        custom_field_data={"librenms_id": {server_key: int(libre_device["device_id"])}},
     )
+
+    from ..utils import set_librenms_device_id
+
+    set_librenms_device_id(vm, int(libre_device["device_id"]), server_key)
+    vm.save()
 
     logger.info(f"Created VM {vm.name} (ID: {vm.pk}) from LibreNMS device {libre_device['device_id']}")
     return vm
