@@ -72,6 +72,8 @@
                 </td>
                 <td class="text-end pe-3">
                     {% if not mapping.is_configured %}
+                    {% with model_name=object|meta:"model_name" %}
+                    {% if model_name == "device" %}
                     <form method="post"
                           action="{% url 'plugins:netbox_librenms_plugin:remove_server_mapping' pk=object.pk %}"
                           style="display:inline"
@@ -83,6 +85,8 @@
                             <i class="mdi mdi-trash-can-outline"></i> Remove
                         </button>
                     </form>
+                    {% endif %}
+                    {% endwith %}
                     {% endif %}
                 </td>
             </tr>

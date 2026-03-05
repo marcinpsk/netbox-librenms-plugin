@@ -12,13 +12,16 @@ from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.utils import convert_speed_to_kbps, get_interface_name_field, set_librenms_device_id
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
+    LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
     VlanAssignmentMixin,
 )
 
 
-class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, VlanAssignmentMixin, CacheMixin, View):
+class SyncInterfacesView(
+    LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, VlanAssignmentMixin, CacheMixin, View
+):
     """Sync selected interfaces from LibreNMS into NetBox."""
 
     def get_required_permissions_for_object_type(self, object_type):

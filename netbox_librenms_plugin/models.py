@@ -183,9 +183,13 @@ class ModuleBayMapping(NetBoxModel):
         super().clean()
         if self.is_regex:
             try:
-                re.compile(self.librenms_name)
+                pattern = re.compile(self.librenms_name)
             except re.error as e:
                 raise ValidationError({"librenms_name": f"Invalid regex: {e}"})
+            try:
+                pattern.sub(self.netbox_bay_name, "")
+            except (re.error, IndexError) as e:
+                raise ValidationError({"netbox_bay_name": f"Invalid replacement: {e}"})
 
     def get_absolute_url(self):
         """Return the URL for this mapping's detail page."""

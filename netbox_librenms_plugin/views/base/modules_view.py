@@ -999,9 +999,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
             parent_descr = parent.get("entPhysicalDescr", "")
 
             # Check if this parent matches an installed module bay on the device
-            device_bays = ModuleBay.objects.filter(device=device, module_id__isnull=True).select_related(
-                "installed_module"
-            )
+            device_bays = ModuleBay.objects.filter(device=device).select_related("installed_module")
 
             for bay in device_bays:
                 if hasattr(bay, "installed_module") and bay.installed_module:
@@ -1015,7 +1013,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
                 mapping = ModuleBayMapping.objects.filter(librenms_name=name).first()
                 if mapping:
                     bay = (
-                        ModuleBay.objects.filter(device=device, name=mapping.netbox_bay_name, module_id__isnull=True)
+                        ModuleBay.objects.filter(device=device, name=mapping.netbox_bay_name)
                         .select_related("installed_module")
                         .first()
                     )

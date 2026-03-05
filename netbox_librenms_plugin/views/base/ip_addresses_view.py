@@ -109,7 +109,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         for interface in all_interfaces:
             lib_id = get_librenms_device_id(interface, server_key)
             if lib_id:
-                interfaces_by_librenms_id[lib_id] = interface
+                interfaces_by_librenms_id[str(lib_id)] = interface
 
         interfaces_by_name = {interface.name: interface for interface in all_interfaces}
 
@@ -192,8 +192,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         assigned_interface = ip_address.assigned_object
 
         # Check if interface matches by LibreNMS ID
-        if port_id in prefetched_data["interfaces_by_librenms_id"]:
-            interface = prefetched_data["interfaces_by_librenms_id"][port_id]
+        if str(port_id) in prefetched_data["interfaces_by_librenms_id"]:
+            interface = prefetched_data["interfaces_by_librenms_id"][str(port_id)]
             if assigned_interface == interface:
                 enriched_ip["status"] = "matched"
                 return
@@ -208,8 +208,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
     def _add_interface_info_to_ip(self, enriched_ip, port_id, librenms_interface_name, prefetched_data):
         """Add interface information to the IP entry regardless of IP status"""
         # First try to match by LibreNMS ID (highest priority)
-        if port_id in prefetched_data["interfaces_by_librenms_id"]:
-            interface = prefetched_data["interfaces_by_librenms_id"][port_id]
+        if str(port_id) in prefetched_data["interfaces_by_librenms_id"]:
+            interface = prefetched_data["interfaces_by_librenms_id"][str(port_id)]
             enriched_ip["interface_name"] = interface.name
             enriched_ip["interface_url"] = interface.get_absolute_url()
             return

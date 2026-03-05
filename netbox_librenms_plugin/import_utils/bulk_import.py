@@ -414,11 +414,6 @@ def _empty_return(return_cache_status: bool):
     return ([], False) if return_cache_status else []
 
 
-def _empty_return(return_cache_status: bool):
-    """Centralised empty-result return value for process_device_filters."""
-    return ([], False) if return_cache_status else []
-
-
 def process_device_filters(
     api: LibreNMSAPI,
     filters: dict,

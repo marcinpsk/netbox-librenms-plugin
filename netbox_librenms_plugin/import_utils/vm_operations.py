@@ -24,6 +24,7 @@ def create_vm_from_librenms(
         validation: Validation result from validate_device_for_import with import_as_vm=True
         use_sysname: If True, prefer sysName; if False, use hostname
         role: Optional DeviceRole to assign to the VM
+        server_key: LibreNMS server key used to store the librenms_id custom field
 
     Returns:
         Created VirtualMachine instance
