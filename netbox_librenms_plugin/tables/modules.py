@@ -13,6 +13,7 @@ class LibreNMSModuleTable(tables.Table):
     selection = ToggleColumn(
         orderable=False,
         visible=True,
+        accessor="ent_physical_index",
         attrs={"td": {"data-col": "selection"}, "input": {"name": "select"}},
     )
     name = tables.Column(

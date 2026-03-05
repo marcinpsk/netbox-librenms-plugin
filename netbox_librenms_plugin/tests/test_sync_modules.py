@@ -759,3 +759,160 @@ class TestInstallSingleStatus:
                             )
 
         assert result["status"] == "failed"
+
+
+# ---------------------------------------------------------------------------
+# Regression: ToggleColumn accessor for per-row checkboxes
+# ---------------------------------------------------------------------------
+
+
+class TestToggleColumnAccessor:
+    """ToggleColumn must have accessor='ent_physical_index' so per-row checkboxes render."""
+
+    def test_selection_column_has_correct_accessor(self):
+        """Regression: without accessor='ent_physical_index' checkboxes are empty."""
+        from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
+
+        col = LibreNMSModuleTable.base_columns["selection"]
+        assert col.accessor == "ent_physical_index", (
+            "ToggleColumn must use accessor='ent_physical_index'; "
+            "otherwise the column value resolves to '' and render() is never called"
+        )
+
+    def test_selection_column_renders_checkbox_for_record_with_index(self):
+        """Per-row checkbox renders when ent_physical_index is present in record."""
+        from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
+
+        record = {
+            "ent_physical_index": 42,
+            "name": "Slot 1",
+            "model": "WS-X4748",
+            "depth": 0,
+        }
+        table = LibreNMSModuleTable([record])
+        rows = list(table.rows)
+        assert len(rows) == 1
+        # The cell value for 'selection' should be 42 (ent_physical_index), not ''
+        cell_val = rows[0].get_cell("selection")
+        assert str(cell_val) != "", "Checkbox cell must not be empty for a record with ent_physical_index"
+
+
+# ---------------------------------------------------------------------------
+# Regression: ancestor walk skips containers with N/A model (Cisco 8201 style)
+# ---------------------------------------------------------------------------
+
+
+class TestAncestorWalkGenericContainerModel:
+    """Top-level items under containers with 'N/A' model should not be excluded."""
+
+    def _run_top_items(self, inventory_data):
+        from netbox_librenms_plugin.views.base.modules_view import INVENTORY_CLASSES, _GENERIC_CONTAINER_MODELS
+
+        idx_map = {
+            item["entPhysicalIndex"]: item for item in inventory_data if item.get("entPhysicalIndex") is not None
+        }
+        top_items = []
+        for item in inventory_data:
+            phys_class = item.get("entPhysicalClass")
+            if phys_class not in INVENTORY_CLASSES:
+                continue
+            model = (item.get("entPhysicalModelName") or "").strip()
+            if phys_class == "container" and model in _GENERIC_CONTAINER_MODELS:
+                continue
+            if model and model in _GENERIC_CONTAINER_MODELS:
+                continue
+            is_descendant = False
+            current_idx = item.get("entPhysicalContainedIn", 0)
+            visited_ancestors = set()
+            while current_idx and current_idx in idx_map and current_idx not in visited_ancestors:
+                visited_ancestors.add(current_idx)
+                ancestor = idx_map[current_idx]
+                anc_class = ancestor.get("entPhysicalClass")
+                if anc_class in INVENTORY_CLASSES:
+                    anc_model = (ancestor.get("entPhysicalModelName") or "").strip()
+                    if anc_class == "container" and anc_model in _GENERIC_CONTAINER_MODELS:
+                        current_idx = ancestor.get("entPhysicalContainedIn", 0)
+                        continue
+                    is_descendant = True
+                    break
+                current_idx = ancestor.get("entPhysicalContainedIn", 0)
+            if is_descendant:
+                continue
+            top_items.append(item)
+        return top_items
+
+    def test_item_under_container_with_na_model_is_top_level(self):
+        """Module under a container with model='N/A' must appear as top-level item."""
+        inventory = [
+            # chassis (not in INVENTORY_CLASSES, so ignored in ancestor walk)
+            {
+                "entPhysicalIndex": 9000,
+                "entPhysicalClass": "chassis",
+                "entPhysicalModelName": "8201-SYS",
+                "entPhysicalContainedIn": 0,
+            },
+            # container with model='N/A' inside chassis — generic slot
+            {
+                "entPhysicalIndex": 8000,
+                "entPhysicalClass": "container",
+                "entPhysicalModelName": "N/A",
+                "entPhysicalContainedIn": 9000,
+            },
+            # real module inside the N/A container — should be top-level
+            {
+                "entPhysicalIndex": 1,
+                "entPhysicalClass": "module",
+                "entPhysicalModelName": "8201-SYS",
+                "entPhysicalContainedIn": 8000,
+            },
+        ]
+        top = self._run_top_items(inventory)
+        indices = [i["entPhysicalIndex"] for i in top]
+        assert 1 in indices, "Module inside N/A container must be a top-level item (Cisco 8201 regression)"
+
+    def test_item_under_container_with_empty_model_is_top_level(self):
+        """Legacy: module under container with empty model still works."""
+        inventory = [
+            {
+                "entPhysicalIndex": 9000,
+                "entPhysicalClass": "chassis",
+                "entPhysicalModelName": "8201-SYS",
+                "entPhysicalContainedIn": 0,
+            },
+            {
+                "entPhysicalIndex": 8000,
+                "entPhysicalClass": "container",
+                "entPhysicalModelName": "",
+                "entPhysicalContainedIn": 9000,
+            },
+            {
+                "entPhysicalIndex": 1,
+                "entPhysicalClass": "module",
+                "entPhysicalModelName": "8201-SYS",
+                "entPhysicalContainedIn": 8000,
+            },
+        ]
+        top = self._run_top_items(inventory)
+        indices = [i["entPhysicalIndex"] for i in top]
+        assert 1 in indices
+
+    def test_item_under_real_module_is_excluded(self):
+        """Module inside another real (non-generic) module stays a descendant."""
+        inventory = [
+            {
+                "entPhysicalIndex": 1,
+                "entPhysicalClass": "module",
+                "entPhysicalModelName": "PARENT-MODULE",
+                "entPhysicalContainedIn": 0,
+            },
+            {
+                "entPhysicalIndex": 2,
+                "entPhysicalClass": "module",
+                "entPhysicalModelName": "CHILD-MODULE",
+                "entPhysicalContainedIn": 1,
+            },
+        ]
+        top = self._run_top_items(inventory)
+        indices = [i["entPhysicalIndex"] for i in top]
+        assert 1 in indices
+        assert 2 not in indices, "Child module under real parent must remain a descendant"

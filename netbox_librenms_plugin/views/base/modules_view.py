@@ -143,8 +143,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 anc_class = ancestor.get("entPhysicalClass")
                 if anc_class in INVENTORY_CLASSES:
                     anc_model = (ancestor.get("entPhysicalModelName") or "").strip()
-                    # Empty-model containers are just physical slot representations
-                    if anc_class == "container" and not anc_model:
+                    # Containers with generic/empty models are physical slot representations
+                    if anc_class == "container" and anc_model in _GENERIC_CONTAINER_MODELS:
                         current_idx = ancestor.get("entPhysicalContainedIn", 0)
                         continue
                     is_descendant = True
