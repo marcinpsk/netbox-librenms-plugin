@@ -103,13 +103,6 @@
                 {% else %}
                 {{ librenms_server_info.display_name }} ({{ librenms_server_info.url }})
                 {% endif %}
-                {% if librenms_device_url %}
-                &mdash;
-                <a href="{{ librenms_device_url }}" target="_blank" rel="noopener noreferrer" class="text-decoration-none">
-                    ID {{ librenms_device_id }}
-                    <i class="mdi mdi-open-in-new ms-1" style="font-size:.8em"></i>
-                </a>
-                {% endif %}
             </div>
             {% if not librenms_server_info.is_legacy %}
             <a href="{% url 'plugins:netbox_librenms_plugin:settings' %}" class="btn btn-sm btn-outline-primary ms-3">

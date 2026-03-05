@@ -9,7 +9,15 @@ from netbox_librenms_plugin.utils import get_table_paginate_count
 class LibreNMSModuleTable(tables.Table):
     """Table for displaying LibreNMS inventory items mapped to NetBox modules."""
 
-    name = tables.Column(verbose_name="Name", attrs={"td": {"data-col": "name"}})
+    name = tables.Column(
+        verbose_name="Name",
+        attrs={
+            "td": {"data-col": "name"},
+            "th": {
+                "title": "Name from ENTITY-MIB (entPhysicalName). May differ from interface names in ifDescr/ifName."
+            },
+        },
+    )
     model = tables.Column(verbose_name="Model", attrs={"td": {"data-col": "model"}})
     serial = tables.Column(verbose_name="Serial", attrs={"td": {"data-col": "serial"}})
     description = tables.Column(verbose_name="Description", attrs={"td": {"data-col": "description"}})

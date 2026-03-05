@@ -93,8 +93,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         cached_data = cache.get(self.get_cache_key(obj, "inventory"))
         if not cached_data:
             return {"table": None, "object": obj, "cache_expiry": None}
-        if not getattr(self, "librenms_id", None):
-            self.librenms_id = self.librenms_api.get_librenms_id(obj)
         return self._build_context(request, obj, cached_data)
 
     def _build_context(self, request, obj, inventory_data):
@@ -104,15 +102,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         # Store manufacturer for normalization rules in _build_row
         self._device_manufacturer = getattr(getattr(obj, "device_type", None), "manufacturer", None)
-
-        # Build ifDescr→ifName map for port display when ifName is requested
-        from netbox_librenms_plugin.utils import get_interface_name_field
-
-        interface_name_field = get_interface_name_field(request)
-        if interface_name_field == "ifName" and hasattr(self, "librenms_id") and self.librenms_id:
-            self._port_display_name_map = self._build_ifdescr_to_ifname_map()
-        else:
-            self._port_display_name_map = {}
 
         # Get NetBox module bays and modules for this device
         device_bays, module_scoped_bays = self._get_module_bays(obj)
@@ -372,22 +361,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             p["port_id"]: p["ifName"]
             for p in ports_data.get("ports", [])
             if p.get("port_id") in port_ids and p.get("ifName")
-        }
-
-    def _build_ifdescr_to_ifname_map(self):
-        """Build ifDescr → ifName mapping for port display name overrides.
-
-        Used when interface_name_field=ifName to show short interface names
-        (e.g., Te1/1) instead of the full ENTITY-MIB entPhysicalName (e.g.,
-        TenGigabitEthernet1/1) for port-class inventory items.
-        """
-        success, ports_data = self.librenms_api.get_ports(self.librenms_id, with_vlans=False)
-        if not success or not isinstance(ports_data, dict):
-            return {}
-        return {
-            p["ifDescr"]: p["ifName"]
-            for p in ports_data.get("ports", [])
-            if p.get("ifDescr") and p.get("ifName") and p["ifDescr"] != p["ifName"]
         }
 
     def _get_sub_components(self, parent_idx, inventory_data):
@@ -652,12 +625,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         phys_class = item.get("entPhysicalClass", "")
         name = item.get("entPhysicalName", "") or "-"
         description = item.get("entPhysicalDescr", "") or ""
-
-        # For port-class items, apply ifName override when requested
-        if phys_class == "port" and name != "-":
-            override = getattr(self, "_port_display_name_map", {}).get(name)
-            if override:
-                name = override
 
         # Match to NetBox module bay
         matched_bay = self._match_module_bay(item, index_map, module_bays)
