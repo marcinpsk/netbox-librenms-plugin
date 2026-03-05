@@ -95,10 +95,18 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
     def _build_context(self, request, obj, inventory_data):
         """Build context with matched inventory items and table."""
         # Build a lookup of all inventory items by index for parent resolution
-        index_map = {item["entPhysicalIndex"]: item for item in inventory_data}
+        # Skip items with missing entPhysicalIndex to avoid KeyError on malformed data.
+        index_map = {idx: item for item in inventory_data if (idx := item.get("entPhysicalIndex")) is not None}
 
         # Store manufacturer for normalization rules in _build_row
         self._device_manufacturer = getattr(getattr(obj, "device_type", None), "manufacturer", None)
+
+        # Preload all ModuleBayMapping rows once to avoid N+1 queries in _match_module_bay.
+        from netbox_librenms_plugin.models import ModuleBayMapping
+
+        all_bay_mappings = list(ModuleBayMapping.objects.all())
+        self._exact_bay_mappings = [m for m in all_bay_mappings if not m.is_regex]
+        self._regex_bay_mappings = [m for m in all_bay_mappings if m.is_regex]
 
         # Get NetBox module bays and modules for this device
         device_bays, module_scoped_bays = self._get_module_bays(obj)
@@ -128,9 +136,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             # real modules — skip them so children can be top-level items.
             is_descendant = False
             current_idx = item.get("entPhysicalContainedIn", 0)
-            for _ in range(10):
-                if not current_idx or current_idx not in index_map:
-                    break
+            visited_ancestors = set()
+            while current_idx and current_idx in index_map and current_idx not in visited_ancestors:
+                visited_ancestors.add(current_idx)
                 ancestor = index_map[current_idx]
                 anc_class = ancestor.get("entPhysicalClass")
                 if anc_class in INVENTORY_CLASSES:
@@ -470,8 +478,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         """
         import re
 
-        from netbox_librenms_plugin.models import ModuleBayMapping
-
         parent_name = self._find_parent_container_name(item, index_map)
         item_name = item.get("entPhysicalName", "")
         item_descr = item.get("entPhysicalDescr", "")
@@ -480,22 +486,39 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Build candidate names: parent, item name, item description
         candidate_names = [n for n in [parent_name, item_name, item_descr] if n]
 
+        # Use preloaded exact mappings (set in _build_context to avoid N+1 queries).
+        exact_mappings = getattr(self, "_exact_bay_mappings", None)
+        if exact_mappings is None:
+            from netbox_librenms_plugin.models import ModuleBayMapping
+
+            exact_mappings = list(ModuleBayMapping.objects.filter(is_regex=False))
+
         # Check ModuleBayMapping table for each candidate (exact match)
         for name in candidate_names:
-            filters = {"librenms_name": name, "is_regex": False}
             if phys_class:
-                mapping = ModuleBayMapping.objects.filter(**filters, librenms_class=phys_class).first()
+                mapping = next(
+                    (m for m in exact_mappings if m.librenms_name == name and m.librenms_class == phys_class), None
+                )
                 if not mapping:
-                    mapping = ModuleBayMapping.objects.filter(**filters, librenms_class="").first()
+                    mapping = next(
+                        (m for m in exact_mappings if m.librenms_name == name and m.librenms_class == ""), None
+                    )
             else:
-                mapping = ModuleBayMapping.objects.filter(**filters, librenms_class="").first()
+                mapping = next((m for m in exact_mappings if m.librenms_name == name and m.librenms_class == ""), None)
 
             if mapping and mapping.netbox_bay_name in module_bays:
                 return module_bays[mapping.netbox_bay_name]
 
+        # Use preloaded regex mappings.
+        regex_mappings = getattr(self, "_regex_bay_mappings", None)
+        if regex_mappings is None:
+            from netbox_librenms_plugin.models import ModuleBayMapping
+
+            regex_mappings = list(ModuleBayMapping.objects.filter(is_regex=True))
+
         # Regex pattern matching on all candidate names
         for name in candidate_names:
-            bay = self._lookup_regex_bay_mapping(re, name, phys_class, module_bays, ModuleBayMapping)
+            bay = self._lookup_regex_bay_mapping(re, name, phys_class, module_bays, regex_mappings)
             if bay and self._fpc_slot_matches(name, bay):
                 return bay
 
@@ -537,20 +560,21 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         return parent_bay.position == expected_fpc
 
     @staticmethod
-    def _lookup_regex_bay_mapping(re, name, phys_class, module_bays, ModuleBayMapping):
+    def _lookup_regex_bay_mapping(re, name, phys_class, module_bays, regex_mappings):
         """Try regex ModuleBayMapping patterns against a name.
+
+        ``regex_mappings`` is a pre-filtered list of is_regex=True ModuleBayMapping
+        objects (passed in from the caller to avoid per-item DB queries).
 
         Returns matched module bay or None.
         """
-        regex_filters = {"is_regex": True}
+        # Filter preloaded list by class (exact class match or empty-class fallback)
         if phys_class:
-            regex_mappings = list(ModuleBayMapping.objects.filter(**regex_filters, librenms_class=phys_class)) + list(
-                ModuleBayMapping.objects.filter(**regex_filters, librenms_class="")
-            )
+            candidates = [m for m in regex_mappings if m.librenms_class == phys_class or m.librenms_class == ""]
         else:
-            regex_mappings = list(ModuleBayMapping.objects.filter(**regex_filters, librenms_class=""))
+            candidates = [m for m in regex_mappings if m.librenms_class == ""]
 
-        for mapping in regex_mappings:
+        for mapping in candidates:
             try:
                 match = re.fullmatch(mapping.librenms_name, name)
             except re.error:

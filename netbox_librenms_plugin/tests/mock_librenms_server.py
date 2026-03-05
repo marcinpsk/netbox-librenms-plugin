@@ -69,6 +69,8 @@ class MockLibreNMSServer:
 
     def stop(self):
         self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
 
     # ------- default LibreNMS-shaped responses -------
 

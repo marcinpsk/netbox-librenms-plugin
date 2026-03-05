@@ -80,6 +80,12 @@ class TestFindByLibreNMSId:
         find_by_librenms_id(mock_model, 42, "default")
 
         mock_model.objects.filter.assert_called_once()
+        # Verify the Q argument covers both the JSON server-key path and legacy integer path.
+        call_args = mock_model.objects.filter.call_args
+        q_arg = call_args[0][0]
+        q_str = str(q_arg)
+        assert "librenms_id__default" in q_str, "Expected JSON-scoped server_key lookup in filter"
+        assert "librenms_id" in q_str, "Expected legacy integer lookup in filter"
 
     def test_returns_first_matching_object(self):
         from netbox_librenms_plugin.utils import find_by_librenms_id

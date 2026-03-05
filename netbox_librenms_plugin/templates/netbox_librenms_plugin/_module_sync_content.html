@@ -16,7 +16,8 @@
     {% endif %}
 </div>
 
-<form method="post"
+{# Separate form for Install Selected — uses JS to collect checked rows before submit #}
+<form id="install-selected-form" method="post"
     action="{% url 'plugins:netbox_librenms_plugin:install_selected' pk=module_sync.object.pk %}">
     {% csrf_token %}
     <div class="noprint mb-3">
@@ -24,12 +25,12 @@
             <i class="mdi mdi-package-down"></i> Install Selected
         </button>
     </div>
-    <div class="card">
-        {% include 'netbox_librenms_plugin/inc/paginator.html' with table=module_sync.table %}
-        {% include 'inc/table.html' with table=module_sync.table %}
-        {% include 'netbox_librenms_plugin/inc/paginator.html' with table=module_sync.table %}
-    </div>
 </form>
+<div class="card">
+    {% include 'netbox_librenms_plugin/inc/paginator.html' with table=module_sync.table %}
+    {% include 'inc/table.html' with table=module_sync.table %}
+    {% include 'netbox_librenms_plugin/inc/paginator.html' with table=module_sync.table %}
+</div>
 {% else %}
 <div class="card">
     <div class="card-body text-center text-muted py-4">

@@ -212,9 +212,9 @@ def bulk_import_devices_shared(
                     # LibreNMS) share the same key and VC creation is triggered only once.
                     # Fall back to device_id when no member serials are available.
                     member_serials = sorted(
-                        str(m.get("serial"))
+                        serial
                         for m in vc_data.get("members", [])
-                        if m.get("serial") is not None and m.get("serial") != ""
+                        if (serial := str(m.get("serial") or "").strip()) and serial != "-"
                     )
                     vc_domain = (
                         f"librenms-stack-{','.join(member_serials)}" if member_serials else f"librenms-{device_id}"

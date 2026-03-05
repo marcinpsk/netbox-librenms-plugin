@@ -162,14 +162,12 @@ class TestInstallModuleViewWiring:
 
     def test_install_module_view_not_in_base(self):
         """InstallModuleView must NOT be defined in views/base anymore."""
-        import sys
+        import importlib
 
-        # Reload to avoid cached state
-        if "netbox_librenms_plugin.views.base.modules_view" in sys.modules:
-            mod = sys.modules["netbox_librenms_plugin.views.base.modules_view"]
-            assert not hasattr(mod, "InstallModuleView"), (
-                "InstallModuleView must have been moved out of views/base/modules_view.py"
-            )
+        mod = importlib.import_module("netbox_librenms_plugin.views.base.modules_view")
+        assert not hasattr(mod, "InstallModuleView"), (
+            "InstallModuleView must have been moved out of views/base/modules_view.py"
+        )
 
 
 class TestInstallBranchViewWiring:

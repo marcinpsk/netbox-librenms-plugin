@@ -54,6 +54,10 @@ def create_vm_from_librenms(
     # Generate import timestamp comment
     import_time = timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")
 
+    # Validate device_id before creating the VM so a missing/invalid value
+    # never leaves a VM without a librenms_id (partial persistence).
+    librenms_device_id = int(libre_device["device_id"])
+
     # Create the VM with librenms_id custom field
     vm = VirtualMachine.objects.create(
         name=vm_name,
@@ -65,7 +69,7 @@ def create_vm_from_librenms(
 
     from ..utils import set_librenms_device_id
 
-    set_librenms_device_id(vm, int(libre_device["device_id"]), server_key)
+    set_librenms_device_id(vm, librenms_device_id, server_key)
     vm.save()
 
     logger.info(f"Created VM {vm.name} (ID: {vm.pk}) from LibreNMS device {libre_device['device_id']}")

@@ -21,7 +21,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         from dcim.models import Device, Module, ModuleBay, ModuleType
 
         self.required_object_permissions = {"POST": [("add", Module)]}
-        if error := self.require_all_permissions_json("POST"):
+        if error := self.require_all_permissions("POST"):
             return error
 
         device = get_object_or_404(Device, pk=pk)
@@ -73,7 +73,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         from dcim.models import Device, Module, ModuleBay, ModuleType
 
         self.required_object_permissions = {"POST": [("add", Module)]}
-        if error := self.require_all_permissions_json("POST"):
+        if error := self.require_all_permissions("POST"):
             return error
 
         device = get_object_or_404(Device, pk=pk)
@@ -382,7 +382,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         from dcim.models import Device, Module, ModuleBay, ModuleType
 
         self.required_object_permissions = {"POST": [("add", Module)]}
-        if error := self.require_all_permissions_json("POST"):
+        if error := self.require_all_permissions("POST"):
             return error
 
         device = get_object_or_404(Device, pk=pk)
@@ -400,14 +400,15 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
         try:
-            selected_set = {int(i) for i in selected_indices}
+            # Use dict.fromkeys to preserve order while deduplicating
+            selected_list = list(dict.fromkeys(int(i) for i in selected_indices))
         except ValueError:
             messages.error(request, "Invalid selection.")
             sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
             return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
-        index_map = {item["entPhysicalIndex"]: item for item in cached_data}
-        items = [index_map[idx] for idx in selected_set if idx in index_map]
+        index_map = {idx: item for item in cached_data if (idx := item.get("entPhysicalIndex")) is not None}
+        items = [index_map[idx] for idx in selected_list if idx in index_map]
 
         if not items:
             messages.warning(request, "None of the selected indices matched cached inventory.")
