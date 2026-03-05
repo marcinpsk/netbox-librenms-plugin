@@ -20,6 +20,7 @@
 <form id="install-selected-form" method="post"
     action="{% url 'plugins:netbox_librenms_plugin:install_selected' pk=module_sync.object.pk %}">
     {% csrf_token %}
+    <input type="hidden" name="server_key" value="{{ module_sync.server_key|default:'' }}">
     <div class="noprint mb-3">
         <button type="submit" class="btn btn-primary" id="install-selected-btn">
             <i class="mdi mdi-package-down"></i> Install Selected

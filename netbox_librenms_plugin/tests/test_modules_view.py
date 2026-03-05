@@ -18,6 +18,7 @@ def _make_view():
 
     view = object.__new__(BaseModuleTableView)
     view._device_manufacturer = None
+    view._librenms_api = MagicMock(server_key="test-server")
     view.get_cache_key = MagicMock(return_value="test_cache_key")
     return view
 
@@ -409,9 +410,14 @@ class TestCollectDescendants:
             {"entPhysicalIndex": 1, "entPhysicalModelName": "", "entPhysicalContainedIn": 0},
             {"entPhysicalIndex": 2, "entPhysicalModelName": "REAL-MODULE", "entPhysicalContainedIn": 1},
         ]
+        children_by_parent = {}
+        for item in inventory:
+            p = item.get("entPhysicalContainedIn")
+            if p is not None:
+                children_by_parent.setdefault(p, []).append(item)
         view = self._view()
         results = []
-        view._collect_descendants(0, inventory, depth=1, results=results)
+        view._collect_descendants(0, children_by_parent, depth=1, results=results)
         assert len(results) == 1
         depth, item = results[0]
         assert depth == 1, "Child of modelless container must be at the same depth"
@@ -423,9 +429,14 @@ class TestCollectDescendants:
             {"entPhysicalIndex": 1, "entPhysicalModelName": "PARENT", "entPhysicalContainedIn": 0},
             {"entPhysicalIndex": 2, "entPhysicalModelName": "CHILD", "entPhysicalContainedIn": 1},
         ]
+        children_by_parent = {}
+        for item in inventory:
+            p = item.get("entPhysicalContainedIn")
+            if p is not None:
+                children_by_parent.setdefault(p, []).append(item)
         view = self._view()
         results = []
-        view._collect_descendants(0, inventory, depth=1, results=results)
+        view._collect_descendants(0, children_by_parent, depth=1, results=results)
         depths = [d for d, _ in results]
         assert depths == [1, 2], f"Expected [1, 2] but got {depths}"
 

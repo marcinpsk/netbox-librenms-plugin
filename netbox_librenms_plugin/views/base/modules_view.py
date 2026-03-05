@@ -74,9 +74,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Fetch transceiver data and merge with inventory
         inventory_data = self._merge_transceiver_data(inventory_data)
 
-        # Cache the merged inventory data
+        # Cache the merged inventory data, namespaced by server to avoid cross-server collisions
         cache.set(
-            self.get_cache_key(obj, "inventory"),
+            self.get_cache_key(obj, "inventory", server_key=self.librenms_api.server_key),
             inventory_data,
             timeout=self.librenms_api.cache_timeout,
         )
@@ -87,7 +87,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
     def get_context_data(self, request, obj):
         """Get context from cache (used by the main sync view on initial page load)."""
-        cached_data = cache.get(self.get_cache_key(obj, "inventory"))
+        cached_data = cache.get(self.get_cache_key(obj, "inventory", server_key=self.librenms_api.server_key))
         if not cached_data:
             return {"table": None, "object": obj, "cache_expiry": None}
         return self._build_context(request, obj, cached_data)
@@ -260,13 +260,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         table = self.get_table(table_data, obj)
         table.configure(request)
 
-        cache_ttl = getattr(cache, "ttl", lambda k: None)(self.get_cache_key(obj, "inventory"))
+        cache_ttl = getattr(cache, "ttl", lambda k: None)(
+            self.get_cache_key(obj, "inventory", server_key=self.librenms_api.server_key)
+        )
         cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl is not None else None
 
         return {
             "table": table,
             "object": obj,
             "cache_expiry": cache_expiry,
+            "server_key": self.librenms_api.server_key,
         }
 
     def _merge_transceiver_data(self, inventory_data):
@@ -347,6 +350,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     "_from_transceiver_api": True,
                 }
                 inventory_data.append(synthetic)
+                # Update dedupe maps so subsequent iterations skip this entry
+                inv_by_index[ent_idx] = synthetic
+                if serial:
+                    inv_serials.add(serial)
 
         return inventory_data
 
@@ -376,16 +383,22 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         Returns list of (depth, item) tuples.
         """
+        # Precompute children_by_parent once to avoid O(n²) linear scans per recursion
+        children_by_parent: dict = {}
+        for item in inventory_data:
+            p = item.get("entPhysicalContainedIn")
+            if p is not None:
+                children_by_parent.setdefault(p, []).append(item)
+
         results = []
-        self._collect_descendants(parent_idx, inventory_data, depth=1, results=results, visited={parent_idx})
+        self._collect_descendants(parent_idx, children_by_parent, depth=1, results=results, visited={parent_idx})
         return results
 
-    def _collect_descendants(self, parent_idx, inventory_data, depth, results, visited=None):
+    def _collect_descendants(self, parent_idx, children_by_parent, depth, results, visited=None):
         """Recursively collect descendant items that have a model name."""
         if visited is None:
             visited = set()
-        children = [i for i in inventory_data if i.get("entPhysicalContainedIn") == parent_idx]
-        for child in children:
+        for child in children_by_parent.get(parent_idx, []):
             child_idx = child.get("entPhysicalIndex")
             if child_idx is None:
                 continue
@@ -396,10 +409,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if model and model not in _GENERIC_CONTAINER_MODELS:
                 results.append((depth, child))
                 # Continue looking for deeper components (e.g., SFPs inside converters)
-                self._collect_descendants(child_idx, inventory_data, depth + 1, results, visited)
+                self._collect_descendants(child_idx, children_by_parent, depth + 1, results, visited)
             else:
                 # Skip generic/empty items, but check their children
-                self._collect_descendants(child_idx, inventory_data, depth, results, visited)
+                self._collect_descendants(child_idx, children_by_parent, depth, results, visited)
 
     def _sort_with_hierarchy(self, table_data):
         """Sort table keeping children grouped under their parent."""
@@ -582,10 +595,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         for mapping in candidates:
             try:
                 match = re.fullmatch(mapping.librenms_name, name)
+                if match:
+                    resolved_bay = match.expand(mapping.netbox_bay_name)
             except re.error:
                 continue
             if match:
-                resolved_bay = match.expand(mapping.netbox_bay_name)
                 if resolved_bay in module_bays:
                     bay = module_bays[resolved_bay]
                     if BaseModuleTableView._fpc_slot_matches(name, bay):

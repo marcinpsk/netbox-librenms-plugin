@@ -916,3 +916,84 @@ class TestAncestorWalkGenericContainerModel:
         indices = [i["entPhysicalIndex"] for i in top]
         assert 1 in indices
         assert 2 not in indices, "Child module under real parent must remain a descendant"
+
+
+# ---------------------------------------------------------------------------
+# Regression: parent_row_idx (table index) must not alias entPhysicalIndex
+# ---------------------------------------------------------------------------
+
+
+class TestParentRowIdxVsEntityIndex:
+    """Regression: parent_row_idx must be used for table_data access, not parent_ent_idx.
+
+    Bug: parent_idx was first set to len(table_data) (a small row index), then
+    overwritten with item.get("entPhysicalIndex") (which can be millions).
+    table_data[parent_idx] then indexed the list with the large entity value,
+    causing IndexError or wrong-row mutations.
+    """
+
+    def test_has_installable_children_set_on_correct_row(self):
+        """has_installable_children must land on table row 0, not on entity index 8_000_000."""
+        import importlib
+        from unittest.mock import MagicMock, patch
+
+        mod = importlib.import_module("netbox_librenms_plugin.views.base.modules_view")
+        BaseModuleTableView = mod.BaseModuleTableView
+
+        LARGE_IDX = 8_000_000  # >> any table_data list length
+        CHILD_IDX = 8_000_001
+
+        inventory = [
+            {
+                "entPhysicalIndex": LARGE_IDX,
+                "entPhysicalClass": "module",
+                "entPhysicalModelName": "BIG-MODULE",
+                "entPhysicalContainedIn": 0,
+                "entPhysicalSerialNum": "SN1",
+                "entPhysicalName": "Big Module",
+            },
+            {
+                "entPhysicalIndex": CHILD_IDX,
+                "entPhysicalClass": "port",
+                "entPhysicalModelName": "SFP-X",
+                "entPhysicalContainedIn": LARGE_IDX,
+                "entPhysicalSerialNum": "SN2",
+                "entPhysicalName": "Port 1",
+            },
+        ]
+
+        view = object.__new__(BaseModuleTableView)
+        view._device_manufacturer = None
+        view._librenms_api = MagicMock(server_key="test-server")
+
+        captured_table_data = []
+
+        def fake_build_row(item, index_map, bays, module_types, depth=0):
+            if item.get("entPhysicalIndex") == LARGE_IDX:
+                return {"ent_physical_index": LARGE_IDX, "can_install": False, "depth": 0}
+            # child returns can_install=True to trigger the has_installable_children path
+            return {"ent_physical_index": CHILD_IDX, "can_install": True, "depth": 1}
+
+        def fake_get_table(table_data, obj):
+            captured_table_data.extend(table_data)
+            return MagicMock()
+
+        request = MagicMock()
+        obj = MagicMock()
+        obj.device_type.manufacturer = None
+
+        with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping:
+            mock_mapping.objects.all.return_value = []
+            with patch.object(view, "_get_module_bays", return_value=({}, {})):
+                with patch.object(view, "_get_module_types", return_value={}):
+                    with patch.object(view, "_build_row", side_effect=fake_build_row):
+                        with patch.object(view, "get_table", side_effect=fake_get_table):
+                            with patch.object(view, "_sort_with_hierarchy", side_effect=lambda x: x):
+                                # Old bug: IndexError when large entity index used as list index
+                                view._build_context(request, obj, inventory)
+
+        assert len(captured_table_data) >= 1, "table_data must contain the parent row"
+        assert captured_table_data[0].get("has_installable_children") is True, (
+            "has_installable_children must be set on table row 0 (parent_row_idx), "
+            "not at entity index 8_000_000 which would cause IndexError"
+        )

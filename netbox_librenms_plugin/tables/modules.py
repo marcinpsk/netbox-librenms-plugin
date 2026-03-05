@@ -40,10 +40,11 @@ class LibreNMSModuleTable(tables.Table):
         attrs = {"class": "table table-hover object-list", "id": "librenms-module-table"}
         row_attrs = {"class": lambda record: record.get("row_class", "")}
 
-    def __init__(self, *args, device=None, **kwargs):
+    def __init__(self, *args, device=None, server_key="", **kwargs):
         """Initialize table with optional device context."""
         self.device = device
         self.csrf_token = ""
+        self.server_key = server_key
         super().__init__(*args, **kwargs)
         self.tab = "modules"
         self.htmx_url = None
@@ -173,6 +174,7 @@ class LibreNMSModuleTable(tables.Table):
                 format_html(
                     '<form method="post" action="{}" style="display:inline">'
                     '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
+                    '<input type="hidden" name="server_key" value="{}">'
                     '<input type="hidden" name="module_bay_id" value="{}">'
                     '<input type="hidden" name="module_type_id" value="{}">'
                     '<input type="hidden" name="serial" value="{}">'
@@ -181,6 +183,7 @@ class LibreNMSModuleTable(tables.Table):
                     "</button></form>",
                     url,
                     self.csrf_token,
+                    self.server_key,
                     record.get("module_bay_id", ""),
                     record.get("module_type_id", ""),
                     record.get("serial", ""),
@@ -194,6 +197,7 @@ class LibreNMSModuleTable(tables.Table):
                 format_html(
                     '<form method="post" action="{}" style="display:inline">'
                     '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
+                    '<input type="hidden" name="server_key" value="{}">'
                     '<input type="hidden" name="parent_index" value="{}">'
                     '<button type="submit" class="btn btn-sm btn-primary ms-1"'
                     ' title="Install this module and all installable children">'
@@ -201,6 +205,7 @@ class LibreNMSModuleTable(tables.Table):
                     "</button></form>",
                     url,
                     self.csrf_token,
+                    self.server_key,
                     record.get("ent_physical_index", ""),
                 )
             )

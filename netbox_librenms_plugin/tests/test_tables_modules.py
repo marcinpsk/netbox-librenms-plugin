@@ -17,6 +17,7 @@ class TestLibreNMSModuleTable:
         table = object.__new__(LibreNMSModuleTable)
         table.device = device
         table.csrf_token = "test-csrf-token"
+        table.server_key = ""
         return table
 
     # ------------------------------------------------------------------

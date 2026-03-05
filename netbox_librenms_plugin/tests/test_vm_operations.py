@@ -184,6 +184,7 @@ class TestCreateVmFromLibrenms:
         call_kwargs = mock_vm_class.objects.create.call_args[1]
         assert "LibreNMS" in call_kwargs["comments"]
         assert "netbox-librenms-plugin" in call_kwargs["comments"]
+        assert str(libre_device["device_id"]) in call_kwargs["comments"]
 
 
 class TestBulkImportVms:
@@ -626,7 +627,7 @@ class TestBulkImportVms:
         mock_api.server_key = "default"
 
         # Status is "running" at first checkpoint (idx=5), "failed" at second (idx=10)
-        statuses = iter(["running", "running", "failed"])
+        statuses = iter(["running", "failed"])
         mock_job = MagicMock()
         mock_job.logger = MagicMock()
         mock_job.job.status = "running"
