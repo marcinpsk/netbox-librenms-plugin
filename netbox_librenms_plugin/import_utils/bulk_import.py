@@ -37,7 +37,8 @@ def _safe_disabled(device: dict) -> int:
         if normalized in ("0", "false", "no", "off", ""):
             return 0
     try:
-        return int(val)
+        int_val = int(val)
+        return 1 if int_val else 0
     except (TypeError, ValueError):
         return 0
 
@@ -210,7 +211,11 @@ def bulk_import_devices_shared(
                     # switch in a stacked chassis that appears as a separate device in
                     # LibreNMS) share the same key and VC creation is triggered only once.
                     # Fall back to device_id when no member serials are available.
-                    member_serials = sorted(m.get("serial") for m in vc_data.get("members", []) if m.get("serial"))
+                    member_serials = sorted(
+                        str(m.get("serial"))
+                        for m in vc_data.get("members", [])
+                        if m.get("serial") is not None and m.get("serial") != ""
+                    )
                     vc_domain = (
                         f"librenms-stack-{','.join(member_serials)}" if member_serials else f"librenms-{device_id}"
                     )

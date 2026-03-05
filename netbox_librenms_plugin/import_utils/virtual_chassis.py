@@ -197,6 +197,8 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
             return None
 
         # Step 5: Extract member info
+        # Load naming pattern once to avoid a DB query per member.
+        vc_name_pattern = _load_vc_member_name_pattern() if master_name else None
         members = []
         for idx, chassis in enumerate(chassis_items):
             # entPhysicalParentRelPos is 1-based; fall back to idx+1 (not idx) so
@@ -204,6 +206,8 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
             raw_position = chassis.get("entPhysicalParentRelPos", idx + 1)
             try:
                 position = int(raw_position)
+                if position <= 0:
+                    position = idx + 1
             except (TypeError, ValueError):
                 position = idx + 1
             member_data = {
@@ -218,7 +222,7 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
             # Generate suggested name if we have master name.
             # position is already 1-based, so pass it directly (no +1).
             if master_name:
-                member_data["suggested_name"] = _generate_vc_member_name(master_name, position)
+                member_data["suggested_name"] = _generate_vc_member_name(master_name, position, pattern=vc_name_pattern)
             else:
                 member_data["suggested_name"] = f"Member-{position}"
 
