@@ -110,9 +110,10 @@ class TestLibreNMSAPIDeviceInfo:
         # /api/v0/devices/999 not registered → 404
         api = _make_api(mock_server.url)
 
-        success, _ = api.get_device_info(999)
+        success, info = api.get_device_info(999)
 
         assert success is False
+        assert info is None
 
 
 class TestLibreNMSAPIAddDevice:
@@ -222,3 +223,90 @@ class TestLibreNMSAPIInventory:
         item = data[0]
         assert item["entPhysicalParentRelPos"] == 1
         assert item["entPhysicalSerialNum"] == "JAE123XYZ"
+
+
+class TestLibreNMSAPIDiscovery:
+    """LibreNMSAPI device-ID discovery: lookup by IP and hostname fallback.
+
+    Covers get_device_id_by_ip(), get_device_id_by_hostname(), and the
+    get_librenms_id() fallback chain (IP → DNS name → hostname).
+    """
+
+    _DEVICE_RESPONSE = {
+        "status": "ok",
+        "devices": [{"device_id": 42, "hostname": "sw01.example.com"}],
+    }
+
+    def test_get_device_id_by_ip_returns_id(self, mock_server):
+        mock_server.register("/api/v0/devices/10.0.0.1", self._DEVICE_RESPONSE)
+        api = _make_api(mock_server.url)
+
+        device_id = api.get_device_id_by_ip("10.0.0.1")
+
+        assert device_id == 42
+
+    def test_get_device_id_by_ip_returns_none_on_404(self, mock_server):
+        # no route registered → 404
+        api = _make_api(mock_server.url)
+
+        device_id = api.get_device_id_by_ip("10.0.0.2")
+
+        assert device_id is None
+
+    def test_get_device_id_by_hostname_returns_id(self, mock_server):
+        mock_server.register("/api/v0/devices/sw01.example.com", self._DEVICE_RESPONSE)
+        api = _make_api(mock_server.url)
+
+        device_id = api.get_device_id_by_hostname("sw01.example.com")
+
+        assert device_id == 42
+
+    def test_get_device_id_by_hostname_returns_none_on_404(self, mock_server):
+        api = _make_api(mock_server.url)
+
+        device_id = api.get_device_id_by_hostname("unknown.example.com")
+
+        assert device_id is None
+
+    def test_get_librenms_id_resolves_by_ip(self, mock_server):
+        """get_librenms_id() resolves via IP when the device has a primary_ip."""
+        from unittest.mock import MagicMock, patch
+
+        mock_server.register("/api/v0/devices/10.0.0.10", self._DEVICE_RESPONSE)
+        api = _make_api(mock_server.url)
+
+        obj = MagicMock()
+        obj.cf = {}  # no stored ID
+        obj.primary_ip.address.ip = "10.0.0.10"
+        obj.primary_ip.dns_name = None
+        obj.name = "sw01"
+
+        with patch.object(api, "_get_cache_key", return_value="test-key"):
+            with patch("netbox_librenms_plugin.librenms_api.cache") as mock_cache:
+                mock_cache.get.return_value = None
+                with patch.object(api, "_store_librenms_id"):
+                    result = api.get_librenms_id(obj)
+
+        assert result == 42
+
+    def test_get_librenms_id_falls_back_to_hostname_when_ip_fails(self, mock_server):
+        """get_librenms_id() falls back to hostname when IP lookup returns no result."""
+        from unittest.mock import MagicMock, patch
+
+        # IP path returns 404 (unregistered) → fallback to hostname
+        mock_server.register("/api/v0/devices/sw01.example.com", self._DEVICE_RESPONSE)
+        api = _make_api(mock_server.url)
+
+        obj = MagicMock()
+        obj.cf = {}  # no stored ID
+        obj.primary_ip.address.ip = "192.0.2.1"  # unregistered → 404 → None
+        obj.primary_ip.dns_name = None
+        obj.name = "sw01.example.com"
+
+        with patch.object(api, "_get_cache_key", return_value="test-key"):
+            with patch("netbox_librenms_plugin.librenms_api.cache") as mock_cache:
+                mock_cache.get.return_value = None
+                with patch.object(api, "_store_librenms_id"):
+                    result = api.get_librenms_id(obj)
+
+        assert result == 42
