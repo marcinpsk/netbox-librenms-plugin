@@ -206,7 +206,7 @@ def validate_device_for_import(
         "serial_action": None,  # None, "link", "conflict", "update_serial", "hostname_differs"
         "serial_confirmed": False,  # True when librenms_id match and serial matches
         "serial_duplicate": False,  # True when incoming serial is already on a different device
-        "librenms_id_needs_migration": False,  # True when librenms_id is still a legacy bare int
+        "librenms_id_needs_migration": False,  # True when existing device has legacy bare-int ID
         "name_matches": False,  # True when existing device name matches LibreNMS sysName
         "name_sync_available": False,  # True when existing device name differs from sysName
         "suggested_name": None,  # sysName to suggest when name_sync_available is True

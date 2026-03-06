@@ -2,6 +2,7 @@ from dcim.models import Device, Manufacturer, Platform
 from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.views import View
 import logging
@@ -425,6 +426,8 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
         object_type = request.POST.get("object_type", "device")
         if object_type == "virtualmachine":
             object_type = "vm"
+        if object_type not in ("device", "vm"):
+            return HttpResponse(f"Invalid object_type: {object_type!r}", status=400)
         target_model = VirtualMachine if object_type == "vm" else Device
         self.required_object_permissions = {"POST": [("change", target_model)]}
 
@@ -440,6 +443,9 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
             return redirect(sync_url, pk=pk)
 
         cf_value = obj.custom_field_data.get("librenms_id")
+        # Normalize legacy bare-integer to dict form so pre-migration mappings are found
+        if isinstance(cf_value, int):
+            cf_value = {"default": cf_value}
         if not isinstance(cf_value, dict) or server_key not in cf_value:
             messages.warning(request, f"No mapping found for server '{server_key}'.")
             return redirect(sync_url, pk=pk)
@@ -471,6 +477,9 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
                 messages.error(request, f"{model.__name__} no longer exists.")
                 return redirect(sync_url, pk=pk)
             cf = obj_locked.custom_field_data.get("librenms_id", {})
+            # Normalize legacy bare-integer so the membership check works consistently
+            if isinstance(cf, int):
+                cf = {"default": cf}
             # Re-check after acquiring lock; mirror the pre-transaction protection logic
             _is_protected = server_key in configured_servers or (
                 legacy_url_configured and not configured_servers and server_key == "default"

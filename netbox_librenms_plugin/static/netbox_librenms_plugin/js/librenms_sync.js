@@ -798,7 +798,14 @@ function handleInterfaceChange(select, value) {
             server_key: document.getElementById('current-server-key')?.value || null
         })
     })
-        .then(response => response.json())
+        .then(response => {
+            if (!response.ok) {
+                return response.text().then(text => {
+                    throw new Error(`Server error ${response.status}: ${text}`);
+                });
+            }
+            return response.json();
+        })
         .then(data => {
             const row = document.querySelector(`tr[data-interface="${select.dataset.rowId}"]`);
             if (data.status === 'success' && row) {
@@ -812,6 +819,9 @@ function handleInterfaceChange(select, value) {
                 row.querySelector('td[data-col="description"]').innerHTML = formattedRow.description;
                 initializeFilters();
             }
+        })
+        .catch(error => {
+            console.error('Error verifying interface:', error.message);
         });
 }
 

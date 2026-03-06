@@ -107,6 +107,8 @@ class TestUpdateInterfaceAttributes:
         iface.__class__ = Interface
         iface.cf = {}
         iface.mac_addresses = MagicMock()
+        desc_sentinel = object()
+        iface.description = desc_sentinel
 
         # ifAlias == interface name field value → description should NOT be set
         librenms_data = {"ifName": "eth0", "ifAlias": "eth0"}
@@ -114,7 +116,7 @@ class TestUpdateInterfaceAttributes:
         with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None):
             view.update_interface_attributes(iface, librenms_data, None, {"type", "speed", "mtu"}, "ifName")
 
-        assert iface.description != "eth0"  # not set because alias == name
+        assert iface.description is desc_sentinel  # untouched: alias == name, no update
 
     def test_sets_description_when_alias_differs(self, view):
         from dcim.models import Interface
