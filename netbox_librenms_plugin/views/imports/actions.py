@@ -7,6 +7,7 @@ from django.contrib import messages
 from django.core.cache import cache
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
+from django.db.models import Q
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.utils.html import escape
@@ -1242,13 +1243,17 @@ class DeviceConflictActionView(
                 cf_locked_int = int(cf_locked) if isinstance(cf_locked, str) else cf_locked
                 if cf_locked_int != librenms_id:
                     return HttpResponse(
-                        f"Legacy librenms_id changed under lock ({cf_locked} != {librenms_id}); cannot migrate safely.",
+                        f"Legacy librenms_id changed under lock ({cf_locked_int} != {librenms_id}); cannot migrate safely.",
                         status=400,
                     )
                 # Check that no other device already owns this ID on this server
+                # (both new namespaced format and legacy integer format)
                 server_key = self.librenms_api.server_key
                 conflict = (
-                    Device.objects.filter(**{f"custom_field_data__librenms_id__{server_key}": cf_locked_int})
+                    Device.objects.filter(
+                        Q(**{f"custom_field_data__librenms_id__{server_key}": cf_locked_int})
+                        | Q(custom_field_data__librenms_id=cf_locked_int)
+                    )
                     .exclude(pk=locked_device.pk)
                     .exists()
                 )
@@ -1262,7 +1267,7 @@ class DeviceConflictActionView(
                     return err
             logger.info(
                 f"Migrated legacy librenms_id on '{existing_device.name}' "
-                f"to {{{self.librenms_api.server_key!r}: {cf_value}}}"
+                f"to {{{self.librenms_api.server_key!r}: {cf_int}}}"
             )
 
         else:

@@ -212,9 +212,9 @@ def bulk_import_devices_shared(
                     # LibreNMS) share the same key and VC creation is triggered only once.
                     # Fall back to device_id when no member serials are available.
                     member_serials = sorted(
-                        str(m.get("serial"))
+                        serial
                         for m in vc_data.get("members", [])
-                        if m.get("serial") is not None and m.get("serial") != ""
+                        if (serial := str(m.get("serial") or "").strip()) and serial != "-"
                     )
                     vc_domain = (
                         f"librenms-stack-{','.join(member_serials)}" if member_serials else f"librenms-{device_id}"
@@ -409,8 +409,10 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             validation["existing_match_type"] = match_type
             validation["can_import"] = False
             validation["is_ready"] = False
+            if not import_as_vm and hasattr(new_device, "role") and new_device.role:
+                validation["device_role"] = {"found": True, "role": new_device.role}
     except Exception as e:
-        logger.error(f"Failed to re-check for imported device: {e}")
+        logger.error(f"Failed to check for newly imported device: {e}")
 
 
 def _empty_return(return_cache_status: bool):
