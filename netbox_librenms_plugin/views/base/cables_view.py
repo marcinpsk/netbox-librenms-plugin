@@ -348,10 +348,10 @@ class SingleCableVerifyView(BaseCableTableView):
     def post(self, request):
         data = json.loads(request.body)
         selected_device_id = data.get("device_id")
-        local_port = data.get("local_port")
+        local_port_id = data.get("local_port_id")
 
         formatted_row = {
-            "local_port": local_port,
+            "local_port": "",
             "remote_port": "",
             "remote_device": "",
             "cable_status": "Missing Ports",
@@ -376,18 +376,25 @@ class SingleCableVerifyView(BaseCableTableView):
 
             if cached_links:
                 link_data = next(
-                    (link for link in cached_links.get("links", []) if link["local_port"] == local_port),
+                    (
+                        link
+                        for link in cached_links.get("links", [])
+                        if str(link.get("local_port_id", "")) == str(local_port_id)
+                    ),
                     None,
                 )
                 if link_data:
+                    local_port = link_data.get("local_port", "")
+                    formatted_row["local_port"] = local_port
+
                     # First try to find interface by librenms_id
                     interface = None
-                    if local_port_id := link_data.get("local_port_id"):
+                    if local_port_id:
                         _sk = self.librenms_api.server_key
                         interface = selected_device.interfaces.filter(_librenms_id_q(_sk, local_port_id)).first()
 
                     # If not found by librenms_id, try matching by name
-                    if not interface:
+                    if not interface and local_port:
                         interface = selected_device.interfaces.filter(name=local_port).first()
 
                     if interface:
@@ -426,7 +433,7 @@ class SingleCableVerifyView(BaseCableTableView):
                         if link_data.get("can_create_cable"):
                             formatted_row["actions"] = f"""
                                 <form method="post" action="{reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[selected_device.id])}">
-                                    <input type="hidden" name="select" value="{local_port}">
+                                    <input type="hidden" name="select" value="{local_port_id}">
                                     <button type="submit" class="btn btn-sm btn-primary">Sync Cable</button>
                                 </form>
                             """
