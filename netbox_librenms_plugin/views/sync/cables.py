@@ -9,12 +9,17 @@ from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
 from django.views import View
 
-from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
+from netbox_librenms_plugin.views.mixins import (
+    CacheMixin,
+    LibreNMSAPIMixin,
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+)
 
 logger = logging.getLogger(__name__)
 
 
-class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
+class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
     """Create NetBox cables using cached LibreNMS link data."""
 
     required_object_permissions = {
@@ -44,7 +49,8 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Cache
 
     def get_cached_links_data(self, request, obj):
         """Return cached LibreNMS link data for the given object."""
-        cached_data = cache.get(self.get_cache_key(obj, "links"))
+        server_key = self.librenms_api.server_key
+        cached_data = cache.get(self.get_cache_key(obj, "links", server_key))
         if not cached_data:
             return None
         return cached_data.get("links", [])

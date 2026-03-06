@@ -43,7 +43,8 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
 
     def get_ports_data(self, obj):
         """Get ports data without affecting cache"""
-        cached_data = cache.get(self.get_cache_key(obj, "ports"))
+        server_key = self.librenms_api.server_key
+        cached_data = cache.get(self.get_cache_key(obj, "ports", server_key))
         if cached_data:
             return cached_data
         success, data = self.librenms_api.get_ports(self.librenms_id)
@@ -270,6 +271,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         """Helper method to prepare the context data for cable sync views."""
         table = None
         cache_expiry = None
+        server_key = self.librenms_api.server_key
 
         if fetch_fresh:
             # Always fetch new data when requested
@@ -278,7 +280,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 return None
         else:
             # Try to use cached data
-            cached_links_data = cache.get(self.get_cache_key(obj, "links"))
+            cached_links_data = cache.get(self.get_cache_key(obj, "links", server_key))
             if cached_links_data:
                 links_data = cached_links_data.get("links", [])
             else:
@@ -290,13 +292,13 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         if fetch_fresh:
             # Cache the fresh data after enrichment
             cache.set(
-                self.get_cache_key(obj, "links"),
+                self.get_cache_key(obj, "links", server_key),
                 {"links": links_data},
                 timeout=self.librenms_api.cache_timeout,
             )
 
         # Calculate cache expiry
-        cache_ttl = cache.ttl(self.get_cache_key(obj, "links"))
+        cache_ttl = cache.ttl(self.get_cache_key(obj, "links", server_key))
         if cache_ttl is not None:
             cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl)
         # Generate the table
@@ -372,7 +374,7 @@ class SingleCableVerifyView(BaseCableTableView):
             else:
                 primary_device = selected_device
 
-            cached_links = cache.get(self.get_cache_key(primary_device, "links"))
+            cached_links = cache.get(self.get_cache_key(primary_device, "links", self.librenms_api.server_key))
 
             if cached_links:
                 link_data = next(
