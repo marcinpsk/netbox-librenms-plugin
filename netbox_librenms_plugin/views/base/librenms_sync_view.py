@@ -101,6 +101,18 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
 
         manufacturers = Manufacturer.objects.all().order_by("name")
 
+        # Detect legacy bare-int librenms_id format for conversion badge
+        _lookup_device = getattr(self, "_librenms_lookup_device", obj)
+        _raw_cf = _lookup_device.cf.get("librenms_id") if _lookup_device else None
+        librenms_id_is_legacy = isinstance(_raw_cf, (int, str)) and not isinstance(_raw_cf, bool)
+
+        # Determine if serial match allows legacy ID conversion
+        _librenms_serial = librenms_info["librenms_device_details"].get("librenms_device_serial", "-")
+        _netbox_serial = getattr(obj, "serial", "") or ""
+        librenms_id_serial_confirmed = bool(
+            _librenms_serial and _librenms_serial != "-" and _netbox_serial and _librenms_serial == _netbox_serial
+        )
+
         context.update(
             {
                 "interface_sync": interface_context,
@@ -121,6 +133,8 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 "all_server_mappings": self._build_all_server_mappings(
                     getattr(self, "_librenms_lookup_device", obj), self.librenms_api.server_key
                 ),
+                "librenms_id_is_legacy": librenms_id_is_legacy,
+                "librenms_id_serial_confirmed": librenms_id_serial_confirmed,
             }
         )
 

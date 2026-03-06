@@ -53,6 +53,7 @@ from .views import (
     VMIPAddressTableView,
     VMLibreNMSSyncView,
     VMStatusListView,
+    ConvertLegacyLibreNMSIdView,
 )
 
 urlpatterns = [
@@ -226,6 +227,11 @@ urlpatterns = [
         "devices/<int:pk>/remove-server-mapping/",
         RemoveServerMappingView.as_view(),
         name="remove_server_mapping",
+    ),
+    path(
+        "devices/<int:pk>/convert-legacy-id/",
+        ConvertLegacyLibreNMSIdView.as_view(),
+        name="convert_legacy_librenms_id",
     ),
     path(
         "device-status/",

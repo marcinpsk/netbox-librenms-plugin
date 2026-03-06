@@ -462,6 +462,8 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
 
         Legacy:  librenms_id = 42              → returned as universal fallback for any server_key
         New:     librenms_id = {"primary": 42} → returns 42 only for server_key="primary"
+        Legacy:  librenms_id = 42          → returns 42 for any server_key (universal fallback)
+        New:     librenms_id = {"primary": 42}  → returns 42 only for server_key="primary"
 
     If the stored value (or the dict entry for server_key) is a string it is
     normalised to ``int``.  When *auto_save* is ``True`` (the default) the
@@ -488,6 +490,12 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
     if isinstance(cf_value, str):
         # Someone stored a bare string (e.g., via NetBox UI/API) — normalise to int.
         # Treated as a legacy universal fallback for any server.
+        # Legacy bare integer — return as a universal fallback regardless of server_key.
+        # Multi-server setups should use the migration workflow to convert to JSON dict format.
+        return cf_value
+    if isinstance(cf_value, str):
+        # Someone stored a bare string (e.g., via NetBox UI/API) — normalise to int.
+        # Treat as a legacy universal fallback.
         try:
             int_id = int(cf_value)
         except (ValueError, TypeError):
@@ -554,6 +562,8 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
     directly in ``custom_field_data``.  These are treated as a universal fallback
     for any *server_key* so that devices imported before multi-server support
     remain discoverable regardless of the active server.
+    directly in ``custom_field_data``.  Legacy records are treated as a universal
+    fallback for any *server_key* since they predate multi-server support.
 
     Args:
         model: A Django model class (Device, VirtualMachine, Interface, …).
@@ -566,6 +576,9 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
     q = Q(**{f"custom_field_data__librenms_id__{server_key}": librenms_id})
     # Always include legacy bare-int/string fallback so devices imported before
     # multi-server support are found for any server_key.
+    # Always include legacy bare-integer and bare-string IDs as a universal fallback.
+    # Legacy records were created before multi-server support; they should be visible
+    # regardless of which server is currently active.
     q |= Q(custom_field_data__librenms_id=librenms_id)
     q |= Q(custom_field_data__librenms_id=str(librenms_id))
     return model.objects.filter(q).first()

@@ -8,7 +8,7 @@ from django.views import View
 import logging
 from virtualization.models import VirtualMachine
 
-from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
+from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type, migrate_legacy_librenms_id
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
 logger = logging.getLogger(__name__)
@@ -526,3 +526,88 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
                 messages.warning(request, f"Mapping for server '{server_key}' was already removed.")
 
         return redirect(sync_url, pk=pk)
+
+
+class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
+    """Convert a legacy bare-integer librenms_id to the server-scoped JSON dict format.
+
+    Only allowed when the NetBox serial matches the LibreNMS serial, so the
+    association can be verified before scoping the ID to the active server.
+    """
+
+    required_object_permissions = {
+        "POST": [("change", Device), ("change", VirtualMachine)],
+    }
+
+    def _get_model_and_object(self, object_type, pk):
+        model = VirtualMachine if object_type == "vm" else Device
+        return model, get_object_or_404(model, pk=pk)
+
+    def _sync_url(self, object_type, pk):
+        name = "vm_librenms_sync" if object_type == "vm" else "device_librenms_sync"
+        return redirect(f"plugins:netbox_librenms_plugin:{name}", pk=pk)
+
+    def post(self, request, pk):
+        object_type = request.POST.get("object_type", "device")
+        if object_type == "virtualmachine":
+            object_type = "vm"
+        if object_type not in ("device", "vm"):
+            return HttpResponse(f"Invalid object_type: {object_type!r}", status=400)
+
+        target_model = VirtualMachine if object_type == "vm" else Device
+        self.required_object_permissions = {"POST": [("change", target_model)]}
+        if error := self.require_all_permissions("POST"):
+            return error
+
+        model, obj = self._get_model_and_object(object_type, pk)
+        server_key = self.librenms_api.server_key
+
+        # Verify the device actually has a legacy bare-int librenms_id
+        cf_value = obj.custom_field_data.get("librenms_id")
+        if not isinstance(cf_value, (int, str)) or isinstance(cf_value, bool):
+            messages.warning(request, "librenms_id is already in the server-scoped JSON format.")
+            return self._sync_url(object_type, pk)
+        if isinstance(cf_value, str):
+            if not cf_value.isdigit():
+                messages.error(request, "librenms_id is not a valid integer; cannot convert.")
+                return self._sync_url(object_type, pk)
+
+        # Verify serial match before converting
+        librenms_id = int(cf_value) if isinstance(cf_value, str) else cf_value
+        success, device_info = self.librenms_api.get_device_info(librenms_id)
+        if not success or not device_info:
+            messages.error(request, "Could not retrieve device info from LibreNMS to verify serial.")
+            return self._sync_url(object_type, pk)
+
+        librenms_serial = (device_info.get("serial") or "").strip()
+        netbox_serial = (obj.serial or "").strip()
+        if not netbox_serial or not librenms_serial or netbox_serial != librenms_serial:
+            messages.error(
+                request,
+                "Serial number mismatch — cannot convert legacy ID without serial confirmation.",
+            )
+            return self._sync_url(object_type, pk)
+
+        with transaction.atomic():
+            try:
+                locked = model.objects.select_for_update().get(pk=pk)
+            except model.DoesNotExist:
+                messages.error(request, f"{model.__name__} no longer exists.")
+                return self._sync_url(object_type, pk)
+            migrated = migrate_legacy_librenms_id(locked, server_key)
+            if not migrated:
+                messages.warning(request, "librenms_id is already in the server-scoped JSON format.")
+                return self._sync_url(object_type, pk)
+            try:
+                locked.full_clean()
+                locked.save()
+            except (ValidationError, Exception) as exc:
+                transaction.set_rollback(True)
+                messages.error(request, f"Failed to save converted librenms_id: {exc}")
+                return self._sync_url(object_type, pk)
+
+        messages.success(
+            request,
+            f"Converted legacy librenms_id {librenms_id} → {{'{server_key}': {librenms_id}}}.",
+        )
+        return self._sync_url(object_type, pk)
