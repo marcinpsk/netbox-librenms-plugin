@@ -409,7 +409,7 @@
               hx-swap="none">
           {% csrf_token %}
           <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
-          <input type="hidden" name="existing_device_type" value="{{ validation.existing_device._meta.model_name }}">
+          <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name }}">
           <input type="hidden" name="server_key" value="{{ server_key }}">
           <input type="hidden" name="action" value="migrate_librenms_id">
           {% if not validation.serial_confirmed %}

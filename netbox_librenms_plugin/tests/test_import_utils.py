@@ -2201,6 +2201,53 @@ class TestDeviceConflictActionView:
 
     @patch("netbox_librenms_plugin.views.imports.actions.cache")
     @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
+    def test_update_action_uses_non_default_server_key(self, mock_cache_key, mock_cache):
+        """Update action should store librenms_id under the active server key."""
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+        view = self._create_view()
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "production"
+        existing_device = MagicMock()
+        existing_device.pk = 42
+        existing_device.custom_field_data = {}
+        existing_device.name = "old-name"
+        existing_device.serial = "OLD-SERIAL"
+
+        libre_device = {
+            "device_id": 10,
+            "hostname": "switch-01",
+            "sysName": "switch-01",
+            "serial": "NEW-SERIAL",
+            "resolved_name": "switch-01",
+        }
+        validation = {"can_import": False, "existing_device": existing_device, "resolved_name": "switch-01"}
+        selections = {}
+
+        request = self._create_request("update", 42)
+
+        with (
+            patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
+            patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
+            patch("dcim.models.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx,
+        ):
+            mock_tx.atomic.return_value = MagicMock()
+            mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
+            mock_device_cls.objects.filter.return_value.first.return_value = None
+            mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+            mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
+            mock_validate.return_value = (libre_device, validation, selections)
+            mock_render.return_value = MagicMock()
+
+            view.post(request, device_id=10)
+
+        assert existing_device.custom_field_data["librenms_id"] == {"production": 10}
+
+    @patch("netbox_librenms_plugin.views.imports.actions.cache")
+    @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
     def test_update_serial_action_updates_serial_only(self, mock_cache_key, mock_cache):
         """Update serial action should update serial and librenms_id but not hostname."""
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
@@ -2354,6 +2401,7 @@ class TestDeviceConflictActionView:
 
         assert existing_device.name == "switch-01.example.com"
         existing_device.save.assert_called_once()
+        assert existing_device.custom_field_data["librenms_id"] == 10
 
     @patch("netbox_librenms_plugin.views.imports.actions.cache")
     @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
@@ -2531,6 +2579,7 @@ class TestDeviceConflictActionView:
 
         assert existing_device.device_type == new_device_type
         existing_device.save.assert_called_once()
+        assert existing_device.custom_field_data["librenms_id"] == 10
 
     @patch("netbox_librenms_plugin.views.imports.actions.cache")
     @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
