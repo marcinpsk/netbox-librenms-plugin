@@ -14,7 +14,7 @@ import json
 import threading
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 
 class _LibreNMSHandler(BaseHTTPRequestHandler):
@@ -31,17 +31,50 @@ class _LibreNMSHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def do_GET(self):
-        path = urlparse(self.path).path
+    def _handle_request(self, method, body=None):
+        """Dispatch to the registered route for this path, with optional method+query fallback."""
+        parsed = urlparse(self.path)
+        path = parsed.path
+        query = parsed.query
         routes = self.server.routes  # type: ignore[attr-defined]
-        if path in routes:
-            status, body = routes[path]
-            self._send_json(status, body)
-        else:
-            self._send_json(404, {"status": "error", "message": f"No mock for {path}"})
+
+        # Build lookup keys: prefer method+path+query, then path+query, then path-only.
+        candidates = []
+        if query:
+            candidates.append(f"{method} {path}?{query}")
+            candidates.append(f"{path}?{query}")
+        candidates.append(f"{method} {path}")
+        candidates.append(path)
+
+        for key in candidates:
+            if key in routes:
+                entry = routes[key]
+                if callable(entry):
+                    status, resp_body = entry(
+                        method=method,
+                        path=path,
+                        query=parse_qs(query),
+                        headers=dict(self.headers),
+                        body=body,
+                    )
+                else:
+                    status, resp_body = entry
+                self._send_json(status, resp_body)
+                return
+
+        self._send_json(404, {"status": "error", "message": f"No mock for {self.path}"})
+
+    def do_GET(self):
+        self._handle_request("GET")
 
     def do_POST(self):
-        self.do_GET()
+        length = int(self.headers.get("Content-Length", 0))
+        raw_body = self.rfile.read(length) if length else b""
+        try:
+            body = json.loads(raw_body) if raw_body else None
+        except json.JSONDecodeError:
+            body = raw_body.decode(errors="replace")
+        self._handle_request("POST", body=body)
 
 
 class MockLibreNMSServer:
@@ -49,18 +82,23 @@ class MockLibreNMSServer:
 
     Attributes:
         url (str): Base URL for the mock server (e.g. "http://127.0.0.1:PORT").
-        routes (dict): Mapping of URL path → (status_code, body_dict).
+        routes (dict): Mapping of URL path → (status_code, body_dict) or callable.
+            Callable routes receive keyword arguments: method, path, query, headers, body
+            and must return (status_code, body_dict).
+            Routes can also be keyed as "METHOD /path" for method-specific matching,
+            or "/path?query" for query-specific matching.
     """
 
     def __init__(self):
         self._server = HTTPServer(("127.0.0.1", 0), _LibreNMSHandler)
         self._server.routes = {}
+        self.routes = self._server.routes  # expose on wrapper as documented
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         _, port = self._server.server_address
         self.url = f"http://127.0.0.1:{port}"
 
     def register(self, path: str, body: dict, status: int = 200):
-        """Register a mock response for a URL path."""
+        """Register a mock response for a URL path (any HTTP method)."""
         self._server.routes[path] = (status, body)
 
     def start(self):
@@ -96,6 +134,10 @@ class MockLibreNMSServer:
         hardware: str = "WS-C3560X-24T-S",
         os: str = "ios",
         serial: str = "SN123",
+        ip: str = "192.168.1.1",
+        version: str = "15.2(4)E7",
+        features: str = "-",
+        location: str = "-",
     ):
         self.register(
             f"/api/v0/devices/{device_id}",
@@ -109,6 +151,10 @@ class MockLibreNMSServer:
                         "os": os,
                         "serial": serial,
                         "sysName": hostname,
+                        "ip": ip,
+                        "version": version,
+                        "features": features,
+                        "location": location,
                     }
                 ],
             },
