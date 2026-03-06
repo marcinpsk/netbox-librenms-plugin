@@ -301,6 +301,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                     )
                     return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
+                device = Device.objects.select_for_update().get(pk=pk)
                 device.platform = platform
                 try:
                     device.full_clean()
