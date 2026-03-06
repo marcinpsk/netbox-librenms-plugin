@@ -807,6 +807,7 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
             "validation": validation,
             "use_sysname": use_sysname,
             "strip_domain": strip_domain,
+            "server_key": self.librenms_api.server_key,
         }
 
         # Add sync comparison data for existing devices
@@ -953,10 +954,17 @@ class DeviceConflictActionView(
             return error
 
         from dcim.models import Device
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
         action = request.POST.get("action")
         existing_device_id = request.POST.get("existing_device_id")
         existing_device_type = request.POST.get("existing_device_type", "device")
+
+        # If the form submitted a specific server_key, honour it so the handler uses
+        # the same server context as the import page when the user clicked the button.
+        post_server_key = request.POST.get("server_key", "").strip()
+        if post_server_key:
+            self._librenms_api = LibreNMSAPI(server_key=post_server_key)
 
         if not action or not existing_device_id:
             return HttpResponse("Missing action or existing_device_id", status=400)
