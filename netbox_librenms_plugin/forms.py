@@ -580,14 +580,25 @@ class LibreNMSImportFilterForm(forms.Form):
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
         try:
-            # Use caching to avoid repeated API calls
-            api = LibreNMSAPI()
-            cache_key = f"librenms_locations_choices:{api.server_key}"
-            cached_choices = cache.get(cache_key)
+            # Determine server_key cheaply from settings to check cache before instantiating the API
+            try:
+                from netbox_librenms_plugin.models import LibreNMSSettings
 
+                _settings = LibreNMSSettings.objects.first()
+                _server_key = (_settings.selected_server if _settings else None) or "default"
+            except Exception:
+                _server_key = "default"
+
+            cache_key = f"librenms_locations_choices:{_server_key}"
+            cached_choices = cache.get(cache_key)
             if cached_choices:
                 self.fields["librenms_location"].choices = cached_choices
                 return
+
+            # Cache miss — instantiate the API client and fetch
+            api = LibreNMSAPI()
+            # Recompute cache_key with the resolved server_key in case it differs from settings
+            cache_key = f"librenms_locations_choices:{api.server_key}"
 
             # Fetch locations from LibreNMS
             success, locations = api.get_locations()

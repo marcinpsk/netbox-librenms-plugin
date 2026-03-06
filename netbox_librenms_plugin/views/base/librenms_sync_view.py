@@ -149,7 +149,9 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
             return None
 
         plugins_cfg = getattr(django_settings, "PLUGINS_CONFIG", {}).get("netbox_librenms_plugin", {})
-        servers_config = plugins_cfg.get("servers", {})
+        servers_config = plugins_cfg.get("servers") or {}
+        if not isinstance(servers_config, dict):
+            servers_config = {}
 
         result = []
         for sk, did in cf_value.items():

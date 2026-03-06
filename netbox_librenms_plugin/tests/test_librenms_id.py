@@ -94,18 +94,19 @@ class TestFindByLibreNMSId:
         find_by_librenms_id(mock_model, 42, "default")
 
         mock_model.objects.filter.assert_called_once()
-        # Verify the Q predicate covers both the server-key JSON branch and legacy bare-int branch
+        # Verify the Q predicate covers both the server-key JSON branch and legacy bare-int/string branches
         call_args = mock_model.objects.filter.call_args
         q_arg = call_args[0][0]
         assert isinstance(q_arg, Q)
         assert q_arg.connector == "OR"
-        # The combined Q should contain both children
-        assert len(q_arg.children) == 2
+        # The combined Q should contain three children: JSON key, bare-int, bare-string
+        assert len(q_arg.children) == 3
         children_keys = {child[0] for child in q_arg.children}
         children_values = {child[1] for child in q_arg.children}
         assert "custom_field_data__librenms_id__default" in children_keys
         assert "custom_field_data__librenms_id" in children_keys
         assert 42 in children_values
+        assert "42" in children_values
 
     def test_returns_first_matching_object(self):
         from netbox_librenms_plugin.utils import find_by_librenms_id
@@ -120,6 +121,8 @@ class TestFindByLibreNMSId:
         assert result is expected
 
     def test_returns_none_when_not_found(self):
+        from unittest.mock import MagicMock
+        from django.db.models import Q
         from netbox_librenms_plugin.utils import find_by_librenms_id
 
         mock_model = MagicMock()
@@ -129,6 +132,14 @@ class TestFindByLibreNMSId:
 
         result = find_by_librenms_id(mock_model, 999, "production")
         assert result is None
+
+        # Non-default server_key must only query the JSON server-key branch
+        # (no legacy bare-int/string to prevent cross-server shadowing)
+        call_args = mock_model.objects.filter.call_args
+        q_arg = call_args[0][0]
+        assert isinstance(q_arg, Q)
+        assert len(q_arg.children) == 1
+        assert q_arg.children[0] == ("custom_field_data__librenms_id__production", 999)
 
     def test_default_server_key_is_default(self):
         from netbox_librenms_plugin.utils import find_by_librenms_id
@@ -147,11 +158,13 @@ class TestFindByLibreNMSId:
         q_arg = call_args[0][0]
         assert isinstance(q_arg, Q)
         assert q_arg.connector == "OR"
+        assert len(q_arg.children) == 3
         children_keys = {child[0] for child in q_arg.children}
         children_values = {child[1] for child in q_arg.children}
         assert "custom_field_data__librenms_id__default" in children_keys
         assert "custom_field_data__librenms_id" in children_keys
         assert 42 in children_values
+        assert "42" in children_values
 
 
 class TestMigrateLegacyLibreNMSId:

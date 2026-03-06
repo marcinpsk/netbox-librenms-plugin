@@ -489,7 +489,7 @@ class DeviceImportTable(tables.Table):
                 btn_label = ""
 
             btn_title = "Resolve conflict" if (has_actions or has_mismatch) else "View details"
-            aria_attr = f'aria-label="{btn_title}" ' if btn_label == "" else ""
+            aria_attr = f'aria-label="{btn_title}" '
             buttons.append(
                 f'<button type="button" '
                 f'class="btn btn-sm {btn_class}" '

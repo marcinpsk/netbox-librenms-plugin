@@ -1010,7 +1010,7 @@ class DeviceConflictActionView(
         # serializes concurrent operations on the SAME device and greatly reduces the
         # window for assigning the same ID to two DIFFERENT devices.
         if action in {"link", "update", "update_serial"}:
-            from django.db.models import Q
+            from netbox_librenms_plugin.utils import find_by_librenms_id
 
             with transaction.atomic():
                 server_key = self.librenms_api.server_key
@@ -1025,17 +1025,11 @@ class DeviceConflictActionView(
                         "Device no longer exists; it may have been deleted concurrently.",
                         status=409,
                     )
-                conflict_exists = (
-                    Device.objects.filter(
-                        Q(**{f"custom_field_data__librenms_id__{server_key}": librenms_id})
-                        | Q(custom_field_data__librenms_id=librenms_id)
-                    )
-                    .exclude(pk=existing_device.pk)
-                    .exists()
-                )
-                if conflict_exists:
+                id_conflict = find_by_librenms_id(Device, int(librenms_id), server_key)
+                if id_conflict and id_conflict.pk != existing_device.pk:
                     return HttpResponse(
-                        f"LibreNMS ID conflict: ID {librenms_id} is already assigned to another device.",
+                        f"LibreNMS ID conflict: ID {escape(str(librenms_id))} is already assigned to device "
+                        f"'{escape(id_conflict.name)}' (ID: {id_conflict.pk})",
                         status=409,
                     )
 
