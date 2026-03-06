@@ -104,7 +104,15 @@ def get_librenms_sync_device(device: Device, server_key: str = "default") -> Opt
     vc = device.virtual_chassis
     all_members = vc.members.all()
 
-    # Priority 1: Check if ANY member has librenms_id configured for this server
+    # Priority 1: Prefer member with an explicit per-server dict mapping for server_key.
+    # This ensures a migrated device is preferred over one with a legacy bare-int ID.
+    for member in all_members:
+        raw_cf = member.cf.get("librenms_id")
+        if isinstance(raw_cf, dict) and raw_cf.get(server_key) is not None:
+            return member
+
+    # Priority 2 (legacy fallback): Any member whose librenms_id resolves for this server
+    # (includes bare-int legacy IDs that are a universal fallback).
     for member in all_members:
         if get_librenms_device_id(member, server_key, auto_save=False):
             return member
@@ -518,7 +526,9 @@ def set_librenms_device_id(obj, device_id, server_key: str = "default"):
     """
     Set the LibreNMS device/port ID for a specific server on the JSON custom field.
 
-    Migrates any legacy bare-integer value to the dict format on first write.
+    Does NOT silently migrate legacy bare-integer values to the dict format.
+    If the field contains a legacy bare integer (or a string that parses as an integer),
+    a warning is logged and the write is skipped; use the migration workflow instead.
 
     Args:
         obj: NetBox object with a ``librenms_id`` custom field.
@@ -526,8 +536,31 @@ def set_librenms_device_id(obj, device_id, server_key: str = "default"):
         server_key: LibreNMS server key (from plugin ``servers`` config).
     """
     cf_value = obj.custom_field_data.get("librenms_id") or {}
-    if isinstance(cf_value, int):
-        cf_value = {"default": cf_value}  # migrate legacy value on first write
+    if isinstance(cf_value, int) and not isinstance(cf_value, bool):
+        logger.warning(
+            "librenms_id on %r has legacy bare integer %r; skipping write to prevent "
+            "silent migration. Use the migration workflow to convert.",
+            obj,
+            cf_value,
+        )
+        return
+    elif isinstance(cf_value, str):
+        try:
+            int(cf_value)
+            logger.warning(
+                "librenms_id on %r has legacy bare integer string %r; skipping write to "
+                "prevent silent migration. Use the migration workflow to convert.",
+                obj,
+                cf_value,
+            )
+            return
+        except (ValueError, TypeError):
+            logger.warning(
+                "librenms_id custom field has unexpected string %r on %r; resetting to empty dict.",
+                cf_value,
+                obj,
+            )
+            cf_value = {}
     elif not isinstance(cf_value, dict):
         logger.warning(
             "librenms_id custom field has unexpected type %s on %r; resetting to empty dict.",
@@ -568,8 +601,8 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
         Model instance or None
     """
     q = Q(**{f"custom_field_data__librenms_id__{server_key}": librenms_id})
-    # Always include legacy bare-int/string fallback so devices imported before
-    # multi-server support are found for any server_key.
+    # Also match when the namespaced value was stored as a string (e.g. {"production": "42"}).
+    q |= Q(**{f"custom_field_data__librenms_id__{server_key}": str(librenms_id)})
     # Always include legacy bare-integer and bare-string IDs as a universal fallback.
     # Legacy records were created before multi-server support; they should be visible
     # regardless of which server is currently active.

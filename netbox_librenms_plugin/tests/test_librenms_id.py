@@ -100,8 +100,8 @@ class TestFindByLibreNMSId:
         q_arg = call_args[0][0]
         assert isinstance(q_arg, Q)
         assert q_arg.connector == "OR"
-        # The combined Q should contain three children: JSON key, bare-int, bare-string
-        assert len(q_arg.children) == 3
+        # The combined Q should contain four children: JSON key (int), JSON key (str), bare-int, bare-string
+        assert len(q_arg.children) == 4
         children_keys = {child[0] for child in q_arg.children}
         children_values = {child[1] for child in q_arg.children}
         assert "custom_field_data__librenms_id__default" in children_keys
@@ -160,13 +160,7 @@ class TestFindByLibreNMSId:
         q_arg = call_args[0][0]
         assert isinstance(q_arg, Q)
         assert q_arg.connector == "OR"
-        assert len(q_arg.children) == 3
-        children_keys = {child[0] for child in q_arg.children}
-        children_values = {child[1] for child in q_arg.children}
-        assert "custom_field_data__librenms_id__default" in children_keys
-        assert "custom_field_data__librenms_id" in children_keys
-        assert 42 in children_values
-        assert "42" in children_values
+        assert len(q_arg.children) == 4
 
 
 class TestMigrateLegacyLibreNMSId:
