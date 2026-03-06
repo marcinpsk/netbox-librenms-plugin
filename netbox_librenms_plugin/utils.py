@@ -490,12 +490,6 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
     if isinstance(cf_value, str):
         # Someone stored a bare string (e.g., via NetBox UI/API) — normalise to int.
         # Treated as a legacy universal fallback for any server.
-        # Legacy bare integer — return as a universal fallback regardless of server_key.
-        # Multi-server setups should use the migration workflow to convert to JSON dict format.
-        return cf_value
-    if isinstance(cf_value, str):
-        # Someone stored a bare string (e.g., via NetBox UI/API) — normalise to int.
-        # Treat as a legacy universal fallback.
         try:
             int_id = int(cf_value)
         except (ValueError, TypeError):
