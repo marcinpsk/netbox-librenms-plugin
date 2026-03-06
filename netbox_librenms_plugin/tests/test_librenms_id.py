@@ -129,6 +129,7 @@ class TestFindByLibreNMSId:
 
     def test_default_server_key_is_default(self):
         from netbox_librenms_plugin.utils import find_by_librenms_id
+        from django.db.models import Q
 
         mock_model = MagicMock()
         mock_qs = MagicMock()
@@ -137,8 +138,14 @@ class TestFindByLibreNMSId:
 
         find_by_librenms_id(mock_model, 42)
 
-        # Verify filter was called (Q objects are built internally — just confirm call was made)
+        # Verify the Q predicate uses "default" server key — not an arbitrary key
         mock_model.objects.filter.assert_called_once()
+        call_args = mock_model.objects.filter.call_args
+        q_arg = call_args[0][0]
+        assert isinstance(q_arg, Q)
+        children_keys = {child[0] for child in q_arg.children}
+        assert "custom_field_data__librenms_id__default" in children_keys
+        assert "custom_field_data__librenms_id" in children_keys
 
 
 class TestMigrateLegacyLibreNMSId:

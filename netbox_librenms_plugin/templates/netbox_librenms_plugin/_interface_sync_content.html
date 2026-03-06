@@ -1,6 +1,6 @@
 {% load helpers %}
 {% include 'inc/messages.html' %}
-
+<input type="hidden" id="current-server-key" value="{{ interface_sync.server_key|default:'' }}">
 <!-- Interface Sync Table -->
 {% if interface_sync.table %}
 

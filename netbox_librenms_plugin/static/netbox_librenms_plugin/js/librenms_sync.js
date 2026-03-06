@@ -620,7 +620,8 @@ function initializeVlanModalSave() {
                 },
                 body: JSON.stringify({
                     device_id: deviceId,
-                    vid_group_map: vidGroupMap
+                    vid_group_map: vidGroupMap,
+                    server_key: document.getElementById('current-server-key')?.value || null
                 })
             }).then(response => {
                 if (!response.ok) {
@@ -789,7 +790,8 @@ function handleInterfaceChange(select, value) {
         body: JSON.stringify({
             device_id: value,
             interface_name: select.dataset.interface,
-            interface_name_field: document.querySelector('input[name="interface_name_field"]:checked').value
+            interface_name_field: document.querySelector('input[name="interface_name_field"]:checked').value,
+            server_key: document.getElementById('current-server-key')?.value || null
         })
     })
         .then(response => response.json())

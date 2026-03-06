@@ -5,6 +5,7 @@ from django.db import IntegrityError, transaction
 from django.shortcuts import get_object_or_404, redirect
 from django.views import View
 import logging
+from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
@@ -403,72 +404,93 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
 
 
 class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
-    """Remove a single server entry from the device's librenms_id custom field dict."""
+    """Remove a single server entry from the device's (or VM's) librenms_id custom field dict."""
 
     required_object_permissions = {
-        "POST": [("change", Device)],
+        "POST": [("change", Device), ("change", VirtualMachine)],
     }
 
+    def _get_object(self, object_type, pk):
+        """Return the Device or VirtualMachine for the given pk."""
+        model = VirtualMachine if object_type == "vm" else Device
+        return get_object_or_404(model, pk=pk), model
+
+    def _sync_url_name(self, object_type):
+        if object_type == "vm":
+            return "plugins:netbox_librenms_plugin:vm_librenms_sync"
+        return "plugins:netbox_librenms_plugin:device_librenms_sync"
+
     def post(self, request, pk):
+        # Scope required permissions to the specific model being modified before checking.
+        object_type = request.POST.get("object_type", "device")
+        target_model = VirtualMachine if object_type == "vm" else Device
+        self.required_object_permissions = {"POST": [("change", target_model)]}
+
         if error := self.require_all_permissions("POST"):
             return error
 
-        device = get_object_or_404(Device, pk=pk)
+        obj, model = self._get_object(object_type, pk)
+        sync_url = self._sync_url_name(object_type)
         server_key = request.POST.get("server_key", "").strip()
 
         if not server_key:
             messages.error(request, "No server_key provided.")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return redirect(sync_url, pk=pk)
 
-        cf_value = device.custom_field_data.get("librenms_id")
+        cf_value = obj.custom_field_data.get("librenms_id")
         if not isinstance(cf_value, dict) or server_key not in cf_value:
             messages.warning(request, f"No mapping found for server '{server_key}'.")
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return redirect(sync_url, pk=pk)
 
         # Refuse to remove mappings for servers that are still configured in the plugin.
         # Only orphaned (unconfigured) mappings may be removed via this endpoint.
         # Guard both multi-server mode (servers dict) and legacy single-server mode
-        # (top-level librenms_url in plugin config, which implicitly defines "default").
+        # (top-level librenms_url in plugin config, which implicitly defines "default")
+        # but only when no servers section is configured (pure legacy mode).
         from django.conf import settings as django_settings
 
         plugins_cfg = django_settings.PLUGINS_CONFIG.get("netbox_librenms_plugin", {})
         configured_servers = plugins_cfg.get("servers", {})
         legacy_url_configured = bool(plugins_cfg.get("librenms_url"))
-        if server_key in configured_servers or (legacy_url_configured and server_key == "default"):
+        if server_key in configured_servers or (
+            legacy_url_configured and not configured_servers and server_key == "default"
+        ):
             messages.error(
                 request,
                 f"Cannot remove mapping for configured server '{server_key}'. "
                 "Remove the server from plugin configuration first, then retry.",
             )
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            return redirect(sync_url, pk=pk)
 
         with transaction.atomic():
             try:
-                device_locked = Device.objects.select_for_update().get(pk=pk)
-            except Device.DoesNotExist:
-                messages.error(request, "Device no longer exists.")
-                return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
-            cf = device_locked.custom_field_data.get("librenms_id", {})
+                obj_locked = model.objects.select_for_update().get(pk=pk)
+            except model.DoesNotExist:
+                messages.error(request, f"{model.__name__} no longer exists.")
+                return redirect(sync_url, pk=pk)
+            cf = obj_locked.custom_field_data.get("librenms_id", {})
             # Re-check after acquiring lock; mirror the pre-transaction protection logic
-            _is_protected = server_key in configured_servers or (legacy_url_configured and server_key == "default")
+            _is_protected = server_key in configured_servers or (
+                legacy_url_configured and not configured_servers and server_key == "default"
+            )
             if isinstance(cf, dict) and server_key in cf and not _is_protected:
                 del cf[server_key]
-                device_locked.custom_field_data["librenms_id"] = cf if cf else None
+                obj_locked.custom_field_data["librenms_id"] = cf if cf else None
                 try:
-                    device_locked.full_clean()
-                    device_locked.save()
+                    obj_locked.full_clean()
+                    obj_locked.save()
                 except ValidationError as exc:
                     transaction.set_rollback(True)
                     logger.error("Validation error removing LibreNMS mapping for server %r: %s", server_key, exc)
                     messages.error(request, "Validation error removing LibreNMS mapping.")
-                    return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+                    return redirect(sync_url, pk=pk)
                 except Exception:
                     transaction.set_rollback(True)
                     logger.exception("Unexpected error removing LibreNMS mapping for server %r", server_key)
                     messages.error(request, "An unexpected error occurred while removing the LibreNMS mapping.")
-                    return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+                    return redirect(sync_url, pk=pk)
                 messages.success(request, f"Removed LibreNMS mapping for server '{server_key}'.")
             else:
                 messages.warning(request, f"Mapping for server '{server_key}' was already removed.")
 
-        return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+        return redirect(sync_url, pk=pk)

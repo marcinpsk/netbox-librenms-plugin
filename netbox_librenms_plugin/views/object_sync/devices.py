@@ -109,6 +109,7 @@ class SingleInterfaceVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
         selected_device_id = data.get("device_id")
         interface_name = data.get("interface_name")
         interface_name_field = data.get("interface_name_field") or get_interface_name_field()
+        server_key = data.get("server_key") or None
 
         if not selected_device_id:
             return JsonResponse({"status": "error", "message": "No device ID provided"}, status=400)
@@ -125,7 +126,7 @@ class SingleInterfaceVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
         else:
             primary_device = selected_device
 
-        cached_data = cache.get(self.get_cache_key(primary_device, "ports"))
+        cached_data = cache.get(self.get_cache_key(primary_device, "ports", server_key))
 
         if cached_data:
             port_data = next(
@@ -339,6 +340,7 @@ class SaveVlanGroupOverridesView(LibreNMSPermissionMixin, CacheMixin, View):
         data = json.loads(request.body)
         device_id = data.get("device_id")
         vid_group_map = data.get("vid_group_map", {})
+        server_key = data.get("server_key") or None
 
         if not device_id:
             return JsonResponse({"status": "error", "message": "No device ID provided"}, status=400)
@@ -346,7 +348,7 @@ class SaveVlanGroupOverridesView(LibreNMSPermissionMixin, CacheMixin, View):
         device = get_object_or_404(Device, pk=device_id)
 
         # Use the remaining TTL of the ports cache so both expire together
-        ports_ttl = cache.ttl(self.get_cache_key(device, "ports"))
+        ports_ttl = cache.ttl(self.get_cache_key(device, "ports", server_key))
         if ports_ttl is None or ports_ttl <= 0:
             return JsonResponse(
                 {"status": "error", "message": "No cached port data; refresh interfaces first"},

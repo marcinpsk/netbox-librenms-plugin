@@ -453,7 +453,7 @@ def check_vlan_group_matches(
     return True
 
 
-def get_librenms_device_id(obj, server_key: str = "default"):
+def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool = True):
     """
     Get the LibreNMS device/port ID for a specific server from the JSON custom field.
 
@@ -463,12 +463,16 @@ def get_librenms_device_id(obj, server_key: str = "default"):
         New:     librenms_id = {"primary": 42}  → returns 42 only for server_key="primary"
 
     If the stored value (or the dict entry for server_key) is a string it is
-    normalised to ``int`` and written back so that subsequent DB queries can use
-    a plain integer without defensive ``str()`` casting.
+    normalised to ``int``.  When *auto_save* is ``True`` (the default) the
+    normalised value is written back so that subsequent DB queries can use a
+    plain integer without defensive ``str()`` casting.  Pass ``auto_save=False``
+    in read-only contexts (e.g. table renderers) to avoid triggering unintended
+    DB writes or signals.
 
     Args:
         obj: NetBox object with a ``librenms_id`` custom field.
         server_key: LibreNMS server key (from plugin ``servers`` config).
+        auto_save: When True (default), persist any normalised value back to the DB.
 
     Returns:
         int or None
@@ -485,7 +489,8 @@ def get_librenms_device_id(obj, server_key: str = "default"):
         except (ValueError, TypeError):
             return None
         obj.custom_field_data["librenms_id"] = int_id
-        obj.save()
+        if auto_save:
+            obj.save()
         return int_id
     if isinstance(cf_value, dict):
         value = cf_value.get(server_key)
@@ -497,7 +502,8 @@ def get_librenms_device_id(obj, server_key: str = "default"):
                 return None
             cf_value[server_key] = value
             obj.custom_field_data["librenms_id"] = cf_value
-            obj.save()
+            if auto_save:
+                obj.save()
         return value
     return None
 
