@@ -284,13 +284,37 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
 
         try:
             with transaction.atomic():
-                platform = Platform.objects.create(
-                    name=platform_name,
-                    manufacturer=manufacturer,
-                )
+                try:
+                    platform = Platform.objects.create(
+                        name=platform_name,
+                        manufacturer=manufacturer,
+                    )
+                except ValidationError as e:
+                    transaction.set_rollback(True)
+                    logger.error(
+                        f"ValidationError creating platform '{platform_name}' for device pk={pk}: {e}",
+                        exc_info=True,
+                    )
+                    messages.error(
+                        request,
+                        f"Platform '{platform_name}' could not be created (slug collision). Try a different name.",
+                    )
+                    return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
                 device.platform = platform
-                device.full_clean()
+                try:
+                    device.full_clean()
+                except ValidationError as e:
+                    transaction.set_rollback(True)
+                    logger.error(
+                        f"ValidationError validating device pk={pk}: {e}",
+                        exc_info=True,
+                    )
+                    messages.error(
+                        request,
+                        f"Device (pk={pk}) validation failed: {e}",
+                    )
+                    return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
                 device.save()
         except IntegrityError as e:
             error_str = str(e)
@@ -308,16 +332,6 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                     request,
                     f"Failed to assign platform '{platform_name}'. Please contact an administrator.",
                 )
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
-        except ValidationError as e:
-            logger.error(
-                f"ValidationError assigning platform '{platform_name}' to device pk={pk}: {e}",
-                exc_info=True,
-            )
-            messages.error(
-                request,
-                f"Failed to assign platform '{platform_name}'. Please contact an administrator.",
-            )
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         messages.success(
@@ -443,9 +457,11 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
             return redirect(sync_url, pk=pk)
 
         cf_value = obj.custom_field_data.get("librenms_id")
-        # Normalize legacy bare-integer to dict form so pre-migration mappings are found
+        # Normalize legacy bare-integer/string to dict form so pre-migration mappings are found
         if isinstance(cf_value, int):
             cf_value = {"default": cf_value}
+        elif isinstance(cf_value, str) and cf_value.isdigit():
+            cf_value = {"default": int(cf_value)}
         if not isinstance(cf_value, dict) or server_key not in cf_value:
             messages.warning(request, f"No mapping found for server '{server_key}'.")
             return redirect(sync_url, pk=pk)
@@ -477,9 +493,11 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
                 messages.error(request, f"{model.__name__} no longer exists.")
                 return redirect(sync_url, pk=pk)
             cf = obj_locked.custom_field_data.get("librenms_id", {})
-            # Normalize legacy bare-integer so the membership check works consistently
+            # Normalize legacy bare-integer/string so the membership check works consistently
             if isinstance(cf, int):
                 cf = {"default": cf}
+            elif isinstance(cf, str) and cf.isdigit():
+                cf = {"default": int(cf)}
             # Re-check after acquiring lock; mirror the pre-transaction protection logic
             _is_protected = server_key in configured_servers or (
                 legacy_url_configured and not configured_servers and server_key == "default"

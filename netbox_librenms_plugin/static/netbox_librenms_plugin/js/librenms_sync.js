@@ -628,7 +628,7 @@ function initializeVlanModalSave() {
                     console.error('Failed to persist VLAN group overrides: HTTP', response.status);
                 }
             }).catch(error => {
-                console.error('Failed to persist VLAN group overrides:', error);
+                console.error('Failed to persist VLAN group overrides:', error.message);
             });
         }
 
