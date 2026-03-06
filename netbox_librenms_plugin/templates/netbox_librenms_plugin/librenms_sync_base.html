@@ -155,7 +155,29 @@
                         <!-- LibreNMS ID Row -->
                         <tr>
                             <th scope="row" style="padding-left: 1rem;">ID</th>
-                            <td>{{ librenms_device_id }}</td>
+                            <td>
+                                {{ librenms_device_id }}
+                                {% if librenms_id_is_legacy %}
+                                {% with model_name=object|meta:"model_name" %}
+                                <form style="display:inline" method="post"
+                                      action="{% url 'plugins:netbox_librenms_plugin:convert_legacy_librenms_id' pk=object.pk %}">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="object_type" value="{{ model_name }}">
+                                    {% if librenms_id_serial_confirmed %}
+                                    <button type="submit" class="btn btn-sm btn-outline-warning py-0 px-1 ms-1"
+                                            title="Convert legacy ID to server-scoped format">
+                                        <i class="mdi mdi-database-sync"></i> Convert ID
+                                    </button>
+                                    {% else %}
+                                    <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-1 ms-1" disabled
+                                            title="Conversion requires matching NetBox and LibreNMS serial numbers">
+                                        <i class="mdi mdi-database-sync"></i> Convert ID
+                                    </button>
+                                    {% endif %}
+                                </form>
+                                {% endwith %}
+                                {% endif %}
+                            </td>
                         </tr>
 
                         <!-- Hostname Row -->

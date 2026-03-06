@@ -1273,11 +1273,12 @@ class DeviceConflictActionView(
                         status=400,
                     )
                 # Check that no other object already owns this ID on this server
-                # (both new namespaced format and legacy integer format)
+                # (both new namespaced format — int and string — and legacy integer format)
                 server_key = self.librenms_api.server_key
                 conflict = (
                     existing_model.objects.filter(
                         Q(**{f"custom_field_data__librenms_id__{server_key}": cf_locked_int})
+                        | Q(**{f"custom_field_data__librenms_id__{server_key}": str(cf_locked_int)})
                         | Q(custom_field_data__librenms_id=cf_locked_int)
                         | Q(custom_field_data__librenms_id=str(cf_locked_int))
                     )
