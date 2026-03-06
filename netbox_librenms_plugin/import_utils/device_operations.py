@@ -293,11 +293,12 @@ def validate_device_for_import(
             result["import_as_vm"] = True  # Force VM mode since VM exists
             result["can_import"] = False
 
-            # Detect legacy bare-integer format so UI can offer a migration action.
-            # Direct access needed to detect legacy integer format for migration prompt:
+            # Detect legacy bare-integer or string-digit format so UI can offer a migration action.
+            # Direct access needed to detect legacy format for migration prompt:
             # LibreNMSAPI.get_librenms_id() returns an int in both formats, so only the
             # raw type check on custom_field_data reveals whether migration is needed.
-            if isinstance(existing_vm.custom_field_data.get("librenms_id"), int):
+            _vm_cf_id = existing_vm.custom_field_data.get("librenms_id")
+            if isinstance(_vm_cf_id, int) or (isinstance(_vm_cf_id, str) and _vm_cf_id.isdigit()):
                 result["librenms_id_needs_migration"] = True
 
             # Check if name matches resolved name (accounts for use_sysname/strip_domain)
@@ -323,11 +324,12 @@ def validate_device_for_import(
                 result["existing_match_type"] = "librenms_id"
                 result["can_import"] = False
 
-                # Detect legacy bare-integer format so UI can offer a migration action.
-                # Direct access needed to detect legacy integer format for migration prompt:
+                # Detect legacy bare-integer or string-digit format so UI can offer a migration action.
+                # Direct access needed to detect legacy format for migration prompt:
                 # LibreNMSAPI.get_librenms_id() returns an int in both formats, so only the
                 # raw type check on custom_field_data reveals whether migration is needed.
-                if isinstance(existing_device.custom_field_data.get("librenms_id"), int):
+                _dev_cf_id = existing_device.custom_field_data.get("librenms_id")
+                if isinstance(_dev_cf_id, int) or (isinstance(_dev_cf_id, str) and _dev_cf_id.isdigit()):
                     result["librenms_id_needs_migration"] = True
 
                 # Check if name matches resolved name (VC-aware: compare against VC member name)

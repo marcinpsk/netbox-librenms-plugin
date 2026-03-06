@@ -52,6 +52,10 @@ class SyncInterfacesView(
         obj = self.get_object(object_type, object_id)
         self.object = obj  # Store for use in sync methods
 
+        # Read server_key from POST so we use the exact server the user was viewing
+        server_key = request.POST.get("server_key") or self.librenms_api.server_key
+        self._post_server_key = server_key
+
         interface_name_field = get_interface_name_field(request)
         self.interface_name_field = interface_name_field
         selected_interfaces = self.get_selected_interfaces(request, interface_name_field)
@@ -63,7 +67,7 @@ class SyncInterfacesView(
                 + f"?tab=interfaces&interface_name_field={interface_name_field}"
             )
 
-        ports_data = self.get_cached_ports_data(request, obj)
+        ports_data = self.get_cached_ports_data(request, obj, server_key)
         if ports_data is None:
             return redirect(
                 reverse(url_name, kwargs={"pk": object_id})
@@ -98,9 +102,11 @@ class SyncInterfacesView(
             return None
         return selected_interfaces
 
-    def get_cached_ports_data(self, request, obj):
+    def get_cached_ports_data(self, request, obj, server_key=None):
         """Return cached LibreNMS port data for the given object."""
-        cached_data = cache.get(self.get_cache_key(obj, "ports", self.librenms_api.server_key))
+        if server_key is None:
+            server_key = self.librenms_api.server_key
+        cached_data = cache.get(self.get_cache_key(obj, "ports", server_key))
         if not cached_data:
             messages.warning(
                 request,

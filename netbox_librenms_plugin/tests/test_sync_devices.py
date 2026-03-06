@@ -225,6 +225,7 @@ class TestRemoveServerMappingViewWiring:
 
     def test_has_permission_mixin(self):
         from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
-        from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
+        from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
         assert LibreNMSPermissionMixin in RemoveServerMappingView.__mro__
+        assert NetBoxObjectPermissionMixin in RemoveServerMappingView.__mro__

@@ -785,6 +785,7 @@ class LibreNMSImportFilterForm(forms.Form):
         """Fetch and populate LibreNMS locations in the dropdown."""
         from django.core.cache import cache
 
+        from netbox_librenms_plugin.import_utils.cache import get_location_choices_cache_key
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
         try:
@@ -797,7 +798,7 @@ class LibreNMSImportFilterForm(forms.Form):
             except Exception:
                 _server_key = "default"
 
-            cache_key = f"librenms_locations_choices:{_server_key}"
+            cache_key = get_location_choices_cache_key(_server_key)
             cached_choices = cache.get(cache_key)
             if cached_choices:
                 self.fields["librenms_location"].choices = cached_choices
@@ -806,7 +807,12 @@ class LibreNMSImportFilterForm(forms.Form):
             # Cache miss — instantiate the API client and fetch
             api = LibreNMSAPI()
             # Recompute cache_key with the resolved server_key in case it differs from settings
-            cache_key = f"librenms_locations_choices:{api.server_key}"
+            cache_key = get_location_choices_cache_key(api.server_key)
+            # Second cache check: the resolved server_key may differ from the settings key
+            cached_choices = cache.get(cache_key)
+            if cached_choices:
+                self.fields["librenms_location"].choices = cached_choices
+                return
 
             # Fetch locations from LibreNMS
             success, locations = api.get_locations()

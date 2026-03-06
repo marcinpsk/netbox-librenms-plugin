@@ -7,6 +7,7 @@ from django.contrib import messages
 from django.core.cache import cache
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
+from django.db.models import Q
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.utils.html import escape
@@ -1204,16 +1205,18 @@ class DeviceConflictActionView(
             # LibreNMSAPI.get_librenms_id() returns an int in both formats; only the raw
             # type check on custom_field_data reveals whether migration is needed.
             cf_value = existing_device.custom_field_data.get("librenms_id")
-            if not isinstance(cf_value, int):
+            if not (isinstance(cf_value, int) or (isinstance(cf_value, str) and cf_value.isdigit())):
                 return HttpResponse(
                     "Device librenms_id is already in JSON format; no migration needed.",
                     status=400,
                 )
+            # Normalise string-digit to int for consistent comparison
+            cf_int = int(cf_value) if isinstance(cf_value, str) else cf_value
             # Verify the stored legacy ID matches the active LibreNMS device_id so we don't
             # migrate a stale/incorrect association to the wrong server mapping.
-            if cf_value != librenms_id:
+            if cf_int != librenms_id:
                 return HttpResponse(
-                    f"Legacy librenms_id ({cf_value}) does not match the active device ID "
+                    f"Legacy librenms_id ({cf_int}) does not match the active device ID "
                     f"({librenms_id}); cannot migrate safely.",
                     status=400,
                 )
@@ -1232,14 +1235,15 @@ class DeviceConflictActionView(
                     )
                 # Re-check under lock — another request may have already migrated it
                 cf_locked = locked_device.custom_field_data.get("librenms_id")
-                if not isinstance(cf_locked, int):
+                if not (isinstance(cf_locked, int) or (isinstance(cf_locked, str) and cf_locked.isdigit())):
                     return HttpResponse(
                         "Device librenms_id is already in JSON format; no migration needed.",
                         status=400,
                     )
-                if cf_locked != librenms_id:
+                cf_locked_int = int(cf_locked) if isinstance(cf_locked, str) else cf_locked
+                if cf_locked_int != librenms_id:
                     return HttpResponse(
-                        f"Legacy librenms_id changed under lock ({cf_locked} != {librenms_id}); cannot migrate safely.",
+                        f"Legacy librenms_id changed under lock ({cf_locked_int} != {librenms_id}); cannot migrate safely.",
                         status=400,
                     )
                 # Check that no other device already owns this ID on this server
@@ -1247,15 +1251,15 @@ class DeviceConflictActionView(
                 server_key = self.librenms_api.server_key
                 conflict = (
                     Device.objects.filter(
-                        Q(**{f"custom_field_data__librenms_id__{server_key}": cf_locked})
-                        | Q(custom_field_data__librenms_id=cf_locked)
+                        Q(**{f"custom_field_data__librenms_id__{server_key}": cf_locked_int})
+                        | Q(custom_field_data__librenms_id=cf_locked_int)
                     )
                     .exclude(pk=locked_device.pk)
                     .exists()
                 )
                 if conflict:
                     return HttpResponse(
-                        f"Another device already has librenms_id {cf_locked} for server '{server_key}'; cannot migrate.",
+                        f"Another device already has librenms_id {cf_locked_int} for server '{server_key}'; cannot migrate.",
                         status=409,
                     )
                 migrate_legacy_librenms_id(locked_device, self.librenms_api.server_key)
@@ -1263,7 +1267,7 @@ class DeviceConflictActionView(
                     return err
             logger.info(
                 f"Migrated legacy librenms_id on '{existing_device.name}' "
-                f"to {{{self.librenms_api.server_key!r}: {cf_value}}}"
+                f"to {{{self.librenms_api.server_key!r}: {cf_int}}}"
             )
 
         else:
