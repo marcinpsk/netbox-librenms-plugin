@@ -404,6 +404,7 @@
       </div>
       {% if validation.librenms_id_needs_migration %}
       <div class="mb-3">
+        {% if validation.existing_device._meta.model_name == 'device' %}
         <form style="display:inline"
               hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
               hx-swap="none">
@@ -423,6 +424,9 @@
             <i class="mdi mdi-database-sync"></i> Migrate ID format
           </button>
         </form>
+        {% else %}
+        <span class="text-muted small"><i class="mdi mdi-information-outline"></i> Legacy ID migration is only available for Devices.</span>
+        {% endif %}
       </div>
       {% endif %}
 

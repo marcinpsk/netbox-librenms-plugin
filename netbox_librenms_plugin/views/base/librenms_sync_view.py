@@ -166,6 +166,10 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                         "display_name": plugins_cfg.get("display_name") or sk,
                     }
             is_configured = srv_cfg is not None
+            # Treat malformed (non-dict) server config entries as unconfigured
+            if srv_cfg is not None and not isinstance(srv_cfg, dict):
+                srv_cfg = None
+                is_configured = False
             librenms_url = srv_cfg.get("librenms_url") if srv_cfg else None
             display_name = (srv_cfg.get("display_name") or sk) if srv_cfg else sk
             device_url = f"{librenms_url}/device/device={did}/" if librenms_url else None

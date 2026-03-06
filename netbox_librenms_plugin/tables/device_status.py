@@ -488,7 +488,15 @@ class DeviceImportTable(tables.Table):
                 btn_icon = "mdi-check-circle"
                 btn_label = ""
 
-            btn_title = "Resolve conflict" if (has_actions or has_mismatch) else "View details"
+            btn_title = (
+                "Resolve conflict"
+                if (has_actions or has_mismatch)
+                else (
+                    "Migrate Legacy ID"
+                    if match_type == "librenms_id" and validation.get("librenms_id_needs_migration")
+                    else "View details"
+                )
+            )
             aria_attr = f'aria-label="{btn_title}" '
             buttons.append(
                 f'<button type="button" '

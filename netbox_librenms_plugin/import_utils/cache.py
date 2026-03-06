@@ -9,6 +9,11 @@ from django.core.cache import cache
 logger = logging.getLogger(__name__)
 
 
+def get_location_choices_cache_key(server_key: str) -> str:
+    """Return the cache key for LibreNMS location choices for a given server."""
+    return f"librenms_locations_choices:{server_key}"
+
+
 def get_cache_metadata_key(
     server_key: str, filters: dict, vc_enabled: bool, use_sysname: bool = True, strip_domain: bool = False
 ) -> str:
@@ -70,7 +75,7 @@ def get_active_cached_searches(server_key: str) -> list[dict]:
 
     # Get cached location choices for enrichment; scoped by server_key so labels
     # from different LibreNMS servers don't bleed into each other's filter summaries.
-    location_cache_key = f"librenms_locations_choices:{server_key}"
+    location_cache_key = get_location_choices_cache_key(server_key)
     cached_locations = cache.get(location_cache_key)
     if cached_locations:
         location_choices = dict(cached_locations)

@@ -479,7 +479,9 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
         from django.conf import settings as django_settings
 
         plugins_cfg = django_settings.PLUGINS_CONFIG.get("netbox_librenms_plugin", {})
-        configured_servers = plugins_cfg.get("servers", {})
+        configured_servers = plugins_cfg.get("servers") or {}
+        if not isinstance(configured_servers, dict):
+            configured_servers = {}
         legacy_url_configured = bool(plugins_cfg.get("librenms_url"))
         if server_key in configured_servers or (
             legacy_url_configured and not configured_servers and server_key == "default"
