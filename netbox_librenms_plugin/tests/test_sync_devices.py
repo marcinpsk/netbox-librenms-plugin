@@ -121,6 +121,10 @@ class TestUpdateDeviceLocationView:
     """UpdateDeviceLocationView.post calls update_device_field with site name."""
 
     def test_calls_update_device_field_with_site(self):
+        """post() resolves the NetBox site name and passes the exact API payload
+        expected by LibreNMS's PATCH /api/v0/devices/{id}/field endpoint:
+        ``{"field": ["location", "override_sysLocation"], "data": [name, "1"]}``.
+        """
         from netbox_librenms_plugin.views.sync.devices import UpdateDeviceLocationView
 
         view = object.__new__(UpdateDeviceLocationView)
@@ -139,9 +143,10 @@ class TestUpdateDeviceLocationView:
                 with patch("netbox_librenms_plugin.views.sync.devices.messages") as mock_msg:
                     view.post(view.request, pk=1)
 
-        view._librenms_api.update_device_field.assert_called_once()
-        call_args = view._librenms_api.update_device_field.call_args
-        assert 42 in call_args[0]
+        view._librenms_api.update_device_field.assert_called_once_with(
+            42,
+            {"field": ["location", "override_sysLocation"], "data": ["London", "1"]},
+        )
         mock_msg.success.assert_called_once()
 
     def test_warning_when_no_site(self):

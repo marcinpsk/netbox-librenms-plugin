@@ -27,6 +27,12 @@ class TestGetLibreNMSDeviceId:
         assert result == 42
 
     def test_legacy_bare_int_returned_for_any_server_key(self):
+        """Legacy bare integers are returned regardless of which server_key is queried.
+
+        Backward-compat: devices imported before multi-server support used a plain int.
+        Any server_key must still resolve that int so existing records keep working
+        without migration.
+        """
         from netbox_librenms_plugin.utils import get_librenms_device_id
 
         obj = MagicMock()
@@ -69,7 +75,15 @@ class TestFindByLibreNMSId:
     """Tests for find_by_librenms_id()."""
 
     def test_queries_server_key_and_legacy_integer(self):
+        """find_by_librenms_id() issues a Q that covers both the JSON server-key branch
+        and the legacy bare-int branch in a single filter() call.
+
+        We inspect the Q object's children directly because the two branches must
+        coexist — matching only one would silently miss devices stored in the other
+        format.
+        """
         from unittest.mock import MagicMock
+        from django.db.models import Q
         from netbox_librenms_plugin.utils import find_by_librenms_id
 
         mock_model = MagicMock()
@@ -80,6 +94,15 @@ class TestFindByLibreNMSId:
         find_by_librenms_id(mock_model, 42, "default")
 
         mock_model.objects.filter.assert_called_once()
+        # Verify the Q predicate covers both the server-key JSON branch and legacy bare-int branch
+        call_args = mock_model.objects.filter.call_args
+        q_arg = call_args[0][0]
+        assert isinstance(q_arg, Q)
+        # The combined Q should contain both children
+        assert len(q_arg.children) == 2
+        children_keys = {child[0] for child in q_arg.children}
+        assert "custom_field_data__librenms_id__default" in children_keys
+        assert "custom_field_data__librenms_id" in children_keys
 
     def test_returns_first_matching_object(self):
         from netbox_librenms_plugin.utils import find_by_librenms_id

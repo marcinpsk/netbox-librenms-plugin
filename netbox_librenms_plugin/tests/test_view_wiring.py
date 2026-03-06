@@ -125,6 +125,12 @@ class TestRequiredObjectPermissionsWiring:
     and include the NetBoxObjectPermissionMixin (and LibreNMSPermissionMixin) in their MRO."""
 
     def _assert_has_mixins(self, view_class):
+        """Assert that *view_class* includes both permission mixins in its MRO.
+
+        Checking the MRO (not just runtime behaviour) guarantees that the permission
+        enforcement is wired at the class level — a missing mixin would silently skip
+        all permission checks even if the tests otherwise pass.
+        """
         from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
         assert NetBoxObjectPermissionMixin in view_class.__mro__, (
@@ -219,10 +225,12 @@ class TestViewPropertyLazyInit:
         assert dummy._librenms_api is None
 
     def test_sync_interfaces_has_librenms_api_property_via_class(self):
+        """BaseLibreNMSSyncView must expose librenms_api through its MRO.
+
+        SyncInterfacesView gains LibreNMSAPIMixin in the view-fixes PR; on the
+        current upstream/develop baseline we verify the property via
+        BaseLibreNMSSyncView, which inherits the mixin unconditionally.
+        """
         from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
 
-        # Verify that a view which uses LibreNMSAPIMixin has the librenms_api property
-        # accessible through its MRO. BaseLibreNMSSyncView is the canonical view
-        # that inherits LibreNMSAPIMixin; SyncInterfacesView gains this mixin
-        # once the LibreNMSAPIMixin wiring PR is merged.
         assert any("librenms_api" in vars(cls) for cls in BaseLibreNMSSyncView.__mro__)
