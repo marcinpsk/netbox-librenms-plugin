@@ -90,6 +90,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         cable_context = self.get_cable_context(request, obj)
         ip_context = self.get_ip_context(request, obj)
         vlan_context = self.get_vlan_context(request, obj)
+        module_context = self.get_module_context(request, obj)
 
         interface_name_field = get_interface_name_field(request)
 
@@ -101,12 +102,18 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
 
         manufacturers = Manufacturer.objects.all().order_by("name")
 
+        # Detect legacy bare-int librenms_id format for conversion badge
+        _lookup_device = getattr(self, "_librenms_lookup_device", obj)
+        _raw_cf = _lookup_device.cf.get("librenms_id") if _lookup_device else None
+        librenms_id_is_legacy = isinstance(_raw_cf, (int, str)) and not isinstance(_raw_cf, bool)
+
         context.update(
             {
                 "interface_sync": interface_context,
                 "cable_sync": cable_context,
                 "ip_sync": ip_context,
                 "vlan_sync": vlan_context,
+                "module_sync": module_context,
                 "v1v2form": AddToLIbreSNMPV1V2(prefix="v1v2"),
                 "v3form": AddToLIbreSNMPV3(prefix="v3"),
                 "librenms_device_id": self.librenms_id,
@@ -121,6 +128,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 "all_server_mappings": self._build_all_server_mappings(
                     getattr(self, "_librenms_lookup_device", obj), self.librenms_api.server_key
                 ),
+                "librenms_id_is_legacy": librenms_id_is_legacy,
             }
         )
 
@@ -336,6 +344,13 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         """
         Get the context data for VLAN sync.
         Subclasses should override this method.
+        """
+        return None
+
+    def get_module_context(self, request, obj):
+        """
+        Get the context data for module sync.
+        Subclasses should override this method if applicable.
         """
         return None
 
