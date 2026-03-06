@@ -100,7 +100,7 @@ class SyncInterfacesView(
 
     def get_cached_ports_data(self, request, obj):
         """Return cached LibreNMS port data for the given object."""
-        cached_data = cache.get(self.get_cache_key(obj, "ports"))
+        cached_data = cache.get(self.get_cache_key(obj, "ports", self.librenms_api.server_key))
         if not cached_data:
             messages.warning(
                 request,
