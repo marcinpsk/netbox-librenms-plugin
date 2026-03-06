@@ -815,6 +815,7 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
         if existing:
             context["sync_info"] = self._build_sync_info(libre_device, existing)
             context["existing_id_servers"] = self._build_id_server_info(existing)
+            context["existing_device_model_name"] = existing._meta.model_name
 
         return render(
             request,
@@ -1271,6 +1272,7 @@ class DeviceConflictActionView(
                     existing_model.objects.filter(
                         Q(**{f"custom_field_data__librenms_id__{server_key}": cf_locked_int})
                         | Q(custom_field_data__librenms_id=cf_locked_int)
+                        | Q(custom_field_data__librenms_id=str(cf_locked_int))
                     )
                     .exclude(pk=locked_device.pk)
                     .exists()
