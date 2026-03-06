@@ -35,6 +35,7 @@ def _make_api(url, token="test-token"):
     with patch("netbox_librenms_plugin.librenms_api.get_plugin_config") as mock_cfg:
         mock_cfg.side_effect = lambda _plugin, key: servers_config if key == "servers" else None
         api = LibreNMSAPI(server_key="test")
+    assert api.server_key == "test"
     return api
 
 
@@ -65,7 +66,32 @@ class TestLibreNMSAPIPortsFetch:
     """LibreNMSAPI.get_ports() correctly parses mock server responses."""
 
     def test_get_ports_returns_dict_with_ports_key(self, mock_server):
-        mock_server.ports_response(device_id=1)
+        captured_query: dict = {}
+        ports_body = {
+            "status": "ok",
+            "ports": [
+                {
+                    "port_id": 101,
+                    "ifName": "GigabitEthernet0/1",
+                    "ifDescr": "GigabitEthernet0/1",
+                    "ifType": "ethernetCsmacd",
+                    "ifSpeed": 1_000_000_000,
+                    "ifAdminStatus": "up",
+                    "ifAlias": "uplink",
+                    "ifPhysAddress": "aa:bb:cc:dd:ee:01",
+                    "ifMtu": 1500,
+                    "ifVlan": 1,
+                    "ifTrunk": 0,
+                }
+            ],
+        }
+
+        def _route(method, path, query, headers, body):
+            # query is already parsed by the mock server (dict of lists)
+            captured_query.update(query)
+            return 200, ports_body
+
+        mock_server.routes["/api/v0/devices/1/ports"] = _route
         api = _make_api(mock_server.url)
 
         success, data = api.get_ports(1)
@@ -74,6 +100,9 @@ class TestLibreNMSAPIPortsFetch:
         assert isinstance(data, dict)
         assert "ports" in data
         assert data["ports"][0]["ifName"] == "GigabitEthernet0/1"
+        # Verify the outgoing request includes required query parameters
+        assert "columns" in captured_query, "get_ports() must send a 'columns' query param"
+        assert "vlans" in captured_query.get("with", []), "get_ports() must request 'with=vlans'"
 
     def test_get_ports_returns_false_on_auth_error(self, mock_server):
         mock_server.auth_error_response(path="/api/v0/devices/1/ports")

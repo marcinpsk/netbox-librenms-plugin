@@ -121,7 +121,18 @@ class TestPermissionMixinWiring:
 
 
 class TestRequiredObjectPermissionsWiring:
-    """POST-only sync views that modify NetBox objects must declare required_object_permissions."""
+    """POST-only sync views that modify NetBox objects must declare required_object_permissions
+    and include the NetBoxObjectPermissionMixin (and LibreNMSPermissionMixin) in their MRO."""
+
+    def _assert_has_mixins(self, view_class):
+        from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
+
+        assert NetBoxObjectPermissionMixin in view_class.__mro__, (
+            f"{view_class.__name__} is missing NetBoxObjectPermissionMixin"
+        )
+        assert LibreNMSPermissionMixin in view_class.__mro__, (
+            f"{view_class.__name__} is missing LibreNMSPermissionMixin"
+        )
 
     def test_sync_interfaces_has_required_object_permissions(self):
         from dcim.models import Interface
@@ -129,6 +140,7 @@ class TestRequiredObjectPermissionsWiring:
 
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
+        self._assert_has_mixins(SyncInterfacesView)
         view = object.__new__(SyncInterfacesView)
         # Dynamic views compute permissions per-request; verify the resolver works
         perms_device = view.get_required_permissions_for_object_type("device")
@@ -142,31 +154,31 @@ class TestRequiredObjectPermissionsWiring:
     def test_sync_cables_has_required_object_permissions(self):
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
-        assert hasattr(SyncCablesView, "required_object_permissions")
+        self._assert_has_mixins(SyncCablesView)
         assert "POST" in SyncCablesView.required_object_permissions
 
     def test_sync_vlans_has_required_object_permissions(self):
         from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
 
-        assert hasattr(SyncVLANsView, "required_object_permissions")
+        self._assert_has_mixins(SyncVLANsView)
         assert "POST" in SyncVLANsView.required_object_permissions
 
     def test_sync_ip_addresses_has_required_object_permissions(self):
         from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
-        assert hasattr(SyncIPAddressesView, "required_object_permissions")
+        self._assert_has_mixins(SyncIPAddressesView)
         assert "POST" in SyncIPAddressesView.required_object_permissions
 
     def test_update_device_name_has_required_object_permissions(self):
         from netbox_librenms_plugin.views.sync.device_fields import UpdateDeviceNameView
 
-        assert hasattr(UpdateDeviceNameView, "required_object_permissions")
+        self._assert_has_mixins(UpdateDeviceNameView)
         assert "POST" in UpdateDeviceNameView.required_object_permissions
 
     def test_update_device_serial_has_required_object_permissions(self):
         from netbox_librenms_plugin.views.sync.device_fields import UpdateDeviceSerialView
 
-        assert hasattr(UpdateDeviceSerialView, "required_object_permissions")
+        self._assert_has_mixins(UpdateDeviceSerialView)
         assert "POST" in UpdateDeviceSerialView.required_object_permissions
 
     def test_delete_interfaces_has_required_object_permissions(self):
@@ -175,6 +187,7 @@ class TestRequiredObjectPermissionsWiring:
 
         from netbox_librenms_plugin.views.sync.interfaces import DeleteNetBoxInterfacesView
 
+        self._assert_has_mixins(DeleteNetBoxInterfacesView)
         view = object.__new__(DeleteNetBoxInterfacesView)
         # Dynamic views compute permissions per-request; verify the resolver works
         perms_device = view.get_required_permissions_for_object_type("device")
@@ -206,8 +219,10 @@ class TestViewPropertyLazyInit:
         assert dummy._librenms_api is None
 
     def test_sync_interfaces_has_librenms_api_property_via_class(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
 
-        # Verify that SyncInterfacesView inherits the librenms_api property
-        # through its MRO (comes from LibreNMSAPIMixin)
-        assert any("librenms_api" in vars(cls) for cls in SyncInterfacesView.__mro__)
+        # Verify that a view which uses LibreNMSAPIMixin has the librenms_api property
+        # accessible through its MRO. BaseLibreNMSSyncView is the canonical view
+        # that inherits LibreNMSAPIMixin; SyncInterfacesView gains this mixin
+        # once the LibreNMSAPIMixin wiring PR is merged.
+        assert any("librenms_api" in vars(cls) for cls in BaseLibreNMSSyncView.__mro__)
