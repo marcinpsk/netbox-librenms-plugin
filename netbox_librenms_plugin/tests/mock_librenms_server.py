@@ -122,8 +122,8 @@ class MockLibreNMSServer:
     # ------- default LibreNMS-shaped responses -------
 
     def add_device_response(self, device_id: int = 1, hostname: str = "test-host"):
-        self.register(
-            "/api/v0/devices",
+        self._server.routes["POST /api/v0/devices"] = (
+            200,
             {"status": "ok", "id": device_id, "hostname": hostname},
         )
 
