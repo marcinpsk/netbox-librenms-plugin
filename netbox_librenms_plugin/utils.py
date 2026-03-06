@@ -462,6 +462,10 @@ def get_librenms_device_id(obj, server_key: str = "default"):
         Legacy:  librenms_id = 42          → returns 42 for any server_key
         New:     librenms_id = {"primary": 42}  → returns 42 only for server_key="primary"
 
+    If the stored value (or the dict entry for server_key) is a string it is
+    normalised to ``int`` and written back so that subsequent DB queries can use
+    a plain integer without defensive ``str()`` casting.
+
     Args:
         obj: NetBox object with a ``librenms_id`` custom field.
         server_key: LibreNMS server key (from plugin ``servers`` config).
@@ -474,8 +478,27 @@ def get_librenms_device_id(obj, server_key: str = "default"):
         return None
     if isinstance(cf_value, int):
         return cf_value  # backward compat: bare integer from pre-migration
+    if isinstance(cf_value, str):
+        # Someone stored a bare string (e.g., via NetBox UI/API) — normalise to int.
+        try:
+            int_id = int(cf_value)
+        except (ValueError, TypeError):
+            return None
+        obj.custom_field_data["librenms_id"] = int_id
+        obj.save()
+        return int_id
     if isinstance(cf_value, dict):
-        return cf_value.get(server_key)
+        value = cf_value.get(server_key)
+        if isinstance(value, str):
+            # Normalise string-stored ID inside JSON dict and write back.
+            try:
+                value = int(value)
+            except (ValueError, TypeError):
+                return None
+            cf_value[server_key] = value
+            obj.custom_field_data["librenms_id"] = cf_value
+            obj.save()
+        return value
     return None
 
 
