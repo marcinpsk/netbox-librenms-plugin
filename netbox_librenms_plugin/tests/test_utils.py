@@ -486,13 +486,14 @@ class TestSetLibreNMSDeviceId:
         assert obj.custom_field_data["librenms_id"] == {"primary": 10}
 
     def test_migrates_legacy_int_on_first_write(self):
-        """Legacy bare-integer value is migrated to dict format on first write."""
+        """Legacy bare-integer value blocks the write (no silent migration)."""
         from netbox_librenms_plugin.utils import set_librenms_device_id
 
         obj = MagicMock()
         obj.custom_field_data = {"librenms_id": 7}
         set_librenms_device_id(obj, 99, server_key="secondary")
-        assert obj.custom_field_data["librenms_id"] == {"default": 7, "secondary": 99}
+        # Write must be skipped; user must use the migration workflow.
+        assert obj.custom_field_data["librenms_id"] == 7
 
     def test_adds_new_server_key_to_existing_dict(self):
         """Adding a new server key preserves existing keys."""

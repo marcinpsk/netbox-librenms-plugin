@@ -19,8 +19,19 @@ from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin, Li
 
 
 def _librenms_id_q(server_key: str, value) -> Q:
-    """Return a combined Q matching JSON-field and legacy bare-int librenms_id."""
-    return Q(**{f"custom_field_data__librenms_id__{server_key}": value}) | Q(custom_field_data__librenms_id=value)
+    """Return a combined Q matching JSON-field and legacy bare-int librenms_id.
+
+    Matches both integer and string representations to handle any stored format.
+    """
+    q = Q(**{f"custom_field_data__librenms_id__{server_key}": value}) | Q(custom_field_data__librenms_id=value)
+    try:
+        int_val = int(value)
+        if int_val != value:  # add int variant only when value isn't already an int
+            q |= Q(**{f"custom_field_data__librenms_id__{server_key}": int_val})
+            q |= Q(custom_field_data__librenms_id=int_val)
+    except (TypeError, ValueError):
+        pass
+    return q
 
 
 class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
@@ -285,6 +296,20 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 links_data = cached_links_data.get("links", [])
             else:
                 return None
+
+        if not fetch_fresh:
+            # Strip derived fields so re-enrichment starts from raw link data;
+            # without this, stale IDs/URLs persist when NetBox objects are
+            # deleted and cause DoesNotExist in check_cable_status().
+            _raw_keys = {
+                "local_port",
+                "local_port_id",
+                "remote_port",
+                "remote_device",
+                "remote_port_id",
+                "remote_device_id",
+            }
+            links_data = [{k: v for k, v in link.items() if k in _raw_keys} for link in links_data]
 
         # Enrich data in both cases to ensure current NetBox state
         links_data = self.enrich_links_data(links_data, obj)
