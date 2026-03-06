@@ -98,11 +98,14 @@ class TestFindByLibreNMSId:
         call_args = mock_model.objects.filter.call_args
         q_arg = call_args[0][0]
         assert isinstance(q_arg, Q)
+        assert q_arg.connector == "OR"
         # The combined Q should contain both children
         assert len(q_arg.children) == 2
         children_keys = {child[0] for child in q_arg.children}
+        children_values = {child[1] for child in q_arg.children}
         assert "custom_field_data__librenms_id__default" in children_keys
         assert "custom_field_data__librenms_id" in children_keys
+        assert 42 in children_values
 
     def test_returns_first_matching_object(self):
         from netbox_librenms_plugin.utils import find_by_librenms_id
@@ -143,9 +146,12 @@ class TestFindByLibreNMSId:
         call_args = mock_model.objects.filter.call_args
         q_arg = call_args[0][0]
         assert isinstance(q_arg, Q)
+        assert q_arg.connector == "OR"
         children_keys = {child[0] for child in q_arg.children}
+        children_values = {child[1] for child in q_arg.children}
         assert "custom_field_data__librenms_id__default" in children_keys
         assert "custom_field_data__librenms_id" in children_keys
+        assert 42 in children_values
 
 
 class TestMigrateLegacyLibreNMSId:

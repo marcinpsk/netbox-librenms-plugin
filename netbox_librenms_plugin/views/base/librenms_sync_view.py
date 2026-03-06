@@ -32,8 +32,8 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         # one logical device per VC
         librenms_lookup_device = obj
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-            # Check if this device has its own librenms_id
-            if not obj.cf.get("librenms_id"):
+            # Check if this device has its own librenms_id for the active server
+            if not self.librenms_api.get_librenms_id(obj):
                 # Use helper function to determine the sync device
                 sync_device = get_librenms_sync_device(obj)
                 if sync_device:
