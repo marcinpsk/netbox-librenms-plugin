@@ -35,7 +35,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
             # Check if this device has its own librenms_id for the active server
             if not self.librenms_api.get_librenms_id(obj):
                 # Use helper function to determine the sync device
-                sync_device = get_librenms_sync_device(obj)
+                sync_device = get_librenms_sync_device(obj, server_key=self.librenms_api.server_key)
                 if sync_device:
                     librenms_lookup_device = sync_device
 
@@ -65,14 +65,14 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
 
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
             # Use helper function to determine the sync device
-            librenms_sync_device = get_librenms_sync_device(obj)
+            librenms_sync_device = get_librenms_sync_device(obj, server_key=self.librenms_api.server_key)
 
             # Determine sync device status
             sync_device_has_librenms_id = False
             sync_device_has_primary_ip = False
 
             if librenms_sync_device:
-                sync_device_has_librenms_id = bool(librenms_sync_device.cf.get("librenms_id"))
+                sync_device_has_librenms_id = bool(self.librenms_api.get_librenms_id(librenms_sync_device))
                 sync_device_has_primary_ip = bool(librenms_sync_device.primary_ip)
 
             context.update(

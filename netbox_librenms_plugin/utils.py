@@ -77,7 +77,7 @@ def get_virtual_chassis_member(device: Device, port_name: str) -> Device:
         return device
 
 
-def get_librenms_sync_device(device: Device) -> Optional[Device]:
+def get_librenms_sync_device(device: Device, server_key: str = "default") -> Optional[Device]:
     """
     Determine which Virtual Chassis member should handle LibreNMS sync operations.
 
@@ -85,13 +85,14 @@ def get_librenms_sync_device(device: Device) -> Optional[Device]:
     should have the librenms_id custom field set and be used for sync operations.
 
     Priority order for selecting the sync device:
-    1. Any member with librenms_id custom field set (highest priority - already configured)
+    1. Any member with librenms_id custom field set for *server_key* (highest priority)
     2. Master device with primary IP (if master is designated)
     3. Any member with primary IP (fallback when no master or master lacks IP)
     4. Member with lowest vc_position (for error messages when no IPs configured)
 
     Args:
         device (Device): Any device in the virtual chassis.
+        server_key: LibreNMS server key used to resolve the correct librenms_id mapping.
 
     Returns:
         Optional[Device]: The device that should handle LibreNMS sync, or None if
@@ -103,9 +104,9 @@ def get_librenms_sync_device(device: Device) -> Optional[Device]:
     vc = device.virtual_chassis
     all_members = vc.members.all()
 
-    # Priority 1: Check if ANY member has librenms_id configured
+    # Priority 1: Check if ANY member has librenms_id configured for this server
     for member in all_members:
-        if member.cf.get("librenms_id"):
+        if get_librenms_device_id(member, server_key, auto_save=False):
             return member
 
     # Priority 2: Use master device if it has primary IP
@@ -476,7 +477,7 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
 
     Supports both the legacy integer format and the new multi-server JSON format::
 
-        Legacy:  librenms_id = 42          → returns 42 for any server_key
+        Legacy:  librenms_id = 42          → returns 42 only when server_key == "default"
         New:     librenms_id = {"primary": 42}  → returns 42 only for server_key="primary"
 
     If the stored value (or the dict entry for server_key) is a string it is
@@ -498,12 +499,17 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
     if cf_value is None:
         return None
     if isinstance(cf_value, int):
-        return cf_value  # backward compat: bare integer from pre-migration
+        # Legacy bare integer — only a fallback for the canonical default server to
+        # avoid cross-server shadowing in multi-server setups.
+        return cf_value if server_key == "default" else None
     if isinstance(cf_value, str):
         # Someone stored a bare string (e.g., via NetBox UI/API) — normalise to int.
+        # Only accepted as legacy fallback for the default server.
         try:
             int_id = int(cf_value)
         except (ValueError, TypeError):
+            return None
+        if server_key != "default":
             return None
         obj.custom_field_data["librenms_id"] = int_id
         if auto_save:
@@ -564,7 +570,8 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
     *librenms_id* under *server_key*.
 
     Also matches legacy records that stored ``librenms_id`` as a bare integer
-    directly in ``custom_field_data``.
+    directly in ``custom_field_data``, but **only** when *server_key* is ``"default"``
+    to avoid cross-server shadowing in multi-server setups.
 
     Args:
         model: A Django model class (Device, VirtualMachine, Interface, …).
@@ -574,10 +581,12 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
     Returns:
         Model instance or None
     """
-    return model.objects.filter(
-        Q(**{f"custom_field_data__librenms_id__{server_key}": librenms_id})
-        | Q(custom_field_data__librenms_id=librenms_id)
-    ).first()
+    q = Q(**{f"custom_field_data__librenms_id__{server_key}": librenms_id})
+    if server_key == "default":
+        # Also match legacy bare-integer IDs, but only for the canonical default key
+        # to avoid cross-server shadowing in multi-server setups.
+        q |= Q(custom_field_data__librenms_id=librenms_id)
+    return model.objects.filter(q).first()
 
 
 def migrate_legacy_librenms_id(obj, server_key: str = "default") -> bool:

@@ -26,19 +26,19 @@ class TestGetLibreNMSDeviceId:
         result = get_librenms_device_id(obj, "default")
         assert result == 42
 
-    def test_legacy_bare_int_returned_for_any_server_key(self):
-        """Legacy bare integers are returned regardless of which server_key is queried.
+    def test_legacy_bare_int_returned_only_for_default_key(self):
+        """Legacy bare integers are only returned for server_key == "default".
 
-        Backward-compat: devices imported before multi-server support used a plain int.
-        Any server_key must still resolve that int so existing records keep working
-        without migration.
+        Multi-server setups must not shadow unrelated servers with a legacy value
+        that was stored before the JSON dict format was introduced.
         """
         from netbox_librenms_plugin.utils import get_librenms_device_id
 
         obj = MagicMock()
         obj.cf = {"librenms_id": 99}
-        assert get_librenms_device_id(obj, "production") == 99
-        assert get_librenms_device_id(obj, "secondary") == 99
+        assert get_librenms_device_id(obj, "default") == 99
+        assert get_librenms_device_id(obj, "production") is None
+        assert get_librenms_device_id(obj, "secondary") is None
 
     def test_returns_value_for_matching_server_key(self):
         from netbox_librenms_plugin.utils import get_librenms_device_id
