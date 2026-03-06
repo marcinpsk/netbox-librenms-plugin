@@ -312,14 +312,17 @@ class CacheMixin:
             return f"{base}_{server_key}"
         return base
 
-    def get_vlan_overrides_key(self, obj):
+    def get_vlan_overrides_key(self, obj, server_key=None):
         """
         Get the cache key for user VLAN group override selections.
 
         Stores a {vid_str: group_id_str} map so that "apply to all" VLAN
-        group choices persist across table pages.
+        group choices persist across table pages. Including server_key scopes
+        overrides per-server to avoid leakage when multiple servers are configured.
         """
         model_name = obj._meta.model_name
+        if server_key:
+            return f"librenms_vlan_group_overrides_{model_name}_{obj.pk}_{server_key}"
         return f"librenms_vlan_group_overrides_{model_name}_{obj.pk}"
 
 
