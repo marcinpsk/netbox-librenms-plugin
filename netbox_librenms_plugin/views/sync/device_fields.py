@@ -423,6 +423,8 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
     def post(self, request, pk):
         # Scope required permissions to the specific model being modified before checking.
         object_type = request.POST.get("object_type", "device")
+        if object_type == "virtualmachine":
+            object_type = "vm"
         target_model = VirtualMachine if object_type == "vm" else Device
         self.required_object_permissions = {"POST": [("change", target_model)]}
 

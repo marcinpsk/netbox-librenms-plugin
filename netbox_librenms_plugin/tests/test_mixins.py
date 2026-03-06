@@ -159,10 +159,7 @@ class TestCacheMixinKeyGeneration:
         obj.pk = 3
 
         key = mixin.get_last_fetched_key(obj, "ports")
-        # Should include "last_fetched" and the object identifiers
-        assert "last_fetched" in key
-        assert "device" in key
-        assert "3" in key
+        assert key == "librenms_ports_last_fetched_device_3"
 
     def test_get_last_fetched_key_includes_server_key(self):
         """The last-fetched timestamp key must also be server-scoped.
@@ -176,9 +173,7 @@ class TestCacheMixinKeyGeneration:
         obj.pk = 3
 
         key = mixin.get_last_fetched_key(obj, "ports", server_key="srv1")
-        assert "last_fetched" in key
-        assert "device" in key
-        assert "srv1" in key
+        assert key == "librenms_ports_last_fetched_device_3_srv1"
 
     def test_cache_key_different_pks_differ(self):
         mixin = self._make_mixin()
@@ -193,17 +188,25 @@ class TestCacheMixinKeyGeneration:
         assert mixin.get_cache_key(obj1, "ports") != mixin.get_cache_key(obj2, "ports")
 
     def test_get_vlan_overrides_key_exists_and_differs_from_data_key(self):
-        """VLAN group overrides use a separate cache key from the VLAN data key.
-
-        The test is skipped gracefully on branches where get_vlan_overrides_key
-        is not yet present, so it acts as a forward-compat guard only.
-        """
+        """VLAN group overrides use a separate cache key from the VLAN data key."""
         mixin = self._make_mixin()
         obj = MagicMock()
         obj._meta.model_name = "device"
         obj.pk = 7
 
-        if hasattr(mixin, "get_vlan_overrides_key"):
-            vlan_key = mixin.get_vlan_overrides_key(obj)
-            data_key = mixin.get_cache_key(obj, "vlans")
-            assert vlan_key != data_key
+        vlan_key = mixin.get_vlan_overrides_key(obj)
+        assert vlan_key == "librenms_vlan_group_overrides_device_7"
+        data_key = mixin.get_cache_key(obj, "vlans")
+        assert vlan_key != data_key
+
+    def test_get_vlan_overrides_key_server_scoped(self):
+        """VLAN overrides key includes server_key to avoid cross-server leakage."""
+        mixin = self._make_mixin()
+        obj = MagicMock()
+        obj._meta.model_name = "device"
+        obj.pk = 7
+
+        key_no_server = mixin.get_vlan_overrides_key(obj)
+        key_with_server = mixin.get_vlan_overrides_key(obj, server_key="prod")
+        assert key_with_server == "librenms_vlan_group_overrides_device_7_prod"
+        assert key_no_server != key_with_server

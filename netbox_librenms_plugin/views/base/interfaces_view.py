@@ -159,7 +159,7 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         lookup_maps = self._build_vlan_lookup_maps(vlan_groups)
 
         # Load any user VLAN group overrides from cache (set by "apply to all")
-        vlan_group_overrides = cache.get(self.get_vlan_overrides_key(obj)) or {}
+        vlan_group_overrides = cache.get(self.get_vlan_overrides_key(obj, server_key)) or {}
 
         if cached_data:
             ports_data = cached_data.get("ports", [])

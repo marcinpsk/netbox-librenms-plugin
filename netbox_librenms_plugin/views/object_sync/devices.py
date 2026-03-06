@@ -364,10 +364,10 @@ class SaveVlanGroupOverridesView(LibreNMSPermissionMixin, CacheMixin, View):
             )
 
         # Merge with any existing overrides (user may save multiple times)
-        existing = cache.get(self.get_vlan_overrides_key(device)) or {}
+        existing = cache.get(self.get_vlan_overrides_key(device, server_key)) or {}
         existing.update(vid_group_map)
 
-        cache.set(self.get_vlan_overrides_key(device), existing, timeout=ports_ttl)
+        cache.set(self.get_vlan_overrides_key(device, server_key), existing, timeout=ports_ttl)
 
         return JsonResponse({"status": "success"})
 
