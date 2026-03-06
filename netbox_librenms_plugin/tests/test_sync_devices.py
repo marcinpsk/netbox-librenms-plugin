@@ -229,3 +229,47 @@ class TestRemoveServerMappingViewWiring:
 
         assert LibreNMSPermissionMixin in RemoveServerMappingView.__mro__
         assert NetBoxObjectPermissionMixin in RemoveServerMappingView.__mro__
+
+    def test_post_with_virtualmachine_sets_vm_permissions_and_redirects(self):
+        """post() with object_type='virtualmachine' sets VirtualMachine permissions and redirects to VM URL."""
+        from unittest.mock import MagicMock, patch
+
+        from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
+        from virtualization.models import VirtualMachine
+
+        view = object.__new__(RemoveServerMappingView)
+
+        permissions_at_check = {}
+
+        def capture_perms(method):
+            permissions_at_check[method] = list(view.required_object_permissions.get(method, []))
+            return None  # permission passes
+
+        mock_vm = MagicMock()
+        mock_vm.pk = 10
+        mock_vm.custom_field_data = {"librenms_id": {"orphaned-server": 42}}
+
+        # Use a mock model class so the select_for_update().get() call doesn't hit the DB
+        mock_model = MagicMock()
+        mock_model.objects.select_for_update.return_value.get.return_value = mock_vm
+
+        request = MagicMock()
+        request.POST = {"object_type": "virtualmachine", "server_key": "orphaned-server"}
+
+        with (
+            patch.object(view, "require_all_permissions", side_effect=capture_perms),
+            patch.object(view, "_get_object", return_value=(mock_vm, mock_model)),
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages"),
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect") as mock_redirect,
+            patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
+            patch(
+                "django.conf.settings",
+                PLUGINS_CONFIG={"netbox_librenms_plugin": {}},
+            ),
+        ):
+            view.post(request, pk=10)
+
+        # required_object_permissions must be scoped to VirtualMachine, not Device
+        assert ("change", VirtualMachine) in permissions_at_check.get("POST", [])
+        # Response must redirect to the VM-specific sync URL
+        mock_redirect.assert_called_with("plugins:netbox_librenms_plugin:vm_librenms_sync", pk=10)

@@ -55,40 +55,33 @@ class TestLibreNMSAPIMixinGetServerInfo:
         mixin._librenms_api = fake_api
         return mixin
 
-    def test_multi_server_returns_display_name_and_url(self):
-        mixin = self._make_mixin_with_api("production")
-
-        servers = {
-            "production": {
-                "display_name": "Production LibreNMS",
-                "librenms_url": "https://librenms.example.com",
-            }
-        }
+    def test_multi_server_returns_display_name_and_url(self, mock_multi_server_config):
+        mixin = self._make_mixin_with_api("default")
 
         with patch("netbox.plugins.get_plugin_config") as mock_config:
-            mock_config.side_effect = lambda _plugin, key: servers if key == "servers" else None
+            mock_config.side_effect = lambda _plugin, key: mock_multi_server_config if key == "servers" else None
             info = mixin.get_server_info()
 
-        assert info["display_name"] == "Production LibreNMS"
-        assert info["url"] == "https://librenms.example.com"
+        assert info["display_name"] == "default"  # falls back to server_key (no display_name in fixture)
+        assert info["url"] == mock_multi_server_config["default"]["librenms_url"]
         assert info["is_legacy"] is False
-        assert info["server_key"] == "production"
+        assert info["server_key"] == "default"
 
-    def test_legacy_config_sets_is_legacy_true(self):
+    def test_legacy_config_sets_is_legacy_true(self, mock_legacy_config):
         mixin = self._make_mixin_with_api("default")
 
         def mock_plugin_config(_plugin, key):
             if key == "servers":
                 return None
             if key == "librenms_url":
-                return "https://legacy.example.com"
+                return mock_legacy_config["librenms_url"]
             return None
 
         with patch("netbox.plugins.get_plugin_config", side_effect=mock_plugin_config):
             info = mixin.get_server_info()
 
         assert info["is_legacy"] is True
-        assert info["url"] == "https://legacy.example.com"
+        assert info["url"] == mock_legacy_config["librenms_url"]
 
     def test_returns_error_info_on_exception(self):
         mixin = self._make_mixin_with_api("default")
@@ -159,7 +152,7 @@ class TestCacheMixinKeyGeneration:
         obj.pk = 3
 
         key = mixin.get_last_fetched_key(obj, "ports")
-        assert key == "librenms_ports_last_fetched_device_3"
+        assert key == "librenms_ports_last_fetched_device_3"  # exact string
 
     def test_get_last_fetched_key_includes_server_key(self):
         """The last-fetched timestamp key must also be server-scoped.
@@ -173,7 +166,7 @@ class TestCacheMixinKeyGeneration:
         obj.pk = 3
 
         key = mixin.get_last_fetched_key(obj, "ports", server_key="srv1")
-        assert key == "librenms_ports_last_fetched_device_3_srv1"
+        assert key == "librenms_ports_last_fetched_device_3_srv1"  # exact string
 
     def test_cache_key_different_pks_differ(self):
         mixin = self._make_mixin()
