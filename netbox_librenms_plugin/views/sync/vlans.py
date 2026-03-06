@@ -8,10 +8,15 @@ from django.urls import reverse
 from django.views import View
 from ipam.models import VLAN, VLANGroup
 
-from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
+from netbox_librenms_plugin.views.mixins import (
+    CacheMixin,
+    LibreNMSAPIMixin,
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+)
 
 
-class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
+class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
     """
     Handle POST requests to create/update VLANs in NetBox from LibreNMS data.
     """
@@ -73,7 +78,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheM
             return self._redirect(object_type, object_id)
 
         # Get cached VLAN data
-        cached_vlans = cache.get(self.get_cache_key(obj, "vlans"))
+        cached_vlans = cache.get(self.get_cache_key(obj, "vlans", self.librenms_api.server_key))
         if not cached_vlans:
             messages.error(request, "No cached VLAN data. Please refresh VLANs first.")
             return self._redirect(object_type, object_id)
