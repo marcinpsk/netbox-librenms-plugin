@@ -956,17 +956,27 @@ class DeviceConflictActionView(
 
         action = request.POST.get("action")
         existing_device_id = request.POST.get("existing_device_id")
+        existing_device_type = request.POST.get("existing_device_type", "device")
 
         if not action or not existing_device_id:
             return HttpResponse("Missing action or existing_device_id", status=400)
 
+        # VirtualMachine is supported for migrate_librenms_id only; all other actions
+        # operate on Device-specific fields (serial, device_type) and remain Device-only.
+        if existing_device_type == "virtualmachine" and action == "migrate_librenms_id":
+            from virtualization.models import VirtualMachine as NetBoxVM
+
+            existing_model: type = NetBoxVM
+        else:
+            existing_model = Device
+
         try:
-            existing_device = Device.objects.get(pk=int(existing_device_id))
-        except (Device.DoesNotExist, ValueError):
+            existing_device = existing_model.objects.get(pk=int(existing_device_id))
+        except (existing_model.DoesNotExist, ValueError):
             return HttpResponse("Existing device not found", status=404)
 
-        # Object-level change permission for the specific device being mutated.
-        self.required_object_permissions = {"POST": [("change", Device)]}
+        # Object-level change permission for the specific model being mutated.
+        self.required_object_permissions = {"POST": [("change", existing_model)]}
         if error := self.require_object_permissions("POST"):
             return error
 
@@ -1227,10 +1237,10 @@ class DeviceConflictActionView(
                 )
             with transaction.atomic():
                 try:
-                    locked_device = Device.objects.select_for_update().get(pk=existing_device.pk)
-                except Device.DoesNotExist:
+                    locked_device = existing_model.objects.select_for_update().get(pk=existing_device.pk)
+                except existing_model.DoesNotExist:
                     return HttpResponse(
-                        "Device no longer exists; it may have been deleted concurrently.",
+                        "Object no longer exists; it may have been deleted concurrently.",
                         status=409,
                     )
                 # Re-check under lock — another request may have already migrated it
@@ -1246,11 +1256,11 @@ class DeviceConflictActionView(
                         f"Legacy librenms_id changed under lock ({cf_locked_int} != {librenms_id}); cannot migrate safely.",
                         status=400,
                     )
-                # Check that no other device already owns this ID on this server
+                # Check that no other object already owns this ID on this server
                 # (both new namespaced format and legacy integer format)
                 server_key = self.librenms_api.server_key
                 conflict = (
-                    Device.objects.filter(
+                    existing_model.objects.filter(
                         Q(**{f"custom_field_data__librenms_id__{server_key}": cf_locked_int})
                         | Q(custom_field_data__librenms_id=cf_locked_int)
                     )
