@@ -97,9 +97,15 @@ class MockLibreNMSServer:
         _, port = self._server.server_address
         self.url = f"http://127.0.0.1:{port}"
 
-    def register(self, path: str, body: dict, status: int = 200):
-        """Register a mock response for a URL path (any HTTP method)."""
-        self._server.routes[path] = (status, body)
+    def register(self, path: str, body: dict, status: int = 200, method: str | None = None):
+        """Register a mock response for a URL path.
+
+        If *method* is given the route is stored as ``"METHOD /path"`` and only
+        matches requests using that HTTP verb.  Omit *method* (or pass ``None``)
+        to match any verb on that path.
+        """
+        key = f"{method} {path}" if method else path
+        self._server.routes[key] = (status, body)
 
     def start(self):
         self._thread.start()
@@ -122,9 +128,10 @@ class MockLibreNMSServer:
     # ------- default LibreNMS-shaped responses -------
 
     def add_device_response(self, device_id: int = 1, hostname: str = "test-host"):
-        self._server.routes["POST /api/v0/devices"] = (
-            200,
+        self.register(
+            "/api/v0/devices",
             {"status": "ok", "id": device_id, "hostname": hostname},
+            method="POST",
         )
 
     def device_info_response(

@@ -66,6 +66,12 @@ class TestLibreNMSAPIPortsFetch:
     """LibreNMSAPI.get_ports() correctly parses mock server responses."""
 
     def test_get_ports_returns_dict_with_ports_key(self, mock_server):
+        """get_ports() returns a parsed dict and sends the required query parameters.
+
+        A callable route is used so we can capture the outgoing query string and
+        assert that both the ``columns`` field list and ``with=vlans`` are present —
+        if either is ever dropped, the sync page will silently lose data.
+        """
         captured_query: dict = {}
         ports_body = {
             "status": "ok",
@@ -100,7 +106,6 @@ class TestLibreNMSAPIPortsFetch:
         assert isinstance(data, dict)
         assert "ports" in data
         assert data["ports"][0]["ifName"] == "GigabitEthernet0/1"
-        # Verify the outgoing request includes required query parameters
         assert "columns" in captured_query, "get_ports() must send a 'columns' query param"
         assert "vlans" in captured_query.get("with", []), "get_ports() must request 'with=vlans'"
 

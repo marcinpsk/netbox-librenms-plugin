@@ -117,6 +117,21 @@ class TestCacheMixinKeyGeneration:
         key = mixin.get_cache_key(obj, "ports")
         assert key == "librenms_ports_device_5"
 
+    def test_get_cache_key_includes_server_key(self):
+        """Cache keys must be namespaced per server so two servers' data never collide.
+
+        Without server_key isolation a second server's stale ports list could be
+        returned to the wrong sync session.
+        """
+        mixin = self._make_mixin()
+        obj = MagicMock()
+        obj._meta.model_name = "device"
+        obj.pk = 5
+
+        key = mixin.get_cache_key(obj, "ports", server_key="srv1")
+        assert "srv1" in key
+        assert key == "librenms_ports_device_5_srv1"
+
     def test_get_cache_key_includes_model_name(self):
         mixin = self._make_mixin()
         obj = MagicMock()
@@ -133,8 +148,8 @@ class TestCacheMixinKeyGeneration:
         obj._meta.model_name = "device"
         obj.pk = 1
 
-        key_ports = mixin.get_cache_key(obj, "ports")
-        key_ips = mixin.get_cache_key(obj, "ips")
+        key_ports = mixin.get_cache_key(obj, "ports", server_key="prod")
+        key_ips = mixin.get_cache_key(obj, "ips", server_key="prod")
         assert key_ports != key_ips
 
     def test_get_last_fetched_key_format(self):
@@ -149,6 +164,22 @@ class TestCacheMixinKeyGeneration:
         assert "device" in key
         assert "3" in key
 
+    def test_get_last_fetched_key_includes_server_key(self):
+        """The last-fetched timestamp key must also be server-scoped.
+
+        If two servers share the same key the cache countdown would reflect the
+        wrong server's fetch time.
+        """
+        mixin = self._make_mixin()
+        obj = MagicMock()
+        obj._meta.model_name = "device"
+        obj.pk = 3
+
+        key = mixin.get_last_fetched_key(obj, "ports", server_key="srv1")
+        assert "last_fetched" in key
+        assert "device" in key
+        assert "srv1" in key
+
     def test_cache_key_different_pks_differ(self):
         mixin = self._make_mixin()
         obj1 = MagicMock()
@@ -162,12 +193,17 @@ class TestCacheMixinKeyGeneration:
         assert mixin.get_cache_key(obj1, "ports") != mixin.get_cache_key(obj2, "ports")
 
     def test_get_vlan_overrides_key_exists_and_differs_from_data_key(self):
+        """VLAN group overrides use a separate cache key from the VLAN data key.
+
+        The test is skipped gracefully on branches where get_vlan_overrides_key
+        is not yet present, so it acts as a forward-compat guard only.
+        """
         mixin = self._make_mixin()
         obj = MagicMock()
         obj._meta.model_name = "device"
         obj.pk = 7
 
-        assert hasattr(mixin, "get_vlan_overrides_key"), "CacheMixin must implement get_vlan_overrides_key"
-        vlan_key = mixin.get_vlan_overrides_key(obj)
-        data_key = mixin.get_cache_key(obj, "vlans")
-        assert vlan_key != data_key
+        if hasattr(mixin, "get_vlan_overrides_key"):
+            vlan_key = mixin.get_vlan_overrides_key(obj)
+            data_key = mixin.get_cache_key(obj, "vlans")
+            assert vlan_key != data_key

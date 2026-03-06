@@ -1,6 +1,6 @@
 """Unit tests for SyncInterfacesView: update_interface_attributes and handle_mac_address."""
 
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 
 def _make_view():
@@ -59,15 +59,16 @@ class TestUpdateInterfaceAttributes:
 
     def test_skips_excluded_columns(self):
         view = _make_view()
-        iface = self._make_device_interface()
+        speed_sentinel = object()
+        iface = self._make_device_interface(speed=speed_sentinel)
         librenms_data = {"ifName": "eth0", "ifSpeed": 1_000_000_000, "ifAlias": "uplink"}
 
         with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=1_000_000):
             with patch("netbox_librenms_plugin.views.sync.interfaces.set_librenms_device_id"):
                 view.update_interface_attributes(iface, librenms_data, "1000base-t", {"speed"}, "ifName")
 
-        # speed should NOT be set (it's excluded)
-        assert not any(c == call(iface, "speed", 1_000_000) for c in iface.method_calls)
+        # speed should NOT have been mutated (excluded)
+        assert iface.speed is speed_sentinel
 
     def test_sets_type_for_device_interface(self):
         from dcim.models import Interface
@@ -136,6 +137,12 @@ class TestUpdateInterfaceAttributes:
         assert iface.description == "uplink-port"
 
     def test_sets_librenms_id_when_port_id_present(self):
+        """set_librenms_device_id() is called unconditionally when port_id is not None.
+
+        Previously the call was guarded by ``"librenms_id" in interface.cf``, which
+        prevented the mapping from being created for brand-new interfaces. The fix
+        (this PR) drops that guard so first-time writes are handled correctly.
+        """
         from dcim.models import Interface
 
         view = _make_view()
