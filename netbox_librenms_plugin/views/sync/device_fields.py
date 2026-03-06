@@ -435,6 +435,16 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
             return "plugins:netbox_librenms_plugin:vm_librenms_sync"
         return "plugins:netbox_librenms_plugin:device_librenms_sync"
 
+    def _normalize_librenms_mapping(self, value):
+        if isinstance(value, int):
+            return {"default": value}
+        if isinstance(value, str):
+            try:
+                return {"default": int(value)}
+            except (TypeError, ValueError):
+                return {}
+        return value if isinstance(value, dict) else {}
+
     def post(self, request, pk):
         # Scope required permissions to the specific model being modified before checking.
         object_type = request.POST.get("object_type", "device")
@@ -456,12 +466,7 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
             messages.error(request, "No server_key provided.")
             return redirect(sync_url, pk=pk)
 
-        cf_value = obj.custom_field_data.get("librenms_id")
-        # Normalize legacy bare-integer/string to dict form so pre-migration mappings are found
-        if isinstance(cf_value, int):
-            cf_value = {"default": cf_value}
-        elif isinstance(cf_value, str) and cf_value.isdigit():
-            cf_value = {"default": int(cf_value)}
+        cf_value = self._normalize_librenms_mapping(obj.custom_field_data.get("librenms_id"))
         if not isinstance(cf_value, dict) or server_key not in cf_value:
             messages.warning(request, f"No mapping found for server '{server_key}'.")
             return redirect(sync_url, pk=pk)
@@ -492,12 +497,7 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
             except model.DoesNotExist:
                 messages.error(request, f"{model.__name__} no longer exists.")
                 return redirect(sync_url, pk=pk)
-            cf = obj_locked.custom_field_data.get("librenms_id", {})
-            # Normalize legacy bare-integer/string so the membership check works consistently
-            if isinstance(cf, int):
-                cf = {"default": cf}
-            elif isinstance(cf, str) and cf.isdigit():
-                cf = {"default": int(cf)}
+            cf = self._normalize_librenms_mapping(obj_locked.custom_field_data.get("librenms_id"))
             # Re-check after acquiring lock; mirror the pre-transaction protection logic
             _is_protected = server_key in configured_servers or (
                 legacy_url_configured and not configured_servers and server_key == "default"
