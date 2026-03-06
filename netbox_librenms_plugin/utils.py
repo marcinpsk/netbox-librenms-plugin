@@ -460,8 +460,8 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
 
     Supports both the legacy integer format and the new multi-server JSON format::
 
-        Legacy:  librenms_id = 42          → returns 42 only when server_key == "default"
-        New:     librenms_id = {"primary": 42}  → returns 42 only for server_key="primary"
+        Legacy:  librenms_id = 42              → returned as universal fallback for any server_key
+        New:     librenms_id = {"primary": 42} → returns 42 only for server_key="primary"
 
     If the stored value (or the dict entry for server_key) is a string it is
     normalised to ``int``.  When *auto_save* is ``True`` (the default) the
@@ -482,17 +482,15 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
     if cf_value is None:
         return None
     if isinstance(cf_value, int):
-        # Legacy bare integer — only a fallback for the canonical default server to
-        # avoid cross-server shadowing in multi-server setups.
-        return cf_value if server_key == "default" else None
+        # Legacy bare integer — universal fallback for any server to ensure
+        # devices imported before multi-server support remain discoverable.
+        return cf_value
     if isinstance(cf_value, str):
         # Someone stored a bare string (e.g., via NetBox UI/API) — normalise to int.
-        # Only accepted as legacy fallback for the default server.
+        # Treated as a legacy universal fallback for any server.
         try:
             int_id = int(cf_value)
         except (ValueError, TypeError):
-            return None
-        if server_key != "default":
             return None
         obj.custom_field_data["librenms_id"] = int_id
         if auto_save:
@@ -553,8 +551,9 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
     *librenms_id* under *server_key*.
 
     Also matches legacy records that stored ``librenms_id`` as a bare integer
-    directly in ``custom_field_data``, but **only** when *server_key* is ``"default"``
-    to avoid cross-server shadowing in multi-server setups.
+    directly in ``custom_field_data``.  These are treated as a universal fallback
+    for any *server_key* so that devices imported before multi-server support
+    remain discoverable regardless of the active server.
 
     Args:
         model: A Django model class (Device, VirtualMachine, Interface, …).
@@ -565,11 +564,10 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
         Model instance or None
     """
     q = Q(**{f"custom_field_data__librenms_id__{server_key}": librenms_id})
-    if server_key == "default":
-        # Also match legacy bare-integer and bare-string IDs (only for the canonical default key)
-        # to avoid cross-server shadowing in multi-server setups.
-        q |= Q(custom_field_data__librenms_id=librenms_id)
-        q |= Q(custom_field_data__librenms_id=str(librenms_id))
+    # Always include legacy bare-int/string fallback so devices imported before
+    # multi-server support are found for any server_key.
+    q |= Q(custom_field_data__librenms_id=librenms_id)
+    q |= Q(custom_field_data__librenms_id=str(librenms_id))
     return model.objects.filter(q).first()
 
 

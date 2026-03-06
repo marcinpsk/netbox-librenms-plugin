@@ -352,6 +352,232 @@ class TestVirtualChassisHelpers:
 # =============================================================================
 
 
+# =============================================================================
+# TestGetLibreNMSDeviceId - regression tests for get_librenms_device_id
+# =============================================================================
+
+
+class TestGetLibreNMSDeviceId:
+    """Tests for get_librenms_device_id in utils.py."""
+
+    def test_legacy_int_returned_for_default_server(self):
+        """Legacy bare-int librenms_id is returned for server_key='default'."""
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        obj = MagicMock()
+        obj.cf = {"librenms_id": 5}
+        obj.custom_field_data = {"librenms_id": 5}
+        result = get_librenms_device_id(obj, "default", auto_save=False)
+        assert result == 5
+
+    def test_legacy_int_returned_for_non_default_server(self):
+        """Legacy bare-int librenms_id is returned for any server_key (regression test).
+
+        Devices with a legacy bare-int ID must be recognised even when the active
+        server is not 'default' (e.g. 'production').  This was broken when the
+        check was restricted to server_key == 'default'.
+        """
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        obj = MagicMock()
+        obj.cf = {"librenms_id": 5}
+        obj.custom_field_data = {"librenms_id": 5}
+        result = get_librenms_device_id(obj, "production", auto_save=False)
+        assert result == 5
+
+    def test_legacy_string_int_returned_for_non_default_server(self):
+        """String-stored bare integer is also returned for any server_key."""
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        obj = MagicMock()
+        obj.cf = {"librenms_id": "42"}
+        obj.custom_field_data = {"librenms_id": "42"}
+        result = get_librenms_device_id(obj, "production", auto_save=False)
+        assert result == 42
+
+    def test_json_dict_returns_correct_server_value(self):
+        """New JSON dict format returns value for matching server_key."""
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        obj = MagicMock()
+        obj.cf = {"librenms_id": {"production": 7, "secondary": 99}}
+        obj.custom_field_data = {"librenms_id": {"production": 7, "secondary": 99}}
+        assert get_librenms_device_id(obj, "production", auto_save=False) == 7
+        assert get_librenms_device_id(obj, "secondary", auto_save=False) == 99
+
+    def test_json_dict_returns_none_for_missing_server(self):
+        """JSON dict format returns None when server_key is not present."""
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        obj = MagicMock()
+        obj.cf = {"librenms_id": {"production": 7}}
+        obj.custom_field_data = {"librenms_id": {"production": 7}}
+        assert get_librenms_device_id(obj, "secondary", auto_save=False) is None
+
+    def test_none_cf_returns_none(self):
+        """Returns None when librenms_id custom field is absent."""
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        obj = MagicMock()
+        obj.cf = {}
+        assert get_librenms_device_id(obj, "production", auto_save=False) is None
+
+
+# =============================================================================
+# TestSetLibreNMSDeviceId - 7 tests
+# =============================================================================
+
+
+class TestSetLibreNMSDeviceId:
+    """Tests for set_librenms_device_id in utils.py."""
+
+    def test_stores_int_for_valid_device_id(self):
+        """Valid integer device_id is stored under server_key."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": None}
+        set_librenms_device_id(obj, 42, server_key="primary")
+        assert obj.custom_field_data["librenms_id"] == {"primary": 42}
+
+    def test_invalid_device_id_not_stored(self):
+        """Non-integer device_id is rejected and nothing is written."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {}
+        set_librenms_device_id(obj, "not-an-int", server_key="primary")
+        assert "librenms_id" not in obj.custom_field_data
+
+    def test_invalid_device_id_does_not_overwrite_existing(self):
+        """Existing valid value is preserved when new device_id is invalid."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"primary": 10}}
+        set_librenms_device_id(obj, None, server_key="primary")
+        # The existing value must not be replaced with a broken one
+        assert obj.custom_field_data["librenms_id"] == {"primary": 10}
+
+    def test_migrates_legacy_int_on_first_write(self):
+        """Legacy bare-integer value is migrated to dict format on first write."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": 7}
+        set_librenms_device_id(obj, 99, server_key="secondary")
+        assert obj.custom_field_data["librenms_id"] == {"default": 7, "secondary": 99}
+
+    def test_adds_new_server_key_to_existing_dict(self):
+        """Adding a new server key preserves existing keys."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"primary": 5}}
+        set_librenms_device_id(obj, 20, server_key="secondary")
+        assert obj.custom_field_data["librenms_id"] == {"primary": 5, "secondary": 20}
+
+    def test_string_integer_is_coerced(self):
+        """String '42' is coerced to int 42."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {}
+        set_librenms_device_id(obj, "42", server_key="primary")
+        assert obj.custom_field_data["librenms_id"] == {"primary": 42}
+
+    def test_unexpected_cf_type_reset_to_empty(self):
+        """If custom_field_data has unexpected type for librenms_id, it is reset."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": "unexpected-string"}
+        set_librenms_device_id(obj, 5, server_key="primary")
+        assert obj.custom_field_data["librenms_id"] == {"primary": 5}
+
+
+# =============================================================================
+# TestSafeDisabled - tests for _safe_disabled in bulk_import.py and filters.py
+# =============================================================================
+
+
+class TestSafeDisabledBulkImport:
+    """Tests for _safe_disabled in import_utils/bulk_import.py."""
+
+    def _call(self, val):
+        from netbox_librenms_plugin.import_utils.bulk_import import _safe_disabled
+
+        return _safe_disabled({"disabled": val})
+
+    def test_bool_true(self):
+        assert self._call(True) == 1
+
+    def test_bool_false(self):
+        assert self._call(False) == 0
+
+    def test_string_true_lowercase(self):
+        assert self._call("true") == 1
+
+    def test_string_yes(self):
+        assert self._call("yes") == 1
+
+    def test_string_on(self):
+        assert self._call("on") == 1
+
+    def test_string_false_lowercase(self):
+        assert self._call("false") == 0
+
+    def test_string_no(self):
+        assert self._call("no") == 0
+
+    def test_string_off(self):
+        assert self._call("off") == 0
+
+    def test_numeric_one(self):
+        assert self._call(1) == 1
+
+    def test_numeric_zero(self):
+        assert self._call(0) == 0
+
+    def test_none_defaults_to_zero(self):
+        assert self._call(None) == 0
+
+    def test_missing_key_defaults_to_zero(self):
+        from netbox_librenms_plugin.import_utils.bulk_import import _safe_disabled
+
+        assert _safe_disabled({}) == 0
+
+    def test_string_true_uppercase(self):
+        assert self._call("TRUE") == 1
+
+
+class TestSafeDisabledFilters:
+    """Tests for _safe_disabled in import_utils/filters.py (same contract)."""
+
+    def _call(self, val):
+        from netbox_librenms_plugin.import_utils.filters import _safe_disabled
+
+        return _safe_disabled({"disabled": val})
+
+    def test_bool_true(self):
+        assert self._call(True) == 1
+
+    def test_bool_false(self):
+        assert self._call(False) == 0
+
+    def test_string_true(self):
+        assert self._call("true") == 1
+
+    def test_string_no(self):
+        assert self._call("no") == 0
+
+    def test_numeric_one(self):
+        assert self._call(1) == 1
+
+    def test_none_defaults_to_zero(self):
+        assert self._call(None) == 0
+
+
 class TestPaginationHelpers:
     """Test pagination helper functions."""
 
