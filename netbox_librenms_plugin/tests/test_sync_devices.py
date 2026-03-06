@@ -196,9 +196,15 @@ class TestUpdateDeviceNameViewWiring:
 class TestUpdateDeviceSerialViewWiring:
     def test_has_all_required_mixins(self):
         from netbox_librenms_plugin.views.sync.device_fields import UpdateDeviceSerialView
-        from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin
+        from netbox_librenms_plugin.views.mixins import (
+            LibreNMSAPIMixin,
+            LibreNMSPermissionMixin,
+            NetBoxObjectPermissionMixin,
+        )
 
         assert LibreNMSAPIMixin in UpdateDeviceSerialView.__mro__
+        assert LibreNMSPermissionMixin in UpdateDeviceSerialView.__mro__
+        assert NetBoxObjectPermissionMixin in UpdateDeviceSerialView.__mro__
 
     def test_requires_change_device_permission(self):
         from netbox_librenms_plugin.views.sync.device_fields import UpdateDeviceSerialView

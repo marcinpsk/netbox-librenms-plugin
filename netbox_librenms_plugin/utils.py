@@ -583,9 +583,10 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
     """
     q = Q(**{f"custom_field_data__librenms_id__{server_key}": librenms_id})
     if server_key == "default":
-        # Also match legacy bare-integer IDs, but only for the canonical default key
+        # Also match legacy bare-integer and bare-string IDs (only for the canonical default key)
         # to avoid cross-server shadowing in multi-server setups.
         q |= Q(custom_field_data__librenms_id=librenms_id)
+        q |= Q(custom_field_data__librenms_id=str(librenms_id))
     return model.objects.filter(q).first()
 
 

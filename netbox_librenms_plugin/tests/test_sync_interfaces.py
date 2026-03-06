@@ -144,7 +144,7 @@ class TestUpdateInterfaceAttributes:
 
         iface = MagicMock()
         iface.__class__ = Interface
-        iface.cf = {"librenms_id": {"default": 1}}
+        iface.cf = {}  # empty — first-time write, no existing mapping
         iface.mac_addresses = MagicMock()
         librenms_data = {"ifName": "eth0", "port_id": 77}
 

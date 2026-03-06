@@ -20,6 +20,7 @@ from netbox_librenms_plugin.tables.interfaces import (
 from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
 from netbox_librenms_plugin.utils import (
     get_interface_name_field,
+    get_librenms_sync_device,
     get_missing_vlan_warning,
     get_tagged_vlan_css_class,
     get_untagged_vlan_css_class,
@@ -124,14 +125,9 @@ class SingleInterfaceVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
 
         selected_device = get_object_or_404(Device, pk=selected_device_id)
 
-        if selected_device.virtual_chassis:
-            primary_device = selected_device.virtual_chassis.master
-            if not primary_device or not primary_device.primary_ip:
-                primary_device = next(
-                    (member for member in selected_device.virtual_chassis.members.all() if member.primary_ip),
-                    None,
-                )
-        else:
+        # Normalise to the VC sync device so cache keys match what the sync view stored
+        primary_device = get_librenms_sync_device(selected_device, server_key=server_key or "default")
+        if primary_device is None:
             primary_device = selected_device
 
         cached_data = cache.get(self.get_cache_key(primary_device, "ports", server_key))
@@ -355,8 +351,13 @@ class SaveVlanGroupOverridesView(LibreNMSPermissionMixin, CacheMixin, View):
 
         device = get_object_or_404(Device, pk=device_id)
 
+        # Normalise to the VC sync device so cache keys match what the sync view stored
+        sync_device = get_librenms_sync_device(device, server_key=server_key or "default")
+        if sync_device is None:
+            sync_device = device
+
         # Use the remaining TTL of the ports cache so both expire together
-        ports_ttl = cache.ttl(self.get_cache_key(device, "ports", server_key))
+        ports_ttl = cache.ttl(self.get_cache_key(sync_device, "ports", server_key))
         if ports_ttl is None or ports_ttl <= 0:
             return JsonResponse(
                 {"status": "error", "message": "No cached port data; refresh interfaces first"},
@@ -364,10 +365,10 @@ class SaveVlanGroupOverridesView(LibreNMSPermissionMixin, CacheMixin, View):
             )
 
         # Merge with any existing overrides (user may save multiple times)
-        existing = cache.get(self.get_vlan_overrides_key(device, server_key)) or {}
+        existing = cache.get(self.get_vlan_overrides_key(sync_device, server_key)) or {}
         existing.update(vid_group_map)
 
-        cache.set(self.get_vlan_overrides_key(device, server_key), existing, timeout=ports_ttl)
+        cache.set(self.get_vlan_overrides_key(sync_device, server_key), existing, timeout=ports_ttl)
 
         return JsonResponse({"status": "success"})
 
