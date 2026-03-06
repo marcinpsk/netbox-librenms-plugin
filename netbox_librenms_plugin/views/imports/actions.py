@@ -1266,8 +1266,8 @@ class DeviceConflictActionView(
                 if err := _save_device(locked_device):
                     return err
             logger.info(
-                f"Migrated legacy librenms_id on '{existing_device.name}' "
-                f"to {{{self.librenms_api.server_key!r}: {cf_int}}}"
+                f"Migrated legacy librenms_id on '{locked_device.name}' "
+                f"to {{{self.librenms_api.server_key!r}: {cf_locked_int}}}"
             )
 
         else:
