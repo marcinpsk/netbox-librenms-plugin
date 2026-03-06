@@ -378,6 +378,78 @@ class TestVirtualChassisHelpers:
 
 
 # =============================================================================
+# =============================================================================
+# TestGetLibreNMSDeviceId - regression tests for get_librenms_device_id
+# =============================================================================
+
+
+class TestGetLibreNMSDeviceId:
+    """Tests for get_librenms_device_id in utils.py."""
+
+    def test_legacy_int_returned_for_default_server(self):
+        """Legacy bare-int librenms_id is returned for server_key='default'."""
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        obj = MagicMock()
+        obj.cf = {"librenms_id": 5}
+        obj.custom_field_data = {"librenms_id": 5}
+        result = get_librenms_device_id(obj, "default", auto_save=False)
+        assert result == 5
+
+    def test_legacy_int_returned_for_non_default_server(self):
+        """Legacy bare-int librenms_id is returned for any server_key (regression test).
+
+        Devices with a legacy bare-int ID must be recognised even when the active
+        server is not 'default' (e.g. 'production').  This was broken when the
+        check was restricted to server_key == 'default'.
+        """
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        obj = MagicMock()
+        obj.cf = {"librenms_id": 5}
+        obj.custom_field_data = {"librenms_id": 5}
+        result = get_librenms_device_id(obj, "production", auto_save=False)
+        assert result == 5
+
+    def test_legacy_string_int_returned_for_non_default_server(self):
+        """String-stored bare integer is also returned for any server_key."""
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        obj = MagicMock()
+        obj.cf = {"librenms_id": "42"}
+        obj.custom_field_data = {"librenms_id": "42"}
+        result = get_librenms_device_id(obj, "production", auto_save=False)
+        assert result == 42
+
+    def test_json_dict_returns_correct_server_value(self):
+        """New JSON dict format returns value for matching server_key."""
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        obj = MagicMock()
+        obj.cf = {"librenms_id": {"production": 7, "secondary": 99}}
+        obj.custom_field_data = {"librenms_id": {"production": 7, "secondary": 99}}
+        assert get_librenms_device_id(obj, "production", auto_save=False) == 7
+        assert get_librenms_device_id(obj, "secondary", auto_save=False) == 99
+
+    def test_json_dict_returns_none_for_missing_server(self):
+        """JSON dict format returns None when server_key is not present."""
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        obj = MagicMock()
+        obj.cf = {"librenms_id": {"production": 7}}
+        obj.custom_field_data = {"librenms_id": {"production": 7}}
+        assert get_librenms_device_id(obj, "secondary", auto_save=False) is None
+
+    def test_none_cf_returns_none(self):
+        """Returns None when librenms_id custom field is absent."""
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        obj = MagicMock()
+        obj.cf = {}
+        assert get_librenms_device_id(obj, "production", auto_save=False) is None
+
+
+# =============================================================================
 # TestSetLibreNMSDeviceId - 7 tests
 # =============================================================================
 

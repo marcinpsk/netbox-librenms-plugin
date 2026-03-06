@@ -26,19 +26,20 @@ class TestGetLibreNMSDeviceId:
         result = get_librenms_device_id(obj, "default")
         assert result == 42
 
-    def test_legacy_bare_int_returned_only_for_default_key(self):
-        """Legacy bare integers are only returned for server_key == "default".
+    def test_legacy_bare_int_returned_for_any_server_key(self):
+        """Legacy bare integers are returned as a universal fallback for any server_key.
 
-        Multi-server setups must not shadow unrelated servers with a legacy value
-        that was stored before the JSON dict format was introduced.
+        Devices imported before multi-server support store a bare integer in
+        librenms_id.  These must remain discoverable regardless of which server is
+        active, so the bare-int is returned as-is for any server_key.
         """
         from netbox_librenms_plugin.utils import get_librenms_device_id
 
         obj = MagicMock()
         obj.cf = {"librenms_id": 99}
         assert get_librenms_device_id(obj, "default") == 99
-        assert get_librenms_device_id(obj, "production") is None
-        assert get_librenms_device_id(obj, "secondary") is None
+        assert get_librenms_device_id(obj, "production") == 99
+        assert get_librenms_device_id(obj, "secondary") == 99
 
     def test_returns_value_for_matching_server_key(self):
         from netbox_librenms_plugin.utils import get_librenms_device_id
@@ -133,13 +134,14 @@ class TestFindByLibreNMSId:
         result = find_by_librenms_id(mock_model, 999, "production")
         assert result is None
 
-        # Non-default server_key must only query the JSON server-key branch
-        # (no legacy bare-int/string to prevent cross-server shadowing)
+        # Any server_key must include legacy bare-int/string fallback conditions
+        # so that devices imported before multi-server support are still found.
         call_args = mock_model.objects.filter.call_args
         q_arg = call_args[0][0]
         assert isinstance(q_arg, Q)
-        assert len(q_arg.children) == 1
-        assert q_arg.children[0] == ("custom_field_data__librenms_id__production", 999)
+        keys = [child[0] for child in q_arg.children]
+        assert "custom_field_data__librenms_id__production" in keys
+        assert "custom_field_data__librenms_id" in keys
 
     def test_default_server_key_is_default(self):
         from netbox_librenms_plugin.utils import find_by_librenms_id
