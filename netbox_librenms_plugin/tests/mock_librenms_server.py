@@ -69,6 +69,17 @@ class MockLibreNMSServer:
 
     def stop(self):
         self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
+        if self._thread.is_alive():
+            import warnings
+
+            warnings.warn(
+                f"MockLibreNMSServer thread {self._thread.ident} did not exit within 5 s; "
+                "socket may not be fully released",
+                ResourceWarning,
+                stacklevel=2,
+            )
 
     # ------- default LibreNMS-shaped responses -------
 
@@ -115,6 +126,9 @@ class MockLibreNMSServer:
                     "ifAdminStatus": "up",
                     "ifAlias": "uplink",
                     "ifPhysAddress": "aa:bb:cc:dd:ee:01",
+                    "ifMtu": 1500,
+                    "ifVlan": 1,
+                    "ifTrunk": 0,
                 }
             ]
         self.register(f"/api/v0/devices/{device_id}/ports", {"status": "ok", "ports": ports})
