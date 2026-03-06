@@ -46,7 +46,11 @@ class VMInterfaceTableView(BaseInterfaceTableView):
     def get_table(self, data, obj, interface_name_field, vlan_groups=None):
         """Return a VM interface table for the given data."""
         return LibreNMSVMInterfaceTable(
-            data, device=obj, vlan_groups=vlan_groups, server_key=self.librenms_api.server_key
+            data,
+            device=obj,
+            vlan_groups=vlan_groups,
+            server_key=self.librenms_api.server_key,
+            interface_name_field=interface_name_field,
         )
 
     def get_interfaces(self, obj):

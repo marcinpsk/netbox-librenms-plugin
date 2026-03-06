@@ -362,7 +362,7 @@ class LibreNMSInterfaceTable(tables.Table):
         if not netbox_interface:
             return mark_safe(f'<span class="text-danger">{value}</span>')
 
-        netbox_librenms_id = get_librenms_device_id(netbox_interface, self.server_key)
+        netbox_librenms_id = get_librenms_device_id(netbox_interface, self.server_key, auto_save=False)
 
         if netbox_librenms_id is None:
             return mark_safe(

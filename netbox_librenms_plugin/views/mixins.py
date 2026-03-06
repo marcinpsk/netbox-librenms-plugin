@@ -302,12 +302,15 @@ class CacheMixin:
             return f"{base}_{server_key}"
         return base
 
-    def get_last_fetched_key(self, obj, data_type="ports"):
+    def get_last_fetched_key(self, obj, data_type="ports", server_key=None):
         """
         Get the cache key for the last fetched time of the object.
         """
         model_name = obj._meta.model_name
-        return f"librenms_{data_type}_last_fetched_{model_name}_{obj.pk}"
+        base = f"librenms_{data_type}_last_fetched_{model_name}_{obj.pk}"
+        if server_key:
+            return f"{base}_{server_key}"
+        return base
 
     def get_vlan_overrides_key(self, obj):
         """
