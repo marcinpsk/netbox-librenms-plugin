@@ -262,6 +262,17 @@ _TEMPLATE_FILES = sorted(_TEMPLATE_DIR.rglob("*.html"))
 class TestTemplateSyntax:
     """Compile every plugin template to catch syntax errors early."""
 
+    @pytest.fixture(autouse=True, scope="class")
+    def _django_engine(self):
+        """Ensure Django is set up once and expose the template engine."""
+        os.environ.setdefault("DJANGO_SETTINGS_MODULE", "netbox.settings")
+        import django
+
+        django.setup()
+        from django.template import engines
+
+        self.__class__._engine = engines["django"]
+
     @pytest.mark.parametrize(
         "template_path",
         _TEMPLATE_FILES,
@@ -269,13 +280,6 @@ class TestTemplateSyntax:
     )
     def test_template_compiles(self, template_path):
         """Each template must parse without TemplateSyntaxError."""
-        os.environ.setdefault("DJANGO_SETTINGS_MODULE", "netbox.settings")
-        import django
-
-        django.setup()
-        from django.template import engines
-
-        engine = engines["django"]
         source = template_path.read_text()
         # Compile the template — raises TemplateSyntaxError on bad tags
-        engine.from_string(source)
+        self._engine.from_string(source)
