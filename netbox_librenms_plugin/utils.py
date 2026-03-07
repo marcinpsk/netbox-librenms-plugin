@@ -537,6 +537,13 @@ def set_librenms_device_id(obj, device_id, server_key: str = "default"):
         device_id: LibreNMS device ID (integer).
         server_key: LibreNMS server key (from plugin ``servers`` config).
     """
+    if isinstance(device_id, bool):
+        logger.warning(
+            "librenms_id device_id is a boolean (%r) on %r; not storing.",
+            device_id,
+            obj,
+        )
+        return
     cf_value = obj.custom_field_data.get("librenms_id") or {}
     if isinstance(cf_value, int) and not isinstance(cf_value, bool):
         logger.warning(

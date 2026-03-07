@@ -298,7 +298,9 @@ def validate_device_for_import(
             # LibreNMSAPI.get_librenms_id() returns an int in both formats, so only the
             # raw type check on custom_field_data reveals whether migration is needed.
             _vm_cf_id = existing_vm.custom_field_data.get("librenms_id")
-            if isinstance(_vm_cf_id, int) or (isinstance(_vm_cf_id, str) and _vm_cf_id.isdigit()):
+            if (isinstance(_vm_cf_id, int) and not isinstance(_vm_cf_id, bool)) or (
+                isinstance(_vm_cf_id, str) and _vm_cf_id.isdigit()
+            ):
                 result["librenms_id_needs_migration"] = True
 
             # Check if name matches resolved name (accounts for use_sysname/strip_domain)
@@ -329,7 +331,9 @@ def validate_device_for_import(
                 # LibreNMSAPI.get_librenms_id() returns an int in both formats, so only the
                 # raw type check on custom_field_data reveals whether migration is needed.
                 _dev_cf_id = existing_device.custom_field_data.get("librenms_id")
-                if isinstance(_dev_cf_id, int) or (isinstance(_dev_cf_id, str) and _dev_cf_id.isdigit()):
+                if (isinstance(_dev_cf_id, int) and not isinstance(_dev_cf_id, bool)) or (
+                    isinstance(_dev_cf_id, str) and _dev_cf_id.isdigit()
+                ):
                     result["librenms_id_needs_migration"] = True
 
                 # Check if name matches resolved name (VC-aware: compare against VC member name)
