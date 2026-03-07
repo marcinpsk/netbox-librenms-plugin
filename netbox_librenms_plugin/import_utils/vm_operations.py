@@ -1,8 +1,9 @@
-"""Virtual machine import operations."""
+"""Virtual machine creation and import operations."""
 
 import logging
 
 from dcim.models import DeviceRole
+from django.db import transaction
 from django.utils import timezone
 from virtualization.models import Cluster
 
@@ -13,7 +14,9 @@ from .permissions import require_permissions
 logger = logging.getLogger(__name__)
 
 
-def create_vm_from_librenms(libre_device: dict, validation: dict, use_sysname: bool = True, role=None):
+def create_vm_from_librenms(
+    libre_device: dict, validation: dict, use_sysname: bool = True, role=None, server_key: str = "default"
+):
     """
     Create a NetBox VirtualMachine from LibreNMS device data.
 
@@ -22,6 +25,7 @@ def create_vm_from_librenms(libre_device: dict, validation: dict, use_sysname: b
         validation: Validation result from validate_device_for_import with import_as_vm=True
         use_sysname: If True, prefer sysName; if False, use hostname
         role: Optional DeviceRole to assign to the VM
+        server_key: LibreNMS server key used to store the librenms_id custom field
 
     Returns:
         Created VirtualMachine instance
@@ -51,15 +55,24 @@ def create_vm_from_librenms(libre_device: dict, validation: dict, use_sysname: b
     # Generate import timestamp comment
     import_time = timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")
 
-    # Create the VM with librenms_id custom field
-    vm = VirtualMachine.objects.create(
-        name=vm_name,
-        cluster=cluster,
-        role=role,  # Optional VM role
-        platform=platform,
-        comments=f"Imported from LibreNMS by netbox-librenms-plugin on {import_time}",
-        custom_field_data={"librenms_id": int(libre_device["device_id"])},
-    )
+    # Validate device_id before creating the VM so a missing/invalid value
+    # never leaves a VM without a librenms_id (partial persistence).
+    librenms_device_id = int(libre_device["device_id"])
+
+    from ..utils import set_librenms_device_id
+
+    # Create the VM and assign its LibreNMS ID atomically so a failure in
+    # set_librenms_device_id never leaves a VM without a mapping.
+    with transaction.atomic():
+        vm = VirtualMachine.objects.create(
+            name=vm_name,
+            cluster=cluster,
+            role=role,  # Optional VM role
+            platform=platform,
+            comments=f"Imported from LibreNMS (device_id={librenms_device_id}) by netbox-librenms-plugin on {import_time}",
+        )
+        set_librenms_device_id(vm, librenms_device_id, server_key)
+        vm.save()
 
     logger.info(f"Created VM {vm.name} (ID: {vm.pk}) from LibreNMS device {libre_device['device_id']}")
     return vm
@@ -162,6 +175,7 @@ def bulk_import_vms(
                 api=api,
                 use_sysname=use_sysname_opt,
                 strip_domain=strip_domain_opt,
+                server_key=api.server_key,
             )
 
             # Check if VM already exists
@@ -206,7 +220,9 @@ def bulk_import_vms(
             libre_device["_computed_name"] = vm_name
 
             # Create VM
-            vm = create_vm_from_librenms(libre_device, validation, use_sysname=use_sysname, role=role)
+            vm = create_vm_from_librenms(
+                libre_device, validation, use_sysname=use_sysname, role=role, server_key=api.server_key
+            )
 
             result["success"].append(
                 {

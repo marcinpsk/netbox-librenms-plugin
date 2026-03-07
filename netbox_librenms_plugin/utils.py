@@ -472,8 +472,6 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
 
         Legacy:  librenms_id = 42              → returned as universal fallback for any server_key
         New:     librenms_id = {"primary": 42} → returns 42 only for server_key="primary"
-        Legacy:  librenms_id = 42          → returns 42 for any server_key (universal fallback)
-        New:     librenms_id = {"primary": 42}  → returns 42 only for server_key="primary"
 
     If the stored value (or the dict entry for server_key) is a string it is
     normalised to ``int``.  When *auto_save* is ``True`` (the default) the

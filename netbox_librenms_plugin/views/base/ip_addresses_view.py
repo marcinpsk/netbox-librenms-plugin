@@ -11,7 +11,7 @@ from ipam.models import VRF, IPAddress
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
-from netbox_librenms_plugin.utils import get_interface_name_field
+from netbox_librenms_plugin.utils import get_interface_name_field, get_librenms_device_id
 from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin
 
 
@@ -104,11 +104,12 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         all_interfaces = list(obj.interfaces.all())
 
         # Create maps for efficient lookups
-        interfaces_by_librenms_id = {
-            interface.custom_field_data.get("librenms_id"): interface
-            for interface in all_interfaces
-            if interface.custom_field_data.get("librenms_id")
-        }
+        server_key = self.librenms_api.server_key
+        interfaces_by_librenms_id = {}
+        for interface in all_interfaces:
+            lib_id = get_librenms_device_id(interface, server_key)
+            if lib_id is not None:
+                interfaces_by_librenms_id[str(lib_id)] = interface
 
         interfaces_by_name = {interface.name: interface for interface in all_interfaces}
 
@@ -191,8 +192,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         assigned_interface = ip_address.assigned_object
 
         # Check if interface matches by LibreNMS ID
-        if port_id in prefetched_data["interfaces_by_librenms_id"]:
-            interface = prefetched_data["interfaces_by_librenms_id"][port_id]
+        if str(port_id) in prefetched_data["interfaces_by_librenms_id"]:
+            interface = prefetched_data["interfaces_by_librenms_id"][str(port_id)]
             if assigned_interface == interface:
                 enriched_ip["status"] = "matched"
                 return
@@ -207,8 +208,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
     def _add_interface_info_to_ip(self, enriched_ip, port_id, librenms_interface_name, prefetched_data):
         """Add interface information to the IP entry regardless of IP status"""
         # First try to match by LibreNMS ID (highest priority)
-        if port_id in prefetched_data["interfaces_by_librenms_id"]:
-            interface = prefetched_data["interfaces_by_librenms_id"][port_id]
+        if str(port_id) in prefetched_data["interfaces_by_librenms_id"]:
+            interface = prefetched_data["interfaces_by_librenms_id"][str(port_id)]
             enriched_ip["interface_name"] = interface.name
             enriched_ip["interface_url"] = interface.get_absolute_url()
             return
