@@ -754,6 +754,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 elif serial and installed.serial and installed.serial.strip() != serial.strip():
                     status = "Serial Mismatch"
                     row["row_class"] = "table-danger"
+                    row["can_update_serial"] = True
+                    row["installed_module_id"] = installed.pk
                 else:
                     status = "Installed"
                     row["row_class"] = "table-success"

@@ -440,8 +440,54 @@ class TestLibreNMSModuleTable:
 
         assert "my-csrf-value" in result
 
+    def test_render_actions_serial_mismatch_renders_update_serial_button(self):
+        """can_update_serial=True renders an Update Serial form button."""
+        device = MagicMock()
+        device.pk = 6
+        table = self._make_table(device=device)
+        record = {
+            "can_update_serial": True,
+            "installed_module_id": 42,
+            "serial": "NS225161205",
+        }
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
+            result = str(table.render_actions(None, record))
 
-class TestLibreNMSModuleTableInit:
+        assert "Update Serial" in result
+        assert "update-module-serial" in result or "/url/" in result
+        assert "NS225161205" in result
+        assert "mdi-sync" in result
+
+    def test_render_actions_no_update_serial_without_flag(self):
+        """Update Serial button not rendered when can_update_serial is not set."""
+        device = MagicMock()
+        device.pk = 7
+        table = self._make_table(device=device)
+        record = {
+            "installed_module_id": 42,
+            "serial": "NS225161205",
+            # can_update_serial intentionally absent
+        }
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
+            result = table.render_actions(None, record)
+
+        assert result == ""
+
+    def test_render_actions_no_update_serial_without_module_id(self):
+        """Update Serial button not rendered when installed_module_id is missing."""
+        device = MagicMock()
+        device.pk = 8
+        table = self._make_table(device=device)
+        record = {
+            "can_update_serial": True,
+            # installed_module_id intentionally absent
+            "serial": "NS225161205",
+        }
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
+            result = table.render_actions(None, record)
+
+        assert result == ""
+
     """Tests for __init__ and configure methods, bypassing django-tables2 super().__init__."""
 
     def test_init_sets_device_and_defaults(self):

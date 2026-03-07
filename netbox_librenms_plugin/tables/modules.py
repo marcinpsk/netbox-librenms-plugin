@@ -210,4 +210,24 @@ class LibreNMSModuleTable(tables.Table):
                 )
             )
 
+        # Update serial button for serial mismatch rows
+        if record.get("can_update_serial") and record.get("installed_module_id"):
+            url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": self.device.pk})
+            buttons.append(
+                format_html(
+                    '<form method="post" action="{}" style="display:inline">'
+                    '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
+                    '<input type="hidden" name="module_id" value="{}">'
+                    '<input type="hidden" name="serial" value="{}">'
+                    '<button type="submit" class="btn btn-sm btn-warning ms-1"'
+                    ' title="Update serial in NetBox to match LibreNMS">'
+                    '<i class="mdi mdi-sync"></i> Update Serial'
+                    "</button></form>",
+                    url,
+                    self.csrf_token,
+                    record["installed_module_id"],
+                    record.get("serial", ""),
+                )
+            )
+
         return format_html("{}", mark_safe("".join(str(b) for b in buttons))) if buttons else ""

@@ -10,7 +10,7 @@ from .base.cables_view import BaseCableTableView, SingleCableVerifyView  # noqa:
 from .base.interfaces_view import BaseInterfaceTableView  # noqa: F401
 from .base.ip_addresses_view import BaseIPAddressTableView, SingleIPAddressVerifyView  # noqa: F401
 from .base.librenms_sync_view import BaseLibreNMSSyncView  # noqa: F401
-from .sync.modules import InstallBranchView, InstallModuleView, InstallSelectedView  # noqa: F401
+from .sync.modules import InstallBranchView, InstallModuleView, InstallSelectedView, UpdateModuleSerialView  # noqa: F401
 from .base.vlan_table_view import BaseVLANTableView  # noqa: F401
 from .imports import (  # noqa: F401
     BulkImportConfirmView,

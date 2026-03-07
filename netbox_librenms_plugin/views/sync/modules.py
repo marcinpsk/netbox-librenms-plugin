@@ -495,3 +495,40 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
         return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+
+
+class UpdateModuleSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
+    """Update the serial number of an already-installed module from LibreNMS inventory data."""
+
+    def post(self, request, pk):
+        from dcim.models import Device, Module
+
+        self.required_object_permissions = {"POST": [("change", Module)]}
+        if error := self.require_all_permissions("POST"):
+            return error
+
+        device = get_object_or_404(Device, pk=pk)
+        module_id = request.POST.get("module_id")
+        serial = request.POST.get("serial", "").strip()
+
+        if not module_id:
+            messages.error(request, "Missing module ID.")
+            sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+
+        module = get_object_or_404(Module, pk=module_id, device=device)
+
+        try:
+            with transaction.atomic():
+                module.serial = serial
+                module.full_clean()
+                module.save()
+            messages.success(
+                request,
+                f"Updated serial for {module.module_type.model} in {module.module_bay.name} to '{serial}'.",
+            )
+        except Exception as e:
+            messages.error(request, f"Failed to update serial: {e}")
+
+        sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+        return redirect(f"{sync_url}?tab=modules#librenms-module-table")

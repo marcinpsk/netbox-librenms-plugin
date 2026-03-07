@@ -464,3 +464,127 @@ class TestDetermineStatus:
         view = self._view()
         # matched_bay but no matched_type handled by No Type branch first
         assert view._determine_status(None, None, "S1") == "No Bay"
+
+
+class TestBuildRowSerialMismatch:
+    """Tests for serial mismatch detection and can_update_serial flag in _build_row."""
+
+    def _view(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        view = object.__new__(BaseModuleTableView)
+        view._device_manufacturer = None
+        return view
+
+    def _make_bay(self, installed_serial=None):
+        """Create a mock bay with an optionally installed module."""
+        bay = MagicMock()
+        bay.pk = 10
+        bay.name = "Slot 1"
+        bay.get_absolute_url.return_value = "/dcim/module-bays/10/"
+        if installed_serial is not None:
+            module = MagicMock()
+            module.pk = 42
+            module.serial = installed_serial
+            module.get_absolute_url.return_value = "/dcim/modules/42/"
+            bay.installed_module = module
+        else:
+            bay.installed_module = None
+        return bay
+
+    def _make_item(self, model_name="XCM-7s-b", serial="NS225161205"):
+        return {
+            "entPhysicalModelName": model_name,
+            "entPhysicalSerialNum": serial,
+            "entPhysicalName": "Slot 1",
+            "entPhysicalDescr": "",
+            "entPhysicalClass": "module",
+            "entPhysicalIndex": 100,
+        }
+
+    def test_serial_match_sets_installed_status(self):
+        """When ENTITY-MIB serial matches NetBox serial, status is Installed."""
+        view = self._view()
+        bay = self._make_bay(installed_serial="NS225161205")
+        matched_type = MagicMock()
+        matched_type.model = "XCM-7s-b"
+        matched_type.pk = 5
+        matched_type.get_absolute_url.return_value = "/dcim/module-types/5/"
+
+        with (
+            patch.object(view, "_match_module_bay", return_value=bay),
+            patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="XCM-7s-b"),
+            patch("netbox_librenms_plugin.utils.module_type_uses_module_path", return_value=False),
+            patch("netbox_librenms_plugin.utils.module_type_is_end_module", return_value=False),
+            patch("netbox_librenms_plugin.utils.module_type_uses_module_token", return_value=False),
+            patch("netbox_librenms_plugin.utils.supports_module_path", return_value=True),
+            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
+        ):
+            row = view._build_row(
+                self._make_item(serial="NS225161205"),
+                {},
+                {"Slot 1": bay},
+                {"XCM-7s-b": matched_type},
+            )
+
+        assert row["status"] == "Installed"
+        assert row["row_class"] == "table-success"
+        assert not row.get("can_update_serial")
+
+    def test_serial_mismatch_sets_can_update_serial(self):
+        """When serials differ, can_update_serial=True and installed_module_id set."""
+        view = self._view()
+        bay = self._make_bay(installed_serial="TESTSRL")
+        matched_type = MagicMock()
+        matched_type.model = "XCM-7s-b"
+        matched_type.pk = 5
+        matched_type.get_absolute_url.return_value = "/dcim/module-types/5/"
+
+        with (
+            patch.object(view, "_match_module_bay", return_value=bay),
+            patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="XCM-7s-b"),
+            patch("netbox_librenms_plugin.utils.module_type_uses_module_path", return_value=False),
+            patch("netbox_librenms_plugin.utils.module_type_is_end_module", return_value=False),
+            patch("netbox_librenms_plugin.utils.module_type_uses_module_token", return_value=False),
+            patch("netbox_librenms_plugin.utils.supports_module_path", return_value=True),
+            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
+        ):
+            row = view._build_row(
+                self._make_item(serial="NS225161205"),
+                {},
+                {"Slot 1": bay},
+                {"XCM-7s-b": matched_type},
+            )
+
+        assert row["status"] == "Serial Mismatch"
+        assert row["row_class"] == "table-danger"
+        assert row.get("can_update_serial") is True
+        assert row.get("installed_module_id") == 42
+
+    def test_empty_netbox_serial_does_not_set_mismatch(self):
+        """When NetBox serial is empty, status is Installed regardless of LibreNMS serial."""
+        view = self._view()
+        bay = self._make_bay(installed_serial="")
+        matched_type = MagicMock()
+        matched_type.model = "XCM-7s-b"
+        matched_type.pk = 5
+        matched_type.get_absolute_url.return_value = "/dcim/module-types/5/"
+
+        with (
+            patch.object(view, "_match_module_bay", return_value=bay),
+            patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="XCM-7s-b"),
+            patch("netbox_librenms_plugin.utils.module_type_uses_module_path", return_value=False),
+            patch("netbox_librenms_plugin.utils.module_type_is_end_module", return_value=False),
+            patch("netbox_librenms_plugin.utils.module_type_uses_module_token", return_value=False),
+            patch("netbox_librenms_plugin.utils.supports_module_path", return_value=True),
+            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
+        ):
+            row = view._build_row(
+                self._make_item(serial="NS225161205"),
+                {},
+                {"Slot 1": bay},
+                {"XCM-7s-b": matched_type},
+            )
+
+        assert row["status"] == "Installed"
+        assert not row.get("can_update_serial")

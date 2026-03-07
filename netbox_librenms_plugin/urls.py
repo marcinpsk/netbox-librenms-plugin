@@ -32,6 +32,7 @@ from .views import (
     InstallBranchView,
     InstallModuleView,
     InstallSelectedView,
+    UpdateModuleSerialView,
     InterfaceTypeMappingBulkDeleteView,
     InterfaceTypeMappingBulkImportView,
     InterfaceTypeMappingChangeLogView,
@@ -128,6 +129,11 @@ urlpatterns = [
         "devices/<int:pk>/install-selected/",
         InstallSelectedView.as_view(),
         name="install_selected",
+    ),
+    path(
+        "devices/<int:pk>/update-module-serial/",
+        UpdateModuleSerialView.as_view(),
+        name="update_module_serial",
     ),
     path(
         "devices/<int:pk>/ipaddress-sync/",
