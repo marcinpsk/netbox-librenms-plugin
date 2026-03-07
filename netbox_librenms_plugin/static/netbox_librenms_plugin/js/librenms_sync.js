@@ -337,6 +337,10 @@ function openVlanDetailModal(btn) {
     modal.dataset.currentSafeName = safeName;
     modal.dataset.currentDeviceId = deviceId;
 
+    // Clear any stale error from a previous save attempt
+    const staleAlert = modal.querySelector('.vlan-override-error');
+    if (staleAlert) { staleAlert.remove(); }
+
     // Build table rows
     const tbody = document.getElementById('vlanDetailTableBody');
     tbody.innerHTML = '';

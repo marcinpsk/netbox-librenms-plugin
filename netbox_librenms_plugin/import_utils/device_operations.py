@@ -746,6 +746,7 @@ def import_single_device(
             strip_domain_opt = sync_options.get("strip_domain", False) if sync_options else False
             validation = validate_device_for_import(
                 libre_device,
+                api=api,
                 use_sysname=use_sysname_opt,
                 strip_domain=strip_domain_opt,
                 server_key=api.server_key,

@@ -291,10 +291,12 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         try:
             with transaction.atomic():
                 try:
-                    platform = Platform.objects.create(
+                    platform = Platform(
                         name=platform_name,
                         manufacturer=manufacturer,
                     )
+                    platform.full_clean()
+                    platform.save()
                 except ValidationError as e:
                     transaction.set_rollback(True)
                     logger.error(

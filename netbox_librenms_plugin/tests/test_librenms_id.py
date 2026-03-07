@@ -442,6 +442,25 @@ class TestSetLibreNMSDeviceId:
         set_librenms_device_id(obj, "42", server_key="primary")
         assert obj.custom_field_data["librenms_id"] == {"primary": 42}
 
+    def test_boolean_true_rejected(self):
+        """Boolean True is not accepted as a valid device_id (bool is subclass of int)."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {}
+        set_librenms_device_id(obj, True, server_key="primary")
+        assert "librenms_id" not in obj.custom_field_data
+
+    def test_boolean_false_rejected(self):
+        """Boolean False is not accepted as a valid device_id."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"primary": 10}}
+        set_librenms_device_id(obj, False, server_key="primary")
+        # Existing mapping must be preserved
+        assert obj.custom_field_data["librenms_id"] == {"primary": 10}
+
     def test_unexpected_cf_type_reset_to_empty(self):
         """If custom_field_data has unexpected type for librenms_id, it is reset."""
         from netbox_librenms_plugin.utils import set_librenms_device_id
