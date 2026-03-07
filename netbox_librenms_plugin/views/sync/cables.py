@@ -157,20 +157,22 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             return error
 
         initial_device = get_object_or_404(Device, pk=pk)
+        server_key = self.librenms_api.server_key
+        redirect_url = (
+            f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[initial_device.pk])}?tab=cables"
+            + (f"&server_key={server_key}" if server_key else "")
+        )
+
         selected_interfaces = self.get_selected_interfaces(request, initial_device)
         cached_links = self.get_cached_links_data(request, initial_device)
 
         if not self.validate_prerequisites(cached_links, selected_interfaces):
-            return redirect(
-                f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[initial_device.pk])}?tab=cables"
-            )
+            return redirect(redirect_url)
 
         results = self.process_interface_sync(selected_interfaces, cached_links)
         self.display_sync_results(request, results)
 
-        return redirect(
-            f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[initial_device.pk])}?tab=cables"
-        )
+        return redirect(redirect_url)
 
     def display_sync_results(self, request, results):
         """Display flash messages summarizing the cable sync results."""
