@@ -448,13 +448,12 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
         return "plugins:netbox_librenms_plugin:device_librenms_sync"
 
     def _normalize_librenms_mapping(self, value):
+        if isinstance(value, bool):
+            return {}
         if isinstance(value, int):
             return {"default": value}
-        if isinstance(value, str):
-            try:
-                return {"default": int(value)}
-            except (TypeError, ValueError):
-                return {}
+        if isinstance(value, str) and value.isdigit():
+            return {"default": int(value)}
         return value if isinstance(value, dict) else {}
 
     def post(self, request, pk):
@@ -604,6 +603,20 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 locked = model.objects.select_for_update().get(pk=pk)
             except model.DoesNotExist:
                 messages.error(request, f"{model.__name__} no longer exists.")
+                return self._sync_url(object_type, pk)
+            # Re-check preconditions on the locked row (another admin may have
+            # changed cf_value or serial between the initial read and the lock).
+            locked_cf = locked.custom_field_data.get("librenms_id")
+            if not isinstance(locked_cf, (int, str)) or isinstance(locked_cf, bool):
+                messages.warning(request, "librenms_id is already in the server-scoped JSON format.")
+                return self._sync_url(object_type, pk)
+            locked_id = int(locked_cf) if isinstance(locked_cf, str) and locked_cf.isdigit() else locked_cf
+            if not isinstance(locked_id, int):
+                messages.error(request, "librenms_id changed before lock was acquired; aborting.")
+                return self._sync_url(object_type, pk)
+            locked_serial = (getattr(locked, "serial", None) or "").strip()
+            if locked_id != librenms_id or locked_serial != netbox_serial:
+                messages.error(request, "Device data changed before lock was acquired; aborting conversion.")
                 return self._sync_url(object_type, pk)
             # Check that no other object already owns this ID (server-scoped or legacy)
             match = find_by_librenms_id(model, librenms_id, server_key)
