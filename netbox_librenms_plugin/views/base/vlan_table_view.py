@@ -108,7 +108,7 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
 
         # Calculate cache TTL
         cache_ttl = cache.ttl(self.get_cache_key(obj, "vlans", server_key))
-        cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl else None
+        cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl and cache_ttl > 0 else None
 
         return {
             "object": obj,
