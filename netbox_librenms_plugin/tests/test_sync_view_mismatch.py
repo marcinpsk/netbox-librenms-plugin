@@ -341,7 +341,7 @@ class TestVCLookupDelegation:
         # Viewed device: member A with its own librenms_id
         member_a = MagicMock()
         member_a.pk = 1
-        member_a.cf = {"librenms_id": 42}
+        member_a.cf = {"librenms_id": {"default": 42}}
         member_a.virtual_chassis = MagicMock()
 
         # Sync device: member B (returned by get_librenms_sync_device)
@@ -354,6 +354,7 @@ class TestVCLookupDelegation:
         view = object.__new__(BaseLibreNMSSyncView)
         view.model = MagicMock()
         api = MagicMock()
+        api.server_key = "default"
         api.get_librenms_id.return_value = 42
         view._librenms_api = api
         view.tab = MagicMock()
@@ -364,7 +365,7 @@ class TestVCLookupDelegation:
         view.get(request, pk=1)
 
         # get_librenms_sync_device must be called unconditionally for VC members
-        mock_sync_device.assert_called_once_with(member_a)
+        mock_sync_device.assert_called_once_with(member_a, server_key="default")
         # get_librenms_id should be called on the sync device (member_b)
         api.get_librenms_id.assert_called_once_with(member_b)
 
@@ -385,6 +386,7 @@ class TestVCLookupDelegation:
         view = object.__new__(BaseLibreNMSSyncView)
         view.model = MagicMock()
         api = MagicMock()
+        api.server_key = "default"
         api.get_librenms_id.return_value = 42
         view._librenms_api = api
         view.tab = MagicMock()
@@ -395,3 +397,88 @@ class TestVCLookupDelegation:
         view.get(request, pk=1)
 
         mock_sync_device.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Tests for _build_all_server_mappings
+# ---------------------------------------------------------------------------
+
+
+class TestBuildAllServerMappings:
+    """Tests for BaseLibreNMSSyncView._build_all_server_mappings."""
+
+    def test_returns_none_for_legacy_int(self, mock_netbox_device):
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+        mock_netbox_device.custom_field_data = {"librenms_id": 42}
+        result = BaseLibreNMSSyncView._build_all_server_mappings(mock_netbox_device, "production")
+        assert result is None
+
+    def test_returns_none_for_missing_cf(self, mock_netbox_device):
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+        mock_netbox_device.custom_field_data = {"librenms_id": None}
+        result = BaseLibreNMSSyncView._build_all_server_mappings(mock_netbox_device, "production")
+        assert result is None
+
+    def test_single_configured_server(self, mock_netbox_device, mock_plugins_config_single_server):
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+        mock_netbox_device.custom_field_data = {"librenms_id": {"production": 42}}
+        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings") as mock_settings:
+            mock_settings.PLUGINS_CONFIG = mock_plugins_config_single_server
+            result = BaseLibreNMSSyncView._build_all_server_mappings(mock_netbox_device, "production")
+
+        assert result is not None
+        assert len(result) == 1
+        entry = result[0]
+        assert entry["server_key"] == "production"
+        assert entry["device_id"] == 42
+        assert entry["display_name"] == "Production LibreNMS"
+        assert entry["is_configured"] is True
+        assert entry["is_active"] is True
+        assert entry["device_url"] == "https://librenms.example.com/device/device=42/"
+
+    def test_orphaned_server_is_not_configured(self, mock_netbox_device, mock_plugins_config_empty_servers):
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+        mock_netbox_device.custom_field_data = {"librenms_id": {"deleted-server": 77}}
+        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings") as mock_settings:
+            mock_settings.PLUGINS_CONFIG = mock_plugins_config_empty_servers
+            result = BaseLibreNMSSyncView._build_all_server_mappings(mock_netbox_device, "production")
+
+        assert result is not None
+        assert len(result) == 1
+        entry = result[0]
+        assert entry["server_key"] == "deleted-server"
+        assert entry["device_id"] == 77
+        assert entry["is_configured"] is False
+        assert entry["is_active"] is False
+        assert entry["device_url"] is None
+
+    def test_multiple_servers_sorted_active_first(self, mock_netbox_device, mock_plugins_config_multi_server_mapping):
+        from unittest.mock import patch
+
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+        mock_netbox_device.custom_field_data = {"librenms_id": {"mock-dev": 99, "production": 42, "old-server": 11}}
+        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.django_settings") as mock_settings:
+            mock_settings.PLUGINS_CONFIG = mock_plugins_config_multi_server_mapping
+            result = BaseLibreNMSSyncView._build_all_server_mappings(mock_netbox_device, "production")
+
+        assert result is not None
+        assert len(result) == 3
+        # Active (production) first
+        assert result[0]["server_key"] == "production"
+        assert result[0]["is_active"] is True
+        # Configured (mock-dev) second
+        assert result[1]["server_key"] == "mock-dev"
+        assert result[1]["is_configured"] is True
+        assert result[1]["is_active"] is False
+        # Orphaned last
+        assert result[2]["server_key"] == "old-server"
+        assert result[2]["is_configured"] is False

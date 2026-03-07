@@ -63,6 +63,11 @@ class TestLibreNMSAPIMixinWiring:
 
         self._assert_has_api_mixin(AssignVCSerialView)
 
+    def test_convert_legacy_id_has_librenms_api_mixin(self):
+        from netbox_librenms_plugin.views.sync.device_fields import ConvertLegacyLibreNMSIdView
+
+        self._assert_has_api_mixin(ConvertLegacyLibreNMSIdView)
+
 
 class TestCacheMixinWiring:
     """Views that cache LibreNMS data must have CacheMixin and expose get_cache_key."""
@@ -192,6 +197,18 @@ class TestRequiredObjectPermissionsWiring:
         self._assert_has_mixins(UpdateDeviceSerialView)
         assert "POST" in UpdateDeviceSerialView.required_object_permissions
 
+    def test_remove_server_mapping_has_required_object_permissions(self):
+        from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
+
+        self._assert_has_mixins(RemoveServerMappingView)
+        assert "POST" in RemoveServerMappingView.required_object_permissions
+
+    def test_convert_legacy_id_has_required_object_permissions(self):
+        from netbox_librenms_plugin.views.sync.device_fields import ConvertLegacyLibreNMSIdView
+
+        self._assert_has_mixins(ConvertLegacyLibreNMSIdView)
+        assert "POST" in ConvertLegacyLibreNMSIdView.required_object_permissions
+
     def test_delete_interfaces_has_required_object_permissions(self):
         from dcim.models import Interface
         from virtualization.models import VMInterface
@@ -253,17 +270,6 @@ _TEMPLATE_FILES = sorted(_TEMPLATE_DIR.rglob("*.html"))
 class TestTemplateSyntax:
     """Compile every plugin template to catch syntax errors early."""
 
-    @pytest.fixture(autouse=True, scope="class")
-    def _django_engine(self):
-        """Ensure Django is set up once and expose the template engine."""
-        os.environ.setdefault("DJANGO_SETTINGS_MODULE", "netbox.settings")
-        import django
-
-        django.setup()
-        from django.template import engines
-
-        self.__class__._engine = engines["django"]
-
     @pytest.mark.parametrize(
         "template_path",
         _TEMPLATE_FILES,
@@ -271,6 +277,13 @@ class TestTemplateSyntax:
     )
     def test_template_compiles(self, template_path):
         """Each template must parse without TemplateSyntaxError."""
+        os.environ.setdefault("DJANGO_SETTINGS_MODULE", "netbox.settings")
+        import django
+
+        django.setup()
+        from django.template import engines
+
+        engine = engines["django"]
         source = template_path.read_text()
         # Compile the template — raises TemplateSyntaxError on bad tags
-        self._engine.from_string(source)
+        engine.from_string(source)

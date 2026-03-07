@@ -190,16 +190,11 @@ class LibreNMSAPI:
             If found via API, stores ID in custom field if available,
             otherwise caches the value.
         """
-        librenms_id = obj.cf.get("librenms_id")
-        if librenms_id is not None:
-            if isinstance(librenms_id, str):
-                try:
-                    librenms_id = int(librenms_id)
-                    self._store_librenms_id(obj, librenms_id)
-                except (ValueError, TypeError):
-                    librenms_id = None  # empty or invalid string — fall through to discovery
-            if librenms_id:
-                return librenms_id
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        librenms_id = get_librenms_device_id(obj, self.server_key)
+        if librenms_id:
+            return librenms_id
 
         # Check cache
         cache_key = self._get_cache_key(obj)
@@ -261,7 +256,9 @@ class LibreNMSAPI:
             None
         """
         if "librenms_id" in obj.cf:
-            obj.custom_field_data["librenms_id"] = librenms_id
+            from netbox_librenms_plugin.utils import set_librenms_device_id
+
+            set_librenms_device_id(obj, librenms_id, self.server_key)
             obj.save()
         else:
             # Use cache as fallback

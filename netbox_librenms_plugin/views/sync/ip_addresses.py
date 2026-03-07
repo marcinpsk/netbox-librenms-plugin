@@ -9,10 +9,15 @@ from django.views import View
 from ipam.models import VRF, IPAddress
 from virtualization.models import VirtualMachine, VMInterface
 
-from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
+from netbox_librenms_plugin.views.mixins import (
+    CacheMixin,
+    LibreNMSAPIMixin,
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+)
 
 
-class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
+class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
     """Synchronize IP addresses from LibreNMS cache into NetBox."""
 
     required_object_permissions = {
@@ -40,7 +45,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
     def get_cached_ip_data(self, request, obj):
         """Return cached LibreNMS IP address data for the given object."""
-        cached_data = cache.get(self.get_cache_key(obj, "ip_addresses"))
+        server_key = self.librenms_api.server_key
+        cached_data = cache.get(self.get_cache_key(obj, "ip_addresses", server_key))
         if not cached_data:
             return None
         return cached_data.get("ip_addresses", [])

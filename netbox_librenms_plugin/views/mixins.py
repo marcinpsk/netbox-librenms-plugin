@@ -287,32 +287,42 @@ class CacheMixin:
     A mixin class that provides caching functionality.
     """
 
-    def get_cache_key(self, obj, data_type="ports"):
+    def get_cache_key(self, obj, data_type="ports", server_key=None):
         """
         Get the cache key for the object.
 
         Args:
             obj: The object to cache data for
-            data_type: Type of data being cached ('ports' or 'links')
+            data_type: Type of data being cached ('ports', 'links', 'inventory', etc.)
+            server_key: Optional LibreNMS server key for namespacing per-server data
         """
         model_name = obj._meta.model_name
-        return f"librenms_{data_type}_{model_name}_{obj.pk}"
+        base = f"librenms_{data_type}_{model_name}_{obj.pk}"
+        if server_key:
+            return f"{base}_{server_key}"
+        return base
 
-    def get_last_fetched_key(self, obj, data_type="ports"):
+    def get_last_fetched_key(self, obj, data_type="ports", server_key=None):
         """
         Get the cache key for the last fetched time of the object.
         """
         model_name = obj._meta.model_name
-        return f"librenms_{data_type}_last_fetched_{model_name}_{obj.pk}"
+        base = f"librenms_{data_type}_last_fetched_{model_name}_{obj.pk}"
+        if server_key:
+            return f"{base}_{server_key}"
+        return base
 
-    def get_vlan_overrides_key(self, obj):
+    def get_vlan_overrides_key(self, obj, server_key=None):
         """
         Get the cache key for user VLAN group override selections.
 
         Stores a {vid_str: group_id_str} map so that "apply to all" VLAN
-        group choices persist across table pages.
+        group choices persist across table pages. Including server_key scopes
+        overrides per-server to avoid leakage when multiple servers are configured.
         """
         model_name = obj._meta.model_name
+        if server_key:
+            return f"librenms_vlan_group_overrides_{model_name}_{obj.pk}_{server_key}"
         return f"librenms_vlan_group_overrides_{model_name}_{obj.pk}"
 
 

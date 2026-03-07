@@ -481,17 +481,24 @@ class DeviceImportTable(tables.Table):
                 btn_class = "btn-outline-warning"
                 btn_icon = "mdi-information-outline"
                 btn_label = " Details"
-                btn_title = "View details"
             elif match_type == "librenms_id" and validation.get("librenms_id_needs_migration"):
                 btn_class = "btn-outline-warning"
                 btn_icon = "mdi-database-alert"
                 btn_label = " Legacy ID"
-                btn_title = "Migrate Legacy ID"
             else:
                 btn_class = "btn-outline-success"
                 btn_icon = "mdi-check-circle"
                 btn_label = ""
-                btn_title = "View details"
+
+            btn_title = (
+                "Resolve conflict"
+                if (has_actions or has_mismatch)
+                else (
+                    "Migrate Legacy ID"
+                    if match_type == "librenms_id" and validation.get("librenms_id_needs_migration")
+                    else "View details"
+                )
+            )
             aria_attr = f'aria-label="{btn_title}" '
             buttons.append(
                 f'<button type="button" '

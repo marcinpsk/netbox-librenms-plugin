@@ -4,6 +4,7 @@ from dcim.models import Device, Interface
 from django.contrib import messages
 from django.core.cache import cache
 from django.core.exceptions import MultipleObjectsReturned
+from django.db.models import Q
 from django.http import JsonResponse
 from django.middleware.csrf import get_token
 from django.shortcuts import get_object_or_404, render
@@ -14,9 +15,30 @@ from django.views import View
 
 from netbox_librenms_plugin.utils import (
     get_interface_name_field,
+    get_librenms_sync_device,
     get_virtual_chassis_member,
 )
 from netbox_librenms_plugin.views.mixins import CacheMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin
+
+
+def _librenms_id_q(server_key: str, value) -> Q:
+    """Return a combined Q matching JSON-field and legacy bare-int librenms_id.
+
+    Matches both integer and string representations to handle any stored format.
+    """
+    q = Q(**{f"custom_field_data__librenms_id__{server_key}": value}) | Q(custom_field_data__librenms_id=value)
+    try:
+        int_val = int(value)
+        str_val = str(int_val)
+        if int_val != value:  # value was a string; also add the integer variant
+            q |= Q(**{f"custom_field_data__librenms_id__{server_key}": int_val})
+            q |= Q(custom_field_data__librenms_id=int_val)
+        if str_val != value:  # value was an integer; also add the string variant
+            q |= Q(**{f"custom_field_data__librenms_id__{server_key}": str_val})
+            q |= Q(custom_field_data__librenms_id=str_val)
+    except (TypeError, ValueError):
+        pass
+    return q
 
 
 class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
@@ -39,7 +61,8 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
 
     def get_ports_data(self, obj):
         """Get ports data without affecting cache"""
-        cached_data = cache.get(self.get_cache_key(obj, "ports"))
+        server_key = self.librenms_api.server_key
+        cached_data = cache.get(self.get_cache_key(obj, "ports", server_key))
         if cached_data:
             return cached_data
         success, data = self.librenms_api.get_ports(self.librenms_id)
@@ -77,10 +100,11 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
 
     def get_device_by_id_or_name(self, remote_device_id, hostname):
         """Try to find device in NetBox first by librenms_id custom field, then by name"""
+        server_key = self.librenms_api.server_key
         # First try matching by LibreNMS ID
         if remote_device_id:
             try:
-                device = Device.objects.get(custom_field_data__librenms_id=remote_device_id)
+                device = Device.objects.get(_librenms_id_q(server_key, remote_device_id))
                 return device, True, None
             except Device.DoesNotExist:
                 pass
@@ -115,13 +139,14 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         if local_port := link.get("local_port"):
             interface = None
             local_port_id = link.get("local_port_id")
+            server_key = self.librenms_api.server_key
 
             if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                 chassis_member = get_virtual_chassis_member(obj, local_port)
 
                 # First try to find interface by librenms_id
                 if local_port_id:
-                    interface = chassis_member.interfaces.filter(custom_field_data__librenms_id=local_port_id).first()
+                    interface = chassis_member.interfaces.filter(_librenms_id_q(server_key, local_port_id)).first()
 
                 # Only if librenms_id match fails, try matching by name
                 if not interface:
@@ -129,7 +154,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             else:
                 # First try to find interface by librenms_id
                 if local_port_id:
-                    interface = obj.interfaces.filter(custom_field_data__librenms_id=local_port_id).first()
+                    interface = obj.interfaces.filter(_librenms_id_q(server_key, local_port_id)).first()
 
                 # Only if librenms_id match fails, try matching by name
                 if not interface:
@@ -144,6 +169,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         if remote_port := link.get("remote_port"):
             netbox_remote_interface = None
             librenms_remote_port_id = link.get("remote_port_id")
+            server_key = self.librenms_api.server_key
 
             # Handle virtual chassis case
             if hasattr(device, "virtual_chassis") and device.virtual_chassis:
@@ -153,7 +179,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 # First try to find interface by librenms_id
                 if librenms_remote_port_id:
                     netbox_remote_interface = chassis_member.interfaces.filter(
-                        custom_field_data__librenms_id=librenms_remote_port_id
+                        _librenms_id_q(server_key, librenms_remote_port_id)
                     ).first()
 
                 # If not found by librenms_id, fall back to name matching on the correct chassis member
@@ -164,7 +190,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 # First try to find interface by librenms_id
                 if librenms_remote_port_id:
                     netbox_remote_interface = device.interfaces.filter(
-                        custom_field_data__librenms_id=librenms_remote_port_id
+                        _librenms_id_q(server_key, librenms_remote_port_id)
                     ).first()
 
                 # If not found by librenms_id, fall back to name matching
@@ -254,6 +280,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
     def _prepare_context(self, request, obj, fetch_fresh=False):
         """Helper method to prepare the context data for cable sync views."""
         cache_expiry = None
+        server_key = self.librenms_api.server_key
 
         if fetch_fresh:
             # Always fetch new data when requested
@@ -262,7 +289,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 return None
         else:
             # Try to use cached data
-            cached_links_data = cache.get(self.get_cache_key(obj, "links"))
+            cached_links_data = cache.get(self.get_cache_key(obj, "links", server_key))
             if cached_links_data:
                 links_data = cached_links_data.get("links", [])
             else:
@@ -286,7 +313,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         links_data = self.enrich_links_data(links_data, obj)
 
         # Cache after enrichment so verify/sync views read current NetBox state
-        cache_key = self.get_cache_key(obj, "links")
+        cache_key = self.get_cache_key(obj, "links", server_key)
         if fetch_fresh:
             cache.set(
                 cache_key,
@@ -363,18 +390,13 @@ class SingleCableVerifyView(BaseCableTableView):
         if selected_device_id:
             selected_device = get_object_or_404(Device, pk=selected_device_id)
 
-            # Get the primary device (master or first with IP) if part of virtual chassis
-            if selected_device.virtual_chassis:
-                primary_device = selected_device.virtual_chassis.master
-                if not primary_device or not primary_device.primary_ip:
-                    primary_device = next(
-                        (member for member in selected_device.virtual_chassis.members.all() if member.primary_ip),
-                        None,
-                    )
-            else:
-                primary_device = selected_device
+            # Use the same sync-device resolution as the GET path so the cache
+            # key matches what _prepare_context wrote.
+            primary_device = (
+                get_librenms_sync_device(selected_device, server_key=self.librenms_api.server_key) or selected_device
+            )
 
-            cached_links = cache.get(self.get_cache_key(primary_device, "links"))
+            cached_links = cache.get(self.get_cache_key(primary_device, "links", self.librenms_api.server_key))
 
             if cached_links:
                 link_data = next(
@@ -386,38 +408,24 @@ class SingleCableVerifyView(BaseCableTableView):
                     None,
                 )
                 if link_data:
-                    # Strip derived fields from cached data to avoid stale
-                    # IDs/URLs when NetBox objects are deleted after caching.
-                    _raw_keys = {
-                        "local_port",
-                        "local_port_id",
-                        "remote_port",
-                        "remote_device",
-                        "remote_port_id",
-                        "remote_device_id",
-                    }
-                    link_data = {k: v for k, v in link_data.items() if k in _raw_keys}
-
-                    # Re-enrich remote side from current NetBox state
-                    remote_hostname = link_data.get("remote_device", "")
-                    if remote_hostname:
-                        link_data = self.process_remote_device(
-                            link_data, remote_hostname, link_data.get("remote_device_id")
-                        )
-
                     local_port = link_data.get("local_port", "")
                     formatted_row["local_port"] = local_port
+
+                    # Resolve the VC member that owns this port (mirrors enrich_local_port).
+                    _sk = self.librenms_api.server_key
+                    if hasattr(selected_device, "virtual_chassis") and selected_device.virtual_chassis:
+                        _member = get_virtual_chassis_member(selected_device, local_port)
+                    else:
+                        _member = selected_device
 
                     # First try to find interface by librenms_id
                     interface = None
                     if local_port_id:
-                        interface = selected_device.interfaces.filter(
-                            custom_field_data__librenms_id=local_port_id
-                        ).first()
+                        interface = _member.interfaces.filter(_librenms_id_q(_sk, local_port_id)).first()
 
                     # If not found by librenms_id, try matching by name
                     if not interface and local_port:
-                        interface = selected_device.interfaces.filter(name=local_port).first()
+                        interface = _member.interfaces.filter(name=local_port).first()
 
                     if interface:
                         link_data["netbox_local_interface_id"] = interface.pk
