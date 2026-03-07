@@ -92,6 +92,8 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         filters = job_data.get("filters", {})
         server_key = job_data.get("server_key", "default")
         vc_enabled = job_data.get("vc_detection_enabled", False)
+        use_sysname = job_data.get("use_sysname", True)
+        strip_domain = job_data.get("strip_domain", False)
 
         # Extract cache metadata for frontend warnings
         self._cache_timestamp = job_data.get("cached_at")
@@ -109,6 +111,8 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
                 filters=filters,
                 device_id=device_id,
                 vc_enabled=vc_enabled,
+                use_sysname=use_sysname,
+                strip_domain=strip_domain,
             )
             device = cache.get(cache_key)
             if device:
@@ -283,6 +287,26 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
                 if get_workers_for_queue("default") > 0:
                     from netbox_librenms_plugin.jobs import FilterDevicesJob
 
+                    # Resolve naming preferences freshly for the background job.
+                    # Toggles fire savePref() AJAX calls and are not in the form submission.
+                    _settings_bg = None
+                    try:
+                        _settings_bg = LibreNMSSettings.objects.first()
+                    except Exception:
+                        logger.exception("Failed to load LibreNMSSettings for background job naming prefs")
+                    _use_sysname_pref = get_user_pref(request, "plugins.netbox_librenms_plugin.use_sysname")
+                    _strip_domain_pref = get_user_pref(request, "plugins.netbox_librenms_plugin.strip_domain")
+                    _use_sysname = (
+                        _use_sysname_pref
+                        if _use_sysname_pref is not None
+                        else (getattr(_settings_bg, "use_sysname_default", True) if _settings_bg else True)
+                    )
+                    _strip_domain = (
+                        _strip_domain_pref
+                        if _strip_domain_pref is not None
+                        else (getattr(_settings_bg, "strip_domain_default", False) if _settings_bg else False)
+                    )
+
                     # Enqueue background job
                     job = FilterDevicesJob.enqueue(
                         user=request.user,
@@ -292,8 +316,8 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
                         show_disabled=bool(self._filter_form_data.get("show_disabled")),
                         exclude_existing=bool(self._filter_form_data.get("exclude_existing")),
                         server_key=self.librenms_api.server_key,
-                        use_sysname=self._use_sysname,
-                        strip_domain=self._strip_domain,
+                        use_sysname=_use_sysname,
+                        strip_domain=_strip_domain,
                     )
 
                     logger.info(
@@ -417,6 +441,25 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         show_disabled = bool(data_source.get("show_disabled"))
         exclude_existing = bool(data_source.get("exclude_existing"))
 
+        # Resolve naming preferences: user pref → settings default.
+        use_sysname_pref = get_user_pref(self._request, "plugins.netbox_librenms_plugin.use_sysname")
+        strip_domain_pref = get_user_pref(self._request, "plugins.netbox_librenms_plugin.strip_domain")
+        try:
+            _settings = LibreNMSSettings.objects.first()
+        except Exception:
+            logger.exception("Failed to load LibreNMSSettings for naming preferences")
+            _settings = None
+        use_sysname = (
+            use_sysname_pref
+            if use_sysname_pref is not None
+            else (getattr(_settings, "use_sysname_default", True) if _settings else True)
+        )
+        strip_domain = (
+            strip_domain_pref
+            if strip_domain_pref is not None
+            else (getattr(_settings, "strip_domain_default", False) if _settings else False)
+        )
+
         validated_devices, from_cache = process_device_filters(
             api=self.librenms_api,
             filters=libre_filters,
@@ -426,8 +469,8 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             exclude_existing=exclude_existing,
             request=self._request,
             return_cache_status=True,
-            use_sysname=self._use_sysname,
-            strip_domain=self._strip_domain,
+            use_sysname=use_sysname,
+            strip_domain=strip_domain,
         )
 
         self._from_cache = from_cache
@@ -441,6 +484,8 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
                 server_key=self.librenms_api.server_key,
                 filters=libre_filters,
                 vc_enabled=vc_detection_enabled,
+                use_sysname=use_sysname,
+                strip_domain=strip_domain,
             )
             cache_metadata = cache.get(cache_metadata_key)
             if cache_metadata:

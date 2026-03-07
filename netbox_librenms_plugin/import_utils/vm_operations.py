@@ -1,4 +1,4 @@
-"""Virtual machine import operations."""
+"""Virtual machine creation and import operations."""
 
 import logging
 

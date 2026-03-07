@@ -1,4 +1,4 @@
-"""Virtual chassis detection, creation, and caching."""
+"""Virtual chassis detection, creation, and management."""
 
 import logging
 from typing import List
@@ -32,11 +32,12 @@ def _clone_virtual_chassis_data(data: dict | None) -> dict:
     members = []
     for idx, member in enumerate(data.get("members", [])):
         member_copy = member.copy()
-        raw_position = member_copy.get("position", idx)
+        raw_position = member_copy.get("position", idx + 1)
         try:
-            member_copy["position"] = int(raw_position)
+            pos = int(raw_position)
+            member_copy["position"] = pos if pos > 0 else idx + 1
         except (TypeError, ValueError):
-            member_copy["position"] = idx
+            member_copy["position"] = idx + 1  # 1-based fallback; position 0 is invalid
         members.append(member_copy)
 
     member_count = data.get("member_count") or len(members)
@@ -175,7 +176,7 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
                 logger.debug(f"VC detection: Found parent container at index {parent_index} for device {device_id}")
                 break
 
-        if not parent_index:
+        if parent_index is None:
             return None
 
         # Step 3: Get children chassis at next level
@@ -200,11 +201,15 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
         vc_name_pattern = _load_vc_member_name_pattern() if master_name else None
         members = []
         for idx, chassis in enumerate(chassis_items):
-            raw_position = chassis.get("entPhysicalParentRelPos", idx)
+            # entPhysicalParentRelPos is 1-based; fall back to idx+1 (not idx) so
+            # position 0 is never produced — VC positions must be ≥ 1.
+            raw_position = chassis.get("entPhysicalParentRelPos", idx + 1)
             try:
                 position = int(raw_position)
+                if position <= 0:
+                    position = idx + 1
             except (TypeError, ValueError):
-                position = idx
+                position = idx + 1
             member_data = {
                 "serial": chassis.get("entPhysicalSerialNum", ""),
                 "position": position,
@@ -214,13 +219,12 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
                 "description": chassis.get("entPhysicalDescr", ""),
             }
 
-            # Generate suggested name if we have master name
+            # Generate suggested name if we have master name.
+            # position is already 1-based, so pass it directly (no +1).
             if master_name:
-                member_data["suggested_name"] = _generate_vc_member_name(
-                    master_name, position + 1, pattern=vc_name_pattern
-                )
+                member_data["suggested_name"] = _generate_vc_member_name(master_name, position, pattern=vc_name_pattern)
             else:
-                member_data["suggested_name"] = f"Member-{position + 1}"
+                member_data["suggested_name"] = f"Member-{position}"
 
             members.append(member_data)
 
@@ -260,8 +264,9 @@ def _generate_vc_member_name(master_name: str, position: int, serial: str = None
         master_name: Name of the master/primary device
         position: VC position number
         serial: Optional serial number of the member device
-        pattern: Optional pre-loaded pattern; if None, loaded from settings via
-            _load_vc_member_name_pattern()
+        pattern: Optional pre-loaded name pattern; if None, loaded from settings.
+                 Pass a pre-loaded pattern when calling inside a loop to avoid
+                 repeated DB queries.
 
     Returns:
         Generated member device name
@@ -311,13 +316,16 @@ def update_vc_member_suggested_names(vc_data: dict, master_name: str) -> dict:
     # Load naming pattern once to avoid a DB query per member
     vc_pattern = _load_vc_member_name_pattern()
     for idx, member in enumerate(vc_data.get("members", [])):
-        raw_position = member.get("position", idx)
+        # Positions are stored as 1-based (from entPhysicalParentRelPos or idx+1 fallback).
+        # Use them directly for name generation; only replace 0/negative with 1-based fallback.
+        raw_position = member.get("position", idx + 1)
         try:
-            base_position = int(raw_position)
+            position = int(raw_position)
+            if position <= 0:
+                position = idx + 1
         except (TypeError, ValueError):
-            base_position = idx
-        position = base_position + 1  # Convert to 1-based position
-        member["position"] = base_position
+            position = idx + 1
+        member["position"] = position
         member["suggested_name"] = _generate_vc_member_name(
             master_name, position, serial=member.get("serial"), pattern=vc_pattern
         )
@@ -352,10 +360,8 @@ def create_virtual_chassis_with_members(master_device: Device, members_info: lis
         ]
     """
 
-    # Store original master device state for rollback
+    # original_master_name is still referenced in warning messages inside the atomic block.
     original_master_name = master_device.name
-    original_vc = master_device.virtual_chassis
-    original_vc_position = master_device.vc_position
 
     try:
         with transaction.atomic():
@@ -382,7 +388,7 @@ def create_virtual_chassis_with_members(master_device: Device, members_info: lis
             vc = VirtualChassis.objects.create(
                 name=vc_name,
                 master=master_device,
-                domain=f"librenms-{libre_device['device_id']}",
+                domain=f"librenms-{libre_device.get('device_id') or master_device.pk}",
             )
 
             # Update master device
@@ -392,11 +398,12 @@ def create_virtual_chassis_with_members(master_device: Device, members_info: lis
 
             # Create member devices for remaining positions
             position = 2  # Start at 2 (master is 1)
+            used_positions = {1}  # Master occupies position 1
             members_created = 0
 
             for member in members_info:
-                # Skip if this is the master's serial
-                if member.get("serial") == master_device.serial:
+                # Skip if this is the master's serial (only when both serials are non-empty)
+                if member.get("serial") and member.get("serial") == master_device.serial:
                     continue
 
                 serial = member.get("serial")
@@ -411,7 +418,30 @@ def create_virtual_chassis_with_members(master_device: Device, members_info: lis
                     logger.warning(f"Device with serial '{serial}' already exists, skipping VC member creation")
                     continue
 
-                member_name = _generate_vc_member_name(master_base_name, position, serial=serial, pattern=vc_pattern)
+                # Prefer the discovered SNMP position; fall back to sequential counter.
+                # Normalize discovered_pos: 0 is not a valid VC position, treat as absent.
+                try:
+                    discovered_pos = int(member.get("position")) if member.get("position") is not None else None
+                except (TypeError, ValueError):
+                    discovered_pos = None
+                if discovered_pos is not None and discovered_pos < 1:
+                    discovered_pos = None  # 0 is invalid for vc_position; fall back to counter
+                # If discovered_pos is already taken by another member, treat as absent.
+                if discovered_pos is not None and discovered_pos in used_positions:
+                    discovered_pos = None
+                # Consume next free sequential slot when no valid discovered_pos.
+                if discovered_pos is None:
+                    while position in used_positions:
+                        position += 1
+                    chosen_pos = position
+                    position += 1
+                else:
+                    chosen_pos = discovered_pos
+                    # Advance sequential counter past chosen position.
+                    position = max(position, chosen_pos + 1)
+                used_positions.add(chosen_pos)
+
+                member_name = _generate_vc_member_name(master_base_name, chosen_pos, serial=serial, pattern=vc_pattern)
 
                 # Check for duplicate name
                 if Device.objects.filter(name=member_name).exists():
@@ -428,15 +458,16 @@ def create_virtual_chassis_with_members(master_device: Device, members_info: lis
                     platform=master_device.platform,
                     serial=serial,
                     virtual_chassis=vc,
-                    vc_position=position,
+                    vc_position=chosen_pos,
                     comments=f"VC member (LibreNMS: {member.get('name', 'Unknown')})\n"
                     f"Auto-created from stack inventory",
                 )
                 members_created += 1
-                position += 1
 
             # Validate member count
-            expected_members = len([m for m in members_info if m.get("serial") != master_device.serial])
+            expected_members = len(
+                [m for m in members_info if not (m.get("serial") and m.get("serial") == master_device.serial)]
+            )
             if members_created < expected_members:
                 logger.warning(
                     f"Created {members_created} members but expected {expected_members}. "
@@ -451,12 +482,10 @@ def create_virtual_chassis_with_members(master_device: Device, members_info: lis
             return vc
 
     except Exception as e:
-        # Rollback master device to original state
+        # The transaction.atomic() block above will roll back all DB changes automatically.
+        # Manual state restoration is redundant and the save() would fail in a broken transaction.
         logger.error(
-            f"Virtual Chassis creation failed for device {master_device.name}: {e}. Rolling back master device changes."
+            f"Virtual Chassis creation failed for device {master_device.name}: {e}",
+            exc_info=True,
         )
-        master_device.name = original_master_name
-        master_device.virtual_chassis = original_vc
-        master_device.vc_position = original_vc_position
-        master_device.save()
         raise
