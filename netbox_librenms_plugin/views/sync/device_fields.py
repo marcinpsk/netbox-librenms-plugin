@@ -303,7 +303,12 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                     )
                     return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
-                device = Device.objects.select_for_update().get(pk=pk)
+                try:
+                    device = Device.objects.select_for_update().get(pk=pk)
+                except Device.DoesNotExist:
+                    transaction.set_rollback(True)
+                    messages.error(request, "Device no longer exists.")
+                    return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
                 device.platform = platform
                 try:
                     device.full_clean()
