@@ -4,13 +4,17 @@ from dcim.models import Device, Manufacturer, Platform
 from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
-from django.db.models import Q
+
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.views import View
 from virtualization.models import VirtualMachine
 
-from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type, migrate_legacy_librenms_id
+from netbox_librenms_plugin.utils import (
+    find_by_librenms_id,
+    match_librenms_hardware_to_device_type,
+    migrate_legacy_librenms_id,
+)
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
 logger = logging.getLogger(__name__)
@@ -601,15 +605,9 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             except model.DoesNotExist:
                 messages.error(request, f"{model.__name__} no longer exists.")
                 return self._sync_url(object_type, pk)
-            # Check that no other object already owns this ID on this server
-            conflict = (
-                model.objects.filter(
-                    Q(**{f"custom_field_data__librenms_id__{server_key}": librenms_id})
-                    | Q(**{f"custom_field_data__librenms_id__{server_key}": str(librenms_id)})
-                )
-                .exclude(pk=locked.pk)
-                .exists()
-            )
+            # Check that no other object already owns this ID (server-scoped or legacy)
+            match = find_by_librenms_id(model, librenms_id, server_key)
+            conflict = match is not None and match.pk != locked.pk
             if conflict:
                 transaction.set_rollback(True)
                 messages.error(

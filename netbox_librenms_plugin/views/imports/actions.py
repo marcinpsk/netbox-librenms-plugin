@@ -7,7 +7,7 @@ from django.contrib import messages
 from django.core.cache import cache
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
-from django.db.models import Q
+
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.utils.html import escape
@@ -1280,19 +1280,12 @@ class DeviceConflictActionView(
                         f"Legacy librenms_id changed under lock ({cf_locked_int} != {librenms_id}); cannot migrate safely.",
                         status=400,
                     )
-                # Check that no other object already owns this ID on this server
-                # (both new namespaced format — int and string — and legacy integer format)
+                # Check that no other object already owns this ID (server-scoped or legacy)
                 server_key = self.librenms_api.server_key
-                conflict = (
-                    existing_model.objects.filter(
-                        Q(**{f"custom_field_data__librenms_id__{server_key}": cf_locked_int})
-                        | Q(**{f"custom_field_data__librenms_id__{server_key}": str(cf_locked_int)})
-                        | Q(custom_field_data__librenms_id=cf_locked_int)
-                        | Q(custom_field_data__librenms_id=str(cf_locked_int))
-                    )
-                    .exclude(pk=locked_device.pk)
-                    .exists()
-                )
+                from netbox_librenms_plugin.utils import find_by_librenms_id
+
+                match = find_by_librenms_id(existing_model, cf_locked_int, server_key)
+                conflict = match is not None and match.pk != locked_device.pk
                 if conflict:
                     return HttpResponse(
                         f"Another device already has librenms_id {cf_locked_int} for server '{server_key}'; cannot migrate.",

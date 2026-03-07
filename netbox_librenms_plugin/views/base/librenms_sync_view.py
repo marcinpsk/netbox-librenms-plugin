@@ -105,7 +105,9 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         # Detect legacy bare-int librenms_id format for conversion badge
         _lookup_device = getattr(self, "_librenms_lookup_device", obj)
         _raw_cf = _lookup_device.cf.get("librenms_id") if _lookup_device else None
-        librenms_id_is_legacy = isinstance(_raw_cf, (int, str)) and not isinstance(_raw_cf, bool)
+        librenms_id_is_legacy = (isinstance(_raw_cf, int) and not isinstance(_raw_cf, bool)) or (
+            isinstance(_raw_cf, str) and _raw_cf.isdigit()
+        )
 
         # Determine if serial match allows legacy ID conversion
         _librenms_serial = librenms_info["librenms_device_details"].get("librenms_device_serial", "-")

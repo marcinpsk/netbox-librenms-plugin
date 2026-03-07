@@ -105,7 +105,7 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
                 vlan_groups=vlan_groups,
                 server_key=server_key,
             )
-        table.htmx_url = f"{self.request.path}?tab=interfaces"
+        table.htmx_url = f"{self.request.path}?tab=interfaces" + (f"&server_key={server_key}" if server_key else "")
         return table
 
 
@@ -406,5 +406,6 @@ class DeviceModuleTableView(BaseModuleTableView):
     def get_table(self, data, obj):
         """Return the module sync table."""
         table = LibreNMSModuleTable(data, device=obj, server_key=self.librenms_api.server_key)
-        table.htmx_url = f"{self.request.path}?tab=modules"
+        server_key = self.librenms_api.server_key
+        table.htmx_url = f"{self.request.path}?tab=modules" + (f"&server_key={server_key}" if server_key else "")
         return table

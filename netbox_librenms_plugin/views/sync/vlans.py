@@ -41,6 +41,9 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         if error := self.require_all_permissions("POST"):
             return error
 
+        # Read server_key from POST so we use the exact server the user was viewing
+        self._post_server_key = request.POST.get("server_key") or self.librenms_api.server_key
+
         obj = self.get_object(object_type, object_id)
         action = request.POST.get("action", "")
 
@@ -63,7 +66,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             if object_type == "device"
             else "plugins:netbox_librenms_plugin:vm_librenms_sync"
         )
-        server_key = self.librenms_api.server_key
+        server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
         url = reverse(url_name, kwargs={"pk": object_id}) + "?tab=vlans"
         if server_key:
             url += f"&server_key={server_key}"
@@ -82,7 +85,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             return self._redirect(object_type, object_id)
 
         # Get cached VLAN data
-        cached_vlans = cache.get(self.get_cache_key(obj, "vlans", self.librenms_api.server_key))
+        cached_vlans = cache.get(self.get_cache_key(obj, "vlans", self._post_server_key))
         if not cached_vlans:
             messages.error(request, "No cached VLAN data. Please refresh VLANs first.")
             return self._redirect(object_type, object_id)
