@@ -1,12 +1,19 @@
+import logging
+
 from dcim.models import Device, Manufacturer, Platform
 from django.contrib import messages
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
+from django.db.models import Q
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.views import View
+from virtualization.models import VirtualMachine
 
-from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
+from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type, migrate_legacy_librenms_id
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
+
+logger = logging.getLogger(__name__)
 
 
 class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
@@ -278,26 +285,61 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 pass
 
         try:
-            platform = Platform.objects.create(
-                name=platform_name,
-                manufacturer=manufacturer,
-            )
-        except IntegrityError:
-            messages.error(
-                request,
-                f"Platform '{platform_name}' could not be created (slug collision). Try a different name.",
-            )
-            return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+            with transaction.atomic():
+                try:
+                    platform = Platform.objects.create(
+                        name=platform_name,
+                        manufacturer=manufacturer,
+                    )
+                except ValidationError as e:
+                    transaction.set_rollback(True)
+                    logger.error(
+                        f"ValidationError creating platform '{platform_name}' for device pk={pk}: {e}",
+                        exc_info=True,
+                    )
+                    messages.error(
+                        request,
+                        f"Platform '{platform_name}' could not be created (slug collision). Try a different name.",
+                    )
+                    return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
-        old_platform = device.platform
-        device.platform = platform
-        try:
-            device.full_clean()
-            device.save()
-        except (ValidationError, IntegrityError) as e:
-            device.platform = old_platform
-            error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
-            messages.error(request, f"Failed to assign platform '{platform}': {error_msg}")
+                try:
+                    device = Device.objects.select_for_update().get(pk=pk)
+                except Device.DoesNotExist:
+                    transaction.set_rollback(True)
+                    messages.error(request, "Device no longer exists.")
+                    return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+                device.platform = platform
+                try:
+                    device.full_clean()
+                except ValidationError as e:
+                    transaction.set_rollback(True)
+                    logger.error(
+                        f"ValidationError validating device pk={pk}: {e}",
+                        exc_info=True,
+                    )
+                    messages.error(
+                        request,
+                        f"Device (pk={pk}) validation failed: {e}",
+                    )
+                    return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+                device.save()
+        except IntegrityError as e:
+            error_str = str(e)
+            logger.error(
+                f"IntegrityError creating platform '{platform_name}' for device pk={pk}: {e}",
+                exc_info=True,
+            )
+            if "platform" in error_str.lower() or "slug" in error_str.lower():
+                messages.error(
+                    request,
+                    f"Platform '{platform_name}' could not be created (slug collision). Try a different name.",
+                )
+            else:
+                messages.error(
+                    request,
+                    f"Failed to assign platform '{platform_name}'. Please contact an administrator.",
+                )
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         messages.success(
@@ -382,3 +424,214 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
             messages.info(request, "No serial assignments were made")
 
         return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
+
+
+class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
+    """Remove a single server entry from the device's (or VM's) librenms_id custom field dict."""
+
+    required_object_permissions = {
+        "POST": [("change", Device), ("change", VirtualMachine)],
+    }
+
+    def _get_object(self, object_type, pk):
+        """Return the Device or VirtualMachine for the given pk."""
+        model = VirtualMachine if object_type == "vm" else Device
+        return get_object_or_404(model, pk=pk), model
+
+    def _sync_url_name(self, object_type):
+        if object_type == "vm":
+            return "plugins:netbox_librenms_plugin:vm_librenms_sync"
+        return "plugins:netbox_librenms_plugin:device_librenms_sync"
+
+    def _normalize_librenms_mapping(self, value):
+        if isinstance(value, int):
+            return {"default": value}
+        if isinstance(value, str):
+            try:
+                return {"default": int(value)}
+            except (TypeError, ValueError):
+                return {}
+        return value if isinstance(value, dict) else {}
+
+    def post(self, request, pk):
+        # Scope required permissions to the specific model being modified before checking.
+        object_type = request.POST.get("object_type", "device")
+        if object_type == "virtualmachine":
+            object_type = "vm"
+        if object_type not in ("device", "vm"):
+            return HttpResponse(f"Invalid object_type: {object_type!r}", status=400)
+        target_model = VirtualMachine if object_type == "vm" else Device
+        self.required_object_permissions = {"POST": [("change", target_model)]}
+
+        if error := self.require_all_permissions("POST"):
+            return error
+
+        obj, model = self._get_object(object_type, pk)
+        sync_url = self._sync_url_name(object_type)
+        server_key = request.POST.get("server_key", "").strip()
+
+        if not server_key:
+            messages.error(request, "No server_key provided.")
+            return redirect(sync_url, pk=pk)
+
+        cf_value = self._normalize_librenms_mapping(obj.custom_field_data.get("librenms_id"))
+        if not isinstance(cf_value, dict) or server_key not in cf_value:
+            messages.warning(request, f"No mapping found for server '{server_key}'.")
+            return redirect(sync_url, pk=pk)
+
+        # Refuse to remove mappings for servers that are still configured in the plugin.
+        # Only orphaned (unconfigured) mappings may be removed via this endpoint.
+        # Guard both multi-server mode (servers dict) and legacy single-server mode
+        # (top-level librenms_url in plugin config, which implicitly defines "default")
+        # but only when no servers section is configured (pure legacy mode).
+        from django.conf import settings as django_settings
+
+        plugins_cfg = django_settings.PLUGINS_CONFIG.get("netbox_librenms_plugin", {})
+        configured_servers = plugins_cfg.get("servers") or {}
+        if not isinstance(configured_servers, dict):
+            configured_servers = {}
+        legacy_url_configured = bool(plugins_cfg.get("librenms_url"))
+        if server_key in configured_servers or (
+            legacy_url_configured and not configured_servers and server_key == "default"
+        ):
+            messages.error(
+                request,
+                f"Cannot remove mapping for configured server '{server_key}'. "
+                "Remove the server from plugin configuration first, then retry.",
+            )
+            return redirect(sync_url, pk=pk)
+
+        with transaction.atomic():
+            try:
+                obj_locked = model.objects.select_for_update().get(pk=pk)
+            except model.DoesNotExist:
+                messages.error(request, f"{model.__name__} no longer exists.")
+                return redirect(sync_url, pk=pk)
+            cf = self._normalize_librenms_mapping(obj_locked.custom_field_data.get("librenms_id"))
+            # Re-check after acquiring lock; mirror the pre-transaction protection logic
+            _is_protected = server_key in configured_servers or (
+                legacy_url_configured and not configured_servers and server_key == "default"
+            )
+            if isinstance(cf, dict) and server_key in cf and not _is_protected:
+                del cf[server_key]
+                obj_locked.custom_field_data["librenms_id"] = cf if cf else None
+                try:
+                    obj_locked.full_clean()
+                    obj_locked.save()
+                except ValidationError as exc:
+                    transaction.set_rollback(True)
+                    logger.error("Validation error removing LibreNMS mapping for server %r: %s", server_key, exc)
+                    messages.error(request, "Validation error removing LibreNMS mapping.")
+                    return redirect(sync_url, pk=pk)
+                except Exception:
+                    transaction.set_rollback(True)
+                    logger.exception("Unexpected error removing LibreNMS mapping for server %r", server_key)
+                    messages.error(request, "An unexpected error occurred while removing the LibreNMS mapping.")
+                    return redirect(sync_url, pk=pk)
+                messages.success(request, f"Removed LibreNMS mapping for server '{server_key}'.")
+            else:
+                messages.warning(request, f"Mapping for server '{server_key}' was already removed.")
+
+        return redirect(sync_url, pk=pk)
+
+
+class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
+    """Convert a legacy bare-integer librenms_id to the server-scoped JSON dict format.
+
+    Only allowed when the NetBox serial matches the LibreNMS serial, so the
+    association can be verified before scoping the ID to the active server.
+    """
+
+    required_object_permissions = {
+        "POST": [("change", Device), ("change", VirtualMachine)],
+    }
+
+    def _get_model_and_object(self, object_type, pk):
+        model = VirtualMachine if object_type == "vm" else Device
+        return model, get_object_or_404(model, pk=pk)
+
+    def _sync_url(self, object_type, pk):
+        name = "vm_librenms_sync" if object_type == "vm" else "device_librenms_sync"
+        return redirect(f"plugins:netbox_librenms_plugin:{name}", pk=pk)
+
+    def post(self, request, pk):
+        object_type = request.POST.get("object_type", "device")
+        if object_type == "virtualmachine":
+            object_type = "vm"
+        if object_type not in ("device", "vm"):
+            return HttpResponse(f"Invalid object_type: {object_type!r}", status=400)
+
+        target_model = VirtualMachine if object_type == "vm" else Device
+        self.required_object_permissions = {"POST": [("change", target_model)]}
+        if error := self.require_all_permissions("POST"):
+            return error
+
+        model, obj = self._get_model_and_object(object_type, pk)
+        server_key = self.librenms_api.server_key
+
+        # Verify the device actually has a legacy bare-int librenms_id
+        cf_value = obj.custom_field_data.get("librenms_id")
+        if not isinstance(cf_value, (int, str)) or isinstance(cf_value, bool):
+            messages.warning(request, "librenms_id is already in the server-scoped JSON format.")
+            return self._sync_url(object_type, pk)
+        if isinstance(cf_value, str):
+            if not cf_value.isdigit():
+                messages.error(request, "librenms_id is not a valid integer; cannot convert.")
+                return self._sync_url(object_type, pk)
+
+        # Verify serial match before converting
+        librenms_id = int(cf_value) if isinstance(cf_value, str) else cf_value
+        success, device_info = self.librenms_api.get_device_info(librenms_id)
+        if not success or not device_info:
+            messages.error(request, "Could not retrieve device info from LibreNMS to verify serial.")
+            return self._sync_url(object_type, pk)
+
+        librenms_serial = (device_info.get("serial") or "").strip()
+        netbox_serial = (obj.serial or "").strip()
+        if not netbox_serial or not librenms_serial or netbox_serial != librenms_serial:
+            messages.error(
+                request,
+                "Serial number mismatch — cannot convert legacy ID without serial confirmation.",
+            )
+            return self._sync_url(object_type, pk)
+
+        with transaction.atomic():
+            try:
+                locked = model.objects.select_for_update().get(pk=pk)
+            except model.DoesNotExist:
+                messages.error(request, f"{model.__name__} no longer exists.")
+                return self._sync_url(object_type, pk)
+            # Check that no other object already owns this ID on this server
+            conflict = (
+                model.objects.filter(
+                    Q(**{f"custom_field_data__librenms_id__{server_key}": librenms_id})
+                    | Q(**{f"custom_field_data__librenms_id__{server_key}": str(librenms_id)})
+                )
+                .exclude(pk=locked.pk)
+                .exists()
+            )
+            if conflict:
+                transaction.set_rollback(True)
+                messages.error(
+                    request,
+                    f"Another {model.__name__} already has librenms_id {librenms_id} "
+                    f"for server '{server_key}'; cannot convert.",
+                )
+                return self._sync_url(object_type, pk)
+            migrated = migrate_legacy_librenms_id(locked, server_key)
+            if not migrated:
+                messages.warning(request, "librenms_id is already in the server-scoped JSON format.")
+                return self._sync_url(object_type, pk)
+            try:
+                locked.full_clean()
+                locked.save()
+            except (ValidationError, Exception) as exc:
+                transaction.set_rollback(True)
+                messages.error(request, f"Failed to save converted librenms_id: {exc}")
+                return self._sync_url(object_type, pk)
+
+        messages.success(
+            request,
+            f"Converted legacy librenms_id {librenms_id} → {{'{server_key}': {librenms_id}}}.",
+        )
+        return self._sync_url(object_type, pk)

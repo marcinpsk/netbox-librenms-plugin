@@ -479,15 +479,29 @@ class DeviceImportTable(tables.Table):
                 btn_class = "btn-outline-warning"
                 btn_icon = "mdi-information-outline"
                 btn_label = " Details"
+            elif match_type == "librenms_id" and validation.get("librenms_id_needs_migration"):
+                btn_class = "btn-outline-warning"
+                btn_icon = "mdi-database-alert"
+                btn_label = " Legacy ID"
             else:
                 btn_class = "btn-outline-success"
                 btn_icon = "mdi-check-circle"
                 btn_label = ""
 
-            btn_title = "Resolve conflict" if (has_actions or has_mismatch) else "View details"
+            btn_title = (
+                "Resolve conflict"
+                if (has_actions or has_mismatch)
+                else (
+                    "Migrate Legacy ID"
+                    if match_type == "librenms_id" and validation.get("librenms_id_needs_migration")
+                    else "View details"
+                )
+            )
+            aria_attr = f'aria-label="{btn_title}" '
             buttons.append(
                 f'<button type="button" '
                 f'class="btn btn-sm {btn_class}" '
+                f"{aria_attr}"
                 f'hx-get="{details_url}" '
                 f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}], [name=rack_{device_id}], #use-sysname-toggle, #strip-domain-toggle" '
                 f'hx-target="#htmx-modal-content" '

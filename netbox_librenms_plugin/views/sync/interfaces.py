@@ -9,16 +9,19 @@ from django.views import View
 from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.models import InterfaceTypeMapping
-from netbox_librenms_plugin.utils import convert_speed_to_kbps, get_interface_name_field
+from netbox_librenms_plugin.utils import convert_speed_to_kbps, get_interface_name_field, set_librenms_device_id
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
+    LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
     VlanAssignmentMixin,
 )
 
 
-class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, VlanAssignmentMixin, CacheMixin, View):
+class SyncInterfacesView(
+    LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, VlanAssignmentMixin, CacheMixin, View
+):
     """Sync selected interfaces from LibreNMS into NetBox."""
 
     def get_required_permissions_for_object_type(self, object_type):
@@ -49,6 +52,10 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
         obj = self.get_object(object_type, object_id)
         self.object = obj  # Store for use in sync methods
 
+        # Read server_key from POST so we use the exact server the user was viewing
+        server_key = request.POST.get("server_key") or self.librenms_api.server_key
+        self._post_server_key = server_key
+
         interface_name_field = get_interface_name_field(request)
         self.interface_name_field = interface_name_field
         selected_interfaces = self.get_selected_interfaces(request, interface_name_field)
@@ -60,7 +67,7 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
                 + f"?tab=interfaces&interface_name_field={interface_name_field}"
             )
 
-        ports_data = self.get_cached_ports_data(request, obj)
+        ports_data = self.get_cached_ports_data(request, obj, server_key)
         if ports_data is None:
             return redirect(
                 reverse(url_name, kwargs={"pk": object_id})
@@ -95,9 +102,11 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
             return None
         return selected_interfaces
 
-    def get_cached_ports_data(self, request, obj):
+    def get_cached_ports_data(self, request, obj, server_key=None):
         """Return cached LibreNMS port data for the given object."""
-        cached_data = cache.get(self.get_cache_key(obj, "ports"))
+        if server_key is None:
+            server_key = self.librenms_api.server_key
+        cached_data = cache.get(self.get_cache_key(obj, "ports", server_key))
         if not cached_data:
             messages.warning(
                 request,
@@ -164,14 +173,8 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
         )
 
         # Sync VLANs if not excluded
-        vlan_synced = False
         if "vlans" not in exclude_columns:
             self._sync_interface_vlans(interface, librenms_interface, interface_name)
-            vlan_synced = True
-
-        # Skip redundant save when _sync_interface_vlans already saved (via _update_interface_vlan_assignment)
-        if not vlan_synced:
-            interface.save()
 
     def get_netbox_interface_type(self, librenms_interface):
         """Return the NetBox interface type mapped from LibreNMS type and speed."""
@@ -196,7 +199,8 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
                 mac_obj = MACAddress.objects.create(mac_address=ifPhysAddress)
 
             interface.mac_addresses.add(mac_obj)
-            interface.primary_mac_address = mac_obj
+            if hasattr(interface, "primary_mac_address"):
+                interface.primary_mac_address = mac_obj
 
     def update_interface_attributes(
         self,
@@ -234,8 +238,10 @@ class SyncInterfacesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
             else:
                 setattr(interface, netbox_key, librenms_interface.get(librenms_key))
 
-        if "librenms_id" in interface.cf:
-            interface.custom_field_data["librenms_id"] = librenms_interface.get("port_id")
+        port_id = librenms_interface.get("port_id")
+        if port_id is not None:
+            server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
+            set_librenms_device_id(interface, port_id, server_key)
 
         if "enabled" not in exclude_columns:
             admin_status = librenms_interface.get("ifAdminStatus")

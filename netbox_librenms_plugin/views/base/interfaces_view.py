@@ -93,15 +93,16 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         enriched_ports = self._enrich_ports_with_vlan_data(ports, interface_name_field)
         librenms_data["ports"] = enriched_ports
 
-        # Store data in cache
+        _server_key = self.librenms_api.server_key
+        # Store data in cache using server-scoped key to prevent cross-server collisions.
         cache.set(
-            self.get_cache_key(obj, "ports"),
+            self.get_cache_key(obj, "ports", _server_key),
             librenms_data,
             timeout=self.librenms_api.cache_timeout,
         )
         last_fetched = timezone.now()
         cache.set(
-            self.get_last_fetched_key(obj, "ports"),
+            self.get_last_fetched_key(obj, "ports", _server_key),
             last_fetched,
             timeout=self.librenms_api.cache_timeout,
         )
@@ -147,15 +148,16 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         if interface_name_field is None:
             interface_name_field = get_interface_name_field(request)
 
-        cached_data = cache.get(self.get_cache_key(obj, "ports"))
-        last_fetched = cache.get(self.get_last_fetched_key(obj, "ports"))
+        _server_key = self.librenms_api.server_key
+        cached_data = cache.get(self.get_cache_key(obj, "ports", _server_key))
+        last_fetched = cache.get(self.get_last_fetched_key(obj, "ports", _server_key))
 
         # Get VLAN groups for dropdown
         vlan_groups = self.get_vlan_groups_for_device(obj)
         lookup_maps = self._build_vlan_lookup_maps(vlan_groups)
 
         # Load any user VLAN group overrides from cache (set by "apply to all")
-        vlan_group_overrides = cache.get(self.get_vlan_overrides_key(obj)) or {}
+        vlan_group_overrides = cache.get(self.get_vlan_overrides_key(obj, _server_key)) or {}
 
         if cached_data:
             ports_data = cached_data.get("ports", [])
@@ -244,7 +246,7 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
             virtual_chassis_members = obj.virtual_chassis.members.all()
 
-        cache_ttl = cache.ttl(self.get_cache_key(obj, "ports"))
+        cache_ttl = cache.ttl(self.get_cache_key(obj, "ports", _server_key))
         cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl is not None else None
 
         return {
@@ -256,6 +258,7 @@ class BaseInterfaceTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPerm
             "virtual_chassis_members": virtual_chassis_members,
             "interface_name_field": interface_name_field,
             "netbox_only_interfaces": netbox_only_interfaces,
+            "server_key": _server_key,
         }
 
     def _add_vlan_group_selection(self, port, lookup_maps, device, vlan_group_overrides=None):
