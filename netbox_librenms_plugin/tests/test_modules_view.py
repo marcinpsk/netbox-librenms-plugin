@@ -885,10 +885,10 @@ class TestCheckIgnoreRules:
         rule.enabled = True
         return rule
 
-    def _check(self, item, parent_item, rules):
+    def _check(self, item, parent_item, rules, index_map=None):
         from netbox_librenms_plugin.views.base.modules_view import _check_ignore_rules
 
-        return _check_ignore_rules(item, parent_item, rules)
+        return _check_ignore_rules(item, parent_item, rules, index_map)
 
     def test_match_with_serial_match_skips(self):
         """Item matches rule name AND serial matches parent → should be skipped."""
@@ -939,6 +939,54 @@ class TestCheckIgnoreRules:
         parent = {"entPhysicalName": "Optics0/0/0/0", "entPhysicalSerialNum": "ABC123"}
         # rule_skip (require_serial=False) matches first → should skip
         assert self._check(item, parent, [rule_skip, rule_serial]) is True
+
+    def test_ancestor_walk_skips_when_grandparent_serial_matches(self):
+        """IOS-XR case: IDPROM is child of empty-serial Mother Board, but grandparent serial matches."""
+        # Mirrors actual 8201-SYS data: 0/RP0/CPU0-Base Board IDPROM (idx=7)
+        # parent=Mother Board (idx=30, serial=''), grandparent=0/RP0/CPU0 (idx=1, serial='FOC2418NHRK')
+        grandparent = {
+            "entPhysicalIndex": 1,
+            "entPhysicalName": "0/RP0/CPU0",
+            "entPhysicalSerialNum": "FOC2418NHRK",
+            "entPhysicalContainedIn": 0,
+        }
+        parent = {
+            "entPhysicalIndex": 30,
+            "entPhysicalName": "0/RP0/CPU0-Mother Board",
+            "entPhysicalSerialNum": "",
+            "entPhysicalContainedIn": 1,
+        }
+        item = {
+            "entPhysicalIndex": 7,
+            "entPhysicalName": "0/RP0/CPU0-Base Board IDPROM",
+            "entPhysicalSerialNum": "FOC2418NHRK",
+            "entPhysicalContainedIn": 30,
+        }
+        index_map = {1: grandparent, 30: parent, 7: item}
+        assert self._check(item, parent, [self._rule()], index_map=index_map) is True
+
+    def test_ancestor_walk_stops_at_non_matching_serial(self):
+        """Ancestor walk stops at first non-empty serial; if it doesn't match → NOT skipped."""
+        grandparent = {
+            "entPhysicalIndex": 1,
+            "entPhysicalName": "Chassis",
+            "entPhysicalSerialNum": "DIFFERENT_SN",
+            "entPhysicalContainedIn": 0,
+        }
+        parent = {
+            "entPhysicalIndex": 30,
+            "entPhysicalName": "Board",
+            "entPhysicalSerialNum": "",
+            "entPhysicalContainedIn": 1,
+        }
+        item = {
+            "entPhysicalIndex": 7,
+            "entPhysicalName": "Board-IDPROM",
+            "entPhysicalSerialNum": "FOC2418NHRK",
+            "entPhysicalContainedIn": 30,
+        }
+        index_map = {1: grandparent, 30: parent, 7: item}
+        assert self._check(item, parent, [self._rule()], index_map=index_map) is False
 
 
 class TestCollectDescendantsIgnoreRules:

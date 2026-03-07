@@ -30,13 +30,19 @@ INVENTORY_CLASSES = {
 _GENERIC_CONTAINER_MODELS = {"", "BUILTIN", "Default", "N/A"}
 
 
-def _check_ignore_rules(item: dict, parent_item: dict | None, rules: list) -> bool:
+def _check_ignore_rules(item: dict, parent_item: dict | None, rules: list, index_map: dict | None = None) -> bool:
     """Return True if this ENTITY-MIB item should be skipped based on configured ignore rules.
 
     Rules are loaded from InventoryIgnoreRule (DB) and evaluated in order.
     When ``require_serial_match_parent`` is True, the item is only skipped if its
-    serial number is non-empty and identical to the parent entity's serial —
-    guarding against patterns that could accidentally hide legitimate modules.
+    serial number is non-empty and matches **any ancestor's** serial in the
+    ENTITY-MIB hierarchy (walking up from the direct parent).
+
+    Ancestor walking handles cases like Cisco IOS-XR where an IDPROM entry is not
+    a direct child of the module it represents — e.g. ``0/RP0/CPU0-Base Board IDPROM``
+    is a child of ``0/RP0/CPU0-Mother Board`` (empty serial), but its serial matches
+    the grandparent ``0/RP0/CPU0``.  Traversal stops at the first non-empty serial
+    encountered to avoid false positives deeper in the tree.
     """
     name = (item.get("entPhysicalName") or "").strip()
     for rule in rules:
@@ -48,9 +54,28 @@ def _check_ignore_rules(item: dict, parent_item: dict | None, rules: list) -> bo
             # Can't satisfy serial check without a parent — skip conservatively.
             continue
         item_serial = (item.get("entPhysicalSerialNum") or "").strip()
-        parent_serial = (parent_item.get("entPhysicalSerialNum") or "").strip()
-        if item_serial and item_serial == parent_serial:
-            return True
+        if not item_serial:
+            continue
+        # Walk up ancestors until a non-empty serial is found.
+        current = parent_item
+        visited = set()
+        while current is not None:
+            current_idx = current.get("entPhysicalIndex")
+            if current_idx is not None:
+                if current_idx in visited:
+                    break
+                visited.add(current_idx)
+            ancestor_serial = (current.get("entPhysicalSerialNum") or "").strip()
+            if ancestor_serial:
+                if ancestor_serial == item_serial:
+                    return True
+                # Non-empty serial that doesn't match — stop looking further up.
+                break
+            if index_map is not None:
+                next_idx = current.get("entPhysicalContainedIn")
+                current = index_map.get(next_idx) if next_idx else None
+            else:
+                break
     return False
 
 
@@ -160,7 +185,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 continue
             # Skip items matched by configured ignore rules (e.g. Cisco IOS-XR IDPROMs).
             parent_item = index_map.get(item.get("entPhysicalContainedIn"))
-            if _check_ignore_rules(item, parent_item, ignore_rules):
+            if _check_ignore_rules(item, parent_item, ignore_rules, index_map):
                 continue
             # Skip items with generic model names (not real hardware).
             # Containers with empty model are physical slot representations.
@@ -453,7 +478,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             visited.add(child_idx)
             # Skip items matched by ignore rules (e.g. Cisco IOS-XR IDPROM entries).
             parent_item = index_map.get(parent_idx)
-            if _check_ignore_rules(child, parent_item, ignore_rules):
+            if _check_ignore_rules(child, parent_item, ignore_rules, index_map):
                 continue
             model = (child.get("entPhysicalModelName") or "").strip()
             if model and model not in _GENERIC_CONTAINER_MODELS:
