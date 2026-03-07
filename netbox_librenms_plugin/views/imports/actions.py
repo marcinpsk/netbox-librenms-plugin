@@ -895,11 +895,15 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
         if not isinstance(cf_value, dict):
             return None
 
-        plugins_config = settings.PLUGINS_CONFIG.get("netbox_librenms_plugin", {})
-        servers_config = plugins_config.get("servers", {})
+        plugins_config = settings.PLUGINS_CONFIG.get("netbox_librenms_plugin") or {}
+        servers_config = plugins_config.get("servers") or {}
+        if not isinstance(servers_config, dict):
+            servers_config = {}
         result = []
         for sk, did in cf_value.items():
-            srv_cfg = servers_config.get(sk, {})
+            srv_cfg = servers_config.get(sk) or {}
+            if not isinstance(srv_cfg, dict):
+                srv_cfg = {}
             display_name = srv_cfg.get("display_name") or sk
             result.append({"server_key": sk, "display_name": display_name, "device_id": did})
         return result or None
@@ -999,7 +1003,7 @@ class DeviceConflictActionView(
         validated_existing = validation.get("existing_device") if validation else None
         if validated_existing is None:
             return HttpResponse("Missing validated conflict target", status=400)
-        if validated_existing.pk != existing_device.pk:
+        if validated_existing.pk != existing_device.pk or type(validated_existing) is not type(existing_device):
             return HttpResponse("Device ID mismatch: existing_device_id does not match validated device", status=400)
 
         # Require force flag when device type mismatches, but only for actions that use it
