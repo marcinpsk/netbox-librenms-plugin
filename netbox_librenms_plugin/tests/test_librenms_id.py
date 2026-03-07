@@ -100,8 +100,78 @@ class TestGetLibreNMSDeviceId:
         assert get_librenms_device_id(obj) == 5
 
 
+class TestGetLibreNMSDeviceIdAutoSave:
+    """Tests for auto_save behaviour of get_librenms_device_id()."""
+
+    def test_auto_save_true_mutates_bare_string(self):
+        """When auto_save=True (default), a bare string is normalised in-place and saved."""
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        obj = MagicMock()
+        obj.cf = {"librenms_id": "42"}
+        obj.custom_field_data = {"librenms_id": "42"}
+        result = get_librenms_device_id(obj, "default", auto_save=True)
+        assert result == 42
+        assert obj.custom_field_data["librenms_id"] == 42
+        obj.save.assert_called_once()
+
+    def test_auto_save_false_does_not_mutate_bare_string(self):
+        """When auto_save=False, bare string is returned as int but obj is not mutated."""
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        obj = MagicMock()
+        obj.cf = {"librenms_id": "42"}
+        obj.custom_field_data = {"librenms_id": "42"}
+        result = get_librenms_device_id(obj, "default", auto_save=False)
+        assert result == 42
+        assert obj.custom_field_data["librenms_id"] == "42"
+        obj.save.assert_not_called()
+
+    def test_auto_save_false_does_not_mutate_string_in_dict(self):
+        """When auto_save=False, string inside dict is returned as int but dict is not mutated."""
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        obj = MagicMock()
+        obj.cf = {"librenms_id": {"prod": "7"}}
+        obj.custom_field_data = {"librenms_id": {"prod": "7"}}
+        result = get_librenms_device_id(obj, "prod", auto_save=False)
+        assert result == 7
+        assert obj.custom_field_data["librenms_id"]["prod"] == "7"
+        obj.save.assert_not_called()
+
+    def test_auto_save_true_mutates_string_in_dict(self):
+        """When auto_save=True, string inside dict is normalised and saved."""
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        obj = MagicMock()
+        obj.cf = {"librenms_id": {"prod": "7"}}
+        obj.custom_field_data = {"librenms_id": {"prod": "7"}}
+        result = get_librenms_device_id(obj, "prod", auto_save=True)
+        assert result == 7
+        assert obj.custom_field_data["librenms_id"]["prod"] == 7
+        obj.save.assert_called_once()
+
+
 class TestFindByLibreNMSId:
     """Tests for find_by_librenms_id()."""
+
+    def test_rejects_boolean_true(self):
+        """find_by_librenms_id(model, True) returns None without querying."""
+        from netbox_librenms_plugin.utils import find_by_librenms_id
+
+        mock_model = MagicMock()
+        result = find_by_librenms_id(mock_model, True, "default")
+        assert result is None
+        mock_model.objects.filter.assert_not_called()
+
+    def test_rejects_boolean_false(self):
+        """find_by_librenms_id(model, False) returns None without querying."""
+        from netbox_librenms_plugin.utils import find_by_librenms_id
+
+        mock_model = MagicMock()
+        result = find_by_librenms_id(mock_model, False, "default")
+        assert result is None
+        mock_model.objects.filter.assert_not_called()
 
     def test_queries_server_key_and_legacy_integer(self):
         """find_by_librenms_id() issues a Q that covers both the JSON server-key branch

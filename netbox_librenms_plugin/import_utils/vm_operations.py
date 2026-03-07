@@ -64,7 +64,7 @@ def create_vm_from_librenms(libre_device: dict, validation: dict, use_sysname: b
         cluster=cluster,
         role=role,  # Optional VM role
         platform=platform,
-        comments=f"Imported from LibreNMS (device_id={librenms_device_id}) by netbox-librenms-plugin on {import_time}",
+        comments=f"Imported from LibreNMS by netbox-librenms-plugin on {import_time}",
         custom_field_data={"librenms_id": librenms_device_id},
     )
 

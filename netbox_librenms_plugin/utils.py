@@ -504,8 +504,8 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
             int_id = int(cf_value)
         except (ValueError, TypeError):
             return None
-        obj.custom_field_data["librenms_id"] = int_id
         if auto_save:
+            obj.custom_field_data["librenms_id"] = int_id
             obj.save()
         return int_id
     if isinstance(cf_value, dict):
@@ -518,9 +518,9 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
                 value = int(value)
             except (ValueError, TypeError):
                 return None
-            cf_value[server_key] = value
-            obj.custom_field_data["librenms_id"] = cf_value
             if auto_save:
+                cf_value[server_key] = value
+                obj.custom_field_data["librenms_id"] = cf_value
                 obj.save()
             return value
         if isinstance(value, int):
