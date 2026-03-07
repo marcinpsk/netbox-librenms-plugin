@@ -1,7 +1,8 @@
 """Unit tests for SyncInterfacesView: update_interface_attributes and handle_mac_address."""
 
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 
 class TestUpdateInterfaceAttributes:
@@ -9,6 +10,7 @@ class TestUpdateInterfaceAttributes:
 
     @pytest.fixture
     def view(self, mock_librenms_api):
+        """Return a SyncInterfacesView wired to the shared mock API fixture."""
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         v = object.__new__(SyncInterfacesView)
@@ -105,11 +107,11 @@ class TestUpdateInterfaceAttributes:
         iface.__class__ = Interface
         iface.cf = {}
         iface.mac_addresses = MagicMock()
+        desc_sentinel = object()
+        iface.description = desc_sentinel
 
         # ifAlias == interface name field value → description should NOT be set
         librenms_data = {"ifName": "eth0", "ifAlias": "eth0"}
-        desc_sentinel = object()
-        iface.description = desc_sentinel
 
         with patch("netbox_librenms_plugin.views.sync.interfaces.convert_speed_to_kbps", return_value=None):
             view.update_interface_attributes(iface, librenms_data, None, {"type", "speed", "mtu"}, "ifName")
@@ -231,6 +233,7 @@ class TestHandleMacAddress:
 
     @pytest.fixture
     def view(self, mock_librenms_api):
+        """Return a SyncInterfacesView wired to the shared mock API fixture."""
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         v = object.__new__(SyncInterfacesView)

@@ -352,6 +352,87 @@ class TestVirtualChassisHelpers:
 # =============================================================================
 
 
+# TestSafeDisabled - tests for _safe_disabled in bulk_import.py and filters.py
+# =============================================================================
+
+
+class TestSafeDisabledBulkImport:
+    """Tests for _safe_disabled in import_utils/bulk_import.py."""
+
+    def _call(self, val):
+        from netbox_librenms_plugin.import_utils.bulk_import import _safe_disabled
+
+        return _safe_disabled({"disabled": val})
+
+    def test_bool_true(self):
+        assert self._call(True) == 1
+
+    def test_bool_false(self):
+        assert self._call(False) == 0
+
+    def test_string_true_lowercase(self):
+        assert self._call("true") == 1
+
+    def test_string_yes(self):
+        assert self._call("yes") == 1
+
+    def test_string_on(self):
+        assert self._call("on") == 1
+
+    def test_string_false_lowercase(self):
+        assert self._call("false") == 0
+
+    def test_string_no(self):
+        assert self._call("no") == 0
+
+    def test_string_off(self):
+        assert self._call("off") == 0
+
+    def test_numeric_one(self):
+        assert self._call(1) == 1
+
+    def test_numeric_zero(self):
+        assert self._call(0) == 0
+
+    def test_none_defaults_to_zero(self):
+        assert self._call(None) == 0
+
+    def test_missing_key_defaults_to_zero(self):
+        from netbox_librenms_plugin.import_utils.bulk_import import _safe_disabled
+
+        assert _safe_disabled({}) == 0
+
+    def test_string_true_uppercase(self):
+        assert self._call("TRUE") == 1
+
+
+class TestSafeDisabledFilters:
+    """Tests for _safe_disabled in import_utils/filters.py (same contract)."""
+
+    def _call(self, val):
+        from netbox_librenms_plugin.import_utils.filters import _safe_disabled
+
+        return _safe_disabled({"disabled": val})
+
+    def test_bool_true(self):
+        assert self._call(True) == 1
+
+    def test_bool_false(self):
+        assert self._call(False) == 0
+
+    def test_string_true(self):
+        assert self._call("true") == 1
+
+    def test_string_no(self):
+        assert self._call("no") == 0
+
+    def test_numeric_one(self):
+        assert self._call(1) == 1
+
+    def test_none_defaults_to_zero(self):
+        assert self._call(None) == 0
+
+
 class TestPaginationHelpers:
     """Test pagination helper functions."""
 
