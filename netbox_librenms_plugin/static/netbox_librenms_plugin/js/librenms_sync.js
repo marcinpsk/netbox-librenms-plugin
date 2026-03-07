@@ -862,7 +862,8 @@ function handleCableChange(select, value) {
         },
         body: JSON.stringify({
             device_id: value,
-            local_port_id: select.dataset.interface
+            local_port_id: select.dataset.interface,
+            server_key: document.getElementById('current-server-key')?.value || null
         })
     })
         .then(response => {
