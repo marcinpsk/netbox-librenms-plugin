@@ -758,7 +758,12 @@ function handleVRFChange(select, value) {
             server_key: document.getElementById('current-server-key')?.value || null
         })
     })
-        .then(response => response.json())
+        .then(response => {
+            if (!response.ok) {
+                return response.text().then(t => { throw new Error(t); });
+            }
+            return response.json();
+        })
         .then(data => {
             const row = document.querySelector(`tr[data-interface="${select.dataset.rowId}"]`);
 
@@ -770,7 +775,7 @@ function handleVRFChange(select, value) {
             }
         })
         .catch(error => {
-            console.error('VRF verification failed:', error);
+            console.error('VRF verification failed:', error.message);
         });
 }
 

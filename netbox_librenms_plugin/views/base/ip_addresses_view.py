@@ -257,7 +257,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
 
         # Calculate cache expiry
         cache_ttl = cache.ttl(self.get_cache_key(obj, "ip_addresses", server_key))
-        if cache_ttl is not None:
+        if cache_ttl is not None and cache_ttl > 0:
             cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl)
 
         # Generate the table

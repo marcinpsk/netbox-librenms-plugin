@@ -26,6 +26,9 @@ def _librenms_id_q(server_key: str, value) -> Q:
 
     Matches both integer and string representations to handle any stored format.
     """
+    if isinstance(value, bool):
+        return Q(pk__isnull=True) & Q(pk__isnull=False)  # match nothing
+
     q = Q(**{f"custom_field_data__librenms_id__{server_key}": value}) | Q(custom_field_data__librenms_id=value)
     try:
         int_val = int(value)
@@ -333,7 +336,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
 
         # Calculate cache expiry
         cache_ttl = cache.ttl(cache_key)
-        if cache_ttl is not None:
+        if cache_ttl is not None and cache_ttl > 0:
             cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl)
         # Generate the table
         table = self.get_table(links_data, obj)

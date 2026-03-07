@@ -222,6 +222,28 @@ class TestMigrateLegacyLibreNMSId:
         migrate_legacy_librenms_id(obj, "production")
         assert obj.custom_field_data["librenms_id"] == {"production": 42}
 
+    def test_migrates_string_digit_legacy_id(self):
+        """A string-digit like "42" should be migrated to {server_key: 42} (int)."""
+        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": "42"}
+        result = migrate_legacy_librenms_id(obj, "production")
+        assert result is True
+        assert obj.custom_field_data["librenms_id"] == {"production": 42}
+        assert isinstance(obj.custom_field_data["librenms_id"]["production"], int)
+        obj.save.assert_not_called()
+
+    def test_returns_false_for_non_digit_string(self):
+        """A non-digit string should not be migrated."""
+        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": "not-a-number"}
+        result = migrate_legacy_librenms_id(obj, "default")
+        assert result is False
+        assert obj.custom_field_data["librenms_id"] == "not-a-number"
+
     def test_returns_false_when_already_dict(self):
         from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
 
