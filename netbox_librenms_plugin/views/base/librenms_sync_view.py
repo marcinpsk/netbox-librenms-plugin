@@ -109,7 +109,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
 
         # Determine if serial match allows legacy ID conversion
         _librenms_serial = librenms_info["librenms_device_details"].get("librenms_device_serial", "-")
-        _netbox_serial = getattr(obj, "serial", "") or ""
+        _netbox_serial = getattr(_lookup_device, "serial", "") or ""
         librenms_id_serial_confirmed = bool(
             _librenms_serial and _librenms_serial != "-" and _netbox_serial and _librenms_serial == _netbox_serial
         )
