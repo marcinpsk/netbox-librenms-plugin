@@ -395,12 +395,6 @@ class SingleIPAddressVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
             else:
                 return "sync"
 
-    def _get_cache_key(self, obj, data_type):
-        """
-        Generate a cache key for the specified object and data type.
-        """
-        return f"librenms_plugin:{obj.__class__.__name__}:{obj.pk}:{data_type}"
-
     def post(self, request):
         """
         POST request to return json response with formatted IP address status.
@@ -411,6 +405,7 @@ class SingleIPAddressVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
             vrf_id = data.get("vrf_id")
             object_id = data.get("device_id")
             object_type = data.get("object_type")
+            server_key = data.get("server_key") or "default"
 
             if not ip_address:
                 return JsonResponse({"status": "error", "message": "No IP address provided"}, status=400)
@@ -430,7 +425,7 @@ class SingleIPAddressVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
             except ValueError as e:
                 return JsonResponse({"status": "error", "message": str(e)}, status=400)
 
-            cache_key = self._get_cache_key(obj, "ip_addresses")
+            cache_key = self.get_cache_key(obj, "ip_addresses", server_key)
             cached_data = cache.get(cache_key)
 
             # Basic record with default values
