@@ -577,19 +577,19 @@ class LibreNMSImportFilterForm(forms.Form):
         """Fetch and populate LibreNMS locations in the dropdown."""
         from django.core.cache import cache
 
+        from netbox_librenms_plugin.import_utils.cache import get_location_choices_cache_key
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
         try:
-            # Use caching to avoid repeated API calls
-            cache_key = "librenms_locations_choices"
+            # Instantiate the API client to resolve the authoritative server_key
+            api = LibreNMSAPI()
+            cache_key = get_location_choices_cache_key(api.server_key)
             cached_choices = cache.get(cache_key)
-
             if cached_choices:
                 self.fields["librenms_location"].choices = cached_choices
                 return
 
             # Fetch locations from LibreNMS
-            api = LibreNMSAPI()
             success, locations = api.get_locations()
 
             if success and locations:

@@ -1343,22 +1343,36 @@ class TestNameMatchesWithNamingPreferences:
         self.mock_site_model.objects.all.return_value = []
 
     def _setup_librenms_id_match(self, existing_device, as_vm=False):
-        """Configure mocks so that a device is found by librenms_id."""
+        """Configure mocks so that a device is found by librenms_id.
+
+        Uses a Q-aware side_effect so only filter() calls targeting a
+        ``librenms_id`` field return the existing device; other filter() calls
+        (e.g. name lookups, serial lookups) return an empty queryset.
+        """
+        from unittest.mock import MagicMock
+
+        def _librenms_id_filter_side_effect(hit):
+            def side_effect(*args, **kwargs):
+                mock_qs = MagicMock()
+                # Match when the first positional arg is a Q that references librenms_id
+                if args:
+                    q = args[0]
+                    if hasattr(q, "children") and any(
+                        isinstance(child, tuple) and "librenms_id" in child[0] for child in q.children
+                    ):
+                        mock_qs.first.return_value = hit
+                        return mock_qs
+                mock_qs.first.return_value = None
+                return mock_qs
+
+            return side_effect
+
         if as_vm:
-            self.mock_vm.objects.filter.return_value.first.return_value = existing_device
-            self.mock_device.objects.filter.return_value.first.return_value = None
+            self.mock_vm.objects.filter.side_effect = _librenms_id_filter_side_effect(existing_device)
+            self.mock_device.objects.filter.side_effect = _librenms_id_filter_side_effect(None)
         else:
-            self.mock_vm.objects.filter.return_value.first.return_value = None
-
-            def device_filter(**kwargs):
-                result = MagicMock()
-                if "custom_field_data__librenms_id" in kwargs:
-                    result.first.return_value = existing_device
-                else:
-                    result.first.return_value = None
-                return result
-
-            self.mock_device.objects.filter.side_effect = device_filter
+            self.mock_device.objects.filter.side_effect = _librenms_id_filter_side_effect(existing_device)
+            self.mock_vm.objects.filter.side_effect = _librenms_id_filter_side_effect(None)
 
     def setup_method(self):
         """Set up common patches."""
@@ -1647,7 +1661,7 @@ class TestSerialNumberMatching:
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
-        def device_filter(**kwargs):
+        def device_filter(*args, **kwargs):
             result = MagicMock()
             if "serial" in kwargs:
                 result.first.return_value = existing
@@ -1674,7 +1688,7 @@ class TestSerialNumberMatching:
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
-        def device_filter(**kwargs):
+        def device_filter(*args, **kwargs):
             result = MagicMock()
             if "serial" in kwargs:
                 result.first.return_value = existing
@@ -1701,7 +1715,7 @@ class TestSerialNumberMatching:
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
-        def device_filter(**kwargs):
+        def device_filter(*args, **kwargs):
             result = MagicMock()
             if "serial" in kwargs:
                 result.first.return_value = existing
@@ -1728,7 +1742,7 @@ class TestSerialNumberMatching:
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
-        def device_filter(**kwargs):
+        def device_filter(*args, **kwargs):
             result = MagicMock()
             if "name__iexact" in kwargs:
                 result.first.return_value = existing
@@ -1809,7 +1823,7 @@ class TestSerialNumberMatching:
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
-        def device_filter(**kwargs):
+        def device_filter(*args, **kwargs):
             result = MagicMock()
             if "name__iexact" in kwargs:
                 result.first.return_value = hostname_device
@@ -1838,9 +1852,9 @@ class TestSerialNumberMatching:
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
-        def device_filter(**kwargs):
+        def device_filter(*args, **kwargs):
             result = MagicMock()
-            if "custom_field_data__librenms_id" in kwargs:
+            if args:  # Q-object call from find_by_librenms_id
                 result.first.return_value = existing
             else:
                 result.first.return_value = None
@@ -1878,9 +1892,9 @@ class TestSerialNumberMatching:
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
-        def device_filter(**kwargs):
+        def device_filter(*args, **kwargs):
             result = MagicMock()
-            if "custom_field_data__librenms_id" in kwargs:
+            if args:  # Q-object call from find_by_librenms_id
                 result.first.return_value = existing
             elif "serial" in kwargs:
                 result.first.return_value = None
@@ -1920,9 +1934,9 @@ class TestSerialNumberMatching:
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
-        def device_filter(**kwargs):
+        def device_filter(*args, **kwargs):
             result = MagicMock()
-            if "custom_field_data__librenms_id" in kwargs:
+            if args:  # Q-object call from find_by_librenms_id
                 result.first.return_value = existing
             else:
                 result.first.return_value = None
@@ -1963,7 +1977,7 @@ class TestSerialNumberMatching:
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
-        def device_filter(**kwargs):
+        def device_filter(*args, **kwargs):
             result = MagicMock()
             if "serial" in kwargs:
                 result.first.return_value = existing
@@ -2015,7 +2029,7 @@ class TestSerialNumberMatching:
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
-        def device_filter(**kwargs):
+        def device_filter(*args, **kwargs):
             result = MagicMock()
             if "serial" in kwargs:
                 result.first.return_value = existing
@@ -2065,7 +2079,7 @@ class TestSerialNumberMatching:
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
-        def device_filter(**kwargs):
+        def device_filter(*args, **kwargs):
             result = MagicMock()
             if "serial" in kwargs:
                 result.first.return_value = existing
@@ -2106,21 +2120,28 @@ class TestDeviceConflictActionView:
         """Create a DeviceConflictActionView instance with mocked dependencies."""
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
-        view = object.__new__(DeviceConflictActionView)
+        view = DeviceConflictActionView()
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
-        view.request = MagicMock()
-        view.request.user.has_perm.return_value = True
         return view
 
     def _create_request(self, action, existing_device_id, use_sysname=False, strip_domain=False):
-        """Create a mock request with POST data."""
+        """Create a mock request with POST data and permission stubs.
+
+        The returned request should be bound to the view (view.request = request)
+        before calling view.post() so permission checks and business logic
+        operate on the same request object, matching real Django CBV behavior.
+        """
         request = MagicMock()
-        post_data = {"action": action, "existing_device_id": str(existing_device_id)}
-        if use_sysname:
-            post_data["use-sysname-toggle"] = "on"
-        if strip_domain:
-            post_data["strip-domain-toggle"] = "on"
+        request.user.has_perm.return_value = True
+        # Always include both toggles so _resolve_naming_preferences never falls through
+        # to the user-pref/settings DB path, which would hit the real database.
+        post_data = {
+            "action": action,
+            "existing_device_id": str(existing_device_id),
+            "use-sysname-toggle": "on" if use_sysname else "off",
+            "strip-domain-toggle": "on" if strip_domain else "off",
+        }
         request.POST = post_data
         return request
 
@@ -2151,17 +2172,68 @@ class TestDeviceConflictActionView:
             patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
             patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
             patch("dcim.models.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx,
         ):
+            mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
+            mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+            mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
+            view.request = request
             view.post(request, device_id=10)
 
-        assert existing_device.custom_field_data["librenms_id"] == 10
+        assert existing_device.custom_field_data["librenms_id"] == {"default": 10}
         assert existing_device.name == "switch-01.example.com"
         existing_device.save.assert_called_once()
+
+    @patch("netbox_librenms_plugin.views.imports.actions.cache")
+    @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
+    def test_link_action_uses_non_default_server_key(self, mock_cache_key, mock_cache):
+        """Link action should store librenms_id under the active server_key, not always 'default'."""
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+        view = self._create_view()
+        view._librenms_api.server_key = "production"
+        existing_device = MagicMock()
+        existing_device.pk = 42
+        existing_device.custom_field_data = {}
+        existing_device.name = "84.116.251.35"
+
+        libre_device = {
+            "device_id": 10,
+            "hostname": "84.116.251.35",
+            "sysName": "switch-01.example.com",
+            "serial": "ABC123",
+        }
+        validation = {"can_import": False, "existing_device": existing_device}
+        selections = {}
+
+        request = self._create_request("link", 42, use_sysname=True)
+
+        with (
+            patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
+            patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
+            patch("dcim.models.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx,
+        ):
+            mock_tx.atomic.return_value = MagicMock()
+            mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.filter.return_value.first.return_value = None
+            mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+            mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
+            mock_validate.return_value = (libre_device, validation, selections)
+            mock_render.return_value = MagicMock()
+
+            view.request = request
+            view.post(request, device_id=10)
+
+        assert existing_device.custom_field_data["librenms_id"] == {"production": 10}
 
     @patch("netbox_librenms_plugin.views.imports.actions.cache")
     @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
@@ -2191,18 +2263,73 @@ class TestDeviceConflictActionView:
             patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
             patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
             patch("dcim.models.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx,
         ):
+            mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
+            mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+            mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
+            view.request = request
             view.post(request, device_id=10)
 
-        assert existing_device.custom_field_data["librenms_id"] == 10
+        assert existing_device.custom_field_data["librenms_id"] == {"default": 10}
         assert existing_device.serial == "NEW-SERIAL"
         assert existing_device.name == "new-name.example.com"
         existing_device.save.assert_called_once()
+
+    @patch("netbox_librenms_plugin.views.imports.actions.cache")
+    @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
+    def test_update_action_uses_non_default_server_key(self, mock_cache_key, mock_cache):
+        """Update action should store librenms_id under the active server key."""
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+        view = self._create_view()
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "production"
+        existing_device = MagicMock()
+        existing_device.pk = 42
+        existing_device.custom_field_data = {}
+        existing_device.name = "old-name"
+        existing_device.serial = "OLD-SERIAL"
+
+        libre_device = {
+            "device_id": 10,
+            "hostname": "switch-01",
+            "sysName": "switch-01",
+            "serial": "NEW-SERIAL",
+            "resolved_name": "switch-01",
+        }
+        validation = {"can_import": False, "existing_device": existing_device, "resolved_name": "switch-01"}
+        selections = {}
+
+        request = self._create_request("update", 42)
+
+        with (
+            patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
+            patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
+            patch("dcim.models.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx,
+        ):
+            mock_tx.atomic.return_value = MagicMock()
+            mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
+            mock_device_cls.objects.filter.return_value.first.return_value = None
+            mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+            mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
+            mock_validate.return_value = (libre_device, validation, selections)
+            mock_render.return_value = MagicMock()
+
+            view.request = request
+            view.post(request, device_id=10)
+
+        assert existing_device.custom_field_data["librenms_id"] == {"production": 10}
 
     @patch("netbox_librenms_plugin.views.imports.actions.cache")
     @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
@@ -2227,15 +2354,22 @@ class TestDeviceConflictActionView:
             patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
             patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
             patch("dcim.models.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx,
         ):
+            mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
+            mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+            mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
+            view.request = request
             view.post(request, device_id=10)
 
-        assert existing_device.custom_field_data["librenms_id"] == 10
+        assert existing_device.custom_field_data["librenms_id"] == {"default": 10}
         assert existing_device.serial == "NEW-SERIAL"
         # Name should NOT be changed by update_serial
         assert existing_device.name == "switch-01"
@@ -2264,11 +2398,17 @@ class TestDeviceConflictActionView:
             patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
             patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
             patch("dcim.models.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx,
         ):
+            mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
+            mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
+            view.request = request
             view.post(request, device_id=10)
 
         # Serial should NOT be updated to '-'
@@ -2278,8 +2418,10 @@ class TestDeviceConflictActionView:
         """Missing action or existing_device_id should return 400."""
         view = self._create_view()
         request = MagicMock()
+        request.user.has_perm.return_value = True
         request.POST = {}
 
+        view.request = request
         response = view.post(request, device_id=10)
         assert response.status_code == 400
 
@@ -2291,15 +2433,22 @@ class TestDeviceConflictActionView:
         request = self._create_request("invalid_action", 42)
 
         existing_device = MagicMock()
+        existing_device.pk = 42
         libre_device = {"device_id": 10, "hostname": "switch-01", "serial": "ABC"}
 
         with (
             patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
+            patch.object(DeviceConflictActionView, "require_object_permissions", return_value=None),
             patch("dcim.models.Device") as mock_device_cls,
         ):
             mock_device_cls.objects.get.return_value = existing_device
-            mock_validate.return_value = (libre_device, {}, {})
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
+            # Include existing_device so the validated-conflict-target guard passes;
+            # we want to exercise the unknown-action branch, not the missing-device guard.
+            mock_validate.return_value = (libre_device, {"existing_device": existing_device}, {})
 
+            view.request = request
             response = view.post(request, device_id=10)
 
         assert response.status_code == 400
@@ -2333,13 +2482,17 @@ class TestDeviceConflictActionView:
             patch("dcim.models.Device") as mock_device_cls,
         ):
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
+            view.request = request
             view.post(request, device_id=10)
 
         assert existing_device.name == "switch-01.example.com"
         existing_device.save.assert_called_once()
+        assert existing_device.custom_field_data["librenms_id"] == 10
 
     @patch("netbox_librenms_plugin.views.imports.actions.cache")
     @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
@@ -2363,8 +2516,11 @@ class TestDeviceConflictActionView:
             patch("dcim.models.Device") as mock_device_cls,
         ):
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
             mock_validate.return_value = (libre_device, validation, selections)
 
+            view.request = request
             response = view.post(request, device_id=10)
 
         assert response.status_code == 400
@@ -2398,15 +2554,22 @@ class TestDeviceConflictActionView:
             patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
             patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
             patch("dcim.models.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx,
         ):
+            mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
+            mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+            mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
+            view.request = request
             view.post(request, device_id=10)
 
-        assert existing_device.custom_field_data["librenms_id"] == 10
+        assert existing_device.custom_field_data["librenms_id"] == {"default": 10}
         existing_device.save.assert_called_once()
 
     @patch("netbox_librenms_plugin.views.imports.actions.cache")
@@ -2444,16 +2607,23 @@ class TestDeviceConflictActionView:
             patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
             patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
             patch("dcim.models.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx,
         ):
+            mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
+            mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+            mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
+            view.request = request
             view.post(request, device_id=10)
 
         assert existing_device.device_type == librenms_device_type
-        assert existing_device.custom_field_data["librenms_id"] == 10
+        assert existing_device.custom_field_data["librenms_id"] == {"default": 10}
         existing_device.save.assert_called_once()
 
     @patch("netbox_librenms_plugin.views.imports.actions.cache")
@@ -2494,13 +2664,17 @@ class TestDeviceConflictActionView:
             patch("dcim.models.Device") as mock_device_cls,
         ):
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
+            view.request = request
             view.post(request, device_id=10)
 
         assert existing_device.device_type == new_device_type
         existing_device.save.assert_called_once()
+        assert existing_device.custom_field_data["librenms_id"] == 10
 
     @patch("netbox_librenms_plugin.views.imports.actions.cache")
     @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
@@ -2521,12 +2695,19 @@ class TestDeviceConflictActionView:
             patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
             patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
             patch("dcim.models.Device") as mock_device_cls,
+            patch("netbox_librenms_plugin.views.imports.actions.transaction") as mock_tx,
         ):
+            mock_tx.atomic.return_value = MagicMock()
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
+            mock_device_cls.objects.filter.return_value.first.return_value = None
             mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+            mock_device_cls.objects.filter.return_value.exclude.return_value.exists.return_value = False
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
+            view.request = request
             view.post(request, device_id=10)
 
         assert existing_device.serial == "NEW456"
@@ -2552,13 +2733,18 @@ class TestDeviceConflictActionView:
             patch.object(DeviceConflictActionView, "get_validated_device_with_selections") as mock_validate,
             patch.object(DeviceConflictActionView, "render_device_row") as mock_render,
             patch("dcim.models.Device") as mock_device_cls,
-            patch("dcim.models.Platform") as mock_platform_cls,
+            # Patch find_matching_platform at the utility module level — the action imports
+            # it from netbox_librenms_plugin.utils, so that is the correct seam to mock.
+            patch("netbox_librenms_plugin.utils.find_matching_platform") as mock_find_platform,
         ):
             mock_device_cls.objects.get.return_value = existing_device
-            mock_platform_cls.objects.get.return_value = mock_platform
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
+            mock_find_platform.return_value = {"found": True, "platform": mock_platform, "match_type": "exact"}
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
+            view.request = request
             view.post(request, device_id=10)
 
         assert existing_device.platform == mock_platform
@@ -2586,10 +2772,13 @@ class TestDeviceConflictActionView:
             patch("netbox_librenms_plugin.utils.match_librenms_hardware_to_device_type") as mock_hw_match,
         ):
             mock_device_cls.objects.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.get.return_value = existing_device
+            mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
             mock_hw_match.return_value = {"matched": True, "device_type": new_device_type}
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
+            view.request = request
             view.post(request, device_id=10)
 
         assert existing_device.device_type == new_device_type

@@ -222,13 +222,15 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
     def get_table(self, data, obj, request):
         """Get the table instance for the view."""
         table = IPAddressTable(data)
-        table.htmx_url = f"{request.path}?tab=ipaddresses"
+        server_key = self.librenms_api.server_key
+        table.htmx_url = f"{request.path}?tab=ipaddresses" + (f"&server_key={server_key}" if server_key else "")
         return table
 
     def _prepare_context(self, request, obj, interface_name_field, fetch_fresh=False):
         """Helper method to prepare the context data for IP address sync views."""
         table = None
         cache_expiry = None
+        server_key = self.librenms_api.server_key
 
         if interface_name_field is None:
             interface_name_field = get_interface_name_field(request)
@@ -236,7 +238,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         if fetch_fresh:
             success, ip_data = self.get_ip_addresses(obj)
         else:
-            cached_ip_data = cache.get(self.get_cache_key(obj, "ip_addresses"))
+            cached_ip_data = cache.get(self.get_cache_key(obj, "ip_addresses", server_key))
             if cached_ip_data:
                 ip_data = cached_ip_data.get("ip_addresses", [])
             else:
@@ -248,14 +250,14 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         if fetch_fresh:
             # Cache the fresh data after enrichment
             cache.set(
-                self.get_cache_key(obj, "ip_addresses"),
+                self.get_cache_key(obj, "ip_addresses", server_key),
                 {"ip_addresses": ip_data},
                 timeout=self.librenms_api.cache_timeout,
             )
 
         # Calculate cache expiry
-        cache_ttl = cache.ttl(self.get_cache_key(obj, "ip_addresses"))
-        if cache_ttl is not None:
+        cache_ttl = cache.ttl(self.get_cache_key(obj, "ip_addresses", server_key))
+        if cache_ttl is not None and cache_ttl > 0:
             cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl)
 
         # Generate the table
@@ -268,6 +270,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             "table": table,
             "object": obj,
             "cache_expiry": cache_expiry,
+            "server_key": server_key,
         }
 
     def get_context_data(self, request, obj):
@@ -392,12 +395,6 @@ class SingleIPAddressVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
             else:
                 return "sync"
 
-    def _get_cache_key(self, obj, data_type):
-        """
-        Generate a cache key for the specified object and data type.
-        """
-        return f"librenms_plugin:{obj.__class__.__name__}:{obj.pk}:{data_type}"
-
     def post(self, request):
         """
         POST request to return json response with formatted IP address status.
@@ -408,6 +405,7 @@ class SingleIPAddressVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
             vrf_id = data.get("vrf_id")
             object_id = data.get("device_id")
             object_type = data.get("object_type")
+            server_key = data.get("server_key") or "default"
 
             if not ip_address:
                 return JsonResponse({"status": "error", "message": "No IP address provided"}, status=400)
@@ -427,7 +425,7 @@ class SingleIPAddressVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
             except ValueError as e:
                 return JsonResponse({"status": "error", "message": str(e)}, status=400)
 
-            cache_key = self._get_cache_key(obj, "ip_addresses")
+            cache_key = self.get_cache_key(obj, "ip_addresses", server_key)
             cached_data = cache.get(cache_key)
 
             # Basic record with default values

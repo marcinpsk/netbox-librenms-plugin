@@ -1,6 +1,7 @@
 """Device validation, import, and matching operations."""
 
 import logging
+from types import SimpleNamespace
 
 from dcim.models import Device, DeviceRole, DeviceType, Rack, Site
 from django.core.cache import cache
@@ -10,9 +11,11 @@ from virtualization.models import Cluster
 
 from ..librenms_api import LibreNMSAPI
 from ..utils import (
+    find_by_librenms_id,
     find_matching_platform,
     find_matching_site,
     match_librenms_hardware_to_device_type,
+    set_librenms_device_id,
 )
 from .cache import get_import_device_cache_key
 from .virtual_chassis import (
@@ -86,6 +89,7 @@ def validate_device_for_import(
     import_as_vm: bool = False,
     api: "LibreNMSAPI" = None,
     *,
+    server_key: str = "default",
     include_vc_detection: bool = True,
     force_vc_refresh: bool = False,
     use_sysname: bool = True,
@@ -168,6 +172,7 @@ def validate_device_for_import(
         "name_sync_available": False,  # True when existing device name differs from sysName
         "suggested_name": None,  # sysName to suggest when name_sync_available is True
         "device_type_mismatch": False,  # True when existing device's type differs from LibreNMS
+        "librenms_id_needs_migration": False,  # True when existing device has legacy bare-int ID
         "issues": [],
         "warnings": [],
         "virtual_chassis": empty_virtual_chassis_data(),
@@ -227,13 +232,12 @@ def validate_device_for_import(
 
         from virtualization.models import VirtualMachine
 
-        # Check for existing VM first (by librenms_id custom field)
-        # Always query with int to match custom field type
-        try:
-            existing_vm = VirtualMachine.objects.filter(custom_field_data__librenms_id=int(librenms_id)).first()
-        except (ValueError, TypeError):
-            # librenms_id is not convertible to int; no match will be found
-            existing_vm = None
+        server_key = api.server_key if api is not None else server_key
+
+        # Check for existing VM first (by librenms_id custom field).
+        # find_by_librenms_id() covers both the new per-server JSON format
+        # and legacy bare-integer values so neither is missed.
+        existing_vm = find_by_librenms_id(VirtualMachine, librenms_id, server_key)
 
         if existing_vm:
             logger.info(f"Found existing VM: {existing_vm.name} (matched by librenms_id={librenms_id})")
@@ -242,6 +246,13 @@ def validate_device_for_import(
             result["import_as_vm"] = True  # Force VM mode since VM exists
             result["can_import"] = False
 
+            # Flag legacy bare-int or string-digit librenms_id for migration to per-server dict format
+            _vm_cf_id = existing_vm.custom_field_data.get("librenms_id")
+            if (isinstance(_vm_cf_id, int) and not isinstance(_vm_cf_id, bool)) or (
+                isinstance(_vm_cf_id, str) and _vm_cf_id.isdigit()
+            ):
+                result["librenms_id_needs_migration"] = True
+
             # Check if name matches sysName
             # Note: name_sync_available/suggested_name are intentionally not set for VMs
             # because UpdateDeviceNameView only supports Device objects; VM name-sync
@@ -249,20 +260,24 @@ def validate_device_for_import(
             if hostname and existing_vm.name == hostname:
                 result["name_matches"] = True
 
-        # Check for existing Device (by librenms_id custom field)
-        # Always query with int to match custom field type
+        # Check for existing Device (by librenms_id custom field).
+        # find_by_librenms_id() covers both the new per-server JSON format
+        # and legacy bare-integer values so neither is missed.
         if not result["existing_device"]:
-            try:
-                existing_device = Device.objects.filter(custom_field_data__librenms_id=int(librenms_id)).first()
-            except (ValueError, TypeError):
-                # librenms_id is not convertible to int; no match will be found
-                existing_device = None
+            existing_device = find_by_librenms_id(Device, librenms_id, server_key)
 
             if existing_device:
                 logger.info(f"Found existing device: {existing_device.name} (matched by librenms_id={librenms_id})")
                 result["existing_device"] = existing_device
                 result["existing_match_type"] = "librenms_id"
                 result["can_import"] = False
+
+                # Flag legacy bare-int or string-digit librenms_id for migration to per-server dict format
+                _dev_cf_id = existing_device.custom_field_data.get("librenms_id")
+                if (isinstance(_dev_cf_id, int) and not isinstance(_dev_cf_id, bool)) or (
+                    isinstance(_dev_cf_id, str) and _dev_cf_id.isdigit()
+                ):
+                    result["librenms_id_needs_migration"] = True
 
                 # Check if name matches resolved name (accounts for use_sysname/strip_domain)
                 # Also accounts for virtual chassis naming pattern when device is a VC member
@@ -694,6 +709,7 @@ def import_single_device(
                 libre_device,
                 use_sysname=use_sysname_opt,
                 strip_domain=strip_domain_opt,
+                server_key=api.server_key,
             )
 
         # Check if device already exists
@@ -772,6 +788,8 @@ def import_single_device(
             # Generate import timestamp comment
             import_time = timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")
 
+            _cf_proxy = SimpleNamespace(custom_field_data={})
+            set_librenms_device_id(_cf_proxy, device_id, api.server_key)
             device_data = {
                 "name": device_name,
                 "site": site,
@@ -779,7 +797,7 @@ def import_single_device(
                 "role": device_role,
                 "status": "active" if libre_device.get("status") == 1 else "offline",
                 "comments": f"Imported from LibreNMS by netbox-librenms-plugin on {import_time}",
-                "custom_field_data": {"librenms_id": int(device_id)},
+                "custom_field_data": _cf_proxy.custom_field_data,
             }
 
             # Add optional fields
@@ -804,6 +822,9 @@ def import_single_device(
 
             # Create the device
             device = Device(**device_data)
+            # Store librenms_id in per-server dict format before validation so the
+            # mapping is present on the instance when full_clean() runs.
+            set_librenms_device_id(device, device_id, api.server_key)
             device.full_clean()
             device.save()
 
