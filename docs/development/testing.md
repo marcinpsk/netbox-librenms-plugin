@@ -34,7 +34,12 @@ The test suite covers all major plugin functionality. Tests are organized by the
 | [test_sync_devices.py](../../netbox_librenms_plugin/tests/test_sync_devices.py) | Device sync views—field updates, platform creation, server mapping, legacy ID conversion |
 | [test_sync_interfaces.py](../../netbox_librenms_plugin/tests/test_sync_interfaces.py) | Interface sync—port matching, attribute updates, MAC handling, librenms_id assignment |
 | [test_sync_view_mismatch.py](../../netbox_librenms_plugin/tests/test_sync_view_mismatch.py) | Sync page context—device type mismatch detection and badge rendering |
+| [test_sync_modules.py](../../netbox_librenms_plugin/tests/test_sync_modules.py) | Module sync—inventory matching, module type resolution, and normalization rules |
+| [test_modules_view.py](../../netbox_librenms_plugin/tests/test_modules_view.py) | Module sync view—context preparation, table rendering, and module bay mapping |
+| [test_tables_modules.py](../../netbox_librenms_plugin/tests/test_tables_modules.py) | Module tables—column rendering, row formatting, and action buttons |
 | [test_permissions.py](../../netbox_librenms_plugin/tests/test_permissions.py) | Permission enforcement—mixin contracts, object-level permissions, and write guards |
+| [test_vm_operations.py](../../netbox_librenms_plugin/tests/test_vm_operations.py) | VM operations—virtual machine sync, interface handling, and VM-specific views |
+| [test_integration_sync.py](../../netbox_librenms_plugin/tests/test_integration_sync.py) | Integration tests—API client against local mock HTTP server |
 | [test_view_wiring.py](../../netbox_librenms_plugin/tests/test_view_wiring.py) | Smoke tests—view class MRO, mixin wiring, permission contracts, and template syntax |
 
 Supporting files:
@@ -43,6 +48,7 @@ Supporting files:
 |------|---------|
 | [conftest.py](../../netbox_librenms_plugin/tests/conftest.py) | Shared pytest fixtures |
 | [test_librenms_api_helpers.py](../../netbox_librenms_plugin/tests/test_librenms_api_helpers.py) | Auto-use fixture for API configuration mocking |
+| [mock_librenms_server.py](../../netbox_librenms_plugin/tests/mock_librenms_server.py) | Minimal HTTP mock server for integration tests |
 
 ## Running Tests
 
@@ -74,8 +80,11 @@ pytest netbox_librenms_plugin/tests/test_background_jobs.py -v
 # Multi-server librenms_id tests
 pytest netbox_librenms_plugin/tests/test_librenms_id.py -v
 
-# Sync view tests (devices, interfaces)
-pytest netbox_librenms_plugin/tests/test_sync_devices.py netbox_librenms_plugin/tests/test_sync_interfaces.py -v
+# Sync view tests (devices, interfaces, modules)
+pytest netbox_librenms_plugin/tests/test_sync_devices.py netbox_librenms_plugin/tests/test_sync_interfaces.py netbox_librenms_plugin/tests/test_sync_modules.py -v
+
+# Integration tests (API client against mock HTTP server)
+pytest netbox_librenms_plugin/tests/test_integration_sync.py -v
 
 # View wiring and template syntax smoke tests
 pytest netbox_librenms_plugin/tests/test_view_wiring.py -v
@@ -202,7 +211,7 @@ mock_delete.assert_not_called()
 The tests run in any environment without external dependencies:
 
 - No database connection required
-- No external network access needed
+- No external network access needed (integration tests use local loopback only)
 - Fast execution suitable for pre-commit hooks
 - Clear failure messages for debugging
 - Works in containerized environments
