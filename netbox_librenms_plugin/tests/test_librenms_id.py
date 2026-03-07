@@ -73,6 +73,25 @@ class TestGetLibreNMSDeviceId:
         assert get_librenms_device_id(obj, "default") == 42
         assert get_librenms_device_id(obj, "production") == 42
 
+    def test_returns_none_for_bare_boolean(self):
+        """bool is a subclass of int; bare True/False must not be treated as a valid ID."""
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        obj = MagicMock()
+        obj.cf = {"librenms_id": True}
+        assert get_librenms_device_id(obj, "default") is None
+
+        obj.cf = {"librenms_id": False}
+        assert get_librenms_device_id(obj, "default") is None
+
+    def test_returns_none_for_boolean_inside_dict(self):
+        """Boolean values inside the JSON dict must be rejected."""
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        obj = MagicMock()
+        obj.cf = {"librenms_id": {"default": True}}
+        assert get_librenms_device_id(obj, "default") is None
+
     def test_default_server_key_is_default(self):
         from netbox_librenms_plugin.utils import get_librenms_device_id
 
@@ -206,6 +225,15 @@ class TestMigrateLegacyLibreNMSId:
         obj.custom_field_data = {"librenms_id": None}
         result = migrate_legacy_librenms_id(obj, "default")
         assert result is False
+
+    def test_returns_false_for_boolean_value(self):
+        """bool is a subclass of int; True/False must not be migrated."""
+        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": True}
+        assert migrate_legacy_librenms_id(obj, "default") is False
+        assert obj.custom_field_data["librenms_id"] is True  # unchanged
 
     def test_does_not_call_save(self):
         """migrate_legacy_librenms_id must NOT call obj.save() — caller is responsible."""

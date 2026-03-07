@@ -470,8 +470,6 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
 
         Legacy:  librenms_id = 42              → returned as universal fallback for any server_key
         New:     librenms_id = {"primary": 42} → returns 42 only for server_key="primary"
-        Legacy:  librenms_id = 42          → returns 42 for any server_key (universal fallback)
-        New:     librenms_id = {"primary": 42}  → returns 42 only for server_key="primary"
 
     If the stored value (or the dict entry for server_key) is a string it is
     normalised to ``int``.  When *auto_save* is ``True`` (the default) the
@@ -491,7 +489,7 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
     cf_value = obj.cf.get("librenms_id")
     if cf_value is None:
         return None
-    if isinstance(cf_value, int):
+    if isinstance(cf_value, int) and not isinstance(cf_value, bool):
         # Legacy bare integer — universal fallback for any server to ensure
         # devices imported before multi-server support remain discoverable.
         return cf_value
@@ -508,6 +506,8 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
         return int_id
     if isinstance(cf_value, dict):
         value = cf_value.get(server_key)
+        if isinstance(value, bool):
+            return None
         if isinstance(value, str):
             # Normalise string-stored ID inside JSON dict and write back.
             try:
@@ -628,7 +628,7 @@ def migrate_legacy_librenms_id(obj, server_key: str = "default") -> bool:
         True if the value was migrated, False if it was already in the correct format.
     """
     cf_value = obj.custom_field_data.get("librenms_id")
-    if not isinstance(cf_value, int):
+    if not isinstance(cf_value, int) or isinstance(cf_value, bool):
         return False
     obj.custom_field_data["librenms_id"] = {server_key: cf_value}
     logger.info(
