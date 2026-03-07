@@ -230,4 +230,24 @@ class LibreNMSModuleTable(tables.Table):
                 )
             )
 
+        # Replace button for type/serial mismatch rows — opens comparison modal
+        if record.get("can_replace") and record.get("installed_module_id"):
+            preview_url = reverse(
+                "plugins:netbox_librenms_plugin:module_mismatch_preview", kwargs={"pk": self.device.pk}
+            )
+            buttons.append(
+                format_html(
+                    '<button type="button" class="btn btn-sm btn-danger ms-1 module-replace-btn"'
+                    ' data-module-id="{}" data-ent-index="{}" data-server-key="{}"'
+                    ' data-preview-url="{}"'
+                    ' title="Replace module — opens comparison dialog">'
+                    '<i class="mdi mdi-swap-horizontal"></i> Replace'
+                    "</button>",
+                    record["installed_module_id"],
+                    record.get("ent_physical_index", ""),
+                    self.server_key or "",
+                    preview_url,
+                )
+            )
+
         return format_html("{}", mark_safe("".join(str(b) for b in buttons))) if buttons else ""

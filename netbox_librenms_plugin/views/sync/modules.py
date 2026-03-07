@@ -3,7 +3,8 @@
 from django.contrib import messages
 from django.core.cache import cache
 from django.db import transaction
-from django.shortcuts import get_object_or_404, redirect
+from django.http import HttpResponse
+from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.views import View
 
@@ -531,4 +532,269 @@ class UpdateModuleSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
             messages.error(request, f"Failed to update serial: {e}")
 
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+        return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+
+
+class ModuleMismatchPreviewView(LibreNMSPermissionMixin, CacheMixin, View):
+    """Return the modal body HTML fragment for the module replace/move dialog.
+
+    Loads the installed module and the corresponding LibreNMS inventory item from
+    cache, detects type/serial mismatch and serial conflicts, then renders the
+    comparison template so the user can choose between Replace, Move, or
+    Update Serial Only.
+    """
+
+    def get(self, request, pk):
+        from dcim.models import Device, Module
+
+        device = get_object_or_404(Device, pk=pk)
+        module_id = request.GET.get("module_id")
+        ent_index = request.GET.get("ent_index")
+        server_key = request.GET.get("server_key") or None
+
+        if not module_id or not ent_index:
+            return HttpResponse("Missing required parameters.", status=400)
+
+        try:
+            ent_index_int = int(ent_index)
+        except ValueError:
+            return HttpResponse("Invalid ent_index.", status=400)
+
+        installed_module = get_object_or_404(
+            Module.objects.select_related("module_type", "module_bay", "device"),
+            pk=module_id,
+            device=device,
+        )
+
+        cached_data = cache.get(self.get_cache_key(device, "inventory", server_key=server_key))
+        if not cached_data:
+            return HttpResponse("No cached inventory data. Please refresh modules first.", status=400)
+
+        librenms_item = next(
+            (item for item in cached_data if item.get("entPhysicalIndex") == ent_index_int),
+            None,
+        )
+        if not librenms_item:
+            return HttpResponse("Inventory item not found in cache.", status=400)
+
+        librenms_model = (librenms_item.get("entPhysicalModelName") or "").strip() or "-"
+        librenms_serial = (librenms_item.get("entPhysicalSerialNum") or "").strip()
+
+        # Detect type mismatch
+        from netbox_librenms_plugin.utils import apply_normalization_rules, get_module_types_indexed
+
+        module_types = get_module_types_indexed()
+        matched_type = module_types.get(librenms_model)
+        if not matched_type and librenms_model != "-":
+            manufacturer = getattr(getattr(device, "device_type", None), "manufacturer", None)
+            normalized = apply_normalization_rules(librenms_model, "module_type", manufacturer=manufacturer)
+            if normalized != librenms_model:
+                matched_type = module_types.get(normalized)
+
+        type_mismatch = matched_type is not None and installed_module.module_type_id != matched_type.pk
+        installed_serial = (installed_module.serial or "").strip()
+        serial_mismatch = bool(
+            not type_mismatch and librenms_serial and installed_serial and librenms_serial != installed_serial
+        )
+
+        # Check whether the LibreNMS serial already exists at a different location
+        serial_conflict = None
+        if librenms_serial:
+            serial_conflict = (
+                Module.objects.filter(serial=librenms_serial)
+                .exclude(pk=installed_module.pk)
+                .select_related("module_type", "module_bay", "device")
+                .first()
+            )
+
+        return render(
+            request,
+            "netbox_librenms_plugin/htmx/module_mismatch_modal.html",
+            {
+                "device_pk": pk,
+                "installed_module": installed_module,
+                "bay_name": installed_module.module_bay.name,
+                "target_bay_id": installed_module.module_bay_id,
+                "installed_serial": installed_serial,
+                "librenms_model": librenms_model,
+                "librenms_serial": librenms_serial,
+                "type_mismatch": type_mismatch,
+                "serial_mismatch": serial_mismatch,
+                "serial_conflict": serial_conflict,
+                "ent_index": ent_index,
+                "server_key": server_key or "",
+            },
+        )
+
+
+class ReplaceModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
+    """Replace the installed module in a bay with fresh data from LibreNMS inventory.
+
+    Deletes the currently installed module (and optionally removes a conflicting
+    module with the same serial from another location), then installs a new module
+    from cached LibreNMS inventory data.
+    """
+
+    def post(self, request, pk):
+        from dcim.models import Device, Module, ModuleBay, ModuleType  # noqa: F401
+
+        self.required_object_permissions = {"POST": [("add", Module), ("change", Module), ("delete", Module)]}
+        if error := self.require_all_permissions("POST"):
+            return error
+
+        device = get_object_or_404(Device, pk=pk)
+        module_id = request.POST.get("module_id")
+        ent_index = request.POST.get("ent_index")
+        server_key = request.POST.get("server_key") or None
+        conflict_module_id = request.POST.get("conflict_module_id")
+        sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+
+        if not module_id or not ent_index:
+            messages.error(request, "Missing required parameters.")
+            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+
+        try:
+            ent_index_int = int(ent_index)
+        except ValueError:
+            messages.error(request, "Invalid inventory index.")
+            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+
+        installed_module = get_object_or_404(
+            Module.objects.select_related("module_type", "module_bay"),
+            pk=module_id,
+            device=device,
+        )
+        target_bay = installed_module.module_bay
+
+        cached_data = cache.get(self.get_cache_key(device, "inventory", server_key=server_key))
+        if not cached_data:
+            messages.error(request, "No cached inventory data. Please refresh modules first.")
+            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+
+        librenms_item = next(
+            (item for item in cached_data if item.get("entPhysicalIndex") == ent_index_int),
+            None,
+        )
+        if not librenms_item:
+            messages.error(request, "Inventory item not found in cache.")
+            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+
+        model_name = (librenms_item.get("entPhysicalModelName") or "").strip()
+        serial = (librenms_item.get("entPhysicalSerialNum") or "").strip()
+
+        helper = InstallBranchView()
+        module_types = helper._get_module_types()
+        from netbox_librenms_plugin.utils import apply_normalization_rules
+
+        matched_type = module_types.get(model_name)
+        if not matched_type and model_name:
+            manufacturer = getattr(getattr(device, "device_type", None), "manufacturer", None)
+            normalized = apply_normalization_rules(model_name, "module_type", manufacturer=manufacturer)
+            if normalized != model_name:
+                matched_type = module_types.get(normalized)
+
+        if not matched_type:
+            messages.error(request, f"No matching module type found for '{model_name}'.")
+            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+
+        old_type_name = installed_module.module_type.model
+        old_bay_name = target_bay.name
+
+        try:
+            with transaction.atomic():
+                # Remove conflict module from its current location (if provided)
+                if conflict_module_id:
+                    conflict = Module.objects.filter(pk=conflict_module_id).exclude(pk=installed_module.pk).first()
+                    if conflict:
+                        c_bay = conflict.module_bay.name
+                        c_device = conflict.device.name
+                        conflict.delete()
+                        messages.info(request, f"Removed {conflict.module_type.model} from {c_device}/{c_bay}.")
+
+                # Delete the currently installed module in the target bay
+                installed_module.delete()
+
+                # Install fresh module from LibreNMS data
+                new_module = Module(
+                    device=device,
+                    module_bay=target_bay,
+                    module_type=matched_type,
+                    serial=serial,
+                    status="active",
+                )
+                new_module.full_clean()
+                new_module.save()
+
+            messages.success(
+                request,
+                f"Replaced {old_type_name} with {matched_type.model} in {old_bay_name}"
+                + (f" (serial: {serial})" if serial else "")
+                + ".",
+            )
+        except Exception as e:
+            messages.error(request, f"Replace failed: {e}")
+
+        return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+
+
+class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
+    """Move an existing module from its current location to a target bay.
+
+    Handles the case where a module (identified by serial) has been physically
+    moved from one slot to another — possibly on a different device.  Updates
+    the module_bay (and device when moving cross-device) rather than deleting
+    and recreating, preserving the module's history.
+    """
+
+    def post(self, request, pk):
+        from dcim.models import Device, Module, ModuleBay
+
+        self.required_object_permissions = {"POST": [("change", Module), ("delete", Module)]}
+        if error := self.require_all_permissions("POST"):
+            return error
+
+        device = get_object_or_404(Device, pk=pk)
+        module_id = request.POST.get("module_id")  # current occupant of target bay (may be absent)
+        conflict_module_id = request.POST.get("conflict_module_id")  # module to move here
+        target_bay_id = request.POST.get("target_bay_id")
+        sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+
+        if not conflict_module_id or not target_bay_id:
+            messages.error(request, "Missing required parameters.")
+            return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+
+        conflict_module = get_object_or_404(
+            Module.objects.select_related("module_type", "module_bay", "device"),
+            pk=conflict_module_id,
+        )
+        target_bay = get_object_or_404(ModuleBay, pk=target_bay_id, device=device)
+
+        try:
+            with transaction.atomic():
+                # Remove whatever is currently in the target bay (if provided and different)
+                if module_id:
+                    occupant = Module.objects.filter(pk=module_id, device=device).first()
+                    if occupant and occupant.pk != conflict_module.pk:
+                        messages.info(
+                            request,
+                            f"Removed {occupant.module_type.model} from {target_bay.name}.",
+                        )
+                        occupant.delete()
+
+                # Move the conflict module to the target bay
+                from_bay = conflict_module.module_bay.name
+                from_device = conflict_module.device.name
+                conflict_module.module_bay = target_bay
+                conflict_module.device = device
+                conflict_module.full_clean()
+                conflict_module.save()
+
+            moved_msg = f"Moved {conflict_module.module_type.model}"
+            if from_device != device.name:
+                moved_msg += f" from {from_device}"
+            moved_msg += f"/{from_bay} to {target_bay.name}."
+            messages.success(request, moved_msg)
+        except Exception as e:
+            messages.error(request, f"Move failed: {e}")
+
         return redirect(f"{sync_url}?tab=modules#librenms-module-table")

@@ -209,9 +209,10 @@ def _bay(name, installed_module=None, pk=None):
     return bay
 
 
-def _module(serial="SN001"):
+def _module(serial="SN001", module_type_id=1):
     mod = MagicMock()
     mod.serial = serial
+    mod.module_type_id = module_type_id
     mod.get_absolute_url.return_value = "/dcim/modules/1/"
     return mod
 

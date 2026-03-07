@@ -1458,6 +1458,73 @@ function initializeInstallSelectedForm() {
     form.addEventListener('submit', handleInstallSelectedSubmit);
 }
 
+/**
+ * Initialize Replace buttons on the module sync table.
+ * Each button carries module/ent_index/server_key as data attributes and opens
+ * the mismatch comparison modal by fetching the preview fragment from the server.
+ */
+function initializeModuleReplaceButtons() {
+    document.querySelectorAll('.module-replace-btn').forEach(btn => {
+        if (btn.dataset.replaceInitialized) return;
+        btn.dataset.replaceInitialized = 'true';
+
+        btn.addEventListener('click', function () {
+            const previewUrl = this.dataset.previewUrl;
+            const moduleId = this.dataset.moduleId;
+            const entIndex = this.dataset.entIndex;
+            const serverKey = this.dataset.serverKey;
+
+            const params = new URLSearchParams({
+                module_id: moduleId,
+                ent_index: entIndex,
+                server_key: serverKey,
+            });
+
+            // Show modal with loading state first
+            const modalBody = document.getElementById('moduleReplaceModalBody');
+            if (modalBody) {
+                modalBody.innerHTML =
+                    '<div class="text-center py-3">' +
+                    '<i class="mdi mdi-loading mdi-spin mdi-36px"></i>' +
+                    '<p class="mt-2">Loading…</p>' +
+                    '</div>';
+            }
+
+            let trigger = document.getElementById('moduleReplaceModalTrigger');
+            if (!trigger) {
+                trigger = document.createElement('button');
+                trigger.id = 'moduleReplaceModalTrigger';
+                trigger.setAttribute('data-bs-toggle', 'modal');
+                trigger.setAttribute('data-bs-target', '#moduleReplaceModal');
+                trigger.style.display = 'none';
+                document.body.appendChild(trigger);
+            }
+            trigger.click();
+
+            // Fetch preview content and inject into modal body
+            fetch(`${previewUrl}?${params.toString()}`)
+                .then(response => {
+                    if (!response.ok) return response.text().then(t => { throw new Error(t); });
+                    return response.text();
+                })
+                .then(html => {
+                    if (modalBody) {
+                        modalBody.innerHTML = html;
+                    }
+                })
+                .catch(err => {
+                    if (modalBody) {
+                        modalBody.innerHTML =
+                            '<div class="alert alert-danger">' +
+                            '<i class="mdi mdi-alert me-1"></i>' +
+                            (err.message || 'Failed to load preview.') +
+                            '</div>';
+                    }
+                });
+        });
+    });
+}
+
 function initializeScripts() {
     initializeCheckboxes();
     initializeVCMemberSelect();
@@ -1475,6 +1542,7 @@ function initializeScripts() {
     initializeSyncFormSpinners();
     initializeVlanSyncGroupSelects();
     initializeInstallSelectedForm();
+    initializeModuleReplaceButtons();
 }
 
 

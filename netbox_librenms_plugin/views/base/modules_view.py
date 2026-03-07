@@ -264,6 +264,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Sort top-level groups by status, keeping children after their parent
         table_data = self._sort_with_hierarchy(table_data)
 
+        # Bulk-detect serial conflicts for rows that can be replaced/installed
+        self._detect_serial_conflicts(table_data)
+
         table = self.get_table(table_data, obj)
         table.configure(request)
 
@@ -416,7 +419,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
     def _sort_with_hierarchy(self, table_data):
         """Sort table keeping children grouped under their parent."""
-        status_order = {"Installed": 0, "Serial Mismatch": 1, "Matched": 2, "No Type": 3, "No Bay": 4, "Unmatched": 5}
+        status_order = {
+            "Installed": 0,
+            "Serial Mismatch": 1,
+            "Type Mismatch": 2,
+            "Matched": 3,
+            "No Type": 4,
+            "No Bay": 5,
+            "Unmatched": 6,
+        }
 
         # Group into top-level items with their children
         groups = []
@@ -747,15 +758,17 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 installed = matched_bay.installed_module
                 row["installed_module"] = installed
                 row["module_url"] = installed.get_absolute_url()
-                # Check serial match
-                if serial and installed.serial and installed.serial.strip() == serial.strip():
-                    status = "Installed"
-                    row["row_class"] = "table-success"
+                row["installed_module_id"] = installed.pk
+                # Type mismatch takes priority over serial comparison
+                if matched_type is not None and installed.module_type_id != matched_type.pk:
+                    status = "Type Mismatch"
+                    row["row_class"] = "table-warning"
+                    row["can_replace"] = True
                 elif serial and installed.serial and installed.serial.strip() != serial.strip():
                     status = "Serial Mismatch"
                     row["row_class"] = "table-danger"
                     row["can_update_serial"] = True
-                    row["installed_module_id"] = installed.pk
+                    row["can_replace"] = True
                 else:
                     status = "Installed"
                     row["row_class"] = "table-success"
@@ -778,3 +791,39 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if not matched_type:
             return "No Type"
         return "Unmatched"
+
+    def _detect_serial_conflicts(self, table_data):
+        """Bulk-check whether LibreNMS serials for replaceable rows already exist elsewhere in NetBox.
+
+        For each row with can_replace, checks whether the LibreNMS serial (the value we want to
+        write) is already assigned to a *different* module.  When a conflict is found the row
+        gets two extra keys:
+
+          serial_conflict_module  – the conflicting Module object (with device/module_bay loaded)
+          can_move_from           – True (convenience flag for templates/tests)
+        """
+        from dcim.models import Module
+
+        # Map serial → list of rows that may be affected
+        serial_rows: dict = {}
+        for row in table_data:
+            if not row.get("can_replace"):
+                continue
+            serial = row.get("serial", "")
+            if serial and serial != "-":
+                serial_rows.setdefault(serial, []).append(row)
+
+        if not serial_rows:
+            return
+
+        conflicts = Module.objects.filter(serial__in=serial_rows.keys()).select_related(
+            "module_type", "module_bay", "device"
+        )
+        for conflict in conflicts:
+            for row in serial_rows.get(conflict.serial, []):
+                installed_id = row.get("installed_module_id")
+                # Skip if this IS the module already in the current bay
+                if installed_id and conflict.pk == installed_id:
+                    continue
+                row["serial_conflict_module"] = conflict
+                row["can_move_from"] = True

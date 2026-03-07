@@ -32,6 +32,9 @@ from .views import (
     InstallBranchView,
     InstallModuleView,
     InstallSelectedView,
+    ModuleMismatchPreviewView,
+    MoveModuleView,
+    ReplaceModuleView,
     UpdateModuleSerialView,
     InterfaceTypeMappingBulkDeleteView,
     InterfaceTypeMappingBulkImportView,
@@ -134,6 +137,21 @@ urlpatterns = [
         "devices/<int:pk>/update-module-serial/",
         UpdateModuleSerialView.as_view(),
         name="update_module_serial",
+    ),
+    path(
+        "devices/<int:pk>/module-mismatch-preview/",
+        ModuleMismatchPreviewView.as_view(),
+        name="module_mismatch_preview",
+    ),
+    path(
+        "devices/<int:pk>/replace-module/",
+        ReplaceModuleView.as_view(),
+        name="replace_module",
+    ),
+    path(
+        "devices/<int:pk>/move-module/",
+        MoveModuleView.as_view(),
+        name="move_module",
     ),
     path(
         "devices/<int:pk>/ipaddress-sync/",

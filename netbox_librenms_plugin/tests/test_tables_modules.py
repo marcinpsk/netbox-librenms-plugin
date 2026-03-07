@@ -488,6 +488,58 @@ class TestLibreNMSModuleTable:
 
         assert result == ""
 
+    def test_render_actions_can_replace_renders_replace_button(self):
+        """can_replace=True with installed_module_id renders a Replace button."""
+        device = MagicMock()
+        device.pk = 9
+        table = self._make_table(device=device)
+        record = {
+            "can_replace": True,
+            "installed_module_id": 55,
+            "ent_physical_index": 200,
+            "serial": "S1",
+        }
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/replace-url/"):
+            result = str(table.render_actions(None, record))
+
+        assert "Replace" in result
+        assert "module-replace-btn" in result
+        assert "mdi-swap-horizontal" in result
+        assert 'data-module-id="55"' in result
+
+    def test_render_actions_serial_mismatch_shows_both_update_and_replace(self):
+        """Serial Mismatch row (can_update_serial + can_replace) shows both buttons."""
+        device = MagicMock()
+        device.pk = 10
+        table = self._make_table(device=device)
+        record = {
+            "can_update_serial": True,
+            "can_replace": True,
+            "installed_module_id": 66,
+            "ent_physical_index": 300,
+            "serial": "NEWSERIAL",
+        }
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
+            result = str(table.render_actions(None, record))
+
+        assert "Update Serial" in result
+        assert "Replace" in result
+
+    def test_render_actions_no_replace_without_module_id(self):
+        """Replace button not rendered when installed_module_id is absent."""
+        device = MagicMock()
+        device.pk = 11
+        table = self._make_table(device=device)
+        record = {
+            "can_replace": True,
+            # installed_module_id intentionally absent
+            "ent_physical_index": 400,
+        }
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
+            result = table.render_actions(None, record)
+
+        assert "Replace" not in str(result)
+
     """Tests for __init__ and configure methods, bypassing django-tables2 super().__init__."""
 
     def test_init_sets_device_and_defaults(self):

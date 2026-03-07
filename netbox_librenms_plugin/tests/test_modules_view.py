@@ -52,6 +52,8 @@ def _run_build_context(view, inventory_data, device_bays, module_scoped_bays, mo
         patch("netbox_librenms_plugin.utils.module_type_is_end_module", return_value=True),
         patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
         patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping,
+        # _detect_serial_conflicts makes a real DB query; mock it out for unit tests
+        patch.object(view.__class__, "_detect_serial_conflicts", return_value=None),
     ):
         mock_cache.ttl = MagicMock(return_value=None)
         mock_qs = MagicMock()
@@ -177,14 +179,17 @@ def _bay_setup():
     linecard_module = MagicMock()
     linecard_module.pk = 100
     linecard_module.serial = "S_LINECARD"
+    linecard_module.module_type_id = 10  # matches mt_linecard.pk
 
     cvr2_module = MagicMock()
     cvr2_module.pk = 200
     cvr2_module.serial = "FDO_CVR2"
+    cvr2_module.module_type_id = 20  # matches mt_cvr.pk
 
     glc_te_installed = MagicMock()
     glc_te_installed.serial = "MTC213403BB"
     glc_te_installed.get_absolute_url.return_value = "/modules/99/"
+    glc_te_installed.module_type_id = 30  # matches mt_glc_te.pk
 
     # --- device-level bays ---
     slot3_bay = MagicMock()
@@ -221,12 +226,16 @@ def _bay_setup():
 def _module_types():
     """Minimal module-type dict for the test scenario."""
     mt_linecard = MagicMock()
+    mt_linecard.pk = 10
     mt_linecard.model = "WS-X4908"
     mt_cvr = MagicMock()
+    mt_cvr.pk = 20
     mt_cvr.model = "CVR-X2-SFP"
     mt_glc_te = MagicMock()
+    mt_glc_te.pk = 30
     mt_glc_te.model = "GLC-TE"
     mt_glc_t = MagicMock()
+    mt_glc_t.pk = 40
     mt_glc_t.model = "GLC-T"
     return {
         "WS-X4908": mt_linecard,
@@ -363,12 +372,14 @@ class TestBayDepthScopeWithUninstalledParent:
         cvr6_module = MagicMock()
         cvr6_module.pk = 300
         cvr6_module.serial = "FDO_CVR6"
+        cvr6_module.module_type_id = 20  # matches mt_cvr.pk
 
         sfp1_bay_6 = MagicMock()
         sfp1_bay_6.name = "SFP 1"
         sfp6_installed = MagicMock()
         sfp6_installed.serial = "SFP6_SERIAL"
         sfp6_installed.get_absolute_url.return_value = "/modules/199/"
+        sfp6_installed.module_type_id = 30  # matches mt_glc_te.pk
         sfp1_bay_6.installed_module = sfp6_installed
 
         x2p6_bay = MagicMock()
@@ -476,7 +487,7 @@ class TestBuildRowSerialMismatch:
         view._device_manufacturer = None
         return view
 
-    def _make_bay(self, installed_serial=None):
+    def _make_bay(self, installed_serial=None, module_type_id=5):
         """Create a mock bay with an optionally installed module."""
         bay = MagicMock()
         bay.pk = 10
@@ -486,6 +497,7 @@ class TestBuildRowSerialMismatch:
             module = MagicMock()
             module.pk = 42
             module.serial = installed_serial
+            module.module_type_id = module_type_id
             module.get_absolute_url.return_value = "/dcim/modules/42/"
             bay.installed_module = module
         else:
@@ -588,3 +600,182 @@ class TestBuildRowSerialMismatch:
 
         assert row["status"] == "Installed"
         assert not row.get("can_update_serial")
+
+    def _common_patches(self, view, bay, matched_type_name):
+        """Return a stack of common patches for _build_row helper calls."""
+        from unittest.mock import patch
+
+        return [
+            patch.object(view, "_match_module_bay", return_value=bay),
+            patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value=matched_type_name),
+            patch("netbox_librenms_plugin.utils.module_type_uses_module_path", return_value=False),
+            patch("netbox_librenms_plugin.utils.module_type_is_end_module", return_value=False),
+            patch("netbox_librenms_plugin.utils.module_type_uses_module_token", return_value=False),
+            patch("netbox_librenms_plugin.utils.supports_module_path", return_value=True),
+            patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
+        ]
+
+    def _make_matched_type(self, model_name, pk=5):
+        matched_type = MagicMock()
+        matched_type.model = model_name
+        matched_type.pk = pk
+        matched_type.get_absolute_url.return_value = f"/dcim/module-types/{pk}/"
+        return matched_type
+
+    def test_type_mismatch_sets_type_mismatch_status(self):
+        """When installed module type differs from LibreNMS type, status is Type Mismatch."""
+        view = self._view()
+        bay = self._make_bay(installed_serial="S1")
+        # Installed type pk=99, matched type pk=5 — different
+        bay.installed_module.module_type_id = 99
+        matched_type = self._make_matched_type("XCM-7s-b", pk=5)
+
+        patches = self._common_patches(view, bay, "XCM-7s-b")
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            row = view._build_row(
+                self._make_item(model_name="XCM-7s-b", serial="NS225161205"),
+                {},
+                {"Slot 1": bay},
+                {"XCM-7s-b": matched_type},
+            )
+
+        assert row["status"] == "Type Mismatch"
+        assert row["row_class"] == "table-warning"
+
+    def test_type_mismatch_sets_can_replace(self):
+        """Type Mismatch row has can_replace=True and installed_module_id set."""
+        view = self._view()
+        bay = self._make_bay(installed_serial="S1")
+        bay.installed_module.module_type_id = 99
+        matched_type = self._make_matched_type("XCM-7s-b", pk=5)
+
+        patches = self._common_patches(view, bay, "XCM-7s-b")
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            row = view._build_row(
+                self._make_item(model_name="XCM-7s-b", serial="NS225161205"),
+                {},
+                {"Slot 1": bay},
+                {"XCM-7s-b": matched_type},
+            )
+
+        assert row.get("can_replace") is True
+        assert row.get("installed_module_id") == 42
+
+    def test_serial_mismatch_also_sets_can_replace(self):
+        """Serial Mismatch rows also get can_replace=True (same type)."""
+        view = self._view()
+        bay = self._make_bay(installed_serial="TESTSRL")
+        bay.installed_module.module_type_id = 5
+        matched_type = self._make_matched_type("XCM-7s-b", pk=5)
+
+        patches = self._common_patches(view, bay, "XCM-7s-b")
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            row = view._build_row(
+                self._make_item(serial="NS225161205"),
+                {},
+                {"Slot 1": bay},
+                {"XCM-7s-b": matched_type},
+            )
+
+        assert row["status"] == "Serial Mismatch"
+        assert row.get("can_replace") is True
+        assert row.get("can_update_serial") is True
+
+    def test_same_type_same_serial_no_replace(self):
+        """Clean Installed row has neither can_replace nor can_update_serial."""
+        view = self._view()
+        bay = self._make_bay(installed_serial="NS225161205")
+        bay.installed_module.module_type_id = 5
+        matched_type = self._make_matched_type("XCM-7s-b", pk=5)
+
+        patches = self._common_patches(view, bay, "XCM-7s-b")
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            row = view._build_row(
+                self._make_item(serial="NS225161205"),
+                {},
+                {"Slot 1": bay},
+                {"XCM-7s-b": matched_type},
+            )
+
+        assert row["status"] == "Installed"
+        assert not row.get("can_replace")
+        assert not row.get("can_update_serial")
+
+
+class TestDetectSerialConflicts:
+    """Tests for BaseModuleTableView._detect_serial_conflicts()."""
+
+    def _view(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        return object.__new__(BaseModuleTableView)
+
+    def test_no_can_replace_rows_does_nothing(self):
+        """When no rows have can_replace, the method returns without DB query."""
+        view = self._view()
+        table_data = [{"serial": "S1", "status": "Installed"}]
+        # Should not raise; no DB query since no can_replace rows
+        with patch("netbox_librenms_plugin.views.base.modules_view.BaseModuleTableView._detect_serial_conflicts"):
+            # Call the real method — it should exit early
+            pass
+        # Call real method directly to verify it doesn't error
+        view._detect_serial_conflicts(table_data)
+        assert "serial_conflict_module" not in table_data[0]
+
+    def test_conflict_detected_for_can_replace_row(self):
+        """When a conflicting module exists, serial_conflict_module is set on the row."""
+        view = self._view()
+        conflict = MagicMock()
+        conflict.serial = "CONFLICT_SERIAL"
+        conflict.pk = 999
+        conflict.module_bay = MagicMock()
+        conflict.device = MagicMock()
+
+        row = {
+            "can_replace": True,
+            "serial": "CONFLICT_SERIAL",
+            "installed_module_id": 42,  # different from conflict.pk
+        }
+
+        with patch("dcim.models.Module") as mock_module_cls:
+            mock_module_cls.objects.filter.return_value.select_related.return_value = [conflict]
+            view._detect_serial_conflicts([row])
+
+        assert row.get("serial_conflict_module") is conflict
+        assert row.get("can_move_from") is True
+
+    def test_no_conflict_when_conflict_is_same_module(self):
+        """When the only module with the serial IS the installed module, no conflict is set."""
+        view = self._view()
+        conflict = MagicMock()
+        conflict.serial = "S1"
+        conflict.pk = 42  # Same as installed_module_id
+
+        row = {
+            "can_replace": True,
+            "serial": "S1",
+            "installed_module_id": 42,
+        }
+
+        with patch("dcim.models.Module") as mock_module_cls:
+            mock_module_cls.objects.filter.return_value.select_related.return_value = [conflict]
+            view._detect_serial_conflicts([row])
+
+        assert "serial_conflict_module" not in row
+        assert not row.get("can_move_from")
