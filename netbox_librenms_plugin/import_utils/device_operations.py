@@ -278,6 +278,8 @@ def validate_device_for_import(
 
         from virtualization.models import VirtualMachine
 
+        server_key = api.server_key if api is not None else server_key
+
         # Check for existing VM first (by librenms_id custom field)
         try:
             from netbox_librenms_plugin.utils import find_by_librenms_id
