@@ -63,7 +63,11 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             if object_type == "device"
             else "plugins:netbox_librenms_plugin:vm_librenms_sync"
         )
-        return redirect(reverse(url_name, kwargs={"pk": object_id}) + "?tab=vlans")
+        server_key = self.librenms_api.server_key
+        url = reverse(url_name, kwargs={"pk": object_id}) + "?tab=vlans"
+        if server_key:
+            url += f"&server_key={server_key}"
+        return redirect(url)
 
     def _handle_create_vlans(self, request, obj, object_type, object_id):
         """
