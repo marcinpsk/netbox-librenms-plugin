@@ -232,8 +232,6 @@ class TestRemoveServerMappingViewWiring:
 
     def test_post_with_virtualmachine_sets_vm_permissions_and_redirects(self):
         """post() with object_type='virtualmachine' sets VirtualMachine permissions and redirects to VM URL."""
-        from unittest.mock import MagicMock, patch
-
         from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
         from virtualization.models import VirtualMachine
 

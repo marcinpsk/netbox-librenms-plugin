@@ -844,20 +844,28 @@ function handleCableChange(select, value) {
             local_port_id: select.dataset.interface
         })
     })
-        .then(response => response.json())
+        .then(response => {
+            if (!response.ok) {
+                return response.text().then(text => {
+                    throw new Error(`Server error ${response.status}: ${text}`);
+                });
+            }
+            return response.json();
+        })
         .then(data => {
             const row = document.querySelector(`tr[data-interface="${select.dataset.rowId}"]`);
 
             if (data.status === 'success' && row) {
                 const formattedRow = data.formatted_row;
-                const actionsCell = row.querySelector('td[data-col="actions"]');
                 row.querySelector('td[data-col="local_port"]').innerHTML = formattedRow.local_port;
                 row.querySelector('td[data-col="remote_port"]').innerHTML = formattedRow.remote_port;
                 row.querySelector('td[data-col="remote_device"]').innerHTML = formattedRow.remote_device;
                 row.querySelector('td[data-col="cable_status"]').innerHTML = formattedRow.cable_status;
                 row.querySelector('td[data-col="actions"]').innerHTML = formattedRow.actions;
-
             }
+        })
+        .catch(error => {
+            console.error('Error verifying cable:', error.message);
         });
 }
 

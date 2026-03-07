@@ -1235,7 +1235,9 @@ class DeviceConflictActionView(
             # LibreNMSAPI.get_librenms_id() returns an int in both formats; only the raw
             # type check on custom_field_data reveals whether migration is needed.
             cf_value = existing_device.custom_field_data.get("librenms_id")
-            if not (isinstance(cf_value, int) or (isinstance(cf_value, str) and cf_value.isdigit())):
+            if isinstance(cf_value, bool) or not (
+                isinstance(cf_value, int) or (isinstance(cf_value, str) and cf_value.isdigit())
+            ):
                 return HttpResponse(
                     "Device librenms_id is already in JSON format; no migration needed.",
                     status=400,
@@ -1265,7 +1267,9 @@ class DeviceConflictActionView(
                     )
                 # Re-check under lock — another request may have already migrated it
                 cf_locked = locked_device.custom_field_data.get("librenms_id")
-                if not (isinstance(cf_locked, int) or (isinstance(cf_locked, str) and cf_locked.isdigit())):
+                if isinstance(cf_locked, bool) or not (
+                    isinstance(cf_locked, int) or (isinstance(cf_locked, str) and cf_locked.isdigit())
+                ):
                     return HttpResponse(
                         "Device librenms_id is already in JSON format; no migration needed.",
                         status=400,
@@ -1294,7 +1298,11 @@ class DeviceConflictActionView(
                         f"Another device already has librenms_id {cf_locked_int} for server '{server_key}'; cannot migrate.",
                         status=409,
                     )
-                migrate_legacy_librenms_id(locked_device, self.librenms_api.server_key)
+                if not migrate_legacy_librenms_id(locked_device, self.librenms_api.server_key):
+                    return HttpResponse(
+                        "Migration failed: librenms_id could not be converted.",
+                        status=400,
+                    )
                 if err := _save_device(locked_device):
                     return err
             logger.info(

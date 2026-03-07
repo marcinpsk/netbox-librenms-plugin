@@ -118,7 +118,7 @@ class SingleInterfaceVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
         selected_device_id = data.get("device_id")
         interface_name = data.get("interface_name")
         interface_name_field = data.get("interface_name_field") or get_interface_name_field()
-        server_key = data.get("server_key") or None
+        server_key = data.get("server_key") or "default"
 
         if not selected_device_id:
             return JsonResponse({"status": "error", "message": "No device ID provided"}, status=400)
@@ -126,7 +126,7 @@ class SingleInterfaceVerifyView(LibreNMSPermissionMixin, CacheMixin, View):
         selected_device = get_object_or_404(Device, pk=selected_device_id)
 
         # Normalise to the VC sync device so cache keys match what the sync view stored
-        primary_device = get_librenms_sync_device(selected_device, server_key=server_key or "default")
+        primary_device = get_librenms_sync_device(selected_device, server_key=server_key)
         if primary_device is None:
             primary_device = selected_device
 
@@ -345,7 +345,7 @@ class SaveVlanGroupOverridesView(LibreNMSPermissionMixin, CacheMixin, View):
         data = json.loads(request.body)
         device_id = data.get("device_id")
         vid_group_map = data.get("vid_group_map", {})
-        server_key = data.get("server_key") or None
+        server_key = data.get("server_key") or "default"
 
         if not device_id:
             return JsonResponse({"status": "error", "message": "No device ID provided"}, status=400)
@@ -353,7 +353,7 @@ class SaveVlanGroupOverridesView(LibreNMSPermissionMixin, CacheMixin, View):
         device = get_object_or_404(Device, pk=device_id)
 
         # Normalise to the VC sync device so cache keys match what the sync view stored
-        sync_device = get_librenms_sync_device(device, server_key=server_key or "default")
+        sync_device = get_librenms_sync_device(device, server_key=server_key)
         if sync_device is None:
             sync_device = device
 

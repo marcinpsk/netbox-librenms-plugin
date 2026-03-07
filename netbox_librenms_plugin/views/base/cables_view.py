@@ -6,9 +6,11 @@ from django.core.cache import cache
 from django.core.exceptions import MultipleObjectsReturned
 from django.db.models import Q
 from django.http import JsonResponse
+from django.middleware.csrf import get_token
 from django.shortcuts import get_object_or_404, render
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.html import escape
 from django.views import View
 
 from netbox_librenms_plugin.utils import (
@@ -470,9 +472,11 @@ class SingleCableVerifyView(BaseCableTableView):
                             formatted_row["cable_status"] = link_data["cable_status"]
 
                         if link_data.get("can_create_cable"):
+                            csrf_token = get_token(request)
                             formatted_row["actions"] = f"""
                                 <form method="post" action="{reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[selected_device.id])}">
-                                    <input type="hidden" name="select" value="{local_port_id}">
+                                    <input type="hidden" name="csrfmiddlewaretoken" value="{csrf_token}">
+                                    <input type="hidden" name="select" value="{escape(str(local_port_id))}">
                                     <button type="submit" class="btn btn-sm btn-primary">Sync Cable</button>
                                 </form>
                             """
