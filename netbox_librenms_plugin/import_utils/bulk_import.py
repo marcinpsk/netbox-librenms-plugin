@@ -129,6 +129,7 @@ def bulk_import_devices_shared(
                 api=api,
                 use_sysname=use_sysname_opt,
                 strip_domain=strip_domain_opt,
+                server_key=api.server_key,
             )
 
             # Build manual mappings from validation + any provided overrides
@@ -148,7 +149,7 @@ def bulk_import_devices_shared(
 
             result = import_single_device(
                 device_id,
-                server_key=server_key,
+                server_key=api.server_key,  # use resolved key, not raw parameter (may be None)
                 sync_options=sync_options,
                 manual_mappings=device_mappings if device_mappings else None,
                 libre_device=libre_device,
@@ -503,6 +504,7 @@ def process_device_filters(
                 api=api_for_validation,
                 include_vc_detection=vc_detection_enabled,
                 force_vc_refresh=clear_cache,
+                server_key=api.server_key,
                 use_sysname=use_sysname,
                 strip_domain=strip_domain,
             )
