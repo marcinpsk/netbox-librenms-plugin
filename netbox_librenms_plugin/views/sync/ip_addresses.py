@@ -65,7 +65,11 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             url_name = "plugins:netbox_librenms_plugin:device_librenms_sync"
         else:
             url_name = "plugins:netbox_librenms_plugin:vm_librenms_sync"
-        return f"{reverse(url_name, args=[obj.pk])}?tab=ipaddresses"
+        server_key = self.librenms_api.server_key
+        url = f"{reverse(url_name, args=[obj.pk])}?tab=ipaddresses"
+        if server_key:
+            url += f"&server_key={server_key}"
+        return url
 
     def post(self, request, object_type, pk):
         """Sync selected IP addresses from LibreNMS into NetBox."""

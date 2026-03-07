@@ -61,18 +61,18 @@ class SyncInterfacesView(
         selected_interfaces = self.get_selected_interfaces(request, interface_name_field)
         exclude_columns = request.POST.getlist("exclude_columns")
 
+        redirect_url = (
+            reverse(url_name, kwargs={"pk": object_id})
+            + f"?tab=interfaces&interface_name_field={interface_name_field}"
+            + (f"&server_key={server_key}" if server_key else "")
+        )
+
         if selected_interfaces is None:
-            return redirect(
-                reverse(url_name, kwargs={"pk": object_id})
-                + f"?tab=interfaces&interface_name_field={interface_name_field}"
-            )
+            return redirect(redirect_url)
 
         ports_data = self.get_cached_ports_data(request, obj, server_key)
         if ports_data is None:
-            return redirect(
-                reverse(url_name, kwargs={"pk": object_id})
-                + f"?tab=interfaces&interface_name_field={interface_name_field}"
-            )
+            return redirect(redirect_url)
 
         # Prepare VLAN lookup maps if VLAN sync is enabled
         vlan_groups = self.get_vlan_groups_for_device(obj)
@@ -82,9 +82,7 @@ class SyncInterfacesView(
         self.sync_selected_interfaces(obj, selected_interfaces, ports_data, exclude_columns, interface_name_field)
 
         messages.success(request, "Selected interfaces synced successfully.")
-        return redirect(
-            reverse(url_name, kwargs={"pk": object_id}) + f"?tab=interfaces&interface_name_field={interface_name_field}"
-        )
+        return redirect(redirect_url)
 
     def get_object(self, object_type, object_id):
         """Return the Device or VirtualMachine for the given type and ID."""

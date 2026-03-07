@@ -408,6 +408,25 @@ class SingleCableVerifyView(BaseCableTableView):
                     None,
                 )
                 if link_data:
+                    # Strip derived fields from cached data to avoid stale
+                    # IDs/URLs when NetBox objects are deleted after caching.
+                    _raw_keys = {
+                        "local_port",
+                        "local_port_id",
+                        "remote_port",
+                        "remote_device",
+                        "remote_port_id",
+                        "remote_device_id",
+                    }
+                    link_data = {k: v for k, v in link_data.items() if k in _raw_keys}
+
+                    # Re-enrich remote side from current NetBox state
+                    remote_hostname = link_data.get("remote_device", "")
+                    if remote_hostname:
+                        link_data = self.process_remote_device(
+                            link_data, remote_hostname, link_data.get("remote_device_id")
+                        )
+
                     local_port = link_data.get("local_port", "")
                     formatted_row["local_port"] = local_port
 
