@@ -1,7 +1,7 @@
 """Tests for multi-server librenms_id helpers.
 
-Covers get_librenms_device_id, find_by_librenms_id, and migrate_legacy_librenms_id.
-set_librenms_device_id is already tested in test_utils.py::TestSetLibreNMSDeviceId.
+Covers get_librenms_device_id, set_librenms_device_id, find_by_librenms_id,
+and migrate_legacy_librenms_id.
 """
 
 from unittest.mock import MagicMock
@@ -63,6 +63,15 @@ class TestGetLibreNMSDeviceId:
         obj.cf = {"librenms_id": "not-an-int-or-dict"}
         result = get_librenms_device_id(obj, "default")
         assert result is None
+
+    def test_legacy_string_int_returned_for_any_server_key(self):
+        """A bare string integer ('42') is coerced and returned for any server_key."""
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+
+        obj = MagicMock()
+        obj.cf = {"librenms_id": "42"}
+        assert get_librenms_device_id(obj, "default") == 42
+        assert get_librenms_device_id(obj, "production") == 42
 
     def test_default_server_key_is_default(self):
         from netbox_librenms_plugin.utils import get_librenms_device_id
@@ -253,3 +262,71 @@ class TestLibreNMSIdRoundtrip:
         migrate_legacy_librenms_id(obj, "default")
         result = get_librenms_device_id(obj, "default")
         assert result == 55
+
+
+class TestSetLibreNMSDeviceId:
+    """Tests for set_librenms_device_id in utils.py."""
+
+    def test_stores_int_for_valid_device_id(self):
+        """Valid integer device_id is stored under server_key."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": None}
+        set_librenms_device_id(obj, 42, server_key="primary")
+        assert obj.custom_field_data["librenms_id"] == {"primary": 42}
+
+    def test_invalid_device_id_not_stored(self):
+        """Non-integer device_id is rejected and nothing is written."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {}
+        set_librenms_device_id(obj, "not-an-int", server_key="primary")
+        assert "librenms_id" not in obj.custom_field_data
+
+    def test_invalid_device_id_does_not_overwrite_existing(self):
+        """Existing valid value is preserved when new device_id is invalid."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"primary": 10}}
+        set_librenms_device_id(obj, None, server_key="primary")
+        assert obj.custom_field_data["librenms_id"] == {"primary": 10}
+
+    def test_legacy_bare_int_blocks_write(self):
+        """Legacy bare-integer value blocks the write (no silent migration)."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": 7}
+        set_librenms_device_id(obj, 99, server_key="secondary")
+        # Write must be skipped; user must use the migration workflow.
+        assert obj.custom_field_data["librenms_id"] == 7
+
+    def test_adds_new_server_key_to_existing_dict(self):
+        """Adding a new server key preserves existing keys."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"primary": 5}}
+        set_librenms_device_id(obj, 20, server_key="secondary")
+        assert obj.custom_field_data["librenms_id"] == {"primary": 5, "secondary": 20}
+
+    def test_string_integer_is_coerced(self):
+        """String '42' is coerced to int 42."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {}
+        set_librenms_device_id(obj, "42", server_key="primary")
+        assert obj.custom_field_data["librenms_id"] == {"primary": 42}
+
+    def test_unexpected_cf_type_reset_to_empty(self):
+        """If custom_field_data has unexpected type for librenms_id, it is reset."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": "unexpected-string"}
+        set_librenms_device_id(obj, 5, server_key="primary")
+        assert obj.custom_field_data["librenms_id"] == {"primary": 5}

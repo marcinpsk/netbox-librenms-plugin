@@ -26,9 +26,13 @@ def _librenms_id_q(server_key: str, value) -> Q:
     q = Q(**{f"custom_field_data__librenms_id__{server_key}": value}) | Q(custom_field_data__librenms_id=value)
     try:
         int_val = int(value)
-        if int_val != value:  # add int variant only when value isn't already an int
+        str_val = str(int_val)
+        if int_val != value:  # value was a string; also add the integer variant
             q |= Q(**{f"custom_field_data__librenms_id__{server_key}": int_val})
             q |= Q(custom_field_data__librenms_id=int_val)
+        if str_val != value:  # value was an integer; also add the string variant
+            q |= Q(**{f"custom_field_data__librenms_id__{server_key}": str_val})
+            q |= Q(custom_field_data__librenms_id=str_val)
     except (TypeError, ValueError):
         pass
     return q
@@ -420,15 +424,21 @@ class SingleCableVerifyView(BaseCableTableView):
                     local_port = link_data.get("local_port", "")
                     formatted_row["local_port"] = local_port
 
+                    # Resolve the VC member that owns this port (mirrors enrich_local_port).
+                    _sk = self.librenms_api.server_key
+                    if hasattr(selected_device, "virtual_chassis") and selected_device.virtual_chassis:
+                        _member = get_virtual_chassis_member(selected_device, local_port)
+                    else:
+                        _member = selected_device
+
                     # First try to find interface by librenms_id
                     interface = None
                     if local_port_id:
-                        _sk = self.librenms_api.server_key
-                        interface = selected_device.interfaces.filter(_librenms_id_q(_sk, local_port_id)).first()
+                        interface = _member.interfaces.filter(_librenms_id_q(_sk, local_port_id)).first()
 
                     # If not found by librenms_id, try matching by name
                     if not interface and local_port:
-                        interface = selected_device.interfaces.filter(name=local_port).first()
+                        interface = _member.interfaces.filter(name=local_port).first()
 
                     if interface:
                         link_data["netbox_local_interface_id"] = interface.pk

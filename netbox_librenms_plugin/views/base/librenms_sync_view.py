@@ -130,11 +130,15 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 "platform_info": platform_info,
                 "vc_inventory_serials": librenms_info["librenms_device_details"].get("vc_inventory_serials", []),
                 "manufacturers": manufacturers,
-                "all_server_mappings": self._build_all_server_mappings(
-                    getattr(self, "_librenms_lookup_device", obj), self.librenms_api.server_key
-                ),
+                "all_server_mappings": self._build_all_server_mappings(_lookup_device, self.librenms_api.server_key),
                 "librenms_id_is_legacy": librenms_id_is_legacy,
                 "librenms_id_serial_confirmed": librenms_id_serial_confirmed,
+                # Lookup device may differ from object (e.g. VC master vs member).
+                # Used by the Remove server mapping form to post to the correct device.
+                "lookup_device_pk": _lookup_device.pk if _lookup_device else obj.pk,
+                "lookup_device_model_name": (
+                    _lookup_device._meta.model_name if _lookup_device else obj._meta.model_name
+                ),
             }
         )
 

@@ -585,12 +585,9 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
     Return the first object of *model* whose ``librenms_id`` JSON field contains
     *librenms_id* under *server_key*.
 
-    Also matches legacy records that stored ``librenms_id`` as a bare integer
-    directly in ``custom_field_data``.  These are treated as a universal fallback
-    for any *server_key* so that devices imported before multi-server support
-    remain discoverable regardless of the active server.
-    directly in ``custom_field_data``.  Legacy records are treated as a universal
-    fallback for any *server_key* since they predate multi-server support.
+    Also matches legacy records stored as a bare ``librenms_id`` integer or string
+    in ``custom_field_data``—these predate multi-server support and act as a
+    universal fallback for any *server_key*.
 
     Args:
         model: A Django model class (Device, VirtualMachine, Interface, …).
