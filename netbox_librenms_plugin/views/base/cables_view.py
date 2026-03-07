@@ -458,29 +458,33 @@ class SingleCableVerifyView(BaseCableTableView):
                         # Check cable status if remote side was resolved
                         if link_data.get("netbox_remote_device_id"):
                             link_data = self.check_cable_status(link_data)
-                        formatted_row["cable_status"] = link_data.get("cable_status", "Missing Ports")
 
-                        formatted_row["local_port"] = (
-                            f'<a href="{reverse("dcim:interface", args=[interface.pk])}">{local_port}</a>'
-                        )
+                        # Escape LibreNMS-sourced labels to prevent XSS
+                        safe_local_port = escape(local_port)
                         remote_port_name = link_data.get("remote_port_name", link_data.get("remote_port", ""))
-                        formatted_row["remote_port"] = (
-                            f'<a href="{link_data["remote_port_url"]}">{remote_port_name}</a>'
-                            if link_data.get("remote_port_url")
-                            else remote_port_name
-                        )
+                        safe_remote_port = escape(remote_port_name)
                         remote_device_name = link_data.get("remote_device", "")
+                        safe_remote_device = escape(remote_device_name)
+                        safe_cable_status = escape(link_data.get("cable_status", "Missing Ports"))
+
+                        formatted_row["cable_status"] = safe_cable_status
+                        formatted_row["local_port"] = (
+                            f'<a href="{reverse("dcim:interface", args=[interface.pk])}">{safe_local_port}</a>'
+                        )
+                        formatted_row["remote_port"] = (
+                            f'<a href="{link_data["remote_port_url"]}">{safe_remote_port}</a>'
+                            if link_data.get("remote_port_url")
+                            else safe_remote_port
+                        )
                         formatted_row["remote_device"] = (
-                            f'<a href="{link_data["remote_device_url"]}">{remote_device_name}</a>'
+                            f'<a href="{link_data["remote_device_url"]}">{safe_remote_device}</a>'
                             if link_data.get("remote_device_url")
-                            else remote_device_name
+                            else safe_remote_device
                         )
                         if link_data.get("cable_url"):
                             formatted_row["cable_status"] = (
-                                f'<a href="{link_data["cable_url"]}">{link_data["cable_status"]}</a>'
+                                f'<a href="{link_data["cable_url"]}">{safe_cable_status}</a>'
                             )
-                        else:
-                            formatted_row["cable_status"] = link_data["cable_status"]
 
                         if link_data.get("can_create_cable"):
                             csrf_token = get_token(request)
@@ -492,20 +496,22 @@ class SingleCableVerifyView(BaseCableTableView):
                                 </form>
                             """
                     else:
-                        formatted_row["local_port"] = local_port
+                        formatted_row["local_port"] = escape(local_port)
                         # Keep remote port name visible, add URL if available
                         remote_port_name = link_data.get("remote_port_name", link_data.get("remote_port", ""))
+                        safe_remote_port = escape(remote_port_name)
                         formatted_row["remote_port"] = (
-                            f'<a href="{link_data["remote_port_url"]}">{remote_port_name}</a>'
+                            f'<a href="{link_data["remote_port_url"]}">{safe_remote_port}</a>'
                             if link_data.get("remote_port_url")
-                            else remote_port_name
+                            else safe_remote_port
                         )
                         # Keep remote device name visible, add URL if available
                         remote_device_name = link_data.get("remote_device", "")
+                        safe_remote_device = escape(remote_device_name)
                         formatted_row["remote_device"] = (
-                            f'<a href="{link_data["remote_device_url"]}">{remote_device_name}</a>'
+                            f'<a href="{link_data["remote_device_url"]}">{safe_remote_device}</a>'
                             if link_data.get("remote_device_url")
-                            else remote_device_name
+                            else safe_remote_device
                         )
 
                         # First check if remote device exists in NetBox
