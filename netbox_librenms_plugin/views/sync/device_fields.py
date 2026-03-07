@@ -1,11 +1,13 @@
+import logging
+
 from dcim.models import Device, Manufacturer, Platform
 from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
+from django.db.models import Q
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.views import View
-import logging
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type, migrate_legacy_librenms_id
@@ -593,6 +595,23 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 locked = model.objects.select_for_update().get(pk=pk)
             except model.DoesNotExist:
                 messages.error(request, f"{model.__name__} no longer exists.")
+                return self._sync_url(object_type, pk)
+            # Check that no other object already owns this ID on this server
+            conflict = (
+                model.objects.filter(
+                    Q(**{f"custom_field_data__librenms_id__{server_key}": librenms_id})
+                    | Q(**{f"custom_field_data__librenms_id__{server_key}": str(librenms_id)})
+                )
+                .exclude(pk=locked.pk)
+                .exists()
+            )
+            if conflict:
+                transaction.set_rollback(True)
+                messages.error(
+                    request,
+                    f"Another {model.__name__} already has librenms_id {librenms_id} "
+                    f"for server '{server_key}'; cannot convert.",
+                )
                 return self._sync_url(object_type, pk)
             migrated = migrate_legacy_librenms_id(locked, server_key)
             if not migrated:

@@ -108,8 +108,10 @@ def get_librenms_sync_device(device: Device, server_key: str = "default") -> Opt
     # This ensures a migrated device is preferred over one with a legacy bare-int ID.
     for member in all_members:
         raw_cf = member.cf.get("librenms_id")
-        if isinstance(raw_cf, dict) and raw_cf.get(server_key) is not None:
-            return member
+        if isinstance(raw_cf, dict):
+            val = raw_cf.get(server_key)
+            if val is not None and not isinstance(val, bool):
+                return member
 
     # Priority 2 (legacy fallback): Any member whose librenms_id resolves for this server
     # (includes bare-int legacy IDs that are a universal fallback).
