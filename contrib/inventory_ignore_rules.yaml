@@ -1,0 +1,56 @@
+# Inventory Ignore Rules — skip unwanted ENTITY-MIB items during module sync
+#
+# These rules filter out phantom EEPROM/IDPROM entries that appear in the
+# SNMP ENTITY-MIB but do not represent installable hardware modules.
+# Import via: LibreNMS Plugin → Settings → Inventory Ignore Rules → Import
+#
+# Fields:
+#   name:                     Human-readable label
+#   match_type:               ends_with | starts_with | contains | regex
+#   pattern:                  Pattern text (case-insensitive for non-regex types)
+#   require_serial_match_parent:
+#                             true  — only skip if the item's serial number matches
+#                                     any ancestor entity's serial (safety net against
+#                                     accidentally hiding real modules whose name
+#                                     happens to contain the pattern)
+#                             false — skip unconditionally on name match alone
+#   enabled:                  true | false
+#   description:              Optional notes
+#
+# Serial-match ancestor walk:
+#   When require_serial_match_parent is true, the plugin walks up the ENTITY-MIB
+#   ancestor chain until it finds a non-empty serial number. If that serial matches
+#   the item's serial the item is skipped. This handles multi-level hierarchies
+#   (e.g. Cisco IOS-XR: IDPROM → Mother Board [empty serial] → RP module).
+#
+# The rule below is also created automatically by migration 0014 with the same
+# settings. Import it only if you wiped the table or need to share settings
+# across instances.
+
+# ─── Cisco IOS-XR ────────────────────────────────────────────────────────────
+# IOS-XR reports each hardware component's EEPROM as a child entity whose name
+# ends in "-IDPROM" (e.g. "Optics0/0/0/0-IDPROM", "0/RP0/CPU0-Base Board IDPROM").
+# These entries share the same model and serial as the parent module and are not
+# installable hardware — they are EEPROM read-back artefacts.
+#
+# Hierarchy example (Cisco 8201-SYS):
+#   0/RP0/CPU0  (serial FOC2418NHRK)
+#   └── 0/RP0/CPU0-Mother Board  (serial empty)
+#       └── 0/RP0/CPU0-Base Board IDPROM  (serial FOC2418NHRK) ← SKIP
+#   └── Optics Controller
+#       └── 0/RP0/CPU0-QSFP bay 0
+#           └── Optics0/0/0/0  (installed transceiver)
+#               └── Optics0/0/0/0-IDPROM  (serial same as transceiver) ← SKIP
+
+- name: "Cisco IOS-XR IDPROM entries"
+  match_type: ends_with
+  pattern: "IDPROM"
+  require_serial_match_parent: true
+  enabled: true
+  description: >
+    Cisco IOS-XR reports every hardware component's EEPROM as a child entity
+    whose entPhysicalName ends in "IDPROM". These entries duplicate the parent
+    module's serial number and are not real installable modules.
+    The serial-match guard ensures only genuine EEPROM duplicates are skipped —
+    a module whose name happens to end in "IDPROM" but has a different serial
+    will not be filtered.

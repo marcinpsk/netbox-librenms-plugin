@@ -20,6 +20,8 @@ feature in the NetBox UI.
 | `device_type_mappings.yaml` | Maps LibreNMS hardware strings to NetBox device types |
 | `module_type_mappings.yaml` | Maps LibreNMS inventory model names to NetBox module types (incl. transceivers) |
 | `module_bay_mappings.yaml` | Maps LibreNMS inventory container names to NetBox module bay names |
+| `normalization_rules.yaml` | Regex-based string normalisation applied before module type/bay lookups |
+| `inventory_ignore_rules.yaml` | Suppresses phantom ENTITY-MIB entries (e.g. Cisco IOS-XR IDPROM artefacts) |
 
 ## Customisation
 
