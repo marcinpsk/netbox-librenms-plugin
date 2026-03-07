@@ -1,6 +1,13 @@
 import django_filters
 
-from .models import DeviceTypeMapping, InterfaceTypeMapping, ModuleBayMapping, ModuleTypeMapping, NormalizationRule
+from .models import (
+    DeviceTypeMapping,
+    InterfaceTypeMapping,
+    InventoryIgnoreRule,
+    ModuleBayMapping,
+    ModuleTypeMapping,
+    NormalizationRule,
+)
 
 
 class InterfaceTypeMappingFilterSet(django_filters.FilterSet):
@@ -51,3 +58,13 @@ class NormalizationRuleFilterSet(django_filters.FilterSet):
 
         model = NormalizationRule
         fields = ["scope", "manufacturer"]
+
+
+class InventoryIgnoreRuleFilterSet(django_filters.FilterSet):
+    """Filter set for InventoryIgnoreRule model."""
+
+    class Meta:
+        """Meta options for InventoryIgnoreRuleFilterSet."""
+
+        model = InventoryIgnoreRule
+        fields = ["match_type", "enabled"]

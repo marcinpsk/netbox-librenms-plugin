@@ -43,6 +43,9 @@ def _run_build_context(view, inventory_data, device_bays, module_scoped_bays, mo
     view._get_module_bays = MagicMock(return_value=(device_bays, module_scoped_bays))
     view._get_module_types = MagicMock(return_value=module_types)
 
+    mock_ignore_qs = MagicMock()
+    mock_ignore_qs.__iter__ = lambda s: iter([])
+
     with (
         patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
         patch("netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda v, *a, **kw: v),
@@ -52,6 +55,7 @@ def _run_build_context(view, inventory_data, device_bays, module_scoped_bays, mo
         patch("netbox_librenms_plugin.utils.module_type_is_end_module", return_value=True),
         patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
         patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping,
+        patch("netbox_librenms_plugin.models.InventoryIgnoreRule") as mock_ignore_rule,
         # _detect_serial_conflicts makes a real DB query; mock it out for unit tests
         patch.object(view.__class__, "_detect_serial_conflicts", return_value=None),
     ):
@@ -60,6 +64,7 @@ def _run_build_context(view, inventory_data, device_bays, module_scoped_bays, mo
         mock_qs.__iter__ = lambda s: iter([])
         mock_qs.first.return_value = None
         mock_mapping.objects.filter.return_value = mock_qs
+        mock_ignore_rule.objects.filter.return_value = mock_ignore_qs
 
         # Inline import: patch ModuleBayMapping inside models module
         view._build_context(MagicMock(), MagicMock(), inventory_data)
@@ -421,13 +426,17 @@ class TestCollectDescendants:
             {"entPhysicalIndex": 2, "entPhysicalModelName": "REAL-MODULE", "entPhysicalContainedIn": 1},
         ]
         children_by_parent = {}
+        index_map = {}
         for item in inventory:
             p = item.get("entPhysicalContainedIn")
             if p is not None:
                 children_by_parent.setdefault(p, []).append(item)
+            idx = item.get("entPhysicalIndex")
+            if idx is not None:
+                index_map[idx] = item
         view = self._view()
         results = []
-        view._collect_descendants(0, children_by_parent, depth=1, results=results)
+        view._collect_descendants(0, children_by_parent, index_map, ignore_rules=[], depth=1, results=results)
         assert len(results) == 1
         depth, item = results[0]
         assert depth == 1, "Child of modelless container must be at the same depth"
@@ -440,13 +449,17 @@ class TestCollectDescendants:
             {"entPhysicalIndex": 2, "entPhysicalModelName": "CHILD", "entPhysicalContainedIn": 1},
         ]
         children_by_parent = {}
+        index_map = {}
         for item in inventory:
             p = item.get("entPhysicalContainedIn")
             if p is not None:
                 children_by_parent.setdefault(p, []).append(item)
+            idx = item.get("entPhysicalIndex")
+            if idx is not None:
+                index_map[idx] = item
         view = self._view()
         results = []
-        view._collect_descendants(0, children_by_parent, depth=1, results=results)
+        view._collect_descendants(0, children_by_parent, index_map, ignore_rules=[], depth=1, results=results)
         depths = [d for d, _ in results]
         assert depths == [1, 2], f"Expected [1, 2] but got {depths}"
 
@@ -781,82 +794,182 @@ class TestDetectSerialConflicts:
         assert not row.get("can_move_from")
 
 
-class TestIsIdpromEntry:
-    """Tests for the _is_idprom_entry() helper (Cisco IOS-XR EEPROM filter)."""
+class TestInventoryIgnoreRuleMatchesName:
+    """Tests for InventoryIgnoreRule.matches_name() — all four match types."""
 
-    def _fn(self, name):
-        from netbox_librenms_plugin.views.base.modules_view import _is_idprom_entry
+    def _rule(self, match_type, pattern, require_serial=True):
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
 
-        return _is_idprom_entry({"entPhysicalName": name})
+        rule = InventoryIgnoreRule.__new__(InventoryIgnoreRule)
+        rule.match_type = match_type
+        rule.pattern = pattern
+        rule.require_serial_match_parent = require_serial
+        rule.enabled = True
+        return rule
 
-    # ---- positive cases (should be True) -----------------------------------
+    # --- ends_with ---
 
-    def test_optics_idprom_with_dash(self):
-        assert self._fn("Optics0/0/0/0-IDPROM") is True
+    def test_ends_with_optics_idprom(self):
+        assert self._rule("ends_with", "IDPROM").matches_name("Optics0/0/0/0-IDPROM") is True
 
-    def test_fan_tray_idprom_with_space(self):
-        assert self._fn("0/FT0-FT IDPROM") is True
+    def test_ends_with_fan_idprom(self):
+        assert self._rule("ends_with", "IDPROM").matches_name("0/FT0-FT IDPROM") is True
 
-    def test_psu_idprom(self):
-        assert self._fn("0/PM0-PSU2KW_ACPI IDPROM") is True
+    def test_ends_with_chassis_idprom(self):
+        assert self._rule("ends_with", "IDPROM").matches_name("Rack 0-Chassis IDPROM") is True
 
-    def test_base_board_idprom(self):
-        assert self._fn("0/RP0/CPU0-Base Board IDPROM") is True
+    def test_ends_with_case_insensitive(self):
+        assert self._rule("ends_with", "IDPROM").matches_name("Optics0/0/0/0-idprom") is True
 
-    def test_chassis_idprom(self):
-        assert self._fn("Rack 0-Chassis IDPROM") is True
+    def test_ends_with_no_match(self):
+        assert self._rule("ends_with", "IDPROM").matches_name("Optics0/0/0/0") is False
 
-    def test_idprom_uppercase_already(self):
-        assert self._fn("SomeModule-IDPROM") is True
+    def test_ends_with_idprom_in_middle(self):
+        assert self._rule("ends_with", "IDPROM").matches_name("IDPROM-Optics0/0/0/0") is False
 
-    def test_idprom_mixed_case(self):
-        # entPhysicalName is compared case-insensitively
-        assert self._fn("Optics0/0/0/0-idprom") is True
+    # --- starts_with ---
 
-    def test_missing_name_key(self):
-        from netbox_librenms_plugin.views.base.modules_view import _is_idprom_entry
+    def test_starts_with_match(self):
+        assert self._rule("starts_with", "Optics").matches_name("Optics0/0/0/0") is True
 
-        assert _is_idprom_entry({}) is False
+    def test_starts_with_no_match(self):
+        assert self._rule("starts_with", "Optics").matches_name("0/FT0") is False
 
-    def test_none_name_value(self):
-        from netbox_librenms_plugin.views.base.modules_view import _is_idprom_entry
+    def test_starts_with_case_insensitive(self):
+        assert self._rule("starts_with", "OPTICS").matches_name("optics0/0/0/0") is True
 
-        assert _is_idprom_entry({"entPhysicalName": None}) is False
+    # --- contains ---
 
-    # ---- negative cases (should be False) ----------------------------------
+    def test_contains_match(self):
+        assert self._rule("contains", "IDPROM").matches_name("Rack 0-Chassis IDPROM") is True
 
-    def test_normal_optics_not_filtered(self):
-        assert self._fn("Optics0/0/0/0") is False
+    def test_contains_middle_match(self):
+        assert self._rule("contains", "IDPROM").matches_name("IDPROM-Optics0/0/0/0") is True
 
-    def test_fan_tray_not_filtered(self):
-        assert self._fn("0/FT0") is False
+    def test_contains_case_insensitive(self):
+        assert self._rule("contains", "IDPROM").matches_name("chassis-idprom") is True
 
-    def test_psu_not_filtered(self):
-        assert self._fn("0/PM0") is False
+    def test_contains_no_match(self):
+        assert self._rule("contains", "IDPROM").matches_name("Optics0/0/0/0") is False
 
-    def test_chassis_not_filtered(self):
-        assert self._fn("Rack 0") is False
+    # --- regex ---
 
-    def test_name_containing_idprom_in_middle_not_filtered(self):
-        # "IDPROM" must be at the END of the name, not just anywhere
-        assert self._fn("IDPROM-Optics0/0/0/0") is False
+    def test_regex_match(self):
+        assert self._rule("regex", r"-IDPROM$").matches_name("Optics0/0/0/0-IDPROM") is True
+
+    def test_regex_no_match(self):
+        assert self._rule("regex", r"-IDPROM$").matches_name("Optics0/0/0/0") is False
+
+    def test_regex_complex_pattern(self):
+        assert self._rule("regex", r"^0/FT\d+-FT IDPROM$").matches_name("0/FT0-FT IDPROM") is True
+
+    # --- edge cases ---
+
+    def test_empty_name(self):
+        assert self._rule("ends_with", "IDPROM").matches_name("") is False
+
+    def test_none_name(self):
+        assert self._rule("ends_with", "IDPROM").matches_name(None) is False
 
 
-class TestCollectDescendantsIdpromFilter:
-    """_collect_descendants must skip IDPROM children entirely."""
+class TestCheckIgnoreRules:
+    """Tests for the _check_ignore_rules() module-level function."""
+
+    def _rule(self, match_type="ends_with", pattern="IDPROM", require_serial=True):
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+        rule = InventoryIgnoreRule.__new__(InventoryIgnoreRule)
+        rule.match_type = match_type
+        rule.pattern = pattern
+        rule.require_serial_match_parent = require_serial
+        rule.enabled = True
+        return rule
+
+    def _check(self, item, parent_item, rules):
+        from netbox_librenms_plugin.views.base.modules_view import _check_ignore_rules
+
+        return _check_ignore_rules(item, parent_item, rules)
+
+    def test_match_with_serial_match_skips(self):
+        """Item matches rule name AND serial matches parent → should be skipped."""
+        item = {"entPhysicalName": "Optics0/0/0/0-IDPROM", "entPhysicalSerialNum": "ABC123"}
+        parent = {"entPhysicalName": "Optics0/0/0/0", "entPhysicalSerialNum": "ABC123"}
+        assert self._check(item, parent, [self._rule()]) is True
+
+    def test_match_with_serial_mismatch_not_skipped(self):
+        """Name matches but serial differs from parent → NOT skipped (could be real module)."""
+        item = {"entPhysicalName": "Optics0/0/0/0-IDPROM", "entPhysicalSerialNum": "XYZ999"}
+        parent = {"entPhysicalName": "Optics0/0/0/0", "entPhysicalSerialNum": "ABC123"}
+        assert self._check(item, parent, [self._rule()]) is False
+
+    def test_match_with_no_parent_not_skipped(self):
+        """Name matches, require_serial=True, but no parent → conservative: NOT skipped."""
+        item = {"entPhysicalName": "Optics0/0/0/0-IDPROM", "entPhysicalSerialNum": "ABC123"}
+        assert self._check(item, None, [self._rule()]) is False
+
+    def test_match_no_serial_require_false_skips(self):
+        """require_serial_match_parent=False → skipped on name match alone."""
+        item = {"entPhysicalName": "Optics0/0/0/0-IDPROM", "entPhysicalSerialNum": ""}
+        parent = {"entPhysicalName": "Optics0/0/0/0", "entPhysicalSerialNum": "ABC123"}
+        assert self._check(item, parent, [self._rule(require_serial=False)]) is True
+
+    def test_no_matching_rule_not_skipped(self):
+        """Name does not match any rule → NOT skipped."""
+        item = {"entPhysicalName": "Optics0/0/0/0", "entPhysicalSerialNum": "ABC123"}
+        parent = {"entPhysicalName": "Rack 0", "entPhysicalSerialNum": "ABC123"}
+        assert self._check(item, parent, [self._rule()]) is False
+
+    def test_empty_rules_not_skipped(self):
+        """Empty rules list → nothing skipped."""
+        item = {"entPhysicalName": "Optics0/0/0/0-IDPROM", "entPhysicalSerialNum": "ABC123"}
+        parent = {"entPhysicalName": "Optics0/0/0/0", "entPhysicalSerialNum": "ABC123"}
+        assert self._check(item, parent, []) is False
+
+    def test_item_serial_empty_not_skipped_when_serial_required(self):
+        """Item has empty serial → can't confirm match → NOT skipped."""
+        item = {"entPhysicalName": "Optics0/0/0/0-IDPROM", "entPhysicalSerialNum": ""}
+        parent = {"entPhysicalName": "Optics0/0/0/0", "entPhysicalSerialNum": "ABC123"}
+        assert self._check(item, parent, [self._rule()]) is False
+
+    def test_first_matching_rule_wins(self):
+        """First rule that matches and satisfies serial check is used; later rules ignored."""
+        rule_skip = self._rule(require_serial=False)
+        rule_serial = self._rule(require_serial=True)
+        item = {"entPhysicalName": "Optics0/0/0/0-IDPROM", "entPhysicalSerialNum": ""}
+        parent = {"entPhysicalName": "Optics0/0/0/0", "entPhysicalSerialNum": "ABC123"}
+        # rule_skip (require_serial=False) matches first → should skip
+        assert self._check(item, parent, [rule_skip, rule_serial]) is True
+
+
+class TestCollectDescendantsIgnoreRules:
+    """_collect_descendants must skip items matched by ignore rules."""
 
     def _view(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         return object.__new__(BaseModuleTableView)
 
-    def _build_children(self, inventory):
+    def _rule(self, match_type="ends_with", pattern="IDPROM", require_serial=True):
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+        rule = InventoryIgnoreRule.__new__(InventoryIgnoreRule)
+        rule.match_type = match_type
+        rule.pattern = pattern
+        rule.require_serial_match_parent = require_serial
+        rule.enabled = True
+        return rule
+
+    def _build_maps(self, inventory):
         children_by_parent = {}
+        index_map = {}
         for item in inventory:
             p = item.get("entPhysicalContainedIn")
             if p is not None:
                 children_by_parent.setdefault(p, []).append(item)
-        return children_by_parent
+            idx = item.get("entPhysicalIndex")
+            if idx is not None:
+                index_map[idx] = item
+        return children_by_parent, index_map
 
     def test_idprom_child_is_excluded(self):
         """IDPROM child of a real module must not appear in results."""
@@ -865,78 +978,115 @@ class TestCollectDescendantsIdpromFilter:
                 "entPhysicalIndex": 1,
                 "entPhysicalName": "Optics0/0/0/0",
                 "entPhysicalModelName": "DP04QSDD-HE0",
+                "entPhysicalSerialNum": "SER001",
                 "entPhysicalContainedIn": 0,
             },
             {
                 "entPhysicalIndex": 2,
                 "entPhysicalName": "Optics0/0/0/0-IDPROM",
                 "entPhysicalModelName": "DP04QSDD-HE0",
+                "entPhysicalSerialNum": "SER001",
                 "entPhysicalContainedIn": 1,
             },
         ]
+        children_by_parent, index_map = self._build_maps(inventory)
         view = self._view()
         results = []
-        view._collect_descendants(0, self._build_children(inventory), depth=1, results=results)
+        view._collect_descendants(0, children_by_parent, index_map, [self._rule()], depth=1, results=results)
         assert len(results) == 1
         _, item = results[0]
         assert item["entPhysicalName"] == "Optics0/0/0/0"
 
     def test_idprom_child_descendants_also_excluded(self):
-        """Nothing nested below an IDPROM entry should appear either."""
+        """Nothing nested below a skipped entry should appear either."""
         inventory = [
             {
                 "entPhysicalIndex": 1,
                 "entPhysicalName": "Optics0/0/0/0",
                 "entPhysicalModelName": "DP04QSDD-HE0",
+                "entPhysicalSerialNum": "SER001",
                 "entPhysicalContainedIn": 0,
             },
             {
                 "entPhysicalIndex": 2,
                 "entPhysicalName": "Optics0/0/0/0-IDPROM",
                 "entPhysicalModelName": "DP04QSDD-HE0",
+                "entPhysicalSerialNum": "SER001",
                 "entPhysicalContainedIn": 1,
             },
             {
                 "entPhysicalIndex": 3,
                 "entPhysicalName": "Optics0/0/0/0-IDPROM-SubItem",
                 "entPhysicalModelName": "DP04QSDD-HE0",
+                "entPhysicalSerialNum": "SER001",
                 "entPhysicalContainedIn": 2,
             },
         ]
+        children_by_parent, index_map = self._build_maps(inventory)
         view = self._view()
         results = []
-        view._collect_descendants(0, self._build_children(inventory), depth=1, results=results)
+        view._collect_descendants(0, children_by_parent, index_map, [self._rule()], depth=1, results=results)
         names = [item["entPhysicalName"] for _, item in results]
         assert "Optics0/0/0/0" in names
         assert "Optics0/0/0/0-IDPROM" not in names
         assert "Optics0/0/0/0-IDPROM-SubItem" not in names
 
     def test_real_submodule_still_included(self):
-        """A legitimate non-IDPROM child remains in results."""
+        """A legitimate non-matching child remains in results."""
         inventory = [
             {
                 "entPhysicalIndex": 1,
                 "entPhysicalName": "0/FT0",
                 "entPhysicalModelName": "FAN-1RU-PI",
+                "entPhysicalSerialNum": "SER002",
                 "entPhysicalContainedIn": 0,
             },
             {
                 "entPhysicalIndex": 2,
                 "entPhysicalName": "0/FT0-FT IDPROM",
                 "entPhysicalModelName": "FAN-1RU-PI",
+                "entPhysicalSerialNum": "SER002",
                 "entPhysicalContainedIn": 1,
             },
             {
                 "entPhysicalIndex": 3,
                 "entPhysicalName": "FanBlade-0",
                 "entPhysicalModelName": "BLADE-A",
+                "entPhysicalSerialNum": "SER003",
                 "entPhysicalContainedIn": 1,
             },
         ]
+        children_by_parent, index_map = self._build_maps(inventory)
         view = self._view()
         results = []
-        view._collect_descendants(0, self._build_children(inventory), depth=1, results=results)
+        view._collect_descendants(0, children_by_parent, index_map, [self._rule()], depth=1, results=results)
         names = [item["entPhysicalName"] for _, item in results]
         assert "0/FT0" in names
         assert "0/FT0-FT IDPROM" not in names
         assert "FanBlade-0" in names
+
+    def test_no_rules_includes_all(self):
+        """With empty rules list, no items are filtered (regression guard)."""
+        inventory = [
+            {
+                "entPhysicalIndex": 1,
+                "entPhysicalName": "Optics0/0/0/0",
+                "entPhysicalModelName": "DP04QSDD-HE0",
+                "entPhysicalSerialNum": "SER001",
+                "entPhysicalContainedIn": 0,
+            },
+            {
+                "entPhysicalIndex": 2,
+                "entPhysicalName": "Optics0/0/0/0-IDPROM",
+                "entPhysicalModelName": "DP04QSDD-HE0",
+                "entPhysicalSerialNum": "SER001",
+                "entPhysicalContainedIn": 1,
+            },
+        ]
+        children_by_parent, index_map = self._build_maps(inventory)
+        view = self._view()
+        results = []
+        view._collect_descendants(0, children_by_parent, index_map, [], depth=1, results=results)
+        names = [item["entPhysicalName"] for _, item in results]
+        assert "Optics0/0/0/0" in names
+        assert "Optics0/0/0/0-IDPROM" in names

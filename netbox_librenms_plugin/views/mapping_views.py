@@ -4,6 +4,7 @@ from utilities.views import register_model_view
 from netbox_librenms_plugin.filters import (
     DeviceTypeMappingFilterSet,
     InterfaceTypeMappingFilterSet,
+    InventoryIgnoreRuleFilterSet,
     ModuleBayMappingFilterSet,
     ModuleTypeMappingFilterSet,
     NormalizationRuleFilterSet,
@@ -15,6 +16,9 @@ from netbox_librenms_plugin.forms import (
     InterfaceTypeMappingFilterForm,
     InterfaceTypeMappingForm,
     InterfaceTypeMappingImportForm,
+    InventoryIgnoreRuleFilterForm,
+    InventoryIgnoreRuleForm,
+    InventoryIgnoreRuleImportForm,
     ModuleBayMappingFilterForm,
     ModuleBayMappingForm,
     ModuleBayMappingImportForm,
@@ -28,6 +32,7 @@ from netbox_librenms_plugin.forms import (
 from netbox_librenms_plugin.models import (
     DeviceTypeMapping,
     InterfaceTypeMapping,
+    InventoryIgnoreRule,
     ModuleBayMapping,
     ModuleTypeMapping,
     NormalizationRule,
@@ -35,6 +40,7 @@ from netbox_librenms_plugin.models import (
 from netbox_librenms_plugin.tables.mappings import (
     DeviceTypeMappingTable,
     InterfaceTypeMappingTable,
+    InventoryIgnoreRuleTable,
     ModuleBayMappingTable,
     ModuleTypeMappingTable,
     NormalizationRuleTable,
@@ -354,3 +360,63 @@ class NormalizationRuleChangeLogView(LibreNMSPermissionMixin, generic.ObjectChan
     """Provides a view for displaying the change log of a specific NormalizationRule object."""
 
     queryset = NormalizationRule.objects.all()
+
+
+# --- InventoryIgnoreRule views ---
+
+
+class InventoryIgnoreRuleListView(LibreNMSPermissionMixin, generic.ObjectListView):
+    """Provides a view for listing all InventoryIgnoreRule objects."""
+
+    queryset = InventoryIgnoreRule.objects.all()
+    table = InventoryIgnoreRuleTable
+    filterset = InventoryIgnoreRuleFilterSet
+    filterset_form = InventoryIgnoreRuleFilterForm
+    template_name = "netbox_librenms_plugin/inventoryignorerule_list.html"
+
+
+class InventoryIgnoreRuleCreateView(LibreNMSPermissionMixin, generic.ObjectEditView):
+    """Provides a view for creating a new InventoryIgnoreRule object."""
+
+    queryset = InventoryIgnoreRule.objects.all()
+    form = InventoryIgnoreRuleForm
+
+
+@register_model_view(InventoryIgnoreRule, "bulk_import", path="import", detail=False)
+class InventoryIgnoreRuleBulkImportView(LibreNMSPermissionMixin, generic.BulkImportView):
+    """Provides a view for bulk importing InventoryIgnoreRule objects."""
+
+    queryset = InventoryIgnoreRule.objects.all()
+    model_form = InventoryIgnoreRuleImportForm
+
+
+class InventoryIgnoreRuleView(LibreNMSPermissionMixin, generic.ObjectView):
+    """Provides a view for displaying details of a specific InventoryIgnoreRule object."""
+
+    queryset = InventoryIgnoreRule.objects.all()
+
+
+class InventoryIgnoreRuleEditView(LibreNMSPermissionMixin, generic.ObjectEditView):
+    """Provides a view for editing a specific InventoryIgnoreRule object."""
+
+    queryset = InventoryIgnoreRule.objects.all()
+    form = InventoryIgnoreRuleForm
+
+
+class InventoryIgnoreRuleDeleteView(LibreNMSPermissionMixin, generic.ObjectDeleteView):
+    """Provides a view for deleting a specific InventoryIgnoreRule object."""
+
+    queryset = InventoryIgnoreRule.objects.all()
+
+
+class InventoryIgnoreRuleBulkDeleteView(LibreNMSPermissionMixin, generic.BulkDeleteView):
+    """Provides a view for deleting multiple InventoryIgnoreRule objects."""
+
+    queryset = InventoryIgnoreRule.objects.all()
+    table = InventoryIgnoreRuleTable
+
+
+class InventoryIgnoreRuleChangeLogView(LibreNMSPermissionMixin, generic.ObjectChangeLogView):
+    """Provides a view for displaying the change log of a specific InventoryIgnoreRule object."""
+
+    queryset = InventoryIgnoreRule.objects.all()

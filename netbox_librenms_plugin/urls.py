@@ -1,6 +1,13 @@
 from django.urls import include, path
 
-from .models import DeviceTypeMapping, InterfaceTypeMapping, ModuleBayMapping, ModuleTypeMapping, NormalizationRule
+from .models import (
+    DeviceTypeMapping,
+    InterfaceTypeMapping,
+    InventoryIgnoreRule,
+    ModuleBayMapping,
+    ModuleTypeMapping,
+    NormalizationRule,
+)
 from .views import (
     AddDeviceToLibreNMSView,
     AssignVCSerialView,
@@ -70,6 +77,14 @@ from .views import (
     NormalizationRuleEditView,
     NormalizationRuleListView,
     NormalizationRuleView,
+    InventoryIgnoreRuleBulkDeleteView,
+    InventoryIgnoreRuleBulkImportView,
+    InventoryIgnoreRuleChangeLogView,
+    InventoryIgnoreRuleCreateView,
+    InventoryIgnoreRuleDeleteView,
+    InventoryIgnoreRuleEditView,
+    InventoryIgnoreRuleListView,
+    InventoryIgnoreRuleView,
     RemoveServerMappingView,
     SaveUserPrefView,
     SingleCableVerifyView,
@@ -594,6 +609,48 @@ urlpatterns = [
         "normalization-rules/delete/",
         NormalizationRuleBulkDeleteView.as_view(),
         name="normalizationrule_bulk_delete",
+    ),
+    # Inventory Ignore Rule URLs
+    path(
+        "inventory-ignore-rules/",
+        InventoryIgnoreRuleListView.as_view(),
+        name="inventoryignorerule_list",
+    ),
+    path(
+        "inventory-ignore-rules/<int:pk>/",
+        InventoryIgnoreRuleView.as_view(),
+        name="inventoryignorerule_detail",
+    ),
+    path(
+        "inventory-ignore-rules/add/",
+        InventoryIgnoreRuleCreateView.as_view(),
+        name="inventoryignorerule_add",
+    ),
+    path(
+        "inventory-ignore-rules/import/",
+        InventoryIgnoreRuleBulkImportView.as_view(),
+        name="inventoryignorerule_bulk_import",
+    ),
+    path(
+        "inventory-ignore-rules/<int:pk>/delete/",
+        InventoryIgnoreRuleDeleteView.as_view(),
+        name="inventoryignorerule_delete",
+    ),
+    path(
+        "inventory-ignore-rules/<int:pk>/edit/",
+        InventoryIgnoreRuleEditView.as_view(),
+        name="inventoryignorerule_edit",
+    ),
+    path(
+        "inventory-ignore-rules/<int:pk>/changelog/",
+        InventoryIgnoreRuleChangeLogView.as_view(),
+        name="inventoryignorerule_changelog",
+        kwargs={"model": InventoryIgnoreRule},
+    ),
+    path(
+        "inventory-ignore-rules/delete/",
+        InventoryIgnoreRuleBulkDeleteView.as_view(),
+        name="inventoryignorerule_bulk_delete",
     ),
     path("api/", include("netbox_librenms_plugin.api.urls")),
 ]

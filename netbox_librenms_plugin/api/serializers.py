@@ -3,6 +3,7 @@ from netbox.api.serializers import NetBoxModelSerializer
 from netbox_librenms_plugin.models import (
     DeviceTypeMapping,
     InterfaceTypeMapping,
+    InventoryIgnoreRule,
     ModuleBayMapping,
     ModuleTypeMapping,
     NormalizationRule,
@@ -63,5 +64,23 @@ class NormalizationRuleSerializer(NetBoxModelSerializer):
             "match_pattern",
             "replacement",
             "priority",
+            "description",
+        ]
+
+
+class InventoryIgnoreRuleSerializer(NetBoxModelSerializer):
+    """Serialize InventoryIgnoreRule model for REST API."""
+
+    class Meta:
+        """Meta options for InventoryIgnoreRuleSerializer."""
+
+        model = InventoryIgnoreRule
+        fields = [
+            "id",
+            "name",
+            "match_type",
+            "pattern",
+            "require_serial_match_parent",
+            "enabled",
             "description",
         ]

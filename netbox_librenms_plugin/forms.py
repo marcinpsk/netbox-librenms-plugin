@@ -23,6 +23,7 @@ from virtualization.models import Cluster, VirtualMachine
 from .models import (
     DeviceTypeMapping,
     InterfaceTypeMapping,
+    InventoryIgnoreRule,
     LibreNMSSettings,
     ModuleBayMapping,
     ModuleTypeMapping,
@@ -463,6 +464,48 @@ class NormalizationRuleFilterForm(NetBoxModelFilterSetForm):
     )
 
     model = NormalizationRule
+
+
+class InventoryIgnoreRuleForm(NetBoxModelForm):
+    """Form for creating and editing inventory ignore rules."""
+
+    class Meta:
+        """Meta options for InventoryIgnoreRuleForm."""
+
+        model = InventoryIgnoreRule
+        fields = ["name", "match_type", "pattern", "require_serial_match_parent", "enabled", "description"]
+
+
+class InventoryIgnoreRuleImportForm(NetBoxModelImportForm):
+    """Form for bulk importing inventory ignore rules."""
+
+    match_type = CSVChoiceField(
+        choices=InventoryIgnoreRule.MATCH_TYPE_CHOICES,
+        help_text="Match type: ends_with, starts_with, contains, or regex",
+    )
+
+    class Meta:
+        """Meta options for InventoryIgnoreRuleImportForm."""
+
+        model = InventoryIgnoreRule
+        fields = ["name", "match_type", "pattern", "require_serial_match_parent", "enabled", "description"]
+
+
+class InventoryIgnoreRuleFilterForm(NetBoxModelFilterSetForm):
+    """Form for filtering inventory ignore rules."""
+
+    match_type = forms.ChoiceField(
+        required=False,
+        choices=[("", "---------")] + InventoryIgnoreRule.MATCH_TYPE_CHOICES,
+        label="Match Type",
+    )
+    enabled = forms.NullBooleanField(
+        required=False,
+        widget=forms.Select(choices=[("", "---------"), ("true", "Yes"), ("false", "No")]),
+        label="Enabled",
+    )
+
+    model = InventoryIgnoreRule
 
 
 class AddToLIbreSNMPV1V2(forms.Form):

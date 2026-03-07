@@ -286,3 +286,104 @@ class NormalizationRule(NetBoxModel):
 
     def __str__(self):
         return f"[{self.get_scope_display()}] {self.match_pattern} → {self.replacement}"
+
+
+class InventoryIgnoreRule(NetBoxModel):
+    """Rule-based filter for ENTITY-MIB inventory items that should not appear as modules.
+
+    Some vendors (e.g. Cisco IOS-XR) report phantom EEPROM/IDPROM child entities in
+    ENTITY-MIB with the same model name and serial number as the real parent hardware.
+    These are not installable modules and must be suppressed.
+
+    This model replaces the hard-coded ``_is_idprom_entry()`` helper with an
+    admin-configurable rule table so other vendor-specific patterns can be added
+    without code changes.
+
+    Example — Cisco IOS-XR IDPROM entries:
+        match_type:                ends_with
+        pattern:                   IDPROM
+        require_serial_match_parent: True
+        Skips ``Optics0/0/0/0-IDPROM``, ``0/FT0-FT IDPROM``, etc. when the serial
+        number matches the parent entity.
+    """
+
+    MATCH_ENDS_WITH = "ends_with"
+    MATCH_STARTS_WITH = "starts_with"
+    MATCH_CONTAINS = "contains"
+    MATCH_REGEX = "regex"
+
+    MATCH_TYPE_CHOICES = [
+        (MATCH_ENDS_WITH, "Ends with"),
+        (MATCH_STARTS_WITH, "Starts with"),
+        (MATCH_CONTAINS, "Contains"),
+        (MATCH_REGEX, "Regex"),
+    ]
+
+    name = models.CharField(
+        max_length=100,
+        help_text="Short descriptive label for this rule",
+    )
+    match_type = models.CharField(
+        max_length=20,
+        choices=MATCH_TYPE_CHOICES,
+        default=MATCH_ENDS_WITH,
+        help_text="How to match the entPhysicalName value",
+    )
+    pattern = models.CharField(
+        max_length=200,
+        help_text="Pattern to match against entPhysicalName. "
+        "Case-insensitive for ends_with / starts_with / contains; "
+        "Python re syntax for regex.",
+    )
+    require_serial_match_parent = models.BooleanField(
+        default=True,
+        help_text="Only skip this entity if its serial number matches its direct parent's "
+        "serial number. Recommended: prevents false positives when the pattern "
+        "could match legitimate module names.",
+    )
+    enabled = models.BooleanField(
+        default=True,
+        help_text="Uncheck to temporarily disable this rule without deleting it",
+    )
+    description = models.TextField(
+        blank=True,
+        help_text="Optional notes about this rule (vendor, firmware version, etc.)",
+    )
+
+    def clean(self):
+        """Validate regex pattern compiles when match_type is 'regex'."""
+        super().clean()
+        if self.match_type == self.MATCH_REGEX:
+            try:
+                re.compile(self.pattern)
+            except re.error as e:
+                raise ValidationError({"pattern": f"Invalid regex: {e}"})
+
+    def matches_name(self, name: str) -> bool:
+        """Return True if *name* matches this rule's pattern/match_type."""
+        if not name:
+            return False
+        if self.match_type == self.MATCH_REGEX:
+            return bool(re.search(self.pattern, name))
+        name_up = name.upper()
+        pat = self.pattern.upper()
+        if self.match_type == self.MATCH_ENDS_WITH:
+            return name_up.endswith(pat)
+        if self.match_type == self.MATCH_STARTS_WITH:
+            return name_up.startswith(pat)
+        if self.match_type == self.MATCH_CONTAINS:
+            return pat in name_up
+        return False
+
+    def get_absolute_url(self):
+        """Return the URL for this rule's detail page."""
+        return reverse("plugins:netbox_librenms_plugin:inventoryignorerule_detail", args=[self.pk])
+
+    class Meta:
+        """Meta options for InventoryIgnoreRule."""
+
+        ordering = ["name", "pk"]
+
+    def __str__(self):
+        serial_note = " [serial match]" if self.require_serial_match_parent else ""
+        return f"{self.name}: {self.get_match_type_display()} '{self.pattern}'{serial_note}"

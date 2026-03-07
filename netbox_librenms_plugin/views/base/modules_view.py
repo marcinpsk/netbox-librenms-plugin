@@ -30,24 +30,28 @@ INVENTORY_CLASSES = {
 _GENERIC_CONTAINER_MODELS = {"", "BUILTIN", "Default", "N/A"}
 
 
-def _is_idprom_entry(item: dict) -> bool:
-    """Return True if this ENTITY-MIB item is an IDPROM (embedded EEPROM chip).
+def _check_ignore_rules(item: dict, parent_item: dict | None, rules: list) -> bool:
+    """Return True if this ENTITY-MIB item should be skipped based on configured ignore rules.
 
-    Cisco IOS-XR reports every hardware component's EEPROM as a child entity
-    named ``<parent>-IDPROM`` or ``<parent>-<label> IDPROM``, carrying the same
-    model name and serial number as the parent.  These are not installable
-    modules and must be suppressed so they don't appear as duplicates.
-
-    The check is intentionally broad (name ends with ``IDPROM``, case-insensitive)
-    to cover all IOS-XR naming variants:
-        ``Optics0/0/0/0-IDPROM``
-        ``0/FT0-FT IDPROM``
-        ``0/PM0-PSU2KW_ACPI IDPROM``
-        ``0/RP0/CPU0-Base Board IDPROM``
-        ``Rack 0-Chassis IDPROM``
+    Rules are loaded from InventoryIgnoreRule (DB) and evaluated in order.
+    When ``require_serial_match_parent`` is True, the item is only skipped if its
+    serial number is non-empty and identical to the parent entity's serial —
+    guarding against patterns that could accidentally hide legitimate modules.
     """
-    name = (item.get("entPhysicalName") or "").upper()
-    return name.endswith("IDPROM")
+    name = (item.get("entPhysicalName") or "").strip()
+    for rule in rules:
+        if not rule.matches_name(name):
+            continue
+        if not rule.require_serial_match_parent:
+            return True
+        if parent_item is None:
+            # Can't satisfy serial check without a parent — skip conservatively.
+            continue
+        item_serial = (item.get("entPhysicalSerialNum") or "").strip()
+        parent_serial = (parent_item.get("entPhysicalSerialNum") or "").strip()
+        if item_serial and item_serial == parent_serial:
+            return True
+    return False
 
 
 class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
@@ -129,11 +133,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         self._device_manufacturer = getattr(getattr(obj, "device_type", None), "manufacturer", None)
 
         # Preload all ModuleBayMapping rows once to avoid N+1 queries in _match_module_bay.
-        from netbox_librenms_plugin.models import ModuleBayMapping
+        from netbox_librenms_plugin.models import InventoryIgnoreRule, ModuleBayMapping
 
         all_bay_mappings = list(ModuleBayMapping.objects.all())
         self._exact_bay_mappings = [m for m in all_bay_mappings if not m.is_regex]
         self._regex_bay_mappings = [m for m in all_bay_mappings if m.is_regex]
+
+        # Load enabled ignore rules once; passed to _check_ignore_rules throughout.
+        ignore_rules = list(InventoryIgnoreRule.objects.filter(enabled=True))
 
         # Get NetBox module bays and modules for this device
         device_bays, module_scoped_bays = self._get_module_bays(obj)
@@ -151,8 +158,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             phys_class = item.get("entPhysicalClass")
             if phys_class not in INVENTORY_CLASSES:
                 continue
-            # Skip IDPROM entries (e.g. Cisco IOS-XR EEPROM representations).
-            if _is_idprom_entry(item):
+            # Skip items matched by configured ignore rules (e.g. Cisco IOS-XR IDPROMs).
+            parent_item = index_map.get(item.get("entPhysicalContainedIn"))
+            if _check_ignore_rules(item, parent_item, ignore_rules):
                 continue
             # Skip items with generic model names (not real hardware).
             # Containers with empty model are physical slot representations.
@@ -231,7 +239,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             parent_ent_idx = item.get("entPhysicalIndex")
             if parent_ent_idx is None:
                 continue
-            sub_items = self._get_sub_components(parent_ent_idx, children_by_parent)
+            sub_items = self._get_sub_components(parent_ent_idx, children_by_parent, index_map, ignore_rules)
             for depth, sub_item in sub_items:
                 scope_bays = bays_by_depth.get(depth, child_bays)
                 sub_row = self._build_row(sub_item, index_map, scope_bays, module_types, depth=depth)
@@ -413,16 +421,26 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if p.get("port_id") in port_ids and p.get("ifName")
         }
 
-    def _get_sub_components(self, parent_idx, children_by_parent):
+    def _get_sub_components(self, parent_idx, children_by_parent, index_map, ignore_rules):
         """Find descendant items with a model name (real hardware, not empty containers).
 
         Returns list of (depth, item) tuples.
         """
         results = []
-        self._collect_descendants(parent_idx, children_by_parent, depth=1, results=results, visited={parent_idx})
+        self._collect_descendants(
+            parent_idx,
+            children_by_parent,
+            index_map,
+            ignore_rules,
+            depth=1,
+            results=results,
+            visited={parent_idx},
+        )
         return results
 
-    def _collect_descendants(self, parent_idx, children_by_parent, depth, results, visited=None):
+    def _collect_descendants(
+        self, parent_idx, children_by_parent, index_map, ignore_rules, depth, results, visited=None
+    ):
         """Recursively collect descendant items that have a model name."""
         if visited is None:
             visited = set()
@@ -433,18 +451,22 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if child_idx in visited:
                 continue
             visited.add(child_idx)
-            # Skip IDPROM entries — Cisco IOS-XR reports every module's EEPROM as a
-            # child entity with the same model/serial as the parent (not a real module).
-            if _is_idprom_entry(child):
+            # Skip items matched by ignore rules (e.g. Cisco IOS-XR IDPROM entries).
+            parent_item = index_map.get(parent_idx)
+            if _check_ignore_rules(child, parent_item, ignore_rules):
                 continue
             model = (child.get("entPhysicalModelName") or "").strip()
             if model and model not in _GENERIC_CONTAINER_MODELS:
                 results.append((depth, child))
                 # Continue looking for deeper components (e.g., SFPs inside converters)
-                self._collect_descendants(child_idx, children_by_parent, depth + 1, results, visited)
+                self._collect_descendants(
+                    child_idx, children_by_parent, index_map, ignore_rules, depth + 1, results, visited
+                )
             else:
                 # Skip generic/empty items, but check their children
-                self._collect_descendants(child_idx, children_by_parent, depth, results, visited)
+                self._collect_descendants(
+                    child_idx, children_by_parent, index_map, ignore_rules, depth, results, visited
+                )
 
     def _sort_with_hierarchy(self, table_data):
         """Sort table keeping children grouped under their parent."""

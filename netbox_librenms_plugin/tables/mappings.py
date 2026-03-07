@@ -4,6 +4,7 @@ from netbox.tables import NetBoxTable, columns
 from netbox_librenms_plugin.models import (
     DeviceTypeMapping,
     InterfaceTypeMapping,
+    InventoryIgnoreRule,
     ModuleBayMapping,
     ModuleTypeMapping,
     NormalizationRule,
@@ -168,6 +169,43 @@ class NormalizationRuleTable(NetBoxTable):
             "match_pattern",
             "replacement",
             "priority",
+            "actions",
+        )
+        attrs = {"class": "table table-hover table-headings table-striped"}
+
+
+class InventoryIgnoreRuleTable(NetBoxTable):
+    """Table for displaying InventoryIgnoreRule data."""
+
+    name = tables.Column(verbose_name="Name", linkify=True)
+    match_type = tables.Column(verbose_name="Match Type")
+    pattern = tables.Column(verbose_name="Pattern")
+    require_serial_match_parent = tables.BooleanColumn(verbose_name="Require Serial Match")
+    enabled = tables.BooleanColumn(verbose_name="Enabled")
+    description = tables.Column(verbose_name="Description", linkify=False)
+    actions = columns.ActionsColumn(actions=("edit", "delete"))
+
+    class Meta:
+        """Meta options for InventoryIgnoreRuleTable."""
+
+        model = InventoryIgnoreRule
+        fields = (
+            "id",
+            "name",
+            "match_type",
+            "pattern",
+            "require_serial_match_parent",
+            "enabled",
+            "description",
+            "actions",
+        )
+        default_columns = (
+            "id",
+            "name",
+            "match_type",
+            "pattern",
+            "require_serial_match_parent",
+            "enabled",
             "actions",
         )
         attrs = {"class": "table table-hover table-headings table-striped"}

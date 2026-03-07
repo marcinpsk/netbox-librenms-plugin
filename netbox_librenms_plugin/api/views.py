@@ -14,6 +14,7 @@ from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGI
 from netbox_librenms_plugin.models import (
     DeviceTypeMapping,
     InterfaceTypeMapping,
+    InventoryIgnoreRule,
     ModuleBayMapping,
     ModuleTypeMapping,
     NormalizationRule,
@@ -22,6 +23,7 @@ from netbox_librenms_plugin.models import (
 from .serializers import (
     DeviceTypeMappingSerializer,
     InterfaceTypeMappingSerializer,
+    InventoryIgnoreRuleSerializer,
     ModuleBayMappingSerializer,
     ModuleTypeMappingSerializer,
     NormalizationRuleSerializer,
@@ -87,6 +89,15 @@ class NormalizationRuleViewSet(NetBoxModelViewSet):
 
     queryset = NormalizationRule.objects.all()
     serializer_class = NormalizationRuleSerializer
+
+
+class InventoryIgnoreRuleViewSet(NetBoxModelViewSet):
+    """API viewset for InventoryIgnoreRule CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+
+    queryset = InventoryIgnoreRule.objects.all()
+    serializer_class = InventoryIgnoreRuleSerializer
 
 
 @api_view(["POST"])

@@ -73,6 +73,14 @@ from .mapping_views import (  # noqa: F401
     NormalizationRuleEditView,
     NormalizationRuleListView,
     NormalizationRuleView,
+    InventoryIgnoreRuleBulkDeleteView,
+    InventoryIgnoreRuleBulkImportView,
+    InventoryIgnoreRuleChangeLogView,
+    InventoryIgnoreRuleCreateView,
+    InventoryIgnoreRuleDeleteView,
+    InventoryIgnoreRuleEditView,
+    InventoryIgnoreRuleListView,
+    InventoryIgnoreRuleView,
 )
 from .object_sync import (  # noqa: F401
     DeviceCableTableView,
