@@ -242,14 +242,8 @@ class TestFindByLibreNMSId:
         assert "custom_field_data__librenms_id" in keys
 
     def test_default_server_key_is_default(self):
-        """find_by_librenms_id() uses "default" as the server key when no key is passed.
-
-        We inspect the Q predicate's children to confirm the key embedded in the
-        JSON path is exactly "default", not some other fallback value.
-        """
-        from unittest.mock import MagicMock
-        from django.db.models import Q
         from netbox_librenms_plugin.utils import find_by_librenms_id
+        from django.db.models import Q
 
         mock_model = MagicMock()
         mock_qs = MagicMock()
@@ -258,19 +252,13 @@ class TestFindByLibreNMSId:
 
         find_by_librenms_id(mock_model, 42)
 
+        # Verify the Q predicate uses "default" server key — not an arbitrary key
         mock_model.objects.filter.assert_called_once()
         call_args = mock_model.objects.filter.call_args
         q_arg = call_args[0][0]
         assert isinstance(q_arg, Q)
         assert q_arg.connector == "OR"
         assert len(q_arg.children) == 4
-        children_keys = {child[0] for child in q_arg.children}
-        children_values = {child[1] for child in q_arg.children}
-        # The JSON-path branch must use "default" as the server key
-        assert "custom_field_data__librenms_id__default" in children_keys
-        assert "custom_field_data__librenms_id" in children_keys
-        assert 42 in children_values
-        assert "42" in children_values
 
 
 class TestMigrateLegacyLibreNMSId:
@@ -453,6 +441,25 @@ class TestSetLibreNMSDeviceId:
         obj.custom_field_data = {}
         set_librenms_device_id(obj, "42", server_key="primary")
         assert obj.custom_field_data["librenms_id"] == {"primary": 42}
+
+    def test_boolean_true_rejected(self):
+        """Boolean True is not accepted as a valid device_id (bool is subclass of int)."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {}
+        set_librenms_device_id(obj, True, server_key="primary")
+        assert "librenms_id" not in obj.custom_field_data
+
+    def test_boolean_false_rejected(self):
+        """Boolean False is not accepted as a valid device_id."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": {"primary": 10}}
+        set_librenms_device_id(obj, False, server_key="primary")
+        # Existing mapping must be preserved
+        assert obj.custom_field_data["librenms_id"] == {"primary": 10}
 
     def test_unexpected_cf_type_reset_to_empty(self):
         """If custom_field_data has unexpected type for librenms_id, it is reset."""

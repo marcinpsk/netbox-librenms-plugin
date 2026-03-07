@@ -383,6 +383,8 @@ class SingleCableVerifyView(BaseCableTableView):
         data = json.loads(request.body)
         selected_device_id = data.get("device_id")
         local_port_id = data.get("local_port_id")
+        # Read server_key from POST so we use the exact server the user was viewing
+        server_key = data.get("server_key") or self.librenms_api.server_key
 
         formatted_row = {
             "local_port": "",
@@ -397,11 +399,9 @@ class SingleCableVerifyView(BaseCableTableView):
 
             # Use the same sync-device resolution as the GET path so the cache
             # key matches what _prepare_context wrote.
-            primary_device = (
-                get_librenms_sync_device(selected_device, server_key=self.librenms_api.server_key) or selected_device
-            )
+            primary_device = get_librenms_sync_device(selected_device, server_key=server_key) or selected_device
 
-            cached_links = cache.get(self.get_cache_key(primary_device, "links", self.librenms_api.server_key))
+            cached_links = cache.get(self.get_cache_key(primary_device, "links", server_key))
 
             if cached_links:
                 link_data = next(
@@ -436,7 +436,7 @@ class SingleCableVerifyView(BaseCableTableView):
                     formatted_row["local_port"] = local_port
 
                     # Resolve the VC member that owns this port (mirrors enrich_local_port).
-                    _sk = self.librenms_api.server_key
+                    _sk = server_key
                     if hasattr(selected_device, "virtual_chassis") and selected_device.virtual_chassis:
                         _member = get_virtual_chassis_member(selected_device, local_port)
                     else:
@@ -487,7 +487,6 @@ class SingleCableVerifyView(BaseCableTableView):
 
                         if link_data.get("can_create_cable"):
                             csrf_token = get_token(request)
-                            server_key = self.librenms_api.server_key
                             server_key_input = (
                                 f'<input type="hidden" name="server_key" value="{escape(str(server_key))}">'
                                 if server_key
