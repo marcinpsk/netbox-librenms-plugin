@@ -2124,13 +2124,17 @@ class TestDeviceConflictActionView:
         view = DeviceConflictActionView()
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
-        view.request = MagicMock()
-        view.request.user.has_perm.return_value = True
         return view
 
     def _create_request(self, action, existing_device_id, use_sysname=False, strip_domain=False):
-        """Create a mock request with POST data."""
+        """Create a mock request with POST data and permission stubs.
+
+        The returned request should be bound to the view (view.request = request)
+        before calling view.post() so permission checks and business logic
+        operate on the same request object, matching real Django CBV behavior.
+        """
         request = MagicMock()
+        request.user.has_perm.return_value = True
         # Always include both toggles so _resolve_naming_preferences never falls through
         # to the user-pref/settings DB path, which would hit the real database.
         post_data = {
@@ -2181,6 +2185,7 @@ class TestDeviceConflictActionView:
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
+            view.request = request
             view.post(request, device_id=10)
 
         assert existing_device.custom_field_data["librenms_id"] == {"default": 10}
@@ -2226,6 +2231,7 @@ class TestDeviceConflictActionView:
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
+            view.request = request
             view.post(request, device_id=10)
 
         assert existing_device.custom_field_data["librenms_id"] == {"production": 10}
@@ -2270,6 +2276,7 @@ class TestDeviceConflictActionView:
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
+            view.request = request
             view.post(request, device_id=10)
 
         assert existing_device.custom_field_data["librenms_id"] == {"default": 10}
@@ -2320,6 +2327,7 @@ class TestDeviceConflictActionView:
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
+            view.request = request
             view.post(request, device_id=10)
 
         assert existing_device.custom_field_data["librenms_id"] == {"production": 10}
@@ -2359,6 +2367,7 @@ class TestDeviceConflictActionView:
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
+            view.request = request
             view.post(request, device_id=10)
 
         assert existing_device.custom_field_data["librenms_id"] == {"default": 10}
@@ -2400,6 +2409,7 @@ class TestDeviceConflictActionView:
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
+            view.request = request
             view.post(request, device_id=10)
 
         # Serial should NOT be updated to '-'
@@ -2409,8 +2419,10 @@ class TestDeviceConflictActionView:
         """Missing action or existing_device_id should return 400."""
         view = self._create_view()
         request = MagicMock()
+        request.user.has_perm.return_value = True
         request.POST = {}
 
+        view.request = request
         response = view.post(request, device_id=10)
         assert response.status_code == 400
 
@@ -2437,6 +2449,7 @@ class TestDeviceConflictActionView:
             # we want to exercise the unknown-action branch, not the missing-device guard.
             mock_validate.return_value = (libre_device, {"existing_device": existing_device}, {})
 
+            view.request = request
             response = view.post(request, device_id=10)
 
         assert response.status_code == 400
@@ -2475,6 +2488,7 @@ class TestDeviceConflictActionView:
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
+            view.request = request
             view.post(request, device_id=10)
 
         assert existing_device.name == "switch-01.example.com"
@@ -2507,6 +2521,7 @@ class TestDeviceConflictActionView:
             mock_device_cls.objects.select_for_update.return_value.filter.return_value.exclude.return_value.first.return_value = None
             mock_validate.return_value = (libre_device, validation, selections)
 
+            view.request = request
             response = view.post(request, device_id=10)
 
         assert response.status_code == 400
@@ -2552,6 +2567,7 @@ class TestDeviceConflictActionView:
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
+            view.request = request
             view.post(request, device_id=10)
 
         assert existing_device.custom_field_data["librenms_id"] == {"default": 10}
@@ -2604,6 +2620,7 @@ class TestDeviceConflictActionView:
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
+            view.request = request
             view.post(request, device_id=10)
 
         assert existing_device.device_type == librenms_device_type
@@ -2653,6 +2670,7 @@ class TestDeviceConflictActionView:
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
+            view.request = request
             view.post(request, device_id=10)
 
         assert existing_device.device_type == new_device_type
@@ -2690,6 +2708,7 @@ class TestDeviceConflictActionView:
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
+            view.request = request
             view.post(request, device_id=10)
 
         assert existing_device.serial == "NEW456"
@@ -2726,6 +2745,7 @@ class TestDeviceConflictActionView:
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
+            view.request = request
             view.post(request, device_id=10)
 
         assert existing_device.platform == mock_platform
@@ -2759,6 +2779,7 @@ class TestDeviceConflictActionView:
             mock_validate.return_value = (libre_device, validation, selections)
             mock_render.return_value = MagicMock()
 
+            view.request = request
             view.post(request, device_id=10)
 
         assert existing_device.device_type == new_device_type

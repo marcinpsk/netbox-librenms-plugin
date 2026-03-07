@@ -905,10 +905,15 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
             servers_config = {}
         result = []
         for sk, did in cf_value.items():
-            srv_cfg = servers_config.get(sk) or {}
-            if not isinstance(srv_cfg, dict):
-                srv_cfg = {}
-            display_name = srv_cfg.get("display_name") or sk
+            srv_cfg = servers_config.get(sk)
+            # Legacy single-server config: "default" key with no matching servers entry —
+            # fall back to root-level display_name in plugins_config.
+            if srv_cfg is None and sk == "default" and not servers_config:
+                display_name = plugins_config.get("display_name") or sk
+            else:
+                if not isinstance(srv_cfg, dict):
+                    srv_cfg = {}
+                display_name = srv_cfg.get("display_name") or sk
             result.append({"server_key": sk, "display_name": display_name, "device_id": did})
         return result or None
 
