@@ -30,6 +30,26 @@ INVENTORY_CLASSES = {
 _GENERIC_CONTAINER_MODELS = {"", "BUILTIN", "Default", "N/A"}
 
 
+def _is_idprom_entry(item: dict) -> bool:
+    """Return True if this ENTITY-MIB item is an IDPROM (embedded EEPROM chip).
+
+    Cisco IOS-XR reports every hardware component's EEPROM as a child entity
+    named ``<parent>-IDPROM`` or ``<parent>-<label> IDPROM``, carrying the same
+    model name and serial number as the parent.  These are not installable
+    modules and must be suppressed so they don't appear as duplicates.
+
+    The check is intentionally broad (name ends with ``IDPROM``, case-insensitive)
+    to cover all IOS-XR naming variants:
+        ``Optics0/0/0/0-IDPROM``
+        ``0/FT0-FT IDPROM``
+        ``0/PM0-PSU2KW_ACPI IDPROM``
+        ``0/RP0/CPU0-Base Board IDPROM``
+        ``Rack 0-Chassis IDPROM``
+    """
+    name = (item.get("entPhysicalName") or "").upper()
+    return name.endswith("IDPROM")
+
+
 class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
     """
     Base view for synchronizing module/inventory data from LibreNMS.
@@ -130,6 +150,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 continue
             phys_class = item.get("entPhysicalClass")
             if phys_class not in INVENTORY_CLASSES:
+                continue
+            # Skip IDPROM entries (e.g. Cisco IOS-XR EEPROM representations).
+            if _is_idprom_entry(item):
                 continue
             # Skip items with generic model names (not real hardware).
             # Containers with empty model are physical slot representations.
@@ -410,6 +433,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if child_idx in visited:
                 continue
             visited.add(child_idx)
+            # Skip IDPROM entries — Cisco IOS-XR reports every module's EEPROM as a
+            # child entity with the same model/serial as the parent (not a real module).
+            if _is_idprom_entry(child):
+                continue
             model = (child.get("entPhysicalModelName") or "").strip()
             if model and model not in _GENERIC_CONTAINER_MODELS:
                 results.append((depth, child))

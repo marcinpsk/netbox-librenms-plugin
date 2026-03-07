@@ -779,3 +779,164 @@ class TestDetectSerialConflicts:
 
         assert "serial_conflict_module" not in row
         assert not row.get("can_move_from")
+
+
+class TestIsIdpromEntry:
+    """Tests for the _is_idprom_entry() helper (Cisco IOS-XR EEPROM filter)."""
+
+    def _fn(self, name):
+        from netbox_librenms_plugin.views.base.modules_view import _is_idprom_entry
+
+        return _is_idprom_entry({"entPhysicalName": name})
+
+    # ---- positive cases (should be True) -----------------------------------
+
+    def test_optics_idprom_with_dash(self):
+        assert self._fn("Optics0/0/0/0-IDPROM") is True
+
+    def test_fan_tray_idprom_with_space(self):
+        assert self._fn("0/FT0-FT IDPROM") is True
+
+    def test_psu_idprom(self):
+        assert self._fn("0/PM0-PSU2KW_ACPI IDPROM") is True
+
+    def test_base_board_idprom(self):
+        assert self._fn("0/RP0/CPU0-Base Board IDPROM") is True
+
+    def test_chassis_idprom(self):
+        assert self._fn("Rack 0-Chassis IDPROM") is True
+
+    def test_idprom_uppercase_already(self):
+        assert self._fn("SomeModule-IDPROM") is True
+
+    def test_idprom_mixed_case(self):
+        # entPhysicalName is compared case-insensitively
+        assert self._fn("Optics0/0/0/0-idprom") is True
+
+    def test_missing_name_key(self):
+        from netbox_librenms_plugin.views.base.modules_view import _is_idprom_entry
+
+        assert _is_idprom_entry({}) is False
+
+    def test_none_name_value(self):
+        from netbox_librenms_plugin.views.base.modules_view import _is_idprom_entry
+
+        assert _is_idprom_entry({"entPhysicalName": None}) is False
+
+    # ---- negative cases (should be False) ----------------------------------
+
+    def test_normal_optics_not_filtered(self):
+        assert self._fn("Optics0/0/0/0") is False
+
+    def test_fan_tray_not_filtered(self):
+        assert self._fn("0/FT0") is False
+
+    def test_psu_not_filtered(self):
+        assert self._fn("0/PM0") is False
+
+    def test_chassis_not_filtered(self):
+        assert self._fn("Rack 0") is False
+
+    def test_name_containing_idprom_in_middle_not_filtered(self):
+        # "IDPROM" must be at the END of the name, not just anywhere
+        assert self._fn("IDPROM-Optics0/0/0/0") is False
+
+
+class TestCollectDescendantsIdpromFilter:
+    """_collect_descendants must skip IDPROM children entirely."""
+
+    def _view(self):
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        return object.__new__(BaseModuleTableView)
+
+    def _build_children(self, inventory):
+        children_by_parent = {}
+        for item in inventory:
+            p = item.get("entPhysicalContainedIn")
+            if p is not None:
+                children_by_parent.setdefault(p, []).append(item)
+        return children_by_parent
+
+    def test_idprom_child_is_excluded(self):
+        """IDPROM child of a real module must not appear in results."""
+        inventory = [
+            {
+                "entPhysicalIndex": 1,
+                "entPhysicalName": "Optics0/0/0/0",
+                "entPhysicalModelName": "DP04QSDD-HE0",
+                "entPhysicalContainedIn": 0,
+            },
+            {
+                "entPhysicalIndex": 2,
+                "entPhysicalName": "Optics0/0/0/0-IDPROM",
+                "entPhysicalModelName": "DP04QSDD-HE0",
+                "entPhysicalContainedIn": 1,
+            },
+        ]
+        view = self._view()
+        results = []
+        view._collect_descendants(0, self._build_children(inventory), depth=1, results=results)
+        assert len(results) == 1
+        _, item = results[0]
+        assert item["entPhysicalName"] == "Optics0/0/0/0"
+
+    def test_idprom_child_descendants_also_excluded(self):
+        """Nothing nested below an IDPROM entry should appear either."""
+        inventory = [
+            {
+                "entPhysicalIndex": 1,
+                "entPhysicalName": "Optics0/0/0/0",
+                "entPhysicalModelName": "DP04QSDD-HE0",
+                "entPhysicalContainedIn": 0,
+            },
+            {
+                "entPhysicalIndex": 2,
+                "entPhysicalName": "Optics0/0/0/0-IDPROM",
+                "entPhysicalModelName": "DP04QSDD-HE0",
+                "entPhysicalContainedIn": 1,
+            },
+            {
+                "entPhysicalIndex": 3,
+                "entPhysicalName": "Optics0/0/0/0-IDPROM-SubItem",
+                "entPhysicalModelName": "DP04QSDD-HE0",
+                "entPhysicalContainedIn": 2,
+            },
+        ]
+        view = self._view()
+        results = []
+        view._collect_descendants(0, self._build_children(inventory), depth=1, results=results)
+        names = [item["entPhysicalName"] for _, item in results]
+        assert "Optics0/0/0/0" in names
+        assert "Optics0/0/0/0-IDPROM" not in names
+        assert "Optics0/0/0/0-IDPROM-SubItem" not in names
+
+    def test_real_submodule_still_included(self):
+        """A legitimate non-IDPROM child remains in results."""
+        inventory = [
+            {
+                "entPhysicalIndex": 1,
+                "entPhysicalName": "0/FT0",
+                "entPhysicalModelName": "FAN-1RU-PI",
+                "entPhysicalContainedIn": 0,
+            },
+            {
+                "entPhysicalIndex": 2,
+                "entPhysicalName": "0/FT0-FT IDPROM",
+                "entPhysicalModelName": "FAN-1RU-PI",
+                "entPhysicalContainedIn": 1,
+            },
+            {
+                "entPhysicalIndex": 3,
+                "entPhysicalName": "FanBlade-0",
+                "entPhysicalModelName": "BLADE-A",
+                "entPhysicalContainedIn": 1,
+            },
+        ]
+        view = self._view()
+        results = []
+        view._collect_descendants(0, self._build_children(inventory), depth=1, results=results)
+        names = [item["entPhysicalName"] for _, item in results]
+        assert "0/FT0" in names
+        assert "0/FT0-FT IDPROM" not in names
+        assert "FanBlade-0" in names
