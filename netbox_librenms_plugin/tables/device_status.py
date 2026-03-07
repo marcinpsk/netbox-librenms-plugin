@@ -455,7 +455,7 @@ class DeviceImportTable(tables.Table):
             device_url = reverse(url_name, kwargs={"pk": existing.pk})
             buttons.append(
                 f'<a href="{device_url}" class="btn btn-sm btn-secondary" '
-                f'title="{title}"><i class="mdi mdi-open-in-new"></i></a>'
+                f'title="{title}" aria-label="{title}"><i class="mdi mdi-open-in-new"></i></a>'
             )
 
             # Add details/conflict button for conflict resolution actions
@@ -519,6 +519,7 @@ class DeviceImportTable(tables.Table):
             buttons.append(
                 f'<button type="button" '
                 f'class="btn btn-sm btn-outline-primary" '
+                f'aria-label="View details" '
                 f'hx-get="{details_url}" '
                 f'hx-include="[name=cluster_{device_id}], [name=role_{device_id}], [name=rack_{device_id}], #use-sysname-toggle, #strip-domain-toggle" '
                 f'hx-target="#htmx-modal-content" '

@@ -129,7 +129,7 @@
                     <span class="text-muted">New device</span>
                   {% endif %}
                 </td>
-                <td>{{ libre_device.sysName|default:libre_device.hostname }}</td>
+                <td>{{ validation.resolved_name|default:libre_device.sysName|default:libre_device.hostname }}</td>
               </tr>
 
               {% if not validation.import_as_vm %}

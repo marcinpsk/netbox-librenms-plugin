@@ -57,7 +57,10 @@ def create_vm_from_librenms(
 
     # Validate device_id before creating the VM so a missing/invalid value
     # never leaves a VM without a librenms_id (partial persistence).
-    librenms_device_id = int(libre_device["device_id"])
+    raw_device_id = libre_device["device_id"]
+    if isinstance(raw_device_id, bool):
+        raise ValueError(f"device_id is a boolean ({raw_device_id!r}); expected an integer")
+    librenms_device_id = int(raw_device_id)
 
     from ..utils import set_librenms_device_id
 

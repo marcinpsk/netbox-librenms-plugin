@@ -590,7 +590,7 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             return self._sync_url(object_type, pk)
 
         librenms_serial = (device_info.get("serial") or "").strip()
-        netbox_serial = (obj.serial or "").strip()
+        netbox_serial = (getattr(obj, "serial", None) or "").strip()
         if not netbox_serial or not librenms_serial or netbox_serial != librenms_serial:
             messages.error(
                 request,

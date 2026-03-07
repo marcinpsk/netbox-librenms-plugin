@@ -629,17 +629,29 @@ function initializeVlanModalSave() {
                 })
             }).then(response => {
                 if (!response.ok) {
-                    console.error('Failed to persist VLAN group overrides: HTTP', response.status);
+                    return response.text().then(t => { throw new Error(`HTTP ${response.status}: ${t}`); });
+                }
+                // Close modal only on success
+                const closeBtn = modalEl.querySelector('[data-bs-dismiss="modal"]');
+                if (closeBtn) {
+                    closeBtn.click();
                 }
             }).catch(error => {
                 console.error('Failed to persist VLAN group overrides:', error.message);
+                let alertEl = modalEl.querySelector('.vlan-override-error');
+                if (!alertEl) {
+                    alertEl = document.createElement('div');
+                    alertEl.className = 'vlan-override-error alert alert-danger mt-2';
+                    modalEl.querySelector('.modal-body')?.appendChild(alertEl);
+                }
+                alertEl.textContent = 'Failed to save VLAN group overrides: ' + error.message;
             });
-        }
-
-        // Close the modal
-        const closeBtn = modalEl.querySelector('[data-bs-dismiss="modal"]');
-        if (closeBtn) {
-            closeBtn.click();
+        } else {
+            // No server persist needed — close immediately
+            const closeBtn = modalEl.querySelector('[data-bs-dismiss="modal"]');
+            if (closeBtn) {
+                closeBtn.click();
+            }
         }
     });
 }
@@ -800,7 +812,7 @@ function handleInterfaceChange(select, value) {
         body: JSON.stringify({
             device_id: value,
             interface_name: select.dataset.interface,
-            interface_name_field: document.querySelector('input[name="interface_name_field"]:checked').value,
+            interface_name_field: document.querySelector('input[name="interface_name_field"]:checked')?.value || null,
             server_key: document.getElementById('current-server-key')?.value || null
         })
     })

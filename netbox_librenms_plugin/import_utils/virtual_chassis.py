@@ -244,12 +244,16 @@ def _load_vc_member_name_pattern() -> str:
     """Load the VC member name pattern from settings, with fallback to default."""
     from ..models import LibreNMSSettings
 
+    default = "-M{position}"
     try:
         settings = LibreNMSSettings.objects.order_by("pk").first()
-        return settings.vc_member_name_pattern if settings else "-M{position}"
+        if not settings:
+            return default
+        pattern = settings.vc_member_name_pattern
+        return pattern if isinstance(pattern, str) and pattern.strip() else default
     except Exception as e:
         logger.warning(f"Could not load VC member name pattern from settings: {e}. Using default.")
-        return "-M{position}"
+        return default
 
 
 def _generate_vc_member_name(master_name: str, position: int, serial: str = None, pattern: str = None) -> str:

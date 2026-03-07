@@ -82,6 +82,20 @@ class TestCreateVmFromLibrenms:
         assert call_kwargs["name"] == "vm02-determined"
         assert result == mock_vm
 
+    def test_boolean_device_id_raises_value_error(self):
+        """Boolean device_id (True/False) is rejected before VM creation."""
+        from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
+
+        libre_device = {"device_id": True, "hostname": "vm-bool", "_computed_name": "vm-bool"}
+        validation = {
+            "can_import": True,
+            "cluster": {"cluster": MagicMock()},
+            "platform": {"platform": None},
+        }
+
+        with pytest.raises(ValueError, match="boolean"):
+            create_vm_from_librenms(libre_device, validation)
+
     def test_can_import_false_raises_value_error(self):
         """Raises ValueError immediately when validation['can_import'] is False."""
         from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms

@@ -107,7 +107,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         server_key = self.librenms_api.server_key
         interfaces_by_librenms_id = {}
         for interface in all_interfaces:
-            lib_id = get_librenms_device_id(interface, server_key)
+            lib_id = get_librenms_device_id(interface, server_key, auto_save=False)
             if lib_id is not None:
                 interfaces_by_librenms_id[str(lib_id)] = interface
 

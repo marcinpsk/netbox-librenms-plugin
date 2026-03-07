@@ -177,6 +177,15 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
 
         result = []
         for sk, did in cf_value.items():
+            # Validate device ID — accept int or digit-string, skip bool/None/junk.
+            if isinstance(did, bool) or did is None:
+                continue
+            if isinstance(did, str):
+                if not did.isdigit():
+                    continue
+                did = int(did)
+            elif not isinstance(did, int):
+                continue
             srv_cfg = servers_config.get(sk)
             # Legacy single-server config: "default" key with no matching servers entry —
             # fall back to root-level librenms_url/display_name in plugins_cfg.
