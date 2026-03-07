@@ -45,7 +45,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
     def get_cached_ip_data(self, request, obj):
         """Return cached LibreNMS IP address data for the given object."""
-        server_key = self.librenms_api.server_key
+        server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
         cached_data = cache.get(self.get_cache_key(obj, "ip_addresses", server_key))
         if not cached_data:
             return None
@@ -65,7 +65,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             url_name = "plugins:netbox_librenms_plugin:device_librenms_sync"
         else:
             url_name = "plugins:netbox_librenms_plugin:vm_librenms_sync"
-        server_key = self.librenms_api.server_key
+        server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
         url = f"{reverse(url_name, args=[obj.pk])}?tab=ipaddresses"
         if server_key:
             url += f"&server_key={server_key}"
@@ -76,6 +76,9 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         # Check both plugin write and NetBox object permissions
         if error := self.require_all_permissions("POST"):
             return error
+
+        # Read server_key from POST so we use the exact server the user was viewing
+        self._post_server_key = request.POST.get("server_key") or self.librenms_api.server_key
 
         obj = self.get_object(object_type, pk)
 

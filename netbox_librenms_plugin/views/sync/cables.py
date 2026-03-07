@@ -49,7 +49,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
     def get_cached_links_data(self, request, obj):
         """Return cached LibreNMS link data for the given object."""
-        server_key = self.librenms_api.server_key
+        server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
         cached_data = cache.get(self.get_cache_key(obj, "links", server_key))
         if not cached_data:
             return None
@@ -157,7 +157,8 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             return error
 
         initial_device = get_object_or_404(Device, pk=pk)
-        server_key = self.librenms_api.server_key
+        server_key = request.POST.get("server_key") or self.librenms_api.server_key
+        self._post_server_key = server_key
         redirect_url = (
             f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[initial_device.pk])}?tab=cables"
             + (f"&server_key={server_key}" if server_key else "")

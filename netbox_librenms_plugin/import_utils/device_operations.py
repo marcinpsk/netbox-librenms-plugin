@@ -296,7 +296,9 @@ def validate_device_for_import(
 
             # Flag legacy bare-int or string-digit librenms_id for migration to per-server dict format
             _vm_cf_id = existing_vm.custom_field_data.get("librenms_id")
-            if isinstance(_vm_cf_id, int) or (isinstance(_vm_cf_id, str) and _vm_cf_id.isdigit()):
+            if (isinstance(_vm_cf_id, int) and not isinstance(_vm_cf_id, bool)) or (
+                isinstance(_vm_cf_id, str) and _vm_cf_id.isdigit()
+            ):
                 result["librenms_id_needs_migration"] = True
 
             # Check if name matches sysName
