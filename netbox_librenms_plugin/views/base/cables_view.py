@@ -277,7 +277,8 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
     def get_table(self, data, obj):
         """Get the table instance for the view."""
         table = super().get_table(data, obj)
-        table.htmx_url = f"{self.request.path}?tab=cables"
+        server_key = self.librenms_api.server_key
+        table.htmx_url = f"{self.request.path}?tab=cables" + (f"&server_key={server_key}" if server_key else "")
         return table
 
     def _prepare_context(self, request, obj, fetch_fresh=False):
@@ -344,6 +345,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             "table": table,
             "object": obj,
             "cache_expiry": cache_expiry,
+            "server_key": server_key,
         }
 
     def get_context_data(self, request, obj):

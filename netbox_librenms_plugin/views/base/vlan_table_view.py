@@ -116,6 +116,7 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
             "vlan_groups": vlan_groups,
             "last_fetched": last_fetched,
             "cache_expiry": cache_expiry,
+            "server_key": server_key,
         }
 
     def _get_error_context(self, obj, error_message):

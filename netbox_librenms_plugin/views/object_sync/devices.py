@@ -97,7 +97,7 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
                 vlan_groups=vlan_groups,
                 server_key=server_key,
             )
-        table.htmx_url = f"{self.request.path}?tab=interfaces"
+        table.htmx_url = f"{self.request.path}?tab=interfaces" + (f"&server_key={server_key}" if server_key else "")
         return table
 
 

@@ -222,7 +222,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
     def get_table(self, data, obj, request):
         """Get the table instance for the view."""
         table = IPAddressTable(data)
-        table.htmx_url = f"{request.path}?tab=ipaddresses"
+        server_key = self.librenms_api.server_key
+        table.htmx_url = f"{request.path}?tab=ipaddresses" + (f"&server_key={server_key}" if server_key else "")
         return table
 
     def _prepare_context(self, request, obj, interface_name_field, fetch_fresh=False):
@@ -269,6 +270,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             "table": table,
             "object": obj,
             "cache_expiry": cache_expiry,
+            "server_key": server_key,
         }
 
     def get_context_data(self, request, obj):
