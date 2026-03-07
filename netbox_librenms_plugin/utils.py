@@ -520,7 +520,10 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
             obj.custom_field_data["librenms_id"] = cf_value
             if auto_save:
                 obj.save()
-        return value
+            return value
+        if isinstance(value, int):
+            return value
+        return None
     return None
 
 
@@ -637,14 +640,20 @@ def migrate_legacy_librenms_id(obj, server_key: str = "default") -> bool:
         True if the value was migrated, False if it was already in the correct format.
     """
     cf_value = obj.custom_field_data.get("librenms_id")
-    if not isinstance(cf_value, int) or isinstance(cf_value, bool):
+    if isinstance(cf_value, bool):
         return False
-    obj.custom_field_data["librenms_id"] = {server_key: cf_value}
+    if isinstance(cf_value, int):
+        int_value = cf_value
+    elif isinstance(cf_value, str) and cf_value.isdigit():
+        int_value = int(cf_value)
+    else:
+        return False
+    obj.custom_field_data["librenms_id"] = {server_key: int_value}
     logger.info(
-        "Migrated legacy librenms_id %d → {%r: %d} on %r",
+        "Migrated legacy librenms_id %r → {%r: %d} on %r",
         cf_value,
         server_key,
-        cf_value,
+        int_value,
         obj,
     )
     return True

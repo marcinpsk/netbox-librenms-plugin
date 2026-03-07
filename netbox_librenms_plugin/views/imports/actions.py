@@ -830,8 +830,9 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
         librenms_os = libre_device.get("os") or "-"
         librenms_hardware = libre_device.get("hardware") or "-"
 
-        # Serial comparison
-        serial_synced = existing_device.serial == librenms_serial or librenms_serial == "-"
+        # Serial comparison (VMs may not have serial in all NetBox versions)
+        netbox_serial = getattr(existing_device, "serial", None) or ""
+        serial_synced = netbox_serial == librenms_serial or librenms_serial == "-"
 
         # Platform comparison
         platform_info = {
@@ -854,16 +855,17 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
             netbox_platform and matching_platform and netbox_platform.pk == matching_platform.pk
         )
 
-        # Device type comparison
+        # Device type comparison (VMs don't have device_type)
         device_type_synced = True
         librenms_device_type = None
-        if librenms_hardware and librenms_hardware != "-":
+        netbox_device_type = getattr(existing_device, "device_type", None)
+        if librenms_hardware and librenms_hardware != "-" and netbox_device_type is not None:
             from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
 
             hw_match = match_librenms_hardware_to_device_type(librenms_hardware)
             if hw_match.get("matched"):
                 librenms_device_type = hw_match["device_type"]
-                if not existing_device.device_type or existing_device.device_type.pk != librenms_device_type.pk:
+                if not netbox_device_type or netbox_device_type.pk != librenms_device_type.pk:
                     device_type_synced = False
             else:
                 device_type_synced = False
@@ -901,10 +903,15 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
             servers_config = {}
         result = []
         for sk, did in cf_value.items():
-            srv_cfg = servers_config.get(sk) or {}
-            if not isinstance(srv_cfg, dict):
-                srv_cfg = {}
-            display_name = srv_cfg.get("display_name") or sk
+            srv_cfg = servers_config.get(sk)
+            # Legacy single-server config: "default" key with no matching servers entry —
+            # fall back to root-level display_name in plugins_config.
+            if srv_cfg is None and sk == "default" and not servers_config:
+                display_name = plugins_config.get("display_name") or sk
+            else:
+                if not isinstance(srv_cfg, dict):
+                    srv_cfg = {}
+                display_name = srv_cfg.get("display_name") or sk
             result.append({"server_key": sk, "display_name": display_name, "device_id": did})
         return result or None
 
