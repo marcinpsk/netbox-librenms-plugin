@@ -754,7 +754,8 @@ function handleVRFChange(select, value) {
         body: JSON.stringify({
             device_id: deviceId,
             ip_address: fullIpAddress,  // Use full IP address with prefix
-            vrf_id: value
+            vrf_id: value,
+            server_key: document.getElementById('current-server-key')?.value || null
         })
     })
         .then(response => response.json())

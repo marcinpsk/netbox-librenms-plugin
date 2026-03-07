@@ -490,10 +490,17 @@ class SingleCableVerifyView(BaseCableTableView):
 
                         if link_data.get("can_create_cable"):
                             csrf_token = get_token(request)
+                            server_key = self.librenms_api.server_key
+                            server_key_input = (
+                                f'<input type="hidden" name="server_key" value="{escape(str(server_key))}">'
+                                if server_key
+                                else ""
+                            )
                             formatted_row["actions"] = f"""
                                 <form method="post" action="{reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[selected_device.id])}">
                                     <input type="hidden" name="csrfmiddlewaretoken" value="{csrf_token}">
                                     <input type="hidden" name="select" value="{escape(str(local_port_id))}">
+                                    {server_key_input}
                                     <button type="submit" class="btn btn-sm btn-primary">Sync Cable</button>
                                 </form>
                             """
