@@ -524,13 +524,16 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
                     obj_locked.save()
                 except ValidationError as exc:
                     transaction.set_rollback(True)
-                    logger.error("Validation error removing LibreNMS mapping for server %r: %s", server_key, exc)
-                    messages.error(request, "Validation error removing LibreNMS mapping.")
+                    error_msg = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
+                    logger.exception(
+                        "Validation error removing LibreNMS mapping for server %r: %s", server_key, error_msg
+                    )
+                    messages.error(request, f"Validation error removing LibreNMS mapping: {error_msg}")
                     return redirect(sync_url, pk=pk)
-                except Exception:
+                except Exception as exc:
                     transaction.set_rollback(True)
                     logger.exception("Unexpected error removing LibreNMS mapping for server %r", server_key)
-                    messages.error(request, "An unexpected error occurred while removing the LibreNMS mapping.")
+                    messages.error(request, f"Unexpected error removing LibreNMS mapping: {exc}")
                     return redirect(sync_url, pk=pk)
                 messages.success(request, f"Removed LibreNMS mapping for server '{server_key}'.")
             else:
@@ -637,8 +640,14 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             try:
                 locked.full_clean()
                 locked.save()
-            except (ValidationError, Exception) as exc:
+            except ValidationError as exc:
                 transaction.set_rollback(True)
+                error_msg = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
+                messages.error(request, f"Failed to save converted librenms_id: {error_msg}")
+                return self._sync_url(object_type, pk)
+            except Exception as exc:
+                transaction.set_rollback(True)
+                logger.exception("Failed saving converted librenms_id for %s/%s", object_type, pk)
                 messages.error(request, f"Failed to save converted librenms_id: {exc}")
                 return self._sync_url(object_type, pk)
 
