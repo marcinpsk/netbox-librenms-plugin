@@ -346,67 +346,64 @@ class TestVirtualChassisHelpers:
 
         assert result == mock_member_with_id
 
-    def test_get_librenms_sync_device_member_with_id_preferred(self):
-        """A VC member with librenms_id set is preferred over members without."""
+    def test_get_librenms_sync_device_dict_preferred_over_legacy_bare_int(self):
+        """In a partially migrated VC, a member with per-server dict format
+        is preferred over a member with legacy bare-int format."""
         from netbox_librenms_plugin.utils import get_librenms_sync_device
 
+        # Member A: legacy bare-int librenms_id (not yet migrated)
         member_a = MagicMock()
-        member_a.cf = {}
+        member_a.cf = {"librenms_id": 42}
 
+        # Member B: migrated per-server dict format
         member_b = MagicMock()
-        member_b.cf = {"librenms_id": 42}
+        member_b.cf = {"librenms_id": {"default": 42}}
 
         mock_device = MagicMock()
         mock_device.virtual_chassis = MagicMock()
+        # member_a listed first — the function should still prefer member_b
         mock_device.virtual_chassis.members.all.return_value = [member_a, member_b]
 
-        result = get_librenms_sync_device(mock_device)
+        result = get_librenms_sync_device(mock_device, server_key="default")
 
         assert result == member_b
 
-    def test_get_librenms_sync_device_fallback_to_master_with_ip(self):
-        """When no member has librenms_id, fall back to master with primary IP."""
+    def test_get_librenms_sync_device_legacy_fallback_when_no_dict(self):
+        """When no member has a per-server dict, fall back to legacy bare-int."""
         from netbox_librenms_plugin.utils import get_librenms_sync_device
 
         member_a = MagicMock()
-        member_a.cf = {}
-        member_a.primary_ip = MagicMock()
-
+        member_a.cf = {"librenms_id": 42}
         member_b = MagicMock()
         member_b.cf = {}
-        member_b.primary_ip = None
 
         mock_device = MagicMock()
         mock_device.virtual_chassis = MagicMock()
-        mock_device.virtual_chassis.master = member_a
-        mock_device.virtual_chassis.master.primary_ip = MagicMock()
-        mock_device.virtual_chassis.members.all.return_value = [member_a, member_b]
+        mock_device.virtual_chassis.members.all.return_value = [member_b, member_a]
 
-        result = get_librenms_sync_device(mock_device)
+        result = get_librenms_sync_device(mock_device, server_key="default")
 
         assert result == member_a
 
-    def test_get_librenms_sync_device_fallback_to_any_member_with_ip(self):
-        """When no member has librenms_id and master has no IP, fall back to any member with IP."""
+    def test_get_librenms_sync_device_dict_for_different_server_falls_through(self):
+        """Per-server dict with a different key does not match; legacy bare-int resolves instead."""
         from netbox_librenms_plugin.utils import get_librenms_sync_device
 
+        # Member A: legacy bare-int (universal fallback)
         member_a = MagicMock()
-        member_a.cf = {}
-        member_a.primary_ip = None
+        member_a.cf = {"librenms_id": 42}
 
+        # Member B: dict but only for "production", not "default"
         member_b = MagicMock()
-        member_b.cf = {}
-        member_b.primary_ip = MagicMock()
+        member_b.cf = {"librenms_id": {"production": 99}}
 
         mock_device = MagicMock()
         mock_device.virtual_chassis = MagicMock()
-        mock_device.virtual_chassis.master = member_a
-        mock_device.virtual_chassis.master.primary_ip = None
         mock_device.virtual_chassis.members.all.return_value = [member_a, member_b]
 
-        result = get_librenms_sync_device(mock_device)
+        result = get_librenms_sync_device(mock_device, server_key="default")
 
-        assert result == member_b
+        assert result == member_a
 
 
 # =============================================================================
