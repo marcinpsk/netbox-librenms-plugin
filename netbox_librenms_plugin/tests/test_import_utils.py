@@ -1886,8 +1886,8 @@ class TestNameMatchesWithNamingPreferences:
         result = validate_device_for_import(
             device_data, include_vc_detection=False, use_sysname=False, strip_domain=False
         )
-        # Both empty → final fallback is 'hostname'
-        assert result["naming_criteria"]["source"] == "hostname"
+        # Both empty → final fallback uses device-<id> as source
+        assert result["naming_criteria"]["source"] == "device-99"
 
 
 class TestLegacyLibreNMSIdMigration:

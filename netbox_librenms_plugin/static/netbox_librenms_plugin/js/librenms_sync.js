@@ -405,17 +405,21 @@ function openVlanDetailModal(btn) {
         applyAllCheckbox.checked = false;
     }
 
-    // Show modal via hidden trigger (bootstrap not globally available in NetBox/Tabler)
-    let trigger = document.getElementById('vlanModalTrigger');
-    if (!trigger) {
-        trigger = document.createElement('button');
-        trigger.id = 'vlanModalTrigger';
-        trigger.setAttribute('data-bs-toggle', 'modal');
-        trigger.setAttribute('data-bs-target', '#vlanDetailModal');
-        trigger.style.display = 'none';
-        document.body.appendChild(trigger);
+    // Show modal using direct class manipulation (consistent with openBulkVCModal)
+    const vlanModal = document.getElementById('vlanDetailModal');
+    if (vlanModal) {
+        vlanModal.classList.add('show');
+        vlanModal.style.display = 'block';
+        vlanModal.setAttribute('aria-modal', 'true');
+        vlanModal.removeAttribute('aria-hidden');
+        let backdrop = document.querySelector('.modal-backdrop');
+        if (!backdrop) {
+            backdrop = document.createElement('div');
+            backdrop.className = 'modal-backdrop fade show';
+            document.body.appendChild(backdrop);
+        }
+        document.body.classList.add('modal-open');
     }
-    trigger.click();
 }
 
 /**
@@ -1512,16 +1516,21 @@ function initializeModuleReplaceButtons() {
                     '</div>';
             }
 
-            let trigger = document.getElementById('moduleReplaceModalTrigger');
-            if (!trigger) {
-                trigger = document.createElement('button');
-                trigger.id = 'moduleReplaceModalTrigger';
-                trigger.setAttribute('data-bs-toggle', 'modal');
-                trigger.setAttribute('data-bs-target', '#moduleReplaceModal');
-                trigger.style.display = 'none';
-                document.body.appendChild(trigger);
+            // Show modal using direct class manipulation (consistent with openBulkVCModal)
+            const replaceModal = document.getElementById('moduleReplaceModal');
+            if (replaceModal) {
+                replaceModal.classList.add('show');
+                replaceModal.style.display = 'block';
+                replaceModal.setAttribute('aria-modal', 'true');
+                replaceModal.removeAttribute('aria-hidden');
+                let backdrop = document.querySelector('.modal-backdrop');
+                if (!backdrop) {
+                    backdrop = document.createElement('div');
+                    backdrop.className = 'modal-backdrop fade show';
+                    document.body.appendChild(backdrop);
+                }
+                document.body.classList.add('modal-open');
             }
-            trigger.click();
 
             // Fetch preview content and inject into modal body
             fetch(`${previewUrl}?${params.toString()}`)
@@ -1536,11 +1545,14 @@ function initializeModuleReplaceButtons() {
                 })
                 .catch(err => {
                     if (modalBody) {
-                        modalBody.innerHTML =
-                            '<div class="alert alert-danger">' +
-                            '<i class="mdi mdi-alert me-1"></i>' +
-                            (err.message || 'Failed to load preview.') +
-                            '</div>';
+                        const alert = document.createElement('div');
+                        alert.className = 'alert alert-danger';
+                        const icon = document.createElement('i');
+                        icon.className = 'mdi mdi-alert me-1';
+                        alert.appendChild(icon);
+                        alert.appendChild(document.createTextNode(err.message || 'Failed to load preview.'));
+                        modalBody.textContent = '';
+                        modalBody.appendChild(alert);
                     }
                 });
         });

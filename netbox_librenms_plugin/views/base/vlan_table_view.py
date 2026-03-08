@@ -126,6 +126,7 @@ class BaseVLANTableView(VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissio
             "error_message": error_message,
             "vlan_table": None,
             "vlan_groups": self.get_vlan_groups_for_device(obj),
+            "server_key": getattr(self.librenms_api, "server_key", None),
         }
 
     def compare_vlans(self, librenms_vlans, lookup_maps=None, device=None):

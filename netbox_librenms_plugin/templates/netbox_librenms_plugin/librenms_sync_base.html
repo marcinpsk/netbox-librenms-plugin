@@ -799,6 +799,7 @@
                 <form method="post" action="{% url 'plugins:netbox_librenms_plugin:add_device_to_librenms' object.id %}"
                     id="snmpv1v2-form" name="snmpv1v2-form" style="display: block;">
                     {% csrf_token %}
+                    {% with model_name=object|meta:"model_name" %}<input type="hidden" name="object_type" value="{{ model_name }}">{% endwith %}
                     <!-- v1/v2c Toggle Button -->
                     <div class="mb-3">
                         <label class="form-label">Protocol Version</label>
@@ -848,6 +849,7 @@
                 <form method="post" action="{% url 'plugins:netbox_librenms_plugin:add_device_to_librenms' object.id %}"
                     id="snmpv3-form" name="snmpv3-form" style="display: none;">
                     {% csrf_token %}
+                    {% with model_name=object|meta:"model_name" %}<input type="hidden" name="object_type" value="{{ model_name }}">{% endwith %}
                     {{ v3form.snmp_version }}
 
                     <div class="row">

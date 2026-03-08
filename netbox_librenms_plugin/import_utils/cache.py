@@ -206,8 +206,6 @@ def get_import_search_cache_key(server_key: str, api_filters: dict, client_filte
     Returns:
         str: Cache key for the import search result.
     """
-    import hashlib
-    import json
 
     def _hash(d):
         return hashlib.sha256(

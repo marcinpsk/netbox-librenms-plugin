@@ -12,6 +12,7 @@
             <th>Name</th>
             <th>Match Type</th>
             <th>Pattern</th>
+            <th>Action</th>
             <th>Require Serial Match</th>
             <th>Enabled</th>
             <th>Description</th>
@@ -22,6 +23,7 @@
             <td>{{ object.name }}</td>
             <td>{{ object.get_match_type_display }}</td>
             <td><code>{{ object.pattern }}</code></td>
+            <td>{{ object.get_action_display }}</td>
             <td>{% if object.require_serial_match_parent %}<span class="text-success">Yes</span>{% else %}<span class="text-danger">No</span>{% endif %}</td>
             <td>{% if object.enabled %}<span class="text-success">Yes</span>{% else %}<span class="text-danger">No</span>{% endif %}</td>
             <td>{{ object.description|default:"—" }}</td>

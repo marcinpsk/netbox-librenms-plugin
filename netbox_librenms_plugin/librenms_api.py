@@ -728,10 +728,8 @@ class LibreNMSAPI:
             )
             response.raise_for_status()
 
-            if response.status_code == 200:
-                data = response.json()
-                return True, data.get("transceivers", [])
-            return False, []
+            data = response.json()
+            return True, data.get("transceivers", [])
         except requests.exceptions.RequestException as e:
             return False, str(e)
 
