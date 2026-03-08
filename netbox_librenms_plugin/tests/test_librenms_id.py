@@ -446,6 +446,16 @@ class TestSetLibreNMSDeviceId:
         # Write must be skipped; user must use the migration workflow.
         assert obj.custom_field_data["librenms_id"] == 7
 
+    def test_legacy_bare_string_int_blocks_write(self):
+        """Legacy bare numeric string value blocks the write (no silent migration)."""
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": "7"}
+        set_librenms_device_id(obj, 99, server_key="secondary")
+        # Write must be skipped; user must use the migration workflow.
+        assert obj.custom_field_data["librenms_id"] == "7"
+
     def test_adds_new_server_key_to_existing_dict(self):
         """Adding a new server key preserves existing keys."""
         from netbox_librenms_plugin.utils import set_librenms_device_id
