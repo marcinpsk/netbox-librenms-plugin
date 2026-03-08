@@ -23,12 +23,6 @@ def _make_request(post_data=None):
     return req
 
 
-def _mock_transaction():
-    """Return a patched transaction where atomic() works as a no-op context manager."""
-    mock_txn = MagicMock()
-    return mock_txn
-
-
 # ---------------------------------------------------------------------------
 # UpdateDeviceNameView
 # ---------------------------------------------------------------------------
@@ -1041,7 +1035,6 @@ class TestRemoveServerMappingViewHelpers:
     def test_get_object_device(self):
         view = self._view()
         mock_device = MagicMock()
-        MagicMock()
 
         with patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device):
             obj, model = view._get_object("device", 1)

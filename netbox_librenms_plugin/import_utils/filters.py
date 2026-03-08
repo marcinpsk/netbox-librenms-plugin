@@ -28,7 +28,8 @@ def _safe_disabled(device: dict) -> int:
         if normalized in ("0", "false", "no", "off", ""):
             return 0
     try:
-        return int(val)
+        int_val = int(val)
+        return 1 if int_val else 0
     except (TypeError, ValueError):
         return 0
 
