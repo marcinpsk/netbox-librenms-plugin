@@ -1877,7 +1877,7 @@ class TestNameMatchesWithNamingPreferences:
         )
 
     def test_naming_criteria_source_hostname_fallback_when_both_empty(self):
-        """When both hostname and sysName are empty, source is 'hostname' (final fallback)."""
+        """When both hostname and sysName are empty, source is 'device-{id}' (no-name guard)."""
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
         self.mock_device.objects.filter.return_value.first.return_value = None
@@ -1886,8 +1886,8 @@ class TestNameMatchesWithNamingPreferences:
         result = validate_device_for_import(
             device_data, include_vc_detection=False, use_sysname=False, strip_domain=False
         )
-        # Both empty → final fallback is 'hostname'
-        assert result["naming_criteria"]["source"] == "hostname"
+        # Both empty → no-name guard returns 'device-{id}' as source
+        assert result["naming_criteria"]["source"] == "device-99"
 
 
 class TestLegacyLibreNMSIdMigration:
