@@ -209,13 +209,10 @@ def bulk_import_vms(
                     apply_role_to_validation(validation, role, is_vm=True)
 
             # Determine VM name
-            use_sysname = sync_options.get("use_sysname", True) if sync_options else True
-            strip_domain = sync_options.get("strip_domain", False) if sync_options else False
-
             vm_name = _determine_device_name(
                 libre_device,
-                use_sysname=use_sysname,
-                strip_domain=strip_domain,
+                use_sysname=use_sysname_opt,
+                strip_domain=strip_domain_opt,
                 device_id=vm_id,
             )
 
@@ -224,7 +221,7 @@ def bulk_import_vms(
 
             # Create VM
             vm = create_vm_from_librenms(
-                libre_device, validation, use_sysname=use_sysname, role=role, server_key=api.server_key
+                libre_device, validation, use_sysname=use_sysname_opt, role=role, server_key=api.server_key
             )
 
             result["success"].append(

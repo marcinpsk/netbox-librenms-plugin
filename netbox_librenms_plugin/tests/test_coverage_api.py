@@ -548,11 +548,9 @@ class TestStorelibrenmsId:
         obj.cf = {"librenms_id": {"default": None}}
         obj.custom_field_data = {"librenms_id": {"default": None}}
 
-        # set_librenms_device_id is imported inline in the method
         with patch("netbox_librenms_plugin.utils.set_librenms_device_id") as mock_set:
-            with patch("netbox_librenms_plugin.librenms_api.set_librenms_device_id", mock_set, create=True):
-                api._store_librenms_id(obj, 42)
-        # Check that obj.save() was called (proxy for the function running)
+            api._store_librenms_id(obj, 42)
+        mock_set.assert_called_once_with(obj, 42, api.server_key)
         obj.save.assert_called_once()
 
     def test_stores_in_cache_when_no_cf_key(self):

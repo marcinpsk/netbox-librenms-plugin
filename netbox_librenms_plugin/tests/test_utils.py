@@ -465,6 +465,12 @@ class TestSafeDisabledBulkImport:
     def test_string_true_uppercase(self):
         assert self._call("TRUE") == 1
 
+    def test_non_zero_int_is_disabled(self):
+        assert self._call(2) == 1
+
+    def test_negative_int_is_disabled(self):
+        assert self._call(-1) == 1
+
 
 class TestSafeDisabledFilters:
     """Tests for _safe_disabled in import_utils/filters.py (same contract)."""
@@ -491,6 +497,17 @@ class TestSafeDisabledFilters:
 
     def test_none_defaults_to_zero(self):
         assert self._call(None) == 0
+
+    def test_non_zero_int_is_disabled(self):
+        assert self._call(2) == 1
+
+    def test_negative_int_is_disabled(self):
+        assert self._call(-1) == 1
+
+    def test_missing_key_defaults_to_zero(self):
+        from netbox_librenms_plugin.import_utils.filters import _safe_disabled
+
+        assert _safe_disabled({}) == 0
 
 
 class TestPaginationHelpers:
