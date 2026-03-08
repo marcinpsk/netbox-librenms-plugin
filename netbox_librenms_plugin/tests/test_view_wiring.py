@@ -246,15 +246,6 @@ class TestViewPropertyLazyInit:
         # After init, the backing attribute must be None (lazy, not eager)
         assert dummy._librenms_api is None
 
-<<<<<<< HEAD
-    def test_sync_interfaces_has_librenms_api_property_via_class(self):
-        """SyncInterfacesView must expose librenms_api through its MRO."""
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        assert any("librenms_api" in vars(cls) for cls in SyncInterfacesView.__mro__)
-
-=======
->>>>>>> 946109a (tests + device_fields: transaction.atomic, full_clean, select_for_update, wiring tests)
 
 # ── Template syntax smoke tests ──────────────────────────────────────────────
 
