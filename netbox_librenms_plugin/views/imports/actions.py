@@ -495,12 +495,13 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             messages.error(request, "Invalid device identifier supplied")
             return HttpResponse("Invalid device identifier", status=400)
 
+        use_sysname, strip_domain = _resolve_naming_preferences(request)
         sync_options = {
             "sync_interfaces": request.POST.get("sync_interfaces") == "on",
             "sync_cables": request.POST.get("sync_cables") == "on",
             "sync_ips": request.POST.get("sync_ips") == "on",
-            "use_sysname": request.POST.get("use_sysname", "true") == "true",
-            "strip_domain": request.POST.get("strip_domain", "false") == "true",
+            "use_sysname": use_sysname,
+            "strip_domain": strip_domain,
         }
 
         manual_mappings_per_device: dict[int, dict[str, int]] = {}
