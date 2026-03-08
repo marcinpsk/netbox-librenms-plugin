@@ -146,7 +146,7 @@ class LibreNMSModuleTable(tables.Table):
                 badge_class,
                 warning,
                 value,
-                "Upgrade NetBox to fully support {module_path}",
+                "Upgrade NetBox to support module bays",
             )
         if warning := record.get("name_conflict_warning"):
             return format_html(

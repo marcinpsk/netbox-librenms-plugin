@@ -760,7 +760,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             try:
                 match = re.fullmatch(mapping.librenms_name, name)
                 if match:
-                    resolved_bay = match.expand(mapping.netbox_bay_name)
+                    try:
+                        resolved_bay = match.expand(mapping.netbox_bay_name)
+                    except (re.error, IndexError):
+                        continue
             except re.error:
                 continue
             if match:

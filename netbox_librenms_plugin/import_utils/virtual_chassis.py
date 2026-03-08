@@ -71,11 +71,14 @@ def get_virtual_chassis_data(api: LibreNMSAPI, device_id: int | str, *, force_re
             return _clone_virtual_chassis_data(cached)
 
     detection_data = detect_virtual_chassis_from_inventory(api, device_id)
-    if detection_data and "detection_error" not in detection_data:
+    if detection_data is None:
+        # API failure or genuine non-stack — don't cache, caller will retry
+        return empty_virtual_chassis_data()
+
+    if "detection_error" not in detection_data:
         detection_data["detection_error"] = None
 
-    cache_value = _clone_virtual_chassis_data(detection_data) if detection_data else empty_virtual_chassis_data()
-
+    cache_value = _clone_virtual_chassis_data(detection_data)
     cache_timeout = getattr(api, "cache_timeout", 300) or 300
     cache.set(cache_key, cache_value, timeout=cache_timeout)
     return _clone_virtual_chassis_data(cache_value)

@@ -34,6 +34,10 @@ The test suite covers all major plugin functionality. Tests are organized by the
 | [test_sync_devices.py](../../netbox_librenms_plugin/tests/test_sync_devices.py) | Device sync views—field updates, platform creation, server mapping, legacy ID conversion |
 | [test_sync_interfaces.py](../../netbox_librenms_plugin/tests/test_sync_interfaces.py) | Interface sync—port matching, attribute updates, MAC handling, librenms_id assignment |
 | [test_sync_view_mismatch.py](../../netbox_librenms_plugin/tests/test_sync_view_mismatch.py) | Sync page context—device type mismatch detection and badge rendering |
+| [test_coverage_device_fields.py](../../netbox_librenms_plugin/tests/test_coverage_device_fields.py) | Device field sync view—field update logic and device field mapping |
+| [test_coverage_list.py](../../netbox_librenms_plugin/tests/test_coverage_list.py) | Import list view—background job decision, job result loading, and GET handler |
+| [test_coverage_sync_view.py](../../netbox_librenms_plugin/tests/test_coverage_sync_view.py) | Sync view base class—context preparation and tab rendering |
+| [test_coverage_filters.py](../../netbox_librenms_plugin/tests/test_coverage_filters.py) | Import filter logic—filter form processing and device count helpers |
 | [test_sync_modules.py](../../netbox_librenms_plugin/tests/test_sync_modules.py) | Module sync—inventory matching, module type resolution, and normalization rules |
 | [test_modules_view.py](../../netbox_librenms_plugin/tests/test_modules_view.py) | Module sync view—context preparation, table rendering, and module bay mapping |
 | [test_tables_modules.py](../../netbox_librenms_plugin/tests/test_tables_modules.py) | Module tables—column rendering, row formatting, and action buttons |
@@ -111,9 +115,10 @@ pytest netbox_librenms_plugin/tests/ -v --lf
 The test suite prioritizes speed and isolation so you can run tests frequently during development:
 
 - **Mock-based**: Unit tests use `MagicMock` instead of real database objects. No Django database setup required.
-- **Fast execution**: The full suite runs in under 0.5 seconds.
+- **Fast execution**: The full suite runs in approximately 15-20 seconds (varies by environment).
 - **Isolated**: Each test is independent with no shared state between tests.
 - **No external network access**: Tests never call external services. Integration tests use a local loopback HTTP server (`mock_librenms_server.py`) to exercise the real API client against realistic HTTP responses without requiring a running LibreNMS instance.
+- **Coverage exclusions**: Test files themselves are excluded from coverage reports (see `[tool.coverage.run]` omit list in `pyproject.toml`).
 
 This approach means tests work identically in your local development environment, in the devcontainer, and in CI pipelines.
 
