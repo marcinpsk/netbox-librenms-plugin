@@ -339,10 +339,13 @@ def validate_device_for_import(
 
                 # Check if name matches resolved name (VC-aware: compare against VC member name)
                 if hostname and existing_device.virtual_chassis and existing_device.vc_position:
+                    incoming_serial = libre_device.get("serial") or ""
+                    if incoming_serial == "-":
+                        incoming_serial = ""
                     vc_expected_name = _generate_vc_member_name(
                         hostname,
                         existing_device.vc_position,
-                        serial=existing_device.serial or "",
+                        serial=incoming_serial or existing_device.serial or "",
                     )
                     if existing_device.name == vc_expected_name:
                         result["name_matches"] = True

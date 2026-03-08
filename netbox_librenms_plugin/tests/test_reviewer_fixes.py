@@ -417,6 +417,8 @@ class TestCreatePlatformFullClean:
             platform_instance.full_clean.assert_called_once()
             # save must NOT have been called (ValidationError raised before save)
             platform_instance.save.assert_not_called()
-            # Error message should be shown to user
+            # Error message should be shown to user with the actual validation detail
             mock_messages.error.assert_called_once()
-            assert "could not be created" in mock_messages.error.call_args[0][1]
+            error_msg = mock_messages.error.call_args[0][1]
+            assert "could not be created" in error_msg
+            assert "Slug already exists" in error_msg
