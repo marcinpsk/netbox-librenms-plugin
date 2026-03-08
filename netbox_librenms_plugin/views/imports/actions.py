@@ -48,7 +48,8 @@ def _save_device(device) -> HttpResponse | None:
     try:
         device.full_clean()
     except ValidationError as exc:
-        return HttpResponse(f"Validation error: {escape(str(exc))}", status=400)
+        error_msg = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
+        return HttpResponse(f"Validation error: {escape(str(error_msg))}", status=400)
     try:
         device.save()
     except IntegrityError as exc:

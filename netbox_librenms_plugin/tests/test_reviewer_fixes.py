@@ -293,6 +293,9 @@ class TestSingleCableVerifyServerKey:
 
             # get_librenms_sync_device should be called with the posted server_key
             mock_sync_device.assert_called_once_with(mock_device, server_key="production")
+            # cache lookup must also use the posted server_key (not the api default)
+            cache_key_arg = mock_cache.get.call_args[0][0]
+            assert "production" in cache_key_arg
 
     def test_fallback_to_api_server_key(self):
         """When POST body has no server_key, falls back to self.librenms_api.server_key."""
@@ -327,6 +330,9 @@ class TestSingleCableVerifyServerKey:
 
             mock_sync_device.assert_called_once()
             assert mock_sync_device.call_args[1]["server_key"] == "fallback-server"
+            # cache lookup must also use the fallback server_key
+            cache_key_arg = mock_cache.get.call_args[0][0]
+            assert "fallback-server" in cache_key_arg
 
 
 # ---------------------------------------------------------------------------

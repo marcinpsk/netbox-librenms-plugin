@@ -302,6 +302,28 @@ class TestMigrateLegacyLibreNMSId:
         assert result is False
         assert obj.custom_field_data["librenms_id"] == "not-a-number"
 
+    def test_returns_false_for_plus_prefix_string(self):
+        """'+42' is not strictly digit-only; must not be migrated."""
+        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": "+42"}
+        result = migrate_legacy_librenms_id(obj, "default")
+        assert result is False
+        assert obj.custom_field_data["librenms_id"] == "+42"
+        obj.save.assert_not_called()
+
+    def test_returns_false_for_space_padded_string(self):
+        """' 42 ' is not strictly digit-only; must not be migrated."""
+        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
+
+        obj = MagicMock()
+        obj.custom_field_data = {"librenms_id": " 42 "}
+        result = migrate_legacy_librenms_id(obj, "default")
+        assert result is False
+        assert obj.custom_field_data["librenms_id"] == " 42 "
+        obj.save.assert_not_called()
+
     def test_returns_false_when_already_dict(self):
         from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
 

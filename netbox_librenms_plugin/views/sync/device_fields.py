@@ -299,13 +299,16 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                     platform.save()
                 except ValidationError as e:
                     transaction.set_rollback(True)
-                    logger.error(
-                        f"ValidationError creating platform '{platform_name}' for device pk={pk}: {e}",
-                        exc_info=True,
+                    error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
+                    logger.exception(
+                        "ValidationError creating platform '%s' for device pk=%s: %s",
+                        platform_name,
+                        pk,
+                        error_msg,
                     )
                     messages.error(
                         request,
-                        f"Platform '{platform_name}' could not be created (slug collision). Try a different name.",
+                        f"Platform '{platform_name}' could not be created: {error_msg}",
                     )
                     return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
@@ -320,32 +323,28 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                     device.full_clean()
                 except ValidationError as e:
                     transaction.set_rollback(True)
-                    logger.error(
-                        f"ValidationError validating device pk={pk}: {e}",
-                        exc_info=True,
+                    error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
+                    logger.exception(
+                        "ValidationError validating device pk=%s: %s",
+                        pk,
+                        error_msg,
                     )
                     messages.error(
                         request,
-                        f"Device (pk={pk}) validation failed: {e}",
+                        f"Device (pk={pk}) validation failed: {error_msg}",
                     )
                     return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
                 device.save()
         except IntegrityError as e:
-            error_str = str(e)
-            logger.error(
-                f"IntegrityError creating platform '{platform_name}' for device pk={pk}: {e}",
-                exc_info=True,
+            logger.exception(
+                "IntegrityError creating platform '%s' for device pk=%s",
+                platform_name,
+                pk,
             )
-            if "platform" in error_str.lower() or "slug" in error_str.lower():
-                messages.error(
-                    request,
-                    f"Platform '{platform_name}' could not be created (slug collision). Try a different name.",
-                )
-            else:
-                messages.error(
-                    request,
-                    f"Failed to assign platform '{platform_name}'. Please contact an administrator.",
-                )
+            messages.error(
+                request,
+                f"Platform '{platform_name}' could not be created: {e}",
+            )
             return redirect("plugins:netbox_librenms_plugin:device_librenms_sync", pk=pk)
 
         messages.success(
@@ -525,13 +524,16 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
                     obj_locked.save()
                 except ValidationError as exc:
                     transaction.set_rollback(True)
-                    logger.error("Validation error removing LibreNMS mapping for server %r: %s", server_key, exc)
-                    messages.error(request, "Validation error removing LibreNMS mapping.")
+                    error_msg = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
+                    logger.exception(
+                        "Validation error removing LibreNMS mapping for server %r: %s", server_key, error_msg
+                    )
+                    messages.error(request, f"Validation error removing LibreNMS mapping: {error_msg}")
                     return redirect(sync_url, pk=pk)
-                except Exception:
+                except Exception as exc:
                     transaction.set_rollback(True)
                     logger.exception("Unexpected error removing LibreNMS mapping for server %r", server_key)
-                    messages.error(request, "An unexpected error occurred while removing the LibreNMS mapping.")
+                    messages.error(request, f"Unexpected error removing LibreNMS mapping: {exc}")
                     return redirect(sync_url, pk=pk)
                 messages.success(request, f"Removed LibreNMS mapping for server '{server_key}'.")
             else:
@@ -638,8 +640,14 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             try:
                 locked.full_clean()
                 locked.save()
-            except (ValidationError, Exception) as exc:
+            except ValidationError as exc:
                 transaction.set_rollback(True)
+                error_msg = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
+                messages.error(request, f"Failed to save converted librenms_id: {error_msg}")
+                return self._sync_url(object_type, pk)
+            except Exception as exc:
+                transaction.set_rollback(True)
+                logger.exception("Failed saving converted librenms_id for %s/%s", object_type, pk)
                 messages.error(request, f"Failed to save converted librenms_id: {exc}")
                 return self._sync_url(object_type, pk)
 

@@ -80,6 +80,11 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         if not success or "error" in data:
             return None
 
+        # TODO: local_port names are baked into the cache using the requesting
+        # user's interface_name_field preference.  Subsequent users with a
+        # different preference will see (and match against) the wrong label.
+        # Fix requires either rebuilding names per-request from local_port_id
+        # or partitioning the cache key by interface_name_field.
         interface_name_field = get_interface_name_field(getattr(self, "request", None))
         ports_data = self.get_ports_data(obj)
         local_ports_map = {}
@@ -361,7 +366,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         context = self._prepare_context(request, obj, fetch_fresh=False)
         if context is None:
             # No data found; return context with empty table
-            context = {"table": None, "object": obj, "cache_expiry": None}
+            context = {"table": None, "object": obj, "cache_expiry": None, "server_key": self.librenms_api.server_key}
         return context
 
     def post(self, request, pk):
@@ -374,7 +379,14 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             return render(
                 request,
                 self.partial_template_name,
-                {"cable_sync": {"object": obj, "table": None, "cache_expiry": None}},
+                {
+                    "cable_sync": {
+                        "object": obj,
+                        "table": None,
+                        "cache_expiry": None,
+                        "server_key": self.librenms_api.server_key,
+                    }
+                },
             )
 
         messages.success(request, "Cable data refreshed successfully.")
