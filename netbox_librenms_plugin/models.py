@@ -289,34 +289,54 @@ class NormalizationRule(NetBoxModel):
 
 
 class InventoryIgnoreRule(NetBoxModel):
-    """Rule-based filter for ENTITY-MIB inventory items that should not appear as modules.
+    """Rule-based filter for ENTITY-MIB inventory items during module sync.
 
-    Some vendors (e.g. Cisco IOS-XR) report phantom EEPROM/IDPROM child entities in
-    ENTITY-MIB with the same model name and serial number as the real parent hardware.
-    These are not installable modules and must be suppressed.
+    Two use-cases are supported, controlled by the ``action`` field:
 
-    This model replaces the hard-coded ``_is_idprom_entry()`` helper with an
-    admin-configurable rule table so other vendor-specific patterns can be added
-    without code changes.
+    **Skip** (``action='skip'``)
+        The matched item is removed from the sync table entirely.  Used for
+        phantom EEPROM/IDPROM child entities that Cisco IOS-XR reports with the
+        same model and serial as the real parent module.
 
-    Example — Cisco IOS-XR IDPROM entries:
-        match_type:                ends_with
-        pattern:                   IDPROM
-        require_serial_match_parent: True
-        Skips ``Optics0/0/0/0-IDPROM``, ``0/FT0-FT IDPROM``, etc. when the serial
-        number matches the parent entity.
+    **Transparent** (``action='transparent'``)
+        The matched item's row is hidden, but its ENTITY-MIB children are
+        *promoted* to device-level bay matching instead of being treated as
+        sub-components.  Used for fixed-chassis devices (e.g. Cisco 8201-SYS)
+        where the RP/system-board entity is the device itself — it carries the
+        same serial number as the NetBox device, so its children (transceivers,
+        fans, PSUs) should be matched directly against device-level bays.
+
+    Match types:
+        ``ends_with / starts_with / contains / regex``
+            Compare ``entPhysicalName``.  Use ``require_serial_match_parent``
+            as a safety net to avoid false positives.
+        ``serial_matches_device``
+            Match when the item's ``entPhysicalSerialNum`` equals the NetBox
+            device's own serial number.  No ``pattern`` is required.
+            Pair with ``action='transparent'`` for embedded-RP detection.
     """
 
+    # --- action ---
+    ACTION_SKIP = "skip"
+    ACTION_TRANSPARENT = "transparent"
+    ACTION_CHOICES = [
+        (ACTION_SKIP, "Skip (remove from table)"),
+        (ACTION_TRANSPARENT, "Transparent (hide row, promote children to device level)"),
+    ]
+
+    # --- match_type ---
     MATCH_ENDS_WITH = "ends_with"
     MATCH_STARTS_WITH = "starts_with"
     MATCH_CONTAINS = "contains"
     MATCH_REGEX = "regex"
+    MATCH_SERIAL_DEVICE = "serial_matches_device"
 
     MATCH_TYPE_CHOICES = [
-        (MATCH_ENDS_WITH, "Ends with"),
-        (MATCH_STARTS_WITH, "Starts with"),
-        (MATCH_CONTAINS, "Contains"),
-        (MATCH_REGEX, "Regex"),
+        (MATCH_ENDS_WITH, "Ends with (entPhysicalName)"),
+        (MATCH_STARTS_WITH, "Starts with (entPhysicalName)"),
+        (MATCH_CONTAINS, "Contains (entPhysicalName)"),
+        (MATCH_REGEX, "Regex (entPhysicalName)"),
+        (MATCH_SERIAL_DEVICE, "Serial matches device (entPhysicalSerialNum = Device.serial)"),
     ]
 
     name = models.CharField(
@@ -324,22 +344,31 @@ class InventoryIgnoreRule(NetBoxModel):
         help_text="Short descriptive label for this rule",
     )
     match_type = models.CharField(
-        max_length=20,
+        max_length=25,
         choices=MATCH_TYPE_CHOICES,
         default=MATCH_ENDS_WITH,
-        help_text="How to match the entPhysicalName value",
+        help_text="How to match the inventory item",
     )
     pattern = models.CharField(
         max_length=200,
+        blank=True,
         help_text="Pattern to match against entPhysicalName. "
         "Case-insensitive for ends_with / starts_with / contains; "
-        "Python re syntax for regex.",
+        "Python re syntax for regex. "
+        "Not used for serial_matches_device.",
+    )
+    action = models.CharField(
+        max_length=15,
+        choices=ACTION_CHOICES,
+        default=ACTION_SKIP,
+        help_text="What to do when this rule matches: skip the item entirely, "
+        "or hide its row and promote its children to device-level bay matching.",
     )
     require_serial_match_parent = models.BooleanField(
         default=True,
-        help_text="Only skip this entity if its serial number matches its direct parent's "
-        "serial number. Recommended: prevents false positives when the pattern "
-        "could match legitimate module names.",
+        help_text="(Name-based rules only) Only apply this rule if the item's serial "
+        "number matches an ancestor entity's serial number.  Recommended to "
+        "prevent false positives.  Ignored for serial_matches_device rules.",
     )
     enabled = models.BooleanField(
         default=True,
@@ -351,17 +380,19 @@ class InventoryIgnoreRule(NetBoxModel):
     )
 
     def clean(self):
-        """Validate regex pattern compiles when match_type is 'regex'."""
+        """Validate pattern/match_type consistency."""
         super().clean()
-        if self.match_type == self.MATCH_REGEX:
+        if self.match_type == self.MATCH_REGEX and self.pattern:
             try:
                 re.compile(self.pattern)
             except re.error as e:
                 raise ValidationError({"pattern": f"Invalid regex: {e}"})
+        if self.match_type != self.MATCH_SERIAL_DEVICE and not self.pattern:
+            raise ValidationError({"pattern": "Pattern is required for name-based match types."})
 
     def matches_name(self, name: str) -> bool:
-        """Return True if *name* matches this rule's pattern/match_type."""
-        if not name:
+        """Return True if *name* matches this rule's pattern/match_type (name-based rules only)."""
+        if not name or self.match_type == self.MATCH_SERIAL_DEVICE:
             return False
         if self.match_type == self.MATCH_REGEX:
             return bool(re.search(self.pattern, name))
@@ -374,6 +405,16 @@ class InventoryIgnoreRule(NetBoxModel):
         if self.match_type == self.MATCH_CONTAINS:
             return pat in name_up
         return False
+
+    def check_match(self, item_name: str, item_serial: str, device_serial: str) -> bool:
+        """Return True if this rule matches the given inventory item.
+
+        For ``serial_matches_device``: compares *item_serial* to *device_serial*.
+        For all other match types: delegates to :meth:`matches_name`.
+        """
+        if self.match_type == self.MATCH_SERIAL_DEVICE:
+            return bool(item_serial and device_serial and item_serial == device_serial)
+        return self.matches_name(item_name)
 
     def get_absolute_url(self):
         """Return the URL for this rule's detail page."""

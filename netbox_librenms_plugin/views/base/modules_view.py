@@ -30,35 +30,65 @@ INVENTORY_CLASSES = {
 _GENERIC_CONTAINER_MODELS = {"", "BUILTIN", "Default", "N/A"}
 
 
-def _check_ignore_rules(item: dict, parent_item: dict | None, rules: list, index_map: dict | None = None) -> bool:
-    """Return True if this ENTITY-MIB item should be skipped based on configured ignore rules.
+def _check_ignore_rules(
+    item: dict,
+    parent_item: dict | None,
+    rules: list,
+    index_map: dict | None = None,
+    device_serial: str = "",
+) -> str | None:
+    """Return the matched rule action or ``None`` if no rule matches.
 
-    Rules are loaded from InventoryIgnoreRule (DB) and evaluated in order.
-    When ``require_serial_match_parent`` is True, the item is only skipped if its
-    serial number is non-empty and matches **any ancestor's** serial in the
-    ENTITY-MIB hierarchy (walking up from the direct parent).
+    Return values:
+        ``None``          — no rule matched; process the item normally.
+        ``"skip"``        — drop the item from the sync table.
+        ``"transparent"`` — hide the item's row but promote its ENTITY-MIB
+                            children to device-level bay matching (used for
+                            embedded RPs on fixed-chassis routers).
 
-    Ancestor walking handles cases like Cisco IOS-XR where an IDPROM entry is not
-    a direct child of the module it represents — e.g. ``0/RP0/CPU0-Base Board IDPROM``
-    is a child of ``0/RP0/CPU0-Mother Board`` (empty serial), but its serial matches
-    the grandparent ``0/RP0/CPU0``.  Traversal stops at the first non-empty serial
-    encountered to avoid false positives deeper in the tree.
+    Match logic per rule type:
+
+    **serial_matches_device**
+        Matches when the item's ``entPhysicalSerialNum`` equals *device_serial*
+        (the NetBox ``Device.serial`` value).  No name pattern is used.
+        ``require_serial_match_parent`` is ignored for this type.
+
+    **Name-based types** (ends_with / starts_with / contains / regex):
+        Matches on ``entPhysicalName``.  When ``require_serial_match_parent``
+        is True the item is only matched if its serial number is non-empty and
+        equals **any ancestor's** serial in the ENTITY-MIB hierarchy (walking
+        up from the direct parent).
+
+        Ancestor walking handles cases like Cisco IOS-XR where an IDPROM entry
+        is not a direct child of the module it represents — e.g.
+        ``0/RP0/CPU0-Base Board IDPROM`` is a child of ``0/RP0/CPU0-Mother Board``
+        (empty serial), but its serial matches the grandparent ``0/RP0/CPU0``.
+        Traversal stops at the first non-empty serial encountered to avoid false
+        positives deeper in the tree.
     """
+    item_serial = (item.get("entPhysicalSerialNum") or "").strip()
     name = (item.get("entPhysicalName") or "").strip()
+
     for rule in rules:
+        # --- serial_matches_device: no name match, just compare serials ---
+        if rule.match_type == "serial_matches_device":
+            if item_serial and device_serial and item_serial == device_serial:
+                return rule.action
+            continue
+
+        # --- name-based rules ---
         if not rule.matches_name(name):
             continue
         if not rule.require_serial_match_parent:
-            return True
+            return rule.action
         if parent_item is None:
             # Can't satisfy serial check without a parent — skip conservatively.
             continue
-        item_serial = (item.get("entPhysicalSerialNum") or "").strip()
         if not item_serial:
             continue
         # Walk up ancestors until a non-empty serial is found.
         current = parent_item
-        visited = set()
+        visited: set = set()
         while current is not None:
             current_idx = current.get("entPhysicalIndex")
             if current_idx is not None:
@@ -68,7 +98,7 @@ def _check_ignore_rules(item: dict, parent_item: dict | None, rules: list, index
             ancestor_serial = (current.get("entPhysicalSerialNum") or "").strip()
             if ancestor_serial:
                 if ancestor_serial == item_serial:
-                    return True
+                    return rule.action
                 # Non-empty serial that doesn't match — stop looking further up.
                 break
             if index_map is not None:
@@ -76,7 +106,7 @@ def _check_ignore_rules(item: dict, parent_item: dict | None, rules: list, index
                 current = index_map.get(next_idx) if next_idx else None
             else:
                 break
-    return False
+    return None
 
 
 class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
@@ -167,9 +197,25 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Load enabled ignore rules once; passed to _check_ignore_rules throughout.
         ignore_rules = list(InventoryIgnoreRule.objects.filter(enabled=True))
 
+        # Device serial for serial_matches_device rules (strip whitespace defensively).
+        device_serial = (getattr(obj, "serial", None) or "").strip()
+
         # Get NetBox module bays and modules for this device
         device_bays, module_scoped_bays = self._get_module_bays(obj)
         module_types = self._get_module_types()
+
+        # --- Pass 1: build transparent_indices ---
+        # Identify ENTITY-MIB items whose entPhysicalIndex should be treated as
+        # transparent parents (row hidden, children promoted to device-level bays).
+        transparent_indices: set = set()
+        for item in inventory_data:
+            idx = item.get("entPhysicalIndex")
+            if idx is None:
+                continue
+            parent_item = index_map.get(item.get("entPhysicalContainedIn"))
+            action = _check_ignore_rules(item, parent_item, ignore_rules, index_map, device_serial)
+            if action == "transparent":
+                transparent_indices.add(idx)
 
         # Collect top-level items and their sub-components
         # Include synthetic transceiver items (from vendors without ENTITY-MIB SFP data)
@@ -183,9 +229,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             phys_class = item.get("entPhysicalClass")
             if phys_class not in INVENTORY_CLASSES:
                 continue
-            # Skip items matched by configured ignore rules (e.g. Cisco IOS-XR IDPROMs).
             parent_item = index_map.get(item.get("entPhysicalContainedIn"))
-            if _check_ignore_rules(item, parent_item, ignore_rules, index_map):
+            action = _check_ignore_rules(item, parent_item, ignore_rules, index_map, device_serial)
+            if action == "skip":
+                continue
+            # Transparent items are hidden from the table but must NOT be added as
+            # top-level items — their children will appear instead.
+            if action == "transparent":
                 continue
             # Skip items with generic model names (not real hardware).
             # Containers with empty model are physical slot representations.
@@ -197,12 +247,19 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             # Walk up ancestor chain; skip if any ancestor is an inventory-class item.
             # Containers with empty model are physical slot/bay representations, not
             # real modules — skip them so children can be top-level items.
+            # Transparent ancestors are treated as generic containers — their children
+            # should become top-level items rather than sub-components.
             is_descendant = False
             current_idx = item.get("entPhysicalContainedIn", 0)
             visited_ancestors = set()
             while current_idx and current_idx in index_map and current_idx not in visited_ancestors:
                 visited_ancestors.add(current_idx)
                 ancestor = index_map[current_idx]
+                # Transparent ancestors are effectively "see-through" — treat them
+                # like generic containers and keep walking up.
+                if current_idx in transparent_indices:
+                    current_idx = ancestor.get("entPhysicalContainedIn", 0)
+                    continue
                 anc_class = ancestor.get("entPhysicalClass")
                 if anc_class in INVENTORY_CLASSES:
                     anc_model = (ancestor.get("entPhysicalModelName") or "").strip()
@@ -264,7 +321,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             parent_ent_idx = item.get("entPhysicalIndex")
             if parent_ent_idx is None:
                 continue
-            sub_items = self._get_sub_components(parent_ent_idx, children_by_parent, index_map, ignore_rules)
+            sub_items = self._get_sub_components(
+                parent_ent_idx, children_by_parent, index_map, ignore_rules, device_serial
+            )
             for depth, sub_item in sub_items:
                 scope_bays = bays_by_depth.get(depth, child_bays)
                 sub_row = self._build_row(sub_item, index_map, scope_bays, module_types, depth=depth)
@@ -446,7 +505,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if p.get("port_id") in port_ids and p.get("ifName")
         }
 
-    def _get_sub_components(self, parent_idx, children_by_parent, index_map, ignore_rules):
+    def _get_sub_components(self, parent_idx, children_by_parent, index_map, ignore_rules, device_serial=""):
         """Find descendant items with a model name (real hardware, not empty containers).
 
         Returns list of (depth, item) tuples.
@@ -457,6 +516,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             children_by_parent,
             index_map,
             ignore_rules,
+            device_serial=device_serial,
             depth=1,
             results=results,
             visited={parent_idx},
@@ -464,7 +524,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         return results
 
     def _collect_descendants(
-        self, parent_idx, children_by_parent, index_map, ignore_rules, depth, results, visited=None
+        self,
+        parent_idx,
+        children_by_parent,
+        index_map,
+        ignore_rules,
+        depth,
+        results,
+        visited=None,
+        device_serial="",
     ):
         """Recursively collect descendant items that have a model name."""
         if visited is None:
@@ -476,21 +544,37 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if child_idx in visited:
                 continue
             visited.add(child_idx)
-            # Skip items matched by ignore rules (e.g. Cisco IOS-XR IDPROM entries).
+            # Skip items matched by any ignore rule action (skip or transparent).
+            # In sub-component context, transparent items are also effectively skipped —
+            # children promotion only applies at the top-level pass in _build_context.
             parent_item = index_map.get(parent_idx)
-            if _check_ignore_rules(child, parent_item, ignore_rules, index_map):
+            if _check_ignore_rules(child, parent_item, ignore_rules, index_map, device_serial):
                 continue
             model = (child.get("entPhysicalModelName") or "").strip()
             if model and model not in _GENERIC_CONTAINER_MODELS:
                 results.append((depth, child))
                 # Continue looking for deeper components (e.g., SFPs inside converters)
                 self._collect_descendants(
-                    child_idx, children_by_parent, index_map, ignore_rules, depth + 1, results, visited
+                    child_idx,
+                    children_by_parent,
+                    index_map,
+                    ignore_rules,
+                    depth=depth + 1,
+                    results=results,
+                    visited=visited,
+                    device_serial=device_serial,
                 )
             else:
                 # Skip generic/empty items, but check their children
                 self._collect_descendants(
-                    child_idx, children_by_parent, index_map, ignore_rules, depth, results, visited
+                    child_idx,
+                    children_by_parent,
+                    index_map,
+                    ignore_rules,
+                    depth=depth,
+                    results=results,
+                    visited=visited,
+                    device_serial=device_serial,
                 )
 
     def _sort_with_hierarchy(self, table_data):

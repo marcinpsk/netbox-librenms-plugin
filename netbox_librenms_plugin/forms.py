@@ -473,7 +473,7 @@ class InventoryIgnoreRuleForm(NetBoxModelForm):
         """Meta options for InventoryIgnoreRuleForm."""
 
         model = InventoryIgnoreRule
-        fields = ["name", "match_type", "pattern", "require_serial_match_parent", "enabled", "description"]
+        fields = ["name", "match_type", "pattern", "action", "require_serial_match_parent", "enabled", "description"]
 
 
 class InventoryIgnoreRuleImportForm(NetBoxModelImportForm):
@@ -481,14 +481,18 @@ class InventoryIgnoreRuleImportForm(NetBoxModelImportForm):
 
     match_type = CSVChoiceField(
         choices=InventoryIgnoreRule.MATCH_TYPE_CHOICES,
-        help_text="Match type: ends_with, starts_with, contains, or regex",
+        help_text="Match type: ends_with, starts_with, contains, regex, or serial_matches_device",
+    )
+    action = CSVChoiceField(
+        choices=InventoryIgnoreRule.ACTION_CHOICES,
+        help_text="Action: skip (remove from table) or transparent (hide row, promote children)",
     )
 
     class Meta:
         """Meta options for InventoryIgnoreRuleImportForm."""
 
         model = InventoryIgnoreRule
-        fields = ["name", "match_type", "pattern", "require_serial_match_parent", "enabled", "description"]
+        fields = ["name", "match_type", "pattern", "action", "require_serial_match_parent", "enabled", "description"]
 
 
 class InventoryIgnoreRuleFilterForm(NetBoxModelFilterSetForm):
@@ -498,6 +502,11 @@ class InventoryIgnoreRuleFilterForm(NetBoxModelFilterSetForm):
         required=False,
         choices=[("", "---------")] + InventoryIgnoreRule.MATCH_TYPE_CHOICES,
         label="Match Type",
+    )
+    action = forms.ChoiceField(
+        required=False,
+        choices=[("", "---------")] + InventoryIgnoreRule.ACTION_CHOICES,
+        label="Action",
     )
     enabled = forms.NullBooleanField(
         required=False,

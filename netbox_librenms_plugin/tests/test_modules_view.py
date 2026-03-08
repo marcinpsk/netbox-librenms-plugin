@@ -875,61 +875,62 @@ class TestInventoryIgnoreRuleMatchesName:
 class TestCheckIgnoreRules:
     """Tests for the _check_ignore_rules() module-level function."""
 
-    def _rule(self, match_type="ends_with", pattern="IDPROM", require_serial=True):
+    def _rule(self, match_type="ends_with", pattern="IDPROM", require_serial=True, action="skip"):
         from netbox_librenms_plugin.models import InventoryIgnoreRule
 
         rule = InventoryIgnoreRule.__new__(InventoryIgnoreRule)
         rule.match_type = match_type
         rule.pattern = pattern
         rule.require_serial_match_parent = require_serial
+        rule.action = action
         rule.enabled = True
         return rule
 
-    def _check(self, item, parent_item, rules, index_map=None):
+    def _check(self, item, parent_item, rules, index_map=None, device_serial=""):
         from netbox_librenms_plugin.views.base.modules_view import _check_ignore_rules
 
-        return _check_ignore_rules(item, parent_item, rules, index_map)
+        return _check_ignore_rules(item, parent_item, rules, index_map, device_serial)
 
     def test_match_with_serial_match_skips(self):
         """Item matches rule name AND serial matches parent → should be skipped."""
         item = {"entPhysicalName": "Optics0/0/0/0-IDPROM", "entPhysicalSerialNum": "ABC123"}
         parent = {"entPhysicalName": "Optics0/0/0/0", "entPhysicalSerialNum": "ABC123"}
-        assert self._check(item, parent, [self._rule()]) is True
+        assert self._check(item, parent, [self._rule()]) == "skip"
 
     def test_match_with_serial_mismatch_not_skipped(self):
         """Name matches but serial differs from parent → NOT skipped (could be real module)."""
         item = {"entPhysicalName": "Optics0/0/0/0-IDPROM", "entPhysicalSerialNum": "XYZ999"}
         parent = {"entPhysicalName": "Optics0/0/0/0", "entPhysicalSerialNum": "ABC123"}
-        assert self._check(item, parent, [self._rule()]) is False
+        assert self._check(item, parent, [self._rule()]) is None
 
     def test_match_with_no_parent_not_skipped(self):
         """Name matches, require_serial=True, but no parent → conservative: NOT skipped."""
         item = {"entPhysicalName": "Optics0/0/0/0-IDPROM", "entPhysicalSerialNum": "ABC123"}
-        assert self._check(item, None, [self._rule()]) is False
+        assert self._check(item, None, [self._rule()]) is None
 
     def test_match_no_serial_require_false_skips(self):
         """require_serial_match_parent=False → skipped on name match alone."""
         item = {"entPhysicalName": "Optics0/0/0/0-IDPROM", "entPhysicalSerialNum": ""}
         parent = {"entPhysicalName": "Optics0/0/0/0", "entPhysicalSerialNum": "ABC123"}
-        assert self._check(item, parent, [self._rule(require_serial=False)]) is True
+        assert self._check(item, parent, [self._rule(require_serial=False)]) == "skip"
 
     def test_no_matching_rule_not_skipped(self):
         """Name does not match any rule → NOT skipped."""
         item = {"entPhysicalName": "Optics0/0/0/0", "entPhysicalSerialNum": "ABC123"}
         parent = {"entPhysicalName": "Rack 0", "entPhysicalSerialNum": "ABC123"}
-        assert self._check(item, parent, [self._rule()]) is False
+        assert self._check(item, parent, [self._rule()]) is None
 
     def test_empty_rules_not_skipped(self):
         """Empty rules list → nothing skipped."""
         item = {"entPhysicalName": "Optics0/0/0/0-IDPROM", "entPhysicalSerialNum": "ABC123"}
         parent = {"entPhysicalName": "Optics0/0/0/0", "entPhysicalSerialNum": "ABC123"}
-        assert self._check(item, parent, []) is False
+        assert self._check(item, parent, []) is None
 
     def test_item_serial_empty_not_skipped_when_serial_required(self):
         """Item has empty serial → can't confirm match → NOT skipped."""
         item = {"entPhysicalName": "Optics0/0/0/0-IDPROM", "entPhysicalSerialNum": ""}
         parent = {"entPhysicalName": "Optics0/0/0/0", "entPhysicalSerialNum": "ABC123"}
-        assert self._check(item, parent, [self._rule()]) is False
+        assert self._check(item, parent, [self._rule()]) is None
 
     def test_first_matching_rule_wins(self):
         """First rule that matches and satisfies serial check is used; later rules ignored."""
@@ -938,7 +939,7 @@ class TestCheckIgnoreRules:
         item = {"entPhysicalName": "Optics0/0/0/0-IDPROM", "entPhysicalSerialNum": ""}
         parent = {"entPhysicalName": "Optics0/0/0/0", "entPhysicalSerialNum": "ABC123"}
         # rule_skip (require_serial=False) matches first → should skip
-        assert self._check(item, parent, [rule_skip, rule_serial]) is True
+        assert self._check(item, parent, [rule_skip, rule_serial]) == "skip"
 
     def test_ancestor_walk_skips_when_grandparent_serial_matches(self):
         """IOS-XR case: IDPROM is child of empty-serial Mother Board, but grandparent serial matches."""
@@ -963,7 +964,7 @@ class TestCheckIgnoreRules:
             "entPhysicalContainedIn": 30,
         }
         index_map = {1: grandparent, 30: parent, 7: item}
-        assert self._check(item, parent, [self._rule()], index_map=index_map) is True
+        assert self._check(item, parent, [self._rule()], index_map=index_map) == "skip"
 
     def test_ancestor_walk_stops_at_non_matching_serial(self):
         """Ancestor walk stops at first non-empty serial; if it doesn't match → NOT skipped."""
@@ -986,7 +987,43 @@ class TestCheckIgnoreRules:
             "entPhysicalContainedIn": 30,
         }
         index_map = {1: grandparent, 30: parent, 7: item}
-        assert self._check(item, parent, [self._rule()], index_map=index_map) is False
+        assert self._check(item, parent, [self._rule()], index_map=index_map) is None
+
+    def test_serial_matches_device_transparent(self):
+        """serial_matches_device rule with action=transparent returns 'transparent'."""
+        rule = self._rule(match_type="serial_matches_device", pattern="", action="transparent")
+        item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": "FOC2418NHRK", "entPhysicalIndex": 5}
+        assert self._check(item, None, [rule], device_serial="FOC2418NHRK") == "transparent"
+
+    def test_serial_matches_device_skip(self):
+        """serial_matches_device rule with action=skip returns 'skip'."""
+        rule = self._rule(match_type="serial_matches_device", pattern="", action="skip")
+        item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": "FOC2418NHRK"}
+        assert self._check(item, None, [rule], device_serial="FOC2418NHRK") == "skip"
+
+    def test_serial_matches_device_no_match(self):
+        """serial_matches_device: item serial differs from device serial → no match."""
+        rule = self._rule(match_type="serial_matches_device", pattern="", action="transparent")
+        item = {"entPhysicalName": "Optics0/0/0/0", "entPhysicalSerialNum": "XCVR001"}
+        assert self._check(item, None, [rule], device_serial="FOC2418NHRK") is None
+
+    def test_serial_matches_device_empty_device_serial(self):
+        """serial_matches_device: device serial empty → no match (defensive)."""
+        rule = self._rule(match_type="serial_matches_device", pattern="", action="transparent")
+        item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": "FOC2418NHRK"}
+        assert self._check(item, None, [rule], device_serial="") is None
+
+    def test_serial_matches_device_empty_item_serial(self):
+        """serial_matches_device: item serial empty → no match (defensive)."""
+        rule = self._rule(match_type="serial_matches_device", pattern="", action="transparent")
+        item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": ""}
+        assert self._check(item, None, [rule], device_serial="FOC2418NHRK") is None
+
+    def test_transparent_action_returned_for_name_rule(self):
+        """A name-based rule with action=transparent returns 'transparent'."""
+        rule = self._rule(match_type="ends_with", pattern="IDPROM", require_serial=False, action="transparent")
+        item = {"entPhysicalName": "Optics0/0/0/0-IDPROM", "entPhysicalSerialNum": "ABC123"}
+        assert self._check(item, None, [rule]) == "transparent"
 
 
 class TestCollectDescendantsIgnoreRules:
@@ -997,13 +1034,14 @@ class TestCollectDescendantsIgnoreRules:
 
         return object.__new__(BaseModuleTableView)
 
-    def _rule(self, match_type="ends_with", pattern="IDPROM", require_serial=True):
+    def _rule(self, match_type="ends_with", pattern="IDPROM", require_serial=True, action="skip"):
         from netbox_librenms_plugin.models import InventoryIgnoreRule
 
         rule = InventoryIgnoreRule.__new__(InventoryIgnoreRule)
         rule.match_type = match_type
         rule.pattern = pattern
         rule.require_serial_match_parent = require_serial
+        rule.action = action
         rule.enabled = True
         return rule
 
