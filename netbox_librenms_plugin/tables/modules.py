@@ -223,6 +223,7 @@ class LibreNMSModuleTable(tables.Table):
                 format_html(
                     '<form method="post" action="{}" style="display:inline">'
                     '<input type="hidden" name="csrfmiddlewaretoken" value="{}">'
+                    '<input type="hidden" name="server_key" value="{}">'
                     '<input type="hidden" name="module_id" value="{}">'
                     '<input type="hidden" name="serial" value="{}">'
                     '<button type="submit" class="btn btn-sm btn-warning ms-1"'
@@ -231,6 +232,7 @@ class LibreNMSModuleTable(tables.Table):
                     "</button></form>",
                     url,
                     self.csrf_token,
+                    self.server_key,
                     record["installed_module_id"],
                     record.get("serial", ""),
                 )
@@ -256,4 +258,4 @@ class LibreNMSModuleTable(tables.Table):
                 )
             )
 
-        return format_html("{}", mark_safe("".join(str(b) for b in buttons))) if buttons else ""
+        return mark_safe("".join(str(b) for b in buttons)) if buttons else ""

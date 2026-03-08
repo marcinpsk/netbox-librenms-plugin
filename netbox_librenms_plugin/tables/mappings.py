@@ -1,4 +1,5 @@
 import django_tables2 as tables
+from django.utils.html import format_html, mark_safe
 from netbox.tables import NetBoxTable, columns
 
 from netbox_librenms_plugin.models import (
@@ -184,6 +185,22 @@ class InventoryIgnoreRuleTable(NetBoxTable):
     enabled = tables.BooleanColumn(verbose_name="Enabled")
     description = tables.Column(verbose_name="Description", linkify=False)
     actions = columns.ActionsColumn(actions=("edit", "delete"))
+
+    def render_pattern(self, value, record):
+        """Show dash for serial_matches_device rules where pattern is unused."""
+        if record.match_type == "serial_matches_device":
+            return mark_safe('<span class="text-muted">—</span>')
+        return format_html("<code>{}</code>", value) if value else "—"
+
+    def render_require_serial_match_parent(self, value, record):
+        """Show dash for serial_matches_device rules where this flag is unused."""
+        if record.match_type == "serial_matches_device":
+            return mark_safe('<span class="text-muted">—</span>')
+        return (
+            mark_safe('<span class="text-success">Yes</span>')
+            if value
+            else mark_safe('<span class="text-danger">No</span>')
+        )
 
     class Meta:
         """Meta options for InventoryIgnoreRuleTable."""

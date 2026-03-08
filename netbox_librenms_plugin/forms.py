@@ -315,6 +315,12 @@ class DeviceTypeMappingForm(NetBoxModelForm):
 class DeviceTypeMappingImportForm(NetBoxModelImportForm):
     """Form for bulk importing device type mappings."""
 
+    manufacturer = CSVModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        to_field_name="name",
+        required=False,
+        help_text="Manufacturer name — required when the model name is not unique across manufacturers",
+    )
     netbox_device_type = CSVModelChoiceField(
         queryset=DeviceType.objects.all(),
         to_field_name="model",
@@ -325,7 +331,14 @@ class DeviceTypeMappingImportForm(NetBoxModelImportForm):
         """Meta options for DeviceTypeMappingImportForm."""
 
         model = DeviceTypeMapping
-        fields = ["librenms_hardware", "netbox_device_type", "description"]
+        fields = ["librenms_hardware", "manufacturer", "netbox_device_type", "description"]
+
+    def __init__(self, data=None, *args, **kwargs):
+        super().__init__(data, *args, **kwargs)
+        if data:
+            mfr_field = self.fields["manufacturer"]
+            params = {f"manufacturer__{mfr_field.to_field_name}": data.get("manufacturer")}
+            self.fields["netbox_device_type"].queryset = DeviceType.objects.filter(**params)
 
 
 class DeviceTypeMappingFilterForm(NetBoxModelFilterSetForm):
@@ -354,6 +367,12 @@ class ModuleTypeMappingForm(NetBoxModelForm):
 class ModuleTypeMappingImportForm(NetBoxModelImportForm):
     """Form for bulk importing module type mappings."""
 
+    manufacturer = CSVModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        to_field_name="name",
+        required=False,
+        help_text="Manufacturer name — required when the model name is not unique across manufacturers",
+    )
     netbox_module_type = CSVModelChoiceField(
         queryset=ModuleType.objects.all(),
         to_field_name="model",
@@ -364,7 +383,14 @@ class ModuleTypeMappingImportForm(NetBoxModelImportForm):
         """Meta options for ModuleTypeMappingImportForm."""
 
         model = ModuleTypeMapping
-        fields = ["librenms_model", "netbox_module_type", "description"]
+        fields = ["librenms_model", "manufacturer", "netbox_module_type", "description"]
+
+    def __init__(self, data=None, *args, **kwargs):
+        super().__init__(data, *args, **kwargs)
+        if data:
+            mfr_field = self.fields["manufacturer"]
+            params = {f"manufacturer__{mfr_field.to_field_name}": data.get("manufacturer")}
+            self.fields["netbox_module_type"].queryset = ModuleType.objects.filter(**params)
 
 
 class ModuleTypeMappingFilterForm(NetBoxModelFilterSetForm):

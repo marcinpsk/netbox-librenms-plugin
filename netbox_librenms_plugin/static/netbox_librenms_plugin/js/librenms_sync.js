@@ -221,6 +221,7 @@ function initializeCheckboxes() {
     initializeTableCheckboxes('librenms-ipaddress-table');
     initializeTableCheckboxes('librenms-vlan-table');
     initializeTableCheckboxes('librenms-port-vlan-table');
+    initializeTableCheckboxes('librenms-module-table');
 }
 
 // ============================================
@@ -1485,6 +1486,12 @@ function initializeInstallSelectedForm() {
 }
 
 /**
+ * Tracks the in-flight AbortController for the module replace preview fetch.
+ * Cancelled when a new Replace button is clicked before the previous fetch completes.
+ */
+let _activeReplaceController = null;
+
+/**
  * Initialize Replace buttons on the module sync table.
  * Each button carries module/ent_index/server_key as data attributes and opens
  * the mismatch comparison modal by fetching the preview fragment from the server.
@@ -1495,6 +1502,13 @@ function initializeModuleReplaceButtons() {
         btn.dataset.replaceInitialized = 'true';
 
         btn.addEventListener('click', function () {
+            // Cancel any in-flight preview request before starting a new one
+            if (_activeReplaceController) {
+                _activeReplaceController.abort();
+            }
+            _activeReplaceController = new AbortController();
+            const signal = _activeReplaceController.signal;
+
             const previewUrl = this.dataset.previewUrl;
             const moduleId = this.dataset.moduleId;
             const entIndex = this.dataset.entIndex;
@@ -1537,7 +1551,7 @@ function initializeModuleReplaceButtons() {
             }
 
             // Fetch preview content and inject into modal body
-            fetch(`${previewUrl}?${params.toString()}`)
+            fetch(`${previewUrl}?${params.toString()}`, { signal })
                 .then(response => {
                     if (!response.ok) return response.text().then(t => { throw new Error(t); });
                     return response.text();
@@ -1549,6 +1563,7 @@ function initializeModuleReplaceButtons() {
                     }
                 })
                 .catch(err => {
+                    if (err.name === 'AbortError') return; // Superseded by a newer click — ignore
                     const modalBody = document.getElementById('htmx-modal-body');
                     if (modalBody) {
                         const alert = document.createElement('div');
