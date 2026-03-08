@@ -259,6 +259,8 @@ class TestFindByLibreNMSId:
         assert isinstance(q_arg, Q)
         assert q_arg.connector == "OR"
         assert len(q_arg.children) == 4
+        keys = [child[0] for child in q_arg.children]
+        assert "custom_field_data__librenms_id__default" in keys
 
 
 
