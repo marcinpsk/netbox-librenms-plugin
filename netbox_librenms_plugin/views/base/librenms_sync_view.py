@@ -7,6 +7,7 @@ from netbox.views import generic
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.utils import (
     get_interface_name_field,
+    get_librenms_device_id,
     get_librenms_sync_device,
     match_librenms_hardware_to_device_type,
 )
@@ -32,8 +33,10 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         # one logical device per VC
         librenms_lookup_device = obj
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-            # Check if this device has its own librenms_id for the active server
-            if not self.librenms_api.get_librenms_id(obj):
+            # Check if this device has its own librenms_id for the active server.
+            # Use get_librenms_device_id (CF/cache-only) to avoid triggering auto-discovery
+            # that would incorrectly persist a librenms_id for a VC member.
+            if not get_librenms_device_id(obj, self.librenms_api.server_key):
                 # Use helper function to determine the sync device
                 sync_device = get_librenms_sync_device(obj, server_key=self.librenms_api.server_key)
                 if sync_device:
