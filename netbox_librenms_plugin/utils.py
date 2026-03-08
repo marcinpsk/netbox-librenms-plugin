@@ -239,7 +239,11 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict:
     except DeviceTypeMapping.DoesNotExist:
         pass
     except DeviceTypeMapping.MultipleObjectsReturned:
-        pass
+        logger.warning(
+            "Multiple DeviceTypeMapping entries match hardware %r — skipping mapping lookup; "
+            "resolve the ambiguity by removing duplicate mappings.",
+            hardware_name,
+        )
 
     # Try part number exact match
     try:

@@ -29,7 +29,7 @@ class VMLibreNMSSyncView(BaseLibreNMSSyncView):
         interface_name_field = get_interface_name_field(request)
         interface_sync_view = VMInterfaceTableView()
         interface_sync_view.request = copy.copy(request)
-        return interface_sync_view.get_context_data(request, obj, interface_name_field)
+        return interface_sync_view.get_context_data(interface_sync_view.request, obj, interface_name_field)
 
     def get_cable_context(self, request, obj):
         """Return None; VMs do not support cable sync."""
@@ -43,7 +43,7 @@ class VMLibreNMSSyncView(BaseLibreNMSSyncView):
         """Return IP address sync context for the virtual machine."""
         ipaddress_sync_view = VMIPAddressTableView()
         ipaddress_sync_view.request = copy.copy(request)
-        return ipaddress_sync_view.get_context_data(request, obj)
+        return ipaddress_sync_view.get_context_data(ipaddress_sync_view.request, obj)
 
 
 class VMInterfaceTableView(BaseInterfaceTableView):
