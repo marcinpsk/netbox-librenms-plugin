@@ -411,25 +411,32 @@ class TestBuildAllServerMappings:
 
 
 class TestVCLookupDelegation:
-    """Verify BaseLibreNMSSyncView.get() VC device resolution logic:
-    - If a member has its own librenms_id (any format), it stays as the lookup device
-    - Only if no ID exists does it delegate to get_librenms_sync_device()"""
+    """Verify BaseLibreNMSSyncView.get() always delegates VC resolution to
+    get_librenms_sync_device() regardless of whether the viewed member has
+    its own librenms_id."""
 
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
-    def test_vc_member_with_legacy_id_stays_as_obj(self, mock_sync_device, mock_get_object, mock_render):
-        """A VC member with a legacy bare-int librenms_id stays as the lookup device;
-        get_librenms_sync_device is not called because the member already has an ID."""
+    def test_vc_member_with_legacy_id_delegates_to_sync_device(self, mock_sync_device, mock_get_object, mock_render):
+        """A VC member with a legacy bare-int librenms_id still delegates to
+        get_librenms_sync_device so an explicit per-server mapping on another
+        member takes priority."""
         from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
 
-        # Viewed device: member A with legacy bare-int (has its own ID)
+        # Viewed device: member A with legacy bare-int
         member_a = MagicMock()
         member_a.pk = 1
         member_a.cf = {"librenms_id": 42}
         member_a.virtual_chassis = MagicMock()
 
+        # Sync device: member B (per-server dict preferred by helper)
+        member_b = MagicMock()
+        member_b.pk = 2
+        member_b.cf = {"librenms_id": {"default": 42}}
+
         mock_get_object.return_value = member_a
+        mock_sync_device.return_value = member_b
 
         view = object.__new__(BaseLibreNMSSyncView)
         view.model = MagicMock()
@@ -444,12 +451,11 @@ class TestVCLookupDelegation:
         request = MagicMock()
         view.get(request, pk=1)
 
-        # With own ID, get_librenms_sync_device must NOT be called
-        mock_sync_device.assert_not_called()
-        # The lookup device stays as member_a
-        assert view._librenms_lookup_device is member_a
-        # get_librenms_id should be called on member_a directly
-        api.get_librenms_id.assert_called_once_with(member_a)
+        # Must always delegate — even with a legacy bare-int on the viewed member
+        mock_sync_device.assert_called_once_with(member_a, server_key="default")
+        # Lookup device is member_b (per-server mapping wins)
+        assert view._librenms_lookup_device is member_b
+        api.get_librenms_id.assert_called_once_with(member_b)
 
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")

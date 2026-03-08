@@ -28,18 +28,16 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         """Handle GET request for the LibreNMS sync view."""
         obj = get_object_or_404(self.model, pk=pk)
 
-        # For Virtual Chassis members, determine which device should handle LibreNMS sync.
-        # If this member has its own librenms_id for the active server, keep it as the
-        # lookup device. Otherwise delegate to get_librenms_sync_device() which implements
-        # the full priority order (per-server dict > legacy bare-int > master IP > any IP > position).
-        # Use get_librenms_device_id (CF/cache-only) to avoid triggering auto-discovery
-        # that would incorrectly persist a librenms_id for a VC member.
+        # For Virtual Chassis members, always delegate to get_librenms_sync_device() so
+        # self._librenms_lookup_device and self.librenms_id are consistent with the
+        # helper-based VC status computed in get_context_data().  A legacy bare-int mapping
+        # on the viewed member must not shadow an explicit per-server mapping on another
+        # member — get_librenms_sync_device() applies the full priority order.
         librenms_lookup_device = obj
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-            if get_librenms_device_id(obj, self.librenms_api.server_key, auto_save=False) is None:
-                sync_device = get_librenms_sync_device(obj, server_key=self.librenms_api.server_key)
-                if sync_device:
-                    librenms_lookup_device = sync_device
+            sync_device = get_librenms_sync_device(obj, server_key=self.librenms_api.server_key)
+            if sync_device:
+                librenms_lookup_device = sync_device
 
         # Store for use in get_context_data (badge generation needs the same object)
         self._librenms_lookup_device = librenms_lookup_device
@@ -95,7 +93,6 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         cable_context = self.get_cable_context(request, obj)
         ip_context = self.get_ip_context(request, obj)
         vlan_context = self.get_vlan_context(request, obj)
-        module_context = self.get_module_context(request, obj)
 
         interface_name_field = get_interface_name_field(request)
 
@@ -127,7 +124,6 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 "cable_sync": cable_context,
                 "ip_sync": ip_context,
                 "vlan_sync": vlan_context,
-                "module_sync": module_context,
                 "v1v2form": AddToLIbreSNMPV1V2(prefix="v1v2"),
                 "v3form": AddToLIbreSNMPV3(prefix="v3"),
                 "librenms_device_id": self.librenms_id,
@@ -337,7 +333,6 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 if netbox_identities & librenms_identities:
                     mismatched_device = False
                 else:
-                    # Device is still found (we have librenms_id), just mismatched
                     mismatched_device = True
 
                 librenms_device_details["netbox_dns_name"] = netbox_dns_name or "-"
@@ -373,13 +368,6 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         """
         Get the context data for VLAN sync.
         Subclasses should override this method.
-        """
-        return None
-
-    def get_module_context(self, request, obj):
-        """
-        Get the context data for module sync.
-        Subclasses should override this method if applicable.
         """
         return None
 

@@ -28,8 +28,7 @@ def _safe_disabled(device: dict) -> int:
         if normalized in ("0", "false", "no", "off", ""):
             return 0
     try:
-        val_int = int(val)
-        return 1 if val_int == 1 else 0
+        return int(val)
     except (TypeError, ValueError):
         return 0
 
@@ -222,9 +221,6 @@ def get_librenms_devices_for_import(
 
         if not success:
             logger.error(f"Failed to retrieve devices from LibreNMS: {devices}")
-            # Negative cache: avoid hammering LibreNMS on repeated failures
-            _negative_ttl = getattr(api, "negative_cache_timeout", 30)
-            cache.set(cache_key, [], timeout=_negative_ttl)
             if return_cache_status:
                 return [], False
             return []
@@ -243,12 +239,6 @@ def get_librenms_devices_for_import(
 
     except Exception:
         logger.exception("Error retrieving LibreNMS devices for import")
-        # Negative cache on exception to prevent rapid retries
-        try:
-            _negative_ttl = getattr(api, "negative_cache_timeout", 30)
-            cache.set(cache_key, [], timeout=_negative_ttl)
-        except Exception:
-            pass
         if return_cache_status:
             return [], False
         return []
@@ -273,19 +263,19 @@ def _apply_client_filters(devices: List[dict], filters: dict) -> List[dict]:
 
     if filters.get("type"):
         device_type = filters["type"].lower()
-        filtered = [d for d in filtered if d.get("type", "").lower() == device_type]
+        filtered = [d for d in filtered if (d.get("type") or "").lower() == device_type]
 
     if filters.get("os"):
         os_filter = filters["os"].lower()
-        filtered = [d for d in filtered if os_filter in d.get("os", "").lower()]
+        filtered = [d for d in filtered if os_filter in (d.get("os") or "").lower()]
 
     if filters.get("hostname"):
         hostname_filter = filters["hostname"].lower()
-        filtered = [d for d in filtered if hostname_filter in (d.get("hostname") or "").lower()]
+        filtered = [d for d in filtered if hostname_filter in d.get("hostname", "").lower()]
 
     if filters.get("sysname"):
         sysname_filter = filters["sysname"].lower()
-        filtered = [d for d in filtered if sysname_filter in (d.get("sysName") or "").lower()]
+        filtered = [d for d in filtered if sysname_filter in d.get("sysName", "").lower()]
 
     if filters.get("hardware"):
         hardware_filter = filters["hardware"].lower()
