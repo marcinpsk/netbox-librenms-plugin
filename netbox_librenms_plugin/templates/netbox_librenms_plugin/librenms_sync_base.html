@@ -73,6 +73,7 @@
                 <td class="text-end pe-3">
                     {% if not mapping.is_configured %}
                     {% if lookup_device_model_name == "device" or lookup_device_model_name == "virtualmachine" %}
+                    {% if lookup_device_pk == object.pk %}
                     <form method="post"
                           action="{% url 'plugins:netbox_librenms_plugin:remove_server_mapping' pk=lookup_device_pk %}"
                           style="display:inline"
@@ -85,6 +86,11 @@
                             <i class="mdi mdi-trash-can-outline"></i> Remove
                         </button>
                     </form>
+                    {% else %}
+                    <span class="text-muted small" title="Mapping belongs to VC sync device {{ librenms_sync_device }} — navigate there to remove it">
+                        <i class="mdi mdi-information-outline me-1"></i>Managed by VC sync device
+                    </span>
+                    {% endif %}
                     {% endif %}
                     {% endif %}
                 </td>

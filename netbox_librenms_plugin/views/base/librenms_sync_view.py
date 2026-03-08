@@ -75,7 +75,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
             sync_device_has_primary_ip = False
 
             if librenms_sync_device:
-                sync_device_has_librenms_id = bool(self.librenms_api.get_librenms_id(librenms_sync_device))
+                sync_device_has_librenms_id = self.librenms_api.get_librenms_id(librenms_sync_device) is not None
                 sync_device_has_primary_ip = bool(librenms_sync_device.primary_ip)
 
             context.update(

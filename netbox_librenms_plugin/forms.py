@@ -336,9 +336,11 @@ class DeviceTypeMappingImportForm(NetBoxModelImportForm):
     def __init__(self, data=None, *args, **kwargs):
         super().__init__(data, *args, **kwargs)
         if data:
-            mfr_field = self.fields["manufacturer"]
-            params = {f"manufacturer__{mfr_field.to_field_name}": data.get("manufacturer")}
-            self.fields["netbox_device_type"].queryset = DeviceType.objects.filter(**params)
+            mfr_val = data.get("manufacturer")
+            if mfr_val:
+                mfr_field = self.fields["manufacturer"]
+                params = {f"manufacturer__{mfr_field.to_field_name}": mfr_val}
+                self.fields["netbox_device_type"].queryset = DeviceType.objects.filter(**params)
 
 
 class DeviceTypeMappingFilterForm(NetBoxModelFilterSetForm):
@@ -388,9 +390,11 @@ class ModuleTypeMappingImportForm(NetBoxModelImportForm):
     def __init__(self, data=None, *args, **kwargs):
         super().__init__(data, *args, **kwargs)
         if data:
-            mfr_field = self.fields["manufacturer"]
-            params = {f"manufacturer__{mfr_field.to_field_name}": data.get("manufacturer")}
-            self.fields["netbox_module_type"].queryset = ModuleType.objects.filter(**params)
+            mfr_val = data.get("manufacturer")
+            if mfr_val:
+                mfr_field = self.fields["manufacturer"]
+                params = {f"manufacturer__{mfr_field.to_field_name}": mfr_val}
+                self.fields["netbox_module_type"].queryset = ModuleType.objects.filter(**params)
 
 
 class ModuleTypeMappingFilterForm(NetBoxModelFilterSetForm):
