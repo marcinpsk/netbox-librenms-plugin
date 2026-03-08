@@ -1850,6 +1850,7 @@ class TestSerialNumberMatching:
         existing.name = "switch-01"
         existing.serial = "ABC123"
         existing.virtual_chassis = None
+        existing.vc_position = None
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
