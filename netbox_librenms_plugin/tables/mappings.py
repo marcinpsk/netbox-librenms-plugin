@@ -180,11 +180,16 @@ class InventoryIgnoreRuleTable(NetBoxTable):
 
     name = tables.Column(verbose_name="Name", linkify=True)
     match_type = tables.Column(verbose_name="Match Type")
+    action = tables.Column(verbose_name="Action")
     pattern = tables.Column(verbose_name="Pattern")
     require_serial_match_parent = tables.BooleanColumn(verbose_name="Require Serial Match")
     enabled = tables.BooleanColumn(verbose_name="Enabled")
     description = tables.Column(verbose_name="Description", linkify=False)
     actions = columns.ActionsColumn(actions=("edit", "delete"))
+
+    def render_action(self, value, record):
+        """Display the human-readable action label."""
+        return record.get_action_display()
 
     def render_pattern(self, value, record):
         """Show dash for serial_matches_device rules where pattern is unused."""
@@ -210,6 +215,7 @@ class InventoryIgnoreRuleTable(NetBoxTable):
             "id",
             "name",
             "match_type",
+            "action",
             "pattern",
             "require_serial_match_parent",
             "enabled",
@@ -220,6 +226,7 @@ class InventoryIgnoreRuleTable(NetBoxTable):
             "id",
             "name",
             "match_type",
+            "action",
             "pattern",
             "require_serial_match_parent",
             "enabled",

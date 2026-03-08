@@ -85,8 +85,8 @@ def _get_librenms_poller_group_choices():
         api = LibreNMSAPI()
         success, poller_groups = api.get_poller_groups()
 
-        if success and poller_groups:
-            for group in poller_groups:
+        if success:
+            for group in poller_groups or []:
                 group_id = str(group.get("id", ""))
                 group_name = group.get("group_name", "")
                 group_descr = group.get("descr", "")
