@@ -70,7 +70,10 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
             sync_device_has_primary_ip = False
 
             if librenms_sync_device:
-                sync_device_has_librenms_id = bool(self.librenms_api.get_librenms_id(librenms_sync_device))
+                sync_device_has_librenms_id = (
+                    get_librenms_device_id(librenms_sync_device, self.librenms_api.server_key, auto_save=False)
+                    is not None
+                )
                 sync_device_has_primary_ip = bool(librenms_sync_device.primary_ip)
 
             context.update(
@@ -139,6 +142,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 "lookup_device_model_name": (
                     _lookup_device._meta.model_name if _lookup_device else obj._meta.model_name
                 ),
+                "object_model_name": obj._meta.model_name,
             }
         )
 

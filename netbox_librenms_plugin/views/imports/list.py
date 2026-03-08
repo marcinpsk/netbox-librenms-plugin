@@ -142,10 +142,10 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         # queryset loading) use the same use_sysname/strip_domain values.
         # Cascade: user preference → plugin settings → defaults.
         try:
-            settings_obj, _ = LibreNMSSettings.objects.get_or_create()
+            settings_obj = LibreNMSSettings.objects.first()
         except Exception:
             logger.exception(
-                "Failed to get or create LibreNMSSettings during LibreNMS import for user %s",
+                "Failed to read LibreNMSSettings during LibreNMS import for user %s",
                 getattr(request, "user", None),
             )
             settings_obj = None

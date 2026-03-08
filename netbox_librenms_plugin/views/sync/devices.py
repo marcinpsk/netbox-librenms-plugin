@@ -21,8 +21,14 @@ class AddDeviceToLibreNMSView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             return AddToLIbreSNMPV1V2
         return AddToLIbreSNMPV3
 
-    def get_object(self, object_id):
-        """Return the Device or VirtualMachine for the given ID."""
+    def get_object(self, object_id, object_type=None):
+        """Return the Device or VirtualMachine for the given ID.
+
+        Uses object_type hint when provided to avoid PK collision ambiguity
+        (Device and VirtualMachine share independent PK sequences).
+        """
+        if object_type == "virtualmachine":
+            return VirtualMachine.objects.get(pk=object_id)
         try:
             return Device.objects.get(pk=object_id)
         except Device.DoesNotExist:
@@ -34,7 +40,7 @@ class AddDeviceToLibreNMSView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         if error := self.require_write_permission():
             return error
 
-        self.object = self.get_object(object_id)
+        self.object = self.get_object(object_id, request.POST.get("object_type"))
         form_class = self.get_form_class()
 
         snmp_version = request.POST.get("v1v2-snmp_version") or request.POST.get("v3-snmp_version")
