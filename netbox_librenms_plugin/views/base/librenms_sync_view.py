@@ -36,7 +36,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
             # Check if this device has its own librenms_id for the active server.
             # Use get_librenms_device_id (CF/cache-only) to avoid triggering auto-discovery
             # that would incorrectly persist a librenms_id for a VC member.
-            if not get_librenms_device_id(obj, self.librenms_api.server_key):
+            if not get_librenms_device_id(obj, self.librenms_api.server_key, auto_save=False):
                 # Use helper function to determine the sync device
                 sync_device = get_librenms_sync_device(obj, server_key=self.librenms_api.server_key)
                 if sync_device:
