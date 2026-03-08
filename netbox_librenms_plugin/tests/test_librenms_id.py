@@ -263,7 +263,6 @@ class TestFindByLibreNMSId:
         assert "custom_field_data__librenms_id__default" in keys
 
 
-
 class TestMigrateLegacyLibreNMSId:
     """Tests for migrate_legacy_librenms_id()."""
 

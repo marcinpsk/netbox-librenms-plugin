@@ -284,7 +284,6 @@ def validate_device_for_import(
         try:
             from netbox_librenms_plugin.utils import find_by_librenms_id
 
-
             existing_vm = find_by_librenms_id(VirtualMachine, int(librenms_id), server_key)
         except (ValueError, TypeError):
             # librenms_id is not convertible to int; no match will be found
