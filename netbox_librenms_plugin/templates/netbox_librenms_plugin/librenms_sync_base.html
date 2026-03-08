@@ -162,11 +162,10 @@
                             <td>
                                 {{ librenms_device_id }}
                                 {% if librenms_id_is_legacy %}
-                                {% with model_name=object|meta:"model_name" %}
                                 <form style="display:inline" method="post"
-                                      action="{% url 'plugins:netbox_librenms_plugin:convert_legacy_librenms_id' pk=object.pk %}">
+                                      action="{% url 'plugins:netbox_librenms_plugin:convert_legacy_librenms_id' pk=lookup_device_pk %}">
                                     {% csrf_token %}
-                                    <input type="hidden" name="object_type" value="{{ model_name }}">
+                                    <input type="hidden" name="object_type" value="{{ lookup_device_model_name }}">
                                     {% if librenms_id_serial_confirmed %}
                                     <button type="submit" class="btn btn-sm btn-outline-warning py-0 px-1 ms-1"
                                             title="Convert legacy ID to server-scoped format">
@@ -179,7 +178,6 @@
                                     </button>
                                     {% endif %}
                                 </form>
-                                {% endwith %}
                                 {% endif %}
                             </td>
                         </tr>

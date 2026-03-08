@@ -77,7 +77,7 @@ def get_virtual_chassis_member(device: Device, port_name: str) -> Device:
         return device
 
 
-def get_librenms_sync_device(device: Device, server_key: str = "default") -> Optional[Device]:
+def get_librenms_sync_device(device: Device, server_key: str = None) -> Optional[Device]:
     """
     Determine which Virtual Chassis member should handle LibreNMS sync operations.
 
@@ -85,7 +85,8 @@ def get_librenms_sync_device(device: Device, server_key: str = "default") -> Opt
     should have the librenms_id custom field set and be used for sync operations.
 
     Priority order for selecting the sync device:
-    1. Any member with librenms_id custom field set for *server_key* (highest priority)
+    1. Any member with librenms_id custom field set for *server_key* (highest priority).
+       When *server_key* is None, matches any member that has any librenms_id set.
     2. Master device with primary IP (if master is designated)
     3. Any member with primary IP (fallback when no master or master lacks IP)
     4. Member with lowest vc_position (for error messages when no IPs configured)
@@ -93,6 +94,8 @@ def get_librenms_sync_device(device: Device, server_key: str = "default") -> Opt
     Args:
         device (Device): Any device in the virtual chassis.
         server_key: LibreNMS server key used to resolve the correct librenms_id mapping.
+                    Pass None to match any member that has any librenms_id (e.g. in
+                    contexts where the active server is not known, such as table columns).
 
     Returns:
         Optional[Device]: The device that should handle LibreNMS sync, or None if
@@ -104,21 +107,32 @@ def get_librenms_sync_device(device: Device, server_key: str = "default") -> Opt
     vc = device.virtual_chassis
     all_members = vc.members.all()
 
-    # Priority 1: Prefer member with an explicit per-server dict mapping for server_key.
-    # This ensures a migrated device is preferred over one with a legacy bare-int ID.
-    for member in all_members:
-        raw_cf = member.cf.get("librenms_id")
-        if isinstance(raw_cf, dict):
-            val = raw_cf.get(server_key)
-            if val is not None and not isinstance(val, bool):
-                return member
+    if server_key is not None:
+        # Priority 1: Prefer member with an explicit per-server dict mapping for server_key.
+        # This ensures a migrated device is preferred over one with a legacy bare-int ID.
+        for member in all_members:
+            raw_cf = member.cf.get("librenms_id")
+            if isinstance(raw_cf, dict):
+                val = raw_cf.get(server_key)
+                if val is not None and not isinstance(val, bool):
+                    return member
 
-    # Priority 2 (legacy fallback): Any member whose librenms_id resolves for this server
-    # (includes bare-int legacy IDs that are a universal fallback).
-    for member in all_members:
-        result = get_librenms_device_id(member, server_key, auto_save=False)
-        if result is not None:
-            return member
+        # Priority 2 (legacy fallback): Any member whose librenms_id resolves for this server
+        # (includes bare-int legacy IDs that are a universal fallback).
+        for member in all_members:
+            result = get_librenms_device_id(member, server_key, auto_save=False)
+            if result is not None:
+                return member
+    else:
+        # server_key is None: match any member that has any librenms_id set (any server).
+        # Used in contexts without an active server (e.g. device status table columns).
+        for member in all_members:
+            raw_cf = member.cf.get("librenms_id")
+            if isinstance(raw_cf, dict):
+                if any(v is not None and not isinstance(v, bool) for v in raw_cf.values()):
+                    return member
+            elif raw_cf:
+                return member
 
     # Priority 2: Use master device if it has primary IP
     if vc.master and vc.master.primary_ip:
