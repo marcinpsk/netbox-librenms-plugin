@@ -28,18 +28,16 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
         """Handle GET request for the LibreNMS sync view."""
         obj = get_object_or_404(self.model, pk=pk)
 
-        # For Virtual Chassis members, determine which device should handle LibreNMS sync.
-        # If this member has its own librenms_id for the active server, keep it as the
-        # lookup device. Otherwise delegate to get_librenms_sync_device() which implements
-        # the full priority order (per-server dict > legacy bare-int > master IP > any IP > position).
-        # Use get_librenms_device_id (CF/cache-only) to avoid triggering auto-discovery
-        # that would incorrectly persist a librenms_id for a VC member.
+        # For Virtual Chassis members, always delegate to get_librenms_sync_device() so
+        # self._librenms_lookup_device and self.librenms_id are consistent with the
+        # helper-based VC status computed in get_context_data().  A legacy bare-int mapping
+        # on the viewed member must not shadow an explicit per-server mapping on another
+        # member — get_librenms_sync_device() applies the full priority order.
         librenms_lookup_device = obj
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-            if get_librenms_device_id(obj, self.librenms_api.server_key, auto_save=False) is None:
-                sync_device = get_librenms_sync_device(obj, server_key=self.librenms_api.server_key)
-                if sync_device:
-                    librenms_lookup_device = sync_device
+            sync_device = get_librenms_sync_device(obj, server_key=self.librenms_api.server_key)
+            if sync_device:
+                librenms_lookup_device = sync_device
 
         # Store for use in get_context_data (badge generation needs the same object)
         self._librenms_lookup_device = librenms_lookup_device

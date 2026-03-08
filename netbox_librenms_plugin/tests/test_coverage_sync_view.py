@@ -48,17 +48,15 @@ class TestBaseLibreNMSSyncViewGet:
 
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_device_id")
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
-    def test_get_vc_member_without_own_id_uses_sync_device(self, mock_get_sync, mock_get_id, mock_get_obj, mock_render):
-        """VC member without own librenms_id → uses get_librenms_sync_device result."""
+    def test_get_vc_member_always_delegates_to_sync_device(self, mock_get_sync, mock_get_obj, mock_render):
+        """VC member always delegates to get_librenms_sync_device regardless of own ID."""
         view = _make_view()
 
         obj = MagicMock()
         obj.virtual_chassis = MagicMock()
         mock_get_obj.return_value = obj
 
-        mock_get_id.return_value = None  # No own librenms_id
         sync_device = MagicMock()
         mock_get_sync.return_value = sync_device
 
@@ -72,20 +70,21 @@ class TestBaseLibreNMSSyncViewGet:
         request = MagicMock()
         view.get(request, pk=1)
 
+        mock_get_sync.assert_called_once_with(obj, server_key="default")
         assert view._librenms_lookup_device is sync_device
 
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
-    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_device_id")
-    def test_get_vc_member_with_own_id_stays_as_obj(self, mock_get_id, mock_get_obj, mock_render):
-        """VC member WITH own librenms_id → stays as obj, no redirect."""
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
+    def test_get_vc_member_no_sync_device_falls_back_to_obj(self, mock_get_sync, mock_get_obj, mock_render):
+        """VC member: when get_librenms_sync_device returns None, keeps obj."""
         view = _make_view()
 
         obj = MagicMock()
         obj.virtual_chassis = MagicMock()
         mock_get_obj.return_value = obj
 
-        mock_get_id.return_value = 55  # Has its own librenms_id
+        mock_get_sync.return_value = None
 
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"

@@ -864,8 +864,9 @@ class TestGetInventoryFilteredNonOk:
         mock_resp.json.return_value = {"inventory": []}  # Empty inventory
         with patch("requests.get", return_value=mock_resp):
             ok, data = api.get_inventory_filtered(1)
-        # Empty list means no match, returns False
-        assert ok is False or (ok is True and data == [])
+        # No "status":"ok" in response → falls through to return False, []
+        assert ok is False
+        assert data == []
 
 
 class TestGetDeviceVlansHttpError:
