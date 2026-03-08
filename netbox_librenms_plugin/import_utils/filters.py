@@ -28,7 +28,8 @@ def _safe_disabled(device: dict) -> int:
         if normalized in ("0", "false", "no", "off", ""):
             return 0
     try:
-        return int(val)
+        val_int = int(val)
+        return 1 if val_int == 1 else 0
     except (TypeError, ValueError):
         return 0
 
@@ -221,6 +222,9 @@ def get_librenms_devices_for_import(
 
         if not success:
             logger.error(f"Failed to retrieve devices from LibreNMS: {devices}")
+            # Negative cache: avoid hammering LibreNMS on repeated failures
+            _negative_ttl = getattr(api, "negative_cache_timeout", 30)
+            cache.set(cache_key, [], timeout=_negative_ttl)
             if return_cache_status:
                 return [], False
             return []
@@ -239,6 +243,12 @@ def get_librenms_devices_for_import(
 
     except Exception:
         logger.exception("Error retrieving LibreNMS devices for import")
+        # Negative cache on exception to prevent rapid retries
+        try:
+            _negative_ttl = getattr(api, "negative_cache_timeout", 30)
+            cache.set(cache_key, [], timeout=_negative_ttl)
+        except Exception:
+            pass
         if return_cache_status:
             return [], False
         return []

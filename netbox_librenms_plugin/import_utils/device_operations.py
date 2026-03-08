@@ -938,6 +938,7 @@ def fetch_device_with_cache(
     api: LibreNMSAPI,
     server_key: str = None,
     libre_devices_cache: dict = None,
+    force_refresh: bool = False,
 ) -> dict | None:
     """
     Fetch LibreNMS device from cache or API with automatic caching.
@@ -945,7 +946,7 @@ def fetch_device_with_cache(
     Checks three sources in order:
     1. Pre-fetched cache dict (if provided)
     2. Django cache (Redis/memory)
-    3. LibreNMS API (caches result for future use)
+    3. LibreNMS API (caches result for future use, including negative results)
 
     This function consolidates the device fetching pattern used throughout
     the import workflow, eliminating code duplication.
@@ -955,6 +956,7 @@ def fetch_device_with_cache(
         api: LibreNMSAPI instance for fallback API calls
         server_key: Optional server key for multi-server setups (defaults to api.server_key)
         libre_devices_cache: Optional pre-fetched device cache dict
+        force_refresh: When True, bypass Django cache and re-fetch from API
 
     Returns:
         Device dict from LibreNMS, or None if not found
@@ -969,19 +971,27 @@ def fetch_device_with_cache(
         >>> cache_dict = {123: {...}, 456: {...}}
         >>> libre_device = fetch_device_with_cache(123, api, libre_devices_cache=cache_dict)
     """
-    # Check pre-fetched cache dict first (fastest)
-    if libre_devices_cache and device_id in libre_devices_cache:
+    _NEGATIVE_CACHE_SENTINEL = "__not_found__"
+    _NEGATIVE_CACHE_TTL = getattr(api, "negative_cache_timeout", 300)
+
+    # Check pre-fetched cache dict first (fastest); skip on force_refresh
+    if not force_refresh and libre_devices_cache and device_id in libre_devices_cache:
         return libre_devices_cache[device_id]
 
-    # Check Django cache
+    # Check Django cache (skip on force_refresh)
     cache_key = get_import_device_cache_key(device_id, server_key or api.server_key)
-    libre_device = cache.get(cache_key)
+    if not force_refresh:
+        cached = cache.get(cache_key)
+        if cached is not None:
+            # Return None for negative-cache sentinel, device dict otherwise
+            return None if cached == _NEGATIVE_CACHE_SENTINEL else cached
 
-    if not libre_device:
-        # Fallback to API fetch
-        libre_device = get_librenms_device_by_id(api, device_id)
-        if libre_device:
-            # Cache for future use
-            cache.set(cache_key, libre_device, timeout=api.cache_timeout)
+    # Fallback to API fetch
+    libre_device = get_librenms_device_by_id(api, device_id)
+    if libre_device:
+        cache.set(cache_key, libre_device, timeout=api.cache_timeout)
+    else:
+        # Negative cache: avoid repeated API hits for devices not found
+        cache.set(cache_key, _NEGATIVE_CACHE_SENTINEL, timeout=_NEGATIVE_CACHE_TTL)
 
     return libre_device

@@ -119,6 +119,21 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
         try:
             local_interface = Interface.objects.get(pk=link_data["netbox_local_interface_id"])
+
+            # Honour user's VC member selection: if the selected device_id differs from
+            # the cached interface's device, look up the same port name on that device.
+            selected_device_id = interface.get("device_id")
+            if selected_device_id and str(local_interface.device_id) != str(selected_device_id):
+                port_name = link_data.get("local_port") or local_interface.name
+                try:
+                    local_interface = Interface.objects.get(device_id=selected_device_id, name=port_name)
+                except Interface.DoesNotExist:
+                    logger.debug(
+                        "Port %s not found on device %s; falling back to cached interface",
+                        port_name,
+                        selected_device_id,
+                    )
+
             remote_interface = Interface.objects.get(pk=link_data["netbox_remote_interface_id"])
 
             if self.check_existing_cable(local_interface, remote_interface):

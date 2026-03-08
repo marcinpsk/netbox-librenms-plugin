@@ -40,6 +40,9 @@ logger = logging.getLogger(__name__)
 # Actions that require the force checkbox when a device-type mismatch is detected.
 _FORCE_REQUIRED_ACTIONS = frozenset({"link", "update", "update_serial", "update_type"})
 
+# Actions that operate on Device-only fields and cannot be applied to VMs.
+_DEVICE_ONLY_ACTIONS = frozenset({"link", "update", "update_serial", "update_type", "sync_serial", "sync_device_type"})
+
 
 def _save_device(device) -> HttpResponse | None:
     """Call full_clean() then save(). Return an HttpResponse on failure, None on success."""
@@ -861,13 +864,13 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
         device_type_synced = True
         librenms_device_type = None
         netbox_device_type = getattr(existing_device, "device_type", None)
-        if librenms_hardware and librenms_hardware != "-" and netbox_device_type is not None:
+        if librenms_hardware and librenms_hardware != "-":
             from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
 
             hw_match = match_librenms_hardware_to_device_type(librenms_hardware)
             if hw_match.get("matched"):
                 librenms_device_type = hw_match["device_type"]
-                if not netbox_device_type or netbox_device_type.pk != librenms_device_type.pk:
+                if netbox_device_type is None or netbox_device_type.pk != librenms_device_type.pk:
                     device_type_synced = False
             else:
                 device_type_synced = False
@@ -989,10 +992,10 @@ class DeviceConflictActionView(
         if not action or not existing_device_id:
             return HttpResponse("Missing action or existing_device_id", status=400)
 
-        # VirtualMachine is supported for migrate_librenms_id only; all other actions
-        # operate on Device-specific fields (serial, device_type) and remain Device-only.
+        # VirtualMachine supports migrate_librenms_id, sync_name, and sync_platform.
+        # Device-only actions (serial, device_type, legacy link/update) are rejected.
         if existing_device_type == "virtualmachine":
-            if action != "migrate_librenms_id":
+            if action in _DEVICE_ONLY_ACTIONS:
                 return HttpResponse(
                     f"Action '{escape(action)}' is not supported for virtual machines",
                     status=400,

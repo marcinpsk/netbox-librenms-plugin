@@ -150,7 +150,7 @@ def bulk_import_vms(
             job.job.refresh_from_db()
             job_status = job.job.status
             status_value = job_status.value if hasattr(job_status, "value") else job_status
-            if status_value in ("failed", "errored"):
+            if status_value in ("failed", "errored", "stopped"):
                 log.warning(f"Job cancelled at VM {idx} of {len(vm_ids)}")
                 break
             log.info(f"Imported VM {idx} of {len(vm_ids)}")
