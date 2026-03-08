@@ -245,41 +245,13 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
             if hardware := request.GET.get("librenms_hardware"):
                 libre_filters["hardware"] = hardware
 
-            # Check if data is already cached before deciding on background job
-            # This prevents creating a job when cached results are available
             from netbox_librenms_plugin.import_utils import (
+                get_cache_metadata_key,
                 get_device_count_for_filters,
-                get_librenms_devices_for_import,
             )
 
-            # Quick check: are the raw devices already cached?
-            devices_cached = False
-            if not self._cache_cleared:
-                try:
-                    _, devices_from_cache = get_librenms_devices_for_import(
-                        api=self.librenms_api,
-                        filters=libre_filters,
-                        force_refresh=False,
-                        return_cache_status=True,
-                    )
-                    devices_cached = devices_from_cache
-                except Exception as e:
-                    # Cache check failed; proceed with background job decision based on device_count
-                    logger.debug("Cache check failed; proceeding without cached result: %s", e, exc_info=True)
-
-            # Get device count for background job decision
-            try:
-                device_count = get_device_count_for_filters(
-                    api=self.librenms_api,
-                    filters=libre_filters,
-                    clear_cache=self._cache_cleared,
-                    show_disabled=bool(self._filter_form_data.get("show_disabled", False)),
-                )
-            except Exception as e:
-                logger.error(f"Error getting device count: {e}")
-                device_count = 0
-
-            # Load settings for background job decision; resolve naming preferences.
+            # Resolve naming preferences BEFORE the cache check so the validated-
+            # cache namespace accounts for use_sysname / strip_domain.
             # We intentionally read user_pref here rather than request.GET because the
             # naming toggles (use-sysname-toggle, strip-domain-toggle) live OUTSIDE the
             # filter form (method="get") and are not submitted with it.  Instead, each
@@ -303,9 +275,39 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
                 else (getattr(settings, "strip_domain_default", False) if settings else False)
             )
 
+            # Check if validated results already exist for this naming-mode
+            # namespace.  The metadata key encodes server, filters, vc_enabled,
+            # use_sysname and strip_domain, so a naming-preference change
+            # correctly shows the cache as cold and triggers the background path.
+            validated_cached = False
+            if not self._cache_cleared:
+                try:
+                    metadata_key = get_cache_metadata_key(
+                        server_key=self.librenms_api.server_key,
+                        filters=libre_filters,
+                        vc_enabled=self._vc_detection_enabled,
+                        use_sysname=_use_sysname,
+                        strip_domain=_strip_domain,
+                    )
+                    validated_cached = cache.get(metadata_key) is not None
+                except Exception as e:
+                    logger.debug("Cache check failed; proceeding without cached result: %s", e, exc_info=True)
+
+            # Get device count for background job decision
+            try:
+                device_count = get_device_count_for_filters(
+                    api=self.librenms_api,
+                    filters=libre_filters,
+                    clear_cache=self._cache_cleared,
+                    show_disabled=bool(self._filter_form_data.get("show_disabled", False)),
+                )
+            except Exception as e:
+                logger.error(f"Error getting device count: {e}")
+                device_count = 0
+
             # Decide whether to use background job
-            # Skip background job if data is already cached
-            if not devices_cached and self.should_use_background_job():
+            # Skip background job if validated data is already cached
+            if not validated_cached and self.should_use_background_job():
                 # Check if RQ workers are available
                 if get_workers_for_queue("default") > 0:
                     from netbox_librenms_plugin.jobs import FilterDevicesJob
