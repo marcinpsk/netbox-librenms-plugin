@@ -289,3 +289,4 @@ cython_debug/
 ca-bundle.crt
 *.pem
 .github/hooks/
+.claude/
