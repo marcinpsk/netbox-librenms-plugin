@@ -1,6 +1,6 @@
 {% load helpers %}
 {# Modal body fragment for the module replace / move dialog. #}
-{# Rendered server-side by ModuleMismatchPreviewView and injected into #moduleReplaceModalBody via JS. #}
+{# Rendered server-side by ModuleMismatchPreviewView and injected into #htmx-modal-body via JS. #}
 
 <p class="text-muted small mb-3">Comparing the module currently in NetBox with the LibreNMS inventory data.</p>
 
@@ -61,7 +61,7 @@
 {% endif %}
 
 <div class="d-flex gap-2 justify-content-end flex-wrap mt-3">
-    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+    <button type="button" class="btn btn-secondary" onclick="closeHtmxModal()">Cancel</button>
 
     {% if serial_mismatch and not type_mismatch %}
     {# Quick serial-only update — no delete/recreate needed #}

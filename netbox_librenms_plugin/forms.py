@@ -74,8 +74,7 @@ def _get_librenms_poller_group_choices():
 
     try:
         api = LibreNMSAPI()
-        server_id = api.librenms_url.rstrip("/")
-        cache_key = f"librenms_poller_group_choices_{server_id}"
+        cache_key = f"librenms_poller_group_choices_{api.server_key}"
     except Exception:
         cache_key = "librenms_poller_group_choices"
     cached_choices = cache.get(cache_key)

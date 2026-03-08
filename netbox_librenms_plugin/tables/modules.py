@@ -38,7 +38,13 @@ class LibreNMSModuleTable(tables.Table):
 
     class Meta:
         attrs = {"class": "table table-hover object-list", "id": "librenms-module-table"}
-        row_attrs = {"class": lambda record: record.get("row_class", "")}
+        row_attrs = {
+            "class": lambda record: record.get("row_class", ""),
+            "data-ent-index": lambda record: record.get("ent_physical_index", ""),
+            "data-status": lambda record: record.get("status", ""),
+            "data-depth": lambda record: str(record.get("depth", 0)),
+            "data-item-class": lambda record: record.get("item_class", ""),
+        }
 
     def __init__(self, *args, device=None, server_key="", **kwargs):
         """Initialize table with optional device context."""

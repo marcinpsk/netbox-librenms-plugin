@@ -1506,23 +1506,27 @@ function initializeModuleReplaceButtons() {
                 server_key: serverKey,
             });
 
-            // Show modal with loading state first
-            const modalBody = document.getElementById('moduleReplaceModalBody');
-            if (modalBody) {
-                modalBody.innerHTML =
-                    '<div class="text-center py-3">' +
+            // Show shared HTMX modal with loading state
+            const modalContent = document.getElementById('htmx-modal-content');
+            if (modalContent) {
+                modalContent.innerHTML =
+                    '<div class="modal-header">' +
+                    '<h5 class="modal-title"><i class="mdi mdi-swap-horizontal me-1"></i>Module Mismatch</h5>' +
+                    '<button type="button" class="btn-close" onclick="closeHtmxModal()" aria-label="Close"></button>' +
+                    '</div>' +
+                    '<div class="modal-body text-center py-3" id="htmx-modal-body">' +
                     '<i class="mdi mdi-loading mdi-spin mdi-36px"></i>' +
                     '<p class="mt-2">Loading…</p>' +
                     '</div>';
             }
 
             // Show modal using direct class manipulation (consistent with openBulkVCModal)
-            const replaceModal = document.getElementById('moduleReplaceModal');
-            if (replaceModal) {
-                replaceModal.classList.add('show');
-                replaceModal.style.display = 'block';
-                replaceModal.setAttribute('aria-modal', 'true');
-                replaceModal.removeAttribute('aria-hidden');
+            const htmxModal = document.getElementById('htmx-modal');
+            if (htmxModal) {
+                htmxModal.classList.add('show');
+                htmxModal.style.display = 'block';
+                htmxModal.setAttribute('aria-modal', 'true');
+                htmxModal.removeAttribute('aria-hidden');
                 let backdrop = document.querySelector('.modal-backdrop');
                 if (!backdrop) {
                     backdrop = document.createElement('div');
@@ -1539,11 +1543,13 @@ function initializeModuleReplaceButtons() {
                     return response.text();
                 })
                 .then(html => {
+                    const modalBody = document.getElementById('htmx-modal-body');
                     if (modalBody) {
                         modalBody.innerHTML = html;
                     }
                 })
                 .catch(err => {
+                    const modalBody = document.getElementById('htmx-modal-body');
                     if (modalBody) {
                         const alert = document.createElement('div');
                         alert.className = 'alert alert-danger';
@@ -1557,6 +1563,19 @@ function initializeModuleReplaceButtons() {
                 });
         });
     });
+}
+
+function closeHtmxModal() {
+    const htmxModal = document.getElementById('htmx-modal');
+    if (htmxModal) {
+        htmxModal.classList.remove('show');
+        htmxModal.style.display = 'none';
+        htmxModal.setAttribute('aria-hidden', 'true');
+        htmxModal.removeAttribute('aria-modal');
+        const backdrop = document.querySelector('.modal-backdrop');
+        if (backdrop) backdrop.remove();
+        document.body.classList.remove('modal-open');
+    }
 }
 
 function initializeScripts() {
