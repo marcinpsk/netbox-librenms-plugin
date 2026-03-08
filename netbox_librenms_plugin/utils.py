@@ -116,7 +116,8 @@ def get_librenms_sync_device(device: Device, server_key: str = "default") -> Opt
     # Priority 2 (legacy fallback): Any member whose librenms_id resolves for this server
     # (includes bare-int legacy IDs that are a universal fallback).
     for member in all_members:
-        if get_librenms_device_id(member, server_key, auto_save=False):
+        result = get_librenms_device_id(member, server_key, auto_save=False)
+        if result is not None:
             return member
 
     # Priority 2: Use master device if it has primary IP
@@ -223,27 +224,33 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict:
     """
     from dcim.models import DeviceType
 
-    from netbox_librenms_plugin.models import DeviceTypeMapping
+    try:
+        from netbox_librenms_plugin.models import DeviceTypeMapping
+
+        _has_device_type_mapping = True
+    except ImportError:
+        _has_device_type_mapping = False
 
     if not hardware_name or hardware_name == "-":
         return {"matched": False, "device_type": None, "match_type": None}
 
-    # Check DeviceTypeMapping table first
-    try:
-        mapping = DeviceTypeMapping.objects.get(librenms_hardware__iexact=hardware_name)
-        return {
-            "matched": True,
-            "device_type": mapping.netbox_device_type,
-            "match_type": "mapping",
-        }
-    except DeviceTypeMapping.DoesNotExist:
-        pass
-    except DeviceTypeMapping.MultipleObjectsReturned:
-        logger.warning(
-            "Multiple DeviceTypeMapping entries match hardware %r — skipping mapping lookup; "
-            "resolve the ambiguity by removing duplicate mappings.",
-            hardware_name,
-        )
+    # Check DeviceTypeMapping table first (when available)
+    if _has_device_type_mapping:
+        try:
+            mapping = DeviceTypeMapping.objects.get(librenms_hardware__iexact=hardware_name)
+            return {
+                "matched": True,
+                "device_type": mapping.netbox_device_type,
+                "match_type": "mapping",
+            }
+        except DeviceTypeMapping.DoesNotExist:
+            pass
+        except DeviceTypeMapping.MultipleObjectsReturned:
+            logger.warning(
+                "Multiple DeviceTypeMapping entries match hardware %r — skipping mapping lookup; "
+                "resolve the ambiguity by removing duplicate mappings.",
+                hardware_name,
+            )
 
     # Try part number exact match
     try:

@@ -280,7 +280,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
         context = self._prepare_context(request, obj, interface_name_field, fetch_fresh=False)
         if context is None:
             # No data found; return context with empty table
-            context = {"table": None, "object": obj, "cache_expiry": None}
+            context = {"table": None, "object": obj, "cache_expiry": None, "server_key": self.librenms_api.server_key}
         return context
 
     def post(self, request, pk):
@@ -294,7 +294,14 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMix
             return render(
                 request,
                 self.partial_template_name,
-                {"ip_sync": {"object": obj, "table": None, "cache_expiry": None}},
+                {
+                    "ip_sync": {
+                        "object": obj,
+                        "table": None,
+                        "cache_expiry": None,
+                        "server_key": self.librenms_api.server_key,
+                    }
+                },
             )
 
         messages.success(request, "IP address data refreshed successfully.")
