@@ -221,8 +221,27 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict:
     """
     from dcim.models import DeviceType
 
+    from netbox_librenms_plugin.models import DeviceTypeMapping
+
     if not hardware_name or hardware_name == "-":
         return {"matched": False, "device_type": None, "match_type": None}
+
+    # Check DeviceTypeMapping table first
+    try:
+        mapping = DeviceTypeMapping.objects.get(librenms_hardware__iexact=hardware_name)
+        return {
+            "matched": True,
+            "device_type": mapping.netbox_device_type,
+            "match_type": "mapping",
+        }
+    except DeviceTypeMapping.DoesNotExist:
+        pass
+    except DeviceTypeMapping.MultipleObjectsReturned:
+        logger.warning(
+            "Multiple DeviceTypeMapping entries match hardware %r — skipping mapping lookup; "
+            "resolve the ambiguity by removing duplicate mappings.",
+            hardware_name,
+        )
 
     # Try part number exact match
     try:
