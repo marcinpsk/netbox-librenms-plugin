@@ -111,9 +111,10 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             for link in links
         ]
 
-    def get_device_by_id_or_name(self, remote_device_id, hostname):
+    def get_device_by_id_or_name(self, remote_device_id, hostname, server_key=None):
         """Try to find device in NetBox first by librenms_id custom field, then by name"""
-        server_key = self.librenms_api.server_key
+        if server_key is None:
+            server_key = self.librenms_api.server_key
         # First try matching by LibreNMS ID
         if remote_device_id:
             try:
@@ -147,12 +148,13 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                     f"Multiple devices found with the same name: {hostname}.",
                 )
 
-    def enrich_local_port(self, link, obj):
+    def enrich_local_port(self, link, obj, server_key=None):
         """Add local port URL if interface exists in NetBox"""
         if local_port := link.get("local_port"):
             interface = None
             local_port_id = link.get("local_port_id")
-            server_key = self.librenms_api.server_key
+            if server_key is None:
+                server_key = self.librenms_api.server_key
 
             if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                 chassis_member = get_virtual_chassis_member(obj, local_port)
@@ -177,12 +179,13 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                 link["local_port_url"] = reverse("dcim:interface", args=[interface.pk])
                 link["netbox_local_interface_id"] = interface.pk
 
-    def enrich_remote_port(self, link, device):
+    def enrich_remote_port(self, link, device, server_key=None):
         """Add remote port URL if device and interface exist in NetBox"""
         if remote_port := link.get("remote_port"):
             netbox_remote_interface = None
             librenms_remote_port_id = link.get("remote_port_id")
-            server_key = self.librenms_api.server_key
+            if server_key is None:
+                server_key = self.librenms_api.server_key
 
             # Handle virtual chassis case
             if hasattr(device, "virtual_chassis") and device.virtual_chassis:
@@ -250,9 +253,11 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
 
         return link
 
-    def process_remote_device(self, link, remote_hostname, remote_device_id):
+    def process_remote_device(self, link, remote_hostname, remote_device_id, server_key=None):
         """Process remote device data and add remote device URL if device exists in NetBox"""
-        device, found, error_message = self.get_device_by_id_or_name(remote_device_id, remote_hostname)
+        device, found, error_message = self.get_device_by_id_or_name(
+            remote_device_id, remote_hostname, server_key=server_key
+        )
         if found:
             link.update(
                 {
@@ -260,7 +265,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
                     "netbox_remote_device_id": device.pk,
                 }
             )
-            return self.enrich_remote_port(link, device)
+            return self.enrich_remote_port(link, device, server_key=server_key)
 
         link.update(
             {
@@ -271,14 +276,16 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         )
         return link
 
-    def enrich_links_data(self, links_data, obj):
+    def enrich_links_data(self, links_data, obj, server_key=None):
         """Enrich links data with local and remote port URLs and cable status."""
         for link in links_data:
-            self.enrich_local_port(link, obj)
+            self.enrich_local_port(link, obj, server_key=server_key)
             link["device_id"] = obj.id
 
             if remote_hostname := link.get("remote_device"):
-                link = self.process_remote_device(link, remote_hostname, link.get("remote_device_id"))
+                link = self.process_remote_device(
+                    link, remote_hostname, link.get("remote_device_id"), server_key=server_key
+                )
                 if link.get("netbox_remote_device_id"):
                     link = self.check_cable_status(link)
 
@@ -324,7 +331,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
             links_data = [{k: v for k, v in link.items() if k in _raw_keys} for link in links_data]
 
         # Enrich data in both cases to ensure current NetBox state
-        links_data = self.enrich_links_data(links_data, obj)
+        links_data = self.enrich_links_data(links_data, obj, server_key=server_key)
 
         # Cache after enrichment so verify/sync views read current NetBox state
         cache_key = self.get_cache_key(obj, "links", server_key)
@@ -446,7 +453,7 @@ class SingleCableVerifyView(BaseCableTableView):
                     remote_hostname = link_data.get("remote_device", "")
                     if remote_hostname:
                         link_data = self.process_remote_device(
-                            link_data, remote_hostname, link_data.get("remote_device_id")
+                            link_data, remote_hostname, link_data.get("remote_device_id"), server_key=server_key
                         )
 
                     local_port = link_data.get("local_port", "")
