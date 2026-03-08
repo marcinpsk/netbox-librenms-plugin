@@ -257,10 +257,12 @@ def validate_device_for_import(
         result["resolved_name"] = hostname
         _raw_sysname = libre_device.get("sysName") or ""
         _raw_hostname = libre_device.get("hostname") or ""
-        if use_sysname:
+        if not _raw_sysname and not _raw_hostname:
+            _source = f"device-{librenms_id}"
+        elif use_sysname:
             _source = "sysname" if _raw_sysname else "hostname"
         else:
-            _source = "hostname" if _raw_hostname else ("sysname" if _raw_sysname else "hostname")
+            _source = "hostname" if _raw_hostname else "sysname"
         result["naming_criteria"] = {
             "use_sysname": use_sysname,
             "strip_domain": strip_domain,

@@ -905,6 +905,12 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
             servers_config = {}
         result = []
         for sk, did in cf_value.items():
+            if isinstance(did, bool) or not isinstance(did, (int, str)):
+                continue
+            if isinstance(did, str):
+                if not did.isdigit():
+                    continue
+                did = int(did)
             srv_cfg = servers_config.get(sk)
             # Legacy single-server config: "default" key with no matching servers entry —
             # fall back to root-level display_name in plugins_config.
@@ -985,7 +991,12 @@ class DeviceConflictActionView(
 
         # VirtualMachine is supported for migrate_librenms_id only; all other actions
         # operate on Device-specific fields (serial, device_type) and remain Device-only.
-        if existing_device_type == "virtualmachine" and action == "migrate_librenms_id":
+        if existing_device_type == "virtualmachine":
+            if action != "migrate_librenms_id":
+                return HttpResponse(
+                    f"Action '{escape(action)}' is not supported for virtual machines",
+                    status=400,
+                )
             from virtualization.models import VirtualMachine as NetBoxVM
 
             existing_model: type = NetBoxVM
@@ -1029,6 +1040,8 @@ class DeviceConflictActionView(
             librenms_device_type = validation.get("device_type", {}).get("device_type")
 
         librenms_id = libre_device.get("device_id")
+        if isinstance(librenms_id, bool):
+            return HttpResponse("Invalid or missing LibreNMS device_id in payload", status=400)
         try:
             librenms_id = int(librenms_id)
         except (TypeError, ValueError):
