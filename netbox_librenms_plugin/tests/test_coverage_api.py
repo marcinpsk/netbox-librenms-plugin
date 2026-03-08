@@ -905,7 +905,7 @@ class TestGetPortVlanDetailsHttpError:
         with patch("requests.get", side_effect=exc):
             ok, msg = api.get_port_vlan_details(1)
         assert ok is False
-        assert "HTTP error" in msg or ok is False
+        assert "HTTP error" in msg
 
 
 class TestGetInventoryFilteredNonOkStatus:
@@ -934,7 +934,7 @@ class TestGetDeviceVlansNonOkResponse:
         with patch("requests.get", return_value=mock_resp):
             ok, msg = api.get_device_vlans(1)
         assert ok is False
-        assert "Failed" in msg or ok is False
+        assert "Failed" in msg
 
 
 class TestGetDeviceInventoryNonOkStatus:

@@ -333,6 +333,14 @@ def update_vc_member_suggested_names(vc_data: dict, master_name: str) -> dict:
     return vc_data
 
 
+def _safe_pos(value) -> int | None:
+    """Return int position or None if not parseable."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def create_virtual_chassis_with_members(master_device: Device, members_info: list, libre_device: dict):
     """
     Create Virtual Chassis and member devices from detection info.
@@ -405,6 +413,14 @@ def create_virtual_chassis_with_members(master_device: Device, members_info: lis
                 # Skip if this is the master's serial (only when both serials are non-empty)
                 if member.get("serial") and member.get("serial") == master_device.serial:
                     continue
+                # Skip blank-serial entries that represent the master slot by position
+                if (
+                    not member.get("serial")
+                    and member.get("position") is not None
+                    and master_device.vc_position is not None
+                    and _safe_pos(member["position"]) == master_device.vc_position
+                ):
+                    continue
 
                 serial = member.get("serial")
 
@@ -465,8 +481,19 @@ def create_virtual_chassis_with_members(master_device: Device, members_info: lis
                 members_created += 1
 
             # Validate member count
+            # Validate member count — exclude master-slot entries with blank serials
             expected_members = len(
-                [m for m in members_info if not (m.get("serial") and m.get("serial") == master_device.serial)]
+                [
+                    m
+                    for m in members_info
+                    if not (m.get("serial") and m.get("serial") == master_device.serial)
+                    and not (
+                        not m.get("serial")
+                        and m.get("position") is not None
+                        and master_device.vc_position is not None
+                        and _safe_pos(m["position"]) == master_device.vc_position
+                    )
+                ]
             )
             if members_created < expected_members:
                 logger.warning(
