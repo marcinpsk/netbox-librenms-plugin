@@ -72,7 +72,7 @@ class TestStaleFieldStripping:
             link["can_create_cable"] = True
             return link
 
-        def fake_process_remote_device(link, hostname, device_id):
+        def fake_process_remote_device(link, hostname, device_id, server_key=None):
             # Simulate successful remote enrichment with fresh IDs
             link["remote_device_url"] = "/dcim/devices/777/"
             link["netbox_remote_device_id"] = 777
@@ -156,7 +156,7 @@ class TestXSSEscaping:
         interface_mock = MagicMock()
         interface_mock.pk = 10
 
-        def fake_process_remote_device(link, hostname, device_id):
+        def fake_process_remote_device(link, hostname, device_id, server_key=None):
             link["remote_device_url"] = "/dcim/devices/2/"
             link["netbox_remote_device_id"] = 2
             link["remote_port_url"] = "/dcim/interfaces/20/"
@@ -219,7 +219,7 @@ class TestXSSEscaping:
         interface_mock = MagicMock()
         interface_mock.pk = 10
 
-        def fake_process_remote_device(link, hostname, device_id):
+        def fake_process_remote_device(link, hostname, device_id, server_key=None):
             # Remote device found — but name is the XSS payload
             link["remote_device_url"] = "/dcim/devices/2/"
             link["netbox_remote_device_id"] = 2
