@@ -747,7 +747,7 @@ class TestValidateDeviceForImportEdgeCases:
         assert result is not None
 
     def test_no_hostname_adds_issue(self):
-        """Line 612: Device with no hostname adds an issue."""
+        """Line 612: when both hostname and sysName are empty, _determine_device_name falls back to device-{id}."""
         from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
 
         libre_device = {
@@ -767,8 +767,11 @@ class TestValidateDeviceForImportEdgeCases:
         finally:
             self._stop_patches(patches)
 
-        # Should have hostname-related issue
+        # _determine_device_name always falls back to "device-{id}" so
+        # "Device has no hostname" issue is not expected here.
         assert isinstance(result, dict)
+        assert "Device has no hostname" not in result.get("issues", [])
+        assert result.get("resolved_name", "").startswith("device-")
 
 
 class TestValidateDeviceMoreEdgeCases:

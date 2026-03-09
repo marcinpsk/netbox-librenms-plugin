@@ -116,7 +116,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, 
         if server_key is None:
             server_key = self.librenms_api.server_key
         # First try matching by LibreNMS ID
-        if remote_device_id:
+        if remote_device_id is not None:
             try:
                 device = Device.objects.get(_librenms_id_q(server_key, remote_device_id))
                 return device, True, None

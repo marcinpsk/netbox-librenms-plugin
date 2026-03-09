@@ -509,3 +509,16 @@ class TestGetLibreNMSDeviceIdStringNormalization:
 
         result = get_librenms_device_id(obj, "default")
         assert result is None
+
+
+class TestFindByLibreNMSId:
+    """Tests for find_by_librenms_id None guard (utils.py)."""
+
+    def test_none_id_returns_none_without_query(self):
+        """find_by_librenms_id(None, ...) must return None without hitting the DB."""
+        from netbox_librenms_plugin.utils import find_by_librenms_id
+
+        model = MagicMock()
+        result = find_by_librenms_id(model, None, server_key="default")
+        assert result is None
+        model.objects.filter.assert_not_called()

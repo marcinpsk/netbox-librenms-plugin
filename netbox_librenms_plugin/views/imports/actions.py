@@ -861,7 +861,7 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
         device_type_synced = True
         librenms_device_type = None
         netbox_device_type = getattr(existing_device, "device_type", None)
-        if librenms_hardware and librenms_hardware != "-" and netbox_device_type is not None:
+        if librenms_hardware and librenms_hardware != "-":
             from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
 
             hw_match = match_librenms_hardware_to_device_type(librenms_hardware)
