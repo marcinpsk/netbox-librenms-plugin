@@ -272,11 +272,11 @@ def _apply_client_filters(devices: List[dict], filters: dict) -> List[dict]:
 
     if filters.get("hostname"):
         hostname_filter = filters["hostname"].lower()
-        filtered = [d for d in filtered if hostname_filter in d.get("hostname", "").lower()]
+        filtered = [d for d in filtered if hostname_filter in (d.get("hostname") or "").lower()]
 
     if filters.get("sysname"):
         sysname_filter = filters["sysname"].lower()
-        filtered = [d for d in filtered if sysname_filter in d.get("sysName", "").lower()]
+        filtered = [d for d in filtered if sysname_filter in (d.get("sysName") or "").lower()]
 
     if filters.get("hardware"):
         hardware_filter = filters["hardware"].lower()

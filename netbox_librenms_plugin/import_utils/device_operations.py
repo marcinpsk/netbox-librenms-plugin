@@ -788,8 +788,6 @@ def import_single_device(
             if rack_id:
                 rack = Rack.objects.select_related("location", "site").filter(id=rack_id).first() or rack
 
-        rack = rack or validation.get("rack", {}).get("rack")
-
         # Validate required fields
         if not site:
             return {

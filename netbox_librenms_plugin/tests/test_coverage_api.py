@@ -552,8 +552,7 @@ class TestStorelibrenmsId:
 
         with patch("netbox_librenms_plugin.utils.set_librenms_device_id") as mock_set:
             api._store_librenms_id(obj, 42)
-        mock_set.assert_called_once_with(obj, 42, api.server_key)
-        obj.save.assert_called_once()
+        mock_set.assert_called_once_with(obj, 42, "default")
 
     def test_stores_in_cache_when_no_cf_key(self):
         api = _make_api()

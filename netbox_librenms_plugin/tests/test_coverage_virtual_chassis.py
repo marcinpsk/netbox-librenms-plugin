@@ -73,8 +73,8 @@ class TestCreateVirtualChassisWithMembersPositionConflict:
         # Two Device.objects.create calls for the two non-master members
         create_calls = mock_Device.objects.create.call_args_list
         positions_used = [c.kwargs.get("vc_position") for c in create_calls]
-        # Both members should get unique positions
-        assert len(set(positions_used)) == len(positions_used)
+        # Both members should get distinct positions: first takes 2, second falls back to 3
+        assert sorted(positions_used) == [2, 3]
 
     @patch("netbox_librenms_plugin.import_utils.virtual_chassis.transaction")
     @patch("netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern")
@@ -117,9 +117,8 @@ class TestCreateVirtualChassisWithMembersPositionConflict:
 
         create_calls = mock_Device.objects.create.call_args_list
         positions_used = [c.kwargs.get("vc_position") for c in create_calls]
-        # positions should be unique and contain 2 and 3
-        assert 2 in positions_used
-        assert 3 in positions_used
+        # First member gets explicit position 2; second (no position) gets 3 after 2 is taken
+        assert sorted(positions_used) == [2, 3]
 
     @patch("netbox_librenms_plugin.import_utils.virtual_chassis.transaction")
     @patch("netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern")
@@ -161,7 +160,8 @@ class TestCreateVirtualChassisWithMembersPositionConflict:
 
         create_calls = mock_Device.objects.create.call_args_list
         positions_used = [c.kwargs.get("vc_position") for c in create_calls]
-        assert 4 in positions_used
+        # Members at 2 and 3 are explicit; the member with no position gets 4
+        assert sorted(positions_used) == [2, 3, 4]
 
     @patch("netbox_librenms_plugin.import_utils.virtual_chassis.transaction")
     @patch("netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern")

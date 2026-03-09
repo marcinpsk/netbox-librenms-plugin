@@ -476,6 +476,15 @@ class TestGetLibreNMSDevicesMoreCoverage:
                     "hardware": "Cisco",
                     "location_id": "5",
                 },
+                {
+                    "device_id": 2,
+                    "type": "network",
+                    "os": "ios",
+                    "hostname": "switch99",
+                    "sysName": "switch99",
+                    "hardware": "Cisco",
+                    "location_id": "5",
+                },
             ],
         )
 
@@ -490,7 +499,8 @@ class TestGetLibreNMSDevicesMoreCoverage:
                 "hardware": "Cisco",
             },
         )
-        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0]["device_id"] == 1
         call_args = api.list_devices.call_args[0][0]
         assert call_args["type"] == "location_id"
         assert call_args["query"] == "5"
