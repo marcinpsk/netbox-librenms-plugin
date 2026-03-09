@@ -150,7 +150,8 @@ class TestGetContextDataVC:
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
         view._librenms_api.librenms_url = "https://x.example.com"
-        view._librenms_api.get_librenms_id.return_value = 42
+        # Note: production code calls get_librenms_device_id() (module-level function),
+        # not self.librenms_api.get_librenms_id(). The patch below is the correct target.
 
         view.get_librenms_device_info = MagicMock(
             return_value={
@@ -204,6 +205,78 @@ class TestGetContextDataVC:
         assert ctx.get("is_vc_member") is True
         assert ctx.get("sync_device_has_librenms_id") is True
         assert ctx.get("sync_device_has_primary_ip") is True
+
+    def test_vc_context_sync_device_has_no_id(self):
+        """VC device where get_librenms_device_id returns None → sync_device_has_librenms_id is False."""
+        view = _make_view()
+        view.librenms_id = 42
+        view._librenms_lookup_device = MagicMock()
+
+        obj = MagicMock()
+        obj.virtual_chassis = MagicMock()
+        obj._meta = MagicMock()
+        obj._meta.model_name = "device"
+
+        sync_device = MagicMock()
+        sync_device.primary_ip = None  # also no IP
+        sync_device._meta.model_name = "device"
+        sync_device.pk = 10
+
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default"
+        view._librenms_api.librenms_url = "https://x.example.com"
+
+        view.get_librenms_device_info = MagicMock(
+            return_value={
+                "found_in_librenms": False,
+                "librenms_device_details": {
+                    "librenms_device_serial": "",
+                    "librenms_device_hardware": "-",
+                    "librenms_device_os": "-",
+                    "librenms_device_version": "-",
+                    "librenms_device_features": "-",
+                    "librenms_device_location": "-",
+                    "librenms_device_hardware_match": None,
+                    "vc_inventory_serials": [],
+                },
+                "mismatched_device": False,
+            }
+        )
+        view.get_interface_context = MagicMock(return_value=None)
+        view.get_cable_context = MagicMock(return_value=None)
+        view.get_ip_context = MagicMock(return_value=None)
+        view.get_vlan_context = MagicMock(return_value=None)
+
+        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device") as mock_sync:
+            mock_sync.return_value = sync_device
+            with patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_device_id") as mock_id:
+                mock_id.return_value = None  # No ID → flag should be False
+                with patch(
+                    "netbox_librenms_plugin.views.base.librenms_sync_view.get_interface_name_field",
+                    return_value="ifName",
+                ):
+                    with patch(
+                        "netbox_librenms_plugin.views.base.librenms_sync_view.BaseLibreNMSSyncView._build_all_server_mappings",
+                        return_value=None,
+                    ):
+                        with patch(
+                            "netbox_librenms_plugin.views.base.librenms_sync_view.BaseLibreNMSSyncView._get_platform_info",
+                            return_value={},
+                        ):
+                            with patch("netbox_librenms_plugin.views.base.librenms_sync_view.AddToLIbreSNMPV1V2"):
+                                with patch("netbox_librenms_plugin.views.base.librenms_sync_view.AddToLIbreSNMPV3"):
+                                    with patch("dcim.models.Manufacturer") as MockMfr:
+                                        MockMfr.objects.all.return_value.order_by.return_value = []
+                                        with patch.object(view, "get_context_data", wraps=view.get_context_data):
+                                            with patch(
+                                                "netbox_librenms_plugin.views.base.librenms_sync_view.LibreNMSAPIMixin.get_context_data",
+                                                return_value={},
+                                            ):
+                                                ctx = view.get_context_data(MagicMock(), obj)
+
+        assert ctx.get("is_vc_member") is True
+        assert ctx.get("sync_device_has_librenms_id") is False
+        assert ctx.get("sync_device_has_primary_ip") is False
 
 
 class TestBuildAllServerMappings:

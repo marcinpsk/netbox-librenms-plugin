@@ -620,6 +620,7 @@ class TestValidateDeviceForImportEdgeCases:
             self._stop_patches(patches)
 
         assert result.get("existing_device") is existing_vm
+        assert result.get("librenms_id_needs_migration") is True
 
     def test_vc_detection_called_for_device_with_api(self):
         """Lines 616-638: VC detection executed when include_vc_detection=True and api provided."""
@@ -746,8 +747,9 @@ class TestValidateDeviceForImportEdgeCases:
         finally:
             self._stop_patches(patches)
 
-        # The IP match should set existing_device to the mock device
+        # The IP match should set existing_device to the mock device and match_type to "primary_ip"
         assert result.get("existing_device") is mock_device
+        assert result.get("existing_match_type") == "primary_ip"
 
     def test_no_hostname_adds_issue(self):
         """When hostname and sysName are both empty, _determine_device_name falls back to device-{id}."""
@@ -873,8 +875,8 @@ class TestValidateDeviceMoreEdgeCases:
                 p.stop()
 
         assert result is not None
-
-    def test_serial_conflict_with_another_device(self):
+        # serial '-' must be treated as empty — no serial mismatch should be flagged
+        assert result.get("serial_action") is None
         """Lines 373-375: incoming serial already used by another device."""
         from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
 
