@@ -3540,7 +3540,7 @@ class TestGetVirtualChassisData:
         assert result["is_stack"] is False
 
     def test_cache_miss_detect_returns_none_stores_empty(self):
-        """When detect returns None, empty VC data is stored and returned."""
+        """When detect returns None (API failure), result is not cached so caller can retry."""
         from unittest.mock import patch
 
         from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
@@ -3559,7 +3559,7 @@ class TestGetVirtualChassisData:
             mock_cache.get.return_value = None
             result = get_virtual_chassis_data(mock_api, 99)
 
-        mock_cache.set.assert_called_once()
+        mock_cache.set.assert_not_called()
         assert result["is_stack"] is False
 
     def test_force_refresh_bypasses_cache(self):

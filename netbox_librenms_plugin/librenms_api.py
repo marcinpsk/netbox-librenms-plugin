@@ -624,9 +624,8 @@ class LibreNMSAPI:
                 verify=self.verify_ssl,
             )
             response.raise_for_status()
-            if response.status_code == 200:
-                ip_data = response.json()["addresses"]
-                return True, ip_data
+            ip_data = response.json()["addresses"]
+            return True, ip_data
         except requests.exceptions.RequestException as e:
             return False, str(e)
 
@@ -682,11 +681,8 @@ class LibreNMSAPI:
                 verify=self.verify_ssl,
             )
             response.raise_for_status()
-
-            if response.status_code == 200:
-                inventory_data = response.json()
-                return True, inventory_data.get("inventory", [])
-            return False, []
+            inventory_data = response.json()
+            return True, inventory_data.get("inventory", [])
         except requests.exceptions.RequestException as e:
             return False, str(e)
 
@@ -714,11 +710,9 @@ class LibreNMSAPI:
                 verify=self.verify_ssl,
             )
             response.raise_for_status()
-
-            if response.status_code == 200:
-                result = response.json()
-                if result.get("status") == "ok":
-                    return True, result.get("get_poller_group", [])
+            result = response.json()
+            if result.get("status") == "ok":
+                return True, result.get("get_poller_group", [])
             return False, []
         except requests.exceptions.RequestException as e:
             return False, str(e)
@@ -764,15 +758,14 @@ class LibreNMSAPI:
             )
             response.raise_for_status()
 
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("status") == "ok":
-                    inventory = data.get("inventory", [])
-                    logger.debug(f"API returned {len(inventory)} items")
+            data = response.json()
+            if data.get("status") == "ok":
+                inventory = data.get("inventory", [])
+                logger.debug(f"API returned {len(inventory)} items")
 
-                    # If we got results or didn't specify filters, return
-                    if inventory or not params:
-                        return True, inventory
+                # If we got results or didn't specify filters, return
+                if inventory or not params:
+                    return True, inventory
 
             # If filtered endpoint returned empty but we have filters,
             # try /all endpoint and filter client-side
@@ -860,10 +853,9 @@ class LibreNMSAPI:
                 verify=self.verify_ssl,
             )
             response.raise_for_status()
-            if response.status_code == 200:
-                result = response.json()
-                if result.get("status") == "ok":
-                    return True, result.get("devices", [])
+            result = response.json()
+            if result.get("status") == "ok":
+                return True, result.get("devices", [])
 
             return False, []
         except requests.exceptions.RequestException as e:
@@ -908,16 +900,13 @@ class LibreNMSAPI:
             )
             response.raise_for_status()
 
-            if response.status_code == 200:
-                result = response.json()
-                if result.get("status") == "ok":
-                    # Filter VLANs by device_id since resources endpoint returns all VLANs
-                    all_vlans = result.get("vlans", [])
-                    device_vlans = [v for v in all_vlans if str(v.get("device_id")) == str(device_id)]
-                    return True, device_vlans
-                return False, result.get("message", "Unexpected response format")
-
-            return False, f"HTTP {response.status_code}"
+            result = response.json()
+            if result.get("status") == "ok":
+                # Filter VLANs by device_id since resources endpoint returns all VLANs
+                all_vlans = result.get("vlans", [])
+                device_vlans = [v for v in all_vlans if str(v.get("device_id")) == str(device_id)]
+                return True, device_vlans
+            return False, result.get("message", "Unexpected response format")
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 404:
                 return False, "VLANs resource not found"

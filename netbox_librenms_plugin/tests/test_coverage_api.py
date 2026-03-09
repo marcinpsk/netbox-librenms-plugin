@@ -303,7 +303,9 @@ class TestGetDeviceVlansErrors:
         api = _make_api()
         mock_resp = MagicMock()
         mock_resp.status_code = 503
-        mock_resp.raise_for_status.return_value = None
+        http_err = requests.exceptions.HTTPError("503 Service Unavailable")
+        http_err.response = mock_resp
+        mock_resp.raise_for_status.side_effect = http_err
         with patch("requests.get", return_value=mock_resp):
             ok, msg = api.get_device_vlans(1)
         assert ok is False
@@ -943,8 +945,7 @@ class TestGetDeviceInventoryNonOkStatus:
         api = _make_api()
         mock_resp = MagicMock()
         mock_resp.status_code = 500
-        mock_resp.raise_for_status.return_value = None
+        mock_resp.raise_for_status.side_effect = requests.exceptions.HTTPError("500 Server Error")
         with patch("requests.get", return_value=mock_resp):
             ok, data = api.get_device_inventory(1)
         assert ok is False
-        assert data == []
