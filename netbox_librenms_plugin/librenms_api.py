@@ -210,21 +210,21 @@ class LibreNMSAPI:
         # Try IP address
         if ip_address:
             librenms_id = self.get_device_id_by_ip(ip_address)
-            if librenms_id:
+            if librenms_id is not None:
                 self._store_librenms_id(obj, librenms_id)
                 return librenms_id
 
         # Try primary IP's DNS name
         if dns_name:
             librenms_id = self.get_device_id_by_hostname(dns_name)
-            if librenms_id:
+            if librenms_id is not None:
                 self._store_librenms_id(obj, librenms_id)
                 return librenms_id
 
         # Try hostname if FQDN
         if hostname:
             librenms_id = self.get_device_id_by_hostname(hostname)
-            if librenms_id:
+            if librenms_id is not None:
                 self._store_librenms_id(obj, librenms_id)
                 return librenms_id
 
