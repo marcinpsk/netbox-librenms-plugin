@@ -182,7 +182,7 @@ class TestGetLibreNMSIdDictServerKey:
     """Tests for get_librenms_id → _store_librenms_id with dict CF (lines 259-262)."""
 
     def test_dict_cf_routes_to_get_librenms_device_id(self):
-        """When CF has a dict 'librenms_id', get_librenms_id uses get_librenms_device_id(obj, server_key, auto_save=False)."""
+        """When CF has a dict 'librenms_id', get_librenms_id uses get_librenms_device_id(obj, server_key)."""
         api = _make_api()
 
         obj = MagicMock()
@@ -198,7 +198,7 @@ class TestGetLibreNMSIdDictServerKey:
                 mock_cache.get.return_value = None
                 result = api.get_librenms_id(obj)
                 assert result is None
-                mock_get_id.assert_called_once_with(obj, "default", auto_save=False)
+                mock_get_id.assert_called_once_with(obj, "default")
 
     def test_store_librenms_id_via_hostname_lookup(self):
         """get_librenms_id reaches _store_librenms_id when CF/cache miss but hostname API hit."""

@@ -192,7 +192,7 @@ class LibreNMSAPI:
         """
         from netbox_librenms_plugin.utils import get_librenms_device_id
 
-        librenms_id = get_librenms_device_id(obj, self.server_key, auto_save=False)
+        librenms_id = get_librenms_device_id(obj, self.server_key)
         if librenms_id is not None:
             return librenms_id
 
