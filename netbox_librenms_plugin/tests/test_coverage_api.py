@@ -720,6 +720,7 @@ class TestAddDeviceWithOptionalFields:
         mock_resp.json.return_value = {"status": "ok", "message": "Device added"}
         with patch("requests.post", return_value=mock_resp) as mock_post:
             ok, msg = api.add_device(data)
+        assert ok is True
         assert "port" in mock_post.call_args[1]["json"]
 
     def test_add_device_with_transport(self):
@@ -730,6 +731,7 @@ class TestAddDeviceWithOptionalFields:
         mock_resp.json.return_value = {"status": "ok", "message": "ok"}
         with patch("requests.post", return_value=mock_resp) as mock_post:
             ok, msg = api.add_device(data)
+        assert ok is True
         assert "transport" in mock_post.call_args[1]["json"]
 
     def test_add_device_with_port_association_mode(self):
@@ -740,6 +742,7 @@ class TestAddDeviceWithOptionalFields:
         mock_resp.json.return_value = {"status": "ok", "message": "ok"}
         with patch("requests.post", return_value=mock_resp) as mock_post:
             ok, msg = api.add_device(data)
+        assert ok is True
         assert "port_association_mode" in mock_post.call_args[1]["json"]
 
     def test_add_device_with_poller_group(self):
@@ -750,6 +753,7 @@ class TestAddDeviceWithOptionalFields:
         mock_resp.json.return_value = {"status": "ok", "message": "ok"}
         with patch("requests.post", return_value=mock_resp) as mock_post:
             ok, msg = api.add_device(data)
+        assert ok is True
         assert "poller_group" in mock_post.call_args[1]["json"]
 
 

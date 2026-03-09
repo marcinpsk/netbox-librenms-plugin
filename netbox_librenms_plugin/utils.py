@@ -263,6 +263,7 @@ def match_librenms_hardware_to_device_type(hardware_name: str) -> dict:
                 "resolve the ambiguity by removing duplicate mappings.",
                 hardware_name,
             )
+            return None  # Fail closed: don't silently fall through to unrelated match
 
     # Try part number exact match
     try:
@@ -544,7 +545,7 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
             return None
         if auto_save:
             obj.custom_field_data["librenms_id"] = int_id
-            obj.save()
+            obj.save(update_fields=["custom_field_data"])
         return int_id
     if isinstance(cf_value, dict):
         value = cf_value.get(server_key)
@@ -559,7 +560,7 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
             if auto_save:
                 cf_value[server_key] = value
                 obj.custom_field_data["librenms_id"] = cf_value
-                obj.save()
+                obj.save(update_fields=["custom_field_data"])
             return value
         if isinstance(value, int):
             return value
@@ -653,6 +654,10 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
         return None
     if isinstance(librenms_id, bool):
         return None
+    try:
+        librenms_id = int(librenms_id)
+    except (ValueError, TypeError):
+        pass  # keep original; string queries will still match string-stored IDs
     q = Q(**{f"custom_field_data__librenms_id__{server_key}": librenms_id})
     # Also match when the namespaced value was stored as a string (e.g. {"production": "42"}).
     q |= Q(**{f"custom_field_data__librenms_id__{server_key}": str(librenms_id)})

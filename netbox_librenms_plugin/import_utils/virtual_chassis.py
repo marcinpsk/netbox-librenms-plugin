@@ -234,7 +234,9 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
             # Generate suggested name if we have master name.
             # position is already 1-based, so pass it directly (no +1).
             if master_name:
-                member_data["suggested_name"] = _generate_vc_member_name(master_name, position, pattern=vc_name_pattern)
+                member_data["suggested_name"] = _generate_vc_member_name(
+                    master_name, position, serial=member_data.get("serial"), pattern=vc_name_pattern
+                )
             else:
                 member_data["suggested_name"] = f"Member-{position}"
 
@@ -435,7 +437,7 @@ def create_virtual_chassis_with_members(
 
             for member in members_info:
                 # Skip if this is the master's serial (only when both serials are non-empty)
-                if member.get("serial") and member.get("serial") == master_device.serial:
+                if member.get("serial") and str(member["serial"]).strip() == str(master_device.serial or "").strip():
                     continue
                 # Skip blank-serial entries that represent the master slot by position
                 if (

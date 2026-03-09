@@ -45,6 +45,7 @@ The test suite covers all major plugin functionality. Tests are organized by the
 | [test_permissions.py](../../netbox_librenms_plugin/tests/test_permissions.py) | Permission enforcement—mixin contracts, object-level permissions, and write guards |
 | [test_vm_operations.py](../../netbox_librenms_plugin/tests/test_vm_operations.py) | VM operations—virtual machine sync, interface handling, and VM-specific views |
 | [test_integration_sync.py](../../netbox_librenms_plugin/tests/test_integration_sync.py) | Integration tests—API client against local mock HTTP server |
+| [test_integration_virtual_chassis.py](../../netbox_librenms_plugin/tests/test_integration_virtual_chassis.py) | Integration tests—VC detection, negative cache, multi-server cache isolation |
 | [test_view_wiring.py](../../netbox_librenms_plugin/tests/test_view_wiring.py) | Smoke tests—view class MRO, mixin wiring, permission contracts, and template syntax |
 
 Supporting files:

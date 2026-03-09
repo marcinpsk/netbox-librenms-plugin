@@ -311,7 +311,7 @@ class TestMatchLibrenmsHardwareDeviceTypeMappingPaths:
         assert result["match_type"] == "mapping"
 
     def test_device_type_mapping_multiple_returns_logs_warning(self):
-        """DeviceTypeMapping.MultipleObjectsReturned → logs warning and skips mapping."""
+        """DeviceTypeMapping.MultipleObjectsReturned → logs warning and returns None (fail closed)."""
         from netbox_librenms_plugin.utils import match_librenms_hardware_to_device_type
 
         DoesNotExist = type("DoesNotExist", (Exception,), {})
@@ -332,7 +332,7 @@ class TestMatchLibrenmsHardwareDeviceTypeMappingPaths:
                 MockDT.objects.get.side_effect = dt_DoesNotExist("no match")
                 result = match_librenms_hardware_to_device_type("Ambiguous Hardware")
 
-        assert result["matched"] is False
+        assert result is None
 
 
 class TestMatchLibrenmsHardwareDeviceTypeMultipleReturned:
