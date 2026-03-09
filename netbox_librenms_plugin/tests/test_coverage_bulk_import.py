@@ -714,7 +714,7 @@ class TestRefreshExistingDevice:
 
         assert validation["existing_device"] is None
         assert validation["existing_match_type"] is None
-        assert validation["device_role"] == {}
+        assert validation["device_role"] == {"found": False, "role": None}
         assert validation["can_import"] is True  # no issues
         assert validation["is_ready"] is False  # device_role.found is now missing
 
