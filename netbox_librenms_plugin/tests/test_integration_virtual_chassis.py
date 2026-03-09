@@ -641,9 +641,127 @@ class TestPrefetchVCHTTP:
             ):
                 prefetch_vc_data_for_devices(api, [80, 81])
 
-        # At least the VC device (80) should have been cached
-        # Non-VC devices are not cached (detect returns None for them)
-        assert len(cache_store) >= 1
+        # Both the VC device (80) and the non-VC device (81) should be cached.
+        # Non-VC devices get an empty_virtual_chassis_data() cached so prefetch
+        # suppresses repeated API hits on subsequent renders.
+        assert len(cache_store) == 2
+
+
+class TestNegativeVCCaching:
+    """Negative results (non-stack, API errors) must be cached to suppress repeated hits."""
+
+    def test_non_vc_device_result_is_cached(self, mock_server):
+        """Single device (not a stack) → detect returns None → empty result cached."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+
+        api = _make_api(mock_server.url)
+        device_id = 200
+
+        mock_server.device_info_response(device_id=device_id, hostname="single-sw")
+        root_items = [_stack_root(index=1)]
+        member_items = [_chassis(100, "SN-ONLY", position=1)]  # 1 chassis only → not VC
+        mock_server.vc_inventory_callable(device_id, root_items, {1: member_items})
+
+        cache_store = {}
+
+        def mock_cache_set(key, val, timeout=None):
+            cache_store[key] = val
+
+        def mock_cache_get(key):
+            return cache_store.get(key)
+
+        with patch("netbox_librenms_plugin.import_utils.virtual_chassis.cache") as mock_cache:
+            mock_cache.get.side_effect = mock_cache_get
+            mock_cache.set.side_effect = mock_cache_set
+            with patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+                return_value="{master}-m{position}",
+            ):
+                result = get_virtual_chassis_data(api, device_id)
+
+        assert result is not None
+        assert result.get("is_stack") is False
+        assert result.get("member_count") == 0
+        # The empty result must have been written to cache so a second call is a hit.
+        assert len(cache_store) == 1
+        cached = list(cache_store.values())[0]
+        assert cached.get("is_stack") is False
+
+    def test_api_error_result_is_cached(self, mock_server):
+        """API 500 on inventory → detect returns None → empty result still cached."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+
+        api = _make_api(mock_server.url)
+        device_id = 201
+
+        # Register a 500 for the root inventory call
+        mock_server.routes[f"/api/v0/inventory/{device_id}"] = (500, {"status": "error", "message": "internal"})
+
+        cache_store = {}
+
+        def mock_cache_set(key, val, timeout=None):
+            cache_store[key] = val
+
+        def mock_cache_get(key):
+            return cache_store.get(key)
+
+        with patch("netbox_librenms_plugin.import_utils.virtual_chassis.cache") as mock_cache:
+            mock_cache.get.side_effect = mock_cache_get
+            mock_cache.set.side_effect = mock_cache_set
+            with patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+                return_value="{master}-m{position}",
+            ):
+                result = get_virtual_chassis_data(api, device_id)
+
+        assert result is not None
+        assert result.get("is_stack") is False
+        # Even API failures get cached to suppress repeated hits until TTL expires.
+        assert len(cache_store) == 1
+
+    def test_force_refresh_bypasses_negative_cache(self, mock_server):
+        """force_refresh=True re-fetches even when a negative result is cached."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+
+        api = _make_api(mock_server.url)
+        device_id = 202
+
+        mock_server.device_info_response(device_id=device_id, hostname="single-sw-202")
+        root_items = [_stack_root(index=1)]
+        member_items = [_chassis(100, "SN-202", position=1)]  # 1 chassis → not VC
+        mock_server.vc_inventory_callable(device_id, root_items, {1: member_items})
+
+        # Pre-populate cache with an empty (negative) result.
+        empty_cached = {"is_stack": False, "member_count": 0, "members": [], "detection_error": None}
+
+        call_count = {"n": 0}
+
+        def mock_cache_get(key):
+            return empty_cached  # always returns cached negative
+
+        cache_set_calls = []
+
+        def mock_cache_set(key, val, timeout=None):
+            cache_set_calls.append((key, val))
+            call_count["n"] += 1
+
+        with patch("netbox_librenms_plugin.import_utils.virtual_chassis.cache") as mock_cache:
+            mock_cache.get.side_effect = mock_cache_get
+            mock_cache.set.side_effect = mock_cache_set
+            with patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+                return_value="{master}-m{position}",
+            ):
+                # Normal call — should use cache, NOT call set again
+                result_cached = get_virtual_chassis_data(api, device_id)
+                assert call_count["n"] == 0  # no new set; cache hit returned
+
+                # force_refresh=True — must bypass cache and re-fetch + re-cache
+                result_fresh = get_virtual_chassis_data(api, device_id, force_refresh=True)
+                assert call_count["n"] == 1  # set called once for the re-fetch
+
+        assert result_cached.get("is_stack") is False
+        assert result_fresh.get("is_stack") is False
 
 
 class TestVCPortFetch:
