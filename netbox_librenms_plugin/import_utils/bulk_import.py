@@ -12,7 +12,7 @@ from ..utils import find_by_librenms_id
 from .cache import get_cache_metadata_key, get_import_device_cache_key, get_validated_device_cache_key
 from .device_operations import import_single_device, validate_device_for_import
 from .filters import get_librenms_devices_for_import
-from .permissions import require_permissions
+from .permissions import check_user_permissions, require_permissions
 from .virtual_chassis import (
     create_virtual_chassis_with_members,
     empty_virtual_chassis_data,
@@ -232,9 +232,21 @@ def bulk_import_devices_shared(
                         else:
                             vc_domain = f"librenms-{device_id}"
 
+                    # Guard VC creation with its own permission check — the upfront check
+                    # only covers add_device/change_device; VirtualChassis needs a separate perm.
+                    has_vc_perm, missing_vc_perms = check_user_permissions(user, ["dcim.add_virtualchassis"])
+                    if not has_vc_perm:
+                        warn_msg = (
+                            f"Skipping VC creation for device {device_id}: "
+                            f"missing permissions: {', '.join(missing_vc_perms)}"
+                        )
+                        if job and job.logger:
+                            job.logger.warning(warn_msg)
+                        else:
+                            logger.warning(warn_msg)
                     # Only create VC if we haven't processed this stack yet
                     # Add to set BEFORE attempting creation to prevent race condition
-                    if vc_domain not in processed_vc_domains:
+                    elif vc_domain not in processed_vc_domains:
                         processed_vc_domains.add(vc_domain)
                         try:
                             vc = create_virtual_chassis_with_members(

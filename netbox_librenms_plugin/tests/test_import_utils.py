@@ -4198,6 +4198,105 @@ class TestBulkImportCancellation:
 
 
 # ---------------------------------------------------------------------------
+# Tests for VC permission guard in bulk_import_devices_shared (closes #31)
+# ---------------------------------------------------------------------------
+
+
+class TestBulkImportVCPermission:
+    """Test that dcim.add_virtualchassis is checked before creating a VirtualChassis."""
+
+    def _make_stack_validation(self):
+        from unittest.mock import MagicMock
+
+        v = MagicMock()
+        v.get.side_effect = lambda k, d=None: {
+            "is_ready": True,
+            "import_as_vm": False,
+            "existing_device": None,
+            "virtual_chassis": {
+                "is_stack": True,
+                "members": [
+                    {"serial": "SN-A", "position": 1},
+                    {"serial": "SN-B", "position": 2},
+                ],
+            },
+        }.get(k, d)
+        return v
+
+    def test_vc_creation_skipped_without_vc_permission(self):
+        """User lacks dcim.add_virtualchassis → VC skipped, device import still succeeds (closes #31)."""
+        from unittest.mock import MagicMock, patch
+
+        mock_device = MagicMock()
+        user = MagicMock()
+        user.has_perm.side_effect = lambda p: p != "dcim.add_virtualchassis"
+
+        with (
+            patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions"),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI"),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import",
+                return_value=self._make_stack_validation(),
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.import_single_device",
+                return_value={"success": True, "device": mock_device, "message": "ok", "is_vm": False},
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.create_virtual_chassis_with_members",
+            ) as mock_create_vc,
+        ):
+            from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+
+            result = bulk_import_devices_shared(
+                device_ids=[1],
+                user=user,
+                libre_devices_cache={1: {"device_id": 1, "hostname": "sw"}},
+            )
+
+        mock_create_vc.assert_not_called()
+        assert len(result["success"]) == 1
+        assert result["virtual_chassis_created"] == 0
+
+    def test_vc_creation_proceeds_with_vc_permission(self):
+        """User has dcim.add_virtualchassis → VC creation proceeds normally."""
+        from unittest.mock import MagicMock, patch
+
+        mock_device = MagicMock()
+        mock_vc = MagicMock()
+        mock_vc.name = "VC-Stack"
+        user = MagicMock()
+        user.has_perm.return_value = True
+
+        with (
+            patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions"),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI"),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import",
+                return_value=self._make_stack_validation(),
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.import_single_device",
+                return_value={"success": True, "device": mock_device, "message": "ok", "is_vm": False},
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.create_virtual_chassis_with_members",
+                return_value=mock_vc,
+            ) as mock_create_vc,
+        ):
+            from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+
+            result = bulk_import_devices_shared(
+                device_ids=[1],
+                user=user,
+                libre_devices_cache={1: {"device_id": 1, "hostname": "sw"}},
+            )
+
+        mock_create_vc.assert_called_once()
+        assert result["virtual_chassis_created"] == 1
+
+
+# ---------------------------------------------------------------------------
 # Tests for DeviceValidationDetailsView._build_id_server_info
 # ---------------------------------------------------------------------------
 
