@@ -445,6 +445,86 @@ class TestBulkImportDevicesShared:
         assert result["virtual_chassis_created"] == 0
         mock_create_vc.assert_called_once()
 
+    def test_vc_creation_skipped_without_vc_permission(self):
+        """User lacks dcim.add_virtualchassis → VC skipped, device import still succeeds (closes #31)."""
+        libre_cache = {1: {"device_id": 1, "hostname": "test"}}
+        validation = _make_validation()
+        validation["virtual_chassis"] = {
+            "is_stack": True,
+            "members": [{"serial": "SN001", "position": 1}, {"serial": "SN002", "position": 2}],
+        }
+
+        user = MagicMock()
+        user.has_perm.side_effect = lambda p: p != "dcim.add_virtualchassis"
+
+        with (
+            patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions"),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI"),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import",
+                return_value=validation,
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.import_single_device",
+                return_value=_make_import_result(),
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.create_virtual_chassis_with_members",
+            ) as mock_create_vc,
+        ):
+            from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+
+            result = bulk_import_devices_shared(
+                device_ids=[1],
+                user=user,
+                libre_devices_cache=libre_cache,
+            )
+
+        mock_create_vc.assert_not_called()
+        assert len(result["success"]) == 1
+        assert result["virtual_chassis_created"] == 0
+
+    def test_vc_creation_proceeds_with_vc_permission(self):
+        """User has dcim.add_virtualchassis → VC creation proceeds normally."""
+        libre_cache = {1: {"device_id": 1, "hostname": "test"}}
+        mock_vc = MagicMock()
+        mock_vc.name = "VC-Stack"
+        validation = _make_validation()
+        validation["virtual_chassis"] = {
+            "is_stack": True,
+            "members": [{"serial": "SN001", "position": 1}, {"serial": "SN002", "position": 2}],
+        }
+
+        user = MagicMock()
+        user.has_perm.return_value = True  # all perms granted
+
+        with (
+            patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions"),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI"),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import",
+                return_value=validation,
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.import_single_device",
+                return_value=_make_import_result(),
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.create_virtual_chassis_with_members",
+                return_value=mock_vc,
+            ) as mock_create_vc,
+        ):
+            from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+
+            result = bulk_import_devices_shared(
+                device_ids=[1],
+                user=user,
+                libre_devices_cache=libre_cache,
+            )
+
+        mock_create_vc.assert_called_once()
+        assert result["virtual_chassis_created"] == 1
+
     def test_vc_no_member_serials_uses_device_id_domain(self):
         """Members with no valid serials → vc_domain falls back to device_id (lines 219-221)."""
         libre_cache = {1: {"device_id": 1, "hostname": "test"}}
