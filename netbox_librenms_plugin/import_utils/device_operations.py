@@ -494,18 +494,19 @@ def validate_device_for_import(
 
         # Validate based on import type (Device or VM)
         if import_as_vm:
-            # 2. For VMs: Validate Cluster (required) - Must be manually selected
-            result["cluster"]["found"] = False
-            result["issues"].append("Cluster must be manually selected before importing as VM")
-            # Provide list of available clusters for user selection (cached)
-            cache_key = "librenms_import_all_clusters"
-            all_clusters = cache.get(cache_key)
-            if all_clusters is None:
-                all_clusters = list(Cluster.objects.all())
-                # Use API cache timeout if available, otherwise use default 5 minutes
-                cache_timeout = api.cache_timeout if api else 300
-                cache.set(cache_key, all_clusters, cache_timeout)
-            result["cluster"]["available_clusters"] = all_clusters
+            if not result.get("existing_device"):
+                # 2. For new VMs: Validate Cluster (required) - Must be manually selected
+                result["cluster"]["found"] = False
+                result["issues"].append("Cluster must be manually selected before importing as VM")
+                # Provide list of available clusters for user selection (cached)
+                cache_key = "librenms_import_all_clusters"
+                all_clusters = cache.get(cache_key)
+                if all_clusters is None:
+                    all_clusters = list(Cluster.objects.all())
+                    # Use API cache timeout if available, otherwise use default 5 minutes
+                    cache_timeout = api.cache_timeout if api else 300
+                    cache.set(cache_key, all_clusters, cache_timeout)
+                result["cluster"]["available_clusters"] = all_clusters
 
             # Skip device-specific validations for VMs
             result["site"]["found"] = True  # Not required for VMs
@@ -557,11 +558,12 @@ def validate_device_for_import(
                     for dt in all_device_types
                 ]
 
-            # 4. DeviceRole (required) - Must be manually selected by user
-            logger.debug(f"[{hostname}] Issues BEFORE adding role issue: {result['issues']}")
-            result["device_role"]["found"] = False
-            result["issues"].append("Device role must be manually selected before import")
-            logger.debug(f"[{hostname}] Issues AFTER adding role issue: {result['issues']}")
+            if not result.get("existing_device"):
+                # 4. DeviceRole (required for new devices) - Must be manually selected
+                logger.debug(f"[{hostname}] Issues BEFORE adding role issue: {result['issues']}")
+                result["device_role"]["found"] = False
+                result["issues"].append("Device role must be manually selected before import")
+                logger.debug(f"[{hostname}] Issues AFTER adding role issue: {result['issues']}")
             # Provide list of available roles for user selection (cached)
             cache_key = "librenms_import_all_roles"
             all_roles = cache.get(cache_key)
