@@ -509,7 +509,8 @@ def process_device_filters(
     # Validate each device
     validated_devices = []
     total = len(libre_devices)
-    api_for_validation = api if vc_detection_enabled else None
+    # Always pass api so validate_device_for_import can run hardware/chassis lookups.
+    # vc_detection_enabled only gates VC-specific paths inside that function.
 
     if job:
         job.logger.info(f"Starting validation of {total} devices")
@@ -599,7 +600,7 @@ def process_device_filters(
         try:
             validation = validate_device_for_import(
                 device,
-                api=api_for_validation,
+                api=api,
                 include_vc_detection=vc_detection_enabled,
                 force_vc_refresh=clear_cache,
                 server_key=api.server_key,
