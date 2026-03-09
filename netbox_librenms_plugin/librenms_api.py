@@ -193,13 +193,13 @@ class LibreNMSAPI:
         from netbox_librenms_plugin.utils import get_librenms_device_id
 
         librenms_id = get_librenms_device_id(obj, self.server_key, auto_save=False)
-        if librenms_id:
+        if librenms_id is not None:
             return librenms_id
 
         # Check cache
         cache_key = self._get_cache_key(obj)
         librenms_id = cache.get(cache_key)
-        if librenms_id:
+        if librenms_id is not None:
             return librenms_id
 
         # Determine dynamically from API
@@ -625,9 +625,11 @@ class LibreNMSAPI:
             )
             response.raise_for_status()
             data = response.json()
-            if not isinstance(data, dict) or "addresses" not in data:
-                return False, "Unexpected response format: missing 'addresses' key"
-            return True, data["addresses"]
+            addresses = data.get("addresses") if isinstance(data, dict) else None
+            if not isinstance(addresses, list):
+                message = data.get("message") if isinstance(data, dict) else None
+                return False, message or "Unexpected response format: 'addresses' must be a list"
+            return True, addresses
         except requests.exceptions.RequestException as e:
             return False, str(e)
 

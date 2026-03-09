@@ -349,7 +349,9 @@ def _safe_pos(value) -> int | None:
         return None
 
 
-def create_virtual_chassis_with_members(master_device: Device, members_info: list, libre_device: dict) -> VirtualChassis:
+def create_virtual_chassis_with_members(
+    master_device: Device, members_info: list, libre_device: dict
+) -> VirtualChassis:
     """
     Create Virtual Chassis and member devices from detection info.
 

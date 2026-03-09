@@ -123,6 +123,8 @@ class TestCreateVirtualChassisWithMembersPositionConflict:
         positions_used = [c.kwargs.get("vc_position") for c in create_calls]
         # First member gets explicit position 2; second (no position) gets 3 after 2 is taken
         assert sorted(positions_used) == [2, 3]
+        actual_entries = sorted([(c.kwargs.get("serial"), c.kwargs.get("vc_position")) for c in create_calls])
+        assert actual_entries == [("SN002", 2), ("SN003", 3)]
 
     @patch("netbox_librenms_plugin.import_utils.virtual_chassis.transaction")
     @patch("netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern")
@@ -166,6 +168,8 @@ class TestCreateVirtualChassisWithMembersPositionConflict:
         positions_used = [c.kwargs.get("vc_position") for c in create_calls]
         # Members at 2 and 3 are explicit; the member with no position gets 4
         assert sorted(positions_used) == [2, 3, 4]
+        actual_entries = sorted([(c.kwargs.get("serial"), c.kwargs.get("vc_position")) for c in create_calls])
+        assert actual_entries == [("SN002", 2), ("SN003", 3), ("SN004", 4)]
 
     @patch("netbox_librenms_plugin.import_utils.virtual_chassis.transaction")
     @patch("netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern")
