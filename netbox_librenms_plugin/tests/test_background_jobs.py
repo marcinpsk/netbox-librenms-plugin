@@ -225,6 +225,7 @@ class TestFilterDevicesJob:
 
         mock_api = MagicMock()
         mock_api.cache_timeout = 300
+        mock_api.server_key = "secondary"
         mock_api_class.return_value = mock_api
         mock_process.return_value = [{"device_id": 1, "hostname": "test1"}]
 
@@ -251,6 +252,7 @@ class TestFilterDevicesJob:
 
         mock_api = MagicMock()
         mock_api.cache_timeout = 300
+        mock_api.server_key = "secondary"
         mock_api_class.return_value = mock_api
 
         mock_process.return_value = [

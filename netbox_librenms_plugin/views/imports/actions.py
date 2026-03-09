@@ -496,6 +496,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             return HttpResponse("Invalid device identifier", status=400)
 
         use_sysname, strip_domain = _resolve_naming_preferences(request)
+        vc_detection_enabled = request.POST.get("enable_vc_detection") in ("on", "true", "1", "True")
         sync_options = {
             "sync_interfaces": request.POST.get("sync_interfaces") == "on",
             "sync_cables": request.POST.get("sync_cables") == "on",
@@ -581,6 +582,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     vm_imports=vm_imports,
                     server_key=self.librenms_api.server_key,
                     sync_options=sync_options,
+                    vc_detection_enabled=vc_detection_enabled,
                     manual_mappings_per_device=manual_mappings_per_device,
                     libre_devices_cache=libre_devices_cache,
                 )
@@ -643,6 +645,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     sync_options=sync_options,
                     manual_mappings_per_device=manual_mappings_per_device,  # type: ignore
                     libre_devices_cache=libre_devices_cache_sync,
+                    vc_detection_enabled=vc_detection_enabled,
                     user=request.user,  # Pass user for permission checks
                 )
 

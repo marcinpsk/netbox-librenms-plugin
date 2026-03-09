@@ -122,6 +122,10 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
 
         if not validated_devices and device_ids:
             logger.error(f"Job {job_id} cache expired. Processed {len(device_ids)} devices but none in cache.")
+        else:
+            # Mirror the job's naming settings so toggle state matches the cached results
+            self._use_sysname = use_sysname
+            self._strip_domain = strip_domain
 
         return validated_devices
 

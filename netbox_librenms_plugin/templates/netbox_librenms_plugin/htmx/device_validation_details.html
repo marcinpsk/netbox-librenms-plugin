@@ -27,7 +27,7 @@
 
   {# Compute existing device URL once for use throughout #}
   {% if validation.existing_device %}
-    {% if validation.import_as_vm or validation.existing_device.cluster %}
+    {% if existing_device_model_name == "virtualmachine" %}
       {% url 'virtualization:virtualmachine' pk=validation.existing_device.pk as existing_device_url %}
     {% else %}
       {% url 'dcim:device' pk=validation.existing_device.pk as existing_device_url %}

@@ -28,11 +28,11 @@ class AddDeviceToLibreNMSView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         (Device and VirtualMachine share independent PK sequences).
         """
         if object_type == "virtualmachine":
-            return VirtualMachine.objects.get(pk=object_id)
+            return get_object_or_404(VirtualMachine, pk=object_id)
         try:
             return Device.objects.get(pk=object_id)
         except Device.DoesNotExist:
-            return VirtualMachine.objects.get(pk=object_id)
+            return get_object_or_404(VirtualMachine, pk=object_id)
 
     def post(self, request, object_id):
         """Add a device to LibreNMS using the submitted SNMP form."""
