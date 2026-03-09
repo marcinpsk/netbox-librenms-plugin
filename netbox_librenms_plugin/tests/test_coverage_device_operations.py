@@ -919,7 +919,7 @@ class TestValidateDeviceMoreEdgeCases:
             for p in patches:
                 p.stop()
 
-        assert result.get("serial_action") == "conflict" or result is not None
+        assert result.get("serial_action") == "conflict"
 
     def test_both_vm_and_device_with_same_hostname(self):
         """Lines 395-399: both VM and Device have same hostname - ambiguous match."""

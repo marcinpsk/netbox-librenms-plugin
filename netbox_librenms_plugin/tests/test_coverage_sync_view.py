@@ -400,7 +400,7 @@ class TestStripVcPattern:
         with patch("netbox_librenms_plugin.models.LibreNMSSettings", mock_settings_cls, create=True):
             result = BaseLibreNMSSyncView._strip_vc_pattern("switch01-m2")
             # The suffix -m2 should be stripped, returning "switch01"
-            assert result == "switch01" or result is None  # None if no match
+            assert result == "switch01"  # suffix -m2 must be stripped
 
     def test_returns_none_on_exception(self):
         from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView

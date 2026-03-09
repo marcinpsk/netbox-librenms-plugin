@@ -42,8 +42,9 @@ def create_vm_from_librenms(
     cluster = validation["cluster"]["cluster"]
     platform = validation["platform"].get("platform")
 
-    # Determine VM name - use pre-computed name if available (handles strip_domain)
-    vm_name = libre_device.get("_computed_name")
+    # Determine VM name - use pre-computed name if available (handles strip_domain),
+    # falling back to the validated resolved_name before recomputing from raw fields.
+    vm_name = libre_device.get("_computed_name") or validation.get("resolved_name")
     if not vm_name:
         vm_name = _determine_device_name(
             libre_device,
@@ -145,8 +146,8 @@ def bulk_import_vms(
     log = job.logger if job else logger
 
     for idx, vm_id in enumerate(vm_ids, start=1):
-        # Check for job cancellation every 5 VMs
-        if job and idx % 5 == 0:
+        # Check for job cancellation before first VM and every 5 thereafter
+        if job and (idx == 1 or idx % 5 == 0):
             job.job.refresh_from_db()
             job_status = job.job.status
             status_value = job_status.value if hasattr(job_status, "value") else job_status

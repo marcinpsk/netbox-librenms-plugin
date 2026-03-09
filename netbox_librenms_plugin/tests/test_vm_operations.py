@@ -450,7 +450,7 @@ class TestBulkImportVms:
         assert "Connection error" in result["failed"][0]["error"]
 
     def test_job_cancellation_breaks_loop(self):
-        """Loop exits early when job status is 'failed' at the 5th-iteration check."""
+        """Loop exits early when job status is 'failed' at the first-iteration check."""
         from netbox_librenms_plugin.import_utils.vm_operations import bulk_import_vms
 
         mock_api = MagicMock()
@@ -461,20 +461,20 @@ class TestBulkImportVms:
         # Plain string: no .value attribute → status_value == "failed" → break
         mock_job.job.status = "failed"
 
-        # 5 VMs: cancellation check fires at idx=5 (before the 5th VM is processed)
+        # 5 VMs: cancellation check fires at idx=1 (before any VM is processed)
         vm_imports = {i: {} for i in range(1, 6)}
 
         with (
             patch("netbox_librenms_plugin.import_utils.vm_operations.require_permissions"),
             patch(
                 "netbox_librenms_plugin.import_utils.vm_operations.fetch_device_with_cache",
-                return_value=None,  # VMs 1-4 → failed; VM-5 never reached
+                return_value=None,
             ),
         ):
             result = bulk_import_vms(vm_imports, mock_api, job=mock_job)
 
-        # VMs 1-4 added to failed; 5th cancelled before processing
-        assert len(result["failed"]) == 4
+        # Cancellation fires at idx=1 before any VM is processed
+        assert len(result["failed"]) == 0
 
     def test_job_cancellation_with_errored_status(self):
         """Loop also exits for 'errored' job status."""
@@ -498,7 +498,7 @@ class TestBulkImportVms:
         ):
             result = bulk_import_vms(vm_imports, mock_api, job=mock_job)
 
-        assert len(result["failed"]) == 4
+        assert len(result["failed"]) == 0  # Cancellation fires at idx=1, no VMs processed
 
     def test_user_extracted_from_job_when_not_provided(self):
         """User is extracted from job.job.user when the user param is None."""
@@ -627,16 +627,16 @@ class TestBulkImportVms:
         ):
             result = bulk_import_vms(vm_imports, mock_api, job=mock_job)
 
-        assert len(result["failed"]) == 4
+        assert len(result["failed"]) == 0  # Cancellation fires at idx=1, no VMs processed
 
     def test_job_log_info_when_not_cancelled_at_checkpoint(self):
-        """log.info is called at a non-cancelling 5-iteration checkpoint."""
+        """log.info is called at a non-cancelling checkpoint."""
         from netbox_librenms_plugin.import_utils.vm_operations import bulk_import_vms
 
         mock_api = MagicMock()
         mock_api.server_key = "default"
 
-        # Status is "running" at first checkpoint (idx=5), "failed" at second (idx=10)
+        # Status is "running" at checkpoints idx=1 and idx=5, "failed" at idx=10
         statuses = iter(["running", "running", "failed"])
         mock_job = MagicMock()
         mock_job.logger = MagicMock()
@@ -650,7 +650,7 @@ class TestBulkImportVms:
 
         mock_job.job.refresh_from_db.side_effect = _refresh
 
-        # 10 VMs: checkpoint at idx=5 (running → log.info) and idx=10 (failed → break)
+        # 10 VMs: checkpoints at idx=1 (running → log.info), idx=5 (running → log.info), idx=10 (failed → break)
         vm_imports = {i: {} for i in range(1, 11)}
 
         with (
@@ -662,5 +662,5 @@ class TestBulkImportVms:
         ):
             bulk_import_vms(vm_imports, mock_api, job=mock_job)
 
-        # log.info called at idx=5 checkpoint
+        # log.info called at idx=1 checkpoint (not cancelled)
         mock_job.logger.info.assert_called()

@@ -583,6 +583,82 @@ class TestVCLookupDelegation:
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
+    def test_vc_member_with_own_active_id_stays_as_lookup_device(self, mock_sync_device, mock_get_object, mock_render):
+        """A VC member that has its own per-server librenms_id for the active server
+        stays as _librenms_lookup_device when get_librenms_sync_device returns it."""
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+        # Viewed device: member A with its own per-server mapping for the active server
+        member_a = MagicMock()
+        member_a.pk = 1
+        member_a.cf = {"librenms_id": {"default": 42}}
+        member_a.virtual_chassis = MagicMock()
+
+        # get_librenms_sync_device returns member_a itself (it owns the active mapping)
+        mock_get_object.return_value = member_a
+        mock_sync_device.return_value = member_a
+
+        view = object.__new__(BaseLibreNMSSyncView)
+        view.model = MagicMock()
+        api = MagicMock()
+        api.server_key = "default"
+        api.get_librenms_id.return_value = 42
+        view._librenms_api = api
+        view.tab = MagicMock()
+        view.get_context_data = MagicMock(return_value={})
+        mock_render.return_value = MagicMock()
+
+        request = MagicMock()
+        view.get(request, pk=1)
+
+        mock_sync_device.assert_called_once_with(member_a, server_key="default")
+        # Member stays as lookup device because get_librenms_sync_device returned it
+        assert view._librenms_lookup_device is member_a
+        api.get_librenms_id.assert_called_once_with(member_a)
+
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
+    def test_vc_member_without_active_id_delegates_to_primary(self, mock_sync_device, mock_get_object, mock_render):
+        """A VC member with NO per-server librenms_id for the active server delegates
+        to the VC primary returned by get_librenms_sync_device."""
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+        # Viewed device: member with no active-server mapping
+        member = MagicMock()
+        member.pk = 1
+        member.cf = {"librenms_id": {}}
+        member.virtual_chassis = MagicMock()
+
+        # VC primary has the active mapping
+        vc_primary = MagicMock()
+        vc_primary.pk = 99
+        vc_primary.cf = {"librenms_id": {"default": 7}}
+
+        mock_get_object.return_value = member
+        mock_sync_device.return_value = vc_primary
+
+        view = object.__new__(BaseLibreNMSSyncView)
+        view.model = MagicMock()
+        api = MagicMock()
+        api.server_key = "default"
+        api.get_librenms_id.return_value = 7
+        view._librenms_api = api
+        view.tab = MagicMock()
+        view.get_context_data = MagicMock(return_value={})
+        mock_render.return_value = MagicMock()
+
+        request = MagicMock()
+        view.get(request, pk=1)
+
+        mock_sync_device.assert_called_once_with(member, server_key="default")
+        # Lookup device delegates to VC primary
+        assert view._librenms_lookup_device is vc_primary
+        api.get_librenms_id.assert_called_once_with(vc_primary)
+
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
     def test_non_vc_device_skips_sync_device_lookup(self, mock_sync_device, mock_get_object, mock_render):
         """A device without a virtual chassis should not call
         get_librenms_sync_device at all."""

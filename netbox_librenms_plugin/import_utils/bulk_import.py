@@ -380,7 +380,7 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
         match_type = None
 
         # Check by librenms_id custom field first (JSON multi-server format + legacy)
-        if librenms_id:
+        if librenms_id is not None and not isinstance(librenms_id, bool):
             try:
                 new_device = find_by_librenms_id(Model, int(librenms_id), server_key)
                 if new_device:

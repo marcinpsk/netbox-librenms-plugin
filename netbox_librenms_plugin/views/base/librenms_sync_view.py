@@ -196,7 +196,7 @@ class BaseLibreNMSSyncView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 if legacy_url:
                     srv_cfg = {
                         "librenms_url": legacy_url,
-                        "display_name": plugins_cfg.get("display_name") or sk,
+                        "display_name": plugins_cfg.get("display_name") or f"Default Server ({legacy_url})",
                     }
             is_configured = srv_cfg is not None
             # Treat malformed (non-dict) server config entries as unconfigured
