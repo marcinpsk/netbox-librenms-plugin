@@ -686,7 +686,12 @@ class LibreNMSAPI:
             )
             response.raise_for_status()
             inventory_data = response.json()
-            return True, inventory_data.get("inventory", [])
+            inventory = inventory_data.get("inventory") if isinstance(inventory_data, dict) else None
+            if not isinstance(inventory, list):
+                msg = inventory_data.get("message", "") if isinstance(inventory_data, dict) else ""
+                logger.warning(f"Unexpected inventory response for device {device_id}: {inventory_data}")
+                return False, msg or "Unexpected response format: missing 'inventory' list"
+            return True, inventory
         except requests.exceptions.RequestException as e:
             return False, str(e)
 
