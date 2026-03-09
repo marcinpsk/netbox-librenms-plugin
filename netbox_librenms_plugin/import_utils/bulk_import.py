@@ -359,7 +359,7 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 validation["existing_device"] = None
                 validation["existing_match_type"] = None
                 # Clear stale device_role so is_ready is computed from scratch
-                validation["device_role"] = {}
+                validation["device_role"] = {"found": False, "role": None}
                 can_import = not bool(validation.get("issues"))
                 if validation.get("import_as_vm"):
                     # VMs only require a cluster (site/role not mandatory)

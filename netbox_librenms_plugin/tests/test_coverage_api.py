@@ -345,6 +345,12 @@ class TestGetDeviceLinksErrors:
             ok, msg = api.get_device_links(1)
         assert ok is False
 
+    def test_request_exception_base_returns_false(self):
+        api = _make_api()
+        with patch("requests.get", side_effect=requests.exceptions.RequestException("error")):
+            ok, msg = api.get_device_links(1)
+        assert ok is False
+
 
 class TestListDevicesErrors:
     """Tests for list_devices error paths (lines 542-547)."""
@@ -431,6 +437,22 @@ class TestGetPortVlanDetailsErrors:
             ok, msg = api.get_port_vlan_details(1)
         assert ok is False
 
+    def test_request_exception_base_returns_false(self):
+        api = _make_api()
+        with patch("requests.get", side_effect=requests.exceptions.RequestException("error")):
+            ok, msg = api.get_port_vlan_details(1)
+        assert ok is False
+
+    def test_http_404_via_raise_for_status_returns_false(self):
+        api = _make_api()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        http_error = requests.exceptions.HTTPError(response=mock_resp)
+        mock_resp.raise_for_status.side_effect = http_error
+        with patch("requests.get", return_value=mock_resp):
+            ok, msg = api.get_port_vlan_details(1)
+        assert ok is False
+
 
 class TestListDevicesSuccess:
     """Tests for list_devices success (lines 805+)."""
@@ -479,16 +501,6 @@ class TestGetPoller:
         mock_resp.json.return_value = {"status": "error"}
         with patch("requests.get", return_value=mock_resp):
             ok, result = api.get_poller_groups()
-        assert ok is False
-
-
-class TestGetDeviceLinksAdditionalErrors:
-    """Tests for get_device_links error path (lines 606-607)."""
-
-    def test_request_exception_returns_false(self):
-        api = _make_api()
-        with patch("requests.get", side_effect=requests.exceptions.RequestException("error")):
-            ok, msg = api.get_device_links(1)
         assert ok is False
 
 
@@ -645,35 +657,6 @@ class TestParsePortVlanData:
         port_data = {"port_id": 1, "ifName": "Gi0/5", "ifDescr": "GigabitEthernet0/5", "ifVlan": ""}
         result = api.parse_port_vlan_data(port_data, interface_name_field="ifDescr")
         assert result["interface_name"] == "GigabitEthernet0/5"
-
-
-class TestGetPortVlanDetailsAdditionalErrors:
-    """Tests for get_port_vlan_details error paths (lines 970-976)."""
-
-    def test_request_exception_returns_false(self):
-        api = _make_api()
-        with patch("requests.get", side_effect=requests.exceptions.RequestException("error")):
-            ok, msg = api.get_port_vlan_details(1)
-        assert ok is False
-
-    def test_http_404_returns_false(self):
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 404
-        http_error = requests.exceptions.HTTPError(response=mock_resp)
-        mock_resp.raise_for_status.side_effect = http_error
-        with patch("requests.get", return_value=mock_resp):
-            ok, msg = api.get_port_vlan_details(1)
-        assert ok is False
-
-    def test_non_200_returns_false(self):
-        api = _make_api()
-        mock_resp = MagicMock()
-        mock_resp.status_code = 503
-        mock_resp.raise_for_status.return_value = None
-        with patch("requests.get", return_value=mock_resp):
-            ok, msg = api.get_port_vlan_details(1)
-        assert ok is False
 
 
 class TestGetPortByIdErrors:
@@ -880,7 +863,7 @@ class TestGetInventoryFilteredNonOk:
         assert len(data) == 1
 
     def test_empty_inventory_returns_empty(self):
-        """Line 799: when no inventory, returns False."""
+        """Line 799: when response lacks status:ok (even with an empty inventory list), returns False."""
         api = _make_api()
         mock_resp = MagicMock()
         mock_resp.status_code = 200

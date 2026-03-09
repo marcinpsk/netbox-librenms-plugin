@@ -930,7 +930,9 @@ class LibreNMSAPI:
                     v for v in all_vlans if isinstance(v, dict) and str(v.get("device_id")) == str(device_id)
                 ]
                 return True, device_vlans
-            return False, result.get("message", "Unexpected response format")
+            if isinstance(result, dict):
+                return False, result.get("message", "Unexpected response format")
+            return False, "Unexpected response format"
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 404:
                 return False, "VLANs resource not found"

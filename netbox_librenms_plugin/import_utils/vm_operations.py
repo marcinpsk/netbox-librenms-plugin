@@ -15,7 +15,11 @@ logger = logging.getLogger(__name__)
 
 
 def create_vm_from_librenms(
-    libre_device: dict, validation: dict, use_sysname: bool = True, server_key: str = "default"
+    libre_device: dict,
+    validation: dict,
+    use_sysname: bool = True,
+    strip_domain: bool = False,
+    server_key: str = "default",
 ):
     """
     Create a NetBox VirtualMachine from LibreNMS device data.
@@ -49,7 +53,7 @@ def create_vm_from_librenms(
         vm_name = _determine_device_name(
             libre_device,
             use_sysname=use_sysname,
-            strip_domain=False,
+            strip_domain=strip_domain,
             device_id=libre_device.get("device_id"),
         )
 
