@@ -463,7 +463,7 @@ class TestDeviceTypeMappingImportFormInit:
         with patch("netbox.forms.NetBoxModelImportForm.__init__", fake_super_init):
             with patch("netbox_librenms_plugin.forms.DeviceType") as MockDT:
                 MockDT.objects.filter.return_value = mock_filtered
-                form = DeviceTypeMappingImportForm(data={"manufacturer": "Cisco"})
+                DeviceTypeMappingImportForm(data={"manufacturer": "Cisco"})
 
         MockDT.objects.filter.assert_called_once_with(manufacturer__name="Cisco")
         assert mock_dt_field.queryset == mock_filtered
@@ -787,9 +787,7 @@ class TestLibreNMSImportFilterFormInit:
     def test_populate_locations_always_called(self):
         from netbox_librenms_plugin.forms import LibreNMSImportFilterForm
 
-        with patch.object(
-            LibreNMSImportFilterForm, "_populate_librenms_locations"
-        ) as mock_populate:
+        with patch.object(LibreNMSImportFilterForm, "_populate_librenms_locations") as mock_populate:
             LibreNMSImportFilterForm({})
 
         mock_populate.assert_called_once()
@@ -1008,9 +1006,7 @@ class TestPopulateLibreNMSLocations:
             "netbox_librenms_plugin.librenms_api.LibreNMSAPI",
             side_effect=Exception("API init failed"),
         ):
-            with patch(
-                "netbox_librenms_plugin.import_utils.cache.get_location_choices_cache_key"
-            ):
+            with patch("netbox_librenms_plugin.import_utils.cache.get_location_choices_cache_key"):
                 with patch("netbox_librenms_plugin.forms.logger") as mock_logger:
                     # Must not re-raise
                     form._populate_librenms_locations()
@@ -1197,9 +1193,7 @@ class TestDeviceImportConfigFormInit:
         with patch("django.forms.Form.__init__", self._fake_form_init(mock_fields)):
             with patch("dcim.models.Platform") as MockPlatform:
                 MockPlatform.objects.all.return_value = MagicMock()
-                DeviceImportConfigForm(
-                    validation=validation, suggested_site=mock_site_suggested
-                )
+                DeviceImportConfigForm(validation=validation, suggested_site=mock_site_suggested)
 
         assert mock_fields["site"].initial == mock_site_suggested
 
@@ -1228,9 +1222,7 @@ class TestDeviceImportConfigFormInit:
         with patch("django.forms.Form.__init__", self._fake_form_init(mock_fields)):
             with patch("dcim.models.Platform") as MockPlatform:
                 MockPlatform.objects.all.return_value = MagicMock()
-                DeviceImportConfigForm(
-                    validation=validation, suggested_device_type=mock_dt_s
-                )
+                DeviceImportConfigForm(validation=validation, suggested_device_type=mock_dt_s)
 
         assert mock_fields["device_type"].initial == mock_dt_s
 
@@ -1259,9 +1251,7 @@ class TestDeviceImportConfigFormInit:
         with patch("django.forms.Form.__init__", self._fake_form_init(mock_fields)):
             with patch("dcim.models.Platform") as MockPlatform:
                 MockPlatform.objects.all.return_value = MagicMock()
-                DeviceImportConfigForm(
-                    validation=validation, suggested_role=mock_role_s
-                )
+                DeviceImportConfigForm(validation=validation, suggested_role=mock_role_s)
 
         assert mock_fields["device_role"].initial == mock_role_s
 
@@ -1337,9 +1327,7 @@ class TestDeviceImportConfigFormInit:
                 DeviceImportConfigForm(validation={}, libre_device={})
 
         # No initial values set since validation and libre_device are empty
-        mock_fields["site"].initial.__set__ if hasattr(
-            mock_fields["site"].initial, "__set__"
-        ) else None
+        mock_fields["site"].initial.__set__ if hasattr(mock_fields["site"].initial, "__set__") else None
         # Simply verify no exception was raised and the form was created
 
     def test_no_libre_device_no_initial_hostname(self):

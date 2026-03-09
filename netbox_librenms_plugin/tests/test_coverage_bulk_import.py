@@ -6,7 +6,7 @@ Targets the following uncovered lines (from coverage report):
   548-566, 596-598, 604-641, 665, 687-694
 """
 
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -86,9 +86,7 @@ class TestBulkImportDevices:
 
     def test_delegates_to_shared_with_job_none(self):
         """bulk_import_devices must call bulk_import_devices_shared with job=None."""
-        with patch(
-            "netbox_librenms_plugin.import_utils.bulk_import.bulk_import_devices_shared"
-        ) as mock_shared:
+        with patch("netbox_librenms_plugin.import_utils.bulk_import.bulk_import_devices_shared") as mock_shared:
             from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices
 
             expected = {
@@ -179,7 +177,7 @@ class TestBulkImportDevicesShared:
         ):
             from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
 
-            result = bulk_import_devices_shared(
+            bulk_import_devices_shared(
                 device_ids=[1],
                 job=job,
                 libre_devices_cache=libre_cache,
@@ -570,9 +568,7 @@ class TestBulkImportDevicesShared:
             ),
             patch(
                 "netbox_librenms_plugin.import_utils.bulk_import.import_single_device",
-                return_value=_make_import_result(
-                    success=False, device=existing_device, error="Device already exists"
-                ),
+                return_value=_make_import_result(success=False, device=existing_device, error="Device already exists"),
             ),
         ):
             from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
@@ -719,8 +715,8 @@ class TestRefreshExistingDevice:
         assert validation["existing_device"] is None
         assert validation["existing_match_type"] is None
         assert validation["device_role"] == {}
-        assert validation["can_import"] is True   # no issues
-        assert validation["is_ready"] is False    # device_role.found is now missing
+        assert validation["can_import"] is True  # no issues
+        assert validation["is_ready"] is False  # device_role.found is now missing
 
     def test_deleted_vm_recomputes_readiness_from_cluster(self):
         """VM deleted → is_ready reflects cluster.found (lines 354-356)."""
@@ -760,7 +756,7 @@ class TestRefreshExistingDevice:
             mock_VM.objects.filter.return_value.first.return_value = None
             _refresh_existing_device(validation)
 
-        assert validation["can_import"] is False   # has issues
+        assert validation["can_import"] is False  # has issues
         assert validation["is_ready"] is False
 
     # ------------------------------------------------------------------
@@ -878,7 +874,7 @@ class TestRefreshExistingDevice:
         validation = {"existing_device": None, "import_as_vm": False, "resolved_name": None}
 
         with (
-            patch("dcim.models.Device") as mock_Device,
+            patch("dcim.models.Device"),
             patch(
                 "netbox_librenms_plugin.import_utils.bulk_import.find_by_librenms_id",
                 side_effect=Exception("lookup failed"),
@@ -1054,9 +1050,7 @@ class TestProcessDeviceFilters:
                 "netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import",
                 return_value=_make_validation(),
             ),
-            patch(
-                "netbox_librenms_plugin.import_utils.bulk_import.prefetch_vc_data_for_devices"
-            ) as mock_prefetch,
+            patch("netbox_librenms_plugin.import_utils.bulk_import.prefetch_vc_data_for_devices") as mock_prefetch,
             patch("netbox_librenms_plugin.import_utils.bulk_import.empty_virtual_chassis_data", return_value={}),
             patch("netbox_librenms_plugin.import_utils.bulk_import.cache") as mock_cache,
             patch(
@@ -1080,7 +1074,7 @@ class TestProcessDeviceFilters:
 
             from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
 
-            result = process_device_filters(
+            process_device_filters(
                 api,
                 filters={},
                 vc_detection_enabled=True,
@@ -1409,9 +1403,7 @@ class TestProcessDeviceFilters:
                 "netbox_librenms_plugin.import_utils.bulk_import.get_cache_metadata_key",
                 return_value="mkey",
             ),
-            patch(
-                "netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import"
-            ) as mock_validate,
+            patch("netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import") as mock_validate,
         ):
             # First get → device cache hit; second get → metadata (truthy)
             mock_cache.get.side_effect = [cached_entry, MagicMock()]
@@ -1462,9 +1454,7 @@ class TestProcessDeviceFilters:
                 return_value="mkey",
             ),
             # Patch _refresh_existing_device to be a no-op so we can control existing_device
-            patch(
-                "netbox_librenms_plugin.import_utils.bulk_import._refresh_existing_device"
-            ),
+            patch("netbox_librenms_plugin.import_utils.bulk_import._refresh_existing_device"),
         ):
             mock_cache.get.return_value = cached_entry
 
