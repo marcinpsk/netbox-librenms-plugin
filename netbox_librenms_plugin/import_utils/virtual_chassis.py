@@ -381,13 +381,23 @@ def create_virtual_chassis_with_members(
     # original_master_name is still referenced in warning messages inside the atomic block.
     original_master_name = master_device.name
 
+    # Find master's actual VC position from members_info by serial match; default to 1
+    _master_pos = 1
+    if master_device.serial:
+        for _m in members_info:
+            if _m.get("serial") and str(_m["serial"]).strip() == str(master_device.serial).strip():
+                _found_pos = _safe_pos(_m.get("position"))
+                if _found_pos and _found_pos >= 1:
+                    _master_pos = _found_pos
+                break
+
     try:
         with transaction.atomic():
             # Load naming pattern once to avoid a DB query per member
             vc_pattern = _load_vc_member_name_pattern()
             # Rename master device to include position 1 pattern
             master_device_new_name = _generate_vc_member_name(
-                original_master_name, 1, serial=master_device.serial, pattern=vc_pattern
+                original_master_name, _master_pos, serial=master_device.serial, pattern=vc_pattern
             )
 
             # Check if renamed master conflicts with existing device
@@ -411,12 +421,12 @@ def create_virtual_chassis_with_members(
 
             # Update master device
             master_device.virtual_chassis = vc
-            master_device.vc_position = 1  # Master is position 1
+            master_device.vc_position = _master_pos
             master_device.save()
 
             # Create member devices for remaining positions
-            position = 2  # Start at 2 (master is 1)
-            used_positions = {1}  # Master occupies position 1
+            position = _master_pos + 1  # Start after master position
+            used_positions = {_master_pos}  # Master occupies its actual position
             members_created = 0
 
             for member in members_info:

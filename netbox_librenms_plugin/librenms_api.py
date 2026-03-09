@@ -720,8 +720,11 @@ class LibreNMSAPI:
             )
             response.raise_for_status()
             result = response.json()
-            if result.get("status") == "ok":
-                return True, result.get("get_poller_group", [])
+            if isinstance(result, dict) and result.get("status") == "ok":
+                poller_groups = result.get("get_poller_group")
+                if not isinstance(poller_groups, list):
+                    return False, result.get("message") or "Unexpected response format: missing 'get_poller_group' list"
+                return True, poller_groups
             return False, []
         except requests.exceptions.RequestException as e:
             return False, str(e)
@@ -768,7 +771,7 @@ class LibreNMSAPI:
             response.raise_for_status()
 
             data = response.json()
-            if data.get("status") == "ok":
+            if isinstance(data, dict) and data.get("status") == "ok":
                 inventory = data.get("inventory") if isinstance(data, dict) else None
                 if not isinstance(inventory, list):
                     msg = data.get("message") if isinstance(data, dict) else None
@@ -866,7 +869,7 @@ class LibreNMSAPI:
             )
             response.raise_for_status()
             result = response.json()
-            if result.get("status") == "ok":
+            if isinstance(result, dict) and result.get("status") == "ok":
                 devices = result.get("devices") if isinstance(result, dict) else None
                 if not isinstance(devices, list):
                     msg = result.get("message") if isinstance(result, dict) else None
@@ -917,7 +920,7 @@ class LibreNMSAPI:
             response.raise_for_status()
 
             result = response.json()
-            if result.get("status") == "ok":
+            if isinstance(result, dict) and result.get("status") == "ok":
                 all_vlans = result.get("vlans") if isinstance(result, dict) else None
                 if not isinstance(all_vlans, list):
                     msg = result.get("message") if isinstance(result, dict) else None

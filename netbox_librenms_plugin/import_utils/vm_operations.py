@@ -234,7 +234,11 @@ def bulk_import_vms(
 
             # Create VM
             vm = create_vm_from_librenms(
-                libre_device, validation, use_sysname=use_sysname_opt, server_key=api.server_key
+                libre_device,
+                validation,
+                use_sysname=use_sysname_opt,
+                strip_domain=strip_domain_opt,
+                server_key=api.server_key,
             )
 
             result["success"].append(
