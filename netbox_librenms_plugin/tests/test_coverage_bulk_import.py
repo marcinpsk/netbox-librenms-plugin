@@ -687,7 +687,7 @@ class TestRefreshExistingDevice:
             _refresh_existing_device(validation)
 
         assert validation["existing_device"] is refreshed
-        assert validation["device_role"] == {"found": False}
+        assert validation["device_role"] == {"found": False, "role": None}
 
     # ------------------------------------------------------------------
     # Lines 346-365: Existing device was deleted (Device.objects returns None)

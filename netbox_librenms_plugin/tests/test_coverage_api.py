@@ -577,6 +577,7 @@ class TestStorelibrenmsId:
         with patch("netbox_librenms_plugin.utils.set_librenms_device_id") as mock_set:
             api._store_librenms_id(obj, 42)
         mock_set.assert_called_once_with(obj, 42, "default")
+        obj.save.assert_called_once()
 
     def test_stores_in_cache_when_no_cf_key(self):
         api = _make_api()
@@ -979,6 +980,7 @@ class TestMalformedPayloads:
 
     def _ok_resp(self, body: dict):
         mock_resp = MagicMock()
+        mock_resp.status_code = 200
         mock_resp.raise_for_status.return_value = None
         mock_resp.json.return_value = body
         return mock_resp
@@ -1038,3 +1040,10 @@ class TestMalformedPayloads:
         assert ok is True
         assert len(data) == 1
         assert data[0]["vlan_id"] == 10
+
+    def test_get_device_ips_none_addresses(self):
+        """get_device_ips: addresses=None returns (False, ...)."""
+        api = _make_api()
+        with patch("requests.get", return_value=self._ok_resp({"addresses": None})):
+            ok, _ = api.get_device_ips(1)
+        assert ok is False

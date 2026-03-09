@@ -1,5 +1,6 @@
 """Bulk import orchestration for devices and filter processing."""
 
+import hashlib
 import logging
 from typing import List
 
@@ -216,9 +217,20 @@ def bulk_import_devices_shared(
                         for m in vc_data.get("members", [])
                         if (serial := str(m.get("serial") or "").strip()) and serial != "-"
                     )
-                    vc_domain = (
-                        f"librenms-stack-{','.join(member_serials)}" if member_serials else f"librenms-{device_id}"
-                    )
+                    if member_serials:
+                        vc_domain = f"librenms-stack-{','.join(member_serials)}"
+                    else:
+                        # No serials available — build a stable fingerprint from member name/model/position
+                        # so all LibreNMS devices in the same physical stack share the same dedup key.
+                        member_parts = sorted(
+                            f"{m.get('name', '')}/{m.get('model', '')}:{m.get('position', 0)}"
+                            for m in vc_data.get("members", [])
+                        )
+                        if member_parts:
+                            fingerprint = hashlib.md5(",".join(member_parts).encode()).hexdigest()[:12]
+                            vc_domain = f"librenms-stack-{fingerprint}"
+                        else:
+                            vc_domain = f"librenms-{device_id}"
 
                     # Only create VC if we haven't processed this stack yet
                     # Add to set BEFORE attempting creation to prevent race condition
@@ -339,10 +351,8 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 validation["existing_device"] = refreshed
                 if hasattr(refreshed, "role") and refreshed.role:
                     validation.setdefault("device_role", {}).update({"found": True, "role": refreshed.role})
-                else:
-                    # Role was removed since caching — clear stale state so
-                    # is_ready is not computed against a deleted role.
-                    validation["device_role"] = {"found": False}
+                elif not validation.get("import_as_vm"):
+                    validation.setdefault("device_role", {}).update({"found": False, "role": None})
             else:
                 # Device was deleted since caching — recompute readiness to match
                 # validate_device_for_import logic.
@@ -417,6 +427,8 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             validation["is_ready"] = False
             if not import_as_vm and hasattr(new_device, "role") and new_device.role:
                 validation["device_role"] = {"found": True, "role": new_device.role}
+            elif not import_as_vm:
+                validation.setdefault("device_role", {}).update({"found": False, "role": None})
     except Exception as e:
         logger.error(f"Failed to check for newly imported device: {e}")
 
@@ -623,7 +635,7 @@ def process_device_filters(
                 device,
                 api=api,
                 include_vc_detection=vc_detection_enabled,
-                force_vc_refresh=clear_cache,
+                force_vc_refresh=False,
                 server_key=api.server_key,
                 use_sysname=use_sysname,
                 strip_domain=strip_domain,
