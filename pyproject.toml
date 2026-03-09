@@ -64,8 +64,8 @@ ignore = [
 ]
 
 [tool.ruff.lint.mccabe]
-# Flag errors (`C901`) whenever the complexity level exceeds 15.
-# Rule not enforced - only to bump default 10 to more relaxed 15 to allow for manual checks
+# C901 is not in the select list (not enforced by default).
+# Threshold here applies when run with --select C901 manually.
 max-complexity = 15
 
 [tool.ruff.lint.per-file-ignores]
