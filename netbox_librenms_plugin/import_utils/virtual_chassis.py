@@ -432,7 +432,9 @@ def create_virtual_chassis_with_members(
                 ):
                     continue
 
-                serial = member.get("serial")
+                serial = str(member.get("serial") or "").strip()
+                if serial == "-":
+                    serial = ""
 
                 member_rack = master_device.rack
                 member_location = master_device.location or (

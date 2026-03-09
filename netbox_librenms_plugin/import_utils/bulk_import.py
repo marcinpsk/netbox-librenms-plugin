@@ -490,6 +490,23 @@ def process_device_filters(
     else:
         logger.info(f"Found {len(libre_devices)} devices")
 
+    # Check for early cancellation before the expensive VC prefetch
+    if job:
+        try:
+            from django_rq import get_queue
+            from rq.job import Job as RQJob
+
+            queue = get_queue("default")
+            rq_job = RQJob.fetch(str(job.job.job_id), connection=queue.connection)
+            if rq_job.is_failed or rq_job.is_stopped:
+                job.logger.warning("Job was stopped before VC pre-fetch")
+                return _empty_return(return_cache_status)
+        except Exception:
+            job.job.refresh_from_db()
+            if job.job.status in (JobStatusChoices.STATUS_FAILED, JobStatusChoices.STATUS_ERRORED):
+                job.logger.warning("Job was stopped before VC pre-fetch")
+                return _empty_return(return_cache_status)
+
     # Pre-warm VC cache if needed
     if vc_detection_enabled and libre_devices:
         device_ids = [d["device_id"] for d in libre_devices]

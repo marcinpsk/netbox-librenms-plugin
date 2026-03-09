@@ -7,6 +7,7 @@ to a local mock server — no mocking of the detection logic itself.
 Run:
     python -m pytest netbox_librenms_plugin/tests/test_integration_virtual_chassis.py -v
 """
+
 import pytest
 from unittest.mock import patch
 
@@ -88,7 +89,10 @@ class TestDetectVCCiscoStack:
         ]
         mock_server.vc_inventory_callable(device_id, root_items, {1: member_items})
 
-        with patch("netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern", return_value="{master}-m{position}"):
+        with patch(
+            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+            return_value="{master}-m{position}",
+        ):
             result = detect_virtual_chassis_from_inventory(api, device_id)
 
         assert result is not None
@@ -114,7 +118,10 @@ class TestDetectVCCiscoStack:
         ]
         mock_server.vc_inventory_callable(device_id, root_items, {5: member_items})
 
-        with patch("netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern", return_value="{master}-m{position}"):
+        with patch(
+            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+            return_value="{master}-m{position}",
+        ):
             result = detect_virtual_chassis_from_inventory(api, device_id)
 
         assert result is not None
@@ -136,7 +143,10 @@ class TestDetectVCCiscoStack:
         ]
         mock_server.vc_inventory_callable(device_id, root_items, {1: member_items})
 
-        with patch("netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern", return_value="{master}-m{position}"):
+        with patch(
+            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+            return_value="{master}-m{position}",
+        ):
             result = detect_virtual_chassis_from_inventory(api, device_id)
 
         assert result is not None
@@ -175,7 +185,10 @@ class TestDetectVCCiscoStack:
         ]
         mock_server.vc_inventory_callable(device_id, root_items, {1: member_items})
 
-        with patch("netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern", return_value="{master}-m{position}"):
+        with patch(
+            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+            return_value="{master}-m{position}",
+        ):
             result = detect_virtual_chassis_from_inventory(api, device_id)
 
         assert result is not None
@@ -201,7 +214,10 @@ class TestDetectVCCiscoStack:
         ]
         mock_server.vc_inventory_callable(device_id, root_items, {1: member_items})
 
-        with patch("netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern", return_value="{master}-m{position}"):
+        with patch(
+            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+            return_value="{master}-m{position}",
+        ):
             result = detect_virtual_chassis_from_inventory(api, device_id)
 
         assert result is not None
@@ -240,7 +256,10 @@ class TestDetectVCJuniperStyle:
         ]
         mock_server.vc_inventory_callable(device_id, root_items, {10: member_items})
 
-        with patch("netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern", return_value="{master}-m{position}"):
+        with patch(
+            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+            return_value="{master}-m{position}",
+        ):
             result = detect_virtual_chassis_from_inventory(api, device_id)
 
         assert result is not None
@@ -260,10 +279,24 @@ class TestDetectVCStackPreferredOverChassis:
         mock_server.device_info_response(device_id=device_id, hostname="sw-mixed")
         # Root has BOTH stack (index=5) and chassis (index=6)
         root_items = [
-            {"entPhysicalIndex": 5, "entPhysicalClass": "stack", "entPhysicalName": "Stack-0",
-             "entPhysicalSerialNum": "", "entPhysicalModelName": "", "entPhysicalDescr": "", "entPhysicalContainedIn": 0},
-            {"entPhysicalIndex": 6, "entPhysicalClass": "chassis", "entPhysicalName": "Chassis-0",
-             "entPhysicalSerialNum": "", "entPhysicalModelName": "", "entPhysicalDescr": "", "entPhysicalContainedIn": 0},
+            {
+                "entPhysicalIndex": 5,
+                "entPhysicalClass": "stack",
+                "entPhysicalName": "Stack-0",
+                "entPhysicalSerialNum": "",
+                "entPhysicalModelName": "",
+                "entPhysicalDescr": "",
+                "entPhysicalContainedIn": 0,
+            },
+            {
+                "entPhysicalIndex": 6,
+                "entPhysicalClass": "chassis",
+                "entPhysicalName": "Chassis-0",
+                "entPhysicalSerialNum": "",
+                "entPhysicalModelName": "",
+                "entPhysicalDescr": "",
+                "entPhysicalContainedIn": 0,
+            },
         ]
         # Stack index=5 has 2 members, chassis index=6 has 0
         children = {
@@ -272,7 +305,10 @@ class TestDetectVCStackPreferredOverChassis:
         }
         mock_server.vc_inventory_callable(device_id, root_items, children)
 
-        with patch("netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern", return_value="{master}-m{position}"):
+        with patch(
+            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+            return_value="{master}-m{position}",
+        ):
             result = detect_virtual_chassis_from_inventory(api, device_id)
 
         # Must have detected 2 members (via stack index), not 0 (via chassis index)
@@ -295,7 +331,10 @@ class TestDetectVCSingleDevice:
         member_items = [_chassis(100, "SN-ONLY", position=1)]
         mock_server.vc_inventory_callable(device_id, root_items, {1: member_items})
 
-        with patch("netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern", return_value="{master}-m{position}"):
+        with patch(
+            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+            return_value="{master}-m{position}",
+        ):
             result = detect_virtual_chassis_from_inventory(api, device_id)
 
         assert result is None
@@ -309,14 +348,23 @@ class TestDetectVCSingleDevice:
 
         mock_server.device_info_response(device_id=device_id, hostname="plain-router")
         root_items = [
-            {"entPhysicalIndex": 1, "entPhysicalClass": "module", "entPhysicalName": "Main Module",
-             "entPhysicalSerialNum": "SN1", "entPhysicalModelName": "ASR1001-X",
-             "entPhysicalDescr": "ASR1001-X", "entPhysicalContainedIn": 0}
+            {
+                "entPhysicalIndex": 1,
+                "entPhysicalClass": "module",
+                "entPhysicalName": "Main Module",
+                "entPhysicalSerialNum": "SN1",
+                "entPhysicalModelName": "ASR1001-X",
+                "entPhysicalDescr": "ASR1001-X",
+                "entPhysicalContainedIn": 0,
+            }
         ]
         # Register root-only, no children needed
         mock_server.vc_inventory_callable(device_id, root_items, {})
 
-        with patch("netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern", return_value="{master}-m{position}"):
+        with patch(
+            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+            return_value="{master}-m{position}",
+        ):
             result = detect_virtual_chassis_from_inventory(api, device_id)
 
         assert result is None
@@ -334,7 +382,10 @@ class TestDetectVCEdgeCases:
         mock_server.device_info_response(device_id=device_id, hostname="empty-sw")
         mock_server.vc_inventory_callable(device_id, [], {})  # empty root
 
-        with patch("netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern", return_value="{master}-m{position}"):
+        with patch(
+            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+            return_value="{master}-m{position}",
+        ):
             result = detect_virtual_chassis_from_inventory(api, device_id)
 
         assert result is None
@@ -350,7 +401,10 @@ class TestDetectVCEdgeCases:
         # Register 500 for inventory calls
         mock_server.register(f"/api/v0/inventory/{device_id}", {"status": "error"}, status=500)
 
-        with patch("netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern", return_value="{master}-m{position}"):
+        with patch(
+            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+            return_value="{master}-m{position}",
+        ):
             result = detect_virtual_chassis_from_inventory(api, device_id)
 
         assert result is None
@@ -365,12 +419,15 @@ class TestDetectVCEdgeCases:
         mock_server.device_info_response(device_id=device_id, hostname="nosn-sw")
         root_items = [_stack_root(index=1)]
         member_items = [
-            _chassis(100, "", position=1),   # empty serial
+            _chassis(100, "", position=1),  # empty serial
             _chassis(200, "SN-B", position=2),
         ]
         mock_server.vc_inventory_callable(device_id, root_items, {1: member_items})
 
-        with patch("netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern", return_value="{master}-m{position}"):
+        with patch(
+            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+            return_value="{master}-m{position}",
+        ):
             result = detect_virtual_chassis_from_inventory(api, device_id)
 
         assert result is not None
@@ -392,7 +449,10 @@ class TestDetectVCEdgeCases:
         ]
         mock_server.vc_inventory_callable(device_id, root_items, {1: member_items})
 
-        with patch("netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern", return_value="{master}-m{position}"):
+        with patch(
+            "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+            return_value="{master}-m{position}",
+        ):
             result = detect_virtual_chassis_from_inventory(api, device_id)
 
         # Should still detect VC even without device info
@@ -423,7 +483,10 @@ class TestGetVCDataHTTP:
 
         with patch("netbox_librenms_plugin.import_utils.virtual_chassis.cache") as mock_cache:
             mock_cache.get.return_value = None  # cache miss
-            with patch("netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern", return_value="{master}-m{position}"):
+            with patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+                return_value="{master}-m{position}",
+            ):
                 result = get_virtual_chassis_data(api, device_id)
 
         # Should have called cache.set to store result
@@ -471,7 +534,10 @@ class TestGetVCDataHTTP:
 
         with patch("netbox_librenms_plugin.import_utils.virtual_chassis.cache") as mock_cache:
             mock_cache.get.return_value = old_cached
-            with patch("netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern", return_value="{master}-m{position}"):
+            with patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+                return_value="{master}-m{position}",
+            ):
                 result = get_virtual_chassis_data(api, device_id, force_refresh=True)
 
         # Should have fetched fresh data, not used old_cached
@@ -492,7 +558,10 @@ class TestGetVCDataHTTP:
 
         with patch("netbox_librenms_plugin.import_utils.virtual_chassis.cache") as mock_cache:
             mock_cache.get.return_value = None
-            with patch("netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern", return_value="{master}-m{position}"):
+            with patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+                return_value="{master}-m{position}",
+            ):
                 result = get_virtual_chassis_data(api, device_id)
 
         assert result is not None
@@ -528,7 +597,10 @@ class TestPrefetchVCHTTP:
         with patch("netbox_librenms_plugin.import_utils.virtual_chassis.cache") as mock_cache:
             mock_cache.get.side_effect = mock_cache_get
             mock_cache.set.side_effect = mock_cache_set
-            with patch("netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern", return_value="{master}-m{position}"):
+            with patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+                return_value="{master}-m{position}",
+            ):
                 prefetch_vc_data_for_devices(api, [70, 71, 72])
 
         # Cache should have entries for all 3 VC devices
@@ -563,7 +635,10 @@ class TestPrefetchVCHTTP:
         with patch("netbox_librenms_plugin.import_utils.virtual_chassis.cache") as mock_cache:
             mock_cache.get.side_effect = mock_cache_get
             mock_cache.set.side_effect = mock_cache_set
-            with patch("netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern", return_value="{master}-m{position}"):
+            with patch(
+                "netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern",
+                return_value="{master}-m{position}",
+            ):
                 prefetch_vc_data_for_devices(api, [80, 81])
 
         # At least the VC device (80) should have been cached
@@ -580,22 +655,43 @@ class TestVCPortFetch:
 
         vc_ports = [
             {
-                "port_id": 101, "ifName": "GigabitEthernet1/0/1", "ifDescr": "GigabitEthernet1/0/1",
-                "ifType": "ethernetCsmacd", "ifSpeed": 1_000_000_000, "ifAdminStatus": "up",
-                "ifAlias": "uplink-m1", "ifPhysAddress": "aa:bb:cc:dd:ee:01", "ifMtu": 1500,
-                "ifVlan": 1, "ifTrunk": 0,
+                "port_id": 101,
+                "ifName": "GigabitEthernet1/0/1",
+                "ifDescr": "GigabitEthernet1/0/1",
+                "ifType": "ethernetCsmacd",
+                "ifSpeed": 1_000_000_000,
+                "ifAdminStatus": "up",
+                "ifAlias": "uplink-m1",
+                "ifPhysAddress": "aa:bb:cc:dd:ee:01",
+                "ifMtu": 1500,
+                "ifVlan": 1,
+                "ifTrunk": 0,
             },
             {
-                "port_id": 201, "ifName": "GigabitEthernet2/0/1", "ifDescr": "GigabitEthernet2/0/1",
-                "ifType": "ethernetCsmacd", "ifSpeed": 1_000_000_000, "ifAdminStatus": "up",
-                "ifAlias": "uplink-m2", "ifPhysAddress": "aa:bb:cc:dd:ee:02", "ifMtu": 1500,
-                "ifVlan": 1, "ifTrunk": 0,
+                "port_id": 201,
+                "ifName": "GigabitEthernet2/0/1",
+                "ifDescr": "GigabitEthernet2/0/1",
+                "ifType": "ethernetCsmacd",
+                "ifSpeed": 1_000_000_000,
+                "ifAdminStatus": "up",
+                "ifAlias": "uplink-m2",
+                "ifPhysAddress": "aa:bb:cc:dd:ee:02",
+                "ifMtu": 1500,
+                "ifVlan": 1,
+                "ifTrunk": 0,
             },
             {
-                "port_id": 301, "ifName": "GigabitEthernet1/0/2", "ifDescr": "GigabitEthernet1/0/2",
-                "ifType": "ethernetCsmacd", "ifSpeed": 1_000_000_000, "ifAdminStatus": "down",
-                "ifAlias": "", "ifPhysAddress": "aa:bb:cc:dd:ee:03", "ifMtu": 1500,
-                "ifVlan": 10, "ifTrunk": 0,
+                "port_id": 301,
+                "ifName": "GigabitEthernet1/0/2",
+                "ifDescr": "GigabitEthernet1/0/2",
+                "ifType": "ethernetCsmacd",
+                "ifSpeed": 1_000_000_000,
+                "ifAdminStatus": "down",
+                "ifAlias": "",
+                "ifPhysAddress": "aa:bb:cc:dd:ee:03",
+                "ifMtu": 1500,
+                "ifVlan": 10,
+                "ifTrunk": 0,
             },
         ]
         mock_server.ports_response(device_id=90, ports=vc_ports)
@@ -614,10 +710,17 @@ class TestVCPortFetch:
 
         ports_data = [
             {
-                "port_id": 111, "ifName": "GigabitEthernet1/0/1", "ifDescr": "GigabitEthernet1/0/1",
-                "ifType": "ethernetCsmacd", "ifSpeed": 1_000_000_000, "ifAdminStatus": "up",
-                "ifAlias": "server-link", "ifPhysAddress": "aa:bb:cc:00:00:01",
-                "ifMtu": 9000, "ifVlan": 100, "ifTrunk": 1,
+                "port_id": 111,
+                "ifName": "GigabitEthernet1/0/1",
+                "ifDescr": "GigabitEthernet1/0/1",
+                "ifType": "ethernetCsmacd",
+                "ifSpeed": 1_000_000_000,
+                "ifAdminStatus": "up",
+                "ifAlias": "server-link",
+                "ifPhysAddress": "aa:bb:cc:00:00:01",
+                "ifMtu": 9000,
+                "ifVlan": 100,
+                "ifTrunk": 1,
             },
         ]
         mock_server.ports_response(device_id=91, ports=ports_data)
