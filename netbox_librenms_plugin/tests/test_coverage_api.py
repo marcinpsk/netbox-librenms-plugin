@@ -181,8 +181,8 @@ class TestGetAvailableServersLegacy:
 class TestGetLibreNMSIdDictServerKey:
     """Tests for get_librenms_id → _store_librenms_id with dict CF (lines 259-262)."""
 
-    def test_store_via_custom_field_dict(self):
-        """When CF has 'librenms_id' key, _store_librenms_id updates via set_librenms_device_id."""
+    def test_dict_cf_routes_to_get_librenms_device_id(self):
+        """When CF has a dict 'librenms_id', get_librenms_id uses get_librenms_device_id(obj, server_key, auto_save=False)."""
         api = _make_api()
 
         obj = MagicMock()

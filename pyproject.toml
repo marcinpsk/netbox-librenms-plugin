@@ -64,8 +64,8 @@ ignore = [
 ]
 
 [tool.ruff.lint.mccabe]
-# C901 is not in the select list (not enforced by default).
-# Threshold here applies when run with --select C901 manually.
+# C901 is not selected by default; add it to [tool.ruff.lint] select to enforce.
+# When selected, functions exceeding complexity 15 will be flagged.
 max-complexity = 15
 
 [tool.ruff.lint.per-file-ignores]
