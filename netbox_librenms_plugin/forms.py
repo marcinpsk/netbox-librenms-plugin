@@ -537,7 +537,7 @@ class InventoryIgnoreRuleFilterForm(NetBoxModelFilterSetForm):
         choices=[("", "---------")] + InventoryIgnoreRule.ACTION_CHOICES,
         label="Action",
     )
-    enabled = forms.BooleanField(
+    enabled = forms.NullBooleanField(
         required=False,
         widget=forms.Select(choices=[("", "---------"), ("true", "Yes"), ("false", "No")]),
         label="Enabled",

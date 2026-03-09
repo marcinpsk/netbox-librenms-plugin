@@ -200,6 +200,29 @@ class TestGetLibreNMSIdDictServerKey:
                 assert result is None
                 mock_get_id.assert_called_once_with(obj, "default", auto_save=False)
 
+    def test_store_librenms_id_via_hostname_lookup(self):
+        """get_librenms_id reaches _store_librenms_id when CF/cache miss but hostname API hit."""
+        api = _make_api()
+
+        obj = MagicMock()
+        obj.cf = {"librenms_id": None}  # CF key present so _store_librenms_id uses CF path
+        obj.custom_field_data = {}
+        obj._meta.model_name = "device"
+        obj.pk = 99
+        obj.primary_ip = None
+        obj.name = "hostname"
+
+        with patch("netbox_librenms_plugin.utils.get_librenms_device_id", return_value=None):
+            with patch("netbox_librenms_plugin.librenms_api.cache") as mock_cache:
+                mock_cache.get.return_value = None
+                with patch.object(api, "get_device_id_by_hostname", return_value=42) as mock_by_hostname:
+                    with patch("netbox_librenms_plugin.utils.set_librenms_device_id") as mock_set_id:
+                        result = api.get_librenms_id(obj)
+
+        assert result == 42
+        mock_by_hostname.assert_called_once_with("hostname")
+        mock_set_id.assert_called_once_with(obj, 42, "default")
+
 
 class TestGetPortsErrors:
     """Tests for get_ports error paths (lines 373, 375-376)."""

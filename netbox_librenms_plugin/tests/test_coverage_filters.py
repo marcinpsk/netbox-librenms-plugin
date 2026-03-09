@@ -163,13 +163,21 @@ class TestGetLibreNMSDevicesForImport:
         api = MagicMock()
         api.server_key = "default"
         api.cache_timeout = 300
-        api.list_devices.return_value = (True, [{"hardware": "Cisco C9300", "device_id": 1}])
+        api.list_devices.return_value = (
+            True,
+            [
+                {"hardware": "Cisco C9300", "device_id": 1},
+                {"hardware": "Other Device", "device_id": 2},
+            ],
+        )
 
         result = get_librenms_devices_for_import(api, filters={"hardware": "C9300"})
         # API gets no filters
         api.list_devices.assert_called_once_with(None)
-        # Result filtered by hardware
+        # Only the matching device survives client-side filtering
         assert len(result) == 1
+        assert result[0]["device_id"] == 1
+        assert 2 not in [d["device_id"] for d in result]
 
     @patch("netbox_librenms_plugin.import_utils.filters.cache")
     def test_location_plus_type_location_to_api_type_to_client(self, mock_cache):
@@ -179,15 +187,20 @@ class TestGetLibreNMSDevicesForImport:
         api = MagicMock()
         api.server_key = "default"
         api.cache_timeout = 300
-        devices = [{"device_id": 1, "type": "network", "location_id": 10}]
+        devices = [
+            {"device_id": 1, "type": "network", "location_id": 10},
+            {"device_id": 2, "type": "server", "location_id": 10},
+        ]
         api.list_devices.return_value = (True, devices)
 
         result = get_librenms_devices_for_import(api, filters={"location": "10", "type": "network"})
         call_args = api.list_devices.call_args[0][0]
         # location goes to API
         assert call_args["type"] == "location_id"
-        # result filtered client-side by type
+        # only the matching device survives client-side type filter
         assert len(result) == 1
+        assert result[0]["device_id"] == 1
+        assert 2 not in [d["device_id"] for d in result]
 
     @patch("netbox_librenms_plugin.import_utils.filters.cache")
     def test_force_refresh_deletes_cache(self, mock_cache):
@@ -418,6 +431,9 @@ class TestGetLibreNMSDevicesMoreCoverage:
         assert isinstance(result, list)
         # Invalid status means api.list_devices is called with None (no API type filter)
         api.list_devices.assert_called_once_with(None)
+        # The single device returned from the API is passed through unchanged
+        assert len(result) == 1
+        assert result[0]["device_id"] == 1
 
     @patch("netbox_librenms_plugin.import_utils.filters.cache")
     def test_status_with_all_other_filters_go_to_client(self, mock_cache):
@@ -468,6 +484,8 @@ class TestGetLibreNMSDevicesMoreCoverage:
         # The matching device should be present, but the non-matching device should not
         device_ids = [d["device_id"] for d in result]
         assert 1 in device_ids
+        assert len(result) == 1
+        assert 2 not in device_ids
 
     @patch("netbox_librenms_plugin.import_utils.filters.cache")
     def test_location_with_remaining_client_filters(self, mock_cache):

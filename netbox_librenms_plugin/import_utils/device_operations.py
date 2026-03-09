@@ -401,6 +401,7 @@ def validate_device_for_import(
                     f"Cannot determine which to match. Please set the librenms_id custom field on the correct object."
                 )
                 result["can_import"] = False
+                return result
             elif existing_vm:
                 logger.info(f"Found existing VM by hostname: {existing_vm.name}")
                 result["existing_device"] = existing_vm
@@ -492,7 +493,7 @@ def validate_device_for_import(
         import_as_vm = result["import_as_vm"]
 
         # Validate based on import type (Device or VM)
-        if import_as_vm:
+        if import_as_vm and not result.get("existing_device"):
             # 2. For VMs: Validate Cluster (required) - Must be manually selected
             result["cluster"]["found"] = False
             result["issues"].append("Cluster must be manually selected before importing as VM")

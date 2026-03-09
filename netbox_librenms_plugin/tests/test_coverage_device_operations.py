@@ -711,6 +711,9 @@ class TestValidateDeviceForImportEdgeCases:
 
         # Should have found a match via model name fallback
         assert result is not None
+        assert mock_match.call_count >= 2
+        assert result["matched"] is True
+        assert result.get("device_type") is mock_dt
 
     def test_primary_ip_match_check(self):
         """Lines 474-489: IP address match detection."""
@@ -1254,6 +1257,9 @@ class TestImportSingleDeviceMoreEdgeCases:
                                             )
 
         assert result.get("success") is True
+        # Verify that the platform was looked up with the correct ID and passed to Device()
+        MockPlatform.objects.filter.assert_called_with(id=manual_mappings["platform_id"])
+        assert MockDevice.call_args.kwargs.get("platform") is mock_platform
 
     def test_rack_manual_mapping(self):
         """Line 789: manual_mappings with rack_id applied."""
@@ -1303,6 +1309,9 @@ class TestImportSingleDeviceMoreEdgeCases:
                                             )
 
         assert result.get("success") is True
+        # Verify that the rack was looked up with the correct ID and passed to Device()
+        MockRack.objects.select_related.return_value.filter.assert_called_with(id=manual_mappings["rack_id"])
+        assert MockDevice.call_args.kwargs.get("rack") is mock_rack
 
 
 class TestValidateDeviceChassisMatch:
@@ -1332,13 +1341,16 @@ class TestValidateDeviceChassisMatch:
         chassis_dt.model = "Catalyst 9300"
         chassis_match = {"matched": True, "device_type": chassis_dt, "match_type": "chassis_inventory"}
 
+        vm_no_match = MagicMock()
+        vm_no_match.objects.filter.return_value.first.return_value = None  # no hostname collision
+
         patches = [
             patch("netbox_librenms_plugin.import_utils.device_operations.Site"),
             patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType"),
             patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole"),
             patch("netbox_librenms_plugin.import_utils.device_operations.Device"),
             patch("netbox_librenms_plugin.import_utils.device_operations.cache"),
-            patch("virtualization.models.VirtualMachine"),
+            patch("virtualization.models.VirtualMachine", new=vm_no_match),
             patch("ipam.models.IPAddress"),
             patch("netbox_librenms_plugin.utils.find_by_librenms_id", return_value=None),
             patch(
