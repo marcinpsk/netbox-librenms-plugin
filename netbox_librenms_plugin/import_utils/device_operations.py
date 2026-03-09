@@ -396,12 +396,11 @@ def validate_device_for_import(
                     f"Hostname conflict: Both VM '{existing_vm.name}' and Device "
                     f"'{existing_device.name}' exist with hostname '{hostname}'"
                 )
-                result["warnings"].append(
+                result["issues"].append(
                     f"Both a VM and Device exist with hostname '{hostname}' in NetBox. "
                     f"Cannot determine which to match. Please set the librenms_id custom field on the correct object."
                 )
-                # Don't set existing_device, don't block import - let user proceed as new
-                # This allows them to import and then resolve the conflict manually
+                result["can_import"] = False
             elif existing_vm:
                 logger.info(f"Found existing VM by hostname: {existing_vm.name}")
                 result["existing_device"] = existing_vm
@@ -518,7 +517,7 @@ def validate_device_for_import(
             site_match = find_matching_site(location)
             result["site"] = site_match
 
-            if not site_match["found"]:
+            if not site_match["found"] and not result["existing_device"]:
                 result["issues"].append(f"No matching site found for location: '{location}'")
                 # Get alternative suggestions
                 if location:
@@ -543,7 +542,7 @@ def validate_device_for_import(
             result["device_type"]["device_type"] = dt_match.get("device_type")
             result["device_type"]["match_type"] = dt_match.get("match_type")
 
-            if not dt_match["matched"]:
+            if not dt_match["matched"] and not result["existing_device"]:
                 result["device_type"]["found"] = False
                 result["issues"].append(f"No matching device type found for hardware: '{hardware}'")
                 # Get some device types for user to choose from
@@ -558,10 +557,11 @@ def validate_device_for_import(
                 ]
 
             # 4. DeviceRole (required) - Must be manually selected by user
-            logger.debug(f"[{hostname}] Issues BEFORE adding role issue: {result['issues']}")
-            result["device_role"]["found"] = False
-            result["issues"].append("Device role must be manually selected before import")
-            logger.debug(f"[{hostname}] Issues AFTER adding role issue: {result['issues']}")
+            if not result["existing_device"]:
+                logger.debug(f"[{hostname}] Issues BEFORE adding role issue: {result['issues']}")
+                result["device_role"]["found"] = False
+                result["issues"].append("Device role must be manually selected before import")
+                logger.debug(f"[{hostname}] Issues AFTER adding role issue: {result['issues']}")
             # Provide list of available roles for user selection (cached)
             cache_key = "librenms_import_all_roles"
             all_roles = cache.get(cache_key)

@@ -192,7 +192,7 @@ class LibreNMSAPI:
         """
         from netbox_librenms_plugin.utils import get_librenms_device_id
 
-        librenms_id = get_librenms_device_id(obj, self.server_key)
+        librenms_id = get_librenms_device_id(obj, self.server_key, auto_save=False)
         if librenms_id:
             return librenms_id
 
@@ -624,8 +624,10 @@ class LibreNMSAPI:
                 verify=self.verify_ssl,
             )
             response.raise_for_status()
-            ip_data = response.json()["addresses"]
-            return True, ip_data
+            data = response.json()
+            if not isinstance(data, dict) or "addresses" not in data:
+                return False, "Unexpected response format: missing 'addresses' key"
+            return True, data["addresses"]
         except requests.exceptions.RequestException as e:
             return False, str(e)
 

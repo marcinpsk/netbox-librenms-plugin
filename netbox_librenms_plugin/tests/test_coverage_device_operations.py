@@ -743,8 +743,8 @@ class TestValidateDeviceForImportEdgeCases:
         finally:
             self._stop_patches(patches)
 
-        # The result will have existing_device if the IP match code was reached
-        assert result is not None
+        # The IP match should set existing_device to the mock device
+        assert result.get("existing_device") is mock_device
 
     def test_no_hostname_adds_issue(self):
         """Line 612: Device with no hostname adds an issue."""
@@ -966,9 +966,10 @@ class TestValidateDeviceMoreEdgeCases:
             for p in patches:
                 p.stop()
 
-        # Ambiguous - should have a warning about both existing
+        # Ambiguous - should be a blocking issue (can_import=False) about both existing
         assert result is not None
-        assert any("VM" in w and "Device" in w for w in result.get("warnings", []))
+        assert result.get("can_import") is False
+        assert any("VM" in i and "Device" in i for i in result.get("issues", []))
 
     def test_existing_vm_by_hostname(self):
         """Lines 406-413: VM found by hostname (no Device match)."""

@@ -41,6 +41,7 @@ def create_vm_from_librenms(
     # Extract matched objects from validation
     cluster = validation["cluster"]["cluster"]
     platform = validation["platform"].get("platform")
+    role = role or validation.get("device_role", {}).get("role")
 
     # Determine VM name - use pre-computed name if available (handles strip_domain),
     # falling back to the validated resolved_name before recomputing from raw fields.

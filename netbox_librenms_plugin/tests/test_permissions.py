@@ -656,7 +656,8 @@ class TestBulkImportPermissions:
         call_args = mock_require.call_args
         assert user == call_args[0][0]
         assert "dcim.add_device" in call_args[0][1]
-        assert "dcim.add_interface" in call_args[0][1]
+        assert "dcim.change_device" in call_args[0][1]
+        assert "dcim.add_interface" not in call_args[0][1]
 
     @patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions")
     @patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI")
@@ -892,7 +893,9 @@ class TestBulkImportVCPermission:
 
         mock_require.assert_called_once()
         call_args = mock_require.call_args
-        assert "dcim.add_virtualchassis" in call_args[0][1]
+        # After Fix 6: interface/VC permissions removed from initial check
+        assert "dcim.add_virtualchassis" not in call_args[0][1]
+        assert "dcim.add_device" in call_args[0][1]
 
 
 class TestObjectTypeValidation:

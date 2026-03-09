@@ -121,7 +121,7 @@ def prefetch_vc_data_for_devices(api: LibreNMSAPI, device_ids: List[int], *, for
     logger.debug(f"VC cache warming complete for {len(device_ids)} devices")
 
 
-def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> dict:
+def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> dict | None:
     """
     Detect if device is a stack/Virtual Chassis by analyzing ENTITY-MIB inventory.
     Vendor-agnostic using standard hierarchical structure.
@@ -170,14 +170,19 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
             return None
 
         # Step 2: Find parent container index
-        # Could be class="stack" or the main "chassis"
+        # Prefer "stack" over "chassis" for deterministic VC detection
         parent_index = None
+        stack_index = None
+        chassis_index = None
         for item in root_items:
             item_class = item.get("entPhysicalClass")
-            if item_class in ["stack", "chassis"]:
-                parent_index = item.get("entPhysicalIndex")
-                logger.debug(f"VC detection: Found parent container at index {parent_index} for device {device_id}")
-                break
+            if item_class == "stack" and stack_index is None:
+                stack_index = item.get("entPhysicalIndex")
+            elif item_class == "chassis" and chassis_index is None:
+                chassis_index = item.get("entPhysicalIndex")
+        parent_index = stack_index if stack_index is not None else chassis_index
+        if parent_index is not None:
+            logger.debug(f"VC detection: Found parent container at index {parent_index} for device {device_id}")
 
         if parent_index is None:
             return None
@@ -344,7 +349,7 @@ def _safe_pos(value) -> int | None:
         return None
 
 
-def create_virtual_chassis_with_members(master_device: Device, members_info: list, libre_device: dict):
+def create_virtual_chassis_with_members(master_device: Device, members_info: list, libre_device: dict) -> VirtualChassis:
     """
     Create Virtual Chassis and member devices from detection info.
 

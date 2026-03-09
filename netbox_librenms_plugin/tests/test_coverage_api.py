@@ -193,11 +193,12 @@ class TestGetLibreNMSIdDictServerKey:
         obj.primary_ip = None
         obj.name = None
 
-        with patch("netbox_librenms_plugin.utils.get_librenms_device_id", return_value=None):
+        with patch("netbox_librenms_plugin.utils.get_librenms_device_id", return_value=None) as mock_get_id:
             with patch("netbox_librenms_plugin.librenms_api.cache") as mock_cache:
                 mock_cache.get.return_value = None
                 result = api.get_librenms_id(obj)
                 assert result is None
+                mock_get_id.assert_called_once_with(obj, "default", auto_save=False)
 
 
 class TestGetPortsErrors:
