@@ -812,10 +812,10 @@ class LibreNMSAPI:
 
             data = response.json()
             if data.get("status") == "ok":
-                raw_inventory = data.get("inventory")
-                inventory = raw_inventory if isinstance(raw_inventory, list) else []
-                if not isinstance(raw_inventory, list) and raw_inventory is not None:
-                    logger.warning(f"Unexpected inventory type for device {device_id}: {type(raw_inventory)}")
+                inventory = data.get("inventory") if isinstance(data, dict) else None
+                if not isinstance(inventory, list):
+                    msg = data.get("message") if isinstance(data, dict) else None
+                    return False, msg or "Unexpected response format: missing 'inventory' list"
                 logger.debug(f"API returned {len(inventory)} items")
 
                 # If we got results or didn't specify filters, return
@@ -910,7 +910,11 @@ class LibreNMSAPI:
             response.raise_for_status()
             result = response.json()
             if result.get("status") == "ok":
-                return True, result.get("devices", [])
+                devices = result.get("devices") if isinstance(result, dict) else None
+                if not isinstance(devices, list):
+                    msg = result.get("message") if isinstance(result, dict) else None
+                    return False, msg or "Unexpected response format: missing 'devices' list"
+                return True, devices
 
             return False, []
         except requests.exceptions.RequestException as e:
@@ -957,9 +961,14 @@ class LibreNMSAPI:
 
             result = response.json()
             if result.get("status") == "ok":
+                all_vlans = result.get("vlans") if isinstance(result, dict) else None
+                if not isinstance(all_vlans, list):
+                    msg = result.get("message") if isinstance(result, dict) else None
+                    return False, msg or "Unexpected response format: missing 'vlans' list"
                 # Filter VLANs by device_id since resources endpoint returns all VLANs
-                all_vlans = result.get("vlans", [])
-                device_vlans = [v for v in all_vlans if str(v.get("device_id")) == str(device_id)]
+                device_vlans = [
+                    v for v in all_vlans if isinstance(v, dict) and str(v.get("device_id")) == str(device_id)
+                ]
                 return True, device_vlans
             return False, result.get("message", "Unexpected response format")
 

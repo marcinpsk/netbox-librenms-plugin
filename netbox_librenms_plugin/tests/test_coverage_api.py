@@ -972,3 +972,69 @@ class TestGetDeviceInventoryNonOkStatus:
         with patch("requests.get", return_value=mock_resp):
             ok, data = api.get_device_inventory(1)
         assert ok is False
+
+
+class TestMalformedPayloads:
+    """Tests for malformed-payload guards in API methods (inventory, devices, vlans)."""
+
+    def _ok_resp(self, body: dict):
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = body
+        return mock_resp
+
+    def test_get_device_inventory_none_inventory(self):
+        """get_device_inventory: inventory=None returns (False, ...)."""
+        api = _make_api()
+        with patch("requests.get", return_value=self._ok_resp({"status": "ok", "inventory": None})):
+            ok, msg = api.get_device_inventory(1)
+        assert ok is False
+        assert msg is not None
+
+    def test_get_device_inventory_non_list_inventory(self):
+        """get_device_inventory: inventory as dict returns (False, ...)."""
+        api = _make_api()
+        with patch("requests.get", return_value=self._ok_resp({"status": "ok", "inventory": {}})):
+            ok, msg = api.get_device_inventory(1)
+        assert ok is False
+
+    def test_get_inventory_filtered_none_inventory(self):
+        """get_inventory_filtered: inventory=None in filtered path returns (False, ...)."""
+        api = _make_api()
+        with patch("requests.get", return_value=self._ok_resp({"status": "ok", "inventory": None})):
+            ok, msg = api.get_inventory_filtered(1)
+        assert ok is False
+        assert msg is not None
+
+    def test_list_devices_none_devices(self):
+        """list_devices: devices=None returns (False, ...)."""
+        api = _make_api()
+        with patch("requests.get", return_value=self._ok_resp({"status": "ok", "devices": None})):
+            ok, msg = api.list_devices()
+        assert ok is False
+        assert msg is not None
+
+    def test_list_devices_non_list_devices(self):
+        """list_devices: devices as string returns (False, ...)."""
+        api = _make_api()
+        with patch("requests.get", return_value=self._ok_resp({"status": "ok", "devices": "bad"})):
+            ok, msg = api.list_devices()
+        assert ok is False
+
+    def test_get_device_vlans_none_vlans(self):
+        """get_device_vlans: vlans=None returns (False, ...)."""
+        api = _make_api()
+        with patch("requests.get", return_value=self._ok_resp({"status": "ok", "vlans": None})):
+            ok, msg = api.get_device_vlans(1)
+        assert ok is False
+        assert msg is not None
+
+    def test_get_device_vlans_skips_non_dict_items(self):
+        """get_device_vlans: non-dict items in vlans list are skipped safely."""
+        api = _make_api()
+        vlans = [None, "bad", {"device_id": 1, "vlan_id": 10}]
+        with patch("requests.get", return_value=self._ok_resp({"status": "ok", "vlans": vlans})):
+            ok, data = api.get_device_vlans(1)
+        assert ok is True
+        assert len(data) == 1
+        assert data[0]["vlan_id"] == 10

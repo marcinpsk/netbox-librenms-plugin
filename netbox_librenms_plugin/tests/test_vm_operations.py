@@ -134,8 +134,8 @@ class TestCreateVmFromLibrenms:
         mock_setter.assert_called_once_with(mock_vm, 5, "secondary")
         mock_vm.save.assert_called_once()
 
-    def test_role_is_passed_to_create(self):
-        """Optional role parameter is forwarded to VirtualMachine.objects.create."""
+    def test_role_is_read_from_validation(self):
+        """Role is read from validation[device_role] and forwarded to VirtualMachine.objects.create."""
         from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
 
         libre_device = {"device_id": 6, "hostname": "vm06", "_computed_name": "vm06"}
@@ -144,6 +144,7 @@ class TestCreateVmFromLibrenms:
             "can_import": True,
             "cluster": {"cluster": MagicMock()},
             "platform": {"platform": None},
+            "device_role": {"role": mock_role},
         }
         mock_vm = MagicMock()
         mock_vm.name = "vm06"
@@ -151,7 +152,7 @@ class TestCreateVmFromLibrenms:
 
         with patch("virtualization.models.VirtualMachine") as mock_vm_class:
             mock_vm_class.objects.create.return_value = mock_vm
-            create_vm_from_librenms(libre_device, validation, role=mock_role)
+            create_vm_from_librenms(libre_device, validation)
 
         call_kwargs = mock_vm_class.objects.create.call_args[1]
         assert call_kwargs["role"] == mock_role
