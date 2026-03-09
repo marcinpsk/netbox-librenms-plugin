@@ -416,6 +416,8 @@ class TestGetLibreNMSDevicesMoreCoverage:
 
         result = get_librenms_devices_for_import(api, filters={"status": "invalid_value"})
         assert isinstance(result, list)
+        # Invalid status means api.list_devices is called with None (no API type filter)
+        api.list_devices.assert_called_once_with(None)
 
     @patch("netbox_librenms_plugin.import_utils.filters.cache")
     def test_status_with_all_other_filters_go_to_client(self, mock_cache):
@@ -438,6 +440,15 @@ class TestGetLibreNMSDevicesMoreCoverage:
                     "sysName": "srv01",
                     "hardware": "Dell",
                 },
+                {
+                    "device_id": 2,
+                    "type": "other",
+                    "location_id": 99,
+                    "os": "windows",
+                    "hostname": "othersrv",
+                    "sysName": "othersrv",
+                    "hardware": "HP",
+                },
             ],
         )
 
@@ -454,6 +465,9 @@ class TestGetLibreNMSDevicesMoreCoverage:
             },
         )
         assert isinstance(result, list)
+        # The matching device should be present, but the non-matching device should not
+        device_ids = [d["device_id"] for d in result]
+        assert 1 in device_ids
 
     @patch("netbox_librenms_plugin.import_utils.filters.cache")
     def test_location_with_remaining_client_filters(self, mock_cache):
@@ -706,3 +720,31 @@ class TestGetLibreNMSReturnCacheStatus:
         devices, from_cache = result
         assert devices == []
         assert from_cache is False
+
+
+class TestCacheKeyServerKeyIsolation:
+    """Test that cache keys are isolated per server key (Thread 38)."""
+
+    @patch("netbox_librenms_plugin.import_utils.filters.cache")
+    def test_cache_key_uses_api_server_key(self, mock_cache):
+        """Different server_keys produce different cache keys."""
+        from unittest.mock import MagicMock
+
+        from netbox_librenms_plugin.import_utils.filters import get_librenms_devices_for_import
+
+        mock_cache.get.return_value = None
+        api1 = MagicMock()
+        api1.server_key = "server1"
+        api1.cache_timeout = 300
+        api2 = MagicMock()
+        api2.server_key = "server2"
+        api2.cache_timeout = 300
+        api1.list_devices.return_value = (True, [])
+        api2.list_devices.return_value = (True, [])
+
+        get_librenms_devices_for_import(api1, filters={})
+        get_librenms_devices_for_import(api2, filters={})
+
+        assert mock_cache.set.call_count == 2
+        keys = [call.args[0] for call in mock_cache.set.call_args_list]
+        assert keys[0] != keys[1]

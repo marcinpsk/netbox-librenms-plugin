@@ -96,8 +96,7 @@ def bulk_import_devices_shared(
     # Check permissions at start of bulk operation
     required_perms = [
         "dcim.add_device",
-        "dcim.add_interface",
-        "dcim.add_virtualchassis",
+        "dcim.change_device",
     ]
     require_permissions(user, required_perms, "import devices")
 
@@ -186,6 +185,7 @@ def bulk_import_devices_shared(
             result = import_single_device(
                 device_id,
                 server_key=api.server_key,  # use resolved key, not raw parameter (may be None)
+                validation=validation,
                 sync_options=sync_options,
                 manual_mappings=device_mappings if device_mappings else None,
                 libre_device=libre_device,

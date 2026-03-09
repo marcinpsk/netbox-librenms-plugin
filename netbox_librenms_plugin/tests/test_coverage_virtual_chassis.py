@@ -72,9 +72,13 @@ class TestCreateVirtualChassisWithMembersPositionConflict:
 
         # Two Device.objects.create calls for the two non-master members
         create_calls = mock_Device.objects.create.call_args_list
-        positions_used = [c.kwargs.get("vc_position") for c in create_calls]
-        # Both members should get distinct positions: first takes 2, second falls back to 3
-        assert sorted(positions_used) == [2, 3]
+        assert len(create_calls) == 2
+        # Map serial -> vc_position for precise identity assertions
+        serial_to_pos = {c.kwargs.get("serial"): c.kwargs.get("vc_position") for c in create_calls}
+        # First member (SN002) takes its explicit position 2
+        assert serial_to_pos.get("SN002") == 2
+        # Second member (SN003) conflicts at 2, falls back to 3
+        assert serial_to_pos.get("SN003") == 3
 
     @patch("netbox_librenms_plugin.import_utils.virtual_chassis.transaction")
     @patch("netbox_librenms_plugin.import_utils.virtual_chassis._load_vc_member_name_pattern")

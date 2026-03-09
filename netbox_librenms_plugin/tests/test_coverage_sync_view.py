@@ -50,15 +50,15 @@ class TestBaseLibreNMSSyncViewGet:
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
     def test_get_vc_member_always_delegates_to_sync_device(self, mock_get_sync, mock_get_obj, mock_render):
-        """VC member always delegates to get_librenms_sync_device regardless of own ID."""
+        """VC member: no own librenms_id - get_librenms_sync_device returns VC primary."""
         view = _make_view()
 
         obj = MagicMock()
         obj.virtual_chassis = MagicMock()
         mock_get_obj.return_value = obj
 
-        sync_device = MagicMock()
-        mock_get_sync.return_value = sync_device
+        vc_primary = MagicMock()  # Represents the VC primary device
+        mock_get_sync.return_value = vc_primary
 
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
@@ -71,7 +71,36 @@ class TestBaseLibreNMSSyncViewGet:
         view.get(request, pk=1)
 
         mock_get_sync.assert_called_once_with(obj, server_key="default")
-        assert view._librenms_lookup_device is sync_device
+        # When member has no own ID, lookup uses the VC primary returned by get_librenms_sync_device
+        assert view._librenms_lookup_device is vc_primary
+
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
+    @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
+    def test_get_vc_member_with_own_librenms_id_uses_itself(self, mock_get_sync, mock_get_obj, mock_render):
+        """VC member: has own librenms_id - get_librenms_sync_device still called, returns member itself."""
+        view = _make_view()
+
+        obj = MagicMock()
+        obj.virtual_chassis = MagicMock()
+        mock_get_obj.return_value = obj
+
+        # get_librenms_sync_device returns obj itself (member has own librenms_id, priority 1)
+        mock_get_sync.return_value = obj
+
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default"
+        view._librenms_api.get_librenms_id.return_value = 55
+
+        view.get_context_data = MagicMock(return_value={})
+        mock_render.return_value = MagicMock()
+
+        request = MagicMock()
+        view.get(request, pk=1)
+
+        mock_get_sync.assert_called_once_with(obj, server_key="default")
+        # When member has its own ID, get_librenms_sync_device returns the member itself
+        assert view._librenms_lookup_device is obj
 
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
