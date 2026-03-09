@@ -460,9 +460,7 @@ class TestVCLookupDelegation:
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
-    def test_vc_member_with_own_active_id_stays_as_lookup_device(
-        self, mock_sync_device, mock_get_object, mock_render
-    ):
+    def test_vc_member_with_own_active_id_stays_as_lookup_device(self, mock_sync_device, mock_get_object, mock_render):
         """A VC member that has its own per-server librenms_id for the active server
         stays as _librenms_lookup_device when get_librenms_sync_device returns it."""
         from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
@@ -498,9 +496,7 @@ class TestVCLookupDelegation:
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.render")
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_object_or_404")
     @patch("netbox_librenms_plugin.views.base.librenms_sync_view.get_librenms_sync_device")
-    def test_vc_member_without_active_id_delegates_to_primary(
-        self, mock_sync_device, mock_get_object, mock_render
-    ):
+    def test_vc_member_without_active_id_delegates_to_primary(self, mock_sync_device, mock_get_object, mock_render):
         """A VC member with NO per-server librenms_id for the active server delegates
         to the VC primary returned by get_librenms_sync_device."""
         from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView

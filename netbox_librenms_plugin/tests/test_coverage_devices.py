@@ -34,7 +34,6 @@ class TestDeviceLibreNMSSyncViewContextMethods:
 
     def test_get_interface_context_delegates_to_interface_view(self):
         """get_interface_context() creates DeviceInterfaceTableView and calls get_context_data."""
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceLibreNMSSyncView
 
         view = _make_device_view()
         request = MagicMock()
@@ -45,13 +44,14 @@ class TestDeviceLibreNMSSyncViewContextMethods:
             "netbox_librenms_plugin.views.object_sync.devices.DeviceInterfaceTableView.get_context_data",
             return_value=mock_ctx,
         ):
-            with patch("netbox_librenms_plugin.views.object_sync.devices.get_interface_name_field", return_value="ifName"):
+            with patch(
+                "netbox_librenms_plugin.views.object_sync.devices.get_interface_name_field", return_value="ifName"
+            ):
                 result = view.get_interface_context(request, obj)
         assert result == mock_ctx
 
     def test_get_cable_context_delegates_to_cable_view(self):
         """get_cable_context() creates DeviceCableTableView and calls get_context_data."""
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceLibreNMSSyncView
 
         view = _make_device_view()
         request = MagicMock()
@@ -67,7 +67,6 @@ class TestDeviceLibreNMSSyncViewContextMethods:
 
     def test_get_ip_context_delegates_to_ip_view(self):
         """get_ip_context() creates DeviceIPAddressTableView and calls get_context_data."""
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceLibreNMSSyncView
 
         view = _make_device_view()
         request = MagicMock()
@@ -83,7 +82,6 @@ class TestDeviceLibreNMSSyncViewContextMethods:
 
     def test_get_vlan_context_delegates_to_vlan_view(self):
         """get_vlan_context() creates DeviceVLANTableView and calls get_vlan_context."""
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceLibreNMSSyncView
 
         view = _make_device_view()
         request = MagicMock()
@@ -99,7 +97,6 @@ class TestDeviceLibreNMSSyncViewContextMethods:
 
     def test_get_module_context_delegates_to_module_view(self):
         """get_module_context() creates DeviceModuleTableView and calls get_context_data."""
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceLibreNMSSyncView
 
         view = _make_device_view()
         request = MagicMock()
@@ -137,14 +134,11 @@ class TestDeviceInterfaceTableView:
         with patch("netbox_librenms_plugin.views.object_sync.devices.reverse") as mock_reverse:
             mock_reverse.return_value = "/dcim/devices/42/interface-sync/"
             result = view.get_redirect_url(obj)
-        mock_reverse.assert_called_once_with(
-            "plugins:netbox_librenms_plugin:device_interface_sync", kwargs={"pk": 42}
-        )
+        mock_reverse.assert_called_once_with("plugins:netbox_librenms_plugin:device_interface_sync", kwargs={"pk": 42})
         assert result == "/dcim/devices/42/interface-sync/"
 
     def test_get_table_returns_vc_table_for_vc_device(self):
         """get_table() returns VCInterfaceTable when device has virtual_chassis."""
-        from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
 
         view = _make_interface_view()
         obj = MagicMock()
@@ -152,9 +146,7 @@ class TestDeviceInterfaceTableView:
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
 
-        with patch(
-            "netbox_librenms_plugin.views.object_sync.devices.VCInterfaceTable"
-        ) as mock_vc_table:
+        with patch("netbox_librenms_plugin.views.object_sync.devices.VCInterfaceTable") as mock_vc_table:
             mock_table = MagicMock()
             mock_vc_table.return_value = mock_table
             result = view.get_table([], obj, "ifName", vlan_groups=[])
@@ -168,9 +160,7 @@ class TestDeviceInterfaceTableView:
         obj = MagicMock()
         obj.virtual_chassis = None  # No VC
 
-        with patch(
-            "netbox_librenms_plugin.views.object_sync.devices.LibreNMSInterfaceTable"
-        ) as mock_table_cls:
+        with patch("netbox_librenms_plugin.views.object_sync.devices.LibreNMSInterfaceTable") as mock_table_cls:
             mock_table = MagicMock()
             mock_table_cls.return_value = mock_table
             result = view.get_table([], obj, "ifName")
@@ -185,9 +175,7 @@ class TestDeviceInterfaceTableView:
         obj = MagicMock()
         obj.virtual_chassis = None
 
-        with patch(
-            "netbox_librenms_plugin.views.object_sync.devices.LibreNMSInterfaceTable"
-        ) as mock_table_cls:
+        with patch("netbox_librenms_plugin.views.object_sync.devices.LibreNMSInterfaceTable") as mock_table_cls:
             mock_table = MagicMock()
             mock_table_cls.return_value = mock_table
             view.get_table([], obj, "ifName")
@@ -232,7 +220,9 @@ class TestSingleInterfaceVerifyView:
         mock_device.virtual_chassis = None
 
         with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404", return_value=mock_device):
-            with patch("netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device", return_value=mock_device):
+            with patch(
+                "netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device", return_value=mock_device
+            ):
                 with patch("netbox_librenms_plugin.views.object_sync.devices.cache") as mock_cache:
                     mock_cache.get.return_value = None
                     with patch.object(view, "get_cache_key", return_value="test_key"):
@@ -257,7 +247,9 @@ class TestSingleInterfaceVerifyView:
         cached_data = {"ports": [{"ifName": "eth0", "speed": 1000}]}
 
         with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404", return_value=mock_device):
-            with patch("netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device", return_value=mock_device):
+            with patch(
+                "netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device", return_value=mock_device
+            ):
                 with patch("netbox_librenms_plugin.views.object_sync.devices.cache") as mock_cache:
                     mock_cache.get.return_value = cached_data
                     with patch.object(view, "get_cache_key", return_value="test_key"):
@@ -286,7 +278,9 @@ class TestSingleInterfaceVerifyView:
         mock_table.format_interface_data.return_value = "<tr>row</tr>"
 
         with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404", return_value=mock_device):
-            with patch("netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device", return_value=mock_device):
+            with patch(
+                "netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device", return_value=mock_device
+            ):
                 with patch("netbox_librenms_plugin.views.object_sync.devices.cache") as mock_cache:
                     mock_cache.get.return_value = cached_data
                     with patch.object(view, "get_cache_key", return_value="test_key"):
@@ -365,12 +359,14 @@ class TestSingleVlanGroupVerifyView:
 
         view = self._make_view()
         request = MagicMock()
-        request.body = json.dumps({
-            "device_id": 1,
-            "vid": "10",
-            "vlan_group_id": "5",
-            "vlan_type": "U",
-        }).encode()
+        request.body = json.dumps(
+            {
+                "device_id": 1,
+                "vid": "10",
+                "vlan_group_id": "5",
+                "vlan_type": "U",
+            }
+        ).encode()
 
         mock_device = MagicMock()
         mock_netbox_iface = MagicMock()
@@ -391,12 +387,18 @@ class TestSingleVlanGroupVerifyView:
 
         with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404") as mock_get_obj:
             mock_get_obj.side_effect = [mock_device, mock_vlan_group]
-            with patch("netbox_librenms_plugin.views.object_sync.devices.get_untagged_vlan_css_class", return_value="text-success"):
-                with patch("netbox_librenms_plugin.views.object_sync.devices.get_tagged_vlan_css_class", return_value="text-success"):
-                    with patch("netbox_librenms_plugin.views.object_sync.devices.get_missing_vlan_warning", return_value=""):
-
+            with patch(
+                "netbox_librenms_plugin.views.object_sync.devices.get_untagged_vlan_css_class",
+                return_value="text-success",
+            ):
+                with patch(
+                    "netbox_librenms_plugin.views.object_sync.devices.get_tagged_vlan_css_class",
+                    return_value="text-success",
+                ):
+                    with patch(
+                        "netbox_librenms_plugin.views.object_sync.devices.get_missing_vlan_warning", return_value=""
+                    ):
                         # Patch the VLAN/VLANGroup imports inside the method
-                        import ipam.models
                         mock_ipam = MagicMock()
                         mock_ipam.VLAN = mock_vlan_model
                         mock_ipam.VLANGroup = mock_vlan_group_model
@@ -414,11 +416,13 @@ class TestSingleVlanGroupVerifyView:
 
         view = self._make_view()
         request = MagicMock()
-        request.body = json.dumps({
-            "device_id": 1,
-            "vid": "100",
-            "vlan_type": "T",
-        }).encode()
+        request.body = json.dumps(
+            {
+                "device_id": 1,
+                "vid": "100",
+                "vlan_type": "T",
+            }
+        ).encode()
 
         mock_device = MagicMock()
         mock_device.interfaces.filter.return_value.first.return_value = None
@@ -429,9 +433,17 @@ class TestSingleVlanGroupVerifyView:
         mock_vlan_model.objects.filter.return_value = mock_vlan_qs
 
         with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404", return_value=mock_device):
-            with patch("netbox_librenms_plugin.views.object_sync.devices.get_untagged_vlan_css_class", return_value="text-danger"):
-                with patch("netbox_librenms_plugin.views.object_sync.devices.get_tagged_vlan_css_class", return_value="text-danger"):
-                    with patch("netbox_librenms_plugin.views.object_sync.devices.get_missing_vlan_warning", return_value=""):
+            with patch(
+                "netbox_librenms_plugin.views.object_sync.devices.get_untagged_vlan_css_class",
+                return_value="text-danger",
+            ):
+                with patch(
+                    "netbox_librenms_plugin.views.object_sync.devices.get_tagged_vlan_css_class",
+                    return_value="text-danger",
+                ):
+                    with patch(
+                        "netbox_librenms_plugin.views.object_sync.devices.get_missing_vlan_warning", return_value=""
+                    ):
                         mock_ipam = MagicMock()
                         mock_ipam.VLAN = mock_vlan_model
                         mock_ipam.VLANGroup = MagicMock()
@@ -495,7 +507,9 @@ class TestVerifyVlanSyncGroupView:
 
         with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404") as mock_get_obj:
             mock_get_obj.return_value = mock_vlan_group
-            with patch("netbox_librenms_plugin.views.object_sync.devices.get_vlan_sync_css_class", return_value="text-success"):
+            with patch(
+                "netbox_librenms_plugin.views.object_sync.devices.get_vlan_sync_css_class", return_value="text-success"
+            ):
                 mock_ipam = MagicMock()
                 mock_vlan_model = MagicMock()
                 mock_vlan_model.objects.filter.return_value.first.return_value = mock_vlan
@@ -521,7 +535,9 @@ class TestVerifyVlanSyncGroupView:
         request = MagicMock()
         request.body = json.dumps({"vid": "20", "name": "vlan20"}).encode()
 
-        with patch("netbox_librenms_plugin.views.object_sync.devices.get_vlan_sync_css_class", return_value="text-danger"):
+        with patch(
+            "netbox_librenms_plugin.views.object_sync.devices.get_vlan_sync_css_class", return_value="text-danger"
+        ):
             mock_ipam = MagicMock()
             mock_vlan_model = MagicMock()
             mock_vlan_model.objects.filter.return_value.first.return_value = None
@@ -590,7 +606,10 @@ class TestSaveVlanGroupOverridesView:
 
         with patch.object(view, "require_write_permission_json", return_value=None):
             with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404", return_value=mock_device):
-                with patch("netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device", return_value=mock_device):
+                with patch(
+                    "netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device",
+                    return_value=mock_device,
+                ):
                     with patch("netbox_librenms_plugin.views.object_sync.devices.cache") as mock_cache:
                         mock_cache.ttl.return_value = 0
                         with patch.object(view, "get_cache_key", return_value="ports_key"):
@@ -607,17 +626,22 @@ class TestSaveVlanGroupOverridesView:
 
         view = self._make_view()
         request = MagicMock()
-        request.body = json.dumps({
-            "device_id": 1,
-            "vid_group_map": {"10": "5", "20": "5"},
-            "server_key": "default",
-        }).encode()
+        request.body = json.dumps(
+            {
+                "device_id": 1,
+                "vid_group_map": {"10": "5", "20": "5"},
+                "server_key": "default",
+            }
+        ).encode()
 
         mock_device = MagicMock()
 
         with patch.object(view, "require_write_permission_json", return_value=None):
             with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404", return_value=mock_device):
-                with patch("netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device", return_value=mock_device):
+                with patch(
+                    "netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device",
+                    return_value=mock_device,
+                ):
                     with patch("netbox_librenms_plugin.views.object_sync.devices.cache") as mock_cache:
                         mock_cache.ttl.return_value = 300
                         mock_cache.get.return_value = {}
