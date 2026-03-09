@@ -279,6 +279,103 @@ class TestGetContextDataVC:
         assert ctx.get("sync_device_has_primary_ip") is False
 
 
+class TestContextAllTabsPresent:
+    """Regression coverage for sync-tab context keys."""
+
+    def test_get_context_data_contains_all_sync_tabs(self):
+        """Context always exposes all tab keys, including module_sync."""
+        view = _make_view()
+        view.librenms_id = 42
+
+        obj = MagicMock()
+        obj.virtual_chassis = None
+        obj._meta = MagicMock()
+        obj._meta.model_name = "device"
+        obj.pk = 1
+        obj.cf = {"librenms_id": {"default": 42}}
+
+        interface_ctx = MagicMock()
+        cable_ctx = MagicMock()
+        ip_ctx = MagicMock()
+        vlan_ctx = MagicMock()
+        module_ctx = MagicMock()
+
+        view.get_librenms_device_info = MagicMock(
+            return_value={
+                "found_in_librenms": True,
+                "librenms_device_details": {
+                    "librenms_device_serial": "SN001",
+                    "librenms_device_hardware": "Cisco",
+                    "librenms_device_os": "ios",
+                    "librenms_device_version": "16.9",
+                    "librenms_device_features": "-",
+                    "librenms_device_location": "NYC",
+                    "librenms_device_hardware_match": None,
+                    "vc_inventory_serials": [],
+                },
+                "mismatched_device": False,
+            }
+        )
+        view.get_interface_context = MagicMock(return_value=interface_ctx)
+        view.get_cable_context = MagicMock(return_value=cable_ctx)
+        view.get_ip_context = MagicMock(return_value=ip_ctx)
+        view.get_vlan_context = MagicMock(return_value=vlan_ctx)
+        view.get_module_context = MagicMock(return_value=module_ctx)
+
+        with patch(
+            "netbox_librenms_plugin.views.base.librenms_sync_view.LibreNMSAPIMixin.get_context_data",
+            return_value={},
+        ):
+            with patch(
+                "netbox_librenms_plugin.views.base.librenms_sync_view.get_interface_name_field", return_value="ifName"
+            ):
+                with patch(
+                    "netbox_librenms_plugin.views.base.librenms_sync_view.BaseLibreNMSSyncView._get_platform_info",
+                    return_value={},
+                ):
+                    with patch("netbox_librenms_plugin.views.base.librenms_sync_view.AddToLIbreSNMPV1V2"):
+                        with patch("netbox_librenms_plugin.views.base.librenms_sync_view.AddToLIbreSNMPV3"):
+                            with patch("dcim.models.Manufacturer") as MockMfr:
+                                MockMfr.objects.all.return_value.order_by.return_value = []
+                                ctx = view.get_context_data(MagicMock(), obj)
+
+        assert "interface_sync" in ctx
+        assert "cable_sync" in ctx
+        assert "ip_sync" in ctx
+        assert "vlan_sync" in ctx
+        assert "module_sync" in ctx
+        assert ctx["interface_sync"] is interface_ctx
+        assert ctx["module_sync"] is module_ctx
+
+
+class TestModuleContextDefaults:
+    """Tests for module-context defaults and concrete overrides."""
+
+    def test_module_sync_is_none_when_not_overridden(self):
+        from netbox_librenms_plugin.views.object_sync.vms import VMLibreNMSSyncView
+
+        base_view = _make_view()
+        assert base_view.get_module_context(MagicMock(), MagicMock()) is None
+
+        vm_view = object.__new__(VMLibreNMSSyncView)
+        assert vm_view.get_module_context(MagicMock(), MagicMock()) is None
+
+    def test_device_view_module_context_is_non_none(self):
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceLibreNMSSyncView
+
+        request = MagicMock()
+        obj = MagicMock()
+        view = object.__new__(DeviceLibreNMSSyncView)
+
+        with patch(
+            "netbox_librenms_plugin.views.object_sync.devices.DeviceModuleTableView.get_context_data",
+            return_value={"modules": []},
+        ):
+            result = view.get_module_context(request, obj)
+
+        assert result is not None
+
+
 class TestBuildAllServerMappings:
     """Tests for _build_all_server_mappings (lines 181, 193, 200, 207-208)."""
 

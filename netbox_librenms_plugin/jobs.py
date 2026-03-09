@@ -111,7 +111,7 @@ class FilterDevicesJob(JobRunner):
             "device_ids": device_ids,
             "total_processed": len(validated_devices),
             "filters": filters,
-            "server_key": server_key,
+            "server_key": api.server_key,
             "vc_detection_enabled": vc_detection_enabled,
             "use_sysname": use_sysname,
             "strip_domain": strip_domain,
@@ -208,7 +208,7 @@ class ImportDevicesJob(JobRunner):
             self.logger.info(f"Importing {len(device_ids)} devices...")
             device_result = bulk_import_devices_shared(
                 device_ids=device_ids,
-                server_key=server_key,
+                server_key=api.server_key,
                 sync_options=sync_options,
                 manual_mappings_per_device=manual_mappings_per_device,
                 libre_devices_cache=libre_devices_cache,
@@ -246,7 +246,7 @@ class ImportDevicesJob(JobRunner):
             "imported_vm_pks": imported_vm_pks,
             "imported_libre_device_ids": imported_libre_device_ids,
             "imported_libre_vm_ids": imported_libre_vm_ids,
-            "server_key": server_key,
+            "server_key": api.server_key,
             "total": total_count,
             "success_count": success_count,
             "failed_count": failed_count,

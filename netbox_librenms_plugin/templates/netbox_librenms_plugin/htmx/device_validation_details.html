@@ -112,7 +112,7 @@
                     <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">
                       {{ validation.existing_device.name }}
                     </a>
-                    {% if validation.name_sync_available and existing_device_model_name != "virtualmachine" %}
+                    {% if validation.name_sync_available %}
                       <form style="display:inline" class="ms-2"
                             hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
                             hx-swap="none"

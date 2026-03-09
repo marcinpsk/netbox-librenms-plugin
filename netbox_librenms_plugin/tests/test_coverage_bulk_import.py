@@ -484,6 +484,80 @@ class TestBulkImportDevicesShared:
         assert len(result["success"]) == 1
         assert result["virtual_chassis_created"] == 0
 
+    def test_vc_creation_skipped_without_permission_logs_job_warning(self):
+        """Missing VC permission with job context logs warning via job.logger (line 244)."""
+        job = _make_job()
+        libre_cache = {1: {"device_id": 1, "hostname": "test"}}
+        validation = _make_validation()
+        validation["virtual_chassis"] = {
+            "is_stack": True,
+            "members": [{"serial": "SN001", "position": 1}],
+        }
+
+        user = MagicMock()
+        user.has_perm.side_effect = lambda p: p != "dcim.add_virtualchassis"
+
+        with (
+            patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions"),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI"),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import",
+                return_value=validation,
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.import_single_device",
+                return_value=_make_import_result(),
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.create_virtual_chassis_with_members",
+            ) as mock_create_vc,
+        ):
+            from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+
+            result = bulk_import_devices_shared(
+                device_ids=[1],
+                user=user,
+                job=job,
+                libre_devices_cache=libre_cache,
+            )
+
+        mock_create_vc.assert_not_called()
+        job.logger.warning.assert_called()
+        assert len(result["success"]) == 1
+
+    def test_vc_with_no_members_falls_back_to_device_id_domain(self):
+        """No serials and no member fingerprint triggers device-id vc_domain fallback (line 233)."""
+        libre_cache = {1: {"device_id": 1, "hostname": "test"}}
+        validation = _make_validation()
+        validation["virtual_chassis"] = {"is_stack": True, "members": []}
+
+        with (
+            patch("netbox_librenms_plugin.import_utils.bulk_import.require_permissions"),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.LibreNMSAPI"),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import",
+                return_value=validation,
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.import_single_device",
+                return_value=_make_import_result(),
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.create_virtual_chassis_with_members",
+                return_value=MagicMock(name="vc"),
+            ) as mock_create_vc,
+        ):
+            from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+
+            result = bulk_import_devices_shared(
+                device_ids=[1],
+                user=MagicMock(),
+                libre_devices_cache=libre_cache,
+            )
+
+        mock_create_vc.assert_called_once()
+        assert result["virtual_chassis_created"] == 1
+
     def test_vc_creation_proceeds_with_vc_permission(self):
         """User has dcim.add_virtualchassis → VC creation proceeds normally."""
         libre_cache = {1: {"device_id": 1, "hostname": "test"}}
@@ -1980,3 +2054,53 @@ class TestProcessDeviceFilters:
         devices, from_cache = result
         assert len(devices) == 1
         assert from_cache is True
+
+    def test_job_rq_check_exception_uses_db_status_and_exits(self):
+        """RQ status read failure falls back to DB status check and exits early (lines 598-607)."""
+        job = _make_job()
+        job.job.status = "failed"
+        api = self._make_api()
+        device = self._make_device()
+
+        with (
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.get_librenms_devices_for_import",
+                return_value=([device], False),
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import",
+                return_value=_make_validation(),
+            ),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.empty_virtual_chassis_data", return_value={}),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.cache") as mock_cache,
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.get_validated_device_cache_key",
+                return_value="vkey",
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.get_import_device_cache_key",
+                return_value="ikey",
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.get_cache_metadata_key",
+                return_value="mkey",
+            ),
+            patch("django_rq.get_queue") as mock_get_queue,
+        ):
+            mock_cache.get.return_value = None
+            mock_get_queue.return_value = MagicMock()
+            with patch("rq.job.Job") as mock_rq_cls:
+                mock_rq_cls.fetch.side_effect = Exception("RQ unavailable")
+                from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
+
+                result = process_device_filters(
+                    api,
+                    filters={},
+                    vc_detection_enabled=False,
+                    clear_cache=True,
+                    show_disabled=True,
+                    job=job,
+                )
+
+        assert result == []
+        job.job.refresh_from_db.assert_called()

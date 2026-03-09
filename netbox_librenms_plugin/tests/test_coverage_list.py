@@ -244,6 +244,33 @@ class TestLoadJobResults:
                         assert result == []
                         mock_logger.error.assert_called_once()
 
+    def test_load_job_results_sets_name_flags_from_job_data(self):
+        """_load_job_results mirrors use_sysname/strip_domain from job metadata."""
+        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
+
+        view = object.__new__(LibreNMSImportView)
+        mock_job = MagicMock()
+        mock_job.status = "completed"
+        mock_job.data = {
+            "device_ids": [1],
+            "filters": {},
+            "server_key": "default",
+            "vc_detection_enabled": False,
+            "use_sysname": False,
+            "strip_domain": True,
+        }
+
+        with patch("core.models.Job") as mock_job_cls:
+            mock_job_cls.objects.get.return_value = mock_job
+            with patch("netbox_librenms_plugin.import_utils.get_validated_device_cache_key", return_value="cache_key"):
+                with patch("netbox_librenms_plugin.views.imports.list.cache") as mock_cache:
+                    mock_cache.get.return_value = {"device_id": 1, "hostname": "router1"}
+                    result = view._load_job_results(1)
+
+        assert len(result) == 1
+        assert view._use_sysname is False
+        assert view._strip_domain is True
+
 
 class TestGetTable:
     """Tests for get_table()."""

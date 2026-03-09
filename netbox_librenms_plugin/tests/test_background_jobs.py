@@ -132,6 +132,7 @@ class TestFilterDevicesJob:
 
         mock_api = MagicMock()
         mock_api.cache_timeout = 300
+        mock_api.server_key = "secondary"
         mock_api_class.return_value = mock_api
         mock_process.return_value = []
 
@@ -155,6 +156,7 @@ class TestFilterDevicesJob:
 
         mock_api = MagicMock()
         mock_api.cache_timeout = 300
+        mock_api.server_key = "secondary"
         mock_api_class.return_value = mock_api
         mock_process.return_value = []
 
@@ -178,6 +180,7 @@ class TestFilterDevicesJob:
 
         mock_api = MagicMock()
         mock_api.cache_timeout = 300
+        mock_api.server_key = "secondary"
         mock_api_class.return_value = mock_api
         mock_process.return_value = []
 
@@ -201,6 +204,7 @@ class TestFilterDevicesJob:
 
         mock_api = MagicMock()
         mock_api.cache_timeout = 300
+        mock_api.server_key = "secondary"
         mock_api_class.return_value = mock_api
         mock_process.return_value = []
 
@@ -225,6 +229,7 @@ class TestFilterDevicesJob:
 
         mock_api = MagicMock()
         mock_api.cache_timeout = 300
+        mock_api.server_key = "secondary"
         mock_api_class.return_value = mock_api
         mock_process.return_value = [{"device_id": 1, "hostname": "test1"}]
 
@@ -245,12 +250,36 @@ class TestFilterDevicesJob:
 
     @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
     @patch("netbox_librenms_plugin.import_utils.process_device_filters")
+    def test_filter_job_stores_server_key(self, mock_process, mock_api_class):
+        """Job stores resolved api.server_key, not raw input parameter."""
+        from netbox_librenms_plugin.jobs import FilterDevicesJob
+
+        mock_api = MagicMock()
+        mock_api.cache_timeout = 300
+        mock_api.server_key = "resolved-default"
+        mock_api_class.return_value = mock_api
+        mock_process.return_value = [{"device_id": 1, "hostname": "test1"}]
+
+        job = create_mock_job_runner(FilterDevicesJob)
+        job.run(
+            filters={},
+            vc_detection_enabled=False,
+            clear_cache=False,
+            show_disabled=False,
+            server_key=None,
+        )
+
+        assert job.job.data["server_key"] == "resolved-default"
+
+    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
+    @patch("netbox_librenms_plugin.import_utils.process_device_filters")
     def test_run_stores_job_data_correctly(self, mock_process, mock_api_class):
         """Job stores expected data structure."""
         from netbox_librenms_plugin.jobs import FilterDevicesJob
 
         mock_api = MagicMock()
         mock_api.cache_timeout = 300
+        mock_api.server_key = "secondary"
         mock_api_class.return_value = mock_api
 
         mock_process.return_value = [
@@ -664,6 +693,29 @@ class TestImportDevicesJob:
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
         assert ImportDevicesJob.Meta.name == "LibreNMS Device Import"
+
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_vms")
+    @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
+    @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
+    def test_import_job_stores_server_key(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
+        """Import job stores resolved api.server_key in job metadata."""
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
+
+        mock_api = MagicMock()
+        mock_api.server_key = "resolved-default"
+        mock_api_class.return_value = mock_api
+        mock_bulk_devices.return_value = {
+            "success": [],
+            "failed": [],
+            "skipped": [],
+            "virtual_chassis_created": 0,
+        }
+        mock_bulk_vms.return_value = {"success": [], "failed": [], "skipped": []}
+
+        job = create_mock_job_runner(ImportDevicesJob)
+        job.run(device_ids=[], vm_imports={}, server_key=None)
+
+        assert job.job.data["server_key"] == "resolved-default"
 
 
 class TestLoadJobResults:

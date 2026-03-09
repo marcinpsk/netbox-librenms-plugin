@@ -94,6 +94,8 @@ class LibreNMSImportView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Obje
         vc_enabled = job_data.get("vc_detection_enabled", False)
         use_sysname = job_data.get("use_sysname", True)
         strip_domain = job_data.get("strip_domain", False)
+        self._use_sysname = use_sysname
+        self._strip_domain = strip_domain
 
         # Extract cache metadata for frontend warnings
         self._cache_timestamp = job_data.get("cached_at")

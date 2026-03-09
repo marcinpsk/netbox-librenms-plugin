@@ -437,6 +437,30 @@ class TestImportSettingsFormCleanVcPattern:
         result = form.clean_vc_member_name_pattern()
         assert result == " {position}"
 
+    def test_pattern_formatting_to_whitespace_raises_validation_error(self):
+        from django import forms as django_forms
+
+        class WhitespacePattern(str):
+            def format(self, **kwargs):
+                return "   "
+
+        form = self._make_form(WhitespacePattern("{position}"))
+        with pytest.raises(django_forms.ValidationError) as exc_info:
+            form.clean_vc_member_name_pattern()
+        assert "empty suffix" in str(exc_info.value)
+
+    def test_key_error_during_format_raises_validation_error(self):
+        from django import forms as django_forms
+
+        class KeyErrorPattern(str):
+            def format(self, **kwargs):
+                raise KeyError("unexpected")
+
+        form = self._make_form(KeyErrorPattern("{position}"))
+        with pytest.raises(django_forms.ValidationError) as exc_info:
+            form.clean_vc_member_name_pattern()
+        assert "Invalid placeholder in pattern" in str(exc_info.value)
+
 
 # =============================================================================
 # Tests for DeviceTypeMappingImportForm.__init__ (lines 337-343)

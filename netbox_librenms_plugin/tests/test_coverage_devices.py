@@ -296,6 +296,37 @@ class TestSingleInterfaceVerifyView:
         assert data["status"] == "success"
         assert "formatted_row" in data
 
+    def test_sync_device_none_falls_back_to_selected_device(self):
+        """When VC sync device is None, selected_device is used for cache key lookup (line 131)."""
+        import json
+
+        from django.http import JsonResponse
+
+        view = self._make_view()
+        request = MagicMock()
+        request.body = json.dumps({"device_id": 1, "interface_name": "eth0", "interface_name_field": "ifName"}).encode()
+
+        mock_device = MagicMock()
+        mock_device.virtual_chassis = None
+        port_data = {"ifName": "eth0", "speed": 1000}
+        cached_data = {"ports": [port_data]}
+        mock_table = MagicMock()
+        mock_table.format_interface_data.return_value = "<tr>row</tr>"
+
+        with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404", return_value=mock_device):
+            with patch("netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device", return_value=None):
+                with patch("netbox_librenms_plugin.views.object_sync.devices.cache") as mock_cache:
+                    mock_cache.get.return_value = cached_data
+                    with patch.object(view, "get_cache_key", return_value="test_key"):
+                        with patch(
+                            "netbox_librenms_plugin.views.object_sync.devices.LibreNMSInterfaceTable",
+                            return_value=mock_table,
+                        ):
+                            response = view.post(request)
+
+        assert isinstance(response, JsonResponse)
+        assert response.status_code == 200
+
 
 class TestSingleVlanGroupVerifyView:
     """Tests for SingleVlanGroupVerifyView (lines 155-278)."""
@@ -452,6 +483,68 @@ class TestSingleVlanGroupVerifyView:
                             response = view.post(request)
 
         assert isinstance(response, JsonResponse)
+
+    def test_existing_interface_with_untagged_and_tagged_vlans(self):
+        """Covers NetBox VLAN extraction branches for untagged and tagged VLANs (lines 211-215)."""
+        import json
+
+        from django.http import JsonResponse
+
+        view = self._make_view()
+        request = MagicMock()
+        request.body = json.dumps(
+            {
+                "device_id": 1,
+                "vid": "10",
+                "vlan_group_id": "5",
+                "vlan_type": "T",
+                "interface_name": "eth0",
+            }
+        ).encode()
+
+        untagged = MagicMock()
+        untagged.vid = 1
+        untagged.group_id = 9
+        tagged = MagicMock()
+        tagged.vid = 10
+        tagged.group_id = 5
+
+        mock_iface = MagicMock()
+        mock_iface.untagged_vlan = untagged
+        mock_iface.tagged_vlans.all.return_value = [tagged]
+        mock_device = MagicMock()
+        mock_device.interfaces.filter.return_value.first.return_value = mock_iface
+
+        mock_vlan_group = MagicMock()
+        mock_group_qs = MagicMock()
+        mock_group_qs.values_list.return_value = [10]
+        mock_global_qs = MagicMock()
+        mock_global_qs.values_list.return_value = []
+        mock_vlan_model = MagicMock()
+        mock_vlan_model.objects.filter.side_effect = [mock_group_qs, mock_global_qs]
+
+        with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404") as mock_get_obj:
+            mock_get_obj.side_effect = [mock_device, mock_vlan_group]
+            with patch(
+                "netbox_librenms_plugin.views.object_sync.devices.get_tagged_vlan_css_class",
+                return_value="text-success",
+            ):
+                with patch(
+                    "netbox_librenms_plugin.views.object_sync.devices.get_missing_vlan_warning", return_value=""
+                ):
+                    mock_ipam = MagicMock()
+                    mock_ipam.VLAN = mock_vlan_model
+                    mock_ipam.VLANGroup = MagicMock()
+                    with patch.dict("sys.modules", {"ipam.models": mock_ipam}):
+                        response = view.post(request)
+
+        assert isinstance(response, JsonResponse)
+        assert response.status_code == 200
+
+    def test_render_vlans_cell_returns_dash_for_empty_values(self):
+        """Empty VLAN inputs render em dash placeholder (line 276)."""
+        view = self._make_view()
+        assert view._render_vlans_cell(None, [], [], False, None, set()) == "—"
 
 
 class TestVerifyVlanSyncGroupView:
@@ -654,6 +747,32 @@ class TestSaveVlanGroupOverridesView:
         data = json.loads(response.content)
         assert data["status"] == "success"
         mock_cache.set.assert_called_once()
+
+    def test_save_overrides_uses_device_when_sync_device_none(self):
+        """If VC sync-device resolution fails, fallback uses original device (line 358)."""
+        import json
+
+        from django.http import JsonResponse
+
+        view = self._make_view()
+        request = MagicMock()
+        request.body = json.dumps({"device_id": 1, "vid_group_map": {"10": "5"}, "server_key": "default"}).encode()
+        mock_device = MagicMock()
+
+        with patch.object(view, "require_write_permission_json", return_value=None):
+            with patch("netbox_librenms_plugin.views.object_sync.devices.get_object_or_404", return_value=mock_device):
+                with patch(
+                    "netbox_librenms_plugin.views.object_sync.devices.get_librenms_sync_device", return_value=None
+                ):
+                    with patch("netbox_librenms_plugin.views.object_sync.devices.cache") as mock_cache:
+                        mock_cache.ttl.return_value = 300
+                        mock_cache.get.return_value = {}
+                        with patch.object(view, "get_cache_key", return_value="ports_key"):
+                            with patch.object(view, "get_vlan_overrides_key", return_value="vlan_overrides_key"):
+                                response = view.post(request)
+
+        assert isinstance(response, JsonResponse)
+        assert response.status_code == 200
 
 
 class TestDeviceCableTableView:

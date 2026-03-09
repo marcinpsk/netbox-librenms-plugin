@@ -170,6 +170,22 @@ class TestUpdateDeviceLocationView:
         mock_msg.warning.assert_called_once()
 
 
+class TestAddDeviceObjectResolution:
+    """Regression tests for AddDeviceToLibreNMSView.get_object()."""
+
+    def test_get_object_uses_get_object_or_404_for_virtualmachine(self):
+        from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
+
+        view = object.__new__(AddDeviceToLibreNMSView)
+        vm_obj = MagicMock()
+
+        with patch("netbox_librenms_plugin.views.sync.devices.get_object_or_404", return_value=vm_obj) as mock_get_obj:
+            result = view.get_object(123, object_type="virtualmachine")
+
+        assert result is vm_obj
+        assert mock_get_obj.call_args[0][0].__name__ == "VirtualMachine"
+
+
 class TestUpdateDeviceNameViewWiring:
     def test_has_all_required_mixins(self):
         from netbox_librenms_plugin.views.sync.device_fields import UpdateDeviceNameView
