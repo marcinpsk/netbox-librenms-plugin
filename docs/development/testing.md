@@ -35,6 +35,7 @@ The test suite covers all major plugin functionality. Tests are organized by the
 | [test_sync_interfaces.py](../../netbox_librenms_plugin/tests/test_sync_interfaces.py) | Interface sync—port matching, attribute updates, MAC handling, librenms_id assignment |
 | [test_sync_view_mismatch.py](../../netbox_librenms_plugin/tests/test_sync_view_mismatch.py) | Sync page context—device type mismatch detection and badge rendering |
 | [test_coverage_device_fields.py](../../netbox_librenms_plugin/tests/test_coverage_device_fields.py) | Device field sync view—field update logic and device field mapping |
+| [test_coverage_api.py](../../netbox_librenms_plugin/tests/test_coverage_api.py) | LibreNMS API client—malformed payload guards, error paths, and edge cases |
 | [test_coverage_list.py](../../netbox_librenms_plugin/tests/test_coverage_list.py) | Import list view—background job decision, job result loading, and GET handler |
 | [test_coverage_sync_view.py](../../netbox_librenms_plugin/tests/test_coverage_sync_view.py) | Sync view base class—context preparation and tab rendering |
 | [test_coverage_filters.py](../../netbox_librenms_plugin/tests/test_coverage_filters.py) | Import filter logic—filter form processing and device count helpers |

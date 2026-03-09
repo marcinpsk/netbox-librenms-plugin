@@ -482,6 +482,23 @@ class TestVirtualChassisHelpers:
 
         assert result == member_pos1  # lowest vc_position wins
 
+    def test_zero_id_is_still_valid(self):
+        """A zero-valued LibreNMS ID must not be treated as missing."""
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
+
+        device = MagicMock()
+        vc = MagicMock()
+        device.virtual_chassis = vc
+
+        member = MagicMock()
+        vc.members.all.return_value = [member]
+
+        with patch("netbox_librenms_plugin.utils.get_librenms_device_id") as mock_get_id:
+            mock_get_id.side_effect = lambda obj, server_key, **kwargs: 0 if obj is member else None
+            result = get_librenms_sync_device(device, server_key="default")
+
+        assert result is member
+
 
 # =============================================================================
 # TestSafeDisabled - tests for _safe_disabled in bulk_import.py and filters.py
@@ -560,6 +577,21 @@ class TestSafeDisabledFilters:
 
     def test_string_true(self):
         assert self._call("true") == 1
+
+    def test_string_yes(self):
+        assert self._call("yes") == 1
+
+    def test_string_on(self):
+        assert self._call("on") == 1
+
+    def test_string_false(self):
+        assert self._call("false") == 0
+
+    def test_string_off(self):
+        assert self._call("off") == 0
+
+    def test_string_uppercase_true(self):
+        assert self._call("TRUE") == 1
 
     def test_string_no(self):
         assert self._call("no") == 0

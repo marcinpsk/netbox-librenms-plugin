@@ -644,6 +644,7 @@ class TestGetPlatformInfo:
         }
 
         with patch("dcim.models.Platform") as MockPlatform:
+            MockPlatform.DoesNotExist = type("DoesNotExist", (Exception,), {})
             MockPlatform.objects.get.side_effect = MockPlatform.DoesNotExist()
             result = view._get_platform_info(librenms_info, obj)
 

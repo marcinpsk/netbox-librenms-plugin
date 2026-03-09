@@ -424,7 +424,7 @@ class TestGetView:
         """When job_id is in GET params, _load_job_results is called."""
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
-        view, request = self._make_view_with_request(query_params={"job_id": "42", "apply_filters": None})
+        view, request = self._make_view_with_request(query_params={"job_id": "42"})
 
         mock_devices = [{"device_id": 1, "hostname": "router1"}]
         mock_api = MagicMock()
@@ -672,10 +672,14 @@ class TestGetView:
                                         mock_job.job_id = "uuid-123"
                                         mock_job_cls.enqueue.return_value = mock_job
 
+                                        import json
                                         from django.http import JsonResponse
 
                                         result = view.get(request)
                                         assert isinstance(result, JsonResponse)
+                                        data = json.loads(result.content)
+                                        assert "job_pk" in data
+                                        assert "poll_url" in data
 
     def test_get_no_workers_falls_back_to_sync(self):
         """With no RQ workers, falls back to synchronous processing."""

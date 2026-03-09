@@ -260,8 +260,8 @@ class TestGetInventoryFilteredErrors:
         assert ok is False
         assert result == []
 
-    def test_empty_results_with_no_filters_returns_false(self):
-        """If no filters and inventory empty, returns False, []."""
+    def test_empty_results_with_no_filters_returns_true_empty_list(self):
+        """Empty inventory with status:ok is a valid successful empty response."""
         api = _make_api()
         mock_resp = MagicMock()
         mock_resp.status_code = 200
