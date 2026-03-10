@@ -267,10 +267,10 @@ class TestDeviceRetrieval:
         assert count == 2
 
     def test_get_import_device_cache_key_default_server(self):
-        """Generate cache key with default server."""
+        """Generate cache key with explicit default server key."""
         from netbox_librenms_plugin.import_utils import get_import_device_cache_key
 
-        key = get_import_device_cache_key(device_id=123)
+        key = get_import_device_cache_key(device_id=123, server_key="default")
 
         assert "default" in key
         assert "123" in key
