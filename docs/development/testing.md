@@ -74,7 +74,7 @@ pytest netbox_librenms_plugin/tests/test_librenms_api.py::TestLibreNMSAPIConnect
 
 ```bash
 # API client tests
-pytest netbox_librenms_plugin/tests/test_librenms_api.py -v
+pytest netbox_librenms_plugin/tests/test_librenms_api.py netbox_librenms_plugin/tests/test_coverage_api.py -v
 
 # Import and validation tests
 pytest netbox_librenms_plugin/tests/test_import_utils.py netbox_librenms_plugin/tests/test_import_validation_helpers.py netbox_librenms_plugin/tests/test_utils.py -v
@@ -89,7 +89,7 @@ pytest netbox_librenms_plugin/tests/test_librenms_id.py -v
 pytest netbox_librenms_plugin/tests/test_sync_devices.py netbox_librenms_plugin/tests/test_sync_interfaces.py netbox_librenms_plugin/tests/test_sync_modules.py -v
 
 # Integration tests (API client against mock HTTP server)
-pytest netbox_librenms_plugin/tests/test_integration_sync.py -v
+pytest netbox_librenms_plugin/tests/test_integration_sync.py netbox_librenms_plugin/tests/test_integration_virtual_chassis.py -v
 
 # View wiring and template syntax smoke tests
 pytest netbox_librenms_plugin/tests/test_view_wiring.py -v

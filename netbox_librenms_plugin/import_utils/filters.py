@@ -222,6 +222,8 @@ def get_librenms_devices_for_import(
 
         if not success:
             logger.error(f"Failed to retrieve devices from LibreNMS: {devices}")
+            # Cache a brief negative result to prevent hammering the API on repeated failures.
+            cache.set(cache_key, [], timeout=min(60, api.cache_timeout))
             if return_cache_status:
                 return [], False
             return []

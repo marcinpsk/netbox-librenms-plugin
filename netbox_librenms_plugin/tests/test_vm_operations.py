@@ -678,10 +678,10 @@ class TestBulkImportVms:
 
 
 class TestMissingFKWarnings:
-    """#34: bulk_import_vms must warn when a selected cluster or role no longer exists."""
+    """#34: bulk_import_vms must fail device when a selected cluster or role no longer exists."""
 
     def _run_bulk_with_mappings(self, vm_mappings, mock_cluster_result, mock_role_result):
-        """Helper: run bulk_import_vms with one VM and given mapping FK results."""
+        """Helper: run bulk_import_vms with one VM and given mapping FK results. Returns (job, result)."""
         from netbox_librenms_plugin.import_utils.vm_operations import bulk_import_vms
 
         mock_api = MagicMock()
@@ -728,36 +728,37 @@ class TestMissingFKWarnings:
         ):
             mock_Cluster.objects.filter.return_value.first.return_value = mock_cluster_result
             mock_DeviceRole.objects.filter.return_value.first.return_value = mock_role_result
-            bulk_import_vms({1: vm_mappings}, mock_api, job=mock_job)
-            return mock_job
+            result = bulk_import_vms({1: vm_mappings}, mock_api, job=mock_job)
+            return mock_job, result
 
     def test_warning_logged_when_cluster_deleted(self):
-        """Warning is emitted when cluster_id is set but cluster no longer exists."""
-        mock_job = self._run_bulk_with_mappings(
+        """Device fails when cluster_id is set but cluster no longer exists."""
+        _mock_job, result = self._run_bulk_with_mappings(
             vm_mappings={"cluster_id": 99, "device_role_id": None},
             mock_cluster_result=None,
             mock_role_result=None,
         )
-        warning_calls = [str(c) for c in mock_job.logger.warning.call_args_list]
-        assert any("cluster" in w.lower() for w in warning_calls), f"Expected cluster warning but got: {warning_calls}"
+        assert len(result["failed"]) == 1, f"Expected 1 failed entry but got: {result['failed']}"
+        error_msg = result["failed"][0]["error"].lower()
+        assert "cluster" in error_msg, f"Expected 'cluster' in error message but got: {error_msg}"
 
     def test_warning_logged_when_role_deleted(self):
-        """Warning is emitted when role_id is set but role no longer exists."""
-        mock_job = self._run_bulk_with_mappings(
+        """Device fails when role_id is set but role no longer exists."""
+        _mock_job, result = self._run_bulk_with_mappings(
             vm_mappings={"cluster_id": None, "device_role_id": 55},
             mock_cluster_result=None,
             mock_role_result=None,
         )
-        warning_calls = [str(c) for c in mock_job.logger.warning.call_args_list]
-        assert any("role" in w.lower() for w in warning_calls), f"Expected role warning but got: {warning_calls}"
+        assert len(result["failed"]) == 1, f"Expected 1 failed entry but got: {result['failed']}"
+        error_msg = result["failed"][0]["error"].lower()
+        assert "role" in error_msg, f"Expected 'role' in error message but got: {error_msg}"
 
     def test_no_warning_when_cluster_found(self):
-        """No warning when cluster exists."""
+        """No failure when cluster exists."""
         mock_cluster = MagicMock()
-        mock_job = self._run_bulk_with_mappings(
+        _mock_job, result = self._run_bulk_with_mappings(
             vm_mappings={"cluster_id": 99, "device_role_id": None},
             mock_cluster_result=mock_cluster,
             mock_role_result=None,
         )
-        warning_calls = [str(c) for c in mock_job.logger.warning.call_args_list]
-        assert not any("cluster" in w.lower() for w in warning_calls)
+        assert result["failed"] == [], f"Expected no failures but got: {result['failed']}"

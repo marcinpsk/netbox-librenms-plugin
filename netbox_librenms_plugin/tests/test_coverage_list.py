@@ -180,6 +180,8 @@ class TestLoadJobResults:
                         assert len(result) == 2
                         assert mock_device_a in result
                         assert mock_device_b in result
+                        # server_key from job data must be forwarded to cache key generation.
+                        assert all(call.kwargs.get("server_key") == "default" for call in mock_key.call_args_list)
 
     def test_cache_miss_skips_device(self):
         """Devices missing from cache are silently skipped."""
@@ -213,6 +215,7 @@ class TestLoadJobResults:
                         result = view._load_job_results(42)
                         assert len(result) == 1
                         assert result[0] == mock_device
+                        assert all(call.kwargs.get("server_key") == "default" for call in mock_key.call_args_list)
 
     def test_all_cache_expired_logs_error(self):
         """When all devices missing from cache, logs error and returns []."""
@@ -243,6 +246,7 @@ class TestLoadJobResults:
                         result = view._load_job_results(42)
                         assert result == []
                         mock_logger.error.assert_called_once()
+                        assert mock_key.call_args.kwargs.get("server_key") == "default"
 
     def test_load_job_results_sets_name_flags_from_job_data(self):
         """_load_job_results mirrors use_sysname/strip_domain from job metadata."""
@@ -705,8 +709,9 @@ class TestGetView:
                                         result = view.get(request)
                                         assert isinstance(result, JsonResponse)
                                         data = json.loads(result.content)
-                                        assert "job_pk" in data
-                                        assert "poll_url" in data
+                                        assert data["job_id"] == "uuid-123"
+                                        assert data["job_pk"] == 123
+                                        assert "uuid-123" in data["poll_url"]
 
     def test_get_no_workers_falls_back_to_sync(self):
         """With no RQ workers, falls back to synchronous processing."""
@@ -1029,8 +1034,16 @@ class TestGetViewFilterFields:
                                             with patch("netbox_librenms_plugin.views.imports.list.cache") as mock_cache:
                                                 mock_cache.get.return_value = None
                                                 view.get(request)
-                                                # All filters were submitted — filter count passed to device count
                                                 mock_count.assert_called_once()
+                                                _, call_kwargs = mock_count.call_args
+                                                assert call_kwargs["filters"] == {
+                                                    "location": "DC1",
+                                                    "type": "network",
+                                                    "os": "ios",
+                                                    "hostname": "router",
+                                                    "sysname": "sw1",
+                                                    "hardware": "Cisco C9300",
+                                                }
 
     def test_get_settings_exception_in_inline_load(self):
         """LibreNMSSettings exception inside filter block is caught (lines 263-264)."""

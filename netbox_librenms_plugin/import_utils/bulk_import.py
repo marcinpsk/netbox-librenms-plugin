@@ -99,6 +99,9 @@ def bulk_import_devices_shared(
         "dcim.add_device",
         "dcim.change_device",
     ]
+    # If any device will be imported as a VM (import_as_vm=True), also require VM perms.
+    if libre_devices_cache and any(libre_devices_cache.get(d_id, {}).get("import_as_vm") for d_id in device_ids):
+        required_perms += ["virtualization.add_virtualmachine", "virtualization.change_virtualmachine"]
     require_permissions(user, required_perms, "import devices")
 
     total = len(device_ids)

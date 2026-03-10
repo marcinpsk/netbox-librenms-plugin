@@ -720,6 +720,9 @@ class TestCreateAndAssignPlatformView:
         ):
             view.post(req, pk=1)
         mock_msg.error.assert_called_once()
+        error_text = mock_msg.error.call_args[0][1]
+        assert "could not be created" in error_text
+        assert "ios" in error_text
 
     def test_device_does_not_exist_inside_transaction(self):
         view = self._view()
@@ -781,6 +784,8 @@ class TestCreateAndAssignPlatformView:
         ):
             view.post(req, pk=1)
         mock_msg.error.assert_called_once()
+        error_text = mock_msg.error.call_args[0][1]
+        assert "validation failed" in error_text
 
     def test_integrity_error(self):
         from django.db import IntegrityError
@@ -812,6 +817,9 @@ class TestCreateAndAssignPlatformView:
         ):
             view.post(req, pk=1)
         mock_msg.error.assert_called_once()
+        error_text = mock_msg.error.call_args[0][1]
+        assert "could not be created" in error_text
+        assert "duplicate" in error_text
 
 
 # ---------------------------------------------------------------------------
@@ -1033,19 +1041,31 @@ class TestRemoveServerMappingViewHelpers:
         return view
 
     def test_get_object_device(self):
+        from dcim.models import Device
+
         view = self._view()
         mock_device = MagicMock()
 
-        with patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device):
+        with patch(
+            "netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device
+        ) as mock_g404:
             obj, model = view._get_object("device", 1)
         assert obj is mock_device
+        assert model is Device
+        mock_g404.assert_called_once_with(Device, pk=1)
 
     def test_get_object_vm(self):
+        from virtualization.models import VirtualMachine
+
         view = self._view()
         mock_vm = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_vm):
+        with patch(
+            "netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_vm
+        ) as mock_g404:
             obj, model = view._get_object("vm", 1)
         assert obj is mock_vm
+        assert model is VirtualMachine
+        mock_g404.assert_called_once_with(VirtualMachine, pk=1)
 
     def test_sync_url_name_device(self):
         view = self._view()
@@ -1452,18 +1472,30 @@ class TestConvertLegacyLibreNMSIdViewHelpers:
         return view
 
     def test_get_model_and_object_device(self):
+        from dcim.models import Device
+
         view = self._view()
         mock_device = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device):
+        with patch(
+            "netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_device
+        ) as mock_g404:
             model, obj = view._get_model_and_object("device", 1)
         assert obj is mock_device
+        assert model is Device
+        mock_g404.assert_called_once_with(Device, pk=1)
 
     def test_get_model_and_object_vm(self):
+        from virtualization.models import VirtualMachine
+
         view = self._view()
         mock_vm = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_vm):
+        with patch(
+            "netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_vm
+        ) as mock_g404:
             model, obj = view._get_model_and_object("vm", 1)
         assert obj is mock_vm
+        assert model is VirtualMachine
+        mock_g404.assert_called_once_with(VirtualMachine, pk=1)
 
     def test_sync_url_device(self):
         view = self._view()
@@ -1523,14 +1555,21 @@ class TestConvertLegacyLibreNMSIdViewPost:
         with (
             patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=mock_obj),
             patch("netbox_librenms_plugin.views.sync.device_fields.VirtualMachine", mock_vm_cls),
-            patch("netbox_librenms_plugin.views.sync.device_fields.find_by_librenms_id", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.device_fields.migrate_legacy_librenms_id", return_value=True),
+            patch(
+                "netbox_librenms_plugin.views.sync.device_fields.find_by_librenms_id", return_value=None
+            ) as mock_find,
+            patch(
+                "netbox_librenms_plugin.views.sync.device_fields.migrate_legacy_librenms_id", return_value=True
+            ) as mock_migrate,
             patch("netbox_librenms_plugin.views.sync.device_fields.transaction"),
             patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
         ):
             view.post(_make_request({"object_type": "virtualmachine"}), pk=1)
         mock_msg.success.assert_called_once()
+        # Helpers must be called with the active server_key so correct namespace is used.
+        assert mock_find.call_args[0][2] == "default"
+        assert mock_migrate.call_args[0][1] == "default"
 
     def test_permission_denied(self):
         view = self._view()

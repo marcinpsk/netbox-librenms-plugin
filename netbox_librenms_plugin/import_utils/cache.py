@@ -169,7 +169,7 @@ def get_validated_device_cache_key(
     )
 
 
-def get_import_device_cache_key(device_id: int | str, server_key: str = "default") -> str:
+def get_import_device_cache_key(device_id: int | str, server_key: str) -> str:
     """
     Generate cache key for raw LibreNMS device data.
 
@@ -179,7 +179,7 @@ def get_import_device_cache_key(device_id: int | str, server_key: str = "default
 
     Args:
         device_id: LibreNMS device ID
-        server_key: LibreNMS server identifier for multi-server setups
+        server_key: LibreNMS server identifier for multi-server setups (required)
 
     Returns:
         str: Cache key for the device data

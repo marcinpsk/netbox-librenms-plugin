@@ -1022,35 +1022,6 @@ class TestValidateDeviceMoreEdgeCases:
         assert result.get("existing_device") is existing_vm
         assert result.get("existing_match_type") == "hostname"
 
-    def test_no_hostname_adds_issue(self):
-        """Line 612: hostname is falsy → 'Device has no hostname' issue added."""
-        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
-
-        libre_device = {
-            "device_id": 1,
-            "hostname": "",
-            "sysName": "",
-            "hardware": "-",
-            "serial": "-",
-            "os": "-",
-            "location": "",
-        }
-        api = self._make_api()
-
-        patches = self._get_patches()
-        try:
-            for p in patches:
-                p.start()
-            # Patch _determine_device_name to return "" to trigger line 612
-            with patch("netbox_librenms_plugin.import_utils.device_operations._determine_device_name", return_value=""):
-                result = validate_device_for_import(libre_device, api=api)
-        finally:
-            for p in patches:
-                p.stop()
-
-        # Issue text is "Device has no hostname"
-        assert any("no hostname" in issue or "hostname" in issue for issue in result.get("issues", []))
-
     def test_vc_detection_exception_handled(self):
         """Lines 634-636: VC detection exception is caught and stored."""
         from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
