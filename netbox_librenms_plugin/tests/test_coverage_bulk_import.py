@@ -2104,3 +2104,183 @@ class TestProcessDeviceFilters:
 
         assert result == []
         job.job.refresh_from_db.assert_called()
+
+
+# ===========================================================================
+# Issue #26 — device_role reset must NOT clear VMs
+# ===========================================================================
+
+
+class TestDeviceRoleResetGuard:
+    """#26: device_role should only be reset when the device was deleted and import_as_vm is False."""
+
+    def _call_refresh(self, validation, libre_device=None):
+        """Simulate a device that was found at cache time but has since been deleted."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        # Set a mock existing_device so the function takes the "deleted" path
+        existing = MagicMock()
+        existing.pk = 42
+        validation["existing_device"] = existing
+
+        with patch("dcim.models.Device") as mock_dev_cls:
+            with patch("virtualization.models.VirtualMachine") as mock_vm_cls:
+                mock_dev_cls.objects.filter.return_value.first.return_value = None  # deleted
+                mock_vm_cls.objects.filter.return_value.first.return_value = None  # deleted
+                _refresh_existing_device(validation, server_key="default")
+
+    def test_device_role_reset_for_plain_device(self):
+        """When import_as_vm=False and device deleted, device_role is reset to not-found."""
+        mock_role = MagicMock()
+        validation = _make_validation(import_as_vm=False)
+        validation["device_role"] = {"found": True, "role": mock_role}
+        self._call_refresh(validation)
+        assert validation["device_role"] == {"found": False, "role": None}
+
+    def test_device_role_preserved_for_vm(self):
+        """When import_as_vm=True and device deleted, device_role must NOT be cleared."""
+        mock_role = MagicMock()
+        validation = _make_validation(import_as_vm=True)
+        validation["device_role"] = {"found": True, "role": mock_role}
+        self._call_refresh(validation)
+        # device_role should remain untouched
+        assert validation["device_role"]["found"] is True
+        assert validation["device_role"]["role"] is mock_role
+
+
+# ===========================================================================
+# Issue #28 — cache index TTL always refreshed
+# ===========================================================================
+
+
+class TestCacheIndexTTLRefresh:
+    """#28: cache index must be re-written even when the key is already present."""
+
+    def _make_api(self, server_key="default", cache_timeout=300):
+        api = MagicMock()
+        api.server_key = server_key
+        api.cache_timeout = cache_timeout
+        return api
+
+    def _run_process_with_cache(self, cache_index_before, api=None):
+        """Run process_device_filters with a pre-seeded cache index and return the mock_cache."""
+        if api is None:
+            api = self._make_api()
+        device = {"device_id": 1, "hostname": "sw01", "sysName": "sw01"}
+        validation = _make_validation()
+
+        with (
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.get_librenms_devices_for_import",
+                return_value=([device], False),
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import",
+                return_value=validation,
+            ),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.empty_virtual_chassis_data", return_value={}),
+            patch("netbox_librenms_plugin.import_utils.bulk_import.cache") as mock_cache,
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.get_validated_device_cache_key",
+                return_value="vkey",
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.get_import_device_cache_key",
+                return_value="ikey",
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.bulk_import.get_cache_metadata_key",
+                return_value="mkey",
+            ),
+        ):
+            mock_cache.get.side_effect = lambda key, default=None: (
+                cache_index_before if "cache_index" in key else default
+            )
+            from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
+
+            process_device_filters(api, filters={}, vc_detection_enabled=False, clear_cache=False, show_disabled=False)
+            return mock_cache
+
+    def test_cache_index_refreshed_when_key_already_present(self):
+        """cache.set is called for the index even when the metadata key is already present."""
+        existing_key = "mkey"
+        mock_cache = self._run_process_with_cache(cache_index_before=[existing_key])
+        # Find the cache.set call that updates the index
+        index_set_calls = [c for c in mock_cache.set.call_args_list if "cache_index" in str(c)]
+        assert len(index_set_calls) >= 1, "cache.set for cache_index was never called"
+        # The stored index must still contain the key (not duplicated)
+        stored_index = index_set_calls[0][0][1]
+        assert stored_index.count(existing_key) == 1
+
+    def test_cache_index_refreshed_for_new_key(self):
+        """cache.set is called when the key is new."""
+        mock_cache = self._run_process_with_cache(cache_index_before=[])
+        index_set_calls = [c for c in mock_cache.set.call_args_list if "cache_index" in str(c)]
+        assert len(index_set_calls) >= 1
+
+
+# ===========================================================================
+# Issue #36 — cross-model conflict detection in stale cache refresh
+# ===========================================================================
+
+
+class TestCrossModelConflictDetection:
+    """#36: stale-cache refresh must detect device imported as VM (or vice versa)."""
+
+    def test_vm_found_when_device_imported_as_vm(self):
+        """
+        import_as_vm=False (cached as device) but the object was actually imported as VM.
+        The refresh should detect the VM and mark the import as conflicting.
+        """
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        validation = _make_validation(import_as_vm=False)
+        # existing_device=None means "check if imported since caching" branch
+        validation["existing_device"] = None
+        libre_device = {"device_id": 99, "hostname": "sw-cross", "sysName": "sw-cross"}
+
+        mock_vm = MagicMock()
+        mock_vm.role = None
+
+        with (
+            patch("netbox_librenms_plugin.import_utils.bulk_import.find_by_librenms_id", return_value=None),
+            patch("dcim.models.Device") as mock_dev_cls,
+            patch("virtualization.models.VirtualMachine") as mock_vm_cls,
+        ):
+            # Primary model (Device) finds nothing; cross model (VirtualMachine) finds it
+            mock_dev_cls.objects.filter.return_value.first.return_value = None
+            mock_vm_cls.objects.filter.return_value.first.return_value = mock_vm
+
+            _refresh_existing_device(validation, libre_device, server_key="default")
+
+        assert validation["existing_device"] is mock_vm
+        assert validation["can_import"] is False
+        assert validation["is_ready"] is False
+
+    def test_device_found_when_vm_imported_as_device(self):
+        """
+        import_as_vm=True but the object was imported as a Device.
+        The refresh should detect the Device through cross-model lookup.
+        """
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        validation = _make_validation(import_as_vm=True)
+        validation["existing_device"] = None
+        libre_device = {"device_id": 77, "hostname": "vm-but-device", "sysName": "vm-but-device"}
+
+        mock_device = MagicMock()
+        mock_device.role = MagicMock()
+
+        with (
+            patch("netbox_librenms_plugin.import_utils.bulk_import.find_by_librenms_id", return_value=None),
+            patch("dcim.models.Device") as mock_dev_cls,
+            patch("virtualization.models.VirtualMachine") as mock_vm_cls,
+        ):
+            # Primary model (VirtualMachine) finds nothing; cross model (Device) finds it
+            mock_vm_cls.objects.filter.return_value.first.return_value = None
+            mock_dev_cls.objects.filter.return_value.first.return_value = mock_device
+
+            _refresh_existing_device(validation, libre_device, server_key="default")
+
+        assert validation["existing_device"] is mock_device
+        assert validation["can_import"] is False

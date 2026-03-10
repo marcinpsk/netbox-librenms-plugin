@@ -371,8 +371,11 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 # validate_device_for_import logic.
                 validation["existing_device"] = None
                 validation["existing_match_type"] = None
-                # Clear stale device_role so is_ready is computed from scratch
-                validation["device_role"] = {"found": False, "role": None}
+                # Clear stale device_role so is_ready is computed from scratch.
+                # Guard: VMs don't use device_role for readiness, so preserve any
+                # user-selected role rather than silently dropping it.
+                if not validation.get("import_as_vm"):
+                    validation["device_role"] = {"found": False, "role": None}
                 can_import = not bool(validation.get("issues"))
                 if validation.get("import_as_vm"):
                     # VMs only require a cluster (site/role not mandatory)
@@ -400,6 +403,9 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
 
         import_as_vm = validation.get("import_as_vm", False)
         Model = VirtualMachine if import_as_vm else Device
+        # Also check the opposite model — the LibreNMS object may have been
+        # imported as a VM even though import_as_vm=False (or vice versa).
+        CrossModel = Device if import_as_vm else VirtualMachine
 
         librenms_id = libre_device.get("device_id")
         hostname = libre_device.get("hostname", "")
@@ -407,40 +413,51 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
 
         new_device = None
         match_type = None
+        found_as_cross_model = False
 
-        # Check by librenms_id custom field first (JSON multi-server format + legacy)
-        if librenms_id is not None and not isinstance(librenms_id, bool):
-            try:
-                new_device = find_by_librenms_id(Model, int(librenms_id), server_key)
-                if new_device:
-                    match_type = "librenms_id"
-            except (ValueError, TypeError):
-                pass
+        def _lookup_in_model(m):
+            """Return (device, match_type) for model m, or (None, None)."""
+            if librenms_id is not None and not isinstance(librenms_id, bool):
+                try:
+                    dev = find_by_librenms_id(m, int(librenms_id), server_key)
+                    if dev:
+                        return dev, "librenms_id"
+                except (ValueError, TypeError):
+                    pass
+            resolved_name = validation.get("resolved_name")
+            if resolved_name:
+                dev = m.objects.filter(name__iexact=resolved_name).first()
+                if dev:
+                    return dev, "resolved_name"
+            if hostname:
+                dev = m.objects.filter(name__iexact=hostname).first()
+                if dev:
+                    return dev, "hostname"
+            if sys_name:
+                dev = m.objects.filter(name__iexact=sys_name).first()
+                if dev:
+                    return dev, "sysname"
+            return None, None
 
-        # Fall back to resolved_name first (accounts for use_sysname/strip_domain naming options)
-        resolved_name = validation.get("resolved_name")
-        if not new_device and resolved_name:
-            new_device = Model.objects.filter(name__iexact=resolved_name).first()
+        new_device, match_type = _lookup_in_model(Model)
+
+        if not new_device:
+            # Try the opposite model: catches cross-model imports that happened
+            # after the cache was built (e.g. LibreNMS device imported as VM).
+            new_device, match_type = _lookup_in_model(CrossModel)
             if new_device:
-                match_type = "resolved_name"
-        # Fall back to hostname match, then sys_name independently
-        if not new_device and hostname:
-            new_device = Model.objects.filter(name__iexact=hostname).first()
-            if new_device:
-                match_type = "hostname"
-        if not new_device and sys_name:
-            new_device = Model.objects.filter(name__iexact=sys_name).first()
-            if new_device:
-                match_type = "sysname"
+                found_as_cross_model = True
 
         if new_device:
             validation["existing_device"] = new_device
             validation["existing_match_type"] = match_type
             validation["can_import"] = False
             validation["is_ready"] = False
-            if not import_as_vm and hasattr(new_device, "role") and new_device.role:
+            # Determine actual model from the found object, not from import_as_vm flag
+            actual_is_vm = found_as_cross_model != import_as_vm  # XOR: cross flips the flag
+            if not actual_is_vm and hasattr(new_device, "role") and new_device.role:
                 validation["device_role"] = {"found": True, "role": new_device.role}
-            elif not import_as_vm:
+            elif not actual_is_vm:
                 validation.setdefault("device_role", {}).update({"found": False, "role": None})
     except Exception as e:
         logger.error(f"Failed to check for newly imported device: {e}")
@@ -722,8 +739,10 @@ def process_device_filters(
             # Add this cache key if not already in index
             if cache_metadata_key not in cache_index:
                 cache_index.append(cache_metadata_key)
-                # Store index with same timeout as the metadata
-                cache.set(cache_index_key, cache_index, timeout=api.cache_timeout)
+            # Always re-write the index so its TTL matches the freshly-written metadata.
+            # Without this the index can expire before the metadata and the active
+            # search entry disappears from the UI.
+            cache.set(cache_index_key, cache_index, timeout=api.cache_timeout)
 
     if job:
         if exclude_existing:

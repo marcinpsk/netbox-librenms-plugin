@@ -45,7 +45,7 @@ class TestCreateVmFromLibrenms:
 
         with patch("virtualization.models.VirtualMachine") as mock_vm_class:
             mock_vm_class.objects.create.return_value = mock_vm
-            result = create_vm_from_librenms(libre_device, validation)
+            result = create_vm_from_librenms(libre_device, validation, server_key="default")
 
         assert result == mock_vm
         call_kwargs = mock_vm_class.objects.create.call_args[1]
@@ -75,7 +75,7 @@ class TestCreateVmFromLibrenms:
             patch("virtualization.models.VirtualMachine") as mock_vm_class,
         ):
             mock_vm_class.objects.create.return_value = mock_vm
-            result = create_vm_from_librenms(libre_device, validation)
+            result = create_vm_from_librenms(libre_device, validation, server_key="default")
 
         mock_det.assert_called_once()
         call_kwargs = mock_vm_class.objects.create.call_args[1]
@@ -94,7 +94,7 @@ class TestCreateVmFromLibrenms:
         }
 
         with pytest.raises(ValueError, match="boolean"):
-            create_vm_from_librenms(libre_device, validation)
+            create_vm_from_librenms(libre_device, validation, server_key="default")
 
     def test_can_import_false_raises_value_error(self):
         """Raises ValueError immediately when validation['can_import'] is False."""
@@ -107,7 +107,7 @@ class TestCreateVmFromLibrenms:
         }
 
         with pytest.raises(ValueError, match="VM cannot be imported"):
-            create_vm_from_librenms(libre_device, validation)
+            create_vm_from_librenms(libre_device, validation, server_key="default")
 
     def test_server_key_stored_in_custom_field(self):
         """librenms_id custom field uses the provided server_key via set_librenms_device_id."""
@@ -152,7 +152,7 @@ class TestCreateVmFromLibrenms:
 
         with patch("virtualization.models.VirtualMachine") as mock_vm_class:
             mock_vm_class.objects.create.return_value = mock_vm
-            create_vm_from_librenms(libre_device, validation)
+            create_vm_from_librenms(libre_device, validation, server_key="default")
 
         call_kwargs = mock_vm_class.objects.create.call_args[1]
         assert call_kwargs["role"] == mock_role
@@ -173,7 +173,7 @@ class TestCreateVmFromLibrenms:
 
         with patch("virtualization.models.VirtualMachine") as mock_vm_class:
             mock_vm_class.objects.create.return_value = mock_vm
-            create_vm_from_librenms(libre_device, validation)
+            create_vm_from_librenms(libre_device, validation, server_key="default")
 
         call_kwargs = mock_vm_class.objects.create.call_args[1]
         assert call_kwargs["platform"] is None
@@ -194,7 +194,7 @@ class TestCreateVmFromLibrenms:
 
         with patch("virtualization.models.VirtualMachine") as mock_vm_class:
             mock_vm_class.objects.create.return_value = mock_vm
-            create_vm_from_librenms(libre_device, validation)
+            create_vm_from_librenms(libre_device, validation, server_key="default")
 
         call_kwargs = mock_vm_class.objects.create.call_args[1]
         assert "LibreNMS" in call_kwargs["comments"]
@@ -670,3 +670,94 @@ class TestBulkImportVms:
 
         # log.info called at idx=1 checkpoint (not cancelled)
         mock_job.logger.info.assert_called()
+
+
+# ===========================================================================
+# Issue #34 — warnings when cluster/role FK lookup fails
+# ===========================================================================
+
+
+class TestMissingFKWarnings:
+    """#34: bulk_import_vms must warn when a selected cluster or role no longer exists."""
+
+    def _run_bulk_with_mappings(self, vm_mappings, mock_cluster_result, mock_role_result):
+        """Helper: run bulk_import_vms with one VM and given mapping FK results."""
+        from netbox_librenms_plugin.import_utils.vm_operations import bulk_import_vms
+
+        mock_api = MagicMock()
+        mock_api.server_key = "default"
+        mock_api.cache_timeout = 300
+
+        mock_job = MagicMock()
+        mock_job.logger = MagicMock()
+        mock_job.job.status = "running"
+
+        libre_device = {
+            "device_id": 1,
+            "hostname": "vm01",
+            "_computed_name": "vm01",
+            "sysName": "vm01",
+            "type": "",
+            "os": "",
+            "version": "",
+        }
+
+        with (
+            patch("netbox_librenms_plugin.import_utils.vm_operations.require_permissions"),
+            patch(
+                "netbox_librenms_plugin.import_utils.vm_operations.fetch_device_with_cache",
+                return_value=libre_device,
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.vm_operations.validate_device_for_import",
+                return_value={
+                    "can_import": True,
+                    "is_ready": True,
+                    "cluster": {"cluster": MagicMock()},
+                    "platform": {"platform": None},
+                    "device_role": {"role": None},
+                    "issues": [],
+                },
+            ),
+            patch("netbox_librenms_plugin.import_utils.vm_operations.Cluster") as mock_Cluster,
+            patch("netbox_librenms_plugin.import_utils.vm_operations.DeviceRole") as mock_DeviceRole,
+            patch(
+                "netbox_librenms_plugin.import_utils.vm_operations.create_vm_from_librenms",
+                return_value=MagicMock(),
+            ),
+        ):
+            mock_Cluster.objects.filter.return_value.first.return_value = mock_cluster_result
+            mock_DeviceRole.objects.filter.return_value.first.return_value = mock_role_result
+            bulk_import_vms({1: vm_mappings}, mock_api, job=mock_job)
+            return mock_job
+
+    def test_warning_logged_when_cluster_deleted(self):
+        """Warning is emitted when cluster_id is set but cluster no longer exists."""
+        mock_job = self._run_bulk_with_mappings(
+            vm_mappings={"cluster_id": 99, "device_role_id": None},
+            mock_cluster_result=None,
+            mock_role_result=None,
+        )
+        warning_calls = [str(c) for c in mock_job.logger.warning.call_args_list]
+        assert any("cluster" in w.lower() for w in warning_calls), f"Expected cluster warning but got: {warning_calls}"
+
+    def test_warning_logged_when_role_deleted(self):
+        """Warning is emitted when role_id is set but role no longer exists."""
+        mock_job = self._run_bulk_with_mappings(
+            vm_mappings={"cluster_id": None, "device_role_id": 55},
+            mock_cluster_result=None,
+            mock_role_result=None,
+        )
+        warning_calls = [str(c) for c in mock_job.logger.warning.call_args_list]
+        assert any("role" in w.lower() for w in warning_calls), f"Expected role warning but got: {warning_calls}"
+
+    def test_no_warning_when_cluster_found(self):
+        """No warning when cluster exists."""
+        mock_cluster = MagicMock()
+        mock_job = self._run_bulk_with_mappings(
+            vm_mappings={"cluster_id": 99, "device_role_id": None},
+            mock_cluster_result=mock_cluster,
+            mock_role_result=None,
+        )
+        warning_calls = [str(c) for c in mock_job.logger.warning.call_args_list]
+        assert not any("cluster" in w.lower() for w in warning_calls)
