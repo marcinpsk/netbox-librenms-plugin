@@ -2,9 +2,7 @@
 name: Publish Python 🐍 distribution 📦 to PyPI
 
 on:
-  workflow-dispatch:
-    branches:
-      - main
+  workflow_dispatch:
 
 jobs:
   build:
