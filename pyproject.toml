@@ -6,12 +6,13 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name =  "netbox-librenms-plugin"
-version = "0.4.3"
+name =  "netbox-librenms-experimental-plugin"
+version = "0.0.1"
 authors = [
     {name = "Andy Norwood"},
+    {name = "Marcin Zieba"},
 ]
-description = "Netbox plugin to sync data between LibreNMS and Netbox."
+description = "Netbox plugin to sync data between LibreNMS and Netbox. This is EXPERIMENTAL package - not official. Official package name is netbox-librenms-plugin. This package may not be maintained when/if features will get merged into official package. Don't use unless you just want to test it. Will break."
 readme = "README.md"
 
 classifiers=[
