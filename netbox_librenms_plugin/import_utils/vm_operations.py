@@ -17,9 +17,9 @@ logger = logging.getLogger(__name__)
 def create_vm_from_librenms(
     libre_device: dict,
     validation: dict,
+    server_key: str,
     use_sysname: bool = True,
     strip_domain: bool = False,
-    server_key: str = "default",
 ):
     """
     Create a NetBox VirtualMachine from LibreNMS device data.
@@ -218,12 +218,20 @@ def bulk_import_vms(
                 cluster = Cluster.objects.filter(id=cluster_id).first()
                 if cluster:
                     apply_cluster_to_validation(validation, cluster)
+                else:
+                    log.warning(
+                        f"Selected cluster (id={cluster_id}) no longer exists; skipping cluster assignment for VM {vm_id}"
+                    )
 
             role = None
             if role_id:
                 role = DeviceRole.objects.filter(id=role_id).first()
                 if role:
                     apply_role_to_validation(validation, role, is_vm=True)
+                else:
+                    log.warning(
+                        f"Selected role (id={role_id}) no longer exists; skipping role assignment for VM {vm_id}"
+                    )
 
             # Determine VM name
             vm_name = _determine_device_name(
