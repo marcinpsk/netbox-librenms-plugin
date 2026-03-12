@@ -145,7 +145,7 @@ class TestSyncCablesViewSuccessPath:
             ),
         ):
             mock_cache.get.return_value = {"links": [link_data]}
-            local_iface.device_id = 1  # match selected_device_id from POST to skip VC branch
+            local_iface.device_id = mock_device.id  # match selected_device_id to skip VC re-lookup
             mock_iface_cls.objects.get.side_effect = [local_iface, remote_iface]
             mock_cable_cls.objects.filter.return_value.exists.return_value = False
 
