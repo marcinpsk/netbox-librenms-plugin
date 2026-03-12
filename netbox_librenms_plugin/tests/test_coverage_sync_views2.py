@@ -139,15 +139,18 @@ class TestSyncCablesViewSuccessPath:
             patch("netbox_librenms_plugin.views.sync.cables.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.cables.Cable") as mock_cable_cls,
             patch("netbox_librenms_plugin.views.sync.cables.Interface") as mock_iface_cls,
+            patch("netbox_librenms_plugin.views.sync.cables.ContentType") as mock_ct,
             patch("netbox_librenms_plugin.views.sync.cables.transaction"),
             patch.object(
                 type(view), "librenms_api", new_callable=lambda: property(lambda s: MagicMock(server_key="default"))
             ),
         ):
             mock_cache.get.return_value = {"links": [link_data]}
-            local_iface.device_id = mock_device.id  # match selected_device_id to skip VC re-lookup
+            local_iface = MagicMock(pk=10)
+            local_iface.device_id = 1  # match selected_device_id ("1") to skip VC re-lookup
             mock_iface_cls.objects.get.side_effect = [local_iface, remote_iface]
             mock_cable_cls.objects.filter.return_value.exists.return_value = False
+            mock_ct.objects.get_for_model.return_value = MagicMock()
 
             view.post(view.request, pk=1)
 
@@ -182,6 +185,7 @@ class TestSyncCablesViewDuplicateCable:
             patch("netbox_librenms_plugin.views.sync.cables.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.cables.Cable") as mock_cable_cls,
             patch("netbox_librenms_plugin.views.sync.cables.Interface") as mock_iface_cls,
+            patch("netbox_librenms_plugin.views.sync.cables.ContentType") as mock_ct,
             patch("netbox_librenms_plugin.views.sync.cables.transaction"),
             patch.object(
                 type(view), "librenms_api", new_callable=lambda: property(lambda s: MagicMock(server_key="default"))
@@ -193,6 +197,7 @@ class TestSyncCablesViewDuplicateCable:
             remote_iface = MagicMock(pk=20)
             mock_iface_cls.objects.get.side_effect = [local_iface, remote_iface]
             mock_cable_cls.objects.filter.return_value.exists.return_value = True
+            mock_ct.objects.get_for_model.return_value = MagicMock()
 
             view.post(view.request, pk=1)
 
@@ -424,8 +429,12 @@ class TestSyncCablesViewHelpers:
         local = MagicMock(pk=1)
         remote = MagicMock(pk=2)
 
-        with patch("netbox_librenms_plugin.views.sync.cables.Cable") as mock_cable_cls:
+        with (
+            patch("netbox_librenms_plugin.views.sync.cables.Cable") as mock_cable_cls,
+            patch("netbox_librenms_plugin.views.sync.cables.ContentType") as mock_ct,
+        ):
             mock_cable_cls.objects.filter.return_value.exists.return_value = True
+            mock_ct.objects.get_for_model.return_value = MagicMock()
             result = view.check_existing_cable(local, remote)
         assert result is True
 
