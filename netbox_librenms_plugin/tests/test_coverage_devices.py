@@ -303,8 +303,8 @@ class TestSingleInterfaceVerifyView:
         assert data["status"] == "success"
         assert "formatted_row" in data
 
-    def test_sync_device_none_falls_back_to_selected_device(self):
-        """When VC sync device is None, selected_device is used for cache key lookup (line 131)."""
+    def test_non_vc_device_skips_sync_device_lookup(self):
+        """For non-VC devices, get_librenms_sync_device is not called; selected_device used directly (line 123)."""
         import json
 
         from django.http import JsonResponse
@@ -335,10 +335,9 @@ class TestSingleInterfaceVerifyView:
 
         assert isinstance(response, JsonResponse)
         assert response.status_code == 200
-        # Verify fallback: get_librenms_sync_device was called with the selected device
-        mock_get_sync_device.assert_called_once()
-        assert mock_get_sync_device.call_args[0][0] is mock_device
-        # Verify the cache key builder was called with mock_device (not None)
+        # Non-VC device: get_librenms_sync_device should NOT be called
+        mock_get_sync_device.assert_not_called()
+        # The cache key builder was called with mock_device directly
         assert get_cache_key_mock.call_args[0][0] is mock_device
 
 
