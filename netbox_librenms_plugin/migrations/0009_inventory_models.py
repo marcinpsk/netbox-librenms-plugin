@@ -18,8 +18,9 @@ from django.db import migrations, models
 
 
 def _insert_default_rules(apps, schema_editor):
+    db_alias = schema_editor.connection.alias
     InventoryIgnoreRule = apps.get_model("netbox_librenms_plugin", "InventoryIgnoreRule")
-    InventoryIgnoreRule.objects.create(
+    InventoryIgnoreRule.objects.using(db_alias).create(
         name="Cisco IOS-XR IDPROM entries",
         match_type="ends_with",
         pattern="IDPROM",
@@ -34,7 +35,7 @@ def _insert_default_rules(apps, schema_editor):
             "hardcoded _is_idprom_entry() behaviour."
         ),
     )
-    InventoryIgnoreRule.objects.create(
+    InventoryIgnoreRule.objects.using(db_alias).create(
         name="Embedded RP / fixed-chassis system board",
         match_type="serial_matches_device",
         pattern="",
@@ -51,10 +52,11 @@ def _insert_default_rules(apps, schema_editor):
 
 
 def _delete_default_rules(apps, schema_editor):
+    db_alias = schema_editor.connection.alias
     InventoryIgnoreRule = apps.get_model("netbox_librenms_plugin", "InventoryIgnoreRule")
     # Delete only the exact seeded defaults — match on ALL seeded fields so
     # admin-created rules that happen to share a name/pattern are not accidentally removed.
-    InventoryIgnoreRule.objects.filter(
+    InventoryIgnoreRule.objects.using(db_alias).filter(
         name="Cisco IOS-XR IDPROM entries",
         match_type="ends_with",
         pattern="IDPROM",
@@ -62,7 +64,7 @@ def _delete_default_rules(apps, schema_editor):
         require_serial_match_parent=True,
         enabled=True,
     ).delete()
-    InventoryIgnoreRule.objects.filter(
+    InventoryIgnoreRule.objects.using(db_alias).filter(
         name="Embedded RP / fixed-chassis system board",
         match_type="serial_matches_device",
         pattern="",

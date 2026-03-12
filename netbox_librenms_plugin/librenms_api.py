@@ -753,7 +753,8 @@ class LibreNMSAPI:
             data = response.json()
             transceivers = data.get("transceivers") if isinstance(data, dict) else None
             if not isinstance(transceivers, list):
-                return False, f"Unexpected transceivers response format for device {device_id}"
+                msg = data.get("message", "") if isinstance(data, dict) else ""
+                return False, msg or f"Unexpected transceivers response format for device {device_id}"
             return True, transceivers
         except requests.exceptions.RequestException as e:
             return False, str(e)

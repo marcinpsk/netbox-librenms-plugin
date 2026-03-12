@@ -393,6 +393,9 @@ class InventoryIgnoreRule(NetBoxModel):
                 raise ValidationError({"pattern": f"Invalid regex: {e}"})
         if self.match_type != self.MATCH_SERIAL_DEVICE and not pattern_stripped:
             raise ValidationError({"pattern": "Pattern is required for name-based match types."})
+        # Normalize stored pattern to the stripped form so matches_name() and
+        # clean() always operate on the same string.
+        self.pattern = pattern_stripped
 
     def matches_name(self, name: str) -> bool:
         """Return True if *name* matches this rule's pattern/match_type (name-based rules only)."""
@@ -433,5 +436,7 @@ class InventoryIgnoreRule(NetBoxModel):
         ordering = ["name", "pk"]
 
     def __str__(self):
+        if self.match_type == self.MATCH_SERIAL_DEVICE:
+            return f"{self.name}: {self.get_match_type_display()}"
         serial_note = " [serial match]" if self.require_serial_match_parent else ""
         return f"{self.name}: {self.get_match_type_display()} '{self.pattern}'{serial_note}"

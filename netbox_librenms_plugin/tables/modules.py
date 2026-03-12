@@ -46,11 +46,12 @@ class LibreNMSModuleTable(tables.Table):
             "data-item-class": lambda record: record.get("item_class", ""),
         }
 
-    def __init__(self, *args, device=None, server_key="", **kwargs):
+    def __init__(self, *args, device=None, server_key="", has_write_permission=False, **kwargs):
         """Initialize table with optional device context."""
         self.device = device
         self.csrf_token = ""
         self.server_key = server_key
+        self.has_write_permission = has_write_permission
         super().__init__(*args, **kwargs)
         self.tab = "modules"
         self.htmx_url = None
@@ -169,6 +170,8 @@ class LibreNMSModuleTable(tables.Table):
     def render_actions(self, value, record):
         """Render install button for matched modules and install branch for parents."""
         if not self.device:
+            return ""
+        if not self.has_write_permission:
             return ""
 
         buttons = []

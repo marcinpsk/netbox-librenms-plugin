@@ -414,7 +414,9 @@ class DeviceModuleTableView(BaseModuleTableView):
 
     def get_table(self, data, obj):
         """Return the module sync table."""
-        table = LibreNMSModuleTable(data, device=obj, server_key=self.librenms_api.server_key)
+        table = LibreNMSModuleTable(
+            data, device=obj, server_key=self.librenms_api.server_key, has_write_permission=self.has_write_permission()
+        )
         server_key = self.librenms_api.server_key
         table.htmx_url = f"{self.request.path}?tab=modules" + (f"&server_key={server_key}" if server_key else "")
         return table

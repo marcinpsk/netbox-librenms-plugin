@@ -78,7 +78,6 @@ class TestShouldUseBackgroundJob:
 
         assert view.should_use_background_job() is True
 
-
     def test_superuser_empty_form_data_defaults_true(self):
         """Empty _filter_form_data defaults use_background_job to True."""
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
@@ -244,7 +243,6 @@ class TestLoadJobResults:
                         result = view._load_job_results(42)
                         assert result == []
                         mock_logger.error.assert_called_once()
-
 
     def test_load_job_results_sets_name_flags_from_job_data(self):
         """_load_job_results mirrors use_sysname/strip_domain from job metadata."""

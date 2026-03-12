@@ -228,6 +228,5 @@ def get_import_search_cache_key(server_key: str, api_filters: dict, client_filte
         str: Cache key for the import search result.
     """
     return (
-        f"librenms_devices_import_{server_key}_"
-        f"{_build_filter_hash(api_filters)}_{_build_filter_hash(client_filters)}"
+        f"librenms_devices_import_{server_key}_{_build_filter_hash(api_filters)}_{_build_filter_hash(client_filters)}"
     )

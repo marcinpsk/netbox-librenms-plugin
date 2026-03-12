@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 class TestLibreNMSModuleTable:
     """Direct unit tests for every render_* method on LibreNMSModuleTable."""
 
-    def _make_table(self, device=None):
+    def _make_table(self, device=None, has_write_permission=True):
         """Create a bare table instance without calling __init__."""
         from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
 
@@ -19,6 +19,7 @@ class TestLibreNMSModuleTable:
         table.device = device
         table.csrf_token = "test-csrf-token"
         table.server_key = ""
+        table.has_write_permission = has_write_permission
         return table
 
     # ------------------------------------------------------------------
@@ -349,6 +350,14 @@ class TestLibreNMSModuleTable:
     def test_render_actions_no_device_returns_empty_string(self):
         """Returns empty string when no device is set on the table."""
         table = self._make_table(device=None)
+        result = table.render_actions(None, {"can_install": True})
+        assert result == ""
+
+    def test_render_actions_no_write_permission_returns_empty_string(self):
+        """Returns empty string when the user lacks write permission."""
+        device = MagicMock()
+        device.pk = 1
+        table = self._make_table(device=device, has_write_permission=False)
         result = table.render_actions(None, {"can_install": True})
         assert result == ""
 
