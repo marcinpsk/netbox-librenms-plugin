@@ -1095,7 +1095,17 @@ class TestGetViewFilterFields:
 
         with patch.object(LibreNMSImportView, "librenms_api", new_callable=lambda: property(lambda self: mock_api)):
             with patch("netbox_librenms_plugin.views.imports.list.LibreNMSSettings") as mock_settings:
-                mock_settings.objects.first.side_effect = Exception("DB error")
+                # First call (module-level read at top of get()) succeeds
+                # Second call (inline, inside the filter block) raises
+                first_call = [True]
+
+                def first_then_raise(*a, **kw):
+                    if first_call:
+                        first_call.pop()
+                        return None
+                    raise Exception("DB error")
+
+                mock_settings.objects.first.side_effect = first_then_raise
                 mock_settings.objects.get_or_create.return_value = (None, False)
 
                 with patch("netbox_librenms_plugin.views.imports.list.get_user_pref") as mock_pref:
@@ -1348,10 +1358,14 @@ class TestGetImportQuerysetFilterFields:
             with patch("netbox_librenms_plugin.views.imports.list.get_user_pref") as mock_pref:
                 mock_pref.return_value = None
 
-                with patch("netbox_librenms_plugin.views.imports.list.cache") as mock_cache:
-                    mock_cache.get.return_value = None
-                    result = view._get_import_queryset()
-                    assert result == []
+                with patch("netbox_librenms_plugin.views.imports.list.LibreNMSSettings") as mock_settings:
+                    mock_settings.objects.first.side_effect = Exception("DB error")
+
+                    with patch("netbox_librenms_plugin.views.imports.list.cache") as mock_cache:
+                        mock_cache.get.return_value = None
+                        # Should not raise
+                        result = view._get_import_queryset()
+                        assert result == []
 
     def test_cache_metadata_found_sets_timestamps(self):
         """When cache metadata is found, timestamps are set (lines 523-527)."""
