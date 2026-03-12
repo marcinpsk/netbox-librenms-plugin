@@ -52,19 +52,23 @@ def _insert_default_rules(apps, schema_editor):
 
 def _delete_default_rules(apps, schema_editor):
     InventoryIgnoreRule = apps.get_model("netbox_librenms_plugin", "InventoryIgnoreRule")
-    # Delete only the exact seeded defaults — match on all seeded fields so
-    # admin-created rules that share a name/pattern are not accidentally removed.
+    # Delete only the exact seeded defaults — match on ALL seeded fields so
+    # admin-created rules that happen to share a name/pattern are not accidentally removed.
     InventoryIgnoreRule.objects.filter(
         name="Cisco IOS-XR IDPROM entries",
         match_type="ends_with",
         pattern="IDPROM",
         action="skip",
+        require_serial_match_parent=True,
+        enabled=True,
     ).delete()
     InventoryIgnoreRule.objects.filter(
         name="Embedded RP / fixed-chassis system board",
         match_type="serial_matches_device",
         pattern="",
         action="transparent",
+        require_serial_match_parent=False,
+        enabled=True,
     ).delete()
 
 
