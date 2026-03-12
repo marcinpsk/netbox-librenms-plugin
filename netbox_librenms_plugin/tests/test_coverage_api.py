@@ -1017,10 +1017,13 @@ class TestGetInventoryFilteredNonOk:
             {"entPhysicalContainedIn": "1", "entPhysicalName": "slot1"},
         ]
         mock_resp.json.return_value = {"status": "ok", "inventory": inventory}
-        with patch("requests.get", return_value=mock_resp):
+        with patch("requests.get", return_value=mock_resp) as mock_get:
             ok, data = api.get_inventory_filtered(1, ent_physical_contained_in="1")
         assert ok is True
         assert len(data) == 1
+        mock_get.assert_called_once()
+        _, call_kwargs = mock_get.call_args
+        assert call_kwargs.get("params", {}).get("entPhysicalContainedIn") == "1"
 
     def test_empty_inventory_returns_empty(self):
         """Line 799: when response lacks status:ok (even with an empty inventory list), returns False."""
