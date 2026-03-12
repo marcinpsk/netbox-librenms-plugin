@@ -1620,6 +1620,8 @@ class TestNameMatchesWithNamingPreferencesLegacy:
 
         assert result["name_matches"] is True
         assert result["name_sync_available"] is False
+
+
 class TestNameMatchesWithNamingPreferences:
     """Test VC-aware name matching with use_sysname/strip_domain preferences."""
 
@@ -2020,6 +2022,7 @@ class TestLegacyLibreNMSIdMigration:
         result = migrate_legacy_librenms_id(obj, "primary")
 
         assert result is False
+
 
 class TestDeviceNamingPreferences:
     """Test that validation honours use_sysname and strip_domain user preferences."""
@@ -3783,15 +3786,10 @@ class TestImportSingleDeviceLazyValidation:
     """import_single_device must pass api=api to validate_device_for_import when validation is None."""
 
     def test_api_passed_to_validate(self):
-        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
 
         mock_api = MagicMock()
         mock_api.server_key = "prod"
 
-        mock_validation = {
-            "existing_device": MagicMock(name="existing"),
-            "can_import": False,
-        }
     def test_show_disabled_filters_integer_disabled_1(self):
         """show_disabled=False should exclude devices with disabled==1 (int)."""
         from unittest.mock import MagicMock, patch

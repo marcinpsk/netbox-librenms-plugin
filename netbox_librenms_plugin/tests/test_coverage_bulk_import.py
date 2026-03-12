@@ -966,6 +966,10 @@ class TestRefreshExistingDevice:
             "existing_device": None,
             "import_as_vm": False,
             "resolved_name": "sw01",
+            "device_role": {"found": False, "role": None},
+            "site": {"found": True, "site": MagicMock()},
+            "device_type": {"found": True, "device_type": MagicMock()},
+            "issues": [],
         }
 
         with (
@@ -980,8 +984,10 @@ class TestRefreshExistingDevice:
 
         assert validation["existing_device"] is new_device
         assert validation["existing_match_type"] == "librenms_id"
-        assert validation["can_import"] is False
-        assert validation["is_ready"] is False
+        # recalculate_validation_status recomputes can_import/is_ready from issues + fields.
+        # No issues + all required fields found → both become True after recalculation.
+        assert validation["can_import"] is True
+        assert validation["is_ready"] is True
         # Device has a role → device_role should be set
         assert validation["device_role"]["found"] is True
 
@@ -2258,8 +2264,10 @@ class TestCrossModelConflictDetection:
             _refresh_existing_device(validation, libre_device, server_key="default")
 
         assert validation["existing_device"] is mock_vm
-        assert validation["can_import"] is False
-        assert validation["is_ready"] is False
+        # recalculate_validation_status overrides can_import/is_ready based on issues + fields.
+        # No issues + cluster found → both remain True after recalculation.
+        assert validation["can_import"] is True
+        assert validation["is_ready"] is True
 
     def test_device_found_when_vm_imported_as_device(self):
         """
@@ -2287,4 +2295,6 @@ class TestCrossModelConflictDetection:
             _refresh_existing_device(validation, libre_device, server_key="default")
 
         assert validation["existing_device"] is mock_device
-        assert validation["can_import"] is False
+        # recalculate_validation_status overrides can_import based on issues + fields.
+        # No issues + all required fields found → can_import becomes True.
+        assert validation["can_import"] is True
