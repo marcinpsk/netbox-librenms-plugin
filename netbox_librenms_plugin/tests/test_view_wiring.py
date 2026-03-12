@@ -7,7 +7,6 @@ hierarchies and attribute presence.
 
 import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -441,3 +440,4 @@ class TestSingleCableVerifyServerKey:
             # cache lookup must also use the fallback server_key
             cache_key_arg = mock_cache.get.call_args[0][0]
             assert "fallback-server" in cache_key_arg
+

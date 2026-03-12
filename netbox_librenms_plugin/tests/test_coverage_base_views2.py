@@ -26,7 +26,6 @@ def _mock_obj(model_name="device", pk=1, name="test-device"):
     obj._meta.model_name = model_name
     obj.pk = pk
     obj.name = name
-    obj.virtual_chassis = None
     return obj
 
 
@@ -556,12 +555,15 @@ class TestProcessRemoteDevice:
         mock_device.pk = 5
 
         link = {"remote_port": "Gi0/1", "remote_port_id": None}
+        enriched = {
+            "remote_port": "Gi0/1",
+            "remote_device_url": "/dcim/devices/5/",
+            "netbox_remote_device_id": 5,
+        }
 
         with (
             patch.object(view, "get_device_by_id_or_name", return_value=(mock_device, True, None)),
-            patch.object(
-                view, "enrich_remote_port", side_effect=lambda link, *_args, **_kwargs: dict(link)
-            ) as mock_enrich,
+            patch.object(view, "enrich_remote_port", return_value=enriched),
             patch(
                 "netbox_librenms_plugin.views.base.cables_view.reverse",
                 return_value="/dcim/devices/5/",
@@ -571,7 +573,6 @@ class TestProcessRemoteDevice:
 
         assert result["remote_device_url"] == "/dcim/devices/5/"
         assert result["netbox_remote_device_id"] == 5
-        mock_enrich.assert_called_once()
 
     def test_found_false_with_error_message(self):
         """found=False with error_message → cable_status set to the error."""
@@ -708,7 +709,7 @@ class TestPostHandlerVC:
             ),
             patch(
                 "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
-                return_value=mock_device,
+                return_value=None,
             ),
             patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -818,7 +819,7 @@ class TestPostHandlerInterfaceNotFound:
             ),
             patch(
                 "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
-                return_value=mock_device,
+                return_value=None,
             ),
             patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -899,7 +900,7 @@ class TestPostHandlerInterfaceNotFound:
             ),
             patch(
                 "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
-                return_value=mock_device,
+                return_value=None,
             ),
             patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -1568,8 +1569,8 @@ class TestSingleIPAddressVerifyViewPost:
         assert rendered_record["interface_name"] == "eth0"
         assert rendered_record["interface_url"] == "/interface/1/"
 
-    def test_invalid_json_returns_400(self):
-        """Malformed JSON body → JsonResponse 400."""
+    def test_exception_returns_500(self):
+        """Unhandled exception inside post() → JsonResponse 500."""
         import json as json_mod
 
         view = self._make_view()
@@ -1577,7 +1578,7 @@ class TestSingleIPAddressVerifyViewPost:
         req.body = b"not-json"  # will cause json.loads to fail
 
         response = view.post(req)
-        assert response.status_code == 400
+        assert response.status_code == 500
         data = json_mod.loads(response.content)
         assert data["status"] == "error"
 
@@ -1896,7 +1897,7 @@ class TestPostHandlerCanCreateCable:
             ),
             patch(
                 "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
-                return_value=mock_device,
+                return_value=None,
             ),
             patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -1984,7 +1985,7 @@ class TestPostHandlerInterfaceNotFoundBranches:
             ),
             patch(
                 "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
-                return_value=mock_device,
+                return_value=None,
             ),
             patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),

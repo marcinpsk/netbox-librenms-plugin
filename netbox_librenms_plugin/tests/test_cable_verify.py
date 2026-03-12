@@ -178,6 +178,28 @@ class TestStaleFieldStripping:
             assert "netbox_remote_device_id" not in received_link
             assert "local_port_url" not in received_link
             assert "cable_status" not in received_link
+    def test_raw_keys_match_prepare_context(self):
+        """The _raw_keys set in post() must match the one in _prepare_context()."""
+        import inspect
+
+        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView, SingleCableVerifyView
+
+        # Extract _raw_keys from _prepare_context source
+        prepare_src = inspect.getsource(BaseCableTableView._prepare_context)
+        post_src = inspect.getsource(SingleCableVerifyView.post)
+
+        # Both should contain the same set of raw keys
+        expected_keys = {
+            "local_port",
+            "local_port_id",
+            "remote_port",
+            "remote_device",
+            "remote_port_id",
+            "remote_device_id",
+        }
+        for key in expected_keys:
+            assert f'"{key}"' in prepare_src, f"{key} missing from _prepare_context _raw_keys"
+            assert f'"{key}"' in post_src, f"{key} missing from post() _raw_keys"
 
 
 class TestXSSEscaping:
