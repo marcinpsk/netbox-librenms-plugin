@@ -74,6 +74,8 @@ class TestLibreNMSAPIInitFallback:
 
                 api = LibreNMSAPI()
                 assert api.server_key == "default"
+                assert api.librenms_url == "https://x.example.com"
+                assert api.api_token == "tok"
 
 
 class TestTestConnectionErrors:
