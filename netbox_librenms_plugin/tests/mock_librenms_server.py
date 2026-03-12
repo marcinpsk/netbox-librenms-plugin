@@ -108,7 +108,10 @@ class MockLibreNMSServer:
         to match any verb on that path.
         """
         key = f"{method} {path}" if method else path
-        self._server.routes[key] = (status, body)
+        if callable(body):
+            self._server.routes[key] = body
+        else:
+            self._server.routes[key] = (status, body)
 
     def start(self):
         self._thread.start()
