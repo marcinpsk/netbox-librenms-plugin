@@ -211,22 +211,46 @@ class LibreNMSAPI:
         if ip_address:
             librenms_id = self._normalize_librenms_id(self.get_device_id_by_ip(ip_address))
             if librenms_id is not None:
-                self._store_librenms_id(obj, librenms_id)
-                return librenms_id
+                if isinstance(librenms_id, bool):
+                    librenms_id = None
+                else:
+                    try:
+                        librenms_id = int(librenms_id)
+                    except (ValueError, TypeError):
+                        librenms_id = None
+                if librenms_id is not None:
+                    self._store_librenms_id(obj, librenms_id)
+                    return librenms_id
 
         # Try primary IP's DNS name
         if dns_name:
             librenms_id = self._normalize_librenms_id(self.get_device_id_by_hostname(dns_name))
             if librenms_id is not None:
-                self._store_librenms_id(obj, librenms_id)
-                return librenms_id
+                if isinstance(librenms_id, bool):
+                    librenms_id = None
+                else:
+                    try:
+                        librenms_id = int(librenms_id)
+                    except (ValueError, TypeError):
+                        librenms_id = None
+                if librenms_id is not None:
+                    self._store_librenms_id(obj, librenms_id)
+                    return librenms_id
 
         # Try hostname if FQDN
         if hostname:
             librenms_id = self._normalize_librenms_id(self.get_device_id_by_hostname(hostname))
             if librenms_id is not None:
-                self._store_librenms_id(obj, librenms_id)
-                return librenms_id
+                if isinstance(librenms_id, bool):
+                    librenms_id = None
+                else:
+                    try:
+                        librenms_id = int(librenms_id)
+                    except (ValueError, TypeError):
+                        librenms_id = None
+                if librenms_id is not None:
+                    self._store_librenms_id(obj, librenms_id)
+                    return librenms_id
 
         return None
 
@@ -902,11 +926,9 @@ class LibreNMSAPI:
                     return False, "Unexpected response format: invalid item shape in 'devices'"
                 return True, devices
 
-            # LibreNMS API v0 always returns JSON objects, so result is always
-            # a dict here; the isinstance guard is purely defensive.
-            if isinstance(result, dict):
-                return False, result.get("message") or "Unexpected response format"
-            return False, "Unexpected response format"
+            return False, result.get("message", "Unexpected response format") if isinstance(
+                result, dict
+            ) else "Unexpected response format"
         except (requests.exceptions.RequestException, ValueError) as e:
             return False, str(e)
 
