@@ -432,7 +432,7 @@ class SingleCableVerifyView(BaseCableTableView):
             # resolvable sync device, return an empty row rather than crashing.
             if selected_device.virtual_chassis:
                 primary_device = get_librenms_sync_device(selected_device, server_key=server_key)
-                if primary_device is None:
+                if not primary_device:
                     return JsonResponse({"status": "success", "formatted_row": formatted_row})
             else:
                 primary_device = selected_device

@@ -709,7 +709,7 @@ class TestPostHandlerVC:
             ),
             patch(
                 "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
-                return_value=None,
+                return_value=mock_device,
             ),
             patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -819,7 +819,7 @@ class TestPostHandlerInterfaceNotFound:
             ),
             patch(
                 "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
-                return_value=None,
+                return_value=mock_device,
             ),
             patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -900,7 +900,7 @@ class TestPostHandlerInterfaceNotFound:
             ),
             patch(
                 "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
-                return_value=None,
+                return_value=mock_device,
             ),
             patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -1897,7 +1897,7 @@ class TestPostHandlerCanCreateCable:
             ),
             patch(
                 "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
-                return_value=None,
+                return_value=mock_device,
             ),
             patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
@@ -1985,7 +1985,7 @@ class TestPostHandlerInterfaceNotFoundBranches:
             ),
             patch(
                 "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
-                return_value=None,
+                return_value=mock_device,
             ),
             patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
             patch.object(view, "get_cache_key", return_value="test-key"),
