@@ -17,6 +17,7 @@ from netbox_librenms_plugin.tables.interfaces import (
     LibreNMSInterfaceTable,
     VCInterfaceTable,
 )
+from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
 from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_librenms_sync_device,
@@ -30,6 +31,7 @@ from ..base.cables_view import BaseCableTableView
 from ..base.interfaces_view import BaseInterfaceTableView
 from ..base.ip_addresses_view import BaseIPAddressTableView
 from ..base.librenms_sync_view import BaseLibreNMSSyncView
+from ..base.modules_view import BaseModuleTableView
 from ..base.vlan_table_view import BaseVLANTableView
 from ..mixins import CacheMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin
 
@@ -63,6 +65,12 @@ class DeviceLibreNMSSyncView(BaseLibreNMSSyncView):
         vlan_table_view = DeviceVLANTableView()
         vlan_table_view.request = request
         return vlan_table_view.get_vlan_context(request, obj)
+
+    def get_module_context(self, request, obj):
+        """Return module sync context for the device."""
+        module_table_view = DeviceModuleTableView()
+        module_table_view.request = request
+        return module_table_view.get_context_data(request, obj)
 
 
 class DeviceInterfaceTableView(BaseInterfaceTableView):
@@ -110,10 +118,12 @@ class SingleInterfaceVerifyView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Cache
         selected_device_id = data.get("device_id")
         interface_name = data.get("interface_name")
         interface_name_field = data.get("interface_name_field") or get_interface_name_field()
-        server_key = data.get("server_key") or self.librenms_api.server_key
+        server_key = data.get("server_key")
 
         if not selected_device_id:
             return JsonResponse({"status": "error", "message": "No device ID provided"}, status=400)
+        if not server_key:
+            server_key = self.librenms_api.server_key
 
         selected_device = get_object_or_404(Device, pk=selected_device_id)
 
@@ -342,10 +352,12 @@ class SaveVlanGroupOverridesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Cach
         data = json.loads(request.body)
         device_id = data.get("device_id")
         vid_group_map = data.get("vid_group_map", {})
-        server_key = data.get("server_key") or self.librenms_api.server_key
+        server_key = data.get("server_key")
 
         if not device_id:
             return JsonResponse({"status": "error", "message": "No device ID provided"}, status=400)
+        if not server_key:
+            server_key = self.librenms_api.server_key
 
         device = get_object_or_404(Device, pk=device_id)
 
@@ -393,3 +405,16 @@ class DeviceVLANTableView(BaseVLANTableView):
     """VLAN synchronization table view for Devices."""
 
     model = Device
+
+
+class DeviceModuleTableView(BaseModuleTableView):
+    """Module/inventory synchronization view for Devices."""
+
+    model = Device
+
+    def get_table(self, data, obj):
+        """Return the module sync table."""
+        table = LibreNMSModuleTable(data, device=obj, server_key=self.librenms_api.server_key)
+        server_key = self.librenms_api.server_key
+        table.htmx_url = f"{self.request.path}?tab=modules" + (f"&server_key={server_key}" if server_key else "")
+        return table

@@ -52,7 +52,6 @@ def bulk_import_devices_shared(
     sync_options: dict = None,
     manual_mappings_per_device: dict = None,
     libre_devices_cache: dict = None,
-    vc_detection_enabled: bool = False,
     job=None,
     user=None,
 ) -> dict:
@@ -70,8 +69,6 @@ def bulk_import_devices_shared(
             Example: {1179: {'device_role_id': 5}, 1180: {'device_role_id': 3}}
         libre_devices_cache: Optional dict mapping device_id to pre-fetched device data
             to avoid redundant API calls. Example: {123: {...device_data...}}
-        vc_detection_enabled: Whether to enable virtual chassis detection during import.
-            Should match the flag used during the filter/preview step for consistency.
         job: Optional JobRunner instance for progress logging and cancellation checks
         user: User performing the import (for permission checks). If job is provided,
             user is extracted from job.job.user if not explicitly passed.
@@ -174,10 +171,10 @@ def bulk_import_devices_shared(
             validation = validate_device_for_import(
                 libre_device,
                 api=api,
+                include_vc_detection=(sync_options.get("vc_detection_enabled", True) if sync_options else True),
                 use_sysname=use_sysname_opt,
                 strip_domain=strip_domain_opt,
                 server_key=api.server_key,
-                include_vc_detection=vc_detection_enabled,
             )
 
             # Build manual mappings from validation + any provided overrides
@@ -315,7 +312,6 @@ def bulk_import_devices(
     sync_options: dict = None,
     manual_mappings_per_device: dict = None,
     libre_devices_cache: dict = None,
-    vc_detection_enabled: bool = False,
     user=None,
 ) -> dict:
     """
@@ -332,7 +328,6 @@ def bulk_import_devices(
             Example: {1179: {'device_role_id': 5}, 1180: {'device_role_id': 3}}
         libre_devices_cache: Optional dict mapping device_id to pre-fetched device data
             to avoid redundant API calls. Example: {123: {...device_data...}}
-        vc_detection_enabled: Whether to enable virtual chassis detection during import.
         user: User performing the import (for permission checks)
 
     Returns:
@@ -354,7 +349,6 @@ def bulk_import_devices(
         sync_options=sync_options,
         manual_mappings_per_device=manual_mappings_per_device,
         libre_devices_cache=libre_devices_cache,
-        vc_detection_enabled=vc_detection_enabled,
         job=None,  # No job context for synchronous imports
         user=user,
     )
@@ -550,6 +544,23 @@ def process_device_filters(
         job.logger.info(f"Found {len(libre_devices)} devices to process")
     else:
         logger.info(f"Found {len(libre_devices)} devices")
+
+    # Check for early cancellation before the expensive VC prefetch
+    if job:
+        try:
+            from django_rq import get_queue
+            from rq.job import Job as RQJob
+
+            queue = get_queue("default")
+            rq_job = RQJob.fetch(str(job.job.job_id), connection=queue.connection)
+            if rq_job.is_failed or rq_job.is_stopped:
+                job.logger.warning("Job was stopped before VC pre-fetch")
+                return _empty_return(return_cache_status)
+        except Exception:
+            job.job.refresh_from_db()
+            if job.job.status in (JobStatusChoices.STATUS_FAILED, JobStatusChoices.STATUS_ERRORED):
+                job.logger.warning("Job was stopped before VC pre-fetch")
+                return _empty_return(return_cache_status)
 
     # Pre-warm VC cache if needed
     if vc_detection_enabled and libre_devices:

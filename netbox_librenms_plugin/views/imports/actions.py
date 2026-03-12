@@ -40,6 +40,9 @@ logger = logging.getLogger(__name__)
 # Actions that require the force checkbox when a device-type mismatch is detected.
 _FORCE_REQUIRED_ACTIONS = frozenset({"link", "update", "update_serial", "update_type"})
 
+# Actions that operate on Device-only fields and cannot be applied to VMs.
+_DEVICE_ONLY_ACTIONS = frozenset({"link", "update", "update_serial", "update_type", "sync_serial", "sync_device_type"})
+
 
 def _save_device(device) -> HttpResponse | None:
     """Call full_clean() then save(). Return an HttpResponse on failure, None on success."""
@@ -213,7 +216,9 @@ class DeviceImportHelperMixin:
             strip_domain=strip_domain,
             server_key=self.librenms_api.server_key,
         )
-        validation["import_as_vm"] = is_vm
+        # Recompute is_vm from validate_device_for_import's own detection
+        # (it may have found an existing VM via hostname/IP lookup)
+        is_vm = bool(validation.get("import_as_vm"))
 
         # Apply user selections (cluster, role, rack) to validation
         _apply_user_selections_to_validation(validation, selections, is_vm)
@@ -367,6 +372,9 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 strip_domain=strip_domain,
                 server_key=self.librenms_api.server_key,
             )
+            # Recompute is_vm from validation result — the function may have
+            # detected an existing VM via hostname/IP lookup
+            is_vm = bool(validation.get("import_as_vm"))
 
             # Mark validation with VC detection flag for proper URL generation in table
             # Bulk confirm should respect the initial filter's VC detection preference
@@ -511,11 +519,11 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             return HttpResponse("Invalid device identifier", status=400)
 
         use_sysname, strip_domain = _resolve_naming_preferences(request)
-        vc_detection_enabled = request.POST.get("enable_vc_detection") in ("on", "true", "1", "True")
         sync_options = {
             "sync_interfaces": request.POST.get("sync_interfaces") == "on",
             "sync_cables": request.POST.get("sync_cables") == "on",
             "sync_ips": request.POST.get("sync_ips") == "on",
+            "vc_detection_enabled": request.POST.get("vc_detection_enabled") in ("on", "true", "1", "True"),
             "use_sysname": use_sysname,
             "strip_domain": strip_domain,
         }
@@ -597,7 +605,6 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     vm_imports=vm_imports,
                     server_key=self.librenms_api.server_key,
                     sync_options=sync_options,
-                    vc_detection_enabled=vc_detection_enabled,
                     manual_mappings_per_device=manual_mappings_per_device,
                     libre_devices_cache=libre_devices_cache,
                 )
@@ -660,7 +667,6 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     sync_options=sync_options,
                     manual_mappings_per_device=manual_mappings_per_device,  # type: ignore
                     libre_devices_cache=libre_devices_cache_sync,
-                    vc_detection_enabled=vc_detection_enabled,
                     user=request.user,  # Pass user for permission checks
                 )
 
@@ -890,7 +896,7 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
                     device_type_synced = False
                 elif hw_match.get("matched"):
                     librenms_device_type = hw_match["device_type"]
-                    if not netbox_device_type or netbox_device_type.pk != librenms_device_type.pk:
+                    if netbox_device_type is None or netbox_device_type.pk != librenms_device_type.pk:
                         device_type_synced = False
                 else:
                     device_type_synced = False
@@ -1013,11 +1019,10 @@ class DeviceConflictActionView(
         if not action or not existing_device_id:
             return HttpResponse("Missing action or existing_device_id", status=400)
 
-        # VirtualMachine supports migrate_librenms_id, sync_name, and sync_platform; all
-        # other actions operate on Device-specific fields (serial, device_type) and remain Device-only.
-        _VM_SUPPORTED_ACTIONS = frozenset({"migrate_librenms_id", "sync_name", "sync_platform"})
+        # VirtualMachine supports migrate_librenms_id, sync_name, and sync_platform.
+        # Device-only actions (serial, device_type, legacy link/update) are rejected.
         if existing_device_type == "virtualmachine":
-            if action not in _VM_SUPPORTED_ACTIONS:
+            if action in _DEVICE_ONLY_ACTIONS:
                 return HttpResponse(
                     f"Action '{escape(action)}' is not supported for virtual machines",
                     status=400,

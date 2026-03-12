@@ -1,4 +1,5 @@
 #!/bin/bash
+# netbox-librenms-plugin devcontainer script
 set -e
 
 echo "🚀 Setting up NetBox LibreNMS Plugin development environment..."

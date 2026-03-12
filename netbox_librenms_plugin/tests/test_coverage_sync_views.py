@@ -554,9 +554,7 @@ class TestAddDeviceToLibreNMSViewGetObject:
 
         view = _make_view(AddDeviceToLibreNMSView)
         mock_device = MagicMock()
-        with patch("netbox_librenms_plugin.views.sync.devices.Device") as mock_dev_cls:
-            mock_dev_cls.objects.get.return_value = mock_device
-            mock_dev_cls.DoesNotExist = Exception
+        with patch("netbox_librenms_plugin.views.sync.devices.get_object_or_404", return_value=mock_device):
             result = view.get_object(1)
         assert result is mock_device
 

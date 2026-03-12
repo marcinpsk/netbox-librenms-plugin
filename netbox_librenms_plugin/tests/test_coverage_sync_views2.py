@@ -145,7 +145,7 @@ class TestSyncCablesViewSuccessPath:
             ),
         ):
             mock_cache.get.return_value = {"links": [link_data]}
-            local_iface.device_id = mock_device.id  # match device_id to skip VC re-lookup
+            local_iface.device_id = 1  # match selected_device_id from POST to skip VC branch
             mock_iface_cls.objects.get.side_effect = [local_iface, remote_iface]
             mock_cable_cls.objects.filter.return_value.exists.return_value = False
 
@@ -166,6 +166,7 @@ class TestSyncCablesViewDuplicateCable:
         view._post_server_key = "default"
 
         mock_device = MagicMock(pk=1)
+        mock_device.id = 1  # ensure id matches device_id on iface to skip VC branch
         link_data = {
             "local_port_id": "port1",
             "local_port": "Gi0/1",
@@ -188,7 +189,7 @@ class TestSyncCablesViewDuplicateCable:
         ):
             mock_cache.get.return_value = {"links": [link_data]}
             local_iface = MagicMock(pk=10)
-            local_iface.device_id = mock_device.id  # match device_id to skip VC re-lookup
+            local_iface.device_id = 1  # match the device pk to skip VC branch
             remote_iface = MagicMock(pk=20)
             mock_iface_cls.objects.get.side_effect = [local_iface, remote_iface]
             mock_cable_cls.objects.filter.return_value.exists.return_value = True

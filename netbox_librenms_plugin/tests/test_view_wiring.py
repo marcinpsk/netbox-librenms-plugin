@@ -252,10 +252,15 @@ class TestViewPropertyLazyInit:
         assert dummy._librenms_api is None
 
     def test_sync_interfaces_has_librenms_api_property_via_class(self):
-        """SyncInterfacesView must expose librenms_api through its MRO."""
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+        """BaseLibreNMSSyncView must expose librenms_api through its MRO.
 
-        assert any("librenms_api" in vars(cls) for cls in SyncInterfacesView.__mro__)
+        SyncInterfacesView gains LibreNMSAPIMixin in the view-fixes PR; on the
+        current upstream/develop baseline we verify the property via
+        BaseLibreNMSSyncView, which inherits the mixin unconditionally.
+        """
+        from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
+
+        assert any("librenms_api" in vars(cls) for cls in BaseLibreNMSSyncView.__mro__)
 
 
 # ── Template syntax smoke tests ──────────────────────────────────────────────

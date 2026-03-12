@@ -82,7 +82,8 @@ jobs:
 
       - name: Upload coverage report
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: matrix.python-version == '3.12'
+        if: always() && matrix.python-version == '3.12'
         with:
           name: coverage-report
           path: netbox-librenms-plugin/coverage_html/
+          if-no-files-found: ignore

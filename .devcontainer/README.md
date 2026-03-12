@@ -49,8 +49,9 @@ If you need to test with a LibreNMS instance on a private network (local lab, co
 4. Create your plugin config — see [Plugin configuration](#plugin-configuration):
    - `cp .devcontainer/config/plugin-config.py.example .devcontainer/config/plugin-config.py`
    - Edit it with your server details (tokens/URLs)
-5. Start NetBox with `netbox-run` (or `netbox-run-bg` in background) (see [Commands](#-commands-aliases))
-6. Access NetBox at http://localhost:8000
+6. Start NetBox with `netbox-run` (or `netbox-run-bg` in background) (see [Commands](#-commands-aliases))
+7. Access NetBox at http://localhost:8000
+   - If using GitHub Codespaces, use the forwarded port URL from the Ports panel instead of `http://localhost:8000`.
    - Username: `admin`
    - Password: `admin`
 

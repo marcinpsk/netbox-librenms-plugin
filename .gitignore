@@ -164,7 +164,6 @@ pip-delete-this-directory.txt
 
 # Unit test / coverage reports
 htmlcov/
-coverage_html/
 .tox/
 .nox/
 .coverage
@@ -290,3 +289,4 @@ cython_debug/
 ca-bundle.crt
 *.pem
 .github/hooks/
+.claude/
