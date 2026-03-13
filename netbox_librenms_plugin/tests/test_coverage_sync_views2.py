@@ -492,6 +492,7 @@ class TestAddDeviceToLibreNMSViewFormInvalid:
             patch("netbox_librenms_plugin.views.sync.devices.Device") as mock_device_cls,
             patch("netbox_librenms_plugin.views.sync.devices.messages") as mock_msgs,
             patch("netbox_librenms_plugin.views.sync.devices.redirect"),
+            patch("netbox_librenms_plugin.forms._get_librenms_poller_group_choices", return_value=[]),
         ):
             mock_device_cls.objects.get.return_value = mock_device
             view.request = _make_request(post_data=post_data)

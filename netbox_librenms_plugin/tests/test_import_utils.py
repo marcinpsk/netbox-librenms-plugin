@@ -440,6 +440,7 @@ class TestDeviceValidation:
         assert result["site"]["found"] is False
         assert any("site" in issue.lower() for issue in result["issues"])
 
+    @patch("netbox_librenms_plugin.import_utils.device_operations.cache")
     @patch("virtualization.models.VirtualMachine")
     @patch("netbox_librenms_plugin.import_utils.device_operations.Device")
     @patch("netbox_librenms_plugin.import_utils.device_operations.find_matching_site")
@@ -462,8 +463,10 @@ class TestDeviceValidation:
         mock_find_site,
         mock_device,
         mock_vm,
+        mock_cache,
     ):
         """Platform matched successfully."""
+        mock_cache.get.return_value = None
         mock_vm.objects.filter.return_value.first.return_value = None
         mock_device.objects.filter.return_value.first.return_value = None
         mock_device_type.objects.all.return_value = []

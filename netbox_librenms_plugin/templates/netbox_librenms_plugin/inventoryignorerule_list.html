@@ -7,9 +7,15 @@
            Some vendors (e.g. Cisco IOS-XR) report EEPROM/IDPROM chips as child
            entities with the same model name and serial as their parent hardware.
            These phantom entries would appear as duplicate modules in the sync UI.</p>
-        <p>Each rule matches an entity name using the selected match type (ends with,
-           starts with, contains, or regex). When <strong>Require Serial Match</strong>
-           is enabled, the entry is only skipped if its serial number matches the
+        <p>Each rule matches an entity using one of the following strategies:</p>
+        <ul>
+            <li><strong>ends_with / starts_with / contains / regex</strong> — matches the entity <em>name</em> string.</li>
+            <li><strong>serial_matches_device</strong> — matches when the entity's serial number is identical to
+                the parent device's serial. Useful for suppressing EEPROM/IDPROM phantom entries that share the
+                device serial.</li>
+        </ul>
+        <p>When <strong>Require Serial Match</strong>
+           is enabled (for name-based rules), the entry is only skipped if its serial number also matches the
            parent entity — providing a safety net against accidentally hiding
            legitimate modules.</p>
         <p>Example — Cisco IOS-XR IDPROM entries:<br>

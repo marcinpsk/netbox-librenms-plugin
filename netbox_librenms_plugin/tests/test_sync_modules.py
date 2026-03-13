@@ -994,8 +994,10 @@ class TestParentRowIdxVsEntityIndex:
                         with patch.object(view, "_build_row", side_effect=fake_build_row):
                             with patch.object(view, "get_table", side_effect=fake_get_table):
                                 with patch.object(view, "_sort_with_hierarchy", side_effect=lambda x: x):
-                                    # Old bug: IndexError when large entity index used as list index
-                                    view._build_context(request, obj, inventory)
+                                    with patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache:
+                                        mock_cache.ttl = lambda k: None
+                                        # Old bug: IndexError when large entity index used as list index
+                                        view._build_context(request, obj, inventory)
 
         assert len(captured_table_data) >= 1, "table_data must contain the parent row"
         assert captured_table_data[0].get("has_installable_children") is True, (

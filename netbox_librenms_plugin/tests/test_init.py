@@ -16,10 +16,10 @@ class TestEnsureLibreNMSIdCustomField:
     """Test _ensure_librenms_id_custom_field signal handler."""
 
     def setup_method(self):
-        """Reset the _executed flag before each test for consistent isolation."""
+        """Reset the _executed_aliases set before each test for consistent isolation."""
         from netbox_librenms_plugin import _ensure_librenms_id_custom_field
 
-        _ensure_librenms_id_custom_field._executed = False
+        _ensure_librenms_id_custom_field._executed_aliases = set()
 
     @patch("dcim.models.Interface", new_callable=MagicMock)
     @patch("dcim.models.Device", new_callable=MagicMock)
@@ -35,16 +35,16 @@ class TestEnsureLibreNMSIdCustomField:
 
         mock_cf = MagicMock()
         mock_cf.object_types.values_list.return_value = []
-        MockCustomField.objects.get_or_create.return_value = (mock_cf, True)
+        MockCustomField.objects.using.return_value.get_or_create.return_value = (mock_cf, True)
 
         mock_ct = MagicMock()
         mock_ct.pk = 1
-        MockContentType.objects.get_for_model.return_value = mock_ct
+        MockContentType.objects.db_manager.return_value.get_for_model.return_value = mock_ct
 
         with patch("logging.getLogger") as mock_get_logger:
-            _ensure_librenms_id_custom_field(sender=None)
+            _ensure_librenms_id_custom_field(sender=None, using="default")
 
-        MockCustomField.objects.get_or_create.assert_called_once_with(
+        MockCustomField.objects.using.return_value.get_or_create.assert_called_once_with(
             name="librenms_id",
             defaults={
                 "type": "json",
@@ -65,14 +65,14 @@ class TestEnsureLibreNMSIdCustomField:
         mock_get_logger.return_value.info.assert_called_once()
 
     def test_skips_when_already_executed(self):
-        """Handler is a no-op on second invocation (per-migrate dedup)."""
+        """Handler is a no-op for an alias that was already processed."""
         from netbox_librenms_plugin import _ensure_librenms_id_custom_field
 
-        _ensure_librenms_id_custom_field._executed = True
+        _ensure_librenms_id_custom_field._executed_aliases = {"default"}
 
         with patch("extras.models.CustomField") as MockCustomField:
-            _ensure_librenms_id_custom_field(sender=None)
-            MockCustomField.objects.get_or_create.assert_not_called()
+            _ensure_librenms_id_custom_field(sender=None, using="default")
+            MockCustomField.objects.using.return_value.get_or_create.assert_not_called()
 
     @patch("dcim.models.Interface", new_callable=MagicMock)
     @patch("dcim.models.Device", new_callable=MagicMock)
@@ -88,13 +88,13 @@ class TestEnsureLibreNMSIdCustomField:
 
         mock_cf = MagicMock()
         mock_cf.object_types.values_list.return_value = [1, 2, 3, 4]
-        MockCustomField.objects.get_or_create.return_value = (mock_cf, False)
+        MockCustomField.objects.using.return_value.get_or_create.return_value = (mock_cf, False)
 
         mock_ct = MagicMock()
         mock_ct.pk = 1
-        MockContentType.objects.get_for_model.return_value = mock_ct
+        MockContentType.objects.db_manager.return_value.get_for_model.return_value = mock_ct
 
-        _ensure_librenms_id_custom_field(sender=None)
+        _ensure_librenms_id_custom_field(sender=None, using="default")
 
         # All pks already present, no types should be added
         mock_cf.object_types.add.assert_not_called()
@@ -113,15 +113,20 @@ class TestEnsureLibreNMSIdCustomField:
 
         mock_cf = MagicMock()
         mock_cf.object_types.values_list.return_value = [1, 2]
-        MockCustomField.objects.get_or_create.return_value = (mock_cf, False)
+        MockCustomField.objects.using.return_value.get_or_create.return_value = (mock_cf, False)
 
         ct_existing = MagicMock()
         ct_existing.pk = 1
         ct_new = MagicMock()
         ct_new.pk = 99
-        MockContentType.objects.get_for_model.side_effect = [ct_existing, ct_existing, ct_new, ct_new]
+        MockContentType.objects.db_manager.return_value.get_for_model.side_effect = [
+            ct_existing,
+            ct_existing,
+            ct_new,
+            ct_new,
+        ]
 
-        _ensure_librenms_id_custom_field(sender=None)
+        _ensure_librenms_id_custom_field(sender=None, using="default")
 
         assert mock_cf.object_types.add.call_count == 2
         mock_cf.object_types.add.assert_any_call(ct_new)
@@ -131,11 +136,11 @@ class TestEnsureLibreNMSIdCustomField:
         """Exceptions during custom field creation are caught and logged."""
         from netbox_librenms_plugin import _ensure_librenms_id_custom_field
 
-        MockCustomField.objects.get_or_create.side_effect = Exception("DB not ready")
+        MockCustomField.objects.using.return_value.get_or_create.side_effect = Exception("DB not ready")
 
         with patch("logging.getLogger") as mock_get_logger:
             # Should not raise
-            _ensure_librenms_id_custom_field(sender=None)
+            _ensure_librenms_id_custom_field(sender=None, using="default")
 
             # Verify the exception was logged
             logger_instance = mock_get_logger.return_value
@@ -143,8 +148,9 @@ class TestEnsureLibreNMSIdCustomField:
             call_args = logger_instance.exception.call_args
             assert "librenms_id" in call_args[0][0]
 
-        # On failure, _executed must NOT be set — failed attempts should allow retry
-        assert not getattr(_ensure_librenms_id_custom_field, "_executed", False)
+        # On failure, "default" must NOT be in _executed_aliases — failed attempts should allow retry
+        executed_aliases = getattr(_ensure_librenms_id_custom_field, "_executed_aliases", set())
+        assert "default" not in executed_aliases
 
     @patch("dcim.models.Interface", new_callable=MagicMock)
     @patch("dcim.models.Device", new_callable=MagicMock)
@@ -160,14 +166,14 @@ class TestEnsureLibreNMSIdCustomField:
 
         mock_cf = MagicMock()
         mock_cf.object_types.values_list.return_value = [1, 2, 3, 4]
-        MockCustomField.objects.get_or_create.return_value = (mock_cf, False)
+        MockCustomField.objects.using.return_value.get_or_create.return_value = (mock_cf, False)
 
         mock_ct = MagicMock()
         mock_ct.pk = 1
-        MockContentType.objects.get_for_model.return_value = mock_ct
+        MockContentType.objects.db_manager.return_value.get_for_model.return_value = mock_ct
 
         with patch("logging.getLogger") as mock_get_logger:
-            _ensure_librenms_id_custom_field(sender=None)
+            _ensure_librenms_id_custom_field(sender=None, using="default")
             # When the field already exists (created=False), the info log should
             # not be emitted.  We verify via the logger instance rather than
             # asserting getLogger was never called, which is fragile.

@@ -331,8 +331,10 @@ class TestSyncJobStatusRQJobNotInQueue:
         mock_job_cls.DoesNotExist = _DoesNotExist
         mock_job_cls.objects.get.return_value = mock_db_job
 
+        from rq.exceptions import NoSuchJobError
+
         mock_rq_cls = MagicMock()
-        mock_rq_cls.fetch.side_effect = Exception("gone")
+        mock_rq_cls.fetch.side_effect = NoSuchJobError("gone")
 
         mock_queue = MagicMock()
         mock_queue_fn = MagicMock(return_value=mock_queue)

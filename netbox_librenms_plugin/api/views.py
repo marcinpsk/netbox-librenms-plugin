@@ -8,6 +8,7 @@ from django_rq import get_queue
 from netbox.api.viewsets import NetBoxModelViewSet
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import BasePermission, SAFE_METHODS
+from rq.exceptions import NoSuchJobError
 from rq.job import Job as RQJob
 
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
@@ -109,6 +110,8 @@ def sync_job_status(request, job_pk):
     This is needed because NetBox's worker doesn't always update the database
     when a job is stopped before it starts processing.
 
+    Only allows users to sync their own LibreNMS jobs.
+
     Args:
         request: Django request
         job_pk: Primary key of the Job to sync
@@ -116,8 +119,9 @@ def sync_job_status(request, job_pk):
     Returns:
         JsonResponse with updated status
     """
+    _LIBRENMS_JOB_NAMES = ("LibreNMS Device Filter", "LibreNMS Device Import")
     try:
-        job = Job.objects.get(pk=job_pk)
+        job = Job.objects.get(pk=job_pk, user=request.user, name__in=_LIBRENMS_JOB_NAMES)
     except Job.DoesNotExist:
         return JsonResponse({"error": "Job not found"}, status=404)
 
@@ -138,9 +142,9 @@ def sync_job_status(request, job_pk):
         else:
             # Job still active in RQ
             return JsonResponse({"status": "no_change", "db_status": job.status, "rq_status": rq_status})
-    except Exception as e:
-        # Job not in RQ queue - mark as failed
-        logger.warning(f"Job #{job.pk} not found in RQ: {e}")
+    except NoSuchJobError:
+        # Job not in RQ queue — mark running jobs as failed
+        logger.warning(f"Job #{job.pk} not found in RQ (NoSuchJobError)")
         if job.status == JobStatusChoices.STATUS_RUNNING:
             job.status = JobStatusChoices.STATUS_FAILED
             if not job.completed:
@@ -148,3 +152,6 @@ def sync_job_status(request, job_pk):
             job.save(update_fields=["status", "completed"])
             return JsonResponse({"status": "updated", "db_status": job.status, "rq_status": "not_found"})
         return JsonResponse({"status": "no_change", "db_status": job.status, "rq_status": "not_found"})
+    except Exception as e:
+        logger.exception(f"Unexpected error fetching RQ job for Job #{job.pk}: {e}")
+        return JsonResponse({"error": "Failed to fetch RQ job status"}, status=500)

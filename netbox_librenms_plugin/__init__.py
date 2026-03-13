@@ -78,8 +78,10 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
     Legacy installations may have this field typed as 'integer'; we upgrade it
     to 'json' automatically so the UI and API accept the dict format.
     """
-    # Only run once per migrate invocation (post_migrate fires per-app).
-    if getattr(_ensure_librenms_id_custom_field, "_executed", False):
+    # Track per-alias execution so each database alias is bootstrapped exactly once.
+    db_alias = kwargs.get("using") or "default"
+    executed_aliases = getattr(_ensure_librenms_id_custom_field, "_executed_aliases", set())
+    if db_alias in executed_aliases:
         return
 
     import logging
@@ -89,7 +91,7 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
 
         from extras.models import CustomField
 
-        cf, created = CustomField.objects.get_or_create(
+        cf, created = CustomField.objects.using(db_alias).get_or_create(
             name="librenms_id",
             defaults={
                 "type": "json",
@@ -106,7 +108,7 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
         # dict format {"server_key": device_id} is accepted by the UI/API.
         if not created and cf.type == "integer":
             cf.type = "json"
-            cf.save(update_fields=["type"])
+            cf.save(using=db_alias, update_fields=["type"])
             logging.getLogger("netbox_librenms_plugin").info(
                 "Migrated 'librenms_id' custom field type from integer to json"
             )
@@ -119,7 +121,7 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
         current_types = set(cf.object_types.values_list("pk", flat=True))
 
         for model in required_models:
-            ct = ContentType.objects.get_for_model(model)
+            ct = ContentType.objects.db_manager(db_alias).get_for_model(model)
             if ct.pk not in current_types:
                 cf.object_types.add(ct)
 
@@ -128,8 +130,9 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
                 "Auto-created 'librenms_id' custom field for Device, VirtualMachine, Interface, VMInterface"
             )
 
-        # Only mark as executed after successful completion to allow retry on failure.
-        _ensure_librenms_id_custom_field._executed = True
+        # Mark this alias as executed after successful completion to allow retry on failure.
+        executed_aliases.add(db_alias)
+        _ensure_librenms_id_custom_field._executed_aliases = executed_aliases
     except Exception as e:
         # Don't break startup if custom field creation fails (e.g., during initial migration),
         # but log the error so it's not silently swallowed.

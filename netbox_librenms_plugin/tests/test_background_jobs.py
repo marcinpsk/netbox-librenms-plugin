@@ -709,7 +709,7 @@ class TestImportDevicesJob:
     @patch("netbox_librenms_plugin.import_utils.bulk_import_devices_shared")
     @patch("netbox_librenms_plugin.librenms_api.LibreNMSAPI")
     def test_import_job_stores_server_key(self, mock_api_class, mock_bulk_devices, mock_bulk_vms):
-        """Import job stores resolved api.server_key in job metadata."""
+        """Import job stores resolved api.server_key in job metadata and forwards it to bulk_import_devices_shared."""
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
         mock_api = MagicMock()
@@ -724,9 +724,12 @@ class TestImportDevicesJob:
         mock_bulk_vms.return_value = {"success": [], "failed": [], "skipped": []}
 
         job = create_mock_job_runner(ImportDevicesJob)
-        job.run(device_ids=[], vm_imports={}, server_key=None)
+        job.run(device_ids=["dummy-id"], vm_imports={}, server_key=None)
 
         assert job.job.data["server_key"] == "resolved-default"
+        mock_bulk_devices.assert_called_once()
+        call_kwargs = mock_bulk_devices.call_args[1]
+        assert call_kwargs.get("server_key") == "resolved-default"
 
 
 class TestLoadJobResults:
@@ -1050,7 +1053,7 @@ class TestGracefulFallback:
             query_params={"apply_filters": "1", "librenms_location": "DC1"},
         )
         mock_api = MagicMock()
-        mock_api.server_key = "default"
+        mock_api.server_key = "server-2"
 
         with (
             patch.object(LibreNMSImportView, "librenms_api", new_callable=lambda: property(lambda self: mock_api)),
@@ -1079,8 +1082,8 @@ class TestGracefulFallback:
 
         # Workers > 0 means background job should have been enqueued
         mock_job_cls.enqueue.assert_called_once()
-        # Verify the server_key was forwarded to the background job
-        assert mock_job_cls.enqueue.call_args.kwargs["server_key"] == "default"
+        # Verify the non-default server_key was forwarded to the background job
+        assert mock_job_cls.enqueue.call_args.kwargs["server_key"] == "server-2"
         assert isinstance(result, JsonResponse)
 
     @patch("netbox_librenms_plugin.views.imports.list.get_workers_for_queue")

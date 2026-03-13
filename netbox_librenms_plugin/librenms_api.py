@@ -750,11 +750,21 @@ class LibreNMSAPI:
             )
             response.raise_for_status()
 
-            data = response.json()
-            transceivers = data.get("transceivers") if isinstance(data, dict) else None
+            try:
+                data = response.json()
+            except ValueError:
+                return False, f"Invalid JSON in transceivers response for device {device_id}"
+
+            if not isinstance(data, dict) or "transceivers" not in data:
+                return False, f"Unexpected transceivers response format for device {device_id}"
+
+            transceivers = data["transceivers"]
             if not isinstance(transceivers, list):
-                msg = data.get("message", "") if isinstance(data, dict) else ""
-                return False, msg or f"Unexpected transceivers response format for device {device_id}"
+                return False, f"Unexpected transceivers response format for device {device_id}"
+
+            if any(item is None or not isinstance(item, dict) for item in transceivers):
+                return False, f"Malformed transceiver entry in response for device {device_id}"
+
             return True, transceivers
         except requests.exceptions.RequestException as e:
             return False, str(e)
