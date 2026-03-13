@@ -901,7 +901,7 @@ class LibreNMSAPI:
                     return False, "Unexpected response format: invalid item shape in 'devices'"
                 return True, devices
 
-            return False, result.get("message", "Unexpected response format") if isinstance(
+            return False, result.get("message") or "Unexpected response format" if isinstance(
                 result, dict
             ) else "Unexpected response format"
         except (requests.exceptions.RequestException, ValueError) as e:
