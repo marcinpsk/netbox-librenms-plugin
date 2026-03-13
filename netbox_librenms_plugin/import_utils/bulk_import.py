@@ -474,6 +474,10 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             elif not actual_is_vm:
                 validation["device_role"] = {"found": False, "role": None}
             recalculate_validation_status(validation, is_vm=actual_is_vm)
+            # Preserve non-importable state: recalculate may flip these back if no other
+            # issues remain, but a late-found existing match must never be import-ready.
+            validation["can_import"] = False
+            validation["is_ready"] = False
     except Exception as e:
         logger.error(f"Failed to check for newly imported device: {e}")
 
