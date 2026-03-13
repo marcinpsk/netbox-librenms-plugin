@@ -1019,6 +1019,7 @@ class TestGracefulFallback:
             patch("netbox_librenms_plugin.views.imports.list.get_active_cached_searches", return_value=[]),
             patch("netbox_librenms_plugin.jobs.FilterDevicesJob") as mock_job_cls,
             patch("netbox_librenms_plugin.views.imports.list.messages"),
+            patch("netbox_librenms_plugin.views.imports.list.process_device_filters") as mock_pdf,
         ):
             mock_settings.objects.first.return_value = None
             mock_settings.objects.get_or_create.return_value = (None, False)
@@ -1031,6 +1032,7 @@ class TestGracefulFallback:
             mock_form.cleaned_data = {"enable_vc_detection": False, "clear_cache": False, "use_background_job": True}
             mock_form_cls.return_value = mock_form
             view.filterset_form = mock_form_cls
+            mock_pdf.return_value = ([], False)
 
             with patch.object(view, "get_server_info", return_value={}):
                 view.get(request)
@@ -1038,6 +1040,7 @@ class TestGracefulFallback:
         # Workers == 0 means synchronous fallback — enqueue must not be called
         mock_job_cls.enqueue.assert_not_called()
         mock_render.assert_called_once()
+        mock_pdf.assert_called_once()
 
     @patch("netbox_librenms_plugin.views.imports.list.get_workers_for_queue")
     def test_workers_available_allows_background_job(self, mock_get_workers):

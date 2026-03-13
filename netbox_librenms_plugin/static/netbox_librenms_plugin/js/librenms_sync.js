@@ -537,7 +537,7 @@ function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
             }
         })
         .catch(err => {
-            console.error('VLAN group verify failed:', err);
+            console.error('VLAN group verify failed:', err && err.message ? err.message : String(err));
         })
         .finally(() => {
             const saveBtn = document.getElementById('saveVlanGroups');

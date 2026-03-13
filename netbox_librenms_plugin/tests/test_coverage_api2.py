@@ -349,6 +349,9 @@ class TestSyncJobStatusRQJobNotInQueue:
 
         mock_tz.now.assert_not_called()
         assert response.status_code == 200
+        # Verify the DB job was marked failed and persisted
+        assert mock_db_job.status == JobStatusChoices.STATUS_FAILED
+        mock_db_job.save.assert_called_once()
 
 
 # ===========================================================================

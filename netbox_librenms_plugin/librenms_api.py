@@ -1009,10 +1009,10 @@ class LibreNMSAPI:
                 if not isinstance(all_vlans, list):
                     msg = result.get("message")
                     return False, msg or "Unexpected response format: missing 'vlans' list"
+                if not all(isinstance(v, dict) for v in all_vlans):
+                    return False, "Unexpected response format: invalid item shape in 'vlans'"
                 # Filter VLANs by device_id since resources endpoint returns all VLANs
-                device_vlans = [
-                    v for v in all_vlans if isinstance(v, dict) and str(v.get("device_id")) == str(device_id)
-                ]
+                device_vlans = [v for v in all_vlans if str(v.get("device_id")) == str(device_id)]
                 return True, device_vlans
             if isinstance(result, dict):
                 return False, result.get("message") or "Unexpected response format"

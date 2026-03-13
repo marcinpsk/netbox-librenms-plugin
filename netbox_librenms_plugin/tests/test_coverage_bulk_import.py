@@ -515,7 +515,12 @@ class TestBulkImportDevicesShared:
             patch(
                 "netbox_librenms_plugin.import_utils.bulk_import.create_virtual_chassis_with_members",
             ) as mock_create_vc,
+            patch("django_rq.get_queue") as mock_get_queue,
+            patch("rq.job.Job") as mock_rq_cls,
         ):
+            mock_queue = MagicMock()
+            mock_get_queue.return_value = mock_queue
+            mock_rq_cls.fetch.return_value = _make_rq_running()
             from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
 
             result = bulk_import_devices_shared(
@@ -1551,7 +1556,9 @@ class TestProcessDeviceFilters:
         api = self._make_api()
         device = self._make_device()
 
-        cached_validation = _make_validation()  # existing_device=None → _refresh returns early
+        existing = MagicMock()
+        cached_validation = _make_validation()
+        cached_validation["existing_device"] = existing  # truthy → refresh skips new-device lookup
         cached_entry = dict(device)
         cached_entry["_validation"] = cached_validation
 
@@ -1569,6 +1576,7 @@ class TestProcessDeviceFilters:
                 "netbox_librenms_plugin.import_utils.bulk_import.get_cache_metadata_key",
                 return_value="mkey",
             ),
+            patch("netbox_librenms_plugin.import_utils.bulk_import._refresh_existing_device"),
             patch("netbox_librenms_plugin.import_utils.bulk_import.validate_device_for_import") as mock_validate,
         ):
             # First get → device cache hit; second get → metadata (truthy)

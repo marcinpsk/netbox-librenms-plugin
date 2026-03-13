@@ -333,7 +333,7 @@ class DeviceTypeMappingImportForm(NetBoxModelImportForm):
     def __init__(self, data=None, *args, **kwargs):
         super().__init__(data, *args, **kwargs)
         if data:
-            mfr_val = data.get("manufacturer")
+            mfr_val = (data.get("manufacturer") or "").strip()
             if mfr_val:
                 mfr_field = self.fields["manufacturer"]
                 params = {f"manufacturer__{mfr_field.to_field_name}": mfr_val}
@@ -387,7 +387,7 @@ class ModuleTypeMappingImportForm(NetBoxModelImportForm):
     def __init__(self, data=None, *args, **kwargs):
         super().__init__(data, *args, **kwargs)
         if data:
-            mfr_val = data.get("manufacturer")
+            mfr_val = (data.get("manufacturer") or "").strip()
             if mfr_val:
                 mfr_field = self.fields["manufacturer"]
                 params = {f"manufacturer__{mfr_field.to_field_name}": mfr_val}

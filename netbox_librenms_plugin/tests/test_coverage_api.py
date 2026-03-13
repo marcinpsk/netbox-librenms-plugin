@@ -1225,15 +1225,14 @@ class TestMalformedPayloads:
         assert ok is False
         assert msg is not None
 
-    def test_get_device_vlans_skips_non_dict_items(self):
-        """get_device_vlans: non-dict items in vlans list are skipped safely."""
+    def test_get_device_vlans_fails_closed_on_non_dict_items(self):
+        """get_device_vlans: non-dict items in vlans list cause fail-closed (False, error message)."""
         api = _make_api()
         vlans = [None, "bad", {"device_id": 1, "vlan_id": 10}]
         with patch("requests.get", return_value=self._ok_resp({"status": "ok", "vlans": vlans})):
-            ok, data = api.get_device_vlans(1)
-        assert ok is True
-        assert len(data) == 1
-        assert data[0]["vlan_id"] == 10
+            ok, msg = api.get_device_vlans(1)
+        assert ok is False
+        assert "invalid item shape" in msg
 
     def test_get_device_ips_none_addresses(self):
         """get_device_ips: addresses=None returns (False, ...)."""

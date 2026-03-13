@@ -198,9 +198,7 @@ class InventoryIgnoreRuleTable(NetBoxTable):
         return format_html("<code>{}</code>", value) if value else "—"
 
     def render_require_serial_match_parent(self, value, record):
-        """Show dash for serial_matches_device rules where this flag is unused."""
-        if record.match_type == "serial_matches_device":
-            return mark_safe('<span class="text-muted">—</span>')
+        """Show the actual stored boolean for require_serial_match_parent."""
         return (
             mark_safe('<span class="text-success">Yes</span>')
             if value

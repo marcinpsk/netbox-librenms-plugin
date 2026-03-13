@@ -195,7 +195,7 @@ class LibreNMSModuleTable(tables.Table):
                     self.server_key,
                     record.get("module_bay_id", ""),
                     record.get("module_type_id", ""),
-                    record.get("serial", ""),
+                    record.get("serial") or "",
                 )
             )
 
