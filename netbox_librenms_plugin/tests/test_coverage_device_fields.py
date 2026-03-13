@@ -390,6 +390,24 @@ class TestUpdateDeviceTypeView:
             view.post(_make_request(), pk=1)
         mock_msg.error.assert_called_once()
 
+    def test_match_none_returns_not_found(self):
+        """match_librenms_hardware_to_device_type returns None → treated same as no match."""
+        view = self._view()
+        view._librenms_api.get_librenms_id.return_value = 7
+        view._librenms_api.get_device_info.return_value = (True, {"hardware": "Cisco 3750"})
+        with (
+            patch("netbox_librenms_plugin.views.sync.device_fields.get_object_or_404", return_value=MagicMock()),
+            patch(
+                "netbox_librenms_plugin.views.sync.device_fields.match_librenms_hardware_to_device_type",
+                return_value=None,
+            ),
+            patch("netbox_librenms_plugin.views.sync.device_fields.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.device_fields.redirect"),
+        ):
+            view.post(_make_request(), pk=1)
+        # None result triggers the `not match_result` guard → error message, no update
+        mock_msg.error.assert_called_once()
+
     def test_save_success(self):
         view = self._view()
         view._librenms_api.get_librenms_id.return_value = 7

@@ -8,6 +8,8 @@ Coverage tests for:
 import json
 from unittest.mock import MagicMock, patch
 
+import rq.exceptions
+
 
 # ===========================================================================
 # Helpers
@@ -260,7 +262,7 @@ class TestSyncJobStatusRQJobNotInQueue:
         mock_job_cls.objects.get.return_value = mock_db_job
 
         mock_rq_cls = MagicMock()
-        mock_rq_cls.fetch.side_effect = Exception("not found in redis")
+        mock_rq_cls.fetch.side_effect = rq.exceptions.NoSuchJobError("not found in redis")
 
         mock_queue = MagicMock()
         mock_queue_fn = MagicMock(return_value=mock_queue)
@@ -296,7 +298,7 @@ class TestSyncJobStatusRQJobNotInQueue:
         mock_job_cls.objects.get.return_value = mock_db_job
 
         mock_rq_cls = MagicMock()
-        mock_rq_cls.fetch.side_effect = Exception("not found in redis")
+        mock_rq_cls.fetch.side_effect = rq.exceptions.NoSuchJobError("not found in redis")
 
         mock_queue = MagicMock()
         mock_queue_fn = MagicMock(return_value=mock_queue)

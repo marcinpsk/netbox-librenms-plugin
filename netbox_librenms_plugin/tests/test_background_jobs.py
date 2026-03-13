@@ -1079,6 +1079,8 @@ class TestGracefulFallback:
 
         # Workers > 0 means background job should have been enqueued
         mock_job_cls.enqueue.assert_called_once()
+        # Verify the server_key was forwarded to the background job
+        assert mock_job_cls.enqueue.call_args.kwargs["server_key"] == "default"
         assert isinstance(result, JsonResponse)
 
     @patch("netbox_librenms_plugin.views.imports.list.get_workers_for_queue")

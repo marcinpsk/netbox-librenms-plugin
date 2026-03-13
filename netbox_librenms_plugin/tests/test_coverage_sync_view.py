@@ -62,7 +62,8 @@ class TestBaseLibreNMSSyncViewGet:
 
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
-        view._librenms_api.get_librenms_id.return_value = 99
+        # Member has no own librenms_id; get_librenms_id returns None after delegation
+        view._librenms_api.get_librenms_id.return_value = None
 
         view.get_context_data = MagicMock(return_value={})
         mock_render.return_value = MagicMock()
@@ -151,6 +152,9 @@ class TestGetContextDataVC:
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
         view._librenms_api.librenms_url = "https://x.example.com"
+        # Explicitly set get_librenms_id return value so sync_device_has_librenms_id
+        # is determined by the patched get_librenms_device_id, not a bare MagicMock.
+        view._librenms_api.get_librenms_id.return_value = 42
         # Note: production code calls get_librenms_device_id() (module-level function),
         # not self.librenms_api.get_librenms_id(). The patch below is the correct target.
 
@@ -226,6 +230,9 @@ class TestGetContextDataVC:
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
         view._librenms_api.librenms_url = "https://x.example.com"
+        # Explicitly set to None so sync_device_has_librenms_id computes as False
+        # (determined by the patched get_librenms_device_id returning None below).
+        view._librenms_api.get_librenms_id.return_value = None
 
         view.get_librenms_device_info = MagicMock(
             return_value={

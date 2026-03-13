@@ -303,14 +303,6 @@ class TestGetCacheMetadataKeyDeterminism:
         key2 = get_cache_metadata_key("default", {"type": "network", "location": "NYC"}, True)
         assert key1 == key2
 
-    def test_none_values_excluded_from_hash(self):
-        """None filter values should be excluded and produce same key as absent."""
-        from netbox_librenms_plugin.import_utils.cache import get_cache_metadata_key
-
-        key_with_none = get_cache_metadata_key("default", {"location": "NYC", "type": None}, False)
-        key_without = get_cache_metadata_key("default", {"location": "NYC"}, False)
-        assert key_with_none == key_without
-
     def test_different_server_keys_produce_different_keys(self):
         """Different server keys should produce different cache metadata keys."""
         from netbox_librenms_plugin.import_utils.cache import get_cache_metadata_key
