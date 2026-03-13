@@ -26,6 +26,7 @@ def _mock_obj(model_name="device", pk=1, name="test-device"):
     obj._meta.model_name = model_name
     obj.pk = pk
     obj.name = name
+    obj.virtual_chassis = None
     return obj
 
 
