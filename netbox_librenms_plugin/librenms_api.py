@@ -211,46 +211,22 @@ class LibreNMSAPI:
         if ip_address:
             librenms_id = self._normalize_librenms_id(self.get_device_id_by_ip(ip_address))
             if librenms_id is not None:
-                if isinstance(librenms_id, bool):
-                    librenms_id = None
-                else:
-                    try:
-                        librenms_id = int(librenms_id)
-                    except (ValueError, TypeError):
-                        librenms_id = None
-                if librenms_id is not None:
-                    self._store_librenms_id(obj, librenms_id)
-                    return librenms_id
+                self._store_librenms_id(obj, librenms_id)
+                return librenms_id
 
         # Try primary IP's DNS name
         if dns_name:
             librenms_id = self._normalize_librenms_id(self.get_device_id_by_hostname(dns_name))
             if librenms_id is not None:
-                if isinstance(librenms_id, bool):
-                    librenms_id = None
-                else:
-                    try:
-                        librenms_id = int(librenms_id)
-                    except (ValueError, TypeError):
-                        librenms_id = None
-                if librenms_id is not None:
-                    self._store_librenms_id(obj, librenms_id)
-                    return librenms_id
+                self._store_librenms_id(obj, librenms_id)
+                return librenms_id
 
         # Try hostname if FQDN
         if hostname:
             librenms_id = self._normalize_librenms_id(self.get_device_id_by_hostname(hostname))
             if librenms_id is not None:
-                if isinstance(librenms_id, bool):
-                    librenms_id = None
-                else:
-                    try:
-                        librenms_id = int(librenms_id)
-                    except (ValueError, TypeError):
-                        librenms_id = None
-                if librenms_id is not None:
-                    self._store_librenms_id(obj, librenms_id)
-                    return librenms_id
+                self._store_librenms_id(obj, librenms_id)
+                return librenms_id
 
         return None
 
@@ -258,8 +234,9 @@ class LibreNMSAPI:
     def _normalize_librenms_id(value):
         """Coerce a raw LibreNMS ID value to int or None.
 
-        Booleans are rejected because bool is a subclass of int in Python,
-        so int(True) silently becomes 1 — a valid-looking device ID.
+        Treats booleans as None (LibreNMS occasionally returns True/False for
+        missing devices) and converts any other value to int, returning None on
+        failure.
         """
         if value is None or isinstance(value, bool):
             return None
@@ -848,11 +825,9 @@ class LibreNMSAPI:
 
                 return True, filtered
 
-            # LibreNMS API v0 always returns JSON objects, so data is always
-            # a dict here; the isinstance guard is purely defensive.
-            if isinstance(data, dict):
-                return False, data.get("message") or "Unexpected response format"
-            return False, "Unexpected response format"
+            return False, data.get("message") or "Unexpected response format" if isinstance(
+                data, dict
+            ) else "Unexpected response format"
 
         except (requests.exceptions.RequestException, ValueError) as e:
             logger.warning(f"Failed to fetch filtered inventory: {e}")
