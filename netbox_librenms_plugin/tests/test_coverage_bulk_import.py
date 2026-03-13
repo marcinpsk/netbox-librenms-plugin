@@ -1864,7 +1864,7 @@ class TestProcessDeviceFilters:
 
         assert len(result) == 1
         # cache.set for metadata should NOT have been called (existing preserved)
-        set_calls = [c for c in mock_cache.set.call_args_list if "mkey" in str(c)]
+        set_calls = [c for c in mock_cache.set.call_args_list if c.args[0] == "mkey"]
         assert len(set_calls) == 0
 
     # ------------------------------------------------------------------
@@ -2229,7 +2229,7 @@ class TestCacheIndexTTLRefresh:
         existing_key = "mkey"
         mock_cache = self._run_process_with_cache(cache_index_before=[existing_key])
         # Find the cache.set call that updates the index
-        index_set_calls = [c for c in mock_cache.set.call_args_list if "cache_index" in str(c)]
+        index_set_calls = [c for c in mock_cache.set.call_args_list if "cache_index" in (c.args[0] if c.args else "")]
         assert len(index_set_calls) >= 1, "cache.set for cache_index was never called"
         # The stored index must still contain the key (not duplicated)
         stored_index = index_set_calls[0][0][1]
@@ -2238,7 +2238,7 @@ class TestCacheIndexTTLRefresh:
     def test_cache_index_refreshed_for_new_key(self):
         """cache.set is called when the key is new."""
         mock_cache = self._run_process_with_cache(cache_index_before=[])
-        index_set_calls = [c for c in mock_cache.set.call_args_list if "cache_index" in str(c)]
+        index_set_calls = [c for c in mock_cache.set.call_args_list if "cache_index" in (c.args[0] if c.args else "")]
         assert len(index_set_calls) >= 1
 
 

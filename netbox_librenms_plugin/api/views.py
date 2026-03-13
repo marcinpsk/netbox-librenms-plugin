@@ -143,9 +143,14 @@ def sync_job_status(request, job_pk):
             # Job still active in RQ
             return JsonResponse({"status": "no_change", "db_status": job.status, "rq_status": rq_status})
     except NoSuchJobError:
-        # Job not in RQ queue — mark running jobs as failed
+        # Job not in RQ queue — mark any non-terminal DB job as failed
         logger.warning(f"Job #{job.pk} not found in RQ (NoSuchJobError)")
-        if job.status == JobStatusChoices.STATUS_RUNNING:
+        terminal_states = {
+            JobStatusChoices.STATUS_COMPLETED,
+            JobStatusChoices.STATUS_FAILED,
+            JobStatusChoices.STATUS_ERRORED,
+        }
+        if job.status not in terminal_states:
             job.status = JobStatusChoices.STATUS_FAILED
             if not job.completed:
                 job.completed = timezone.now()

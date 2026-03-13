@@ -756,11 +756,13 @@ class LibreNMSAPI:
                 return False, f"Invalid JSON in transceivers response for device {device_id}"
 
             if not isinstance(data, dict) or "transceivers" not in data:
-                return False, f"Unexpected transceivers response format for device {device_id}"
+                msg = data.get("message") if isinstance(data, dict) else None
+                return False, msg or f"Unexpected transceivers response format for device {device_id}"
 
             transceivers = data["transceivers"]
             if not isinstance(transceivers, list):
-                return False, f"Unexpected transceivers response format for device {device_id}"
+                msg = data.get("message")
+                return False, msg or f"Unexpected transceivers response format for device {device_id}"
 
             if any(item is None or not isinstance(item, dict) for item in transceivers):
                 return False, f"Malformed transceiver entry in response for device {device_id}"
@@ -1066,7 +1068,7 @@ class LibreNMSAPI:
                     return False, "Unexpected response format"
                 port_data = result.get("port")
                 if not isinstance(port_data, list):
-                    return False, result.get("message", "Unexpected response format: missing 'port' list")
+                    return False, result.get("message") or "Unexpected response format: missing 'port' list"
                 if not port_data:
                     return False, "Port not found"
                 if not isinstance(port_data[0], dict):

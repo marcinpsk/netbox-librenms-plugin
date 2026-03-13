@@ -138,6 +138,7 @@ class LibreNMSModuleTable(tables.Table):
             "Unmatched": "bg-secondary",
             "Serial Mismatch": "bg-danger",
             "Name Conflict": "bg-warning",
+            "Type Mismatch": "bg-warning",
         }
         badge_class = badge_classes.get(value, "bg-secondary")
         if warning := record.get("module_path_warning"):

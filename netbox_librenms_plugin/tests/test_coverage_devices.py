@@ -33,7 +33,7 @@ class TestDeviceLibreNMSSyncViewContextMethods:
     """Tests for DeviceLibreNMSSyncView context delegation (lines 47-73)."""
 
     def test_get_interface_context_delegates_to_interface_view(self):
-        """get_interface_context() creates DeviceInterfaceTableView and calls get_context_data."""
+        """get_interface_context() creates DeviceInterfaceTableView, copies request, and calls get_context_data."""
 
         view = _make_device_view()
         request = MagicMock()
@@ -42,16 +42,22 @@ class TestDeviceLibreNMSSyncViewContextMethods:
         mock_ctx = {"interfaces": []}
         with patch(
             "netbox_librenms_plugin.views.object_sync.devices.DeviceInterfaceTableView.get_context_data",
+            autospec=True,
             return_value=mock_ctx,
-        ):
+        ) as mock_get_context:
             with patch(
                 "netbox_librenms_plugin.views.object_sync.devices.get_interface_name_field", return_value="ifName"
             ):
                 result = view.get_interface_context(request, obj)
         assert result == mock_ctx
+        assert mock_get_context.called
+        child_instance = mock_get_context.call_args[0][0]
+        assert child_instance.request is request
+        assert mock_get_context.call_args[0][1] is request
+        assert mock_get_context.call_args[0][2] is obj
 
     def test_get_cable_context_delegates_to_cable_view(self):
-        """get_cable_context() creates DeviceCableTableView and calls get_context_data."""
+        """get_cable_context() creates DeviceCableTableView and calls get_context_data with request and obj."""
 
         view = _make_device_view()
         request = MagicMock()
@@ -60,13 +66,17 @@ class TestDeviceLibreNMSSyncViewContextMethods:
         mock_ctx = {"cables": []}
         with patch(
             "netbox_librenms_plugin.views.object_sync.devices.DeviceCableTableView.get_context_data",
+            autospec=True,
             return_value=mock_ctx,
-        ):
+        ) as mock_get_context:
             result = view.get_cable_context(request, obj)
         assert result == mock_ctx
+        assert mock_get_context.called
+        assert mock_get_context.call_args[0][1] is request
+        assert mock_get_context.call_args[0][2] is obj
 
     def test_get_ip_context_delegates_to_ip_view(self):
-        """get_ip_context() creates DeviceIPAddressTableView and calls get_context_data."""
+        """get_ip_context() creates DeviceIPAddressTableView and calls get_context_data with request and obj."""
 
         view = _make_device_view()
         request = MagicMock()
@@ -75,13 +85,17 @@ class TestDeviceLibreNMSSyncViewContextMethods:
         mock_ctx = {"ips": []}
         with patch(
             "netbox_librenms_plugin.views.object_sync.devices.DeviceIPAddressTableView.get_context_data",
+            autospec=True,
             return_value=mock_ctx,
-        ):
+        ) as mock_get_context:
             result = view.get_ip_context(request, obj)
         assert result == mock_ctx
+        assert mock_get_context.called
+        assert mock_get_context.call_args[0][1] is request
+        assert mock_get_context.call_args[0][2] is obj
 
     def test_get_vlan_context_delegates_to_vlan_view(self):
-        """get_vlan_context() creates DeviceVLANTableView and calls get_vlan_context."""
+        """get_vlan_context() creates DeviceVLANTableView, copies request, and calls get_vlan_context."""
 
         view = _make_device_view()
         request = MagicMock()
@@ -90,13 +104,19 @@ class TestDeviceLibreNMSSyncViewContextMethods:
         mock_ctx = {"vlans": []}
         with patch(
             "netbox_librenms_plugin.views.object_sync.devices.DeviceVLANTableView.get_vlan_context",
+            autospec=True,
             return_value=mock_ctx,
-        ):
+        ) as mock_get_context:
             result = view.get_vlan_context(request, obj)
         assert result == mock_ctx
+        assert mock_get_context.called
+        child_instance = mock_get_context.call_args[0][0]
+        assert child_instance.request is request
+        assert mock_get_context.call_args[0][1] is request
+        assert mock_get_context.call_args[0][2] is obj
 
     def test_get_module_context_delegates_to_module_view(self):
-        """get_module_context() creates DeviceModuleTableView and calls get_context_data."""
+        """get_module_context() creates DeviceModuleTableView, copies request, and calls get_context_data."""
 
         view = _make_device_view()
         request = MagicMock()
@@ -105,10 +125,16 @@ class TestDeviceLibreNMSSyncViewContextMethods:
         mock_ctx = {"modules": []}
         with patch(
             "netbox_librenms_plugin.views.object_sync.devices.DeviceModuleTableView.get_context_data",
+            autospec=True,
             return_value=mock_ctx,
-        ):
+        ) as mock_get_context:
             result = view.get_module_context(request, obj)
         assert result == mock_ctx
+        assert mock_get_context.called
+        child_instance = mock_get_context.call_args[0][0]
+        assert child_instance.request is request
+        assert mock_get_context.call_args[0][1] is request
+        assert mock_get_context.call_args[0][2] is obj
 
 
 class TestDeviceInterfaceTableView:

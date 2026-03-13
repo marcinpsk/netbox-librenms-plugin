@@ -724,7 +724,7 @@ class TestImportDevicesJob:
         mock_bulk_vms.return_value = {"success": [], "failed": [], "skipped": []}
 
         job = create_mock_job_runner(ImportDevicesJob)
-        job.run(device_ids=["dummy-id"], vm_imports={}, server_key=None)
+        job.run(device_ids=[1], vm_imports={}, server_key=None)
 
         assert job.job.data["server_key"] == "resolved-default"
         mock_bulk_devices.assert_called_once()
