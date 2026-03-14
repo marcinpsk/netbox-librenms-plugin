@@ -991,10 +991,10 @@ class TestRefreshExistingDevice:
 
         assert validation["existing_device"] is new_device
         assert validation["existing_match_type"] == "librenms_id"
-        # recalculate_validation_status recomputes can_import/is_ready from issues + fields.
-        # No issues + all required fields found → both become True after recalculation.
-        assert validation["can_import"] is True
-        assert validation["is_ready"] is True
+        # Late-found existing match must never be import-ready, even if recalculate
+        # would otherwise set can_import=True (no issues + all fields found).
+        assert validation["can_import"] is False
+        assert validation["is_ready"] is False
         # Device has a role → device_role should be set
         assert validation["device_role"]["found"] is True
 
