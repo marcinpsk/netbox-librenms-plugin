@@ -87,7 +87,7 @@ class Migration(migrations.Migration):
     dependencies = [
         ("dcim", "0001_initial"),
         ("extras", "0001_initial"),
-        ("netbox_librenms_plugin", "0008_librenmssettings_import_defaults"),
+        ("netbox_librenms_plugin", "0009_convert_librenms_id_to_json"),
     ]
 
     operations = [
