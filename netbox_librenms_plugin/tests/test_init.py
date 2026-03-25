@@ -35,7 +35,9 @@ class TestEnsureLibreNMSIdCustomField:
 
         mock_cf = MagicMock()
         mock_cf.object_types.values_list.return_value = []
-        MockCustomField.objects.using.return_value.get_or_create.return_value = (mock_cf, True)
+        mock_using = MagicMock()
+        mock_using.get_or_create.return_value = (mock_cf, True)
+        MockCustomField.objects.using.return_value = mock_using
 
         mock_ct = MagicMock()
         mock_ct.pk = 1
@@ -44,7 +46,7 @@ class TestEnsureLibreNMSIdCustomField:
         with patch("logging.getLogger") as mock_get_logger:
             _ensure_librenms_id_custom_field(sender=None, using="default")
 
-        MockCustomField.objects.using.return_value.get_or_create.assert_called_once_with(
+        mock_using.get_or_create.assert_called_once_with(
             name="librenms_id",
             defaults={
                 "type": "json",
@@ -64,15 +66,15 @@ class TestEnsureLibreNMSIdCustomField:
         mock_get_logger.assert_called_with("netbox_librenms_plugin")
         mock_get_logger.return_value.info.assert_called_once()
 
-    def test_skips_when_already_executed(self):
-        """Handler is a no-op for an alias that was already processed."""
+    def test_skips_when_already_executed_for_alias(self):
+        """Handler is a no-op on second invocation for the same db alias."""
         from netbox_librenms_plugin import _ensure_librenms_id_custom_field
 
         _ensure_librenms_id_custom_field._executed_aliases = {"default"}
 
         with patch("extras.models.CustomField") as MockCustomField:
             _ensure_librenms_id_custom_field(sender=None, using="default")
-            MockCustomField.objects.using.return_value.get_or_create.assert_not_called()
+            MockCustomField.objects.using.assert_not_called()
 
     @patch("dcim.models.Interface", new_callable=MagicMock)
     @patch("dcim.models.Device", new_callable=MagicMock)
@@ -88,7 +90,9 @@ class TestEnsureLibreNMSIdCustomField:
 
         mock_cf = MagicMock()
         mock_cf.object_types.values_list.return_value = [1, 2, 3, 4]
-        MockCustomField.objects.using.return_value.get_or_create.return_value = (mock_cf, False)
+        mock_using = MagicMock()
+        mock_using.get_or_create.return_value = (mock_cf, False)
+        MockCustomField.objects.using.return_value = mock_using
 
         mock_ct = MagicMock()
         mock_ct.pk = 1
@@ -113,7 +117,9 @@ class TestEnsureLibreNMSIdCustomField:
 
         mock_cf = MagicMock()
         mock_cf.object_types.values_list.return_value = [1, 2]
-        MockCustomField.objects.using.return_value.get_or_create.return_value = (mock_cf, False)
+        mock_using = MagicMock()
+        mock_using.get_or_create.return_value = (mock_cf, False)
+        MockCustomField.objects.using.return_value = mock_using
 
         ct_existing = MagicMock()
         ct_existing.pk = 1
@@ -166,7 +172,9 @@ class TestEnsureLibreNMSIdCustomField:
 
         mock_cf = MagicMock()
         mock_cf.object_types.values_list.return_value = [1, 2, 3, 4]
-        MockCustomField.objects.using.return_value.get_or_create.return_value = (mock_cf, False)
+        mock_using = MagicMock()
+        mock_using.get_or_create.return_value = (mock_cf, False)
+        MockCustomField.objects.using.return_value = mock_using
 
         mock_ct = MagicMock()
         mock_ct.pk = 1
