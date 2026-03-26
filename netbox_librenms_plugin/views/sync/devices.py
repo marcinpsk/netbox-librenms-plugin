@@ -1,5 +1,6 @@
 from dcim.models import Device
 from django.contrib import messages
+from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect
 from django.views import View
 from virtualization.models import VirtualMachine
@@ -30,7 +31,9 @@ class AddDeviceToLibreNMSView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         """
         if object_type == "virtualmachine":
             return get_object_or_404(VirtualMachine, pk=object_id)
-        return get_object_or_404(Device, pk=object_id)
+        if object_type == "device":
+            return get_object_or_404(Device, pk=object_id)
+        raise Http404(f"Invalid object_type: {object_type!r}")
 
     def post(self, request, object_id):
         """Add a device to LibreNMS using the submitted SNMP form."""

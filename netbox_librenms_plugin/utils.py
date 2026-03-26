@@ -553,7 +553,7 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
             return None
         if auto_save:
             obj.custom_field_data["librenms_id"] = int_id
-            obj.save()
+            obj.save(update_fields=["custom_field_data"])
         return int_id
     if isinstance(cf_value, dict):
         value = cf_value.get(server_key)
@@ -568,7 +568,7 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
             if auto_save:
                 cf_value[server_key] = value
                 obj.custom_field_data["librenms_id"] = cf_value
-                obj.save()
+                obj.save(update_fields=["custom_field_data"])
             return value
         if isinstance(value, int):
             return value if value > 0 else None
@@ -771,7 +771,7 @@ def has_nested_name_conflict(module_type, module_bay):
     if not templates:
         return False  # No interface templates
 
-    uses_module_token = any(MODULE_TOKEN in t.name for t in templates)
+    uses_module_token = any(MODULE_TOKEN in t.name and "{module_path}" not in t.name for t in templates)
     if not uses_module_token:
         return False  # Template doesn't use {module}
 

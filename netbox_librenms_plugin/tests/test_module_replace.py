@@ -54,6 +54,8 @@ class TestModuleMismatchPreviewView:
         from netbox_librenms_plugin.views.sync.modules import ModuleMismatchPreviewView
 
         v = object.__new__(ModuleMismatchPreviewView)
+        v._librenms_api = MagicMock()
+        v._librenms_api.server_key = "default"
         return v
 
     def test_missing_params_returns_400(self):
@@ -200,6 +202,8 @@ class TestReplaceModuleView:
         v = object.__new__(ReplaceModuleView)
         # Bypass permission mixin
         v.required_object_permissions = {}
+        v._librenms_api = MagicMock()
+        v._librenms_api.server_key = "default"
         return v
 
     def test_missing_params_redirects_with_error(self):

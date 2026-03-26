@@ -378,10 +378,11 @@ class TestModuleContextDefaults:
         with patch(
             "netbox_librenms_plugin.views.object_sync.devices.DeviceModuleTableView.get_context_data",
             return_value={"modules": []},
-        ):
+        ) as mock_get_context:
             result = view.get_module_context(request, obj)
 
-        assert result is not None
+        assert result == {"modules": []}
+        mock_get_context.assert_called_once()
 
 
 class TestBuildAllServerMappings:

@@ -10,6 +10,7 @@ from django.views import View
 
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
+    LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
 )
@@ -78,7 +79,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
 
         device = get_object_or_404(Device, pk=pk)
         parent_index = request.POST.get("parent_index")
-        server_key = request.POST.get("server_key") or None
+        server_key = request.POST.get("server_key") or self.librenms_api.server_key
 
         if not parent_index:
             messages.error(request, "Missing parent inventory index.")
@@ -424,7 +425,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             return error
 
         device = get_object_or_404(Device, pk=pk)
-        server_key = request.POST.get("server_key") or None
+        server_key = request.POST.get("server_key") or self.librenms_api.server_key
 
         selected_indices = request.POST.getlist("select")
         if not selected_indices:
@@ -539,7 +540,7 @@ class UpdateModuleSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
         return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
 
-class ModuleMismatchPreviewView(LibreNMSPermissionMixin, CacheMixin, View):
+class ModuleMismatchPreviewView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
     """
     Return the modal body HTML fragment for the module replace/move dialog.
 
@@ -555,7 +556,7 @@ class ModuleMismatchPreviewView(LibreNMSPermissionMixin, CacheMixin, View):
         device = get_object_or_404(Device, pk=pk)
         module_id = request.GET.get("module_id")
         ent_index = request.GET.get("ent_index")
-        server_key = request.GET.get("server_key") or None
+        server_key = request.GET.get("server_key") or self.librenms_api.server_key
 
         if not module_id or not ent_index:
             return HttpResponse("Missing required parameters.", status=400)
@@ -632,7 +633,7 @@ class ModuleMismatchPreviewView(LibreNMSPermissionMixin, CacheMixin, View):
         )
 
 
-class ReplaceModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
+class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
     """
     Replace the installed module in a bay with fresh data from LibreNMS inventory.
 
@@ -651,7 +652,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         device = get_object_or_404(Device, pk=pk)
         module_id = request.POST.get("module_id")
         ent_index = request.POST.get("ent_index")
-        server_key = request.POST.get("server_key") or None
+        server_key = request.POST.get("server_key") or self.librenms_api.server_key
         conflict_module_id = request.POST.get("conflict_module_id")
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
 

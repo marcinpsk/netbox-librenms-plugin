@@ -238,7 +238,7 @@ class LibreNMSModuleTable(tables.Table):
                     self.csrf_token,
                     self.server_key,
                     record["installed_module_id"],
-                    record.get("serial", ""),
+                    record.get("serial") or "",
                 )
             )
 

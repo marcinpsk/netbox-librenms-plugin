@@ -168,7 +168,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
     def get_context_data(self, request, obj):
         """Get context from cache (used by the main sync view on initial page load)."""
         cached_data = cache.get(self.get_cache_key(obj, "inventory", server_key=self.librenms_api.server_key))
-        if not cached_data:
+        if cached_data is None:
             return {"table": None, "object": obj, "cache_expiry": None}
         return self._build_context(request, obj, cached_data)
 
@@ -348,6 +348,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                         # items under this uninstalled module don't accidentally
                         # inherit bays from a previously-processed installed sibling.
                         bays_by_depth[depth + 1] = {}
+                else:
+                    # No bay match for this sub-item: clear scope so it doesn't
+                    # bleed into the next sibling's children.
+                    bays_by_depth[depth + 1] = {}
 
                 # Mark parent if any child is installable
                 if sub_row.get("can_install"):
@@ -760,7 +764,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         """
         # Filter preloaded list by class (exact class match or empty-class fallback)
         if phys_class:
-            candidates = [m for m in regex_mappings if m.librenms_class == phys_class or m.librenms_class == ""]
+            exact = [m for m in regex_mappings if m.librenms_class == phys_class]
+            candidates = exact if exact else [m for m in regex_mappings if m.librenms_class == ""]
         else:
             candidates = [m for m in regex_mappings if m.librenms_class == ""]
 

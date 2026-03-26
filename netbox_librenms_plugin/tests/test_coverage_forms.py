@@ -140,9 +140,9 @@ class TestDeviceImportConfigFormInitialValues:
 
         with (
             patch("dcim.models.Platform"),
-            patch("dcim.models.Site"),
-            patch("dcim.models.DeviceType"),
-            patch("dcim.models.DeviceRole"),
+            patch("netbox_librenms_plugin.forms.Site"),
+            patch("netbox_librenms_plugin.forms.DeviceType"),
+            patch("netbox_librenms_plugin.forms.DeviceRole"),
         ):
             from netbox_librenms_plugin.forms import DeviceImportConfigForm
 
@@ -157,9 +157,9 @@ class TestDeviceImportConfigFormInitialValues:
 
         with (
             patch("dcim.models.Platform"),
-            patch("dcim.models.Site"),
-            patch("dcim.models.DeviceType"),
-            patch("dcim.models.DeviceRole"),
+            patch("netbox_librenms_plugin.forms.Site"),
+            patch("netbox_librenms_plugin.forms.DeviceType"),
+            patch("netbox_librenms_plugin.forms.DeviceRole"),
         ):
             from netbox_librenms_plugin.forms import DeviceImportConfigForm
 
@@ -182,9 +182,9 @@ class TestDeviceImportConfigFormInitialValues:
 
         with (
             patch("dcim.models.Platform"),
-            patch("dcim.models.Site"),
-            patch("dcim.models.DeviceType"),
-            patch("dcim.models.DeviceRole"),
+            patch("netbox_librenms_plugin.forms.Site"),
+            patch("netbox_librenms_plugin.forms.DeviceType"),
+            patch("netbox_librenms_plugin.forms.DeviceRole"),
         ):
             from netbox_librenms_plugin.forms import DeviceImportConfigForm
 

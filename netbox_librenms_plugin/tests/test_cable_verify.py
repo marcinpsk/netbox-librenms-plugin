@@ -178,6 +178,7 @@ class TestStaleFieldStripping:
             assert "netbox_remote_device_id" not in received_link
             assert "local_port_url" not in received_link
             assert "cable_status" not in received_link
+
     def test_raw_keys_match_prepare_context(self):
         """The _raw_keys set in post() must match the one in _prepare_context()."""
         import ast

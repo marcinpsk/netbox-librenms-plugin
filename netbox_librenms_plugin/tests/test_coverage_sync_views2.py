@@ -759,22 +759,16 @@ class TestAddDeviceToLibreNMSViewGetFormClass:
         assert result is mock_vm
 
     def test_get_object_device_not_found_falls_back_to_vm(self):
+        from django.http import Http404
+
         from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView
 
         view = object.__new__(AddDeviceToLibreNMSView)
-        mock_vm = MagicMock()
 
-        class _DNE(Exception):
-            pass
+        import pytest
 
-        with (
-            patch("netbox_librenms_plugin.views.sync.devices.Device") as mock_dev_cls,
-            patch("netbox_librenms_plugin.views.sync.devices.get_object_or_404", return_value=mock_vm),
-        ):
-            mock_dev_cls.DoesNotExist = _DNE
-            mock_dev_cls.objects.get.side_effect = _DNE()
-            result = view.get_object(5)
-        assert result is mock_vm
+        with pytest.raises(Http404):
+            view.get_object(5)
 
     def test_form_valid_with_poller_group(self):
         """poller_group valid int is passed to API."""
