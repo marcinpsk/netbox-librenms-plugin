@@ -182,6 +182,10 @@ class ModuleBayMapping(NetBoxModel):
     def clean(self):
         """Validate that regex patterns compile when is_regex is True."""
         super().clean()
+        librenms_name_stripped = self.librenms_name.strip() if self.librenms_name else ""
+        if not librenms_name_stripped:
+            raise ValidationError({"librenms_name": "LibreNMS name pattern must not be empty or whitespace-only."})
+        self.librenms_name = librenms_name_stripped
         if self.is_regex:
             try:
                 pattern = re.compile(self.librenms_name)

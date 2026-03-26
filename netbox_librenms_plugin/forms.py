@@ -433,7 +433,7 @@ class ModuleBayMappingFilterForm(NetBoxModelFilterSetForm):
     librenms_name = forms.CharField(required=False, label="LibreNMS Name")
     librenms_class = forms.CharField(required=False, label="LibreNMS Class")
     netbox_bay_name = forms.CharField(required=False, label="NetBox Bay Name")
-    is_regex = forms.NullBooleanField(required=False, label="Regex")
+    is_regex = forms.BooleanField(required=False, label="Regex")
 
     model = ModuleBayMapping
 
@@ -534,7 +534,7 @@ class InventoryIgnoreRuleFilterForm(NetBoxModelFilterSetForm):
         choices=[("", "---------")] + InventoryIgnoreRule.ACTION_CHOICES,
         label="Action",
     )
-    enabled = forms.NullBooleanField(
+    enabled = forms.BooleanField(
         required=False,
         widget=forms.Select(choices=[("", "---------"), ("true", "Yes"), ("false", "No")]),
         label="Enabled",
