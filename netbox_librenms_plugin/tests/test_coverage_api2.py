@@ -8,8 +8,6 @@ Coverage tests for:
 import json
 from unittest.mock import MagicMock, patch
 
-import rq.exceptions
-
 
 # ===========================================================================
 # Helpers
@@ -351,9 +349,14 @@ class TestSyncJobStatusRQJobNotInQueue:
 
         mock_tz.now.assert_not_called()
         assert response.status_code == 200
+        data = json.loads(response.content)
+        assert data["status"] == "updated"
+        assert data["rq_status"] == "not_found"
         # Verify the DB job was marked failed and persisted
         assert mock_db_job.status == JobStatusChoices.STATUS_FAILED
         mock_db_job.save.assert_called_once()
+        # completed must NOT be overwritten — it was already set
+        assert mock_db_job.completed == "2024-01-01T08:00:00"
 
 
 # ===========================================================================

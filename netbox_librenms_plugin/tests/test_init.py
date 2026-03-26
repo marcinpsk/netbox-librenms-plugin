@@ -19,7 +19,14 @@ class TestEnsureLibreNMSIdCustomField:
         """Reset the _executed_aliases set before each test for consistent isolation."""
         from netbox_librenms_plugin import _ensure_librenms_id_custom_field
 
+        self._orig_executed_aliases = getattr(_ensure_librenms_id_custom_field, "_executed_aliases", set())
         _ensure_librenms_id_custom_field._executed_aliases = set()
+
+    def teardown_method(self):
+        """Restore the original _executed_aliases after each test to prevent state leak."""
+        from netbox_librenms_plugin import _ensure_librenms_id_custom_field
+
+        _ensure_librenms_id_custom_field._executed_aliases = self._orig_executed_aliases
 
     @patch("dcim.models.Interface", new_callable=MagicMock)
     @patch("dcim.models.Device", new_callable=MagicMock)
@@ -46,6 +53,9 @@ class TestEnsureLibreNMSIdCustomField:
         with patch("logging.getLogger") as mock_get_logger:
             _ensure_librenms_id_custom_field(sender=None, using="default")
 
+        MockCustomField.objects.using.assert_called_once_with("default")
+        # db_manager is called once per content type (4 models); verify alias is forwarded
+        MockContentType.objects.db_manager.assert_any_call("default")
         mock_using.get_or_create.assert_called_once_with(
             name="librenms_id",
             defaults={
