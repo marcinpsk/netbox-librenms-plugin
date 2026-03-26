@@ -27,7 +27,7 @@
 #   item's serial the rule fires. This handles multi-level hierarchies, e.g.
 #   Cisco IOS-XR: IDPROM → Mother Board [empty serial] → RP module.
 #
-# Both rules below are also created automatically by migration 0014. Import them
+# Both rules below are also created automatically by migration 0010. Import them
 # only if you wiped the table or need to replicate settings across instances.
 
 # ─── Cisco IOS-XR — IDPROM entries (action=skip) ─────────────────────────────

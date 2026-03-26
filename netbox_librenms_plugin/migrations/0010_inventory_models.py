@@ -1,13 +1,7 @@
 """
-Add inventory/modules sync models.
-
-Squashed from 0009–0014 (never shipped):
-  0009_add_devicetypemapping
-  0010_add_moduletypemapping
-  0011_modulebaymapping
-  0012_add_is_regex_to_modulebaymapping
-  0013_normalizationrule
-  0014_inventoryignorerule
+Add inventory/modules sync models: DeviceTypeMapping, ModuleTypeMapping,
+ModuleBayMapping, NormalizationRule, and InventoryIgnoreRule, along with
+two default InventoryIgnoreRule entries.
 """
 
 import django.db.models.deletion
@@ -28,11 +22,12 @@ def _insert_default_rules(apps, schema_editor):
         require_serial_match_parent=True,
         enabled=True,
         description=(
-            "Cisco IOS-XR reports every hardware component's EEPROM chip as a child "
-            "ENTITY-MIB entity with the same model name and serial number as the parent "
-            "(e.g. 'Optics0/0/0/0-IDPROM', '0/FT0-FT IDPROM', 'Rack 0-Chassis IDPROM'). "
-            "These are not installable modules. This rule replicates the previous "
-            "hardcoded _is_idprom_entry() behaviour."
+            "Cisco IOS-XR reports every hardware component's EEPROM as a child entity "
+            'whose entPhysicalName ends in "IDPROM". These entries duplicate the parent '
+            "module's serial number and are not real installable modules. "
+            "The serial-match guard ensures only genuine EEPROM duplicates are skipped — "
+            'a module whose name happens to end in "IDPROM" but has a different serial '
+            "will not be filtered."
         ),
     )
     InventoryIgnoreRule.objects.using(db_alias).create(
@@ -43,10 +38,11 @@ def _insert_default_rules(apps, schema_editor):
         require_serial_match_parent=False,
         enabled=True,
         description=(
-            "Fixed-form routers (e.g. Cisco 8201-SYS, 8100 series) report the system board as "
-            "an ENTITY-MIB module entry whose serial number equals the device's own serial. "
-            "Marking the entry 'transparent' hides its row in the sync table while promoting "
-            "its children (transceivers, fans, PSUs) to device-level bay matching."
+            "Fixed-form routers report the built-in RP as an ENTITY-MIB module whose "
+            "serial number equals the device's own serial. Marking it transparent hides "
+            "the RP row in the sync table while promoting its children (transceivers, "
+            "fans, PSUs) to device-level bay matching. No pattern is needed — detection "
+            "is purely serial-based."
         ),
     )
 
@@ -75,15 +71,6 @@ def _delete_default_rules(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-    replaces = [
-        ("netbox_librenms_plugin", "0009_add_devicetypemapping"),
-        ("netbox_librenms_plugin", "0010_add_moduletypemapping"),
-        ("netbox_librenms_plugin", "0011_modulebaymapping"),
-        ("netbox_librenms_plugin", "0012_add_is_regex_to_modulebaymapping"),
-        ("netbox_librenms_plugin", "0013_normalizationrule"),
-        ("netbox_librenms_plugin", "0014_inventoryignorerule"),
-    ]
-
     dependencies = [
         ("dcim", "0001_initial"),
         ("extras", "0001_initial"),
@@ -266,10 +253,12 @@ class Migration(migrations.Migration):
                 ("require_serial_match_parent", models.BooleanField(default=True)),
                 ("enabled", models.BooleanField(default=True)),
                 ("description", models.TextField(blank=True)),
+                ("tags", taggit.managers.TaggableManager(through="extras.TaggedItem", to="extras.Tag")),
             ],
             options={
                 "ordering": ["name", "pk"],
             },
+            bases=(netbox.models.deletion.DeleteMixin, models.Model),
         ),
         migrations.RunPython(code=_insert_default_rules, reverse_code=_delete_default_rules),
     ]
