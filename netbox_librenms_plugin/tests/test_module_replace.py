@@ -276,13 +276,59 @@ class TestReplaceModuleView:
             mock_tx.atomic.return_value.__enter__ = lambda s: s
             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
             mock_module_cls.return_value = new_module
-            mock_module_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+            # Re-derived conflict uses serial-based lookup (.filter().exclude().select_related().first())
+            mock_module_cls.objects.filter.return_value.exclude.return_value.select_related.return_value.first.return_value = None
 
             view.post(request, pk=24)
 
         installed.delete.assert_called_once()
         new_module.full_clean.assert_called_once()
         new_module.save.assert_called_once()
+        mock_msg.success.assert_called_once()
+
+    def test_replace_removes_serial_conflict_from_db(self):
+        """POST re-derives the conflicting module from serial, not from conflict_module_id."""
+        view = self._view()
+        device = _make_device()
+        installed = _make_module(serial="OLD", type_id=5)
+        # No conflict_module_id in POST — conflict must be derived from serial
+        request = _make_request("POST", data={"module_id": "42", "ent_index": "100", "server_key": "prod"})
+        cached = [
+            {"entPhysicalIndex": 100, "entPhysicalModelName": "XCM-7s", "entPhysicalSerialNum": "CONFLICT_SERIAL"}
+        ]
+        matched_type = MagicMock()
+        matched_type.model = "XCM-7s"
+
+        conflict = _make_module(pk=55, serial="CONFLICT_SERIAL", bay_name="Slot 3")
+        new_module = MagicMock()
+
+        with (
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", side_effect=[device, installed]),
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch.object(view, "get_cache_key", return_value="ck"),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.sync.modules.InstallBranchView") as mock_ibv,
+            patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="XCM-7s"),
+            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
+            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.modules.redirect"),
+            patch("dcim.models.Module") as mock_module_cls,
+        ):
+            mock_cache.get.return_value = cached
+            mock_ibv.return_value._get_module_types.return_value = {"XCM-7s": matched_type}
+            mock_tx.atomic.return_value.__enter__ = lambda s: s
+            mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
+            mock_module_cls.return_value = new_module
+            mock_module_cls.objects.filter.return_value.exclude.return_value.select_related.return_value.first.return_value = conflict
+
+            view.post(request, pk=24)
+
+        # Conflict module must be deleted, then the installed module, then new one saved
+        conflict.delete.assert_called_once()
+        installed.delete.assert_called_once()
+        new_module.save.assert_called_once()
+        mock_msg.info.assert_called_once()
         mock_msg.success.assert_called_once()
 
     def test_requires_all_permissions(self):

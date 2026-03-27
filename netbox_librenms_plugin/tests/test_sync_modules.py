@@ -1057,3 +1057,201 @@ class TestInstallViewsDoNotDeleteCache:
             "InstallSelectedView.post must not call cache.delete — "
             "deleting the inventory cache after install causes an empty modules tab."
         )
+
+
+# ---------------------------------------------------------------------------
+# _collect_children with ignore rules (Item 4)
+# ---------------------------------------------------------------------------
+
+
+def _make_rule(pattern="IDPROM", action="skip"):
+    """Create a lightweight InventoryIgnoreRule-like object for testing."""
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+    rule = InventoryIgnoreRule.__new__(InventoryIgnoreRule)
+    rule.match_type = "ends_with"
+    rule.pattern = pattern
+    rule.action = action
+    rule.require_serial_match_parent = False
+    rule.enabled = True
+    return rule
+
+
+class TestCollectChildrenIgnoreRules:
+    """_collect_children respects ignore rules when provided."""
+
+    def test_skip_rule_excludes_item_and_subtree(self):
+        """Child matching a 'skip' rule is excluded along with its descendants."""
+        view = _make_install_branch_view()
+        inventory = [
+            {"entPhysicalIndex": 1, "entPhysicalModelName": "PARENT", "entPhysicalContainedIn": 0},
+            {
+                "entPhysicalIndex": 2,
+                "entPhysicalModelName": "SKIP-ME",
+                "entPhysicalName": "FT-IDPROM",
+                "entPhysicalContainedIn": 1,
+            },
+            {
+                "entPhysicalIndex": 3,
+                "entPhysicalModelName": "DEEP-SKIP",
+                "entPhysicalName": "DEEP",
+                "entPhysicalContainedIn": 2,
+            },
+            {
+                "entPhysicalIndex": 4,
+                "entPhysicalModelName": "KEEP-ME",
+                "entPhysicalName": "NormalChild",
+                "entPhysicalContainedIn": 1,
+            },
+        ]
+        index_map = {i["entPhysicalIndex"]: i for i in inventory}
+        rule = _make_rule(pattern="IDPROM", action="skip")
+        items = []
+        view._collect_children(
+            1, inventory, items, visited={1}, ignore_rules=[rule], device_serial="", index_map=index_map
+        )
+        indices = [i["entPhysicalIndex"] for i in items]
+        assert 2 not in indices  # skip rule matched
+        assert 3 not in indices  # descendant of skip-matched
+        assert 4 in indices  # not matched
+
+    def test_transparent_rule_collects_children_not_item(self):
+        """Child matching a 'transparent' rule is excluded but its children are collected."""
+        view = _make_install_branch_view()
+        inventory = [
+            {"entPhysicalIndex": 1, "entPhysicalModelName": "PARENT", "entPhysicalContainedIn": 0},
+            {
+                "entPhysicalIndex": 2,
+                "entPhysicalModelName": "TRANSPARENT",
+                "entPhysicalName": "T-IDPROM",
+                "entPhysicalContainedIn": 1,
+            },
+            {
+                "entPhysicalIndex": 3,
+                "entPhysicalModelName": "GRANDCHILD",
+                "entPhysicalName": "GrandChild",
+                "entPhysicalContainedIn": 2,
+            },
+        ]
+        index_map = {i["entPhysicalIndex"]: i for i in inventory}
+        rule = _make_rule(pattern="IDPROM", action="transparent")
+        items = []
+        view._collect_children(
+            1, inventory, items, visited={1}, ignore_rules=[rule], device_serial="", index_map=index_map
+        )
+        indices = [i["entPhysicalIndex"] for i in items]
+        assert 2 not in indices  # transparent item excluded
+        assert 3 in indices  # grandchild promoted
+
+    def test_no_ignore_rules_includes_all(self):
+        """Passing ignore_rules=None preserves existing behaviour (all items collected)."""
+        view = _make_install_branch_view()
+        inventory = [
+            {"entPhysicalIndex": 1, "entPhysicalModelName": "PARENT", "entPhysicalContainedIn": 0},
+            {
+                "entPhysicalIndex": 2,
+                "entPhysicalModelName": "CHILD-IDPROM",
+                "entPhysicalName": "X-IDPROM",
+                "entPhysicalContainedIn": 1,
+            },
+        ]
+        items = []
+        view._collect_children(1, inventory, items, visited={1})
+        assert any(i["entPhysicalIndex"] == 2 for i in items)
+
+
+# ---------------------------------------------------------------------------
+# _find_parent_module_id with regex mappings (Item 6)
+# ---------------------------------------------------------------------------
+
+
+class TestFindParentModuleIdRegex:
+    """_find_parent_module_id applies regex ModuleBayMappings in ancestor walk."""
+
+    def _make_bay(self, name, installed_module_id=None):
+        bay = MagicMock()
+        bay.name = name
+        if installed_module_id is not None:
+            bay.installed_module = MagicMock()
+            bay.installed_module.pk = installed_module_id
+        else:
+            bay.installed_module = None
+        return bay
+
+    def _make_regex_mapping(self, pattern, netbox_bay_name):
+        m = MagicMock()
+        m.is_regex = True
+        m.librenms_name = pattern
+        m.netbox_bay_name = netbox_bay_name
+        return m
+
+    def _make_exact_mapping(self, librenms_name, netbox_bay_name):
+        m = MagicMock()
+        m.is_regex = False
+        m.librenms_name = librenms_name
+        m.netbox_bay_name = netbox_bay_name
+        return m
+
+    def test_regex_mapping_matches_ancestor_name(self):
+        """A regex mapping on an ancestor name resolves to the installed module id."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        parent = {
+            "entPhysicalIndex": 10,
+            "entPhysicalName": "Slot 3/0",
+            "entPhysicalDescr": "",
+            "entPhysicalContainedIn": 0,
+        }
+        child = {"entPhysicalIndex": 20, "entPhysicalModelName": "SFP-X", "entPhysicalContainedIn": 10}
+        index_map = {10: parent, 20: child}
+
+        bay = self._make_bay("Slot3", installed_module_id=77)
+        regex_mapping = self._make_regex_mapping(r"Slot \d+/\d+", "Slot3")
+        bay_mappings = [regex_mapping]
+        device_bays = [bay]
+
+        result = InstallBranchView._find_parent_module_id(child, index_map, device_bays, bay_mappings)
+        assert result == 77
+
+    def test_exact_mapping_still_works(self):
+        """Exact mappings continue to work alongside regex mappings."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        parent = {
+            "entPhysicalIndex": 10,
+            "entPhysicalName": "ExactSlot",
+            "entPhysicalDescr": "",
+            "entPhysicalContainedIn": 0,
+        }
+        child = {"entPhysicalIndex": 20, "entPhysicalModelName": "MOD-A", "entPhysicalContainedIn": 10}
+        index_map = {10: parent, 20: child}
+
+        bay = self._make_bay("Bay-1", installed_module_id=42)
+        exact_mapping = self._make_exact_mapping("ExactSlot", "Bay-1")
+        bay_mappings = [exact_mapping]
+        device_bays = [bay]
+
+        result = InstallBranchView._find_parent_module_id(child, index_map, device_bays, bay_mappings)
+        assert result == 42
+
+    def test_no_match_returns_none(self):
+        """Returns None when no exact or regex mapping matches the ancestor."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        parent = {
+            "entPhysicalIndex": 10,
+            "entPhysicalName": "UnknownSlot",
+            "entPhysicalDescr": "",
+            "entPhysicalContainedIn": 0,
+        }
+        child = {"entPhysicalIndex": 20, "entPhysicalModelName": "MOD-B", "entPhysicalContainedIn": 10}
+        index_map = {10: parent, 20: child}
+
+        bay = self._make_bay("Bay-2", installed_module_id=99)
+        regex_mapping = self._make_regex_mapping(r"Slot \d+", "Bay-2")
+        bay_mappings = [regex_mapping]
+        device_bays = [bay]
+
+        # "UnknownSlot" does not match pattern "Slot \d+"
+        result = InstallBranchView._find_parent_module_id(child, index_map, device_bays, bay_mappings)
+        assert result is None

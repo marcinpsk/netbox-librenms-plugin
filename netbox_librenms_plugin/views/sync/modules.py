@@ -100,9 +100,15 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
             sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
             return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
+        # Load ignore rules so the branch respects the same filters shown in the table
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+        ignore_rules = list(InventoryIgnoreRule.objects.filter(enabled=True))
+        device_serial = (getattr(device, "serial", None) or "").strip()
+
         # Build index map and collect the branch to install
         index_map = {idx: item for item in cached_data if (idx := item.get("entPhysicalIndex")) is not None}
-        branch_items = self._collect_branch(parent_index, cached_data)
+        branch_items = self._collect_branch(parent_index, cached_data, ignore_rules, device_serial, index_map)
 
         if not branch_items:
             messages.warning(request, "No installable items found in this branch.")
@@ -160,11 +166,13 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
         return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
-    def _collect_branch(self, parent_index, inventory_data):
+    def _collect_branch(self, parent_index, inventory_data, ignore_rules=None, device_serial="", index_map=None):
         """
         Collect all items in a branch depth-first, parent first.
 
         Returns items in install order (parent before children).
+        Optionally filters items matching 'skip' ignore rules; 'transparent' items
+        are excluded from installation but their children are still collected.
         """
         items = []
         parent = next((i for i in inventory_data if i.get("entPhysicalIndex") == parent_index), None)
@@ -172,11 +180,26 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
             model = (parent.get("entPhysicalModelName") or "").strip()
             if model:
                 items.append(parent)
-            self._collect_children(parent_index, inventory_data, items, visited={parent_index})
+            self._collect_children(
+                parent_index,
+                inventory_data,
+                items,
+                visited={parent_index},
+                ignore_rules=ignore_rules,
+                device_serial=device_serial,
+                index_map=index_map,
+            )
         return items
 
-    def _collect_children(self, parent_idx, inventory_data, items, visited=None):
-        """Recursively collect children with models, depth-first."""
+    def _collect_children(
+        self, parent_idx, inventory_data, items, visited=None, ignore_rules=None, device_serial="", index_map=None
+    ):
+        """Recursively collect children with models, depth-first.
+
+        When ignore_rules are provided, items matching a 'skip' rule (and their
+        subtree) are excluded.  Items matching 'transparent' are not installed but
+        their children are still collected at the same depth.
+        """
         if visited is None:
             visited = set()
         children = [i for i in inventory_data if i.get("entPhysicalContainedIn") == parent_idx]
@@ -187,11 +210,25 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
             if child_idx in visited:
                 continue
             visited.add(child_idx)
+            # Apply ignore rules when provided
+            if ignore_rules:
+                from netbox_librenms_plugin.views.base.modules_view import _check_ignore_rules
+
+                parent_item = index_map.get(child.get("entPhysicalContainedIn")) if index_map else None
+                action = _check_ignore_rules(child, parent_item, ignore_rules, index_map, device_serial)
+                if action == "skip":
+                    continue
+                if action == "transparent":
+                    # Don't install this item but still collect its children
+                    self._collect_children(
+                        child_idx, inventory_data, items, visited, ignore_rules, device_serial, index_map
+                    )
+                    continue
             model = (child.get("entPhysicalModelName") or "").strip()
             if model:
                 items.append(child)
             # Always recurse to find deeper items (containers may lack models)
-            self._collect_children(child_idx, inventory_data, items, visited)
+            self._collect_children(child_idx, inventory_data, items, visited, ignore_rules, device_serial, index_map)
 
     def _get_module_types(self):
         """Get all module types indexed by model, with mappings applied."""
@@ -309,11 +346,16 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         for bay in device_bays:
             if bay.name not in bay_by_name:
                 bay_by_name[bay.name] = bay
-        # Build mapping dict keyed by librenms_name for fast lookup
-        mapping_by_name = {}
+        # Split bay_mappings into exact and regex for correct lookup
+        import re as _re
+
+        exact_mapping_by_name: dict = {}
+        regex_bay_mappings: list = []
         for m in bay_mappings:
-            if m.librenms_name not in mapping_by_name:
-                mapping_by_name[m.librenms_name] = m
+            if m.is_regex:
+                regex_bay_mappings.append(m)
+            elif m.librenms_name not in exact_mapping_by_name:
+                exact_mapping_by_name[m.librenms_name] = m
 
         visited = set()
         while True:
@@ -333,15 +375,25 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
                     if bay.name == parent_name or (parent_descr and bay.name == parent_descr):
                         return bay.installed_module.pk
 
-            # Also check ModuleBayMapping for indirect matches using pre-fetched data
+            # Also check ModuleBayMapping for indirect matches (exact then regex)
             for name in [parent_name, parent_descr]:
                 if not name:
                     continue
-                mapping = mapping_by_name.get(name)
+                # Exact-name mapping
+                mapping = exact_mapping_by_name.get(name)
                 if mapping:
                     bay = bay_by_name.get(mapping.netbox_bay_name)
                     if bay and hasattr(bay, "installed_module") and bay.installed_module:
                         return bay.installed_module.pk
+                # Regex mapping
+                for rm in regex_bay_mappings:
+                    try:
+                        if _re.search(rm.librenms_name, name):
+                            bay = bay_by_name.get(rm.netbox_bay_name)
+                            if bay and hasattr(bay, "installed_module") and bay.installed_module:
+                                return bay.installed_module.pk
+                    except _re.error:
+                        continue
 
             current = parent
 
@@ -454,6 +506,26 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             messages.warning(request, "None of the selected indices matched cached inventory.")
             sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
             return redirect(f"{sync_url}?tab=modules#librenms-module-table")
+
+        # Filter out items matching 'skip' ignore rules (consistent with what the table shows)
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+        from netbox_librenms_plugin.views.base.modules_view import _check_ignore_rules
+
+        ignore_rules = list(InventoryIgnoreRule.objects.filter(enabled=True))
+        device_serial = (getattr(device, "serial", None) or "").strip()
+        if ignore_rules:
+            items = [
+                item
+                for item in items
+                if _check_ignore_rules(
+                    item,
+                    index_map.get(item.get("entPhysicalContainedIn")),
+                    ignore_rules,
+                    index_map,
+                    device_serial,
+                )
+                != "skip"
+            ]
 
         helper = InstallBranchView()
         module_types = helper._get_module_types()
@@ -653,7 +725,6 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         module_id = request.POST.get("module_id")
         ent_index = request.POST.get("ent_index")
         server_key = request.POST.get("server_key") or self.librenms_api.server_key
-        conflict_module_id = request.POST.get("conflict_module_id")
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
 
         if not module_id or not ent_index:
@@ -689,6 +760,17 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         model_name = (librenms_item.get("entPhysicalModelName") or "").strip()
         serial = (librenms_item.get("entPhysicalSerialNum") or "").strip()
 
+        # Re-derive any serial conflict from the database rather than trusting
+        # a client-submitted conflict_module_id POST parameter.
+        conflict_module = None
+        if serial:
+            conflict_module = (
+                Module.objects.filter(serial=serial)
+                .exclude(pk=installed_module.pk)
+                .select_related("module_type", "module_bay", "device")
+                .first()
+            )
+
         helper = InstallBranchView()
         module_types = helper._get_module_types()
         from netbox_librenms_plugin.utils import apply_normalization_rules
@@ -709,14 +791,13 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
 
         try:
             with transaction.atomic():
-                # Remove conflict module from its current location (if provided)
-                if conflict_module_id:
-                    conflict = Module.objects.filter(pk=conflict_module_id).exclude(pk=installed_module.pk).first()
-                    if conflict:
-                        c_bay = conflict.module_bay.name
-                        c_device = conflict.device.name
-                        conflict.delete()
-                        messages.info(request, f"Removed {conflict.module_type.model} from {c_device}/{c_bay}.")
+                # Remove the serial-conflicting module from its current location (re-derived,
+                # not trusted from a client-submitted conflict_module_id field).
+                if conflict_module:
+                    c_bay = conflict_module.module_bay.name
+                    c_device = conflict_module.device.name
+                    conflict_module.delete()
+                    messages.info(request, f"Removed {conflict_module.module_type.model} from {c_device}/{c_bay}.")
 
                 # Delete the currently installed module in the target bay
                 installed_module.delete()

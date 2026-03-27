@@ -742,14 +742,10 @@ class TestDetectSerialConflicts:
 
         return object.__new__(BaseModuleTableView)
 
-    def test_no_can_replace_rows_does_nothing(self):
-        """When no rows have can_replace, the method returns without DB query."""
+    def test_no_can_replace_or_install_rows_does_nothing(self):
+        """When no rows have can_replace or can_install, the method returns without DB query."""
         view = self._view()
         table_data = [{"serial": "S1", "status": "Installed"}]
-        # Should not raise; no DB query since no can_replace rows
-        with patch("netbox_librenms_plugin.views.base.modules_view.BaseModuleTableView._detect_serial_conflicts"):
-            # Call the real method — it should exit early
-            pass
         # Call real method directly to verify it doesn't error
         view._detect_serial_conflicts(table_data)
         assert "serial_conflict_module" not in table_data[0]
@@ -795,6 +791,33 @@ class TestDetectSerialConflicts:
 
         assert "serial_conflict_module" not in row
         assert not row.get("can_move_from")
+
+    def test_conflict_detected_for_can_install_row(self):
+        """Serial conflicts are also detected for empty-bay (can_install) rows."""
+        view = self._view()
+        conflict = MagicMock()
+        conflict.serial = "CONFLICT_SERIAL"
+        conflict.pk = 999
+
+        row = {
+            "can_install": True,
+            "serial": "CONFLICT_SERIAL",
+            # No installed_module_id — bay is empty
+        }
+
+        with patch("dcim.models.Module") as mock_module_cls:
+            mock_module_cls.objects.filter.return_value.select_related.return_value = [conflict]
+            view._detect_serial_conflicts([row])
+
+        assert row.get("serial_conflict_module") is conflict
+        assert row.get("can_move_from") is True
+
+    def test_can_install_no_serial_not_flagged(self):
+        """A can_install row with no serial is not checked for conflicts."""
+        view = self._view()
+        row = {"can_install": True, "serial": "-"}
+        view._detect_serial_conflicts([row])
+        assert "serial_conflict_module" not in row
 
 
 class TestInventoryIgnoreRuleMatchesName:
@@ -1179,3 +1202,53 @@ class TestCollectDescendantsIgnoreRules:
         names = [item["entPhysicalName"] for _, item in results]
         assert "Optics0/0/0/0" in names
         assert "Optics0/0/0/0-IDPROM" in names
+
+    def test_transparent_item_children_promoted_to_same_depth(self):
+        """Children of a transparent-matched item are promoted to the transparent item's depth."""
+        inventory = [
+            {
+                "entPhysicalIndex": 1,
+                "entPhysicalName": "Module-Chassis-IDPROM",
+                "entPhysicalModelName": "CHASSIS-TYPE",
+                "entPhysicalSerialNum": "SER_CHASSIS",
+                "entPhysicalContainedIn": 0,
+            },
+            {
+                "entPhysicalIndex": 2,
+                "entPhysicalName": "Child-Module",
+                "entPhysicalModelName": "SFP-X2",
+                "entPhysicalSerialNum": "SER_SFP",
+                "entPhysicalContainedIn": 1,
+            },
+        ]
+        rule = self._rule(match_type="ends_with", pattern="IDPROM", require_serial=False, action="transparent")
+        children_by_parent, index_map = self._build_maps(inventory)
+        view = self._view()
+        results = []
+        view._collect_descendants(0, children_by_parent, index_map, [rule], depth=1, results=results)
+
+        names = [item["entPhysicalName"] for _, item in results]
+        depths = [d for d, _ in results]
+        # Transparent item itself must not appear
+        assert "Module-Chassis-IDPROM" not in names
+        # Its child must be promoted to the same depth (1) as the transparent item would occupy
+        assert "Child-Module" in names
+        assert depths[names.index("Child-Module")] == 1
+
+    def test_transparent_item_without_children_produces_no_rows(self):
+        """A transparent item with no children yields nothing."""
+        inventory = [
+            {
+                "entPhysicalIndex": 1,
+                "entPhysicalName": "Leaf-IDPROM",
+                "entPhysicalModelName": "LEAF-MODEL",
+                "entPhysicalSerialNum": "LEAF_SER",
+                "entPhysicalContainedIn": 0,
+            },
+        ]
+        rule = self._rule(match_type="ends_with", pattern="IDPROM", require_serial=False, action="transparent")
+        children_by_parent, index_map = self._build_maps(inventory)
+        view = self._view()
+        results = []
+        view._collect_descendants(0, children_by_parent, index_map, [rule], depth=1, results=results)
+        assert results == []

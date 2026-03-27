@@ -552,11 +552,25 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if child_idx in visited:
                 continue
             visited.add(child_idx)
-            # Skip items matched by any ignore rule action (skip or transparent).
-            # In sub-component context, transparent items are also effectively skipped —
-            # children promotion only applies at the top-level pass in _build_context.
+            # Apply ignore rules: skip drops the item and its subtree; transparent
+            # hides the item but promotes its children to the current depth level.
             parent_item = index_map.get(parent_idx)
-            if _check_ignore_rules(child, parent_item, ignore_rules, index_map, device_serial):
+            action = _check_ignore_rules(child, parent_item, ignore_rules, index_map, device_serial)
+            if action == "skip":
+                continue
+            if action == "transparent":
+                # Don't add this item, but recurse at the same depth so its children
+                # are promoted (appear at the same level as the transparent item would).
+                self._collect_descendants(
+                    child_idx,
+                    children_by_parent,
+                    index_map,
+                    ignore_rules,
+                    depth=depth,
+                    results=results,
+                    visited=visited,
+                    device_serial=device_serial,
+                )
                 continue
             model = (child.get("entPhysicalModelName") or "").strip()
             if model and model not in _GENERIC_CONTAINER_MODELS:
@@ -971,9 +985,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
     def _detect_serial_conflicts(self, table_data):
         """
-        Bulk-check whether LibreNMS serials for replaceable rows already exist elsewhere in NetBox.
+        Bulk-check whether LibreNMS serials for replaceable or installable rows already exist elsewhere in NetBox.
 
-        For each row with can_replace, checks whether the LibreNMS serial (the value we want to
+        For each row with can_replace or can_install, checks whether the LibreNMS serial (the value we want to
         write) is already assigned to a *different* module.  When a conflict is found the row
         gets two extra keys:
 
@@ -985,7 +999,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Map serial → list of rows that may be affected
         serial_rows: dict = {}
         for row in table_data:
-            if not row.get("can_replace"):
+            if not row.get("can_replace") and not row.get("can_install"):
                 continue
             serial = row.get("serial", "")
             if serial and serial != "-":
