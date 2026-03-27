@@ -721,10 +721,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 mapping = next(
                     (m for m in exact_mappings if m.librenms_name == name and m.librenms_class == phys_class), None
                 )
-                if not mapping:
-                    mapping = next(
-                        (m for m in exact_mappings if m.librenms_name == name and m.librenms_class == ""), None
-                    )
+                if mapping and mapping.netbox_bay_name in module_bays:
+                    return module_bays[mapping.netbox_bay_name]
+                # Class-specific mapping absent or its bay not in scope — try empty-class fallback
+                mapping = next((m for m in exact_mappings if m.librenms_name == name and m.librenms_class == ""), None)
             else:
                 mapping = next((m for m in exact_mappings if m.librenms_name == name and m.librenms_class == ""), None)
 

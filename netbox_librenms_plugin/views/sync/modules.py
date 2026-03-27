@@ -855,7 +855,7 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
             with transaction.atomic():
                 # Remove whatever is currently in the target bay (if provided and different)
                 if module_id:
-                    occupant = Module.objects.filter(pk=module_id, device=device).first()
+                    occupant = Module.objects.filter(pk=module_id, device=device, module_bay=target_bay).first()
                     if occupant and occupant.pk != conflict_module.pk:
                         messages.info(
                             request,

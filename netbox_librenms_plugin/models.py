@@ -104,6 +104,11 @@ class DeviceTypeMapping(NetBoxModel):
         help_text="Optional description or notes about this mapping",
     )
 
+    def clean(self):
+        """Normalize librenms_hardware so whitespace-padded values don't create duplicate entries."""
+        super().clean()
+        self.librenms_hardware = self.librenms_hardware.strip()
+
     def get_absolute_url(self):
         """Return the URL for this mapping's detail page."""
         return reverse("plugins:netbox_librenms_plugin:devicetypemapping_detail", args=[self.pk])
@@ -135,6 +140,11 @@ class ModuleTypeMapping(NetBoxModel):
         blank=True,
         help_text="Optional description or notes about this mapping",
     )
+
+    def clean(self):
+        """Normalize librenms_model so whitespace-padded values don't create duplicate entries."""
+        super().clean()
+        self.librenms_model = self.librenms_model.strip()
 
     def get_absolute_url(self):
         """Return the URL for this mapping's detail page."""

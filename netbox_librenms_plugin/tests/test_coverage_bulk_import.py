@@ -1071,6 +1071,7 @@ class TestRefreshExistingDevice:
 
         with (
             patch("dcim.models.Device") as mock_Device,
+            patch("netbox_librenms_plugin.import_utils.bulk_import.find_by_librenms_id") as mock_find,
         ):
             mock_Device.objects.filter.return_value.first.return_value = new_device
             _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
@@ -1078,6 +1079,9 @@ class TestRefreshExistingDevice:
         # Should find via resolved_name (librenms_id lookup was skipped due to ValueError)
         assert validation["existing_device"] is new_device
         assert validation["existing_match_type"] == "resolved_name"
+        # Crucially: find_by_librenms_id must never have been called — int("not-an-int")
+        # raises ValueError before the call site is reached.
+        mock_find.assert_not_called()
 
     def test_no_existing_device_hostname_fallback(self):
         """existing=None, not found by id or resolved_name → hostname fallback."""
@@ -1093,12 +1097,12 @@ class TestRefreshExistingDevice:
             "resolved_name": None,  # no resolved_name → fall through to hostname
         }
 
-        # set up: filter returns new_device on the first call (hostname match)
-        filter_results = iter([new_device])
-
+        # filter returns new_device only for the hostname kwargs; any other filter
+        # call (e.g. resolved_name or sysname) returns None — so the test fails if
+        # the wrong lookup path is exercised.
         def filter_first(*args, **kwargs):
             m = MagicMock()
-            m.first.return_value = next(filter_results, None)
+            m.first.return_value = new_device if kwargs.get("name__iexact") == "sw04" else None
             return m
 
         with (
@@ -1113,6 +1117,8 @@ class TestRefreshExistingDevice:
 
         assert validation["existing_device"] is new_device
         assert validation["existing_match_type"] == "hostname"
+        # Verify the hostname-keyed filter call was actually made
+        mock_Device.objects.filter.assert_any_call(name__iexact="sw04")
 
 
 # ===========================================================================
