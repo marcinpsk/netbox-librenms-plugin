@@ -8,6 +8,7 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.views import View
 
+from netbox_librenms_plugin.utils import get_module_types_indexed
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -116,7 +117,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
         # Load module types (with mappings)
-        module_types = self._get_module_types()
+        module_types = get_module_types_indexed()
 
         # Preload all ModuleBayMappings once to avoid N+1 per-item queries
         from netbox_librenms_plugin.models import ModuleBayMapping
@@ -230,14 +231,8 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             # Always recurse to find deeper items (containers may lack models)
             self._collect_children(child_idx, inventory_data, items, visited, ignore_rules, device_serial, index_map)
 
-    def _get_module_types(self):
-        """Get all module types indexed by model, with mappings applied."""
-        from netbox_librenms_plugin.utils import get_module_types_indexed
-
-        return get_module_types_indexed()
-
+    @staticmethod
     def _install_single(
-        self,
         device,
         item,
         index_map,
@@ -285,7 +280,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         # Determine if this item belongs under an installed module
         # by tracing its LibreNMS parent hierarchy to an installed item
-        parent_module_id = self._find_parent_module_id(item, index_map, bays, bay_mappings)
+        parent_module_id = InstallBranchView._find_parent_module_id(item, index_map, bays, bay_mappings)
 
         if parent_module_id:
             bay_dict = {bay.name: bay for bay in bays if bay.module_id == parent_module_id}
@@ -293,7 +288,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             bay_dict = {bay.name: bay for bay in bays if not bay.module_id}
 
         # Match module bay using preloaded mapping data
-        matched_bay = self._match_bay(item, index_map, bay_dict, exact_mappings, regex_mappings)
+        matched_bay = InstallBranchView._match_bay(item, index_map, bay_dict, exact_mappings, regex_mappings)
         if not matched_bay:
             return {"status": "skipped", "name": name, "reason": "no matching bay"}
 
@@ -527,8 +522,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 != "skip"
             ]
 
-        helper = InstallBranchView()
-        module_types = helper._get_module_types()
+        module_types = get_module_types_indexed()
 
         # Preload all ModuleBayMappings once to avoid N+1 per-item queries
         from netbox_librenms_plugin.models import ModuleBayMapping
@@ -542,7 +536,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         try:
             with transaction.atomic():
                 for item in items:
-                    result = helper._install_single(
+                    result = InstallBranchView._install_single(
                         device,
                         item,
                         index_map,
@@ -771,8 +765,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 .first()
             )
 
-        helper = InstallBranchView()
-        module_types = helper._get_module_types()
+        module_types = get_module_types_indexed()
         from netbox_librenms_plugin.utils import apply_normalization_rules
 
         matched_type = module_types.get(model_name)

@@ -280,7 +280,7 @@ class NormalizationRule(NetBoxModel):
         # Validate the replacement template by running a dummy substitution
         try:
             compiled.sub(self.replacement, "")
-        except re.error as e:
+        except (re.error, IndexError) as e:
             raise ValidationError({"replacement": f"Invalid replacement template: {e}"})
 
     def get_absolute_url(self):

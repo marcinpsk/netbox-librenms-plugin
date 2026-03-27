@@ -2277,6 +2277,8 @@ class TestCrossModelConflictDetection:
             _refresh_existing_device(validation, libre_device, server_key="default")
 
         assert validation["existing_device"] is mock_vm
+        # import_as_vm must be flipped to True so future refreshes query VirtualMachine
+        assert validation["import_as_vm"] is True
         # A late-found cross-model match must never be import-ready:
         # _refresh_existing_device re-asserts can_import=False/is_ready=False after
         # recalculate_validation_status regardless of issues/fields state.
@@ -2309,6 +2311,8 @@ class TestCrossModelConflictDetection:
             _refresh_existing_device(validation, libre_device, server_key="default")
 
         assert validation["existing_device"] is mock_device
+        # import_as_vm must be flipped to False so future refreshes query Device
+        assert validation["import_as_vm"] is False
         # A late-found cross-model match must never be import-ready:
         # _refresh_existing_device re-asserts can_import=False/is_ready=False after
         # recalculate_validation_status regardless of issues/fields state.

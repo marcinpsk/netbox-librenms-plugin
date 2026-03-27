@@ -140,7 +140,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             return render(
                 request,
                 self.partial_template_name,
-                {"module_sync": {"object": obj, "table": None, "cache_expiry": None}},
+                {
+                    "module_sync": {
+                        "object": obj,
+                        "table": None,
+                        "cache_expiry": None,
+                        "server_key": self.librenms_api.server_key,
+                    }
+                },
             )
 
         success, inventory_data = self.librenms_api.get_device_inventory(self.librenms_id)
@@ -150,7 +157,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             return render(
                 request,
                 self.partial_template_name,
-                {"module_sync": {"object": obj, "table": None, "cache_expiry": None}},
+                {
+                    "module_sync": {
+                        "object": obj,
+                        "table": None,
+                        "cache_expiry": None,
+                        "server_key": self.librenms_api.server_key,
+                    }
+                },
             )
 
         # Fetch transceiver data and merge with inventory
@@ -959,7 +973,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     status = "Type Mismatch"
                     row["row_class"] = "table-warning"
                     row["can_replace"] = True
-                elif serial and installed.serial and installed.serial.strip() != serial.strip():
+                elif matched_type is not None and serial and (installed.serial or "").strip() != serial.strip():
                     status = "Serial Mismatch"
                     row["row_class"] = "table-danger"
                     row["can_update_serial"] = True
