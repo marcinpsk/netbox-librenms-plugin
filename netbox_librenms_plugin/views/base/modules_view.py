@@ -688,7 +688,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         while contained_in and contained_in in index_map and contained_in not in visited:
             visited.add(contained_in)
             parent = index_map[contained_in]
-            name = parent.get("entPhysicalName", "")
+            name = parent.get("entPhysicalName", "").strip()
             if name:
                 return name
             contained_in = parent.get("entPhysicalContainedIn", 0)
@@ -701,9 +701,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         to exact parent name match, then positional matching.
         """
         parent_name = self._find_parent_container_name(item, index_map)
-        item_name = item.get("entPhysicalName", "")
-        item_descr = item.get("entPhysicalDescr", "")
-        phys_class = item.get("entPhysicalClass", "")
+        item_name = item.get("entPhysicalName", "").strip()
+        item_descr = item.get("entPhysicalDescr", "").strip()
+        phys_class = item.get("entPhysicalClass", "").strip()
 
         # Build candidate names: parent, item name, item description
         candidate_names = [n for n in [parent_name, item_name, item_descr] if n]
@@ -975,7 +975,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                     status = "Type Mismatch"
                     row["row_class"] = "table-warning"
                     row["can_replace"] = True
-                elif matched_type is not None and serial and (installed.serial or "").strip() != serial.strip():
+                elif (
+                    matched_type is not None
+                    and serial
+                    and installed.serial
+                    and installed.serial.strip() != serial.strip()
+                ):
                     status = "Serial Mismatch"
                     row["row_class"] = "table-danger"
                     row["can_update_serial"] = True

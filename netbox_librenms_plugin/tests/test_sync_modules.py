@@ -108,10 +108,12 @@ class TestInstallBranchViewCollectChildrenCycleGuard:
         assert len(items) == 0
 
 
-class TestInstallBranchViewGetModuleTypes:
-    """_get_module_types builds a dict keyed by model name, part number, and mappings."""
+class TestGetModuleTypesIndexed:
+    """get_module_types_indexed builds a dict keyed by model name, part number, and mappings."""
 
     def test_indexes_by_model_and_part_number(self):
+        from netbox_librenms_plugin.utils import get_module_types_indexed
+
         mt1 = MagicMock()
         mt1.model = "WS-X4748"
         mt1.part_number = "ALT-PART-4748"
@@ -137,8 +139,7 @@ class TestInstallBranchViewGetModuleTypes:
             },
         ):
             with patch("netbox_librenms_plugin.models.ModuleTypeMapping", mock_map_cls):
-                view = _make_install_branch_view()
-                result = view._get_module_types()
+                result = get_module_types_indexed()
 
         assert result["WS-X4748"] is mt1
         assert result["ALT-PART-4748"] is mt1
@@ -665,6 +666,8 @@ class TestInstallSingleStatus:
     def test_returns_installed_on_success(self):
         from contextlib import contextmanager
 
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
         view = _make_install_branch_view()
         device, item, index_map, module_types, ModuleBay, ModuleType, Module, bay, mt = self._make_args()
         module_instance = MagicMock()
@@ -678,8 +681,8 @@ class TestInstallSingleStatus:
             with patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="WS-X4748"):
                 with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls:
                     mock_mapping_cls.objects.all.return_value = []
-                    with patch.object(view, "_find_parent_module_id", return_value=None):
-                        with patch.object(view, "_match_bay", return_value=bay):
+                    with patch.object(InstallBranchView, "_find_parent_module_id", return_value=None):
+                        with patch.object(InstallBranchView, "_match_bay", return_value=bay):
                             result = view._install_single(
                                 device, item, index_map, module_types, ModuleBay, ModuleType, Module
                             )
@@ -692,29 +695,30 @@ class TestInstallSingleStatus:
         device, item, index_map, module_types, ModuleBay, ModuleType, Module, bay, mt = self._make_args()
 
         with patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="WS-X4748"):
-            with patch.object(view, "_find_parent_module_id", return_value=None):
-                result = view._install_single(
-                    device,
-                    item,
-                    index_map,
-                    {},  # empty module_types → no match
-                    ModuleBay,
-                    ModuleType,
-                    Module,
-                )
+            result = view._install_single(
+                device,
+                item,
+                index_map,
+                {},  # empty module_types → no match
+                ModuleBay,
+                ModuleType,
+                Module,
+            )
 
         assert result["status"] == "skipped"
         assert "no matching type" in result["reason"]
 
     def test_returns_skipped_when_no_bay(self):
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
         view = _make_install_branch_view()
         device, item, index_map, module_types, ModuleBay, ModuleType, Module, bay, mt = self._make_args()
 
         with patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="WS-X4748"):
             with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls:
                 mock_mapping_cls.objects.all.return_value = []
-                with patch.object(view, "_find_parent_module_id", return_value=None):
-                    with patch.object(view, "_match_bay", return_value=None):
+                with patch.object(InstallBranchView, "_find_parent_module_id", return_value=None):
+                    with patch.object(InstallBranchView, "_match_bay", return_value=None):
                         result = view._install_single(
                             device, item, index_map, module_types, ModuleBay, ModuleType, Module
                         )
@@ -723,6 +727,8 @@ class TestInstallSingleStatus:
         assert "no matching bay" in result["reason"]
 
     def test_returns_skipped_when_bay_already_occupied(self):
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
         view = _make_install_branch_view()
         device, item, index_map, module_types, ModuleBay, ModuleType, Module, bay, mt = self._make_args()
         bay.installed_module = _module()  # occupied!
@@ -730,8 +736,8 @@ class TestInstallSingleStatus:
         with patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="WS-X4748"):
             with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls:
                 mock_mapping_cls.objects.all.return_value = []
-                with patch.object(view, "_find_parent_module_id", return_value=None):
-                    with patch.object(view, "_match_bay", return_value=bay):
+                with patch.object(InstallBranchView, "_find_parent_module_id", return_value=None):
+                    with patch.object(InstallBranchView, "_match_bay", return_value=bay):
                         result = view._install_single(
                             device, item, index_map, module_types, ModuleBay, ModuleType, Module
                         )
@@ -741,6 +747,8 @@ class TestInstallSingleStatus:
 
     def test_returns_failed_on_exception(self):
         from contextlib import contextmanager
+
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
         view = _make_install_branch_view()
         device, item, index_map, module_types, ModuleBay, ModuleType, Module, bay, mt = self._make_args()
@@ -754,8 +762,8 @@ class TestInstallSingleStatus:
             with patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="WS-X4748"):
                 with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls:
                     mock_mapping_cls.objects.all.return_value = []
-                    with patch.object(view, "_find_parent_module_id", return_value=None):
-                        with patch.object(view, "_match_bay", return_value=bay):
+                    with patch.object(InstallBranchView, "_find_parent_module_id", return_value=None):
+                        with patch.object(InstallBranchView, "_match_bay", return_value=bay):
                             result = view._install_single(
                                 device, item, index_map, module_types, ModuleBay, ModuleType, Module
                             )

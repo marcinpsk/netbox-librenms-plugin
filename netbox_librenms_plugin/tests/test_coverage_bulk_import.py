@@ -1198,7 +1198,7 @@ class TestProcessDeviceFilters:
 
         assert len(result) == 1
         # Verify the two job-specific log calls were made
-        log_calls = [str(c) for c in job.logger.info.call_args_list]
+        log_calls = [c.args[0] for c in job.logger.info.call_args_list]
         assert any("Fetching" in s for s in log_calls)
         assert any("Found" in s for s in log_calls)
 
@@ -1255,7 +1255,7 @@ class TestProcessDeviceFilters:
             )
 
         mock_prefetch.assert_called_once()
-        log_calls = [str(c) for c in job.logger.info.call_args_list]
+        log_calls = [c.args[0] for c in job.logger.info.call_args_list]
         assert any("Pre-fetch" in s or "pre-fetch" in s or "virtual chassis" in s.lower() for s in log_calls)
 
     # ------------------------------------------------------------------
