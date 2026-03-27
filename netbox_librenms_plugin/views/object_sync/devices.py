@@ -54,6 +54,7 @@ class DeviceLibreNMSSyncView(BaseLibreNMSSyncView):
     def get_cable_context(self, request, obj):
         """Return cable sync context for the device."""
         cable_table_view = DeviceCableTableView()
+        cable_table_view.request = request
         return cable_table_view.get_context_data(request, obj)
 
     def get_ip_context(self, request, obj):

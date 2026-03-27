@@ -1,3 +1,5 @@
+from collections import ChainMap
+
 from django.contrib import messages
 from django.core.cache import cache
 from django.shortcuts import get_object_or_404, render
@@ -280,13 +282,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         # Build combined bay lookup so synthetic transceiver entries (which may
         # live inside installed modules) can find their module-scoped bays.
-        # NOTE: if two installed modules contain bays with the same name, the
-        # last module's bay silently wins here.  Fixing this properly requires
-        # keying on (module_id, bay_name) and threading module context into
-        # _build_row/_match_module_bay — deferred for safety.
-        all_bays = dict(device_bays)
-        for scope_bays in module_scoped_bays.values():
-            all_bays.update(scope_bays)
+        # ChainMap preserves scope ordering — device-level bays take precedence,
+        # then module bays in definition order — so identically-named bays in
+        # different installed modules no longer silently overwrite each other.
+        all_bays = ChainMap(device_bays, *module_scoped_bays.values())
 
         for item in top_items:
             # Transceiver API entries may live inside installed modules, so they

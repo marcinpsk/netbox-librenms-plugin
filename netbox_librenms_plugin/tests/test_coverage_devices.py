@@ -57,7 +57,7 @@ class TestDeviceLibreNMSSyncViewContextMethods:
         assert mock_get_context.call_args[0][2] is obj
 
     def test_get_cable_context_delegates_to_cable_view(self):
-        """get_cable_context() creates DeviceCableTableView and calls get_context_data with request and obj."""
+        """get_cable_context() creates DeviceCableTableView, copies request, and calls get_context_data."""
 
         view = _make_device_view()
         request = MagicMock()
@@ -72,6 +72,8 @@ class TestDeviceLibreNMSSyncViewContextMethods:
             result = view.get_cable_context(request, obj)
         assert result == mock_ctx
         assert mock_get_context.called
+        child_instance = mock_get_context.call_args[0][0]
+        assert child_instance.request is request
         assert mock_get_context.call_args[0][1] is request
         assert mock_get_context.call_args[0][2] is obj
 
