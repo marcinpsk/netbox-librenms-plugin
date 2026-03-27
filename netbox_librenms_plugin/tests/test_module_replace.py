@@ -264,7 +264,10 @@ class TestReplaceModuleView:
             patch.object(view, "get_cache_key", return_value="ck") as mock_get_cache_key,
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.sync.modules.InstallBranchView") as mock_ibv,
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_module_types_indexed",
+                return_value={"XCM-7s": matched_type},
+            ),
             patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="XCM-7s"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
@@ -272,7 +275,6 @@ class TestReplaceModuleView:
             patch("dcim.models.Module") as mock_module_cls,
         ):
             mock_cache.get.return_value = cached
-            mock_ibv.return_value._get_module_types.return_value = {"XCM-7s": matched_type}
             mock_tx.atomic.return_value.__enter__ = lambda s: s
             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
             mock_module_cls.return_value = new_module
@@ -310,7 +312,10 @@ class TestReplaceModuleView:
             patch.object(view, "get_cache_key", return_value="ck"),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.sync.modules.InstallBranchView") as mock_ibv,
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_module_types_indexed",
+                return_value={"XCM-7s": matched_type},
+            ),
             patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="XCM-7s"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
@@ -318,7 +323,6 @@ class TestReplaceModuleView:
             patch("dcim.models.Module") as mock_module_cls,
         ):
             mock_cache.get.return_value = cached
-            mock_ibv.return_value._get_module_types.return_value = {"XCM-7s": matched_type}
             mock_tx.atomic.return_value.__enter__ = lambda s: s
             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
             mock_module_cls.return_value = new_module
