@@ -155,20 +155,24 @@ class TestModuleInstallWorkflow:
         pane = page.query_selector("#modules")
         assert pane is not None, "Modules pane not found"
 
+        def _text(tr, col):
+            el = tr.query_selector(f'td[data-col="{col}"]')
+            return el.inner_text().strip() if el else ""
+
         rows = []
         for tr in pane.query_selector_all("table tr"):
-            cells = tr.query_selector_all("td")
-            if len(cells) >= 8:
-                rows.append(
-                    {
-                        "name": cells[0].inner_text().strip(),
-                        "model": cells[1].inner_text().strip(),
-                        "serial": cells[2].inner_text().strip(),
-                        "bay": cells[5].inner_text().strip(),
-                        "type": cells[6].inner_text().strip(),
-                        "status": cells[7].inner_text().strip(),
-                    }
-                )
+            if tr.query_selector('td[data-col="name"]') is None:
+                continue
+            rows.append(
+                {
+                    "name": _text(tr, "name"),
+                    "model": _text(tr, "model"),
+                    "serial": _text(tr, "serial"),
+                    "bay": _text(tr, "module_bay"),
+                    "type": _text(tr, "module_type"),
+                    "status": _text(tr, "status"),
+                }
+            )
         return rows
 
     def test_clean_state_shows_install_buttons(self, page):
@@ -192,8 +196,8 @@ class TestModuleInstallWorkflow:
         # Install FanTray 1
         pane = page.query_selector("#modules")
         for tr in pane.query_selector_all("table tr"):
-            cells = tr.query_selector_all("td")
-            if cells and "FanTray 1" in cells[0].inner_text():
+            name_cell = tr.query_selector('td[data-col="name"]')
+            if name_cell and "FanTray 1" in name_cell.inner_text():
                 btn = tr.query_selector('button:has-text("Install"):not(:has-text("Branch"))')
                 if btn:
                     btn.click()
@@ -216,8 +220,8 @@ class TestModuleInstallWorkflow:
         # Click Install Branch on Supervisor(slot 1)
         pane = page.query_selector("#modules")
         for tr in pane.query_selector_all("table tr"):
-            cells = tr.query_selector_all("td")
-            if cells and "Supervisor(slot 1)" in cells[0].inner_text():
+            name_cell = tr.query_selector('td[data-col="name"]')
+            if name_cell and "Supervisor(slot 1)" in name_cell.inner_text():
                 btn = tr.query_selector('button:has-text("Install Branch")')
                 assert btn is not None, "Install Branch button not found for Supervisor"
                 btn.click()
@@ -240,27 +244,39 @@ class TestModuleInstallWorkflow:
 
     def test_branch_install_no_duplicate_errors(self, page):
         """Branch install handles already-occupied bays gracefully."""
-        # Don't delete modules — some should already be installed
+        # Seed state: ensure Supervisor(slot 1) branch is installed before testing
+        # the duplicate-install path. If running in isolation no modules may exist.
         self._goto_modules_tab(page)
-
-        # Click Install Branch on Supervisor(slot 1) again
         pane = page.query_selector("#modules")
+        seed_btn = None
+        for tr in pane.query_selector_all("table tr"):
+            name_cell = tr.query_selector('td[data-col="name"]')
+            if name_cell and "Supervisor(slot 1)" in name_cell.inner_text():
+                seed_btn = tr.query_selector('button:has-text("Install Branch")')
+                break
+
+        if seed_btn:
+            # Not yet installed — do the initial install so bays become occupied
+            seed_btn.click()
+            page.wait_for_load_state("networkidle", timeout=60000)
+            self._goto_modules_tab(page)
+            pane = page.query_selector("#modules")
+
+        # Click Install Branch on Supervisor(slot 1) again (bays now occupied)
         branch_btn = None
         for tr in pane.query_selector_all("table tr"):
-            cells = tr.query_selector_all("td")
-            if cells and "Supervisor(slot 1)" in cells[0].inner_text():
+            name_cell = tr.query_selector('td[data-col="name"]')
+            if name_cell and "Supervisor(slot 1)" in name_cell.inner_text():
                 branch_btn = tr.query_selector('button:has-text("Install Branch")')
                 break
 
-        if branch_btn:
-            branch_btn.click()
-            page.wait_for_load_state("networkidle", timeout=30000)
+        assert branch_btn is not None, "Install Branch button not found for Supervisor(slot 1)"
+        branch_btn.click()
+        page.wait_for_load_state("networkidle", timeout=30000)
 
-            # Check for error messages — should only have skips, no failures
-            body_text = page.query_selector("body").inner_text()
-            assert "Branch install failed" not in body_text, (
-                "Branch install crashed instead of handling errors gracefully"
-            )
+        # Check for error messages — should only have skips, no failures
+        body_text = page.query_selector("body").inner_text()
+        assert "Branch install failed" not in body_text, "Branch install crashed instead of handling errors gracefully"
 
     def test_child_bays_hidden_when_parent_not_installed(self, page):
         """Children show 'No Bay' when parent module is not installed."""
@@ -286,8 +302,8 @@ class TestModuleInstallWorkflow:
         for label in ["FanTray 1", "Power Supply 1", "Power Supply 2"]:
             pane = page.query_selector("#modules")
             for tr in pane.query_selector_all("table tr"):
-                cells = tr.query_selector_all("td")
-                if cells and label in cells[0].inner_text():
+                name_cell = tr.query_selector('td[data-col="name"]')
+                if name_cell and label in name_cell.inner_text():
                     btn = tr.query_selector('button:has-text("Install"):not(:has-text("Branch"))')
                     if btn:
                         btn.click()
@@ -297,8 +313,8 @@ class TestModuleInstallWorkflow:
         # Step 2: Branch install Supervisor + transceivers
         pane = page.query_selector("#modules")
         for tr in pane.query_selector_all("table tr"):
-            cells = tr.query_selector_all("td")
-            if cells and "Supervisor(slot 1)" in cells[0].inner_text():
+            name_cell = tr.query_selector('td[data-col="name"]')
+            if name_cell and "Supervisor(slot 1)" in name_cell.inner_text():
                 btn = tr.query_selector('button:has-text("Install Branch")')
                 if btn:
                     btn.click()
@@ -310,8 +326,8 @@ class TestModuleInstallWorkflow:
         self._goto_modules_tab(page)
         pane = page.query_selector("#modules")
         for tr in pane.query_selector_all("table tr"):
-            cells = tr.query_selector_all("td")
-            if cells and "Linecard(slot 3)" in cells[0].inner_text():
+            name_cell = tr.query_selector('td[data-col="name"]')
+            if name_cell and "Linecard(slot 3)" in name_cell.inner_text():
                 btn = tr.query_selector('button:has-text("Install Branch")')
                 if btn:
                     btn.click()

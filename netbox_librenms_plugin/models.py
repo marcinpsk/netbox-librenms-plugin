@@ -194,7 +194,7 @@ class ModuleBayMapping(NetBoxModel):
             except re.error as e:
                 raise ValidationError({"librenms_name": f"Invalid regex: {e}"})
             try:
-                pattern.sub(self.netbox_bay_name, "")
+                pattern.sub(self.netbox_bay_name, self.librenms_name)
             except (re.error, IndexError) as e:
                 raise ValidationError({"netbox_bay_name": f"Invalid replacement: {e}"})
 

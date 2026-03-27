@@ -758,7 +758,7 @@ class TestAddDeviceToLibreNMSViewGetFormClass:
             result = view.get_object(5, object_type="virtualmachine")
         assert result is mock_vm
 
-    def test_get_object_device_not_found_falls_back_to_vm(self):
+    def test_get_object_raises_http404_when_device_not_found(self):
         from django.http import Http404
 
         from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView

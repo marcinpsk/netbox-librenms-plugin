@@ -2250,7 +2250,6 @@ class TestCacheIndexTTLRefresh:
 class TestCrossModelConflictDetection:
     """#36: stale-cache refresh must detect device imported as VM (or vice versa)."""
 
-    @pytest.mark.xfail(reason="cross-model stale-cache detection not yet implemented", strict=False)
     def test_vm_found_when_device_imported_as_vm(self):
         """
         import_as_vm=False (cached as device) but the object was actually imported as VM.
@@ -2278,12 +2277,12 @@ class TestCrossModelConflictDetection:
             _refresh_existing_device(validation, libre_device, server_key="default")
 
         assert validation["existing_device"] is mock_vm
-        # recalculate_validation_status overrides can_import/is_ready based on issues + fields.
-        # No issues + cluster found → both remain True after recalculation.
-        assert validation["can_import"] is True
-        assert validation["is_ready"] is True
+        # A late-found cross-model match must never be import-ready:
+        # _refresh_existing_device re-asserts can_import=False/is_ready=False after
+        # recalculate_validation_status regardless of issues/fields state.
+        assert validation["can_import"] is False
+        assert validation["is_ready"] is False
 
-    @pytest.mark.xfail(reason="cross-model stale-cache detection not yet implemented", strict=False)
     def test_device_found_when_vm_imported_as_device(self):
         """
         import_as_vm=True but the object was imported as a Device.
@@ -2310,6 +2309,8 @@ class TestCrossModelConflictDetection:
             _refresh_existing_device(validation, libre_device, server_key="default")
 
         assert validation["existing_device"] is mock_device
-        # recalculate_validation_status overrides can_import based on issues + fields.
-        # No issues + all required fields found → can_import becomes True.
-        assert validation["can_import"] is True
+        # A late-found cross-model match must never be import-ready:
+        # _refresh_existing_device re-asserts can_import=False/is_ready=False after
+        # recalculate_validation_status regardless of issues/fields state.
+        assert validation["can_import"] is False
+        assert validation["is_ready"] is False

@@ -67,7 +67,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
 
-class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
+class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
     """Install a module and all its installable descendants from LibreNMS inventory."""
 
     def post(self, request, pk):
@@ -459,7 +459,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
         return BaseModuleTableView._match_bay_by_position(item, index_map, module_bays)
 
 
-class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
+class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
     """
     Install a user-selected set of inventory items by their entPhysicalIndex values.
 
