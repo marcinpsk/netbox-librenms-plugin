@@ -186,6 +186,8 @@ class ModuleBayMapping(NetBoxModel):
         if not librenms_name_stripped:
             raise ValidationError({"librenms_name": "LibreNMS name pattern must not be empty or whitespace-only."})
         self.librenms_name = librenms_name_stripped
+        # Strip class too — whitespace-padded values form spurious distinct rows under unique_together.
+        self.librenms_class = self.librenms_class.strip() if self.librenms_class else ""
         if self.is_regex:
             try:
                 pattern = re.compile(self.librenms_name)

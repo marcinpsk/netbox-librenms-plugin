@@ -18,6 +18,7 @@ class LibreNMSModuleTable(tables.Table):
     )
     name = tables.Column(
         verbose_name="Name",
+        empty_values=(),
         attrs={
             "td": {"data-col": "name"},
             "th": {
@@ -25,13 +26,13 @@ class LibreNMSModuleTable(tables.Table):
             },
         },
     )
-    model = tables.Column(verbose_name="Model", attrs={"td": {"data-col": "model"}})
-    serial = tables.Column(verbose_name="Serial", attrs={"td": {"data-col": "serial"}})
-    description = tables.Column(verbose_name="Description", attrs={"td": {"data-col": "description"}})
-    item_class = tables.Column(verbose_name="Class", attrs={"td": {"data-col": "item_class"}})
-    module_bay = tables.Column(verbose_name="Module Bay", attrs={"td": {"data-col": "module_bay"}})
-    module_type = tables.Column(verbose_name="Module Type", attrs={"td": {"data-col": "module_type"}})
-    status = tables.Column(verbose_name="Status", attrs={"td": {"data-col": "status"}})
+    model = tables.Column(verbose_name="Model", empty_values=(), attrs={"td": {"data-col": "model"}})
+    serial = tables.Column(verbose_name="Serial", empty_values=(), attrs={"td": {"data-col": "serial"}})
+    description = tables.Column(verbose_name="Description", empty_values=(), attrs={"td": {"data-col": "description"}})
+    item_class = tables.Column(verbose_name="Class", empty_values=(), attrs={"td": {"data-col": "item_class"}})
+    module_bay = tables.Column(verbose_name="Module Bay", empty_values=(), attrs={"td": {"data-col": "module_bay"}})
+    module_type = tables.Column(verbose_name="Module Type", empty_values=(), attrs={"td": {"data-col": "module_type"}})
+    status = tables.Column(verbose_name="Status", empty_values=(), attrs={"td": {"data-col": "status"}})
     actions = tables.Column(
         verbose_name="Actions", orderable=False, empty_values=(), attrs={"td": {"data-col": "actions"}}
     )

@@ -549,7 +549,7 @@ class TestAddDeviceToLibreNMSViewGetObject:
             result = view.get_object(5, "virtualmachine")
         assert result is mock_vm
 
-    def test_no_type_defaults_to_device(self):
+    def test_device_type_fetches_device(self):
         from netbox_librenms_plugin.views.sync.devices import AddDeviceToLibreNMSView, Device
 
         view = _make_view(AddDeviceToLibreNMSView)

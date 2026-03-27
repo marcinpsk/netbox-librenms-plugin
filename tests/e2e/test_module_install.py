@@ -74,6 +74,8 @@ def _netbox_shell(code):
     )
     # Filter out config loading lines
     lines = [line for line in result.stdout.strip().split("\n") if not line.startswith(("🧬", "156 objects"))]
+    if result.returncode != 0:
+        raise RuntimeError(f"netbox shell command failed (rc={result.returncode}): {result.stderr}")
     return "\n".join(lines).strip()
 
 

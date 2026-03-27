@@ -169,7 +169,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         """Get context from cache (used by the main sync view on initial page load)."""
         cached_data = cache.get(self.get_cache_key(obj, "inventory", server_key=self.librenms_api.server_key))
         if cached_data is None:
-            return {"table": None, "object": obj, "cache_expiry": None}
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": self.librenms_api.server_key}
         return self._build_context(request, obj, cached_data)
 
     def _build_context(self, request, obj, inventory_data):
@@ -280,6 +280,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         # Build combined bay lookup so synthetic transceiver entries (which may
         # live inside installed modules) can find their module-scoped bays.
+        # NOTE: if two installed modules contain bays with the same name, the
+        # last module's bay silently wins here.  Fixing this properly requires
+        # keying on (module_id, bay_name) and threading module context into
+        # _build_row/_match_module_bay — deferred for safety.
         all_bays = dict(device_bays)
         for scope_bays in module_scoped_bays.values():
             all_bays.update(scope_bays)
@@ -776,10 +780,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         Returns matched module bay or None.
         """
-        # Filter preloaded list by class (exact class match or empty-class fallback)
+        # Filter preloaded list by class (exact class match, then empty-class fallback)
         if phys_class:
             exact = [m for m in regex_mappings if m.librenms_class == phys_class]
-            candidates = exact if exact else [m for m in regex_mappings if m.librenms_class == ""]
+            fallback = [m for m in regex_mappings if m.librenms_class == ""]
+            candidates = exact + fallback
         else:
             candidates = [m for m in regex_mappings if m.librenms_class == ""]
 
@@ -862,8 +867,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             supports_module_path,
         )
 
-        model_name = item.get("entPhysicalModelName", "") or ""
-        serial = item.get("entPhysicalSerialNum", "") or ""
+        model_name = (item.get("entPhysicalModelName", "") or "").strip()
+        serial = (item.get("entPhysicalSerialNum", "") or "").strip()
         phys_class = item.get("entPhysicalClass", "")
         name = item.get("entPhysicalName", "") or "-"
         description = item.get("entPhysicalDescr", "") or ""

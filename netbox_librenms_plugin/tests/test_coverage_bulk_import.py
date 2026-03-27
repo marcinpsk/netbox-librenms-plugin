@@ -360,7 +360,7 @@ class TestBulkImportDevicesShared:
 
         assert result["virtual_chassis_created"] == 1
         # Confirm job logger was called for the VC creation
-        assert any("VC" in str(c) for c in job.logger.info.call_args_list)
+        assert any("VC" in c.args[0] for c in job.logger.info.call_args_list if c.args)
 
     def test_vc_creation_deduplicates_by_member_serials(self):
         """Two devices with identical member serials → VC created only once (lines 217-226)."""
@@ -2232,7 +2232,7 @@ class TestCacheIndexTTLRefresh:
         index_set_calls = [c for c in mock_cache.set.call_args_list if "cache_index" in (c.args[0] if c.args else "")]
         assert len(index_set_calls) >= 1, "cache.set for cache_index was never called"
         # The stored index must still contain the key (not duplicated)
-        stored_index = index_set_calls[0][0][1]
+        stored_index = index_set_calls[0].args[1]
         assert stored_index.count(existing_key) == 1
 
     def test_cache_index_refreshed_for_new_key(self):

@@ -799,10 +799,20 @@ def get_module_types_indexed() -> dict:
     from netbox_librenms_plugin.models import ModuleTypeMapping
 
     result: dict = {}
+    ambiguous: set = set()
     for mt in ModuleType.objects.all().select_related("manufacturer"):
-        result[mt.model] = mt
-        if mt.part_number and mt.part_number != mt.model:
-            result[mt.part_number] = mt
+        seen_this_entry: set = set()
+        for key in (mt.model, mt.part_number):
+            if not key or key in seen_this_entry:
+                continue
+            seen_this_entry.add(key)
+            if key in ambiguous:
+                continue
+            if key in result:
+                ambiguous.add(key)
+                del result[key]
+            else:
+                result[key] = mt
     for mapping in ModuleTypeMapping.objects.select_related("netbox_module_type__manufacturer"):
         result[mapping.librenms_model] = mapping.netbox_module_type
     return result
