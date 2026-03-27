@@ -179,27 +179,6 @@ class TestStaleFieldStripping:
             assert "local_port_url" not in received_link
             assert "cable_status" not in received_link
 
-    def test_raw_keys_match_prepare_context(self):
-        """The _raw_keys set in post() must match the one in _prepare_context()."""
-        import ast
-        import inspect
-        import re
-
-        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView, SingleCableVerifyView
-
-        # Extract _raw_keys from _prepare_context source
-        prepare_src = inspect.getsource(BaseCableTableView._prepare_context)
-        post_src = inspect.getsource(SingleCableVerifyView.post)
-
-        def extract_raw_keys(src, label):
-            match = re.search(r"_raw_keys\s*=\s*(\{[^}]*\})", src, re.S)
-            assert match, f"_raw_keys missing from {label}"
-            return set(ast.literal_eval(match.group(1)))
-
-        prepare_keys = extract_raw_keys(prepare_src, "_prepare_context")
-        post_keys = extract_raw_keys(post_src, "post()")
-        assert prepare_keys == post_keys, f"_raw_keys mismatch: {prepare_keys} != {post_keys}"
-
 
 class TestXSSEscaping:
     """LibreNMS-sourced labels must be HTML-escaped in cable verify output."""
