@@ -14,6 +14,11 @@
 #   40gbase-x-qsfpp, 100gbase-x-qsfp28, 400gbase-x-qsfpdd,
 #   ieee802.11ax, lag, virtual, other
 
+# WARNING: Speed-only matching cannot distinguish copper from fiber optics.
+# For example, 1G ethernetCsmacd could be 1000base-t (copper), 1000base-x-sfp (fiber),
+# or other media types. Review and adjust these mappings for your environment before
+# importing — incorrect mappings will mislabel ports.
+
 - librenms_type: ethernetCsmacd
   librenms_speed: 1000000
   netbox_type: 1000base-t

@@ -1682,3 +1682,18 @@ document.addEventListener('DOMContentLoaded', function () {
 document.body.addEventListener('htmx:afterSwap', function (event) {
     initializeScripts();
 });
+
+// Update HTMX modal accessible label after content loads so screen readers
+// announce the actual dialog title rather than the static "Loading" placeholder.
+document.addEventListener('DOMContentLoaded', function () {
+    const htmxModal = document.getElementById('htmx-modal');
+    if (htmxModal) {
+        htmxModal.addEventListener('htmx:afterSettle', function () {
+            const header = htmxModal.querySelector('.modal-title, .modal-header h5, .modal-header h4');
+            const label = document.getElementById('htmx-modal-label');
+            if (header && label) {
+                label.textContent = header.textContent.trim();
+            }
+        });
+    }
+});

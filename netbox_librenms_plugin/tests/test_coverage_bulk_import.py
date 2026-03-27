@@ -850,7 +850,7 @@ class TestRefreshExistingDevice:
             _refresh_existing_device(validation)
 
         assert validation["existing_device"] is refreshed
-        assert validation["device_role"] == {"found": False, "role": None}
+        assert validation["device_role"] == {"found": False, "role": None, "available_roles": []}
 
     # ------------------------------------------------------------------
     # Lines 346-365: Existing device was deleted (Device.objects returns None)
@@ -877,7 +877,7 @@ class TestRefreshExistingDevice:
 
         assert validation["existing_device"] is None
         assert validation["existing_match_type"] is None
-        assert validation["device_role"] == {"found": False, "role": None}
+        assert validation["device_role"] == {"found": False, "role": None, "available_roles": []}
         assert validation["can_import"] is True  # no issues
         assert validation["is_ready"] is False  # device_role.found is now missing
 
@@ -2150,12 +2150,12 @@ class TestDeviceRoleResetGuard:
                 _refresh_existing_device(validation, server_key="default")
 
     def test_device_role_reset_for_plain_device(self):
-        """When import_as_vm=False and device deleted, device_role is reset to not-found."""
+        """When import_as_vm=False and device deleted, device_role is reset to not-found but available_roles preserved."""
         mock_role = MagicMock()
         validation = _make_validation(import_as_vm=False)
         validation["device_role"] = {"found": True, "role": mock_role}
         self._call_refresh(validation)
-        assert validation["device_role"] == {"found": False, "role": None}
+        assert validation["device_role"] == {"found": False, "role": None, "available_roles": []}
 
     def test_device_role_preserved_for_vm(self):
         """When import_as_vm=True and device deleted, device_role must NOT be cleared."""

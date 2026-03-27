@@ -98,11 +98,13 @@ def bulk_import_devices_shared(
 
     # Check permissions at start of bulk operation — device and VM add perms are
     # required because any device may be flagged as import_as_vm during validation.
-    # change_device is needed for VC master/member updates; VMs are only created, not changed.
+    # change_device is needed for VC master/member updates; change_virtualmachine is
+    # needed when refreshing an existing VM (e.g. setting librenms_id on a re-import).
     required_perms = [
         "dcim.add_device",
         "dcim.change_device",
         "virtualization.add_virtualmachine",
+        "virtualization.change_virtualmachine",
     ]
     require_permissions(user, required_perms, "import devices")
 
@@ -377,7 +379,11 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 if hasattr(refreshed, "role") and refreshed.role:
                     apply_role_to_validation(validation, refreshed.role, is_vm=bool(validation.get("import_as_vm")))
                 elif not validation.get("import_as_vm"):
-                    validation["device_role"] = {"found": False, "role": None}
+                    validation["device_role"] = {
+                        "found": False,
+                        "role": None,
+                        "available_roles": validation.get("device_role", {}).get("available_roles", []),
+                    }
                     remove_validation_issue(validation, "role")
                 recalculate_validation_status(validation, is_vm=bool(validation.get("import_as_vm")))
                 # Re-assert non-importable state: recalculate bases can_import on
@@ -394,7 +400,11 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 # Guard: VMs don't use device_role for readiness, so preserve any
                 # user-selected role rather than silently dropping it.
                 if not validation.get("import_as_vm"):
-                    validation["device_role"] = {"found": False, "role": None}
+                    validation["device_role"] = {
+                        "found": False,
+                        "role": None,
+                        "available_roles": validation.get("device_role", {}).get("available_roles", []),
+                    }
                 recalculate_validation_status(validation, is_vm=bool(validation.get("import_as_vm")))
         except Exception as e:
             existing_id = getattr(existing, "pk", "unknown") if existing else "none"

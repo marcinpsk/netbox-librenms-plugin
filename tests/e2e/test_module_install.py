@@ -14,12 +14,11 @@ Run:
     cd /home/mzieba/workspace/netbox-librenms-plugin
     HTTP_PROXY= HTTPS_PROXY= http_proxy= https_proxy= \
     no_proxy=localhost,127.0.0.1,172.22.0.4 \
-    python -m pytest tests/e2e/test_module_install.py -v -s
+    E2E_TESTS_ENABLED=1 python -m pytest tests/e2e/test_module_install.py -v -s
 """
 
 import os
 import subprocess
-import time
 
 import pytest
 
@@ -27,6 +26,14 @@ NETBOX_URL = os.environ.get("NETBOX_URL", "http://172.22.0.4:8000")
 NETBOX_USER = os.environ.get("NETBOX_USER", "admin")
 NETBOX_PASS = os.environ.get("NETBOX_PASS", "admin")
 CONTAINER_NAME = None
+
+E2E_ENABLED = os.environ.get("E2E_TESTS_ENABLED", "0") == "1"
+
+if not E2E_ENABLED:
+    pytest.skip(
+        "E2E tests skipped — set E2E_TESTS_ENABLED=1 to run against a live instance",
+        allow_module_level=True,
+    )
 
 
 def _get_container():
@@ -131,13 +138,15 @@ class TestModuleInstallWorkflow:
         """Navigate to the modules sync tab and refresh data."""
         page.goto(f"{NETBOX_URL}/dcim/devices/{self.DEVICE_ID}/librenms-sync/?tab=modules")
         page.wait_for_load_state("networkidle")
-        time.sleep(2)
+        page.wait_for_selector('button:has-text("Refresh Modules")', timeout=10000)
 
         # Click Refresh Modules
         btn = page.query_selector('button:has-text("Refresh Modules")')
         assert btn is not None, "Refresh Modules button not found"
         btn.click()
-        time.sleep(8)
+        # Wait for the HTMX-refreshed table to render (spinner gone, rows present)
+        page.wait_for_selector("#modules table tr", timeout=30000)
+        page.wait_for_load_state("networkidle")
 
     def _get_table_rows(self, page):
         """Parse the module sync table into dicts."""
@@ -186,7 +195,7 @@ class TestModuleInstallWorkflow:
                 btn = tr.query_selector('button:has-text("Install"):not(:has-text("Branch"))')
                 if btn:
                     btn.click()
-                    time.sleep(5)
+                    page.wait_for_load_state("networkidle")
                     break
 
         # Verify via DB
@@ -213,9 +222,7 @@ class TestModuleInstallWorkflow:
                 break
 
         # Wait for branch install to complete (creates many modules + signals)
-        time.sleep(20)
-        page.wait_for_load_state("networkidle")
-        time.sleep(5)
+        page.wait_for_load_state("networkidle", timeout=60000)
 
         # Verify interfaces have correct names (not bare position numbers)
         interfaces = _get_interfaces(self.DEVICE_ID)
@@ -245,9 +252,7 @@ class TestModuleInstallWorkflow:
 
         if branch_btn:
             branch_btn.click()
-            time.sleep(10)
-            page.wait_for_load_state("networkidle")
-            time.sleep(2)
+            page.wait_for_load_state("networkidle", timeout=30000)
 
             # Check for error messages — should only have skips, no failures
             body_text = page.query_selector("body").inner_text()
@@ -284,7 +289,7 @@ class TestModuleInstallWorkflow:
                     btn = tr.query_selector('button:has-text("Install"):not(:has-text("Branch"))')
                     if btn:
                         btn.click()
-                        time.sleep(4)
+                        page.wait_for_load_state("networkidle")
                         break
 
         # Step 2: Branch install Supervisor + transceivers
@@ -295,11 +300,9 @@ class TestModuleInstallWorkflow:
                 btn = tr.query_selector('button:has-text("Install Branch")')
                 if btn:
                     btn.click()
-                    time.sleep(10)
                     break
 
-        page.wait_for_load_state("networkidle")
-        time.sleep(2)
+        page.wait_for_load_state("networkidle", timeout=60000)
 
         # Step 3: Branch install Linecard
         self._goto_modules_tab(page)
@@ -310,11 +313,9 @@ class TestModuleInstallWorkflow:
                 btn = tr.query_selector('button:has-text("Install Branch")')
                 if btn:
                     btn.click()
-                    time.sleep(10)
                     break
 
-        page.wait_for_load_state("networkidle")
-        time.sleep(2)
+        page.wait_for_load_state("networkidle", timeout=60000)
 
         # Verify: all installable modules should be installed
         self._goto_modules_tab(page)
