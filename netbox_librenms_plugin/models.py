@@ -1,3 +1,5 @@
+import functools
+import logging
 import re
 
 from dcim.choices import InterfaceTypeChoices
@@ -6,6 +8,8 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from django.urls import reverse
 from netbox.models import NetBoxModel
+
+logger = logging.getLogger(__name__)
 
 
 class LibreNMSSettings(models.Model):
@@ -178,6 +182,16 @@ class ModuleBayMapping(NetBoxModel):
         blank=True,
         help_text="Optional description or notes about this mapping",
     )
+
+    @functools.cached_property
+    def _compiled_pattern(self):
+        """Compiled regex for is_regex=True mappings; None for exact mappings or invalid patterns."""
+        if not self.is_regex or not self.librenms_name:
+            return None
+        try:
+            return re.compile(self.librenms_name)
+        except re.error:
+            return None
 
     def clean(self):
         """Validate that regex patterns compile when is_regex is True."""
@@ -403,6 +417,16 @@ class InventoryIgnoreRule(NetBoxModel):
         # clean() always operate on the same string.
         self.pattern = pattern_stripped
 
+    @functools.cached_property
+    def _compiled_pattern(self):
+        """Compiled regex for MATCH_REGEX rules; None for other match types or invalid patterns."""
+        if self.match_type != self.MATCH_REGEX or not self.pattern:
+            return None
+        try:
+            return re.compile(self.pattern)
+        except re.error:
+            return None
+
     def matches_name(self, name: str) -> bool:
         """Return True if *name* matches this rule's pattern/match_type (name-based rules only)."""
         if not name or self.match_type == self.MATCH_SERIAL_DEVICE:
@@ -410,7 +434,25 @@ class InventoryIgnoreRule(NetBoxModel):
         if not self.pattern or not self.pattern.strip():
             return False
         if self.match_type == self.MATCH_REGEX:
-            return bool(re.search(self.pattern, name))
+            compiled = self._compiled_pattern
+            if compiled is None:
+                logger.error(
+                    "Invalid regex in InventoryIgnoreRule pk=%s pattern=%r — skipping",
+                    self.pk,
+                    self.pattern,
+                )
+                return False
+            try:
+                return bool(compiled.search(name))
+            except re.error as exc:
+                logger.error(
+                    "Regex error in InventoryIgnoreRule pk=%s pattern=%r name=%r: %s — skipping",
+                    self.pk,
+                    self.pattern,
+                    name,
+                    exc,
+                )
+                return False
         name_up = name.upper()
         pat = self.pattern.upper()
         if self.match_type == self.MATCH_ENDS_WITH:

@@ -1,3 +1,4 @@
+import re
 from collections import ChainMap
 
 from django.contrib import messages
@@ -699,8 +700,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         Checks ModuleBayMapping table first (exact then regex), then falls back
         to exact parent name match, then positional matching.
         """
-        import re
-
         parent_name = self._find_parent_container_name(item, index_map)
         item_name = item.get("entPhysicalName", "")
         item_descr = item.get("entPhysicalDescr", "")
@@ -741,7 +740,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         # Regex pattern matching on all candidate names
         for name in candidate_names:
-            bay = self._lookup_regex_bay_mapping(re, name, phys_class, module_bays, regex_mappings)
+            bay = self._lookup_regex_bay_mapping(name, phys_class, module_bays, regex_mappings)
             if bay and self._fpc_slot_matches(name, bay):
                 return bay
 
@@ -784,7 +783,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         return parent_bay.position == expected_fpc
 
     @staticmethod
-    def _lookup_regex_bay_mapping(re, name, phys_class, module_bays, regex_mappings):
+    def _lookup_regex_bay_mapping(name, phys_class, module_bays, regex_mappings):
         """
         Try regex ModuleBayMapping patterns against a name.
 
@@ -802,8 +801,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             candidates = [m for m in regex_mappings if m.librenms_class == ""]
 
         for mapping in candidates:
+            compiled = mapping._compiled_pattern
+            if compiled is None:
+                continue
             try:
-                match = re.fullmatch(mapping.librenms_name, name)
+                match = compiled.fullmatch(name)
                 if match:
                     try:
                         resolved_bay = match.expand(mapping.netbox_bay_name)

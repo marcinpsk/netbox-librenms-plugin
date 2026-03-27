@@ -850,7 +850,7 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None) -> str:
             for rule in rules:
                 try:
                     value = re.sub(rule.match_pattern, rule.replacement, value)
-                except re.error:
+                except (re.error, IndexError):
                     logger.error(
                         "Invalid regex in NormalizationRule pk=%s pattern=%r — skipping", rule.pk, rule.match_pattern
                     )
@@ -859,7 +859,7 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None) -> str:
         for rule in rules:
             try:
                 value = re.sub(rule.match_pattern, rule.replacement, value)
-            except re.error:
+            except (re.error, IndexError):
                 logger.error(
                     "Invalid regex in NormalizationRule pk=%s pattern=%r — skipping", rule.pk, rule.match_pattern
                 )
