@@ -13,6 +13,12 @@ from .models import (
 class InterfaceTypeMappingFilterSet(django_filters.FilterSet):
     """Filter set for InterfaceTypeMapping model."""
 
+    # Explicit declarations ensure filter names match form field names.
+    # Dict-style fields = {"field": ["icontains"]} generates librenms_type__icontains,
+    # but the filter form submits librenms_type — causing silent filter failures.
+    librenms_type = django_filters.CharFilter(lookup_expr="icontains")
+    description = django_filters.CharFilter(lookup_expr="icontains")
+
     class Meta:
         """Meta options for InterfaceTypeMappingFilterSet."""
 
@@ -22,6 +28,9 @@ class InterfaceTypeMappingFilterSet(django_filters.FilterSet):
 
 class DeviceTypeMappingFilterSet(django_filters.FilterSet):
     """Filter set for DeviceTypeMapping model."""
+
+    librenms_hardware = django_filters.CharFilter(lookup_expr="icontains")
+    description = django_filters.CharFilter(lookup_expr="icontains")
 
     class Meta:
         """Meta options for DeviceTypeMappingFilterSet."""
@@ -33,6 +42,9 @@ class DeviceTypeMappingFilterSet(django_filters.FilterSet):
 class ModuleTypeMappingFilterSet(django_filters.FilterSet):
     """Filter set for ModuleTypeMapping model."""
 
+    librenms_model = django_filters.CharFilter(lookup_expr="icontains")
+    description = django_filters.CharFilter(lookup_expr="icontains")
+
     class Meta:
         """Meta options for ModuleTypeMappingFilterSet."""
 
@@ -42,6 +54,10 @@ class ModuleTypeMappingFilterSet(django_filters.FilterSet):
 
 class ModuleBayMappingFilterSet(django_filters.FilterSet):
     """Filter set for ModuleBayMapping model."""
+
+    librenms_name = django_filters.CharFilter(lookup_expr="icontains")
+    librenms_class = django_filters.CharFilter(lookup_expr="icontains")
+    netbox_bay_name = django_filters.CharFilter(lookup_expr="icontains")
 
     class Meta:
         """Meta options for ModuleBayMappingFilterSet."""
@@ -67,4 +83,4 @@ class InventoryIgnoreRuleFilterSet(django_filters.FilterSet):
         """Meta options for InventoryIgnoreRuleFilterSet."""
 
         model = InventoryIgnoreRule
-        fields = ["match_type", "enabled"]
+        fields = ["match_type", "action", "enabled"]

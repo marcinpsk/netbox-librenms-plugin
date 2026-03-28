@@ -596,7 +596,9 @@ def set_librenms_device_id(obj, device_id, server_key: str = "default"):
             obj,
         )
         return
-    cf_value = obj.custom_field_data.get("librenms_id") or {}
+    cf_value = obj.custom_field_data.get("librenms_id")
+    if cf_value is None:
+        cf_value = {}
     if isinstance(cf_value, int) and not isinstance(cf_value, bool):
         logger.warning(
             "librenms_id on %r has legacy bare integer %r; skipping write to prevent "
@@ -712,49 +714,12 @@ def migrate_legacy_librenms_id(obj, server_key: str = "default") -> bool:
     return True
 
 
-# Minimum NetBox version that supports {module_path} token in module templates
-
-
-def supports_module_path():
-    """
-    Check if the running NetBox supports the {module_path} template token.
-
-    Detects by checking for MODULE_PATH_TOKEN in dcim.constants rather than
-    comparing version strings — works with patched/pre-release builds too.
-    """
-    try:
-        from dcim.constants import MODULE_PATH_TOKEN  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
-
-
-def module_type_uses_module_path(module_type):
-    """Check if a ModuleType has any interface templates using {module_path}."""
-    return any("{module_path}" in t.name for t in module_type.interfacetemplates.all())
-
-
-def module_type_uses_module_token(module_type) -> bool:
-    """Check if a ModuleType has interface templates using the {module} token."""
-    try:
-        from dcim.constants import MODULE_TOKEN
-    except ImportError:
-        return False
-    return any(MODULE_TOKEN in t.name for t in module_type.interfacetemplates.all())
-
-
-def module_type_is_end_module(module_type) -> bool:
-    """Return True if this module type defines no module bay templates (i.e., it is a leaf/end module)."""
-    return not module_type.modulebaytemplates.exists()
-
-
 def has_nested_name_conflict(module_type, module_bay):
     """
     Check if installing this module type in a nested bay would cause a name conflict.
 
     Returns True when ALL of the following are true:
-    - The module type has interface templates using only ``{module}`` (not ``{module_path}``)
+    - The module type has interface templates using ``{module}``
     - The bay is nested (its parent is owned by an installed module)
     - There is at least one sibling bay under the same parent
 
@@ -771,8 +736,7 @@ def has_nested_name_conflict(module_type, module_bay):
     if not templates:
         return False  # No interface templates
 
-    uses_module_token = any(MODULE_TOKEN in t.name and "{module_path}" not in t.name for t in templates)
-    if not uses_module_token:
+    if not any(MODULE_TOKEN in t.name for t in templates):
         return False  # Template doesn't use {module}
 
     # Count how many unique interface names this template would produce across siblings
