@@ -1,5 +1,6 @@
 # forms.py
 import logging
+import re
 
 from dcim.choices import InterfaceTypeChoices
 from dcim.models import Device, DeviceRole, DeviceType, Location, Manufacturer, ModuleType, Rack, Site
@@ -185,8 +186,6 @@ class ImportSettingsForm(NetBoxModelForm):
             return pattern
 
         # Check for valid placeholder names using regex
-        import re
-
         valid_placeholders = {"position", "serial"}
         found_placeholders = set(re.findall(r"\{(\w+)\}", pattern))
         invalid_placeholders = found_placeholders - valid_placeholders

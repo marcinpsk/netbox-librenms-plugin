@@ -122,13 +122,17 @@ function getDeviceIdFromUrl() {
     const pluginVMIndex = pathParts.indexOf('virtualmachine');
 
     if (deviceIndex !== -1 && deviceIndex + 1 < pathParts.length) {
-        return { id: pathParts[deviceIndex + 1], type: 'device' };
+        const id = pathParts[deviceIndex + 1];
+        if (/^\d+$/.test(id)) return { id, type: 'device' };
     } else if (vmIndex !== -1 && vmIndex + 1 < pathParts.length) {
-        return { id: pathParts[vmIndex + 1], type: 'virtualmachine' };
+        const id = pathParts[vmIndex + 1];
+        if (/^\d+$/.test(id)) return { id, type: 'virtualmachine' };
     } else if (pluginDeviceIndex !== -1 && pluginDeviceIndex + 1 < pathParts.length) {
-        return { id: pathParts[pluginDeviceIndex + 1], type: 'device' };
+        const id = pathParts[pluginDeviceIndex + 1];
+        if (/^\d+$/.test(id)) return { id, type: 'device' };
     } else if (pluginVMIndex !== -1 && pluginVMIndex + 1 < pathParts.length) {
-        return { id: pathParts[pluginVMIndex + 1], type: 'virtualmachine' };
+        const id = pathParts[pluginVMIndex + 1];
+        if (/^\d+$/.test(id)) return { id, type: 'virtualmachine' };
     }
 
     return null;
@@ -1275,6 +1279,7 @@ function setInterfaceNameFieldFromURL() {
     const urlParams = new URLSearchParams(window.location.search);
     const interfaceNameField = urlParams.get('interface_name_field');
     if (interfaceNameField) {
+        if (!['ifDescr', 'ifName'].includes(interfaceNameField)) return;
         const radio = document.querySelector(`input[name="interface_name_field"][value="${interfaceNameField}"]`);
         if (radio) {
             radio.checked = true;
@@ -1320,11 +1325,6 @@ function initializeNetBoxOnlyInterfaces() {
             if (selectedCheckboxes.length === 0) {
                 return;
             }
-
-            const interfaceNames = Array.from(selectedCheckboxes).map(cb => {
-                const row = cb.closest('tr');
-                return row.querySelector('td:nth-child(2) a').textContent;
-            });
 
             deleteSelectedInterfaces(selectedCheckboxes);
         });

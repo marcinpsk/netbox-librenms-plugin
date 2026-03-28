@@ -151,14 +151,14 @@ def sync_job_status(request, job_pk):
             if not job.completed:
                 job.completed = timezone.now()
             job.save(update_fields=["status", "completed"])
-            logger.info(f"Synced Job #{job.pk}: DB status updated to failed (RQ: {rq_status})")
+            logger.info("Synced Job #%s: DB status updated to failed (RQ: %s)", job.pk, rq_status)
             return JsonResponse({"status": "updated", "db_status": job.status, "rq_status": rq_status})
         else:
             # Job still active in RQ
             return JsonResponse({"status": "no_change", "db_status": job.status, "rq_status": rq_status})
     except NoSuchJobError:
         # Job not in RQ queue — mark any non-terminal DB job as failed
-        logger.warning(f"Job #{job.pk} not found in RQ (NoSuchJobError)")
+        logger.warning("Job #%s not found in RQ (NoSuchJobError)", job.pk)
         terminal_states = {
             JobStatusChoices.STATUS_COMPLETED,
             JobStatusChoices.STATUS_FAILED,
@@ -172,5 +172,5 @@ def sync_job_status(request, job_pk):
             return JsonResponse({"status": "updated", "db_status": job.status, "rq_status": "not_found"})
         return JsonResponse({"status": "no_change", "db_status": job.status, "rq_status": "not_found"})
     except Exception as e:
-        logger.exception(f"Unexpected error fetching RQ job for Job #{job.pk}: {e}")
+        logger.exception("Unexpected error fetching RQ job for Job #%s: %s", job.pk, e)
         return JsonResponse({"error": "Failed to fetch RQ job status"}, status=500)

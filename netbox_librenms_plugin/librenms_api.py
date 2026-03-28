@@ -343,12 +343,11 @@ class LibreNMSAPI:
                 timeout=DEFAULT_API_TIMEOUT,
                 verify=self.verify_ssl,
             )
-            if response.status_code == 200:
-                device_data = response.json()["devices"][0]
-                if not isinstance(device_data, dict):
-                    return False, None
-                return True, device_data
-            return False, None
+            response.raise_for_status()
+            device_data = response.json()["devices"][0]
+            if not isinstance(device_data, dict):
+                return False, None
+            return True, device_data
         except (requests.exceptions.RequestException, ValueError, IndexError, KeyError, TypeError):
             return False, None
 
