@@ -114,7 +114,7 @@ class DeviceTypeMapping(FullCleanOnSaveMixin, NetBoxModel):
     netbox_device_type = models.ForeignKey(
         DeviceType,
         on_delete=models.CASCADE,
-        related_name="librenms_mappings",
+        related_name="librenms_device_type_mappings",
         help_text="The NetBox DeviceType this hardware string maps to",
     )
     description = models.TextField(
@@ -153,7 +153,7 @@ class ModuleTypeMapping(FullCleanOnSaveMixin, NetBoxModel):
     netbox_module_type = models.ForeignKey(
         ModuleType,
         on_delete=models.CASCADE,
-        related_name="librenms_mappings",
+        related_name="librenms_module_type_mappings",
         help_text="The NetBox ModuleType this model name maps to",
     )
     description = models.TextField(

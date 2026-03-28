@@ -64,7 +64,7 @@ def _get_librenms_server_choices():
 def _get_librenms_poller_group_choices():
     """
     Helper function to get poller group choices from LibreNMS API.
-    Shared between AddToLIbreSNMPV1V2 and AddToLIbreSNMPV3 forms.
+    Shared between AddToLibreSNMPV1V2 and AddToLibreSNMPV3 forms (via BaseSNMPForm).
     Results are cached to avoid repeated API calls on every form instantiation.
     """
     from django.core.cache import cache
@@ -543,11 +543,9 @@ class InventoryIgnoreRuleFilterForm(NetBoxModelFilterSetForm):
     model = InventoryIgnoreRule
 
 
-class AddToLIbreSNMPV1V2(forms.Form):
+class BaseSNMPForm(forms.Form):
     """
-    Form for adding devices to LibreNMS using SNMPv1 or SNMPv2c authentication.
-    Collects hostname/IP and SNMP community string information.
-    The SNMP version (v1 or v2c) is selected via a toggle button in the template.
+    Base form with fields shared by both SNMPv1/v2c and SNMPv3 LibreNMS device forms.
     """
 
     hostname = forms.CharField(
@@ -555,7 +553,6 @@ class AddToLIbreSNMPV1V2(forms.Form):
         max_length=255,
         required=True,
     )
-    community = forms.CharField(label="SNMP Community", max_length=255, required=True)
     port = forms.IntegerField(
         label="SNMP Port",
         required=False,
@@ -602,17 +599,26 @@ class AddToLIbreSNMPV1V2(forms.Form):
         self.fields["poller_group"].choices = _get_librenms_poller_group_choices()
 
 
-class AddToLIbreSNMPV3(forms.Form):
+class AddToLibreSNMPV1V2(BaseSNMPForm):
+    """
+    Form for adding devices to LibreNMS using SNMPv1 or SNMPv2c authentication.
+    Collects hostname/IP and SNMP community string information.
+    The SNMP version (v1 or v2c) is selected via a toggle button in the template.
+    """
+
+    community = forms.CharField(label="SNMP Community", max_length=255, required=True)
+
+
+# Backwards-compatible alias — remove once all references are updated.
+AddToLIbreSNMPV1V2 = AddToLibreSNMPV1V2
+
+
+class AddToLibreSNMPV3(BaseSNMPForm):
     """
     Form for adding devices to LibreNMS using SNMPv3 authentication.
     Provides comprehensive SNMPv3 configuration options including authentication and encryption settings.
     """
 
-    hostname = forms.CharField(
-        label="Hostname/IP",
-        max_length=255,
-        required=True,
-    )
     snmp_version = forms.CharField(widget=forms.HiddenInput(), initial="v3")
     authlevel = forms.ChoiceField(
         label="Auth Level",
@@ -653,50 +659,10 @@ class AddToLIbreSNMPV3(forms.Form):
         choices=[("AES", "AES"), ("DES", "DES")],
         required=True,
     )
-    port = forms.IntegerField(
-        label="SNMP Port",
-        required=False,
-        help_text="Leave blank to use default SNMP port (161)",
-        widget=forms.NumberInput(attrs={"placeholder": "161"}),
-    )
-    transport = forms.ChoiceField(
-        label="Transport",
-        choices=[
-            ("udp", "UDP"),
-            ("tcp", "TCP"),
-            ("udp6", "UDP6"),
-            ("tcp6", "TCP6"),
-        ],
-        required=False,
-        initial="udp",
-    )
-    port_association_mode = forms.ChoiceField(
-        label="Port Association Mode",
-        choices=[
-            ("ifIndex", "ifIndex"),
-            ("ifName", "ifName"),
-            ("ifDescr", "ifDescr"),
-            ("ifAlias", "ifAlias"),
-        ],
-        required=False,
-        initial="ifIndex",
-        help_text="Method to identify ports",
-    )
-    poller_group = forms.ChoiceField(
-        label="Poller Group",
-        required=False,
-        help_text="Poller group for distributed poller setup",
-    )
-    force_add = forms.BooleanField(
-        label="Force Add",
-        required=False,
-        initial=False,
-        help_text="Skip duplicate device and SNMP reachability checks (hostname must still be unique)",
-    )
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.fields["poller_group"].choices = _get_librenms_poller_group_choices()
+
+# Backwards-compatible alias — remove once all references are updated.
+AddToLIbreSNMPV3 = AddToLibreSNMPV3
 
 
 class DeviceStatusFilterForm(NetBoxModelFilterSetForm):

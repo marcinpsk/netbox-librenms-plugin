@@ -13,7 +13,7 @@ from utilities.paginator import get_paginate_count as netbox_get_paginate_count
 logger = logging.getLogger(__name__)
 
 
-def convert_speed_to_kbps(speed_bps: int) -> int:
+def convert_speed_to_kbps(speed_bps: int) -> int | None:
     """
     Convert speed from bits per second to kilobits per second.
 
@@ -807,26 +807,24 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None) -> str:
     if not value:
         return value
 
-    if manufacturer:
-        # Manufacturer-specific rules first, then unscoped rules
-        for mfg_filter in [{"manufacturer": manufacturer}, {"manufacturer__isnull": True}]:
-            rules = NormalizationRule.objects.filter(scope=scope, **mfg_filter).order_by("priority", "pk")
-            for rule in rules:
-                try:
-                    value = re.sub(rule.match_pattern, rule.replacement, value)
-                except (re.error, IndexError):
-                    logger.error(
-                        "Invalid regex in NormalizationRule pk=%s pattern=%r — skipping", rule.pk, rule.match_pattern
-                    )
-    else:
-        rules = NormalizationRule.objects.filter(scope=scope).order_by("priority", "pk")
-        for rule in rules:
+    def _apply_rules(val, rules_qs):
+        for rule in rules_qs:
             try:
-                value = re.sub(rule.match_pattern, rule.replacement, value)
+                val = re.sub(rule.match_pattern, rule.replacement, val)
             except (re.error, IndexError):
                 logger.error(
                     "Invalid regex in NormalizationRule pk=%s pattern=%r — skipping", rule.pk, rule.match_pattern
                 )
+        return val
+
+    if manufacturer:
+        # Manufacturer-specific rules first, then unscoped rules
+        for mfg_filter in [{"manufacturer": manufacturer}, {"manufacturer__isnull": True}]:
+            rules = NormalizationRule.objects.filter(scope=scope, **mfg_filter).order_by("priority", "pk")
+            value = _apply_rules(value, rules)
+    else:
+        rules = NormalizationRule.objects.filter(scope=scope).order_by("priority", "pk")
+        value = _apply_rules(value, rules)
     return value
 
 

@@ -205,9 +205,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             if p is not None:
                 children_by_parent.setdefault(p, []).append(item)
 
-        # Store manufacturer for normalization rules in _build_row
-        self._device_manufacturer = getattr(getattr(obj, "device_type", None), "manufacturer", None)
-
         # Preload all ModuleBayMapping rows once to avoid N+1 queries in _match_module_bay.
         from netbox_librenms_plugin.utils import get_enabled_ignore_rules, load_bay_mappings
 
@@ -219,12 +216,32 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Device serial for serial_matches_device rules (strip whitespace defensively).
         device_serial = (getattr(obj, "serial", None) or "").strip()
 
+        # Manufacturer for module-type normalization rules — passed explicitly to
+        # _build_table_rows/_build_row instead of stored as an instance attribute.
+        manufacturer = getattr(getattr(obj, "device_type", None), "manufacturer", None)
+
+        # Pre-compute ignore rule results once to avoid calling _check_ignore_rules
+        # twice per item (once in _find_transparent_indices, once in _collect_top_items).
+        ignore_cache = {
+            item["entPhysicalIndex"]: _check_ignore_rules(
+                item,
+                index_map.get(item.get("entPhysicalContainedIn")),
+                ignore_rules,
+                index_map,
+                device_serial,
+            )
+            for item in inventory_data
+            if item.get("entPhysicalIndex") is not None
+        }
+
         # Get NetBox module bays and modules for this device
         device_bays, module_scoped_bays = self._get_module_bays(obj)
         module_types = self._get_module_types()
 
-        transparent_indices = self._find_transparent_indices(inventory_data, index_map, ignore_rules, device_serial)
-        top_items = self._collect_top_items(inventory_data, index_map, ignore_rules, device_serial, transparent_indices)
+        transparent_indices = self._find_transparent_indices(inventory_data, ignore_cache)
+        top_items = self._collect_top_items(
+            inventory_data, index_map, ignore_rules, device_serial, transparent_indices, ignore_cache
+        )
         table_data = self._build_table_rows(
             top_items,
             index_map,
@@ -234,6 +251,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             device_bays,
             module_scoped_bays,
             module_types,
+            manufacturer=manufacturer,
         )
 
         # Sort top-level groups by status, keeping children after their parent
@@ -260,21 +278,19 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         }
 
     @staticmethod
-    def _find_transparent_indices(inventory_data, index_map, ignore_rules, device_serial):
+    def _find_transparent_indices(inventory_data, ignore_cache):
         """Identify ENTITY-MIB items that should be treated as transparent parents."""
         transparent_indices: set = set()
         for item in inventory_data:
             idx = item.get("entPhysicalIndex")
             if idx is None:
                 continue
-            parent_item = index_map.get(item.get("entPhysicalContainedIn"))
-            action = _check_ignore_rules(item, parent_item, ignore_rules, index_map, device_serial)
-            if action == "transparent":
+            if ignore_cache.get(idx) == "transparent":
                 transparent_indices.add(idx)
         return transparent_indices
 
     @staticmethod
-    def _collect_top_items(inventory_data, index_map, ignore_rules, device_serial, transparent_indices):
+    def _collect_top_items(inventory_data, index_map, ignore_rules, device_serial, transparent_indices, ignore_cache):
         """
         Collect top-level inventory items for the sync table.
 
@@ -289,8 +305,18 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             phys_class = item.get("entPhysicalClass")
             if phys_class not in INVENTORY_CLASSES:
                 continue
-            parent_item = index_map.get(item.get("entPhysicalContainedIn"))
-            action = _check_ignore_rules(item, parent_item, ignore_rules, index_map, device_serial)
+            idx = item.get("entPhysicalIndex")
+            action = (
+                ignore_cache.get(idx)
+                if idx is not None
+                else _check_ignore_rules(
+                    item,
+                    index_map.get(item.get("entPhysicalContainedIn")),
+                    ignore_rules,
+                    index_map,
+                    device_serial,
+                )
+            )
             if action == "skip":
                 continue
             # Transparent items are hidden from the table but must NOT be added as
@@ -338,17 +364,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         device_bays,
         module_scoped_bays,
         module_types,
+        manufacturer=None,
     ):
         """Build table rows from top-level items and their sub-components."""
-        from netbox_librenms_plugin.utils import resolve_module_type
-
         # ChainMap preserves scope ordering — device-level bays take precedence.
         all_bays = ChainMap(device_bays, *module_scoped_bays.values())
         table_data = []
 
         for item in top_items:
             item_bays = all_bays if item.get("_from_transceiver_api") else device_bays
-            row = self._build_row(item, index_map, item_bays, module_types, depth=0)
+            row = self._build_row(item, index_map, item_bays, module_types, depth=0, manufacturer=manufacturer)
             parent_row_idx = len(table_data)
             table_data.append(row)
 
@@ -379,7 +404,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             )
             for depth, sub_item in sub_items:
                 scope_bays = bays_by_depth.get(depth, child_bays)
-                sub_row = self._build_row(sub_item, index_map, scope_bays, module_types, depth=depth)
+                sub_row = self._build_row(
+                    sub_item, index_map, scope_bays, module_types, depth=depth, manufacturer=manufacturer
+                )
                 table_data.append(sub_row)
 
                 # Update bay scope for children of this sub-item.
@@ -400,23 +427,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
                 if sub_row.get("can_install"):
                     table_data[parent_row_idx]["has_installable_children"] = True
-
-            # Enable "Install Branch" if parent is uninstalled but children have types
-            if (
-                parent_bay_matched_but_uninstalled
-                and row.get("can_install")
-                and not table_data[parent_row_idx].get("has_installable_children")
-            ):
-                for _depth, sub_item in sub_items:
-                    sub_model = (sub_item.get("entPhysicalModelName") or "").strip()
-                    if not sub_model:
-                        continue
-                    matched = resolve_module_type(
-                        sub_model, module_types, manufacturer=getattr(self, "_device_manufacturer", None)
-                    )
-                    if matched:
-                        table_data[parent_row_idx]["has_installable_children"] = True
-                        break
+                # When parent bay is uninstalled, sub-rows have empty bays so
+                # can_install is False, but module_type_id is still resolved.
+                # Use it to enable "Install Branch" without a second resolve pass.
+                elif parent_bay_matched_but_uninstalled and sub_row.get("module_type_id"):
+                    table_data[parent_row_idx]["has_installable_children"] = True
 
         return table_data
 
@@ -882,7 +897,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         return None
 
-    def _build_row(self, item, index_map, module_bays, module_types, depth=0):
+    def _build_row(self, item, index_map, module_bays, module_types, depth=0, manufacturer=None):
         """Build a single table row from a LibreNMS inventory item."""
         from netbox_librenms_plugin.utils import (
             has_nested_name_conflict,
@@ -899,9 +914,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         matched_bay = self._match_module_bay(item, index_map, module_bays)
 
         # Match to NetBox module type (direct lookup, then normalization fallback)
-        matched_type = resolve_module_type(
-            model_name, module_types, manufacturer=getattr(self, "_device_manufacturer", None)
-        )
+        matched_type = resolve_module_type(model_name, module_types, manufacturer=manufacturer)
 
         # Check for nested module naming conflicts
         name_conflict = matched_type and matched_bay and has_nested_name_conflict(matched_type, matched_bay)
