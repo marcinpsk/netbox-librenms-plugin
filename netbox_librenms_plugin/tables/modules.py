@@ -47,13 +47,16 @@ class LibreNMSModuleTable(tables.Table):
             "data-item-class": lambda record: record.get("item_class", ""),
         }
 
-    def __init__(self, *args, device=None, server_key="", has_write_permission=False, **kwargs):
+    def __init__(self, *args, device=None, server_key="", can_add_module=False, can_change_module=False, **kwargs):
         """Initialize table with optional device context."""
         self.device = device
         self.csrf_token = ""
         self.server_key = server_key
-        self.has_write_permission = has_write_permission
+        self.can_add_module = can_add_module
+        self.can_change_module = can_change_module
         super().__init__(*args, **kwargs)
+        if not can_add_module and hasattr(self, "columns"):
+            self.columns["selection"].column.visible = False
         self.tab = "modules"
         self.htmx_url = None
         self.prefix = "modules_"
@@ -157,13 +160,13 @@ class LibreNMSModuleTable(tables.Table):
         """Render install button for matched modules and install branch for parents."""
         if not self.device:
             return ""
-        if not self.has_write_permission:
+        if not self.can_add_module and not self.can_change_module:
             return ""
 
         buttons = []
 
-        # Single install button
-        if record.get("can_install"):
+        # Single install button (requires add permission)
+        if self.can_add_module and record.get("can_install"):
             url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": self.device.pk})
             buttons.append(
                 format_html(
@@ -185,8 +188,8 @@ class LibreNMSModuleTable(tables.Table):
                 )
             )
 
-        # Install branch button for parents with installable children
-        if record.get("has_installable_children") and record.get("ent_physical_index"):
+        # Install branch button for parents with installable children (requires add)
+        if self.can_add_module and record.get("has_installable_children") and record.get("ent_physical_index"):
             url = reverse("plugins:netbox_librenms_plugin:install_branch", kwargs={"pk": self.device.pk})
             buttons.append(
                 format_html(
@@ -205,8 +208,8 @@ class LibreNMSModuleTable(tables.Table):
                 )
             )
 
-        # Update serial button for serial mismatch rows
-        if record.get("can_update_serial") and record.get("installed_module_id"):
+        # Update serial button for serial mismatch rows (requires change)
+        if self.can_change_module and record.get("can_update_serial") and record.get("installed_module_id"):
             url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": self.device.pk})
             buttons.append(
                 format_html(
@@ -227,8 +230,13 @@ class LibreNMSModuleTable(tables.Table):
                 )
             )
 
-        # Replace button for type/serial mismatch rows — opens comparison modal
-        if record.get("can_replace") and record.get("installed_module_id"):
+        # Replace button for type/serial mismatch rows (requires add+change+delete)
+        if (
+            self.can_add_module
+            and self.can_change_module
+            and record.get("can_replace")
+            and record.get("installed_module_id")
+        ):
             preview_url = reverse(
                 "plugins:netbox_librenms_plugin:module_mismatch_preview", kwargs={"pk": self.device.pk}
             )

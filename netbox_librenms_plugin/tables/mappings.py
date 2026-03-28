@@ -181,7 +181,7 @@ class InventoryIgnoreRuleTable(NetBoxTable):
     name = tables.Column(verbose_name="Name", linkify=True)
     match_type = tables.Column(verbose_name="Match Type")
     action = tables.Column(verbose_name="Action")
-    pattern = tables.Column(verbose_name="Pattern")
+    pattern = tables.Column(verbose_name="Pattern", empty_values=())
     require_serial_match_parent = tables.BooleanColumn(verbose_name="Require Serial Match")
     enabled = tables.BooleanColumn(verbose_name="Enabled")
     description = tables.Column(verbose_name="Description", linkify=False)

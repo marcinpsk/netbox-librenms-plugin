@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 class TestLibreNMSModuleTable:
     """Direct unit tests for every render_* method on LibreNMSModuleTable."""
 
-    def _make_table(self, device=None, has_write_permission=True):
+    def _make_table(self, device=None, can_add_module=True, can_change_module=True):
         """Create a bare table instance without calling __init__."""
         from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
 
@@ -19,7 +19,8 @@ class TestLibreNMSModuleTable:
         table.device = device
         table.csrf_token = "test-csrf-token"
         table.server_key = ""
-        table.has_write_permission = has_write_permission
+        table.can_add_module = can_add_module
+        table.can_change_module = can_change_module
         return table
 
     # ------------------------------------------------------------------
@@ -321,11 +322,11 @@ class TestLibreNMSModuleTable:
         result = table.render_actions(None, {"can_install": True})
         assert result == ""
 
-    def test_render_actions_no_write_permission_returns_empty_string(self):
-        """Returns empty string when the user lacks write permission."""
+    def test_render_actions_no_permissions_returns_empty_string(self):
+        """Returns empty string when the user lacks both add and change permissions."""
         device = MagicMock()
         device.pk = 1
-        table = self._make_table(device=device, has_write_permission=False)
+        table = self._make_table(device=device, can_add_module=False, can_change_module=False)
         result = table.render_actions(None, {"can_install": True})
         assert result == ""
 
@@ -517,6 +518,72 @@ class TestLibreNMSModuleTable:
             result = table.render_actions(None, record)
 
         assert "Replace" not in str(result)
+
+    # ------------------------------------------------------------------
+    # Permission-gating: add-only vs change-only
+    # ------------------------------------------------------------------
+
+    def test_render_actions_add_only_shows_install_hides_update_serial(self):
+        """User with add but not change sees Install but not Update Serial."""
+        device = MagicMock()
+        device.pk = 20
+        table = self._make_table(device=device, can_add_module=True, can_change_module=False)
+        record = {
+            "can_install": True,
+            "module_bay_id": 1,
+            "module_type_id": 2,
+            "serial": "SN",
+            "can_update_serial": True,
+            "installed_module_id": 99,
+        }
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
+            result = str(table.render_actions(None, record))
+
+        assert "Install" in result
+        assert "Update Serial" not in result
+
+    def test_render_actions_change_only_shows_update_serial_hides_install(self):
+        """User with change but not add sees Update Serial but not Install."""
+        device = MagicMock()
+        device.pk = 21
+        table = self._make_table(device=device, can_add_module=False, can_change_module=True)
+        record = {
+            "can_install": True,
+            "module_bay_id": 1,
+            "module_type_id": 2,
+            "serial": "SN",
+            "can_update_serial": True,
+            "installed_module_id": 99,
+        }
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
+            result = str(table.render_actions(None, record))
+
+        assert "Install" not in result
+        assert "Update Serial" in result
+
+    def test_render_actions_replace_requires_both_add_and_change(self):
+        """Replace button only shown when user has both add and change."""
+        device = MagicMock()
+        device.pk = 22
+        record = {
+            "can_replace": True,
+            "installed_module_id": 55,
+            "ent_physical_index": 200,
+        }
+        # add-only: no Replace
+        table = self._make_table(device=device, can_add_module=True, can_change_module=False)
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
+            assert "Replace" not in str(table.render_actions(None, record))
+
+        # change-only: no Replace
+        table = self._make_table(device=device, can_add_module=False, can_change_module=True)
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
+            assert "Replace" not in str(table.render_actions(None, record))
+
+        # both: Replace shown
+        table = self._make_table(device=device, can_add_module=True, can_change_module=True)
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
+            assert "Replace" in str(table.render_actions(None, record))
 
     """Tests for __init__ and configure methods, bypassing django-tables2 super().__init__."""
 

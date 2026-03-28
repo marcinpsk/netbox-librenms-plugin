@@ -605,7 +605,12 @@ class AddToLibreSNMPV1V2(BaseSNMPForm):
     The SNMP version (v1 or v2c) is selected via a toggle button in the template.
     """
 
-    community = forms.CharField(label="SNMP Community", max_length=255, required=True)
+    community = forms.CharField(
+        label="SNMP Community",
+        max_length=255,
+        required=True,
+        widget=forms.PasswordInput(render_value=True),
+    )
 
 
 # Backwards-compatible alias — remove once all references are updated.

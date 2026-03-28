@@ -810,41 +810,22 @@ class TestToggleColumnAccessor:
 class TestAncestorWalkGenericContainerModel:
     """Top-level items under containers with 'N/A' model should not be excluded."""
 
-    def _run_top_items(self, inventory_data):
-        from netbox_librenms_plugin.views.base.modules_view import INVENTORY_CLASSES, _GENERIC_CONTAINER_MODELS
+    @staticmethod
+    def _run_top_items(inventory_data):
+        """Delegate to the real implementation so tests validate actual behavior."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        idx_map = {
+        index_map = {
             item["entPhysicalIndex"]: item for item in inventory_data if item.get("entPhysicalIndex") is not None
         }
-        top_items = []
-        for item in inventory_data:
-            phys_class = item.get("entPhysicalClass")
-            if phys_class not in INVENTORY_CLASSES:
-                continue
-            model = (item.get("entPhysicalModelName") or "").strip()
-            if phys_class == "container" and model in _GENERIC_CONTAINER_MODELS:
-                continue
-            if model and model in _GENERIC_CONTAINER_MODELS:
-                continue
-            is_descendant = False
-            current_idx = item.get("entPhysicalContainedIn", 0)
-            visited_ancestors = set()
-            while current_idx and current_idx in idx_map and current_idx not in visited_ancestors:
-                visited_ancestors.add(current_idx)
-                ancestor = idx_map[current_idx]
-                anc_class = ancestor.get("entPhysicalClass")
-                if anc_class in INVENTORY_CLASSES:
-                    anc_model = (ancestor.get("entPhysicalModelName") or "").strip()
-                    if anc_class == "container" and anc_model in _GENERIC_CONTAINER_MODELS:
-                        current_idx = ancestor.get("entPhysicalContainedIn", 0)
-                        continue
-                    is_descendant = True
-                    break
-                current_idx = ancestor.get("entPhysicalContainedIn", 0)
-            if is_descendant:
-                continue
-            top_items.append(item)
-        return top_items
+        return BaseModuleTableView._collect_top_items(
+            inventory_data,
+            index_map,
+            ignore_rules=[],
+            device_serial="",
+            transparent_indices=set(),
+            ignore_cache={},
+        )
 
     def test_item_under_container_with_na_model_is_top_level(self):
         """Module under a container with model='N/A' must appear as top-level item."""
@@ -1023,43 +1004,150 @@ class TestInstallViewsDoNotDeleteCache:
     query so the next render correctly shows the "Installed" state without any
     cache invalidation.  Deleting the cache after install caused an empty modules
     tab (regression).
+
+    Each test exercises the view's success path and asserts that cache.delete
+    was never called.
     """
 
-    def test_install_module_view_no_cache_delete_in_source(self):
-        """InstallModuleView.post body must not contain a cache.delete call."""
-        import inspect
+    def test_install_module_view_no_cache_delete(self):
+        """InstallModuleView.post success path must not call cache.delete."""
+        from contextlib import contextmanager
+
+        from dcim.models import ModuleBay
 
         from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
-        source = inspect.getsource(InstallModuleView.post)
-        assert "cache.delete" not in source, (
-            "InstallModuleView.post must not call cache.delete — "
-            "deleting the inventory cache after install causes an empty modules tab."
-        )
+        view = object.__new__(InstallModuleView)
+        view.required_object_permissions = {}
+        device = _make_device()
 
-    def test_install_branch_view_no_cache_delete_in_source(self):
-        """InstallBranchView.post body must not contain a cache.delete call."""
-        import inspect
+        module_bay = MagicMock()
+        module_bay.name = "Slot 1"
+        module_bay.installed_module = None
 
+        module_type = MagicMock()
+        module_type.pk = 5
+        module_type.model = "XCM-7s"
+
+        new_module = MagicMock()
+        request = _make_request("POST", data={"module_bay_id": "10", "module_type_id": "5", "serial": "SN1"})
+
+        @contextmanager
+        def noop_atomic():
+            yield
+
+        mock_qs = MagicMock()
+        mock_qs.get.return_value = module_bay
+
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                side_effect=[device, module_bay, module_type],
+            ),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
+            patch("netbox_librenms_plugin.views.sync.modules.messages"),
+            patch("netbox_librenms_plugin.views.sync.modules.redirect"),
+            patch("dcim.models.Module") as mock_module_cls,
+            patch.object(ModuleBay, "objects") as mock_objects,
+            patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
+        ):
+            mock_tx.atomic = noop_atomic
+            mock_module_cls.return_value = new_module
+            mock_objects.select_for_update.return_value = mock_qs
+            view.post(request, pk=24)
+
+        mock_cache.delete.assert_not_called()
+
+    def test_install_branch_view_no_cache_delete(self):
+        """InstallBranchView.post success path must not call cache.delete."""
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
-        source = inspect.getsource(InstallBranchView.post)
-        assert "cache.delete" not in source, (
-            "InstallBranchView.post must not call cache.delete — "
-            "deleting the inventory cache after install causes an empty modules tab."
-        )
+        view = object.__new__(InstallBranchView)
+        view.required_object_permissions = {}
+        device = _make_device()
 
-    def test_install_selected_view_no_cache_delete_in_source(self):
-        """InstallSelectedView.post body must not contain a cache.delete call."""
-        import inspect
+        request = _make_request("POST", data={"parent_index": "100", "server_key": "default"})
 
-        from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
+        cached_inventory = [
+            {
+                "entPhysicalIndex": 100,
+                "entPhysicalClass": "module",
+                "entPhysicalModelName": "MOD-A",
+                "entPhysicalContainedIn": 0,
+                "entPhysicalName": "Slot 0",
+            },
+        ]
 
-        source = inspect.getsource(InstallSelectedView.post)
-        assert "cache.delete" not in source, (
-            "InstallSelectedView.post must not call cache.delete — "
-            "deleting the inventory cache after install causes an empty modules tab."
-        )
+        install_result = {"status": "installed", "name": "Slot 0"}
+
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
+            patch.object(view, "get_cache_key", return_value="test-key"),
+            patch.object(InstallBranchView, "_collect_branch", return_value=cached_inventory),
+            patch.object(InstallBranchView, "_install_single", return_value=install_result),
+            patch("netbox_librenms_plugin.views.sync.modules.get_module_types_indexed", return_value={}),
+            patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])),
+            patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", return_value=[]),
+            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
+            patch("netbox_librenms_plugin.views.sync.modules.messages"),
+            patch("netbox_librenms_plugin.views.sync.modules.redirect"),
+        ):
+            mock_cache.get.return_value = cached_inventory
+            mock_tx.atomic = lambda: MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+            view.post(request, pk=24)
+
+        mock_cache.delete.assert_not_called()
+
+    def test_install_selected_view_no_cache_delete(self):
+        """InstallSelectedView.post success path must not call cache.delete."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView, InstallSelectedView
+
+        view = object.__new__(InstallSelectedView)
+        view.required_object_permissions = {}
+        device = _make_device()
+
+        request = _make_request("POST", data={"server_key": "default"})
+        post_mock = MagicMock()
+        post_mock.get = MagicMock(side_effect=lambda k, d=None: {"server_key": "default"}.get(k, d))
+        post_mock.getlist = MagicMock(return_value=["100"])
+        request.POST = post_mock
+
+        cached_inventory = [
+            {
+                "entPhysicalIndex": 100,
+                "entPhysicalClass": "module",
+                "entPhysicalModelName": "MOD-A",
+                "entPhysicalContainedIn": 0,
+                "entPhysicalName": "Slot 0",
+            },
+        ]
+
+        install_result = {"status": "installed", "name": "Slot 0"}
+
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
+            patch.object(view, "get_cache_key", return_value="test-key"),
+            patch.object(InstallBranchView, "_install_single", return_value=install_result),
+            patch("netbox_librenms_plugin.views.sync.modules.get_module_types_indexed", return_value={}),
+            patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", return_value=[]),
+            patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])),
+            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
+            patch("netbox_librenms_plugin.views.sync.modules.messages"),
+            patch("netbox_librenms_plugin.views.sync.modules.redirect"),
+        ):
+            mock_cache.get.return_value = cached_inventory
+            mock_tx.atomic = lambda: MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+            view.post(request, pk=24)
+
+        mock_cache.delete.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

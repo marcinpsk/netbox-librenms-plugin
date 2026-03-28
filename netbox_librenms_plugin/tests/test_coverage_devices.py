@@ -886,6 +886,7 @@ class TestDeviceModuleTableView:
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
         view.has_write_permission = MagicMock(return_value=True)
+        view.request.user.has_perm = MagicMock(return_value=True)
         return view
 
     def test_get_table_returns_librenms_module_table(self):
@@ -898,7 +899,9 @@ class TestDeviceModuleTableView:
             mock_table_cls.return_value = mock_table
             result = view.get_table([], obj)
 
-        mock_table_cls.assert_called_once_with([], device=obj, server_key="default", has_write_permission=True)
+        mock_table_cls.assert_called_once_with(
+            [], device=obj, server_key="default", can_add_module=True, can_change_module=True
+        )
         assert result is mock_table
 
     def test_get_table_sets_htmx_url(self):

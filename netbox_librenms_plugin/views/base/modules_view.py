@@ -32,6 +32,11 @@ INVENTORY_CLASSES = {
 # Model name values that indicate a generic/empty container (not real hardware)
 _GENERIC_CONTAINER_MODELS = {"", "BUILTIN", "Default", "N/A"}
 
+# Lowercase placeholder values that LibreNMS returns for absent model/serial fields.
+# Used during transceiver backfill to decide whether existing ENTITY-MIB data should
+# be replaced by richer transceiver API data.
+_PLACEHOLDER_VALUES = {"", "n/a", "na", "default", "-", "unknown"}
+
 
 def _check_ignore_rules(
     item: dict,
@@ -489,11 +494,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             display_model = model or (txr_type if txr_type not in SKIP_TYPES else "")
 
             if ent_idx in inv_by_index:
-                # Supplement existing inventory item if model is missing
+                # Supplement existing inventory item if model/serial is missing or a placeholder
                 existing = inv_by_index[ent_idx]
-                if not (existing.get("entPhysicalModelName") or "").strip() and display_model:
+                existing_model = (existing.get("entPhysicalModelName") or "").strip()
+                if existing_model.lower() in _PLACEHOLDER_VALUES and display_model:
                     existing["entPhysicalModelName"] = display_model
-                if not (existing.get("entPhysicalSerialNum") or "").strip() and serial:
+                existing_serial = (existing.get("entPhysicalSerialNum") or "").strip()
+                if existing_serial.lower() in _PLACEHOLDER_VALUES and serial:
                     existing["entPhysicalSerialNum"] = serial
             else:
                 # Skip if serial already exists in ENTITY-MIB data (avoid duplicates)
@@ -543,10 +550,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if not success or not isinstance(ports_data, dict):
             return {}
 
+        ports = ports_data.get("ports")
+        if not isinstance(ports, list):
+            return {}
+
         return {
             p["port_id"]: p["ifName"]
-            for p in ports_data.get("ports", [])
-            if p.get("port_id") in port_ids and p.get("ifName")
+            for p in ports
+            if isinstance(p, dict) and p.get("port_id") in port_ids and p.get("ifName")
         }
 
     def _get_sub_components(self, parent_idx, children_by_parent, index_map, ignore_rules, device_serial=""):
@@ -852,11 +863,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         Match bay by item's positional order among container siblings.
 
         When an item is inside a container (no model), walk up to find the
-        nearest ancestor with a model, count which container slot the item
-        occupies, and match to the bay by number (e.g., SFP 1, SFP 2).
+        nearest ancestor with a real hardware model, count which container slot
+        the item occupies, and match to the bay by number (e.g., SFP 1, SFP 2).
         """
-        # Walk up through modelless containers to find the parent with a model.
-        # Use a visited set to detect cycles and avoid infinite loops.
+        # Walk up through containers with placeholder/empty models to find the
+        # parent with a real hardware model.  Use a visited set to detect cycles.
         current_idx = item.get("entPhysicalContainedIn", 0)
         container_idx = None
         visited = set()
@@ -864,8 +875,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             visited.add(current_idx)
             ancestor = index_map[current_idx]
             model = (ancestor.get("entPhysicalModelName") or "").strip()
-            if model:
-                # Found the parent with a model; container_idx is the intermediate container
+            if model and model not in _GENERIC_CONTAINER_MODELS:
+                # Found the parent with a real model; container_idx is the intermediate container
                 break
             container_idx = current_idx
             current_idx = ancestor.get("entPhysicalContainedIn", 0)
@@ -875,10 +886,17 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if not container_idx:
             return None
 
-        # Determine position: count siblings of the container under the parent
+        # Determine position: count siblings under the parent, filtering out
+        # non-hardware items (sensors, LEDs) that would shift the bay index.
+        _NON_HARDWARE_CLASSES = {"sensor", "backplane", "stack"}
         parent_with_model_idx = current_idx
         siblings = sorted(
-            [i for i in index_map.values() if i.get("entPhysicalContainedIn") == parent_with_model_idx],
+            [
+                i
+                for i in index_map.values()
+                if i.get("entPhysicalContainedIn") == parent_with_model_idx
+                and i.get("entPhysicalClass") not in _NON_HARDWARE_CLASSES
+            ],
             key=lambda x: x.get("entPhysicalParentRelPos", 0),
         )
         slot_num = None

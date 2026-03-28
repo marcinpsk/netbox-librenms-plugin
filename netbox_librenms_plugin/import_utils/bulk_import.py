@@ -514,6 +514,9 @@ def process_device_filters(
     # Fetch devices from LibreNMS
     if job:
         job.logger.info(f"Fetching devices with filters: {filters}")
+        if _is_job_cancelled(job):
+            job.logger.warning("Job was stopped before fetching devices")
+            return _empty_return(return_cache_status)
     else:
         logger.info(f"Fetching devices with filters: {filters}")
 
