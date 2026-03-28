@@ -302,14 +302,6 @@ class TestLibreNMSModuleTable:
         result = str(table.render_status("Weird Status", {}))
         assert "bg-secondary" in result
 
-    def test_render_status_with_module_path_warning_adds_alert_icon(self):
-        """module_path_warning adds an mdi-alert-outline icon."""
-        table = self._make_table()
-        result = str(table.render_status("Installed", {"module_path_warning": "Upgrade NetBox for module_path"}))
-        assert "mdi-alert-outline" in result
-        assert "Upgrade NetBox for module_path" in result
-        assert "bg-success" in result
-
     def test_render_status_with_name_conflict_warning_adds_alert_icon(self):
         """name_conflict_warning adds an mdi-alert-outline icon with the warning text."""
         table = self._make_table()
@@ -318,30 +310,6 @@ class TestLibreNMSModuleTable:
         )
         assert "mdi-alert-outline" in result
         assert "Name already used by another module" in result
-
-    def test_render_status_with_module_type_upgrade_hint_adds_info_icon(self):
-        """module_type_upgrade_hint adds an mdi-information-outline icon."""
-        table = self._make_table()
-        result = str(table.render_status("Matched", {"module_type_upgrade_hint": "Newer module type available"}))
-        assert "mdi-information-outline" in result
-        assert "Newer module type available" in result
-
-    def test_render_status_module_path_warning_takes_priority_over_hint(self):
-        """module_path_warning short-circuits before module_type_upgrade_hint."""
-        table = self._make_table()
-        # Both present — path_warning fires first
-        result = str(
-            table.render_status(
-                "Installed",
-                {
-                    "module_path_warning": "path warning",
-                    "module_type_upgrade_hint": "hint text",
-                },
-            )
-        )
-        assert "mdi-alert-outline" in result
-        # hint icon should NOT be present
-        assert "mdi-information-outline" not in result
 
     # ------------------------------------------------------------------
     # render_actions

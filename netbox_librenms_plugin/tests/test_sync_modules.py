@@ -6,7 +6,7 @@ bay matching by name/mapping/position, serial comparison, status determination,
 and depth tracking.  inventory-rebased branch only.
 """
 
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 
@@ -14,14 +14,11 @@ from unittest.mock import MagicMock, patch
 def _patch_build_row_deps(view, match_bay_return=None):
     """Patch all utility imports used by _build_row to isolate bay/type matching tests."""
     _utils = "netbox_librenms_plugin.utils"
-    with ExitStack() as stack:
-        stack.enter_context(patch.object(view, "_match_module_bay", return_value=match_bay_return))
-        stack.enter_context(patch(f"{_utils}.resolve_module_type", side_effect=lambda m, t, **kw: t.get(m)))
-        stack.enter_context(patch(f"{_utils}.module_type_uses_module_path", return_value=False))
-        stack.enter_context(patch(f"{_utils}.supports_module_path", return_value=False))
-        stack.enter_context(patch(f"{_utils}.has_nested_name_conflict", return_value=False))
-        stack.enter_context(patch(f"{_utils}.module_type_is_end_module", return_value=False))
-        stack.enter_context(patch(f"{_utils}.module_type_uses_module_token", return_value=False))
+    with (
+        patch.object(view, "_match_module_bay", return_value=match_bay_return),
+        patch(f"{_utils}.resolve_module_type", side_effect=lambda m, t, **kw: t.get(m)),
+        patch(f"{_utils}.has_nested_name_conflict", return_value=False),
+    ):
         yield
 
 
@@ -245,31 +242,6 @@ def _module(serial="SN001", module_type_id=1):
 # ---------------------------------------------------------------------------
 
 
-class TestDetermineStatus:
-    """_determine_status returns the correct badge string for every combination."""
-
-    def test_matched_bay_and_type(self):
-        view = _make_base_view()
-        assert view._determine_status(MagicMock(), MagicMock(), "") == "Matched"
-
-    def test_no_bay_regardless_of_type(self):
-        view = _make_base_view()
-        assert view._determine_status(None, MagicMock(), "") == "No Bay"
-        assert view._determine_status(None, None, "") == "No Bay"
-
-    def test_bay_without_type(self):
-        view = _make_base_view()
-        assert view._determine_status(MagicMock(), None, "") == "No Type"
-
-    def test_unmatched_when_neither(self):
-        # This path is unreachable via current code (No Bay catches it first),
-        # but _determine_status is a standalone method so test the logic directly.
-        view = _make_base_view()
-        # Trick: pass a falsy non-None bay to skip "no bay" but reach "no type"
-        # Not possible with current logic; just verify No Bay path dominates.
-        assert view._determine_status(None, None, "SN1") == "No Bay"
-
-
 # ---------------------------------------------------------------------------
 # Serial comparison inside _build_row
 # ---------------------------------------------------------------------------
@@ -369,6 +341,34 @@ class TestBuildRowSerialComparison:
             row = view._build_row(item, {10: item}, {"Slot 1": bay}, {"WS-X4748": mt}, depth=0)
 
         assert row["can_install"] is False
+
+    def test_librenms_dash_serial_with_empty_installed_gives_installed(self):
+        """LibreNMS serial '-' normalizes to empty; both empty -> Installed, not mismatch."""
+        view = _make_base_view()
+        item = self._make_item("WS-X4748", "-")
+        mt = self._make_matched_type()
+        installed = _module(serial="")
+        bay = _bay("Slot 1", installed_module=installed)
+
+        with _patch_build_row_deps(view, match_bay_return=bay):
+            row = view._build_row(item, {10: item}, {"Slot 1": bay}, {"WS-X4748": mt}, depth=0)
+
+        assert row["status"] == "Installed"
+        assert row["row_class"] == "table-success"
+
+    def test_librenms_dash_serial_with_real_installed_gives_installed(self):
+        """LibreNMS serial '-' normalizes to empty; only NetBox has serial -> no mismatch."""
+        view = _make_base_view()
+        item = self._make_item("WS-X4748", "-")
+        mt = self._make_matched_type()
+        installed = _module(serial="REAL123")
+        bay = _bay("Slot 1", installed_module=installed)
+
+        with _patch_build_row_deps(view, match_bay_return=bay):
+            row = view._build_row(item, {10: item}, {"Slot 1": bay}, {"WS-X4748": mt}, depth=0)
+
+        assert row["status"] == "Installed"
+        assert row["row_class"] == "table-success"
 
 
 # ---------------------------------------------------------------------------
@@ -731,6 +731,39 @@ class TestInstallSingleStatus:
                             )
 
         assert result["status"] == "failed"
+
+    def test_dash_serial_normalized_to_empty_on_install(self):
+        """When LibreNMS reports serial '-', _install_single normalizes it to '' before Module()."""
+        from contextlib import contextmanager
+
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        view = _make_install_branch_view()
+        device, item, index_map, module_types, ModuleBay, ModuleType, Module, bay, mt = self._make_args()
+        # Override the serial to "-"
+        item["entPhysicalSerialNum"] = "-"
+        module_instance = MagicMock()
+        Module.return_value = module_instance
+
+        @contextmanager
+        def noop_atomic():
+            yield
+
+        with patch("netbox_librenms_plugin.views.sync.modules.transaction.atomic", noop_atomic):
+            with patch("netbox_librenms_plugin.utils.resolve_module_type", side_effect=lambda m, t, **kw: t.get(m)):
+                with patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])):
+                    with patch.object(InstallBranchView, "_find_parent_module_id", return_value=None):
+                        with patch.object(InstallBranchView, "_match_bay", return_value=bay):
+                            result = view._install_single(
+                                device, item, index_map, module_types, ModuleBay, ModuleType, Module
+                            )
+
+        assert result["status"] == "installed"
+        # Verify Module was constructed with serial="" (not "-")
+        Module.assert_called_once()
+        assert Module.call_args.kwargs["serial"] == "", (
+            f"Expected serial='' but Module was called with serial={Module.call_args.kwargs['serial']!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1177,10 +1210,9 @@ class TestFindParentModuleIdRegex:
 
         bay = self._make_bay("Slot3", installed_module_id=77)
         regex_mapping = self._make_regex_mapping(r"Slot \d+/\d+", "Slot3")
-        bay_mappings = [regex_mapping]
         device_bays = [bay]
 
-        result = InstallBranchView._find_parent_module_id(child, index_map, device_bays, bay_mappings)
+        result = InstallBranchView._find_parent_module_id(child, index_map, device_bays, [], [regex_mapping])
         assert result == 77
 
     def test_exact_mapping_still_works(self):
@@ -1198,10 +1230,9 @@ class TestFindParentModuleIdRegex:
 
         bay = self._make_bay("Bay-1", installed_module_id=42)
         exact_mapping = self._make_exact_mapping("ExactSlot", "Bay-1")
-        bay_mappings = [exact_mapping]
         device_bays = [bay]
 
-        result = InstallBranchView._find_parent_module_id(child, index_map, device_bays, bay_mappings)
+        result = InstallBranchView._find_parent_module_id(child, index_map, device_bays, [exact_mapping], [])
         assert result == 42
 
     def test_no_match_returns_none(self):
@@ -1219,9 +1250,731 @@ class TestFindParentModuleIdRegex:
 
         bay = self._make_bay("Bay-2", installed_module_id=99)
         regex_mapping = self._make_regex_mapping(r"Slot \d+", "Bay-2")
-        bay_mappings = [regex_mapping]
         device_bays = [bay]
 
         # "UnknownSlot" does not match pattern "Slot \d+"
-        result = InstallBranchView._find_parent_module_id(child, index_map, device_bays, bay_mappings)
+        result = InstallBranchView._find_parent_module_id(child, index_map, device_bays, [], [regex_mapping])
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# _find_parent_module_id — cycle detection and ancestor walk (Item 16)
+# ---------------------------------------------------------------------------
+
+
+class TestFindParentModuleIdAncestorWalk:
+    """_find_parent_module_id walks up the hierarchy and handles edge cases."""
+
+    def _make_bay(self, name, installed_module_id=None):
+        bay = MagicMock()
+        bay.name = name
+        if installed_module_id is not None:
+            bay.installed_module = MagicMock()
+            bay.installed_module.pk = installed_module_id
+        else:
+            bay.installed_module = None
+        return bay
+
+    def test_direct_parent_matches_bay_name(self):
+        """Parent whose entPhysicalName matches a bay with an installed module."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        parent = {
+            "entPhysicalIndex": 10,
+            "entPhysicalName": "Slot 1",
+            "entPhysicalDescr": "",
+            "entPhysicalContainedIn": 0,
+        }
+        child = {"entPhysicalIndex": 20, "entPhysicalContainedIn": 10}
+        index_map = {10: parent, 20: child}
+        bay = self._make_bay("Slot 1", installed_module_id=55)
+
+        result = InstallBranchView._find_parent_module_id(child, index_map, [bay], [], [])
+        assert result == 55
+
+    def test_parent_matched_by_descr_field(self):
+        """Parent matched via entPhysicalDescr when entPhysicalName doesn't match."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        parent = {
+            "entPhysicalIndex": 10,
+            "entPhysicalName": "SomethingElse",
+            "entPhysicalDescr": "Slot 1",
+            "entPhysicalContainedIn": 0,
+        }
+        child = {"entPhysicalIndex": 20, "entPhysicalContainedIn": 10}
+        index_map = {10: parent, 20: child}
+        bay = self._make_bay("Slot 1", installed_module_id=66)
+
+        result = InstallBranchView._find_parent_module_id(child, index_map, [bay], [], [])
+        assert result == 66
+
+    def test_grandparent_walk(self):
+        """Walk two levels up to find an installed ancestor."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        grandparent = {
+            "entPhysicalIndex": 1,
+            "entPhysicalName": "FPC 0",
+            "entPhysicalDescr": "",
+            "entPhysicalContainedIn": 0,
+        }
+        parent = {
+            "entPhysicalIndex": 10,
+            "entPhysicalName": "Container",
+            "entPhysicalDescr": "",
+            "entPhysicalContainedIn": 1,
+        }
+        child = {"entPhysicalIndex": 20, "entPhysicalContainedIn": 10}
+        index_map = {1: grandparent, 10: parent, 20: child}
+        bay = self._make_bay("FPC 0", installed_module_id=33)
+
+        result = InstallBranchView._find_parent_module_id(child, index_map, [bay], [], [])
+        assert result == 33
+
+    def test_cycle_returns_none(self):
+        """Cycle in the hierarchy terminates without infinite loop."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        a = {"entPhysicalIndex": 1, "entPhysicalName": "A", "entPhysicalDescr": "", "entPhysicalContainedIn": 2}
+        b = {"entPhysicalIndex": 2, "entPhysicalName": "B", "entPhysicalDescr": "", "entPhysicalContainedIn": 1}
+        child = {"entPhysicalIndex": 3, "entPhysicalContainedIn": 1}
+        index_map = {1: a, 2: b, 3: child}
+
+        result = InstallBranchView._find_parent_module_id(child, index_map, [], [], [])
+        assert result is None
+
+    def test_missing_parent_index_returns_none(self):
+        """ContainedIn references a non-existent index."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        child = {"entPhysicalIndex": 20, "entPhysicalContainedIn": 999}
+        index_map = {20: child}
+
+        result = InstallBranchView._find_parent_module_id(child, index_map, [], [], [])
+        assert result is None
+
+    def test_root_item_returns_none(self):
+        """Item at root (containedIn=0) has no parent."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        root = {"entPhysicalIndex": 1, "entPhysicalContainedIn": 0}
+        index_map = {1: root}
+
+        result = InstallBranchView._find_parent_module_id(root, index_map, [], [], [])
+        assert result is None
+
+    def test_uninstalled_bay_is_skipped(self):
+        """Bay matches parent name but has no installed module — walk continues."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        parent = {
+            "entPhysicalIndex": 10,
+            "entPhysicalName": "Slot 1",
+            "entPhysicalDescr": "",
+            "entPhysicalContainedIn": 0,
+        }
+        child = {"entPhysicalIndex": 20, "entPhysicalContainedIn": 10}
+        index_map = {10: parent, 20: child}
+        empty_bay = self._make_bay("Slot 1", installed_module_id=None)
+
+        result = InstallBranchView._find_parent_module_id(child, index_map, [empty_bay], [], [])
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# _match_bay — exact mapping, regex mapping, and fallbacks (Item 16)
+# ---------------------------------------------------------------------------
+
+
+class TestMatchBayLogic:
+    """InstallBranchView._match_bay matches items via mappings or name fallback."""
+
+    def _make_exact_mapping(self, librenms_name, netbox_bay_name, librenms_class=""):
+        m = MagicMock()
+        m.is_regex = False
+        m.librenms_name = librenms_name
+        m.netbox_bay_name = netbox_bay_name
+        m.librenms_class = librenms_class
+        return m
+
+    def _make_regex_mapping(self, pattern, netbox_bay_name, librenms_class=""):
+        import re
+
+        m = MagicMock()
+        m.is_regex = True
+        m.librenms_name = pattern
+        m.netbox_bay_name = netbox_bay_name
+        m.librenms_class = librenms_class
+        m._compiled_pattern = re.compile(pattern)
+        return m
+
+    def test_exact_mapping_matches_parent_name(self):
+        """Exact mapping on the parent container name."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        parent = {"entPhysicalIndex": 1, "entPhysicalName": "Rack 0-Slot 3", "entPhysicalContainedIn": 0}
+        child = {
+            "entPhysicalIndex": 2,
+            "entPhysicalName": "SFP-1",
+            "entPhysicalDescr": "",
+            "entPhysicalClass": "module",
+            "entPhysicalContainedIn": 1,
+        }
+        index_map = {1: parent, 2: child}
+
+        bay = MagicMock()
+        bay.name = "Slot 3"
+        module_bays = {"Slot 3": bay}
+        exact = [self._make_exact_mapping("Rack 0-Slot 3", "Slot 3")]
+
+        result = InstallBranchView._match_bay(child, index_map, module_bays, exact, [])
+        assert result is bay
+
+    def test_exact_mapping_matches_item_name(self):
+        """Exact mapping on the item's own name (when parent has no name)."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        parent = {"entPhysicalIndex": 1, "entPhysicalName": "", "entPhysicalContainedIn": 0}
+        child = {
+            "entPhysicalIndex": 2,
+            "entPhysicalName": "PSU 0",
+            "entPhysicalDescr": "",
+            "entPhysicalClass": "powerSupply",
+            "entPhysicalContainedIn": 1,
+        }
+        index_map = {1: parent, 2: child}
+
+        bay = MagicMock()
+        bay.name = "PSU-Slot-0"
+        module_bays = {"PSU-Slot-0": bay}
+        exact = [self._make_exact_mapping("PSU 0", "PSU-Slot-0")]
+
+        result = InstallBranchView._match_bay(child, index_map, module_bays, exact, [])
+        assert result is bay
+
+    def test_class_scoped_mapping_preferred(self):
+        """Mapping with matching librenms_class preferred over classless mapping."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        child = {
+            "entPhysicalIndex": 2,
+            "entPhysicalName": "Fan Tray 1",
+            "entPhysicalDescr": "",
+            "entPhysicalClass": "fan",
+            "entPhysicalContainedIn": 0,
+        }
+        index_map = {2: child}
+
+        bay_generic = MagicMock()
+        bay_generic.name = "FanGeneric"
+        bay_fan = MagicMock()
+        bay_fan.name = "Fan-1"
+        module_bays = {"FanGeneric": bay_generic, "Fan-1": bay_fan}
+        exact = [
+            self._make_exact_mapping("Fan Tray 1", "FanGeneric", librenms_class=""),
+            self._make_exact_mapping("Fan Tray 1", "Fan-1", librenms_class="fan"),
+        ]
+
+        result = InstallBranchView._match_bay(child, index_map, module_bays, exact, [])
+        assert result is bay_fan
+
+    def test_regex_mapping_with_backreference(self):
+        """Regex mapping with capture group + backreference in netbox_bay_name."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        child = {
+            "entPhysicalIndex": 2,
+            "entPhysicalName": "Optics0/0/0/5",
+            "entPhysicalDescr": "",
+            "entPhysicalClass": "module",
+            "entPhysicalContainedIn": 0,
+        }
+        index_map = {2: child}
+
+        bay = MagicMock()
+        bay.name = "Optics0/0/0/5"
+        bay.module = None
+        module_bays = {"Optics0/0/0/5": bay}
+        regex = [self._make_regex_mapping(r"Optics(\d+/\d+/\d+/\d+)", r"Optics\1")]
+
+        with patch(
+            "netbox_librenms_plugin.views.base.modules_view.BaseModuleTableView._fpc_slot_matches", return_value=True
+        ):
+            result = InstallBranchView._match_bay(child, index_map, module_bays, [], regex)
+
+        assert result is bay
+
+    def test_fallback_exact_name_match(self):
+        """Falls back to direct name-in-bays-dict when no mappings match."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        child = {
+            "entPhysicalIndex": 2,
+            "entPhysicalName": "0/FT0",
+            "entPhysicalDescr": "",
+            "entPhysicalClass": "fan",
+            "entPhysicalContainedIn": 0,
+        }
+        index_map = {2: child}
+
+        bay = MagicMock()
+        bay.name = "0/FT0"
+        module_bays = {"0/FT0": bay}
+
+        with patch(
+            "netbox_librenms_plugin.views.base.modules_view.BaseModuleTableView._match_bay_by_position",
+            return_value=None,
+        ):
+            result = InstallBranchView._match_bay(child, index_map, module_bays, [], [])
+
+        assert result is bay
+
+    def test_no_match_returns_none(self):
+        """Returns None when nothing matches."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        child = {
+            "entPhysicalIndex": 2,
+            "entPhysicalName": "Unknown",
+            "entPhysicalDescr": "",
+            "entPhysicalClass": "module",
+            "entPhysicalContainedIn": 0,
+        }
+        index_map = {2: child}
+
+        with patch(
+            "netbox_librenms_plugin.views.base.modules_view.BaseModuleTableView._match_bay_by_position",
+            return_value=None,
+        ):
+            result = InstallBranchView._match_bay(child, index_map, {}, [], [])
+
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# _lookup_regex_bay_mapping — stale resolved_bay regression (Item 1)
+# ---------------------------------------------------------------------------
+
+
+class TestLookupRegexBayMappingStaleResolvedBay:
+    """Regression: a failed expand() must not use resolved_bay from a prior iteration."""
+
+    def _make_mapping(self, pattern, netbox_bay_name):
+        import re
+
+        m = MagicMock()
+        m._compiled_pattern = re.compile(pattern)
+        m.netbox_bay_name = netbox_bay_name
+        m.librenms_class = ""
+        return m
+
+    def test_failed_expand_does_not_match_stale_bay(self):
+        """If expand() raises, the stale resolved_bay from a prior mapping must not be used."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        # Mapping A: matches, expand succeeds, but bay name not in module_bays.
+        # Defined for documentation but replaced by mapping_a_no_bay below.
+        # Mapping B: matches, but expand raises IndexError (bad backreference)
+        mapping_b = self._make_mapping(r"Port-\d+", r"Bay-\2")  # \2 doesn't exist
+
+        stale_bay = MagicMock()
+        stale_bay.name = "Bay-5"
+        module_bays = {"Bay-5": stale_bay}
+
+        # Before the fix, mapping_a sets resolved_bay="Bay-5" (no match in bays? let's say it does),
+        # then mapping_b fails expand but the outer `if match:` used stale resolved_bay="Bay-5".
+        # To properly trigger the bug: mapping_a's expand result is NOT in module_bays,
+        # then mapping_b's expand fails, and the stale value from A should NOT be used.
+        mapping_a_no_bay = self._make_mapping(r"Port-(\d+)", r"NoSuchBay-\1")
+
+        with patch.object(BaseModuleTableView, "_fpc_slot_matches", return_value=True):
+            result = BaseModuleTableView._lookup_regex_bay_mapping(
+                "Port-5", "", module_bays, [mapping_a_no_bay, mapping_b]
+            )
+
+        assert result is None, "Failed expand() must not fall through to stale resolved_bay"
+
+    def test_successful_expand_matches_bay(self):
+        """Happy path: expand succeeds and bay exists."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        mapping = self._make_mapping(r"Optics(\d+/\d+/\d+/\d+)", r"Optics\1")
+        bay = MagicMock()
+        bay.name = "Optics0/0/0/3"
+        module_bays = {"Optics0/0/0/3": bay}
+
+        with patch.object(BaseModuleTableView, "_fpc_slot_matches", return_value=True):
+            result = BaseModuleTableView._lookup_regex_bay_mapping("Optics0/0/0/3", "", module_bays, [mapping])
+
+        assert result is bay
+
+    def test_no_match_returns_none(self):
+        """No mapping matches the name."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        mapping = self._make_mapping(r"Slot-\d+", r"Bay-\1")
+        result = BaseModuleTableView._lookup_regex_bay_mapping("Port-5", "", {}, [mapping])
+        assert result is None
+
+    def test_class_scoped_mapping_preferred(self):
+        """Mappings with matching class are tried before classless fallback."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        # Class-scoped mapping (matches)
+        m_class = self._make_mapping(r"Fan-(\d+)", r"FanBay-\1")
+        m_class.librenms_class = "fan"
+        # Classless mapping (would also match but lower priority)
+        m_generic = self._make_mapping(r"Fan-(\d+)", r"GenericBay-\1")
+        m_generic.librenms_class = ""
+
+        fan_bay = MagicMock()
+        fan_bay.name = "FanBay-3"
+        module_bays = {"FanBay-3": fan_bay, "GenericBay-3": MagicMock()}
+
+        with patch.object(BaseModuleTableView, "_fpc_slot_matches", return_value=True):
+            result = BaseModuleTableView._lookup_regex_bay_mapping("Fan-3", "fan", module_bays, [m_class, m_generic])
+
+        assert result is fan_bay
+
+
+# ---------------------------------------------------------------------------
+# PK validation error paths (finding 14)
+# ---------------------------------------------------------------------------
+
+
+def _make_request(method="GET", data=None):
+    req = MagicMock()
+    req.method = method
+    if method == "GET":
+        req.GET = data or {}
+    else:
+        req.POST = data or {}
+    return req
+
+
+def _make_device(pk=24, name="test-device"):
+    d = MagicMock()
+    d.pk = pk
+    d.name = name
+    d.device_type = MagicMock()
+    d.device_type.manufacturer = None
+    return d
+
+
+class TestPKValidationErrorPaths:
+    """Views must reject non-numeric PK values with an error message and redirect."""
+
+    # -- InstallModuleView.post: non-numeric module_bay_id -----------------
+
+    def test_install_module_non_numeric_bay_id(self):
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        view = object.__new__(InstallModuleView)
+        view.required_object_permissions = {}
+        device = _make_device()
+        request = _make_request(
+            "POST",
+            data={
+                "module_bay_id": "not-a-number",
+                "module_type_id": "5",
+                "serial": "SN1",
+            },
+        )
+
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
+        ):
+            view.post(request, pk=24)
+
+        mock_msg.error.assert_called_once()
+        assert "invalid" in mock_msg.error.call_args[0][1].lower()
+        mock_redirect.assert_called_once()
+
+    # -- InstallBranchView.post: non-numeric parent_index ------------------
+
+    def test_install_branch_non_numeric_parent_index(self):
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        view = object.__new__(InstallBranchView)
+        view.required_object_permissions = {}
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default"
+        device = _make_device()
+        request = _make_request(
+            "POST",
+            data={
+                "parent_index": "abc",
+            },
+        )
+
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
+        ):
+            view.post(request, pk=24)
+
+        mock_msg.error.assert_called_once()
+        assert "invalid" in mock_msg.error.call_args[0][1].lower()
+        mock_redirect.assert_called_once()
+
+    # -- UpdateModuleSerialView.post: non-numeric module_id ----------------
+
+    def test_update_serial_non_numeric_module_id(self):
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
+
+        view = object.__new__(UpdateModuleSerialView)
+        view.required_object_permissions = {}
+        device = _make_device()
+        request = _make_request(
+            "POST",
+            data={
+                "module_id": "xyz",
+                "serial": "NEW-SN",
+            },
+        )
+
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
+        ):
+            view.post(request, pk=24)
+
+        mock_msg.error.assert_called_once()
+        assert "invalid" in mock_msg.error.call_args[0][1].lower()
+        mock_redirect.assert_called_once()
+
+    # -- InstallSelectedView.post: non-numeric select values ---------------
+
+    def test_install_selected_non_numeric_select(self):
+        from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
+
+        view = object.__new__(InstallSelectedView)
+        view.required_object_permissions = {}
+        view._librenms_api = MagicMock()
+        view._librenms_api.server_key = "default"
+        device = _make_device()
+        # POST.getlist must return a list
+        request = _make_request("POST", data={})
+        request.POST = MagicMock()
+        request.POST.get.return_value = None
+        request.POST.getlist.return_value = ["a", "b"]
+
+        cached = [{"entPhysicalIndex": 1, "entPhysicalModelName": "M1"}]
+
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch.object(view, "get_cache_key", return_value="ck"),
+            patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
+            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
+        ):
+            mock_cache.get.return_value = cached
+            view.post(request, pk=24)
+
+        mock_msg.error.assert_called_once()
+        assert "invalid" in mock_msg.error.call_args[0][1].lower()
+        mock_redirect.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Basic behavioral tests — InstallModuleView (finding 15)
+# ---------------------------------------------------------------------------
+
+
+class TestInstallModuleViewBehavior:
+    """Behavioral tests for InstallModuleView.post happy and occupied paths."""
+
+    def _view(self):
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        v = object.__new__(InstallModuleView)
+        v.required_object_permissions = {}
+        return v
+
+    def test_bay_already_occupied_warns(self):
+        """POST where module_bay has installed_module produces a warning and redirects."""
+        from contextlib import contextmanager
+
+        from dcim.models import ModuleBay
+
+        view = self._view()
+        device = _make_device()
+
+        module_bay = MagicMock()
+        module_bay.name = "Slot 1"
+        module_bay.installed_module = MagicMock()  # occupied
+
+        module_type = MagicMock()
+        module_type.pk = 5
+
+        request = _make_request(
+            "POST",
+            data={
+                "module_bay_id": "10",
+                "module_type_id": "5",
+                "serial": "SN1",
+            },
+        )
+
+        @contextmanager
+        def noop_atomic():
+            yield
+
+        mock_qs = MagicMock()
+        mock_qs.get.return_value = module_bay  # locked re-fetch returns same occupied bay
+
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                side_effect=[device, module_bay, module_type],
+            ),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
+            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
+            patch.object(ModuleBay, "objects") as mock_objects,
+        ):
+            mock_tx.atomic = noop_atomic
+            mock_objects.select_for_update.return_value = mock_qs
+            view.post(request, pk=24)
+
+        mock_msg.warning.assert_called_once()
+        assert "already has a module" in mock_msg.warning.call_args[0][1]
+        mock_redirect.assert_called_once()
+
+    def test_successful_install(self):
+        """POST happy path: module is created and success message is shown."""
+        from contextlib import contextmanager
+
+        from dcim.models import ModuleBay
+
+        view = self._view()
+        device = _make_device()
+
+        module_bay = MagicMock()
+        module_bay.name = "Slot 1"
+        module_bay.installed_module = None  # not occupied
+
+        module_type = MagicMock()
+        module_type.pk = 5
+        module_type.model = "XCM-7s"
+
+        new_module = MagicMock()
+
+        request = _make_request(
+            "POST",
+            data={
+                "module_bay_id": "10",
+                "module_type_id": "5",
+                "serial": "SN123",
+            },
+        )
+
+        @contextmanager
+        def noop_atomic():
+            yield
+
+        mock_qs = MagicMock()
+        mock_qs.get.return_value = module_bay  # locked re-fetch returns same bay
+
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                side_effect=[device, module_bay, module_type],
+            ),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
+            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
+            patch("dcim.models.Module") as mock_module_cls,
+            patch.object(ModuleBay, "objects") as mock_objects,
+        ):
+            mock_tx.atomic = noop_atomic
+            mock_module_cls.return_value = new_module
+            mock_objects.select_for_update.return_value = mock_qs
+            view.post(request, pk=24)
+
+        new_module.full_clean.assert_called_once()
+        new_module.save.assert_called_once()
+        mock_msg.success.assert_called_once()
+        assert "XCM-7s" in mock_msg.success.call_args[0][1]
+        mock_redirect.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Basic behavioral tests — UpdateModuleSerialView (finding 15)
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateModuleSerialViewBehavior:
+    """Behavioral tests for UpdateModuleSerialView.post happy path."""
+
+    def _view(self):
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
+
+        v = object.__new__(UpdateModuleSerialView)
+        v.required_object_permissions = {}
+        return v
+
+    def test_updates_serial_successfully(self):
+        """POST with valid module_id and new serial updates the module and shows success."""
+        from contextlib import contextmanager
+
+        view = self._view()
+        device = _make_device()
+
+        module = MagicMock()
+        module.pk = 42
+        module.serial = "OLD-SN"
+        module.module_type = MagicMock()
+        module.module_type.model = "XCM-7s"
+        module.module_bay = MagicMock()
+        module.module_bay.name = "Slot 1"
+
+        request = _make_request(
+            "POST",
+            data={
+                "module_id": "42",
+                "serial": "NEW-SN",
+            },
+        )
+
+        @contextmanager
+        def noop_atomic():
+            yield
+
+        with (
+            patch.object(view, "require_all_permissions", return_value=None),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
+                side_effect=[device, module],
+            ),
+            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
+            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
+            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
+            patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
+        ):
+            mock_tx.atomic = noop_atomic
+            view.post(request, pk=24)
+
+        assert module.serial == "NEW-SN"
+        module.full_clean.assert_called_once()
+        module.save.assert_called_once()
+        mock_msg.success.assert_called_once()
+        assert "NEW-SN" in mock_msg.success.call_args[0][1]
+        mock_redirect.assert_called_once()

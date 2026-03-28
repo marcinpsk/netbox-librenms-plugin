@@ -50,10 +50,6 @@ def _run_build_context(view, inventory_data, device_bays, module_scoped_bays, mo
     with (
         patch("netbox_librenms_plugin.views.base.modules_view.cache") as mock_cache,
         patch("netbox_librenms_plugin.utils.apply_normalization_rules", side_effect=lambda v, *a, **kw: v),
-        patch("netbox_librenms_plugin.utils.supports_module_path", return_value=False),
-        patch("netbox_librenms_plugin.utils.module_type_uses_module_path", return_value=False),
-        patch("netbox_librenms_plugin.utils.module_type_uses_module_token", return_value=False),
-        patch("netbox_librenms_plugin.utils.module_type_is_end_module", return_value=True),
         patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
         patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping,
         patch("netbox_librenms_plugin.models.InventoryIgnoreRule") as mock_ignore_rule,
@@ -542,10 +538,6 @@ class TestBuildRowSerialMismatch:
         with (
             patch.object(view, "_match_module_bay", return_value=bay),
             patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="XCM-7s-b"),
-            patch("netbox_librenms_plugin.utils.module_type_uses_module_path", return_value=False),
-            patch("netbox_librenms_plugin.utils.module_type_is_end_module", return_value=False),
-            patch("netbox_librenms_plugin.utils.module_type_uses_module_token", return_value=False),
-            patch("netbox_librenms_plugin.utils.supports_module_path", return_value=True),
             patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
         ):
             row = view._build_row(
@@ -571,10 +563,6 @@ class TestBuildRowSerialMismatch:
         with (
             patch.object(view, "_match_module_bay", return_value=bay),
             patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="XCM-7s-b"),
-            patch("netbox_librenms_plugin.utils.module_type_uses_module_path", return_value=False),
-            patch("netbox_librenms_plugin.utils.module_type_is_end_module", return_value=False),
-            patch("netbox_librenms_plugin.utils.module_type_uses_module_token", return_value=False),
-            patch("netbox_librenms_plugin.utils.supports_module_path", return_value=True),
             patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
         ):
             row = view._build_row(
@@ -601,10 +589,6 @@ class TestBuildRowSerialMismatch:
         with (
             patch.object(view, "_match_module_bay", return_value=bay),
             patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="XCM-7s-b"),
-            patch("netbox_librenms_plugin.utils.module_type_uses_module_path", return_value=False),
-            patch("netbox_librenms_plugin.utils.module_type_is_end_module", return_value=False),
-            patch("netbox_librenms_plugin.utils.module_type_uses_module_token", return_value=False),
-            patch("netbox_librenms_plugin.utils.supports_module_path", return_value=True),
             patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
         ):
             row = view._build_row(
@@ -624,10 +608,6 @@ class TestBuildRowSerialMismatch:
         return [
             patch.object(view, "_match_module_bay", return_value=bay),
             patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value=matched_type_name),
-            patch("netbox_librenms_plugin.utils.module_type_uses_module_path", return_value=False),
-            patch("netbox_librenms_plugin.utils.module_type_is_end_module", return_value=False),
-            patch("netbox_librenms_plugin.utils.module_type_uses_module_token", return_value=False),
-            patch("netbox_librenms_plugin.utils.supports_module_path", return_value=True),
             patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False),
         ]
 
@@ -731,6 +711,54 @@ class TestBuildRowSerialMismatch:
 
         assert row["status"] == "Installed"
         assert not row.get("can_replace")
+        assert not row.get("can_update_serial")
+
+    def test_librenms_dash_serial_with_empty_installed_gives_installed(self):
+        """LibreNMS serial '-' normalizes to empty; both empty -> Installed, not mismatch."""
+        view = self._view()
+        bay = self._make_bay(installed_serial="")
+        bay.installed_module.module_type_id = 5
+        matched_type = self._make_matched_type("XCM-7s-b", pk=5)
+
+        patches = self._common_patches(view, bay, "XCM-7s-b")
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            row = view._build_row(
+                self._make_item(serial="-"),
+                {},
+                {"Slot 1": bay},
+                {"XCM-7s-b": matched_type},
+            )
+
+        assert row["status"] == "Installed"
+        assert row["row_class"] == "table-success"
+        assert not row.get("can_update_serial")
+
+    def test_librenms_dash_serial_with_real_installed_gives_installed(self):
+        """LibreNMS serial '-' normalizes to empty; only NetBox has serial -> no mismatch."""
+        view = self._view()
+        bay = self._make_bay(installed_serial="REAL123")
+        bay.installed_module.module_type_id = 5
+        matched_type = self._make_matched_type("XCM-7s-b", pk=5)
+
+        patches = self._common_patches(view, bay, "XCM-7s-b")
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            row = view._build_row(
+                self._make_item(serial="-"),
+                {},
+                {"Slot 1": bay},
+                {"XCM-7s-b": matched_type},
+            )
+
+        assert row["status"] == "Installed"
+        assert row["row_class"] == "table-success"
         assert not row.get("can_update_serial")
 
 

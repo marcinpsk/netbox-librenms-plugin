@@ -1,4 +1,5 @@
 import django_filters
+from dcim.models import Manufacturer
 
 from .models import (
     DeviceTypeMapping,
@@ -69,11 +70,19 @@ class ModuleBayMappingFilterSet(django_filters.FilterSet):
 class NormalizationRuleFilterSet(django_filters.FilterSet):
     """Filter set for NormalizationRule model."""
 
+    # DynamicModelChoiceField submits manufacturer_id; use a ModelChoiceFilter
+    # with field_name="manufacturer" so the filterset resolves it to the FK.
+    manufacturer_id = django_filters.ModelChoiceFilter(
+        field_name="manufacturer",
+        queryset=Manufacturer.objects.all(),
+        label="Manufacturer",
+    )
+
     class Meta:
         """Meta options for NormalizationRuleFilterSet."""
 
         model = NormalizationRule
-        fields = ["scope", "manufacturer"]
+        fields = ["scope", "manufacturer_id"]
 
 
 class InventoryIgnoreRuleFilterSet(django_filters.FilterSet):

@@ -290,6 +290,10 @@ class TestReplaceModuleView:
             mock_tx.atomic.return_value.__enter__ = lambda s: s
             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
             mock_module_cls.return_value = new_module
+            # select_for_update chain for re-fetch inside transaction
+            sfu_qs = MagicMock()
+            sfu_qs.filter.return_value.select_related.return_value.first.return_value = installed
+            mock_module_cls.objects.select_for_update.return_value = sfu_qs
             # Re-derived conflict uses serial-based lookup (.filter().exclude().select_related().first())
             mock_module_cls.objects.filter.return_value.exclude.return_value.select_related.return_value.first.return_value = None
 
@@ -338,6 +342,10 @@ class TestReplaceModuleView:
             mock_tx.atomic.return_value.__enter__ = lambda s: s
             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
             mock_module_cls.return_value = new_module
+            # select_for_update chain: first call re-fetches installed, second re-fetches conflict
+            sfu_qs = MagicMock()
+            sfu_qs.filter.return_value.select_related.return_value.first.side_effect = [installed, conflict]
+            mock_module_cls.objects.select_for_update.return_value = sfu_qs
             mock_module_cls.objects.filter.return_value.exclude.return_value.select_related.return_value.first.return_value = conflict
 
             view.post(request, pk=24)
@@ -412,7 +420,7 @@ class TestMoveModuleView:
         with (
             patch(
                 "netbox_librenms_plugin.views.sync.modules.get_object_or_404",
-                side_effect=[device, conflict_module, target_bay],
+                side_effect=[device, target_bay],
             ),
             patch.object(view, "require_all_permissions", return_value=None),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
@@ -423,7 +431,12 @@ class TestMoveModuleView:
         ):
             mock_tx.atomic.return_value.__enter__ = lambda s: s
             mock_tx.atomic.return_value.__exit__ = MagicMock(return_value=False)
-            mock_module_cls.objects.filter.return_value.first.return_value = None
+            # select_for_update chain returns conflict_module
+            sfu_qs = MagicMock()
+            sfu_qs.filter.return_value.select_related.return_value.first.return_value = conflict_module
+            mock_module_cls.objects.select_for_update.return_value = sfu_qs
+            # No occupant in target bay
+            mock_module_cls.objects.select_for_update.return_value.filter.return_value.first.return_value = None
 
             view.post(request, pk=24)
 

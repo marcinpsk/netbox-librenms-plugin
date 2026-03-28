@@ -82,7 +82,7 @@ def _get_librenms_poller_group_choices():
         pass
 
     cached_choices = cache.get(cache_key)
-    if cached_choices:
+    if cached_choices is not None:
         return cached_choices
 
     try:
@@ -534,7 +534,7 @@ class InventoryIgnoreRuleFilterForm(NetBoxModelFilterSetForm):
         choices=[("", "---------")] + InventoryIgnoreRule.ACTION_CHOICES,
         label="Action",
     )
-    enabled = forms.BooleanField(
+    enabled = forms.NullBooleanField(
         required=False,
         widget=forms.Select(choices=[("", "---------"), ("true", "Yes"), ("false", "No")]),
         label="Enabled",

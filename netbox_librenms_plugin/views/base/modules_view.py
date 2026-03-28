@@ -169,7 +169,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             )
 
         # Fetch transceiver data and merge with inventory
-        inventory_data = self._merge_transceiver_data(inventory_data)
+        inventory_data, txr_error = self._merge_transceiver_data(inventory_data)
 
         # Cache the merged inventory data, namespaced by server to avoid cross-server collisions
         cache.set(
@@ -179,7 +179,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         )
 
         context = self._build_context(request, obj, inventory_data)
-        messages.success(request, "Inventory data refreshed successfully.")
+        if txr_error:
+            messages.warning(request, f"Inventory refreshed, but transceiver fetch failed: {txr_error}")
+        else:
+            messages.success(request, "Inventory data refreshed successfully.")
         return render(request, self.partial_template_name, {"module_sync": context})
 
     def get_context_data(self, request, obj):
@@ -429,10 +432,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
           supplement entPhysicalModelName if empty
         - For transceivers NOT in inventory: create synthetic inventory items
           so they appear in the modules table
+
+        Returns:
+            (inventory_data, error_message) — error_message is None on success
+            or a string when the transceiver API call failed.
         """
         success, transceivers = self.librenms_api.get_device_transceivers(self.librenms_id)
-        if not success or not transceivers:
-            return inventory_data
+        if not success:
+            return inventory_data, str(transceivers) if transceivers else "unknown error"
+        if not transceivers:
+            return inventory_data, None
 
         # Build lookup of existing inventory items by index and serial
         inv_by_index = {idx: item for item in inventory_data if (idx := item.get("entPhysicalIndex")) is not None}
@@ -501,7 +510,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 if serial:
                     inv_serials.add(serial)
 
-        return inventory_data
+        return inventory_data, None
 
     def _build_port_name_map(self, transceivers):
         """
@@ -712,19 +721,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
 
         # Check ModuleBayMapping table for each candidate (exact match)
         for name in candidate_names:
-            if phys_class:
-                mapping = next(
-                    (m for m in exact_mappings if m.librenms_name == name and m.librenms_class == phys_class), None
-                )
-                if mapping and mapping.netbox_bay_name in module_bays:
-                    return module_bays[mapping.netbox_bay_name]
-                # Class-specific mapping absent or its bay not in scope — try empty-class fallback
-                mapping = next((m for m in exact_mappings if m.librenms_name == name and m.librenms_class == ""), None)
-            else:
-                mapping = next((m for m in exact_mappings if m.librenms_name == name and m.librenms_class == ""), None)
-
-            if mapping and mapping.netbox_bay_name in module_bays:
-                return module_bays[mapping.netbox_bay_name]
+            bay = self._lookup_exact_bay_mapping(name, phys_class, module_bays, exact_mappings)
+            if bay:
+                return bay
 
         # Use preloaded regex mappings.
         regex_mappings = getattr(self, "_regex_bay_mappings", None)
@@ -736,7 +735,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Regex pattern matching on all candidate names
         for name in candidate_names:
             bay = self._lookup_regex_bay_mapping(name, phys_class, module_bays, regex_mappings)
-            if bay and self._fpc_slot_matches(name, bay):
+            if bay:
                 return bay
 
         # Fallback: exact match on candidate names against bay dict
@@ -763,9 +762,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         orphaned top-level items (e.g. QSFP @ 1/1/1 when FPC1 is not installed)
         from incorrectly matching bays belonging to a different FPC's module.
         """
-        import re as _re
-
-        match = _re.search(r"@\s+(\d+)/", candidate_name)
+        match = re.search(r"@\s+(\d+)/", candidate_name)
         if not match:
             return True
         expected_fpc = match.group(1)
@@ -776,6 +773,25 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         if not parent_bay:
             return True
         return parent_bay.position == expected_fpc
+
+    @staticmethod
+    def _lookup_exact_bay_mapping(name, phys_class, module_bays, exact_mappings):
+        """
+        Try exact ModuleBayMapping entries against a candidate name.
+
+        Checks class-scoped mappings first, then falls back to classless mappings.
+        Returns the matched module bay or None.
+        """
+        if phys_class:
+            mapping = next(
+                (m for m in exact_mappings if m.librenms_name == name and m.librenms_class == phys_class), None
+            )
+            if mapping and mapping.netbox_bay_name in module_bays:
+                return module_bays[mapping.netbox_bay_name]
+        mapping = next((m for m in exact_mappings if m.librenms_name == name and m.librenms_class == ""), None)
+        if mapping and mapping.netbox_bay_name in module_bays:
+            return module_bays[mapping.netbox_bay_name]
+        return None
 
     @staticmethod
     def _lookup_regex_bay_mapping(name, phys_class, module_bays, regex_mappings):
@@ -801,18 +817,18 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 continue
             try:
                 match = compiled.fullmatch(name)
-                if match:
-                    try:
-                        resolved_bay = match.expand(mapping.netbox_bay_name)
-                    except (re.error, IndexError):
-                        continue
             except re.error:
                 continue
-            if match:
-                if resolved_bay in module_bays:
-                    bay = module_bays[resolved_bay]
-                    if BaseModuleTableView._fpc_slot_matches(name, bay):
-                        return bay
+            if not match:
+                continue
+            try:
+                resolved_bay = match.expand(mapping.netbox_bay_name)
+            except (re.error, IndexError):
+                continue
+            if resolved_bay in module_bays:
+                bay = module_bays[resolved_bay]
+                if BaseModuleTableView._fpc_slot_matches(name, bay):
+                    return bay
         return None
 
     @staticmethod
@@ -870,11 +886,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         """Build a single table row from a LibreNMS inventory item."""
         from netbox_librenms_plugin.utils import (
             has_nested_name_conflict,
-            module_type_is_end_module,
-            module_type_uses_module_path,
-            module_type_uses_module_token,
             resolve_module_type,
-            supports_module_path,
         )
 
         model_name = (item.get("entPhysicalModelName", "") or "").strip()
@@ -889,18 +901,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         # Match to NetBox module type (direct lookup, then normalization fallback)
         matched_type = resolve_module_type(
             model_name, module_types, manufacturer=getattr(self, "_device_manufacturer", None)
-        )
-
-        # Badge flags — purely informational, never block installation
-        needs_module_path = matched_type and module_type_uses_module_path(matched_type)
-        # {module_path} used but NetBox version does not support it → "Upgrade NetBox" hint
-        netbox_upgrade_needed = bool(needs_module_path and not supports_module_path())
-        # End module still using old {module} when {module_path} is available → "Upgrade module-type" hint
-        suggest_type_upgrade = bool(
-            matched_type
-            and supports_module_path()
-            and module_type_is_end_module(matched_type)
-            and module_type_uses_module_token(matched_type)
         )
 
         # Check for nested module naming conflicts
@@ -927,23 +927,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             "has_installable_children": False,
         }
 
-        if netbox_upgrade_needed:
-            row["row_class"] = "table-warning"
-            row["module_path_warning"] = (
-                "This module type uses {module_path} in its interface templates. "
-                "The current NetBox version does not support {module_path} yet — "
-                "installation will proceed but interface naming may not work as expected. "
-                "Upgrade NetBox to enable full {module_path} support."
-            )
-
-        if suggest_type_upgrade:
-            row["module_type_upgrade_hint"] = (
-                "This module type uses {module} in its interface templates. "
-                "Since this NetBox version supports {module_path}, consider updating "
-                "the module type's interface templates to use {module_path} for "
-                "precise per-slot interface naming."
-            )
-
         if name_conflict:
             row["row_class"] = "table-warning"
             row["name_conflict_warning"] = (
@@ -961,25 +944,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 row["installed_module"] = installed
                 row["module_url"] = installed.get_absolute_url()
                 row["installed_module_id"] = installed.pk
-                # Type mismatch takes priority over serial comparison
-                if matched_type is not None and installed.module_type_id != matched_type.pk:
-                    status = "Type Mismatch"
-                    row["row_class"] = "table-warning"
-                    row["can_replace"] = True
-                elif (
-                    matched_type is not None
-                    and serial
-                    and installed.serial
-                    and installed.serial.strip() != serial.strip()
-                ):
-                    status = "Serial Mismatch"
-                    row["row_class"] = "table-danger"
-                    row["can_update_serial"] = True
-                    row["can_replace"] = True
-                else:
-                    status = "Installed"
-                    row["row_class"] = "table-success"
-                row["status"] = status
+                self._apply_installed_status(row, installed, matched_type, serial)
             elif matched_type:
                 # Bay exists, type matched, no module installed → can install
                 row["can_install"] = True
@@ -988,6 +953,31 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             row["module_type_url"] = matched_type.get_absolute_url()
 
         return row
+
+    @staticmethod
+    def _apply_installed_status(row, installed, matched_type, serial):
+        """Set status, row_class, and action flags when a module is already installed."""
+        if matched_type is not None and installed.module_type_id != matched_type.pk:
+            row["status"] = "Type Mismatch"
+            row["row_class"] = "table-warning"
+            row["can_replace"] = True
+        elif matched_type is not None:
+            # Normalize both serials: treat None, empty, whitespace, "-" as absent
+            nb_serial = (installed.serial or "").strip()
+            if nb_serial == "-":
+                nb_serial = ""
+            lnms_serial = serial if serial != "-" else ""
+            if lnms_serial and nb_serial and lnms_serial != nb_serial:
+                row["status"] = "Serial Mismatch"
+                row["row_class"] = "table-danger"
+                row["can_update_serial"] = True
+                row["can_replace"] = True
+            else:
+                row["status"] = "Installed"
+                row["row_class"] = "table-success"
+        else:
+            row["status"] = "Installed"
+            row["row_class"] = "table-success"
 
     def _determine_status(self, matched_bay, matched_type, serial):
         """Determine the sync status for an inventory item."""

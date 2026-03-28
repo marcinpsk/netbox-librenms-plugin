@@ -16,7 +16,8 @@ class FullCleanOnSaveMixin:
     """Mixin that calls full_clean() on every save() so custom clean() logic runs even on programmatic saves."""
 
     def save(self, *args, **kwargs):
-        self.full_clean()
+        if not kwargs.get("update_fields"):
+            self.full_clean()
         super().save(*args, **kwargs)
 
 
@@ -124,7 +125,7 @@ class DeviceTypeMapping(FullCleanOnSaveMixin, NetBoxModel):
     def clean(self):
         """Normalize librenms_hardware so whitespace-padded values don't create duplicate entries."""
         super().clean()
-        self.librenms_hardware = self.librenms_hardware.strip()
+        self.librenms_hardware = (self.librenms_hardware or "").strip()
         if not self.librenms_hardware:
             raise ValidationError({"librenms_hardware": "This field may not be blank after normalization."})
 
@@ -163,7 +164,7 @@ class ModuleTypeMapping(FullCleanOnSaveMixin, NetBoxModel):
     def clean(self):
         """Normalize librenms_model so whitespace-padded values don't create duplicate entries."""
         super().clean()
-        self.librenms_model = self.librenms_model.strip()
+        self.librenms_model = (self.librenms_model or "").strip()
         if not self.librenms_model:
             raise ValidationError({"librenms_model": "This field may not be blank after normalization."})
 
@@ -227,6 +228,8 @@ class ModuleBayMapping(FullCleanOnSaveMixin, NetBoxModel):
     def clean(self):
         """Validate that regex patterns compile when is_regex is True."""
         super().clean()
+        # Invalidate cached compiled pattern so it's recomputed from the new value
+        self.__dict__.pop("_compiled_pattern", None)
         librenms_name_stripped = self.librenms_name.strip() if self.librenms_name else ""
         if not librenms_name_stripped:
             raise ValidationError({"librenms_name": "LibreNMS name pattern must not be empty or whitespace-only."})
@@ -324,6 +327,13 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
     def clean(self):
         """Validate that match_pattern compiles as a regex and replacement is a valid template."""
         super().clean()
+        errors = {}
+        if not self.match_pattern:
+            errors["match_pattern"] = "This field is required."
+        if self.replacement is None:
+            errors["replacement"] = "This field is required."
+        if errors:
+            raise ValidationError(errors)
         try:
             compiled = re.compile(self.match_pattern)
         except re.error as e:
@@ -443,6 +453,8 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
     def clean(self):
         """Validate pattern/match_type consistency."""
         super().clean()
+        # Invalidate cached compiled pattern so it's recomputed from the new value
+        self.__dict__.pop("_compiled_pattern", None)
         pattern_stripped = self.pattern.strip() if self.pattern else ""
         if self.match_type == self.MATCH_REGEX and pattern_stripped:
             try:

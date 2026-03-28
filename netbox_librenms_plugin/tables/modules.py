@@ -116,7 +116,7 @@ class LibreNMSModuleTable(tables.Table):
     def render_module_bay(self, value, record):
         """Render module bay with link if found in NetBox."""
         if not value or value == "-":
-            return mark_safe('<span class="text-danger">No matching bay</span>')
+            return format_html('<span class="text-danger">{}</span>', "No matching bay")
         if url := record.get("module_bay_url"):
             return format_html('<a href="{}">{}</a>', url, value)
         return value
@@ -124,7 +124,7 @@ class LibreNMSModuleTable(tables.Table):
     def render_module_type(self, value, record):
         """Render module type match status."""
         if not value or value == "-":
-            return mark_safe('<span class="text-warning">No matching type</span>')
+            return format_html('<span class="text-warning">{}</span>', "No matching type")
         if url := record.get("module_type_url"):
             return format_html('<a href="{}">{}</a>', url, value)
         return value
@@ -142,15 +142,6 @@ class LibreNMSModuleTable(tables.Table):
             "Type Mismatch": "bg-warning",
         }
         badge_class = badge_classes.get(value, "bg-secondary")
-        if warning := record.get("module_path_warning"):
-            return format_html(
-                '<span class="badge {}" title="{}">{}</span>'
-                ' <i class="mdi mdi-alert-outline text-warning" title="{}"></i>',
-                badge_class,
-                warning,
-                value,
-                "Upgrade NetBox to support module bays",
-            )
         if warning := record.get("name_conflict_warning"):
             return format_html(
                 '<span class="badge {}" title="{}">{}</span>'
@@ -159,13 +150,6 @@ class LibreNMSModuleTable(tables.Table):
                 warning,
                 value,
                 warning,
-            )
-        if hint := record.get("module_type_upgrade_hint"):
-            return format_html(
-                '<span class="badge {}">{}</span> <i class="mdi mdi-information-outline text-info" title="{}"></i>',
-                badge_class,
-                value,
-                hint,
             )
         return format_html('<span class="badge {}">{}</span>', badge_class, value)
 
@@ -263,4 +247,4 @@ class LibreNMSModuleTable(tables.Table):
                 )
             )
 
-        return mark_safe("".join(str(b) for b in buttons)) if buttons else ""
+        return mark_safe("".join(buttons)) if buttons else ""
