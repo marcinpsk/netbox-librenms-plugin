@@ -61,7 +61,7 @@ class DeviceTypeMappingViewSet(NetBoxModelViewSet):
 
     permission_classes = [LibreNMSPluginPermission]
 
-    queryset = DeviceTypeMapping.objects.all()
+    queryset = DeviceTypeMapping.objects.select_related("netbox_device_type")
     serializer_class = DeviceTypeMappingSerializer
 
 
@@ -70,7 +70,7 @@ class ModuleTypeMappingViewSet(NetBoxModelViewSet):
 
     permission_classes = [LibreNMSPluginPermission]
 
-    queryset = ModuleTypeMapping.objects.all()
+    queryset = ModuleTypeMapping.objects.select_related("netbox_module_type")
     serializer_class = ModuleTypeMappingSerializer
 
 
@@ -88,7 +88,7 @@ class NormalizationRuleViewSet(NetBoxModelViewSet):
 
     permission_classes = [LibreNMSPluginPermission]
 
-    queryset = NormalizationRule.objects.all()
+    queryset = NormalizationRule.objects.select_related("manufacturer")
     serializer_class = NormalizationRuleSerializer
 
 

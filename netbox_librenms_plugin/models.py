@@ -12,6 +12,14 @@ from netbox.models import NetBoxModel
 logger = logging.getLogger(__name__)
 
 
+class FullCleanOnSaveMixin:
+    """Mixin that calls full_clean() on every save() so custom clean() logic runs even on programmatic saves."""
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+
 class LibreNMSSettings(models.Model):
     """
     Model to store LibreNMS plugin settings, specifically which server to use
@@ -41,6 +49,10 @@ class LibreNMSSettings(models.Model):
         default=False,
         help_text="Remove domain suffix from device names during import",
     )
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super().save(*args, **kwargs)
 
     class Meta:
         """Meta options for LibreNMSSettings."""
@@ -78,14 +90,19 @@ class InterfaceTypeMapping(NetBoxModel):
     class Meta:
         """Meta options for InterfaceTypeMapping."""
 
-        unique_together = ["librenms_type", "librenms_speed"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["librenms_type", "librenms_speed"],
+                name="unique_interface_type_mapping",
+            ),
+        ]
         ordering = ["librenms_type", "librenms_speed"]
 
     def __str__(self):
         return f"{self.librenms_type} + {self.librenms_speed} -> {self.netbox_type}"
 
 
-class DeviceTypeMapping(NetBoxModel):
+class DeviceTypeMapping(FullCleanOnSaveMixin, NetBoxModel):
     """Map LibreNMS hardware strings to NetBox DeviceType objects."""
 
     librenms_hardware = models.CharField(
@@ -108,6 +125,8 @@ class DeviceTypeMapping(NetBoxModel):
         """Normalize librenms_hardware so whitespace-padded values don't create duplicate entries."""
         super().clean()
         self.librenms_hardware = self.librenms_hardware.strip()
+        if not self.librenms_hardware:
+            raise ValidationError({"librenms_hardware": "This field may not be blank after normalization."})
 
     def get_absolute_url(self):
         """Return the URL for this mapping's detail page."""
@@ -122,7 +141,7 @@ class DeviceTypeMapping(NetBoxModel):
         return f"{self.librenms_hardware} -> {self.netbox_device_type}"
 
 
-class ModuleTypeMapping(NetBoxModel):
+class ModuleTypeMapping(FullCleanOnSaveMixin, NetBoxModel):
     """Map LibreNMS inventory model names to NetBox ModuleType objects."""
 
     librenms_model = models.CharField(
@@ -145,6 +164,8 @@ class ModuleTypeMapping(NetBoxModel):
         """Normalize librenms_model so whitespace-padded values don't create duplicate entries."""
         super().clean()
         self.librenms_model = self.librenms_model.strip()
+        if not self.librenms_model:
+            raise ValidationError({"librenms_model": "This field may not be blank after normalization."})
 
     def get_absolute_url(self):
         """Return the URL for this mapping's detail page."""
@@ -159,7 +180,7 @@ class ModuleTypeMapping(NetBoxModel):
         return f"{self.librenms_model} -> {self.netbox_module_type}"
 
 
-class ModuleBayMapping(NetBoxModel):
+class ModuleBayMapping(FullCleanOnSaveMixin, NetBoxModel):
     """
     Map LibreNMS inventory names to NetBox module bay names.
 
@@ -229,7 +250,12 @@ class ModuleBayMapping(NetBoxModel):
     class Meta:
         """Meta options for ModuleBayMapping."""
 
-        unique_together = ["librenms_name", "librenms_class"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["librenms_name", "librenms_class"],
+                name="unique_module_bay_mapping",
+            ),
+        ]
         ordering = ["librenms_name"]
 
     def __str__(self):
@@ -237,7 +263,7 @@ class ModuleBayMapping(NetBoxModel):
         return f"{self.librenms_name}{cls} -> {self.netbox_bay_name}"
 
 
-class NormalizationRule(NetBoxModel):
+class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
     """
     Regex-based string normalization applied before matching lookups.
 
@@ -266,6 +292,7 @@ class NormalizationRule(NetBoxModel):
     scope = models.CharField(
         max_length=50,
         choices=SCOPE_CHOICES,
+        db_index=True,
         help_text="Which matching lookup this rule applies to",
     )
     manufacturer = models.ForeignKey(
@@ -320,7 +347,7 @@ class NormalizationRule(NetBoxModel):
         return f"[{self.get_scope_display()}] {self.match_pattern} → {self.replacement}"
 
 
-class InventoryIgnoreRule(NetBoxModel):
+class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
     """
     Rule-based filter for ENTITY-MIB inventory items during module sync.
 
@@ -405,6 +432,7 @@ class InventoryIgnoreRule(NetBoxModel):
     )
     enabled = models.BooleanField(
         default=True,
+        db_index=True,
         help_text="Uncheck to temporarily disable this rule without deleting it",
     )
     description = models.TextField(

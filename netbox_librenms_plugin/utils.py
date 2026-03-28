@@ -864,3 +864,41 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None) -> str:
                     "Invalid regex in NormalizationRule pk=%s pattern=%r — skipping", rule.pk, rule.match_pattern
                 )
     return value
+
+
+def resolve_module_type(model_name: str, module_types: dict, manufacturer=None):
+    """
+    Resolve a LibreNMS model name to a NetBox ModuleType via direct lookup then normalization.
+
+    Returns the matched ModuleType or None.
+    """
+    if not model_name:
+        return None
+    matched = module_types.get(model_name)
+    if not matched:
+        normalized = apply_normalization_rules(model_name, "module_type", manufacturer=manufacturer)
+        if normalized != model_name:
+            matched = module_types.get(normalized)
+    return matched
+
+
+def get_enabled_ignore_rules() -> list:
+    """Return all enabled InventoryIgnoreRule instances as a list."""
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+    return list(InventoryIgnoreRule.objects.filter(enabled=True))
+
+
+def load_bay_mappings() -> tuple:
+    """
+    Load all ModuleBayMapping rows, split into exact and regex lists.
+
+    Returns:
+        (exact_mappings, regex_mappings) tuple of lists.
+    """
+    from netbox_librenms_plugin.models import ModuleBayMapping
+
+    all_mappings = list(ModuleBayMapping.objects.all())
+    exact = [m for m in all_mappings if not m.is_regex]
+    regex = [m for m in all_mappings if m.is_regex]
+    return exact, regex

@@ -6,7 +6,23 @@ bay matching by name/mapping/position, serial comparison, status determination,
 and depth tracking.  inventory-rebased branch only.
 """
 
+from contextlib import ExitStack, contextmanager
 from unittest.mock import MagicMock, patch
+
+
+@contextmanager
+def _patch_build_row_deps(view, match_bay_return=None):
+    """Patch all utility imports used by _build_row to isolate bay/type matching tests."""
+    _utils = "netbox_librenms_plugin.utils"
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(view, "_match_module_bay", return_value=match_bay_return))
+        stack.enter_context(patch(f"{_utils}.resolve_module_type", side_effect=lambda m, t, **kw: t.get(m)))
+        stack.enter_context(patch(f"{_utils}.module_type_uses_module_path", return_value=False))
+        stack.enter_context(patch(f"{_utils}.supports_module_path", return_value=False))
+        stack.enter_context(patch(f"{_utils}.has_nested_name_conflict", return_value=False))
+        stack.enter_context(patch(f"{_utils}.module_type_is_end_module", return_value=False))
+        stack.enter_context(patch(f"{_utils}.module_type_uses_module_token", return_value=False))
+        yield
 
 
 def _make_install_branch_view():
@@ -201,11 +217,16 @@ def _make_base_view():
     return view
 
 
+_bay_counter = 0
+
+
 def _bay(name, installed_module=None, pk=None):
     """Quick MagicMock module bay."""
+    global _bay_counter
+    _bay_counter += 1
     bay = MagicMock()
     bay.name = name
-    bay.pk = pk or id(bay)
+    bay.pk = pk or _bay_counter
     bay.installed_module = installed_module
     bay.get_absolute_url.return_value = f"/dcim/module-bays/{bay.pk}/"
     return bay
@@ -285,20 +306,8 @@ class TestBuildRowSerialComparison:
         installed = _module(serial="SN-ABC-123")
         bay = _bay("Slot 1", installed_module=installed)
 
-        module_bays = {"Slot 1": bay}
-        module_types = {"WS-X4748": mt}
-        index_map = {10: item}
-
-        with patch.object(view, "_match_module_bay", return_value=bay):
-            with patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="WS-X4748"):
-                with patch("netbox_librenms_plugin.utils.module_type_uses_module_path", return_value=False):
-                    with patch("netbox_librenms_plugin.utils.supports_module_path", return_value=False):
-                        with patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False):
-                            with patch("netbox_librenms_plugin.utils.module_type_is_end_module", return_value=False):
-                                with patch(
-                                    "netbox_librenms_plugin.utils.module_type_uses_module_token", return_value=False
-                                ):
-                                    row = view._build_row(item, index_map, module_bays, module_types, depth=0)
+        with _patch_build_row_deps(view, match_bay_return=bay):
+            row = view._build_row(item, {10: item}, {"Slot 1": bay}, {"WS-X4748": mt}, depth=0)
 
         assert row["status"] == "Installed"
         assert row["row_class"] == "table-success"
@@ -310,20 +319,8 @@ class TestBuildRowSerialComparison:
         installed = _module(serial="SN-OLD-111")
         bay = _bay("Slot 1", installed_module=installed)
 
-        module_bays = {"Slot 1": bay}
-        module_types = {"WS-X4748": mt}
-        index_map = {10: item}
-
-        with patch.object(view, "_match_module_bay", return_value=bay):
-            with patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="WS-X4748"):
-                with patch("netbox_librenms_plugin.utils.module_type_uses_module_path", return_value=False):
-                    with patch("netbox_librenms_plugin.utils.supports_module_path", return_value=False):
-                        with patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False):
-                            with patch("netbox_librenms_plugin.utils.module_type_is_end_module", return_value=False):
-                                with patch(
-                                    "netbox_librenms_plugin.utils.module_type_uses_module_token", return_value=False
-                                ):
-                                    row = view._build_row(item, index_map, module_bays, module_types, depth=0)
+        with _patch_build_row_deps(view, match_bay_return=bay):
+            row = view._build_row(item, {10: item}, {"Slot 1": bay}, {"WS-X4748": mt}, depth=0)
 
         assert row["status"] == "Serial Mismatch"
         assert row["row_class"] == "table-danger"
@@ -333,16 +330,8 @@ class TestBuildRowSerialComparison:
         item = self._make_item("WS-X4748", "SN1")
         mt = self._make_matched_type()
 
-        with patch.object(view, "_match_module_bay", return_value=None):
-            with patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="WS-X4748"):
-                with patch("netbox_librenms_plugin.utils.module_type_uses_module_path", return_value=False):
-                    with patch("netbox_librenms_plugin.utils.supports_module_path", return_value=False):
-                        with patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False):
-                            with patch("netbox_librenms_plugin.utils.module_type_is_end_module", return_value=False):
-                                with patch(
-                                    "netbox_librenms_plugin.utils.module_type_uses_module_token", return_value=False
-                                ):
-                                    row = view._build_row(item, {10: item}, {}, {"WS-X4748": mt}, depth=0)
+        with _patch_build_row_deps(view, match_bay_return=None):
+            row = view._build_row(item, {10: item}, {}, {"WS-X4748": mt}, depth=0)
 
         assert row["status"] == "No Bay"
 
@@ -351,16 +340,8 @@ class TestBuildRowSerialComparison:
         item = self._make_item("UNKNOWN-MODEL", "SN1")
         bay = _bay("Slot 1")
 
-        with patch.object(view, "_match_module_bay", return_value=bay):
-            with patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="UNKNOWN-MODEL"):
-                with patch("netbox_librenms_plugin.utils.module_type_uses_module_path", return_value=False):
-                    with patch("netbox_librenms_plugin.utils.supports_module_path", return_value=False):
-                        with patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False):
-                            with patch("netbox_librenms_plugin.utils.module_type_is_end_module", return_value=False):
-                                with patch(
-                                    "netbox_librenms_plugin.utils.module_type_uses_module_token", return_value=False
-                                ):
-                                    row = view._build_row(item, {10: item}, {"Slot 1": bay}, {}, depth=0)
+        with _patch_build_row_deps(view, match_bay_return=bay):
+            row = view._build_row(item, {10: item}, {"Slot 1": bay}, {}, depth=0)
 
         assert row["status"] == "No Type"
 
@@ -369,20 +350,11 @@ class TestBuildRowSerialComparison:
         view = _make_base_view()
         item = self._make_item("WS-X4748", "SN1")
         mt = self._make_matched_type()
-        # Bay with no installed module
         bay = _bay("Slot 1", installed_module=None)
         bay.installed_module = None
 
-        with patch.object(view, "_match_module_bay", return_value=bay):
-            with patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="WS-X4748"):
-                with patch("netbox_librenms_plugin.utils.module_type_uses_module_path", return_value=False):
-                    with patch("netbox_librenms_plugin.utils.supports_module_path", return_value=False):
-                        with patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False):
-                            with patch("netbox_librenms_plugin.utils.module_type_is_end_module", return_value=False):
-                                with patch(
-                                    "netbox_librenms_plugin.utils.module_type_uses_module_token", return_value=False
-                                ):
-                                    row = view._build_row(item, {10: item}, {"Slot 1": bay}, {"WS-X4748": mt}, depth=0)
+        with _patch_build_row_deps(view, match_bay_return=bay):
+            row = view._build_row(item, {10: item}, {"Slot 1": bay}, {"WS-X4748": mt}, depth=0)
 
         assert row["can_install"] is True
 
@@ -393,16 +365,8 @@ class TestBuildRowSerialComparison:
         installed = _module(serial="SN1")
         bay = _bay("Slot 1", installed_module=installed)
 
-        with patch.object(view, "_match_module_bay", return_value=bay):
-            with patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="WS-X4748"):
-                with patch("netbox_librenms_plugin.utils.module_type_uses_module_path", return_value=False):
-                    with patch("netbox_librenms_plugin.utils.supports_module_path", return_value=False):
-                        with patch("netbox_librenms_plugin.utils.has_nested_name_conflict", return_value=False):
-                            with patch("netbox_librenms_plugin.utils.module_type_is_end_module", return_value=False):
-                                with patch(
-                                    "netbox_librenms_plugin.utils.module_type_uses_module_token", return_value=False
-                                ):
-                                    row = view._build_row(item, {10: item}, {"Slot 1": bay}, {"WS-X4748": mt}, depth=0)
+        with _patch_build_row_deps(view, match_bay_return=bay):
+            row = view._build_row(item, {10: item}, {"Slot 1": bay}, {"WS-X4748": mt}, depth=0)
 
         assert row["can_install"] is False
 
@@ -678,9 +642,8 @@ class TestInstallSingleStatus:
             yield
 
         with patch("netbox_librenms_plugin.views.sync.modules.transaction.atomic", noop_atomic):
-            with patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="WS-X4748"):
-                with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls:
-                    mock_mapping_cls.objects.all.return_value = []
+            with patch("netbox_librenms_plugin.utils.resolve_module_type", side_effect=lambda m, t, **kw: t.get(m)):
+                with patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])):
                     with patch.object(InstallBranchView, "_find_parent_module_id", return_value=None):
                         with patch.object(InstallBranchView, "_match_bay", return_value=bay):
                             result = view._install_single(
@@ -694,7 +657,7 @@ class TestInstallSingleStatus:
         view = _make_install_branch_view()
         device, item, index_map, module_types, ModuleBay, ModuleType, Module, bay, mt = self._make_args()
 
-        with patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="WS-X4748"):
+        with patch("netbox_librenms_plugin.utils.resolve_module_type", return_value=None):
             result = view._install_single(
                 device,
                 item,
@@ -714,9 +677,8 @@ class TestInstallSingleStatus:
         view = _make_install_branch_view()
         device, item, index_map, module_types, ModuleBay, ModuleType, Module, bay, mt = self._make_args()
 
-        with patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="WS-X4748"):
-            with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls:
-                mock_mapping_cls.objects.all.return_value = []
+        with patch("netbox_librenms_plugin.utils.resolve_module_type", side_effect=lambda m, t, **kw: t.get(m)):
+            with patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])):
                 with patch.object(InstallBranchView, "_find_parent_module_id", return_value=None):
                     with patch.object(InstallBranchView, "_match_bay", return_value=None):
                         result = view._install_single(
@@ -733,9 +695,8 @@ class TestInstallSingleStatus:
         device, item, index_map, module_types, ModuleBay, ModuleType, Module, bay, mt = self._make_args()
         bay.installed_module = _module()  # occupied!
 
-        with patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="WS-X4748"):
-            with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls:
-                mock_mapping_cls.objects.all.return_value = []
+        with patch("netbox_librenms_plugin.utils.resolve_module_type", side_effect=lambda m, t, **kw: t.get(m)):
+            with patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])):
                 with patch.object(InstallBranchView, "_find_parent_module_id", return_value=None):
                     with patch.object(InstallBranchView, "_match_bay", return_value=bay):
                         result = view._install_single(
@@ -748,20 +709,21 @@ class TestInstallSingleStatus:
     def test_returns_failed_on_exception(self):
         from contextlib import contextmanager
 
+        from django.db import IntegrityError
+
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
         view = _make_install_branch_view()
         device, item, index_map, module_types, ModuleBay, ModuleType, Module, bay, mt = self._make_args()
-        Module.side_effect = Exception("DB error")
+        Module.side_effect = IntegrityError("DB error")
 
         @contextmanager
         def noop_atomic():
             yield
 
         with patch("netbox_librenms_plugin.views.sync.modules.transaction.atomic", noop_atomic):
-            with patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="WS-X4748"):
-                with patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls:
-                    mock_mapping_cls.objects.all.return_value = []
+            with patch("netbox_librenms_plugin.utils.resolve_module_type", side_effect=lambda m, t, **kw: t.get(m)):
+                with patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])):
                     with patch.object(InstallBranchView, "_find_parent_module_id", return_value=None):
                         with patch.object(InstallBranchView, "_match_bay", return_value=bay):
                             result = view._install_single(

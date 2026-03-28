@@ -63,6 +63,7 @@ class TestModuleMismatchPreviewView:
         view = self._view()
         device = _make_device()
         request = _make_request(data={})
+        view.request = request
 
         with patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device):
             resp = view.get(request, pk=24)
@@ -74,6 +75,7 @@ class TestModuleMismatchPreviewView:
         view = self._view()
         device = _make_device()
         request = _make_request(data={"module_id": "42", "ent_index": "notanint"})
+        view.request = request
 
         with patch("netbox_librenms_plugin.views.sync.modules.get_object_or_404", return_value=device):
             resp = view.get(request, pk=24)
@@ -86,6 +88,7 @@ class TestModuleMismatchPreviewView:
         device = _make_device()
         installed = _make_module()
         request = _make_request(data={"module_id": "42", "ent_index": "100"})
+        view.request = request
 
         with (
             patch(
@@ -106,6 +109,7 @@ class TestModuleMismatchPreviewView:
         device = _make_device()
         installed = _make_module()
         request = _make_request(data={"module_id": "42", "ent_index": "999"})
+        view.request = request
         cached = [{"entPhysicalIndex": 100, "entPhysicalModelName": "XCM-7s", "entPhysicalSerialNum": "S1"}]
 
         with (
@@ -129,6 +133,7 @@ class TestModuleMismatchPreviewView:
         device = _make_device()
         installed = _make_module(type_id=5, type_model="XCM-7s")
         request = _make_request(data={"module_id": "42", "ent_index": "100"})
+        view.request = request
         cached = [{"entPhysicalIndex": 100, "entPhysicalModelName": "XCM-7s", "entPhysicalSerialNum": "NS123"}]
 
         matched_type = MagicMock()
@@ -141,7 +146,10 @@ class TestModuleMismatchPreviewView:
             ),
             patch.object(view, "get_cache_key", return_value="cache-key"),
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
-            patch("netbox_librenms_plugin.utils.get_module_types_indexed", return_value={"XCM-7s": matched_type}),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_module_types_indexed",
+                return_value={"XCM-7s": matched_type},
+            ),
             patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="XCM-7s"),
             patch("dcim.models.Module") as mock_module_cls,
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value=HttpResponse("OK")) as mock_render,
@@ -164,6 +172,7 @@ class TestModuleMismatchPreviewView:
         device = _make_device()
         installed = _make_module(serial="OLD", type_id=5)
         request = _make_request(data={"module_id": "42", "ent_index": "100"})
+        view.request = request
         cached = [{"entPhysicalIndex": 100, "entPhysicalModelName": "XCM-7s", "entPhysicalSerialNum": "NEW_SERIAL"}]
 
         matched_type = MagicMock()
@@ -177,7 +186,10 @@ class TestModuleMismatchPreviewView:
             ),
             patch.object(view, "get_cache_key", return_value="cache-key"),
             patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
-            patch("netbox_librenms_plugin.utils.get_module_types_indexed", return_value={"XCM-7s": matched_type}),
+            patch(
+                "netbox_librenms_plugin.views.sync.modules.get_module_types_indexed",
+                return_value={"XCM-7s": matched_type},
+            ),
             patch("netbox_librenms_plugin.utils.apply_normalization_rules", return_value="XCM-7s"),
             patch("dcim.models.Module") as mock_module_cls,
             patch("netbox_librenms_plugin.views.sync.modules.render", return_value=HttpResponse("OK")) as mock_render,

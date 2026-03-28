@@ -206,14 +206,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         self._device_manufacturer = getattr(getattr(obj, "device_type", None), "manufacturer", None)
 
         # Preload all ModuleBayMapping rows once to avoid N+1 queries in _match_module_bay.
-        from netbox_librenms_plugin.models import InventoryIgnoreRule, ModuleBayMapping
+        from netbox_librenms_plugin.utils import get_enabled_ignore_rules, load_bay_mappings
 
-        all_bay_mappings = list(ModuleBayMapping.objects.all())
-        self._exact_bay_mappings = [m for m in all_bay_mappings if not m.is_regex]
-        self._regex_bay_mappings = [m for m in all_bay_mappings if m.is_regex]
+        self._exact_bay_mappings, self._regex_bay_mappings = load_bay_mappings()
 
         # Load enabled ignore rules once; passed to _check_ignore_rules throughout.
-        ignore_rules = list(InventoryIgnoreRule.objects.filter(enabled=True))
+        ignore_rules = get_enabled_ignore_rules()
 
         # Device serial for serial_matches_device rules (strip whitespace defensively).
         device_serial = (getattr(obj, "serial", None) or "").strip()
@@ -222,182 +220,18 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         device_bays, module_scoped_bays = self._get_module_bays(obj)
         module_types = self._get_module_types()
 
-        # --- Pass 1: build transparent_indices ---
-        # Identify ENTITY-MIB items whose entPhysicalIndex should be treated as
-        # transparent parents (row hidden, children promoted to device-level bays).
-        transparent_indices: set = set()
-        for item in inventory_data:
-            idx = item.get("entPhysicalIndex")
-            if idx is None:
-                continue
-            parent_item = index_map.get(item.get("entPhysicalContainedIn"))
-            action = _check_ignore_rules(item, parent_item, ignore_rules, index_map, device_serial)
-            if action == "transparent":
-                transparent_indices.add(idx)
-
-        # Collect top-level items and their sub-components
-        # Include synthetic transceiver items (from vendors without ENTITY-MIB SFP data)
-        # Exclude items that have any ancestor with an INVENTORY_CLASSES class
-        # (they appear as sub-components under that ancestor)
-        top_items = []
-        for item in inventory_data:
-            if item.get("_from_transceiver_api"):
-                top_items.append(item)
-                continue
-            phys_class = item.get("entPhysicalClass")
-            if phys_class not in INVENTORY_CLASSES:
-                continue
-            parent_item = index_map.get(item.get("entPhysicalContainedIn"))
-            action = _check_ignore_rules(item, parent_item, ignore_rules, index_map, device_serial)
-            if action == "skip":
-                continue
-            # Transparent items are hidden from the table but must NOT be added as
-            # top-level items — their children will appear instead.
-            if action == "transparent":
-                continue
-            # Skip items with generic model names (not real hardware).
-            # Containers with empty model are physical slot representations.
-            model = (item.get("entPhysicalModelName") or "").strip()
-            if phys_class == "container" and model in _GENERIC_CONTAINER_MODELS:
-                continue
-            if model and model in _GENERIC_CONTAINER_MODELS:
-                continue
-            # Walk up ancestor chain; skip if any ancestor is an inventory-class item.
-            # Containers with empty model are physical slot/bay representations, not
-            # real modules — skip them so children can be top-level items.
-            # Transparent ancestors are treated as generic containers — their children
-            # should become top-level items rather than sub-components.
-            is_descendant = False
-            current_idx = item.get("entPhysicalContainedIn", 0)
-            visited_ancestors = set()
-            while current_idx and current_idx in index_map and current_idx not in visited_ancestors:
-                visited_ancestors.add(current_idx)
-                ancestor = index_map[current_idx]
-                # Transparent ancestors are effectively "see-through" — treat them
-                # like generic containers and keep walking up.
-                if current_idx in transparent_indices:
-                    current_idx = ancestor.get("entPhysicalContainedIn", 0)
-                    continue
-                anc_class = ancestor.get("entPhysicalClass")
-                if anc_class in INVENTORY_CLASSES:
-                    anc_model = (ancestor.get("entPhysicalModelName") or "").strip()
-                    # Containers with generic/empty models are physical slot representations
-                    if anc_class == "container" and anc_model in _GENERIC_CONTAINER_MODELS:
-                        current_idx = ancestor.get("entPhysicalContainedIn", 0)
-                        continue
-                    is_descendant = True
-                    break
-                current_idx = ancestor.get("entPhysicalContainedIn", 0)
-            if is_descendant:
-                continue
-            top_items.append(item)
-
-        table_data = []
-        from netbox_librenms_plugin.utils import apply_normalization_rules
-
-        # Build combined bay lookup so synthetic transceiver entries (which may
-        # live inside installed modules) can find their module-scoped bays.
-        # ChainMap preserves scope ordering — device-level bays take precedence,
-        # then module bays in definition order — so identically-named bays in
-        # different installed modules no longer silently overwrite each other.
-        all_bays = ChainMap(device_bays, *module_scoped_bays.values())
-
-        for item in top_items:
-            # Transceiver API entries may live inside installed modules, so they
-            # need the full bay map.  ENTITY-MIB top-level items must only match
-            # device-level bays to avoid name collisions with module-scoped bays
-            # that share the same name as a device bay.
-            item_bays = all_bays if item.get("_from_transceiver_api") else device_bays
-            row = self._build_row(item, index_map, item_bays, module_types, depth=0)
-            parent_row_idx = len(table_data)
-            table_data.append(row)
-
-            # Determine which bays sub-components should match against:
-            # If parent matched a bay with an installed module, use that module's child bays.
-            # If parent matched a bay but it's NOT installed, children can't be installed
-            # individually (parent must be installed first to create child bays).
-            parent_module_id = None
-            parent_bay_matched_but_uninstalled = False
-            if row.get("module_bay_id"):
-                matched_bay = item_bays.get(row["module_bay"])
-                if matched_bay and hasattr(matched_bay, "installed_module") and matched_bay.installed_module:
-                    parent_module_id = matched_bay.installed_module.pk
-                else:
-                    # Parent matched a bay but it's not installed yet
-                    parent_bay_matched_but_uninstalled = True
-
-            if parent_bay_matched_but_uninstalled:
-                # Empty dict: children can't match any bay individually
-                child_bays = {}
-            elif parent_module_id:
-                child_bays = module_scoped_bays.get(parent_module_id, {})
-            else:
-                child_bays = device_bays
-
-            # Find sub-components with a model name (transceivers, converters, etc.)
-            # Track bay scope per depth level so nested modules use correct bays
-            bays_by_depth = {0: child_bays}
-            parent_ent_idx = item.get("entPhysicalIndex")
-            if parent_ent_idx is None:
-                continue
-            sub_items = self._get_sub_components(
-                parent_ent_idx, children_by_parent, index_map, ignore_rules, device_serial
-            )
-            for depth, sub_item in sub_items:
-                scope_bays = bays_by_depth.get(depth, child_bays)
-                sub_row = self._build_row(sub_item, index_map, scope_bays, module_types, depth=depth)
-                table_data.append(sub_row)
-
-                # Update bay scope for children of this sub-item.
-                # Must always set bays_by_depth[depth+1] when a bay was matched to
-                # prevent stale scope from a previously-processed sibling at the
-                # same depth leaking into this item's children.
-                if sub_row.get("module_bay_id"):
-                    matched_sub_bay = scope_bays.get(sub_row["module_bay"])
-                    if (
-                        matched_sub_bay
-                        and hasattr(matched_sub_bay, "installed_module")
-                        and matched_sub_bay.installed_module
-                    ):
-                        sub_module_id = matched_sub_bay.installed_module.pk
-                        bays_by_depth[depth + 1] = module_scoped_bays.get(sub_module_id, {})
-                    else:
-                        # Bay matched but not yet installed: reset child scope so
-                        # items under this uninstalled module don't accidentally
-                        # inherit bays from a previously-processed installed sibling.
-                        bays_by_depth[depth + 1] = {}
-                else:
-                    # No bay match for this sub-item: clear scope so it doesn't
-                    # bleed into the next sibling's children.
-                    bays_by_depth[depth + 1] = {}
-
-                # Mark parent if any child is installable
-                if sub_row.get("can_install"):
-                    table_data[parent_row_idx]["has_installable_children"] = True
-
-            # When parent is installable but children can't match bays yet
-            # (parent module not installed), enable "Install Branch" if any child
-            # has a matching module type (branch install handles bay creation).
-            if (
-                parent_bay_matched_but_uninstalled
-                and row.get("can_install")
-                and not table_data[parent_row_idx].get("has_installable_children")
-            ):
-                for _depth, sub_item in sub_items:
-                    sub_model = (sub_item.get("entPhysicalModelName") or "").strip()
-                    if not sub_model:
-                        continue
-                    matched = module_types.get(sub_model)
-                    if not matched:
-                        normalized = apply_normalization_rules(
-                            sub_model,
-                            "module_type",
-                            manufacturer=getattr(self, "_device_manufacturer", None),
-                        )
-                        matched = module_types.get(normalized)
-                    if matched:
-                        table_data[parent_row_idx]["has_installable_children"] = True
-                        break
+        transparent_indices = self._find_transparent_indices(inventory_data, index_map, ignore_rules, device_serial)
+        top_items = self._collect_top_items(inventory_data, index_map, ignore_rules, device_serial, transparent_indices)
+        table_data = self._build_table_rows(
+            top_items,
+            index_map,
+            children_by_parent,
+            ignore_rules,
+            device_serial,
+            device_bays,
+            module_scoped_bays,
+            module_types,
+        )
 
         # Sort top-level groups by status, keeping children after their parent
         table_data = self._sort_with_hierarchy(table_data)
@@ -421,6 +255,167 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
             "cache_expiry": cache_expiry,
             "server_key": self.librenms_api.server_key,
         }
+
+    @staticmethod
+    def _find_transparent_indices(inventory_data, index_map, ignore_rules, device_serial):
+        """Identify ENTITY-MIB items that should be treated as transparent parents."""
+        transparent_indices: set = set()
+        for item in inventory_data:
+            idx = item.get("entPhysicalIndex")
+            if idx is None:
+                continue
+            parent_item = index_map.get(item.get("entPhysicalContainedIn"))
+            action = _check_ignore_rules(item, parent_item, ignore_rules, index_map, device_serial)
+            if action == "transparent":
+                transparent_indices.add(idx)
+        return transparent_indices
+
+    @staticmethod
+    def _collect_top_items(inventory_data, index_map, ignore_rules, device_serial, transparent_indices):
+        """
+        Collect top-level inventory items for the sync table.
+
+        Includes synthetic transceiver items. Excludes items that have any
+        ancestor with an INVENTORY_CLASSES class (they appear as sub-components).
+        """
+        top_items = []
+        for item in inventory_data:
+            if item.get("_from_transceiver_api"):
+                top_items.append(item)
+                continue
+            phys_class = item.get("entPhysicalClass")
+            if phys_class not in INVENTORY_CLASSES:
+                continue
+            parent_item = index_map.get(item.get("entPhysicalContainedIn"))
+            action = _check_ignore_rules(item, parent_item, ignore_rules, index_map, device_serial)
+            if action == "skip":
+                continue
+            # Transparent items are hidden from the table but must NOT be added as
+            # top-level items — their children will appear instead.
+            if action == "transparent":
+                continue
+            # Skip items with generic model names (not real hardware).
+            model = (item.get("entPhysicalModelName") or "").strip()
+            if phys_class == "container" and model in _GENERIC_CONTAINER_MODELS:
+                continue
+            if model and model in _GENERIC_CONTAINER_MODELS:
+                continue
+            # Walk up ancestor chain; skip if any ancestor is an inventory-class item.
+            # Transparent ancestors are treated as generic containers.
+            is_descendant = False
+            current_idx = item.get("entPhysicalContainedIn", 0)
+            visited_ancestors = set()
+            while current_idx and current_idx in index_map and current_idx not in visited_ancestors:
+                visited_ancestors.add(current_idx)
+                ancestor = index_map[current_idx]
+                if current_idx in transparent_indices:
+                    current_idx = ancestor.get("entPhysicalContainedIn", 0)
+                    continue
+                anc_class = ancestor.get("entPhysicalClass")
+                if anc_class in INVENTORY_CLASSES:
+                    anc_model = (ancestor.get("entPhysicalModelName") or "").strip()
+                    if anc_class == "container" and anc_model in _GENERIC_CONTAINER_MODELS:
+                        current_idx = ancestor.get("entPhysicalContainedIn", 0)
+                        continue
+                    is_descendant = True
+                    break
+                current_idx = ancestor.get("entPhysicalContainedIn", 0)
+            if is_descendant:
+                continue
+            top_items.append(item)
+        return top_items
+
+    def _build_table_rows(
+        self,
+        top_items,
+        index_map,
+        children_by_parent,
+        ignore_rules,
+        device_serial,
+        device_bays,
+        module_scoped_bays,
+        module_types,
+    ):
+        """Build table rows from top-level items and their sub-components."""
+        from netbox_librenms_plugin.utils import resolve_module_type
+
+        # ChainMap preserves scope ordering — device-level bays take precedence.
+        all_bays = ChainMap(device_bays, *module_scoped_bays.values())
+        table_data = []
+
+        for item in top_items:
+            item_bays = all_bays if item.get("_from_transceiver_api") else device_bays
+            row = self._build_row(item, index_map, item_bays, module_types, depth=0)
+            parent_row_idx = len(table_data)
+            table_data.append(row)
+
+            # Determine child bay scope based on parent match state
+            parent_module_id = None
+            parent_bay_matched_but_uninstalled = False
+            if row.get("module_bay_id"):
+                matched_bay = item_bays.get(row["module_bay"])
+                if matched_bay and hasattr(matched_bay, "installed_module") and matched_bay.installed_module:
+                    parent_module_id = matched_bay.installed_module.pk
+                else:
+                    parent_bay_matched_but_uninstalled = True
+
+            if parent_bay_matched_but_uninstalled:
+                child_bays = {}
+            elif parent_module_id:
+                child_bays = module_scoped_bays.get(parent_module_id, {})
+            else:
+                child_bays = device_bays
+
+            # Process sub-components with depth-tracked bay scoping
+            bays_by_depth = {0: child_bays}
+            parent_ent_idx = item.get("entPhysicalIndex")
+            if parent_ent_idx is None:
+                continue
+            sub_items = self._get_sub_components(
+                parent_ent_idx, children_by_parent, index_map, ignore_rules, device_serial
+            )
+            for depth, sub_item in sub_items:
+                scope_bays = bays_by_depth.get(depth, child_bays)
+                sub_row = self._build_row(sub_item, index_map, scope_bays, module_types, depth=depth)
+                table_data.append(sub_row)
+
+                # Update bay scope for children of this sub-item.
+                if sub_row.get("module_bay_id"):
+                    matched_sub_bay = scope_bays.get(sub_row["module_bay"])
+                    if (
+                        matched_sub_bay
+                        and hasattr(matched_sub_bay, "installed_module")
+                        and matched_sub_bay.installed_module
+                    ):
+                        sub_module_id = matched_sub_bay.installed_module.pk
+                        bays_by_depth[depth + 1] = module_scoped_bays.get(sub_module_id, {})
+                    else:
+                        bays_by_depth[depth + 1] = {}
+                else:
+                    # Preserve parent scope for unmatched intermediate containers
+                    bays_by_depth[depth + 1] = scope_bays
+
+                if sub_row.get("can_install"):
+                    table_data[parent_row_idx]["has_installable_children"] = True
+
+            # Enable "Install Branch" if parent is uninstalled but children have types
+            if (
+                parent_bay_matched_but_uninstalled
+                and row.get("can_install")
+                and not table_data[parent_row_idx].get("has_installable_children")
+            ):
+                for _depth, sub_item in sub_items:
+                    sub_model = (sub_item.get("entPhysicalModelName") or "").strip()
+                    if not sub_model:
+                        continue
+                    matched = resolve_module_type(
+                        sub_model, module_types, manufacturer=getattr(self, "_device_manufacturer", None)
+                    )
+                    if matched:
+                        table_data[parent_row_idx]["has_installable_children"] = True
+                        break
+
+        return table_data
 
     def _merge_transceiver_data(self, inventory_data):
         """
@@ -874,11 +869,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
     def _build_row(self, item, index_map, module_bays, module_types, depth=0):
         """Build a single table row from a LibreNMS inventory item."""
         from netbox_librenms_plugin.utils import (
-            apply_normalization_rules,
             has_nested_name_conflict,
             module_type_is_end_module,
             module_type_uses_module_path,
             module_type_uses_module_token,
+            resolve_module_type,
             supports_module_path,
         )
 
@@ -892,13 +887,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         matched_bay = self._match_module_bay(item, index_map, module_bays)
 
         # Match to NetBox module type (direct lookup, then normalization fallback)
-        matched_type = module_types.get(model_name) if model_name else None
-        if not matched_type and model_name:
-            normalized = apply_normalization_rules(
-                model_name, "module_type", manufacturer=getattr(self, "_device_manufacturer", None)
-            )
-            if normalized != model_name:
-                matched_type = module_types.get(normalized)
+        matched_type = resolve_module_type(
+            model_name, module_types, manufacturer=getattr(self, "_device_manufacturer", None)
+        )
 
         # Badge flags — purely informational, never block installation
         needs_module_path = matched_type and module_type_uses_module_path(matched_type)

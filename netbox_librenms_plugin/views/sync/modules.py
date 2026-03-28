@@ -2,7 +2,8 @@
 
 from django.contrib import messages
 from django.core.cache import cache
-from django.db import transaction
+from django.core.exceptions import ValidationError
+from django.db import IntegrityError, transaction
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
@@ -61,7 +62,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Ca
             messages.success(
                 request, f"Installed {module_type.model} in {module_bay.name} (serial: {serial or 'N/A'})."
             )
-        except Exception as e:
+        except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Failed to install module: {e}")
 
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
@@ -102,9 +103,9 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
         # Load ignore rules so the branch respects the same filters shown in the table
-        from netbox_librenms_plugin.models import InventoryIgnoreRule
+        from netbox_librenms_plugin.utils import get_enabled_ignore_rules
 
-        ignore_rules = list(InventoryIgnoreRule.objects.filter(enabled=True))
+        ignore_rules = get_enabled_ignore_rules()
         device_serial = (getattr(device, "serial", None) or "").strip()
 
         # Build index map and collect the branch to install
@@ -120,11 +121,9 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         module_types = get_module_types_indexed()
 
         # Preload all ModuleBayMappings once to avoid N+1 per-item queries
-        from netbox_librenms_plugin.models import ModuleBayMapping
+        from netbox_librenms_plugin.utils import load_bay_mappings
 
-        all_mappings = list(ModuleBayMapping.objects.all())
-        exact_mappings = [m for m in all_mappings if not m.is_regex]
-        regex_mappings = [m for m in all_mappings if m.is_regex]
+        exact_mappings, regex_mappings = load_bay_mappings()
 
         # Install top-down: each install may create new child bays
         installed = []
@@ -151,7 +150,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         skipped.append(f"{result['name']}: {result['reason']}")
                     else:
                         failed.append(f"{result['name']}: {result['reason']}")
-        except Exception as e:
+        except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Branch install failed: {e}")
             sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
             return redirect(f"{sync_url}?tab=modules#librenms-module-table")
@@ -249,19 +248,15 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         Re-fetches module bays each time since parent installs create new ones.
         Scopes bay lookup to the correct parent module to handle duplicate bay names.
         """
-        from netbox_librenms_plugin.utils import apply_normalization_rules
+        from netbox_librenms_plugin.utils import resolve_module_type
 
         model_name = (item.get("entPhysicalModelName") or "").strip()
         serial = (item.get("entPhysicalSerialNum") or "").strip()
         name = item.get("entPhysicalName", "") or model_name
 
         # Match module type (direct, then normalization fallback)
-        matched_type = module_types.get(model_name)
-        if not matched_type and model_name:
-            manufacturer = getattr(getattr(device, "device_type", None), "manufacturer", None)
-            normalized = apply_normalization_rules(model_name, "module_type", manufacturer=manufacturer)
-            if normalized != model_name:
-                matched_type = module_types.get(normalized)
+        manufacturer = getattr(getattr(device, "device_type", None), "manufacturer", None)
+        matched_type = resolve_module_type(model_name, module_types, manufacturer=manufacturer)
         if not matched_type:
             return {"status": "skipped", "name": name, "reason": "no matching type"}
 
@@ -270,11 +265,9 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         # Use preloaded mappings if provided, otherwise load from DB
         if exact_mappings is None or regex_mappings is None:
-            from netbox_librenms_plugin.models import ModuleBayMapping
+            from netbox_librenms_plugin.utils import load_bay_mappings
 
-            all_mappings = list(ModuleBayMapping.objects.all())
-            exact_mappings = [m for m in all_mappings if not m.is_regex]
-            regex_mappings = [m for m in all_mappings if m.is_regex]
+            exact_mappings, regex_mappings = load_bay_mappings()
 
         bay_mappings = exact_mappings + regex_mappings
 
@@ -308,12 +301,12 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 )
                 module.full_clean()
                 module.save()
-        except Exception as e:
+        except (ValidationError, IntegrityError) as e:
             error_msg = str(e)
             if "dcim_interface_unique_device_name" in error_msg:
                 error_msg = (
                     "duplicate interface name — this module type's interface template "
-                    "uses {module} which resolves to the same name for all siblings. "
+                    "uses the '{module}' token which resolves to the same name for all siblings. "
                     "An interface naming plugin with a rewrite rule for this module type can fix this."
                 )
             return {"status": "failed", "name": name, "reason": error_msg}
@@ -342,7 +335,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             if bay.name not in bay_by_name:
                 bay_by_name[bay.name] = bay
         # Split bay_mappings into exact and regex for correct lookup
-        import re as _re
+        import re
 
         exact_mapping_by_name: dict = {}
         regex_bay_mappings: list = []
@@ -383,11 +376,11 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 # Regex mapping
                 for rm in regex_bay_mappings:
                     try:
-                        if _re.search(rm.librenms_name, name):
+                        if re.search(rm.librenms_name, name):
                             bay = bay_by_name.get(rm.netbox_bay_name)
                             if bay and hasattr(bay, "installed_module") and bay.installed_module:
                                 return bay.installed_module.pk
-                    except _re.error:
+                    except re.error:
                         continue
 
             current = parent
@@ -395,8 +388,6 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
     @staticmethod
     def _match_bay(item, index_map, module_bays, exact_mappings, regex_mappings):
         """Match an inventory item to a module bay (same logic as BaseModuleTableView)."""
-        import re
-
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         # Resolve parent name by walking up the containment hierarchy
@@ -441,7 +432,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         # Regex pattern matching using preloaded list
         for name in candidate_names:
-            bay = BaseModuleTableView._lookup_regex_bay_mapping(re, name, phys_class, module_bays, regex_mappings)
+            bay = BaseModuleTableView._lookup_regex_bay_mapping(name, phys_class, module_bays, regex_mappings)
             if bay:
                 return bay
 
@@ -503,10 +494,10 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
         # Filter out items matching 'skip' ignore rules (consistent with what the table shows)
-        from netbox_librenms_plugin.models import InventoryIgnoreRule
+        from netbox_librenms_plugin.utils import get_enabled_ignore_rules
         from netbox_librenms_plugin.views.base.modules_view import _check_ignore_rules
 
-        ignore_rules = list(InventoryIgnoreRule.objects.filter(enabled=True))
+        ignore_rules = get_enabled_ignore_rules()
         device_serial = (getattr(device, "serial", None) or "").strip()
         if ignore_rules:
             items = [
@@ -525,11 +516,9 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         module_types = get_module_types_indexed()
 
         # Preload all ModuleBayMappings once to avoid N+1 per-item queries
-        from netbox_librenms_plugin.models import ModuleBayMapping
+        from netbox_librenms_plugin.utils import load_bay_mappings
 
-        all_mappings = list(ModuleBayMapping.objects.all())
-        exact_mappings = [m for m in all_mappings if not m.is_regex]
-        regex_mappings = [m for m in all_mappings if m.is_regex]
+        exact_mappings, regex_mappings = load_bay_mappings()
 
         installed, skipped, failed = [], [], []
 
@@ -553,7 +542,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         skipped.append(f"{result['name']}: {result['reason']}")
                     else:
                         failed.append(f"{result['name']}: {result['reason']}")
-        except Exception as e:
+        except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Install failed: {e}")
             sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
             return redirect(f"{sync_url}?tab=modules#librenms-module-table")
@@ -599,14 +588,16 @@ class UpdateModuleSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
                 request,
                 f"Updated serial for {module.module_type.model} in {module.module_bay.name} to '{serial}'.",
             )
-        except Exception as e:
+        except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Failed to update serial: {e}")
 
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
         return redirect(f"{sync_url}?tab=modules#librenms-module-table")
 
 
-class ModuleMismatchPreviewView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
+class ModuleMismatchPreviewView(
+    LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View
+):
     """
     Return the modal body HTML fragment for the module replace/move dialog.
 
@@ -618,6 +609,10 @@ class ModuleMismatchPreviewView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Cache
 
     def get(self, request, pk):
         from dcim.models import Device, Module
+
+        self.required_object_permissions = {"GET": [("view", Device), ("view", Module)]}
+        if error := self.require_object_permissions("GET"):
+            return error
 
         device = get_object_or_404(Device, pk=pk)
         module_id = request.GET.get("module_id")
@@ -653,15 +648,13 @@ class ModuleMismatchPreviewView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Cache
         librenms_serial = (librenms_item.get("entPhysicalSerialNum") or "").strip()
 
         # Detect type mismatch
-        from netbox_librenms_plugin.utils import apply_normalization_rules, get_module_types_indexed
+        from netbox_librenms_plugin.utils import resolve_module_type
 
         module_types = get_module_types_indexed()
-        matched_type = module_types.get(librenms_model)
-        if not matched_type and librenms_model != "-":
-            manufacturer = getattr(getattr(device, "device_type", None), "manufacturer", None)
-            normalized = apply_normalization_rules(librenms_model, "module_type", manufacturer=manufacturer)
-            if normalized != librenms_model:
-                matched_type = module_types.get(normalized)
+        manufacturer = getattr(getattr(device, "device_type", None), "manufacturer", None)
+        matched_type = resolve_module_type(
+            librenms_model if librenms_model != "-" else "", module_types, manufacturer=manufacturer
+        )
 
         type_mismatch = matched_type is not None and installed_module.module_type_id != matched_type.pk
         installed_serial = (installed_module.serial or "").strip()
@@ -766,14 +759,10 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
             )
 
         module_types = get_module_types_indexed()
-        from netbox_librenms_plugin.utils import apply_normalization_rules
+        from netbox_librenms_plugin.utils import resolve_module_type
 
-        matched_type = module_types.get(model_name)
-        if not matched_type and model_name:
-            manufacturer = getattr(getattr(device, "device_type", None), "manufacturer", None)
-            normalized = apply_normalization_rules(model_name, "module_type", manufacturer=manufacturer)
-            if normalized != model_name:
-                matched_type = module_types.get(normalized)
+        manufacturer = getattr(getattr(device, "device_type", None), "manufacturer", None)
+        matched_type = resolve_module_type(model_name, module_types, manufacturer=manufacturer)
 
         if not matched_type:
             messages.error(request, f"No matching module type found for '{model_name}'.")
@@ -783,14 +772,16 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         old_bay_name = target_bay.name
 
         try:
+            conflict_removed_msg = None
             with transaction.atomic():
                 # Remove the serial-conflicting module from its current location (re-derived,
                 # not trusted from a client-submitted conflict_module_id field).
                 if conflict_module:
+                    c_model = conflict_module.module_type.model
                     c_bay = conflict_module.module_bay.name
                     c_device = conflict_module.device.name
                     conflict_module.delete()
-                    messages.info(request, f"Removed {conflict_module.module_type.model} from {c_device}/{c_bay}.")
+                    conflict_removed_msg = f"Removed {c_model} from {c_device}/{c_bay}."
 
                 # Delete the currently installed module in the target bay
                 installed_module.delete()
@@ -806,13 +797,15 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 new_module.full_clean()
                 new_module.save()
 
+            if conflict_removed_msg:
+                messages.info(request, conflict_removed_msg)
             messages.success(
                 request,
                 f"Replaced {old_type_name} with {matched_type.model} in {old_bay_name}"
                 + (f" (serial: {serial})" if serial else "")
                 + ".",
             )
-        except Exception as e:
+        except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Replace failed: {e}")
 
         return redirect(f"{sync_url}?tab=modules#librenms-module-table")
@@ -852,15 +845,13 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
         target_bay = get_object_or_404(ModuleBay, pk=target_bay_id, device=device)
 
         try:
+            occupant_removed_msg = None
             with transaction.atomic():
                 # Remove whatever is currently in the target bay (if provided and different)
                 if module_id:
                     occupant = Module.objects.filter(pk=module_id, device=device, module_bay=target_bay).first()
                     if occupant and occupant.pk != conflict_module.pk:
-                        messages.info(
-                            request,
-                            f"Removed {occupant.module_type.model} from {target_bay.name}.",
-                        )
+                        occupant_removed_msg = f"Removed {occupant.module_type.model} from {target_bay.name}."
                         occupant.delete()
 
                 # Move the conflict module to the target bay
@@ -871,12 +862,14 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
                 conflict_module.full_clean()
                 conflict_module.save()
 
+            if occupant_removed_msg:
+                messages.info(request, occupant_removed_msg)
             moved_msg = f"Moved {conflict_module.module_type.model}"
             if from_device != device.name:
                 moved_msg += f" from {from_device}"
             moved_msg += f"/{from_bay} to {target_bay.name}."
             messages.success(request, moved_msg)
-        except Exception as e:
+        except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Move failed: {e}")
 
         return redirect(f"{sync_url}?tab=modules#librenms-module-table")
