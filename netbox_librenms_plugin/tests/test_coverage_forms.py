@@ -193,3 +193,51 @@ class TestDeviceImportConfigFormInitialValues:
         assert form.fields["hostname"].initial == "sw01"
         assert form.fields["hardware"].initial == "Cisco 3850"
         assert form.fields["device_id"].initial == 5
+
+
+class TestAddToLibreSNMPV3Validation:
+    """Tests for SNMPv3 form conditional field requirements based on authlevel."""
+
+    _BASE_DATA = {
+        "hostname": "10.0.0.1",
+        "snmp_version": "v3",
+        "authname": "admin",
+    }
+
+    def _make_form(self, extra):
+        from netbox_librenms_plugin.forms import AddToLibreSNMPV3
+
+        data = {**self._BASE_DATA, **extra}
+        return AddToLibreSNMPV3(data=data)
+
+    def test_no_auth_no_priv_valid_without_auth_fields(self):
+        form = self._make_form({"authlevel": "noAuthNoPriv"})
+        assert form.is_valid(), form.errors
+
+    def test_auth_no_priv_requires_auth_fields(self):
+        form = self._make_form({"authlevel": "authNoPriv"})
+        assert not form.is_valid()
+        assert "authpass" in form.errors
+        assert "authalgo" in form.errors
+
+    def test_auth_no_priv_valid_with_auth_fields(self):
+        form = self._make_form({"authlevel": "authNoPriv", "authpass": "secret", "authalgo": "SHA"})
+        assert form.is_valid(), form.errors
+
+    def test_auth_priv_requires_all_fields(self):
+        form = self._make_form({"authlevel": "authPriv", "authpass": "secret", "authalgo": "SHA"})
+        assert not form.is_valid()
+        assert "cryptopass" in form.errors
+        assert "cryptoalgo" in form.errors
+
+    def test_auth_priv_valid_with_all_fields(self):
+        form = self._make_form(
+            {
+                "authlevel": "authPriv",
+                "authpass": "secret",
+                "authalgo": "SHA",
+                "cryptopass": "encrypt",
+                "cryptoalgo": "AES",
+            }
+        )
+        assert form.is_valid(), form.errors

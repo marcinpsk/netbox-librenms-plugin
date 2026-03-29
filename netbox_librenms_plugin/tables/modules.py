@@ -47,13 +47,23 @@ class LibreNMSModuleTable(tables.Table):
             "data-item-class": lambda record: record.get("item_class", ""),
         }
 
-    def __init__(self, *args, device=None, server_key="", can_add_module=False, can_change_module=False, **kwargs):
+    def __init__(
+        self,
+        *args,
+        device=None,
+        server_key="",
+        can_add_module=False,
+        can_change_module=False,
+        can_delete_module=False,
+        **kwargs,
+    ):
         """Initialize table with optional device context."""
         self.device = device
         self.csrf_token = ""
         self.server_key = server_key
         self.can_add_module = can_add_module
         self.can_change_module = can_change_module
+        self.can_delete_module = can_delete_module
         super().__init__(*args, **kwargs)
         if not can_add_module and hasattr(self, "columns"):
             self.columns["selection"].column.visible = False
@@ -234,6 +244,7 @@ class LibreNMSModuleTable(tables.Table):
         if (
             self.can_add_module
             and self.can_change_module
+            and self.can_delete_module
             and record.get("can_replace")
             and record.get("installed_module_id")
         ):

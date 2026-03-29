@@ -690,7 +690,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
         """
         from dcim.models import ModuleBay
 
-        bays = ModuleBay.objects.filter(device=obj).select_related("installed_module__module_type")
+        bays = ModuleBay.objects.filter(device=obj).select_related(
+            "installed_module__module_type",
+            "module__module_bay",
+        )
         device_bays = {}
         module_scoped_bays = {}
         for bay in bays:

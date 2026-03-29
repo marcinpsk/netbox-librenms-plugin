@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 class TestLibreNMSModuleTable:
     """Direct unit tests for every render_* method on LibreNMSModuleTable."""
 
-    def _make_table(self, device=None, can_add_module=True, can_change_module=True):
+    def _make_table(self, device=None, can_add_module=True, can_change_module=True, can_delete_module=True):
         """Create a bare table instance without calling __init__."""
         from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
 
@@ -21,6 +21,7 @@ class TestLibreNMSModuleTable:
         table.server_key = ""
         table.can_add_module = can_add_module
         table.can_change_module = can_change_module
+        table.can_delete_module = can_delete_module
         return table
 
     # ------------------------------------------------------------------
@@ -580,8 +581,13 @@ class TestLibreNMSModuleTable:
         with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
             assert "Replace" not in str(table.render_actions(None, record))
 
-        # both: Replace shown
-        table = self._make_table(device=device, can_add_module=True, can_change_module=True)
+        # add+change but no delete: no Replace
+        table = self._make_table(device=device, can_add_module=True, can_change_module=True, can_delete_module=False)
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
+            assert "Replace" not in str(table.render_actions(None, record))
+
+        # all three: Replace shown
+        table = self._make_table(device=device, can_add_module=True, can_change_module=True, can_delete_module=True)
         with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
             assert "Replace" in str(table.render_actions(None, record))
 

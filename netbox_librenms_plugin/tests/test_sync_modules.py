@@ -1852,11 +1852,13 @@ class TestPKValidationErrorPaths:
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
         device = _make_device()
-        # POST.getlist must return a list
+        # POST.getlist must return a list with non-numeric values
         request = _make_request("POST", data={})
-        request.POST = MagicMock()
-        request.POST.get.return_value = None
-        request.POST.getlist.return_value = ["a", "b"]
+        post_data = {}
+        post_mock = MagicMock()
+        post_mock.get = MagicMock(side_effect=lambda k, d=None: post_data.get(k, d))
+        post_mock.getlist = MagicMock(return_value=["a", "b"])
+        request.POST = post_mock
 
         cached = [{"entPhysicalIndex": 1, "entPhysicalModelName": "M1"}]
 

@@ -609,7 +609,7 @@ class AddToLibreSNMPV1V2(BaseSNMPForm):
         label="SNMP Community",
         max_length=255,
         required=True,
-        widget=forms.PasswordInput(render_value=True),
+        widget=forms.PasswordInput(),
     )
 
 
@@ -637,8 +637,8 @@ class AddToLibreSNMPV3(BaseSNMPForm):
     authpass = forms.CharField(
         label="Auth Password",
         max_length=255,
-        required=True,
-        widget=forms.PasswordInput(render_value=True),
+        required=False,
+        widget=forms.PasswordInput(),
     )
     authalgo = forms.ChoiceField(
         label="Auth Algorithm",
@@ -650,19 +650,37 @@ class AddToLibreSNMPV3(BaseSNMPForm):
             ("SHA-384", "SHA-384"),
             ("SHA-512", "SHA-512"),
         ],
-        required=True,
+        required=False,
     )
     cryptopass = forms.CharField(
         label="Crypto Password",
         max_length=255,
-        required=True,
-        widget=forms.PasswordInput(render_value=True),
+        required=False,
+        widget=forms.PasswordInput(),
     )
     cryptoalgo = forms.ChoiceField(
         label="Crypto Algorithm",
         choices=[("AES", "AES"), ("DES", "DES")],
-        required=True,
+        required=False,
     )
+
+    def clean(self):
+        cleaned = super().clean()
+        authlevel = cleaned.get("authlevel")
+
+        if authlevel in ("authNoPriv", "authPriv"):
+            if not cleaned.get("authpass"):
+                self.add_error("authpass", "Auth password is required for this auth level.")
+            if not cleaned.get("authalgo"):
+                self.add_error("authalgo", "Auth algorithm is required for this auth level.")
+
+        if authlevel == "authPriv":
+            if not cleaned.get("cryptopass"):
+                self.add_error("cryptopass", "Crypto password is required for authPriv.")
+            if not cleaned.get("cryptoalgo"):
+                self.add_error("cryptoalgo", "Crypto algorithm is required for authPriv.")
+
+        return cleaned
 
 
 # Backwards-compatible alias — remove once all references are updated.

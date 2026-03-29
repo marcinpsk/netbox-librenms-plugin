@@ -193,7 +193,7 @@ class InventoryIgnoreRuleTable(NetBoxTable):
 
     def render_pattern(self, value, record):
         """Show dash for serial_matches_device rules where pattern is unused."""
-        if record.match_type == "serial_matches_device":
+        if record.match_type == InventoryIgnoreRule.MATCH_SERIAL_DEVICE:
             return format_html('<span class="text-muted">—</span>')
         return format_html("<code>{}</code>", value) if value else "—"
 
