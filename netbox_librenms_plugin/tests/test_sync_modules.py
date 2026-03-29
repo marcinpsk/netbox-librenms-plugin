@@ -1047,7 +1047,7 @@ class TestInstallViewsDoNotDeleteCache:
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
-            patch("netbox_librenms_plugin.views.sync.modules.messages"),
+            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.sync.modules.redirect"),
             patch("dcim.models.Module") as mock_module_cls,
             patch.object(ModuleBay, "objects") as mock_objects,
@@ -1058,6 +1058,7 @@ class TestInstallViewsDoNotDeleteCache:
             mock_objects.select_for_update.return_value = mock_qs
             view.post(request, pk=24)
 
+        mock_messages.success.assert_called_once()
         mock_cache.delete.assert_not_called()
 
     def test_install_branch_view_no_cache_delete(self):
@@ -1094,13 +1095,14 @@ class TestInstallViewsDoNotDeleteCache:
             patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])),
             patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", return_value=[]),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
-            patch("netbox_librenms_plugin.views.sync.modules.messages"),
+            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.sync.modules.redirect"),
         ):
             mock_cache.get.return_value = cached_inventory
             mock_tx.atomic = lambda: MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
             view.post(request, pk=24)
 
+        mock_messages.success.assert_called_once()
         mock_cache.delete.assert_not_called()
 
     def test_install_selected_view_no_cache_delete(self):
@@ -1140,13 +1142,14 @@ class TestInstallViewsDoNotDeleteCache:
             patch("netbox_librenms_plugin.utils.get_enabled_ignore_rules", return_value=[]),
             patch("netbox_librenms_plugin.utils.load_bay_mappings", return_value=([], [])),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
-            patch("netbox_librenms_plugin.views.sync.modules.messages"),
+            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
             patch("netbox_librenms_plugin.views.sync.modules.redirect"),
         ):
             mock_cache.get.return_value = cached_inventory
             mock_tx.atomic = lambda: MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
             view.post(request, pk=24)
 
+        mock_messages.success.assert_called_once()
         mock_cache.delete.assert_not_called()
 
 

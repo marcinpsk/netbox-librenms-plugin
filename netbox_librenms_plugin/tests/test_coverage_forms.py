@@ -205,10 +205,16 @@ class TestAddToLibreSNMPV3Validation:
     }
 
     def _make_form(self, extra):
+        from unittest.mock import patch
+
         from netbox_librenms_plugin.forms import AddToLibreSNMPV3
 
         data = {**self._BASE_DATA, **extra}
-        return AddToLibreSNMPV3(data=data)
+        with patch(
+            "netbox_librenms_plugin.forms._get_librenms_poller_group_choices",
+            return_value=[("0", "Default (0)")],
+        ):
+            return AddToLibreSNMPV3(data=data)
 
     def test_no_auth_no_priv_valid_without_auth_fields(self):
         form = self._make_form({"authlevel": "noAuthNoPriv"})

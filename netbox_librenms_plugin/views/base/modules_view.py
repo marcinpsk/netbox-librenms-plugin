@@ -502,6 +502,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, CacheMixin,
                 existing_serial = (existing.get("entPhysicalSerialNum") or "").strip()
                 if existing_serial.lower() in _PLACEHOLDER_VALUES and serial:
                     existing["entPhysicalSerialNum"] = serial
+                    inv_serials.add(serial)
             else:
                 # Skip if serial already exists in ENTITY-MIB data (avoid duplicates)
                 if serial and serial in inv_serials:

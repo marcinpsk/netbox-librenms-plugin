@@ -95,6 +95,8 @@ class TestDeviceLibreNMSSyncViewContextMethods:
         assert mock_get_context.called
         assert mock_get_context.call_args[0][1] is request
         assert mock_get_context.call_args[0][2] is obj
+        child_instance = mock_get_context.call_args[0][0]
+        assert child_instance.request is request
 
     def test_get_vlan_context_delegates_to_vlan_view(self):
         """get_vlan_context() creates DeviceVLANTableView, copies request, and calls get_vlan_context."""
@@ -669,9 +671,10 @@ class TestVerifyVlanSyncGroupView:
 
         assert isinstance(response, JsonResponse)
         data = json.loads(response.content)
+        assert response.status_code == 200
         assert data["status"] == "success"
         assert "exists_in_netbox" in data
-        assert "css_class" in data
+        assert data["css_class"] == "text-success"
 
     def test_returns_success_without_vlan_group(self):
         """Returns success with global VLAN lookup when no vlan_group_id."""
@@ -697,8 +700,10 @@ class TestVerifyVlanSyncGroupView:
 
         assert isinstance(response, JsonResponse)
         data = json.loads(response.content)
+        assert response.status_code == 200
         assert data["status"] == "success"
         assert data["exists_in_netbox"] is False
+        assert data["css_class"] == "text-danger"
 
 
 class TestSaveVlanGroupOverridesView:

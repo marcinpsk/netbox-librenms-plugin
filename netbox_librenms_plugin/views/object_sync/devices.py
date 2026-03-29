@@ -60,6 +60,7 @@ class DeviceLibreNMSSyncView(BaseLibreNMSSyncView):
     def get_ip_context(self, request, obj):
         """Return IP address sync context for the device."""
         ipaddress_table_view = DeviceIPAddressTableView()
+        ipaddress_table_view.request = request
         return ipaddress_table_view.get_context_data(request, obj)
 
     def get_vlan_context(self, request, obj):
