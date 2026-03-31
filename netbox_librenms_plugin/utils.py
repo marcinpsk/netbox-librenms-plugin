@@ -3,14 +3,20 @@ import re
 from typing import Optional
 
 from dcim.models import Device
-from django.db.models import Q
 from django.core.exceptions import ObjectDoesNotExist
+from django.db.models import Q
 from django.http import HttpRequest
 from netbox.config import get_config
 from netbox.plugins import get_plugin_config
 from utilities.paginator import get_paginate_count as netbox_get_paginate_count
 
 logger = logging.getLogger(__name__)
+
+
+try:
+    from netbox_librenms_plugin.models import PlatformMapping
+except ImportError:
+    PlatformMapping = None  # type: ignore[assignment]
 
 
 def convert_speed_to_kbps(speed_bps: int) -> int | None:
@@ -338,9 +344,10 @@ def find_matching_site(librenms_location: str) -> dict:
 
 def find_matching_platform(librenms_os: str) -> dict:
     """
-    Find exact matching NetBox platform for a LibreNMS OS.
+    Find matching NetBox platform for a LibreNMS OS.
 
-    Only performs exact name matching (case-insensitive).
+    Checks PlatformMapping table first (explicit user-defined mapping),
+    then falls back to exact case-insensitive name match.
 
     Args:
         librenms_os (str): OS string from LibreNMS (e.g., 'ios', 'linux', 'junos')
@@ -349,12 +356,20 @@ def find_matching_platform(librenms_os: str) -> dict:
         dict: Dictionary containing:
             - found (bool): Whether a match was found
             - platform (Platform|None): The matched Platform object
-            - match_type (str|None): Always 'exact' if found, None otherwise
+            - match_type (str|None): 'mapping', 'exact', or None
     """
     from dcim.models import Platform
 
     if not librenms_os or librenms_os == "-":
         return {"found": False, "platform": None, "match_type": None}
+
+    # Check PlatformMapping table first
+    if PlatformMapping is not None:
+        try:
+            mapping = PlatformMapping.objects.get(librenms_os__iexact=librenms_os)
+            return {"found": True, "platform": mapping.netbox_platform, "match_type": "mapping"}
+        except PlatformMapping.DoesNotExist:
+            pass
 
     # Try case-insensitive exact name match
     try:

@@ -7,6 +7,7 @@ from .models import (
     ModuleBayMapping,
     ModuleTypeMapping,
     NormalizationRule,
+    PlatformMapping,
 )
 from .views import (
     AddDeviceToLibreNMSView,
@@ -85,6 +86,21 @@ from .views import (
     InventoryIgnoreRuleEditView,
     InventoryIgnoreRuleListView,
     InventoryIgnoreRuleView,
+    DeviceTypeMappingBulkExportYAMLView,
+    InterfaceTypeMappingBulkExportYAMLView,
+    ModuleBayMappingBulkExportYAMLView,
+    ModuleTypeMappingBulkExportYAMLView,
+    NormalizationRuleBulkExportYAMLView,
+    InventoryIgnoreRuleBulkExportYAMLView,
+    PlatformMappingBulkDeleteView,
+    PlatformMappingBulkExportYAMLView,
+    PlatformMappingBulkImportView,
+    PlatformMappingChangeLogView,
+    PlatformMappingCreateView,
+    PlatformMappingDeleteView,
+    PlatformMappingEditView,
+    PlatformMappingListView,
+    PlatformMappingView,
     RemoveServerMappingView,
     SaveUserPrefView,
     SingleCableVerifyView,
@@ -651,6 +667,84 @@ urlpatterns = [
         "inventory-ignore-rules/delete/",
         InventoryIgnoreRuleBulkDeleteView.as_view(),
         name="inventoryignorerule_bulk_delete",
+    ),
+    # Bulk YAML export URLs for all mapping models
+    path(
+        "interface-type-mappings/export-yaml/",
+        InterfaceTypeMappingBulkExportYAMLView.as_view(),
+        name="interfacetypemapping_bulk_export_yaml",
+    ),
+    path(
+        "device-type-mappings/export-yaml/",
+        DeviceTypeMappingBulkExportYAMLView.as_view(),
+        name="devicetypemapping_bulk_export_yaml",
+    ),
+    path(
+        "module-type-mappings/export-yaml/",
+        ModuleTypeMappingBulkExportYAMLView.as_view(),
+        name="moduletypemapping_bulk_export_yaml",
+    ),
+    path(
+        "module-bay-mappings/export-yaml/",
+        ModuleBayMappingBulkExportYAMLView.as_view(),
+        name="modulebaymapping_bulk_export_yaml",
+    ),
+    path(
+        "normalization-rules/export-yaml/",
+        NormalizationRuleBulkExportYAMLView.as_view(),
+        name="normalizationrule_bulk_export_yaml",
+    ),
+    path(
+        "inventory-ignore-rules/export-yaml/",
+        InventoryIgnoreRuleBulkExportYAMLView.as_view(),
+        name="inventoryignorerule_bulk_export_yaml",
+    ),
+    # Platform Mapping URLs
+    path(
+        "platform-mappings/",
+        PlatformMappingListView.as_view(),
+        name="platformmapping_list",
+    ),
+    path(
+        "platform-mappings/<int:pk>/",
+        PlatformMappingView.as_view(),
+        name="platformmapping_detail",
+    ),
+    path(
+        "platform-mappings/add/",
+        PlatformMappingCreateView.as_view(),
+        name="platformmapping_add",
+    ),
+    path(
+        "platform-mappings/import/",
+        PlatformMappingBulkImportView.as_view(),
+        name="platformmapping_bulk_import",
+    ),
+    path(
+        "platform-mappings/<int:pk>/delete/",
+        PlatformMappingDeleteView.as_view(),
+        name="platformmapping_delete",
+    ),
+    path(
+        "platform-mappings/<int:pk>/edit/",
+        PlatformMappingEditView.as_view(),
+        name="platformmapping_edit",
+    ),
+    path(
+        "platform-mappings/<int:pk>/changelog/",
+        PlatformMappingChangeLogView.as_view(),
+        name="platformmapping_changelog",
+        kwargs={"model": PlatformMapping},
+    ),
+    path(
+        "platform-mappings/delete/",
+        PlatformMappingBulkDeleteView.as_view(),
+        name="platformmapping_bulk_delete",
+    ),
+    path(
+        "platform-mappings/export-yaml/",
+        PlatformMappingBulkExportYAMLView.as_view(),
+        name="platformmapping_bulk_export_yaml",
     ),
     path("api/", include("netbox_librenms_plugin.api.urls")),
 ]

@@ -9,6 +9,7 @@ from netbox_librenms_plugin.models import (
     ModuleBayMapping,
     ModuleTypeMapping,
     NormalizationRule,
+    PlatformMapping,
 )
 
 
@@ -228,6 +229,35 @@ class InventoryIgnoreRuleTable(NetBoxTable):
             "pattern",
             "require_serial_match_parent",
             "enabled",
+            "actions",
+        )
+        attrs = {"class": "table table-hover table-headings table-striped"}
+
+
+class PlatformMappingTable(NetBoxTable):
+    """Table for displaying PlatformMapping data."""
+
+    librenms_os = tables.Column(verbose_name="LibreNMS OS", linkify=True)
+    netbox_platform = tables.Column(verbose_name="NetBox Platform", linkify=True)
+    description = tables.Column(verbose_name="Description", linkify=False)
+    actions = columns.ActionsColumn(actions=("edit", "delete"))
+
+    class Meta:
+        """Meta options for PlatformMappingTable."""
+
+        model = PlatformMapping
+        fields = (
+            "id",
+            "librenms_os",
+            "netbox_platform",
+            "description",
+            "actions",
+        )
+        default_columns = (
+            "id",
+            "librenms_os",
+            "netbox_platform",
+            "description",
             "actions",
         )
         attrs = {"class": "table table-hover table-headings table-striped"}

@@ -1,3 +1,4 @@
+from django.http import HttpResponse
 from netbox.views import generic
 from utilities.views import register_model_view
 
@@ -8,6 +9,7 @@ from netbox_librenms_plugin.filters import (
     ModuleBayMappingFilterSet,
     ModuleTypeMappingFilterSet,
     NormalizationRuleFilterSet,
+    PlatformMappingFilterSet,
 )
 from netbox_librenms_plugin.forms import (
     DeviceTypeMappingFilterForm,
@@ -28,6 +30,9 @@ from netbox_librenms_plugin.forms import (
     NormalizationRuleFilterForm,
     NormalizationRuleForm,
     NormalizationRuleImportForm,
+    PlatformMappingFilterForm,
+    PlatformMappingForm,
+    PlatformMappingImportForm,
 )
 from netbox_librenms_plugin.models import (
     DeviceTypeMapping,
@@ -36,6 +41,7 @@ from netbox_librenms_plugin.models import (
     ModuleBayMapping,
     ModuleTypeMapping,
     NormalizationRule,
+    PlatformMapping,
 )
 from netbox_librenms_plugin.tables.mappings import (
     DeviceTypeMappingTable,
@@ -44,6 +50,7 @@ from netbox_librenms_plugin.tables.mappings import (
     ModuleBayMappingTable,
     ModuleTypeMappingTable,
     NormalizationRuleTable,
+    PlatformMappingTable,
 )
 from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
 
@@ -420,3 +427,111 @@ class InventoryIgnoreRuleChangeLogView(LibreNMSPermissionMixin, generic.ObjectCh
     """Provides a view for displaying the change log of a specific InventoryIgnoreRule object."""
 
     queryset = InventoryIgnoreRule.objects.all()
+
+
+# --- BulkExportYAML views ---
+
+
+class BulkExportYAMLView(LibreNMSPermissionMixin):
+    """Base view that exports selected mapping objects as YAML."""
+
+    queryset = None
+
+    def post(self, request):
+        if error := self.require_write_permission(request):
+            return error
+        pks = request.POST.getlist("pk")
+        objects = self.queryset.filter(pk__in=pks)
+        yaml_parts = [obj.to_yaml() for obj in objects]
+        content = "---\n".join(yaml_parts)
+        response = HttpResponse(content, content_type="text/yaml; charset=utf-8")
+        response["Content-Disposition"] = 'attachment; filename="export.yaml"'
+        return response
+
+
+class InterfaceTypeMappingBulkExportYAMLView(BulkExportYAMLView):
+    queryset = InterfaceTypeMapping.objects.all()
+
+
+class DeviceTypeMappingBulkExportYAMLView(BulkExportYAMLView):
+    queryset = DeviceTypeMapping.objects.all()
+
+
+class ModuleTypeMappingBulkExportYAMLView(BulkExportYAMLView):
+    queryset = ModuleTypeMapping.objects.all()
+
+
+class ModuleBayMappingBulkExportYAMLView(BulkExportYAMLView):
+    queryset = ModuleBayMapping.objects.all()
+
+
+class NormalizationRuleBulkExportYAMLView(BulkExportYAMLView):
+    queryset = NormalizationRule.objects.all()
+
+
+class InventoryIgnoreRuleBulkExportYAMLView(BulkExportYAMLView):
+    queryset = InventoryIgnoreRule.objects.all()
+
+
+class PlatformMappingBulkExportYAMLView(BulkExportYAMLView):
+    queryset = PlatformMapping.objects.all()
+
+
+# --- PlatformMapping views ---
+
+
+class PlatformMappingListView(LibreNMSPermissionMixin, generic.ObjectListView):
+    """Provides a view for listing all PlatformMapping objects."""
+
+    queryset = PlatformMapping.objects.all()
+    table = PlatformMappingTable
+    filterset = PlatformMappingFilterSet
+    filterset_form = PlatformMappingFilterForm
+    template_name = "netbox_librenms_plugin/platformmapping_list.html"
+
+
+class PlatformMappingCreateView(LibreNMSPermissionMixin, generic.ObjectEditView):
+    """Provides a view for creating a new PlatformMapping object."""
+
+    queryset = PlatformMapping.objects.all()
+    form = PlatformMappingForm
+
+
+@register_model_view(PlatformMapping, "bulk_import", path="import", detail=False)
+class PlatformMappingBulkImportView(LibreNMSPermissionMixin, generic.BulkImportView):
+    """Provides a view for bulk importing PlatformMapping objects."""
+
+    queryset = PlatformMapping.objects.all()
+    model_form = PlatformMappingImportForm
+
+
+class PlatformMappingView(LibreNMSPermissionMixin, generic.ObjectView):
+    """Provides a view for displaying details of a specific PlatformMapping object."""
+
+    queryset = PlatformMapping.objects.all()
+
+
+class PlatformMappingEditView(LibreNMSPermissionMixin, generic.ObjectEditView):
+    """Provides a view for editing a specific PlatformMapping object."""
+
+    queryset = PlatformMapping.objects.all()
+    form = PlatformMappingForm
+
+
+class PlatformMappingDeleteView(LibreNMSPermissionMixin, generic.ObjectDeleteView):
+    """Provides a view for deleting a specific PlatformMapping object."""
+
+    queryset = PlatformMapping.objects.all()
+
+
+class PlatformMappingBulkDeleteView(LibreNMSPermissionMixin, generic.BulkDeleteView):
+    """Provides a view for deleting multiple PlatformMapping objects."""
+
+    queryset = PlatformMapping.objects.all()
+    table = PlatformMappingTable
+
+
+class PlatformMappingChangeLogView(LibreNMSPermissionMixin, generic.ObjectChangeLogView):
+    """Provides a view for displaying the change log of a specific PlatformMapping object."""
+
+    queryset = PlatformMapping.objects.all()

@@ -8,6 +8,7 @@ from .models import (
     ModuleBayMapping,
     ModuleTypeMapping,
     NormalizationRule,
+    PlatformMapping,
 )
 
 
@@ -93,3 +94,16 @@ class InventoryIgnoreRuleFilterSet(django_filters.FilterSet):
 
         model = InventoryIgnoreRule
         fields = ["match_type", "action", "enabled"]
+
+
+class PlatformMappingFilterSet(django_filters.FilterSet):
+    """Filter set for PlatformMapping model."""
+
+    librenms_os = django_filters.CharFilter(lookup_expr="icontains")
+    description = django_filters.CharFilter(lookup_expr="icontains")
+
+    class Meta:
+        """Meta options for PlatformMappingFilterSet."""
+
+        model = PlatformMapping
+        fields = ["librenms_os", "description"]

@@ -7,6 +7,7 @@ from netbox_librenms_plugin.models import (
     ModuleBayMapping,
     ModuleTypeMapping,
     NormalizationRule,
+    PlatformMapping,
 )
 
 
@@ -83,5 +84,20 @@ class InventoryIgnoreRuleSerializer(NetBoxModelSerializer):
             "action",
             "require_serial_match_parent",
             "enabled",
+            "description",
+        ]
+
+
+class PlatformMappingSerializer(NetBoxModelSerializer):
+    """Serialize PlatformMapping model for REST API."""
+
+    class Meta:
+        """Meta options for PlatformMappingSerializer."""
+
+        model = PlatformMapping
+        fields = [
+            "id",
+            "librenms_os",
+            "netbox_platform",
             "description",
         ]

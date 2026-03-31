@@ -3,7 +3,7 @@ import logging
 import re
 
 from dcim.choices import InterfaceTypeChoices
-from dcim.models import Device, DeviceRole, DeviceType, Location, Manufacturer, ModuleType, Rack, Site
+from dcim.models import Device, DeviceRole, DeviceType, Location, Manufacturer, ModuleType, Platform, Rack, Site
 from django import forms
 from django.db.models import Case, IntegerField, Value, When
 from django.http import QueryDict
@@ -30,6 +30,7 @@ from .models import (
     ModuleBayMapping,
     ModuleTypeMapping,
     NormalizationRule,
+    PlatformMapping,
 )
 
 logger = logging.getLogger(__name__)
@@ -544,6 +545,50 @@ class InventoryIgnoreRuleFilterForm(NetBoxModelFilterSetForm):
     )
 
     model = InventoryIgnoreRule
+
+
+class PlatformMappingForm(NetBoxModelForm):
+    """Form for creating and editing platform mappings between LibreNMS and NetBox."""
+
+    netbox_platform = DynamicModelChoiceField(
+        queryset=Platform.objects.all(),
+        label="NetBox Platform",
+    )
+
+    class Meta:
+        """Meta options for PlatformMappingForm."""
+
+        model = PlatformMapping
+        fields = ["librenms_os", "netbox_platform", "description"]
+
+
+class PlatformMappingImportForm(NetBoxModelImportForm):
+    """Form for bulk importing platform mappings."""
+
+    netbox_platform = CSVModelChoiceField(
+        queryset=Platform.objects.all(),
+        to_field_name="name",
+        help_text="NetBox platform name",
+    )
+
+    class Meta:
+        """Meta options for PlatformMappingImportForm."""
+
+        model = PlatformMapping
+        fields = ["librenms_os", "netbox_platform", "description"]
+
+
+class PlatformMappingFilterForm(NetBoxModelFilterSetForm):
+    """Form for filtering platform mappings."""
+
+    librenms_os = forms.CharField(required=False, label="LibreNMS OS")
+    description = forms.CharField(
+        required=False,
+        label="Description",
+        help_text="Filter by description (partial match)",
+    )
+
+    model = PlatformMapping
 
 
 class BaseSNMPForm(forms.Form):

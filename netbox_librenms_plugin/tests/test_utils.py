@@ -213,11 +213,14 @@ class TestSiteMatching:
 class TestPlatformMatching:
     """Test platform matching logic."""
 
+    @patch("netbox_librenms_plugin.utils.PlatformMapping")
     @patch("dcim.models.Platform")
-    def test_find_platform_for_os_exact_match(self, mock_platform_model):
+    def test_find_platform_for_os_exact_match(self, mock_platform_model, mock_platform_mapping):
         """OS string matched to platform."""
         mock_platform = MagicMock(id=1, name="ios")
         mock_platform_model.objects.get.return_value = mock_platform
+        mock_platform_mapping.DoesNotExist = Exception
+        mock_platform_mapping.objects.get.side_effect = mock_platform_mapping.DoesNotExist
 
         from netbox_librenms_plugin.utils import find_matching_platform
 
@@ -227,9 +230,12 @@ class TestPlatformMatching:
         assert result["platform"] == mock_platform
         assert result["match_type"] == "exact"
 
+    @patch("netbox_librenms_plugin.utils.PlatformMapping")
     @patch("dcim.models.Platform")
-    def test_find_platform_for_os_not_found(self, mock_platform_model):
+    def test_find_platform_for_os_not_found(self, mock_platform_model, mock_platform_mapping):
         """Returns None when no match."""
+        mock_platform_mapping.DoesNotExist = Exception
+        mock_platform_mapping.objects.get.side_effect = mock_platform_mapping.DoesNotExist
         mock_platform_model.DoesNotExist = Exception
         mock_platform_model.objects.get.side_effect = mock_platform_model.DoesNotExist
 

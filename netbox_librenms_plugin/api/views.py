@@ -19,6 +19,7 @@ from netbox_librenms_plugin.filters import (
     ModuleBayMappingFilterSet,
     ModuleTypeMappingFilterSet,
     NormalizationRuleFilterSet,
+    PlatformMappingFilterSet,
 )
 from netbox_librenms_plugin.models import (
     DeviceTypeMapping,
@@ -27,6 +28,7 @@ from netbox_librenms_plugin.models import (
     ModuleBayMapping,
     ModuleTypeMapping,
     NormalizationRule,
+    PlatformMapping,
 )
 
 from .serializers import (
@@ -36,6 +38,7 @@ from .serializers import (
     ModuleBayMappingSerializer,
     ModuleTypeMappingSerializer,
     NormalizationRuleSerializer,
+    PlatformMappingSerializer,
 )
 
 logger = logging.getLogger(__name__)
@@ -113,6 +116,16 @@ class InventoryIgnoreRuleViewSet(NetBoxModelViewSet):
 
     queryset = InventoryIgnoreRule.objects.all()
     serializer_class = InventoryIgnoreRuleSerializer
+
+
+class PlatformMappingViewSet(NetBoxModelViewSet):
+    """API viewset for PlatformMapping CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+    filterset_class = PlatformMappingFilterSet
+
+    queryset = PlatformMapping.objects.all()
+    serializer_class = PlatformMappingSerializer
 
 
 @api_view(["POST"])

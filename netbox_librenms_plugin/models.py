@@ -2,8 +2,9 @@ import functools
 import logging
 import re
 
+import yaml
 from dcim.choices import InterfaceTypeChoices
-from dcim.models import DeviceType, Manufacturer, ModuleType
+from dcim.models import DeviceType, Manufacturer, ModuleType, Platform
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.urls import reverse
@@ -102,6 +103,15 @@ class InterfaceTypeMapping(NetBoxModel):
     def __str__(self):
         return f"{self.librenms_type} + {self.librenms_speed} -> {self.netbox_type}"
 
+    def to_yaml(self):
+        data = {
+            "librenms_type": self.librenms_type,
+            "librenms_speed": self.librenms_speed,
+            "netbox_type": self.netbox_type,
+            "description": self.description,
+        }
+        return yaml.dump(data, sort_keys=False)
+
 
 class DeviceTypeMapping(FullCleanOnSaveMixin, NetBoxModel):
     """Map LibreNMS hardware strings to NetBox DeviceType objects."""
@@ -141,6 +151,14 @@ class DeviceTypeMapping(FullCleanOnSaveMixin, NetBoxModel):
     def __str__(self):
         return f"{self.librenms_hardware} -> {self.netbox_device_type}"
 
+    def to_yaml(self):
+        data = {
+            "librenms_hardware": self.librenms_hardware,
+            "netbox_device_type": str(self.netbox_device_type),
+            "description": self.description,
+        }
+        return yaml.dump(data, sort_keys=False)
+
 
 class ModuleTypeMapping(FullCleanOnSaveMixin, NetBoxModel):
     """Map LibreNMS inventory model names to NetBox ModuleType objects."""
@@ -179,6 +197,14 @@ class ModuleTypeMapping(FullCleanOnSaveMixin, NetBoxModel):
 
     def __str__(self):
         return f"{self.librenms_model} -> {self.netbox_module_type}"
+
+    def to_yaml(self):
+        data = {
+            "librenms_model": self.librenms_model,
+            "netbox_module_type": str(self.netbox_module_type),
+            "description": self.description,
+        }
+        return yaml.dump(data, sort_keys=False)
 
 
 class ModuleBayMapping(FullCleanOnSaveMixin, NetBoxModel):
@@ -264,6 +290,16 @@ class ModuleBayMapping(FullCleanOnSaveMixin, NetBoxModel):
     def __str__(self):
         cls = f" [{self.librenms_class}]" if self.librenms_class else ""
         return f"{self.librenms_name}{cls} -> {self.netbox_bay_name}"
+
+    def to_yaml(self):
+        data = {
+            "librenms_name": self.librenms_name,
+            "librenms_class": self.librenms_class,
+            "netbox_bay_name": self.netbox_bay_name,
+            "is_regex": self.is_regex,
+            "description": self.description,
+        }
+        return yaml.dump(data, sort_keys=False)
 
 
 class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
@@ -355,6 +391,17 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
 
     def __str__(self):
         return f"[{self.get_scope_display()}] {self.match_pattern} → {self.replacement}"
+
+    def to_yaml(self):
+        data = {
+            "scope": self.scope,
+            "manufacturer": str(self.manufacturer) if self.manufacturer else None,
+            "match_pattern": self.match_pattern,
+            "replacement": self.replacement,
+            "priority": self.priority,
+            "description": self.description,
+        }
+        return yaml.dump(data, sort_keys=False)
 
 
 class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
@@ -538,3 +585,62 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
             return f"{self.name}: {self.get_match_type_display()}"
         serial_note = " [serial match]" if self.require_serial_match_parent else ""
         return f"{self.name}: {self.get_match_type_display()} '{self.pattern}'{serial_note}"
+
+    def to_yaml(self):
+        data = {
+            "name": self.name,
+            "match_type": self.match_type,
+            "pattern": self.pattern,
+            "action": self.action,
+            "require_serial_match_parent": self.require_serial_match_parent,
+            "enabled": self.enabled,
+            "description": self.description,
+        }
+        return yaml.dump(data, sort_keys=False)
+
+
+class PlatformMapping(FullCleanOnSaveMixin, NetBoxModel):
+    """Map LibreNMS OS strings to NetBox Platform objects."""
+
+    librenms_os = models.CharField(
+        max_length=255,
+        unique=True,
+        help_text="OS string as reported by LibreNMS (e.g., 'ios', 'eos', 'junos')",
+    )
+    netbox_platform = models.ForeignKey(
+        Platform,
+        on_delete=models.CASCADE,
+        related_name="librenms_platform_mappings",
+        help_text="The NetBox Platform this OS string maps to",
+    )
+    description = models.TextField(
+        blank=True,
+        help_text="Optional description or notes about this mapping",
+    )
+
+    def clean(self):
+        """Normalize librenms_os so whitespace-padded values don't create duplicate entries."""
+        super().clean()
+        self.librenms_os = (self.librenms_os or "").strip()
+        if not self.librenms_os:
+            raise ValidationError({"librenms_os": "This field may not be blank after normalization."})
+
+    def get_absolute_url(self):
+        """Return the URL for this mapping's detail page."""
+        return reverse("plugins:netbox_librenms_plugin:platformmapping_detail", args=[self.pk])
+
+    class Meta:
+        """Meta options for PlatformMapping."""
+
+        ordering = ["librenms_os"]
+
+    def __str__(self):
+        return f"{self.librenms_os} -> {self.netbox_platform}"
+
+    def to_yaml(self):
+        data = {
+            "librenms_os": self.librenms_os,
+            "netbox_platform": str(self.netbox_platform),
+            "description": self.description,
+        }
+        return yaml.dump(data, sort_keys=False)
