@@ -393,7 +393,7 @@ class TestBulkExportYAMLView:
         with patch.object(view, "require_write_permission", return_value=None):
             view.post(request)
 
-        mock_qs.filter.assert_called_once_with(pk__in=["3", "7"])
+        mock_qs.filter.assert_called_once_with(pk__in=[3, 7])
 
     def test_returns_200_with_empty_selection(self):
         """Response is 200 even when no PKs are selected (empty YAML)."""

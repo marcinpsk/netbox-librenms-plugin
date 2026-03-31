@@ -125,7 +125,7 @@ class PlatformMappingViewSet(NetBoxModelViewSet):
     permission_classes = [LibreNMSPluginPermission]
     filterset_class = PlatformMappingFilterSet
 
-    queryset = PlatformMapping.objects.all()
+    queryset = PlatformMapping.objects.select_related("netbox_platform")
     serializer_class = PlatformMappingSerializer
 
 

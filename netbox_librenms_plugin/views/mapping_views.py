@@ -1,4 +1,4 @@
-from django.http import HttpResponse
+from django.http import HttpResponse, HttpResponseBadRequest
 from django.views import View
 from netbox.views import generic
 from utilities.views import register_model_view
@@ -136,7 +136,7 @@ class InterfaceTypeMappingChangeLogView(LibreNMSPermissionMixin, generic.ObjectC
 class DeviceTypeMappingListView(LibreNMSPermissionMixin, generic.ObjectListView):
     """Provides a view for listing all DeviceTypeMapping objects."""
 
-    queryset = DeviceTypeMapping.objects.all()
+    queryset = DeviceTypeMapping.objects.select_related("netbox_device_type")
     table = DeviceTypeMappingTable
     filterset = DeviceTypeMappingFilterSet
     filterset_form = DeviceTypeMappingFilterForm
@@ -196,7 +196,7 @@ class DeviceTypeMappingChangeLogView(LibreNMSPermissionMixin, generic.ObjectChan
 class ModuleTypeMappingListView(LibreNMSPermissionMixin, generic.ObjectListView):
     """Provides a view for listing all ModuleTypeMapping objects."""
 
-    queryset = ModuleTypeMapping.objects.all()
+    queryset = ModuleTypeMapping.objects.select_related("netbox_module_type")
     table = ModuleTypeMappingTable
     filterset = ModuleTypeMappingFilterSet
     filterset_form = ModuleTypeMappingFilterForm
@@ -316,7 +316,7 @@ class ModuleBayMappingChangeLogView(LibreNMSPermissionMixin, generic.ObjectChang
 class NormalizationRuleListView(LibreNMSPermissionMixin, generic.ObjectListView):
     """Provides a view for listing all NormalizationRule objects."""
 
-    queryset = NormalizationRule.objects.all()
+    queryset = NormalizationRule.objects.select_related("manufacturer")
     table = NormalizationRuleTable
     filterset = NormalizationRuleFilterSet
     filterset_form = NormalizationRuleFilterForm
@@ -442,7 +442,11 @@ class BulkExportYAMLView(LibreNMSPermissionMixin, View):
         if error := self.require_write_permission():
             return error
         pks = request.POST.getlist("pk")
-        objects = self.queryset.filter(pk__in=pks)
+        try:
+            int_pks = [int(pk) for pk in pks]
+        except (ValueError, TypeError):
+            return HttpResponseBadRequest("Invalid pk value.")
+        objects = self.queryset.filter(pk__in=int_pks)
         yaml_parts = [obj.to_yaml() for obj in objects]
         content = "---\n".join(yaml_parts)
         response = HttpResponse(content, content_type="text/yaml; charset=utf-8")
@@ -484,7 +488,7 @@ class PlatformMappingBulkExportYAMLView(BulkExportYAMLView):
 class PlatformMappingListView(LibreNMSPermissionMixin, generic.ObjectListView):
     """Provides a view for listing all PlatformMapping objects."""
 
-    queryset = PlatformMapping.objects.all()
+    queryset = PlatformMapping.objects.select_related("netbox_platform")
     table = PlatformMappingTable
     filterset = PlatformMappingFilterSet
     filterset_form = PlatformMappingFilterForm
