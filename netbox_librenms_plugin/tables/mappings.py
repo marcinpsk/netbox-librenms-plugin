@@ -168,6 +168,7 @@ class NormalizationRuleTable(NetBoxTable):
         default_columns = (
             "id",
             "scope",
+            "manufacturer",
             "match_pattern",
             "replacement",
             "priority",

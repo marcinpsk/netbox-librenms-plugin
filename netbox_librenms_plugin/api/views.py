@@ -21,6 +21,7 @@ from netbox_librenms_plugin.filters import (
     NormalizationRuleFilterSet,
     PlatformMappingFilterSet,
 )
+from netbox_librenms_plugin.jobs import FilterDevicesJob, ImportDevicesJob
 from netbox_librenms_plugin.models import (
     DeviceTypeMapping,
     InterfaceTypeMapping,
@@ -146,7 +147,7 @@ def sync_job_status(request, job_pk):
     Returns:
         JsonResponse with updated status
     """
-    _LIBRENMS_JOB_NAMES = ("LibreNMS Device Filter", "LibreNMS Device Import")
+    _LIBRENMS_JOB_NAMES = (FilterDevicesJob.Meta.name, ImportDevicesJob.Meta.name)
     try:
         job = Job.objects.get(pk=job_pk, user=request.user, name__in=_LIBRENMS_JOB_NAMES)
     except Job.DoesNotExist:

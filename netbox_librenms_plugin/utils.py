@@ -370,6 +370,8 @@ def find_matching_platform(librenms_os: str) -> dict:
             return {"found": True, "platform": mapping.netbox_platform, "match_type": "mapping"}
         except PlatformMapping.DoesNotExist:
             pass
+        except PlatformMapping.MultipleObjectsReturned:
+            pass
 
     # Try case-insensitive exact name match
     try:
@@ -579,6 +581,8 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
             try:
                 value = int(value)
             except (ValueError, TypeError):
+                return None
+            if value <= 0:
                 return None
             if auto_save:
                 cf_value[server_key] = value

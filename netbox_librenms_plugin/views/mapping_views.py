@@ -1,4 +1,5 @@
 from django.http import HttpResponse
+from django.views import View
 from netbox.views import generic
 from utilities.views import register_model_view
 
@@ -432,13 +433,13 @@ class InventoryIgnoreRuleChangeLogView(LibreNMSPermissionMixin, generic.ObjectCh
 # --- BulkExportYAML views ---
 
 
-class BulkExportYAMLView(LibreNMSPermissionMixin):
+class BulkExportYAMLView(LibreNMSPermissionMixin, View):
     """Base view that exports selected mapping objects as YAML."""
 
     queryset = None
 
     def post(self, request):
-        if error := self.require_write_permission(request):
+        if error := self.require_write_permission():
             return error
         pks = request.POST.getlist("pk")
         objects = self.queryset.filter(pk__in=pks)
