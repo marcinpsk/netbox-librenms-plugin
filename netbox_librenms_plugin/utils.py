@@ -371,7 +371,7 @@ def find_matching_platform(librenms_os: str) -> dict:
         except PlatformMapping.DoesNotExist:
             pass
         except PlatformMapping.MultipleObjectsReturned:
-            pass
+            return {"found": False, "platform": None, "match_type": "ambiguous"}
 
     # Try case-insensitive exact name match
     try:
