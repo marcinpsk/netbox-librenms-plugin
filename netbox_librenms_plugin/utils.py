@@ -615,9 +615,7 @@ def set_librenms_device_id(obj, device_id, server_key: str = "default"):
             obj,
         )
         return
-    cf_value = obj.custom_field_data.get("librenms_id")
-    if cf_value is None:
-        cf_value = {}
+    cf_value = obj.custom_field_data.get("librenms_id") or {}
     if isinstance(cf_value, int) and not isinstance(cf_value, bool):
         logger.warning(
             "librenms_id on %r has legacy bare integer %r; skipping write to prevent "
