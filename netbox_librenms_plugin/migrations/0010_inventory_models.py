@@ -1,11 +1,14 @@
 """
 Add inventory/modules sync models: DeviceTypeMapping, ModuleTypeMapping,
-ModuleBayMapping, NormalizationRule, and InventoryIgnoreRule, along with
-two default InventoryIgnoreRule entries.
+ModuleBayMapping, NormalizationRule, InventoryIgnoreRule, and PlatformMapping,
+along with two default InventoryIgnoreRule entries.
+
+Squashed from 0010–0013.
 """
 
 import django.db.models.deletion
 import netbox.models.deletion
+import netbox_librenms_plugin.models
 import taggit.managers
 import utilities.json
 from django.db import migrations, models
@@ -50,8 +53,6 @@ def _insert_default_rules(apps, schema_editor):
 def _delete_default_rules(apps, schema_editor):
     db_alias = schema_editor.connection.alias
     InventoryIgnoreRule = apps.get_model("netbox_librenms_plugin", "InventoryIgnoreRule")
-    # Delete only the exact seeded defaults — match on ALL seeded fields so
-    # admin-created rules that happen to share a name/pattern are not accidentally removed.
     InventoryIgnoreRule.objects.using(db_alias).filter(
         name="Cisco IOS-XR IDPROM entries",
         match_type="ends_with",
@@ -72,8 +73,8 @@ def _delete_default_rules(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("dcim", "0001_initial"),
-        ("extras", "0001_initial"),
+        ("dcim", "0225_gfk_indexes"),
+        ("extras", "0134_owner"),
         ("netbox_librenms_plugin", "0009_convert_librenms_id_to_json"),
     ]
 
@@ -95,7 +96,7 @@ class Migration(migrations.Migration):
                     "netbox_device_type",
                     models.ForeignKey(
                         on_delete=django.db.models.deletion.CASCADE,
-                        related_name="librenms_mappings",
+                        related_name="librenms_device_type_mappings",
                         to="dcim.devicetype",
                     ),
                 ),
@@ -104,12 +105,26 @@ class Migration(migrations.Migration):
             options={
                 "ordering": ["librenms_hardware"],
             },
-            bases=(netbox.models.deletion.DeleteMixin, models.Model),
+            bases=(
+                netbox_librenms_plugin.models.FullCleanOnSaveMixin,
+                netbox.models.deletion.DeleteMixin,
+                models.Model,
+            ),
         ),
-        # InterfaceTypeMapping ordering
+        # InterfaceTypeMapping: ordering + unique_together → UniqueConstraint
         migrations.AlterModelOptions(
             name="interfacetypemapping",
             options={"ordering": ["librenms_type", "librenms_speed"]},
+        ),
+        migrations.AlterUniqueTogether(
+            name="interfacetypemapping",
+            unique_together=set(),
+        ),
+        migrations.AddConstraint(
+            model_name="interfacetypemapping",
+            constraint=models.UniqueConstraint(
+                fields=("librenms_type", "librenms_speed"), name="unique_interface_type_mapping"
+            ),
         ),
         # ModuleTypeMapping
         migrations.CreateModel(
@@ -128,7 +143,7 @@ class Migration(migrations.Migration):
                     "netbox_module_type",
                     models.ForeignKey(
                         on_delete=django.db.models.deletion.CASCADE,
-                        related_name="librenms_mappings",
+                        related_name="librenms_module_type_mappings",
                         to="dcim.moduletype",
                     ),
                 ),
@@ -137,9 +152,13 @@ class Migration(migrations.Migration):
             options={
                 "ordering": ["librenms_model"],
             },
-            bases=(netbox.models.deletion.DeleteMixin, models.Model),
+            bases=(
+                netbox_librenms_plugin.models.FullCleanOnSaveMixin,
+                netbox.models.deletion.DeleteMixin,
+                models.Model,
+            ),
         ),
-        # ModuleBayMapping (with is_regex included)
+        # ModuleBayMapping (with UniqueConstraint directly)
         migrations.CreateModel(
             name="ModuleBayMapping",
             fields=[
@@ -165,11 +184,20 @@ class Migration(migrations.Migration):
             ],
             options={
                 "ordering": ["librenms_name"],
-                "unique_together": {("librenms_name", "librenms_class")},
             },
-            bases=(netbox.models.deletion.DeleteMixin, models.Model),
+            bases=(
+                netbox_librenms_plugin.models.FullCleanOnSaveMixin,
+                netbox.models.deletion.DeleteMixin,
+                models.Model,
+            ),
         ),
-        # NormalizationRule
+        migrations.AddConstraint(
+            model_name="modulebaymapping",
+            constraint=models.UniqueConstraint(
+                fields=("librenms_name", "librenms_class"), name="unique_module_bay_mapping"
+            ),
+        ),
+        # NormalizationRule (with SET_NULL and db_index on scope)
         migrations.CreateModel(
             name="NormalizationRule",
             fields=[
@@ -182,14 +210,7 @@ class Migration(migrations.Migration):
                 ),
                 (
                     "scope",
-                    models.CharField(
-                        choices=[
-                            ("module_type", "Module Type"),
-                            ("device_type", "Device Type"),
-                            ("module_bay", "Module Bay"),
-                        ],
-                        max_length=50,
-                    ),
+                    models.CharField(db_index=True, max_length=50),
                 ),
                 ("match_pattern", models.CharField(max_length=500)),
                 ("replacement", models.CharField(max_length=500)),
@@ -200,7 +221,7 @@ class Migration(migrations.Migration):
                     models.ForeignKey(
                         blank=True,
                         null=True,
-                        on_delete=django.db.models.deletion.CASCADE,
+                        on_delete=django.db.models.deletion.SET_NULL,
                         related_name="normalization_rules",
                         to="dcim.manufacturer",
                     ),
@@ -210,9 +231,13 @@ class Migration(migrations.Migration):
             options={
                 "ordering": ["scope", "priority", "pk"],
             },
-            bases=(netbox.models.deletion.DeleteMixin, models.Model),
+            bases=(
+                netbox_librenms_plugin.models.FullCleanOnSaveMixin,
+                netbox.models.deletion.DeleteMixin,
+                models.Model,
+            ),
         ),
-        # InventoryIgnoreRule
+        # InventoryIgnoreRule (with db_index on enabled)
         migrations.CreateModel(
             name="InventoryIgnoreRule",
             fields=[
@@ -251,14 +276,50 @@ class Migration(migrations.Migration):
                     ),
                 ),
                 ("require_serial_match_parent", models.BooleanField(default=True)),
-                ("enabled", models.BooleanField(default=True)),
+                ("enabled", models.BooleanField(db_index=True, default=True)),
                 ("description", models.TextField(blank=True)),
                 ("tags", taggit.managers.TaggableManager(through="extras.TaggedItem", to="extras.Tag")),
             ],
             options={
                 "ordering": ["name", "pk"],
             },
-            bases=(netbox.models.deletion.DeleteMixin, models.Model),
+            bases=(
+                netbox_librenms_plugin.models.FullCleanOnSaveMixin,
+                netbox.models.deletion.DeleteMixin,
+                models.Model,
+            ),
         ),
         migrations.RunPython(code=_insert_default_rules, reverse_code=_delete_default_rules),
+        # PlatformMapping
+        migrations.CreateModel(
+            name="PlatformMapping",
+            fields=[
+                ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False)),
+                ("created", models.DateTimeField(auto_now_add=True, null=True)),
+                ("last_updated", models.DateTimeField(auto_now=True, null=True)),
+                (
+                    "custom_field_data",
+                    models.JSONField(blank=True, default=dict, encoder=utilities.json.CustomFieldJSONEncoder),
+                ),
+                ("librenms_os", models.CharField(max_length=255, unique=True)),
+                ("description", models.TextField(blank=True)),
+                (
+                    "netbox_platform",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="librenms_platform_mappings",
+                        to="dcim.platform",
+                    ),
+                ),
+                ("tags", taggit.managers.TaggableManager(through="extras.TaggedItem", to="extras.Tag")),
+            ],
+            options={
+                "ordering": ["librenms_os"],
+            },
+            bases=(
+                netbox_librenms_plugin.models.FullCleanOnSaveMixin,
+                netbox.models.deletion.DeleteMixin,
+                models.Model,
+            ),
+        ),
     ]
