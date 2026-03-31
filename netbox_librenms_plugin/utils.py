@@ -371,7 +371,7 @@ def find_matching_platform(librenms_os: str) -> dict:
         except PlatformMapping.DoesNotExist:
             pass
         except PlatformMapping.MultipleObjectsReturned:
-            return {"found": True, "platform": None, "match_type": "ambiguous_mapping"}
+            pass
 
     # Try case-insensitive exact name match
     try:
@@ -691,6 +691,12 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default"):
     # regardless of which server is currently active.
     q |= Q(custom_field_data__librenms_id=librenms_id)
     q |= Q(custom_field_data__librenms_id=str(librenms_id))
+    # When a string ID looks like an integer, also match the numeric JSON form so
+    # "42" matches records that store the value as the JSON number 42.
+    if isinstance(librenms_id, str) and librenms_id.isdigit():
+        int_value = int(librenms_id)
+        q |= Q(**{f"custom_field_data__librenms_id__{server_key}": int_value})
+        q |= Q(custom_field_data__librenms_id=int_value)
     return model.objects.filter(q).first()
 
 
