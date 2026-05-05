@@ -1,0 +1,428 @@
+# Changelog
+
+## 0.4.6 (2026-04-20)
+
+### Fixes
+* Fix VC master device showing 0 module bays after import by preventing stale counter overwrites during virtual chassis creation (#275)
+* Defer VC master assignment until after all members are attached
+* Add `_sync_module_bay_counter()` safety net to reconcile counter after master assignment
+
+## 0.4.5 (2026-04-16)
+
+### Fixes
+* Fix VLAN group modal not closing on dismiss button, cancel button, save button, or backdrop click on the interface sync page
+* Align `showModal()`/`hideModal()` with `ModalManager` pattern — try Bootstrap 5 native first, fall back to manual DOM manipulation
+* Prevent stacking backdrop click handlers on repeated `showModal()` calls
+
+## 0.4.4 (2026-04-15)
+
+### New Features
+* **Multi-Server Support**: JSON-based `librenms_id` custom field with per-server device tracking, server management, and migration from legacy integer format
+* **Auto-Create Custom Field**: Automatically create the `librenms_id` custom field via `post_migrate` signal
+* **Sync Page Naming Preferences**: Apply `use_sysname` and `strip_domain` naming preferences to device name matching on sync pages
+* **VC Import Enhancements**: Show virtual chassis members in import confirm modal, enforce stack VC permissions before import, and fix VC flag propagation across the import flow
+
+### Improvements
+* Refactor `import_utils.py` into a package with aligned module boundaries
+* Security hardening — URL-encode `server_key` in redirects, reject `librenms_id` <= 0, CSRF safety, XSS label escaping in cable verify
+* JS hardening — extract `showModal`/`hideModal` helpers, harden `getDeviceIdFromUrl`, guard `interfaceNameField`, remove dead code
+* Server-key propagation, UI polish, and view hardening across multi-server import pipeline
+* Cable sync matching by `local_port_id` instead of display name; strip stale fields on cable verify POST
+* Simplify migration — always revert to integer, handle non-integer custom field types gracefully
+* Skip `device_type` check for VMs; add `sync_platform` to VM supported actions
+* Update supported NetBox versions in README
+
+### Fixes
+* Fix VC master detection, 0-based position correction, and import propagation
+* Fix VC verify view crash by using `get_librenms_sync_device()` in verify views
+* Fix cables view caching, `interface_name_field` per-request, and `LibreNMSAPIMixin`
+* Fix operator precedence in message fallback expressions
+* Fix import validation, template bugs, and pagination
+* Correct `vc_detection_enabled` default in `validate_device_for_import` call
+* Fix stale docstrings, test names, and duplicate functions
+* Guard `dt_match` None on ambiguous hardware match in `validate_device_for_import`
+* Write enriched links data back to cache on non-fresh path
+* Restore multi-key naming preferences and early-exit on missing name
+
+### Development
+* Expanded test coverage with new test files and reorganized existing tests
+* Smoke tests, integration tests, and mock LibreNMS server
+* Add `pytest-cov` coverage report (no gating)
+* Updated pre-commit hooks, ruff config, and uv Dependabot
+* Bump GitHub Actions dependencies (upload-artifact, download-artifact, pypi-publish)
+* Update pull request template for contributions
+
+### Documentation
+* Update documentation for 0.4.4 release
+* Testing docs updates with new test files and philosophy
+
+## 0.4.3 (2026-03-03)
+
+### New Features
+* **VLAN Sync**: Full VLAN synchronization with per-row verification, per-VLAN group selection, color-coded summary UI, edit modal, and form spinners
+* **Two-Tier Permission System**: Plugin-level and object-level access control with `LibreNMSPermissionMixin` and `NetBoxObjectPermissionMixin`
+* **Serial Number Matching & Conflict Resolution**: Import detects serial number matches and guides users through device conflicts
+* **Per-User Preferences**: Persistent user preferences for import toggles and interface name field
+* **Device Identity Mismatch Modal**: Informational mismatch display on sync pages when device name differs between NetBox and LibreNMS
+* **Empty State Cards**: Friendly empty state cards on sync tabs when no data is available
+* **Naming Preferences in Validation**: Honour `use_sysname` and `strip_domain` settings in the import validation path with badge indicators
+* **SNMPv1 Support**: Add SNMPv1 option to the LibreNMS add device form
+
+### Improvements
+* Security hardening — XSS escaping, input validation, open-redirect prevention, and VC member validation
+* Block import when validation issues are present; fix modal titles and hostname conflict display
+* Code deduplication and minor bug fixes across views and utilities
+* Add docstrings to models, tables, views, forms, and API modules
+* Pin all GitHub Actions to commit SHAs and add Dependabot configuration
+* Add pull request template for contributions
+
+### Fixes
+* Fix KeyError for missing non-default server keys in `LibreNMSAPI`
+* Fix device redirect URL and inaccurate docstrings
+* Correct device role refresh to preserve schema keys
+* Fix validation readiness, VM form guards, and sync_info accuracy
+* Use flash message + redirect for import permission denied
+* Add virtual chassis permission check and validate `object_type`
+
+### Development
+* Comprehensive test suite with CI workflow (GitHub Actions, pytest, ruff lint/format)
+* Pre-commit hooks and updated format/lint dependencies
+* DevContainer refactor with script consolidation, proxy/MITM support, and diagnostic tooling
+* Modular copilot instructions split into per-concern `.instructions.md` files
+
+### Documentation
+* VLAN sync feature and view architecture documentation
+* Permission system documentation
+* Improved README, workflow guides, and troubleshooting notes
+
+## 0.4.2 (2026-01-16)
+
+### Fixes
+* Fix device sync not working after update (Issue #199)
+* Fix API endpoints for hostname lookup and port retrieval that were incorrectly changed
+* Fix NameError in get_device_id_by_ip method - correct undefined 'mac_address' variable error (Issue #197)
+
+## 0.4.1 (2026-01-12)
+
+### Fixes
+* Fix librenms_id custom field to use integer values in import process
+
+## 0.4.0 (2026-01-09)
+
+## Major Features
+- **LibreNMS Bulk Device Import**: Complete workflow for importing devices from LibreNMS with HTMX-based UI, validation, and background job processing
+- **Background Job Support**: Asynchronous processing for large device imports with real-time status tracking and cancellation
+- **Enhanced Caching**: Improved caching system with expiration countdown, metadata storage, and multi-server isolation
+- **Virtual Chassis Detection**: Automatic detection and handling of virtual chassis during import
+
+- Add hardware and exclude-existing filters to device import
+- Client-side table sorting for import page
+- Active LibreNMS server display on import page
+- Improved logging patterns and documentation
+- Cache management with discard controls
+- Refactored settings page with HTMX (removed fetch-based JavaScript)
+- Enhanced virtual chassis sync device detection logic
+- Better error handling and connection exhaustion prevention
+
+## Development
+- Improved dev container with RQ worker management
+- Comprehensive test coverage for background jobs
+- Enhanced copilot instructions for AI-assisted development
+- Better process management and reload scripts
+
+## Documentation
+- Extensive import documentation (overview, process, settings, validation, search)
+- Background job architecture documentation
+- Improved README and workflow guides
+- Virtual chassis usage documentation
+
+## 0.3.18 (2025-11-21)
+
+### Improvements
+* Add all LibreNMS SNMP fields to add device form
+
+## 0.3.17 (2025-10-24)
+
+### Improvements
+* Improve device type matching with prioritized matching strategy
+* Centralize device type matching logic in utils.py (DRY principle)
+* Add word boundary detection for more precise substring matches
+
+
+## 0.3.16 (2025-10-24)
+
+### New Features
+* Add device field synchronization (serial number, device type, platform)
+* Add virtual chassis inventory support with serial assignment to individual members
+* Add VM information display in LibreNMS status card
+* Add bulk interface mapping import functionality
+
+### Improvements
+* Improve virtual chassis device matching with LibreNMS for devices with VC member suffixes
+* Enhance virtual chassis logic and member selection
+
+### Development
+* Add GitHub DevContainer setup for easier development environment
+
+### Fixes
+* Fix FieldError for librenms_status on device/VM status pages
+
+### Documentation
+* Update README with device field sync details
+* Improve virtual chassis documentation
+* Added example Interface Mapping YAML for bulk import
+
+## 0.3.15 (2025-07-12)
+
+### Improvements
+* Improve multi-server configuration handling and add connection testing
+
+
+## 0.3.14 (2025-07-08)
+
+### Fixes
+* Filter out invalid IP entries in BaseIPAddressTableView
+
+### New Features
+* View/Delete NetBox-only (unmatched) interfaces
+* Add multi LibreNMS server configuration support for LibreNMS plugin
+
+### Documentation
+* Add page for multi server configuration instructions and example
+
+
+## 0.3.13 (2025-06=27)
+
+### New Feature
+* Add support for IPv6 handling in IP address synchronization
+
+### Documentation
+* Add basic development documentation
+
+## 0.3.12 (2025-04-11)
+
+### Improvements
+* Add VRF selection support to IP address table and sync
+* Implement single IP address verification and VRF assignment
+* Extend single IP verification to support Virtual Machines
+
+### Under the hood
+* Refactor cable and IP address synchronization methods for improved transaction handling
+* Refactor IP address enrichment for improved performance
+
+## 0.3.11 (2025-03-31)
+
+### Improvements
+* Enhance remote port enrichment for virtual chassis devices
+
+## 0.3.10 (2025-03-17)
+
+### Fixes
+* Fix URL error when no interfaces are selected during sync
+* Add hidden SNMP version field to forms and update sync logic
+
+## 0.3.9 (2025-03-14)
+
+### Fixes
+* Fix missing add_device_modal.html template and form handling
+* Fix missing interfacetypemapping template
+
+
+## 0.3.8 (2025-03-06)
+
+### Fixes
+* Fix cable table error when more than one remote device returned
+* Fix cable table checkboxes controls for virtual chassis devices
+
+### Improvements
+* Add slug check to Site and Location Sync
+
+
+## 0.3.7 (2025-01-22)
+
+### Fixes
+* Fix issue with empty queryset to stop fielderror
+### Improvements
+* Enhance filtering options for devices and virtual machines
+### Under the hood
+* Review and refactor docstrings across all files
+
+
+## 0.3.6 (2025-01-21)
+
+###  NOTE
+***Netbox v4.2+ required for this release***
+
+### New Feature
+* New dedicated plugin menu item
+* Add device and VM status pages
+
+### Fixes
+* Add description to interface mapping page
+
+### Under the hood
+* Update to use new Mac Address object for Netbox v4.2
+
+## 0.3.5 (2025-01-13)
+
+### Fixes
+
+* Fix IP Address table not displaying for Virutal Machines
+
+## 0.3.4 (2025-01-08)
+
+### Fixes
+* Fix VM Interface table not dispalying
+
+## 0.3.3 (2025-01-03)
+
+### New Feature
+* Add IP address synchronization
+
+### Fixes
+* Refactor librenms_id handling in SyncInterfacesView
+
+### Under the hood
+* Refactor table.py into separate modules for better maintainability
+* Enhance interface data retrieval efficiency
+
+
+## 0.3.2 (2024-12-16)
+
+### Fixes
+* Refactor tab handling for interface and cable views
+* Fix Duplicate ID in SNMP forms
+* Refactor cable link processing and fix CSRF token error.
+* Generate unique base ID for TomSelect components in VCInterfaceTable
+* Add countdown interval variable to initializeCountdown function
+## 0.3.1 (2024-12-13)
+
+### Fixes
+* Fix issue with tab selection not working after sync task
+* Updated interface name field tooltip
+
+## 0.3.0 (2024-12-13)
+
+### New Setting
+* Add `interface_name_feild` optional setting to allow choice of interface name field used when syncing interface data.
+* Add `interface_name_field` override in GUI for per device control and flexibility.
+
+### Improvements
+* Add `librenms_id` to interface sync table and data sync
+* Use of `librenms_id` custom field on interface lookup for improved matching in the cables table.
+* Add Pagination support to the cables table.
+
+
+### Fixes
+* Fix issue with case sensitive hostname matching
+
+### Under the hood
+* Refactor views into seperate modules for better maintainability
+
+
+## 0.2.9 (2024-11-30)
+
+## Fix pypi release
+Add static include in MANIFEST.in for pypi release
+
+## 0.2.8 (2024-11-29)
+### Use of Custom Field
+This release introduces the option of using a custom field `librenms_id` (integer) to device and virtual machine objects in NetBox. The plugin will work without it but it is recommended for LibreNMS API lookups especially if no primary IP or FQDN available.
+
+**Note: New static javascript file requires running collectstatic after update**
+
+```
+(venv) $ python manage.py collectstatic --no-input
+```
+
+
+### New Features
+* Add device to LibreNMS using SNMPv3
+* Create cable connection from LIbreNMS links data31
+* Plugin can now use primary IP, hostname or Primary IP DNS Name to identify device in LibreNMS
+* Exclude specific columns when syncing data
+* Filter interface and cable tables
+* Bulk edit Virtual Chassis members
+
+
+
+### Improvements
+* Add pagination to SiteLocationSyncTable
+* Add site location filtering functionality and update template for search
+* Refactor LibreNMSAPI to enhance device ID retrieval logic and include DNS name handling
+* Enhance cable sync with device ID handling and user guidance modal
+* Add device mismatch check and user feedback
+* Add check for empty MAC address in format_mac_address function
+* Increase API request timeout to 20 seconds
+* Fix dropdown menu size issue on click
+
+
+### Under the hood
+
+* Refactor interface enabled status logic
+* Fix handling of data-enabled attribute in interface table
+* Improve interface mapping logic for speed matchingpull/24
+* Refactor cable context handling and improve data rendering in cable tables
+* Refactor Javascript into single file. Add cable sync filters and countdown timer
+* Refactor device addition and enhance SNMP v3 support
+
+
+## 0.2.7 (2024-11-11)
+### What's Changed
+* Add new interface table logic to handle virtual chassis member selection
+* Update LibreNMS plugin configuration to allow disabling of SSL verification
+
+### Interface name change
+*The LibreNMS Sync interface names now use the ifDescr from Librenms. This displays the full interface name to better align with the device type library convention. e.g GigabitEthernet1/0/1 instead of Gig1/0/1.*
+
+## 0.2.6 (2024-10-25)
+### New Feature
+
+* Sync Virtual Machine interfaces
+
+### Bug fix
+* Pagination bug where page contents would duplicate now fixed.
+
+### Under the hood
+* Refactoring of views into separate files for better maintainability.
+* Code formatting improvements
+* Remove unused elements
+
+##  0.2.5 (2024-10-21)
+Bug fix release:
+* Missing commas in LibreNMS api module
+
+## 0.2.4 (2024-10-21)
+### Enhancements
+
+* Add mac_address, MTU to interface sync
+* Enable select all and shift click on interface sync page rows, and other improvements
+* Interface mapping now accounts for speed of interface
+    > Update to Interface mapping modal may require recreation of existing mapping.
+* Updated LibreNMS Sync page layout to prepare for new features
+### Under the hood
+* Refactor all views to be class-based
+* Big refactor of device LibreNMS sync views to make way for new features
+## 0.2.3 (2024-09-30)
+
+* Fix bug where wrong template is used when editing interface mappings
+* Remove unused templates from view
+
+## 0.2.2 (2024-09-27)
+
+* Fix too many arguments to add_device error
+
+## 0.2.1 (2024-09-27)
+
+* Fix LibreNMS hardware variable not found
+* Add update_device_field to LibreNMS API
+* Add device location Sync button to device plugin tab
+* Change SNMP community from 'text' to 'password' for privacy
+
+## 0.2.0 (2024-09-25)
+
+* Update to v0.2.0 of the plugin
+
+## 0.1.1 (2024-09-24)
+
+* First release on PyPI.

@@ -1,0 +1,84 @@
+{% load helpers %}
+{% include 'inc/messages.html' %}
+
+<!-- IP Address Sync Table -->
+{% if ip_sync.table %}
+{% with model_name=ip_sync.object|meta:"model_name" %}
+<form method="post" action="{% url 'plugins:netbox_librenms_plugin:sync_device_ip_addresses' object_type=model_name pk=ip_sync.object.pk %}">
+{% endwith %}
+    {% csrf_token %}
+    {% if ip_sync.server_key %}<input type="hidden" name="server_key" value="{{ ip_sync.server_key }}">{% endif %}
+    <input type="hidden" id="selected_ip" name="select" value="">
+    <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
+        <div>
+            <button type="submit" class="btn btn-primary">
+                <span class="spinner spinner-border d-none" id="sync-spinner"></span>
+                <span>Sync Selected IP Addresses</span>
+            </button>
+        </div>
+        {% if ip_sync.cache_expiry %}
+            <div id="ip-cache-countdown" class="me-3">
+                Cache expires in: <span id="ip-countdown-timer" data-expiry="{{ ip_sync.cache_expiry|date:'c' }}"></span>
+            </div>
+        {% endif %}
+    </div>
+
+    <div class="row mb-3">
+        <div class="col col-md-12">
+            <div class="d-flex justify-content-end align-items-center mb-3">
+                <button class="btn btn-sm btn-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#ipFilterSection" aria-expanded="false" aria-controls="ipFilterSection">
+                    <i class="mdi mdi-filter"></i> Toggle Filters
+                </button>
+            </div>
+            <div class="collapse mb-3" id="ipFilterSection">
+                <div class="mb-2">
+                    <small class="text-muted">
+                        <i class="mdi mdi-information"></i> Filters apply to currently displayed IP addresses.
+                    </small>
+                </div>
+                <div class="filter-container d-flex gap-2">
+                    <input type="text" id="filter-address" placeholder="Filter by Address" class="form-control">
+                    <input type="text" id="filter-prefix" placeholder="Filter by Prefix" class="form-control">
+                    <input type="text" id="filter-device" placeholder="Filter by Device" class="form-control">
+                    <input type="text" id="filter-interface" placeholder="Filter by Interface" class="form-control">
+                </div>
+            </div>
+            <style>
+                .ts-wrapper.multi .ts-control {
+                    display: flex !important;
+                    flex-wrap: wrap;
+                    align-items: center;
+                }
+
+                /* VRF dropdown styles */
+                td[data-col="vrf"] {
+                    width: 250px;
+                    min-width: 180px;
+                }
+                td[data-col="vrf"] .ts-wrapper {
+                    width: 100%;
+                    max-width: 100%;
+                }
+
+                /* Ensure select elements in VRF column maintain consistent width */
+                td[data-col="vrf"] select.form-select {
+                    width: 100%;
+                    min-width: 160px;
+                }
+            </style>
+            <div class="card">
+                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=ip_sync.table %}
+                {% include 'inc/table.html' with table=ip_sync.table %}
+                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=ip_sync.table %}
+            </div>
+        </div>
+    </div>
+</form>
+{% else %}
+<div class="card">
+    <div class="card-body text-center text-muted py-4">
+        <i class="mdi mdi-sync-off mdi-48px"></i>
+        <p class="mt-2 mb-0">No IP address data loaded. Click <strong>Refresh IP Addresses</strong> to fetch data from LibreNMS.</p>
+    </div>
+</div>
+{% endif %}

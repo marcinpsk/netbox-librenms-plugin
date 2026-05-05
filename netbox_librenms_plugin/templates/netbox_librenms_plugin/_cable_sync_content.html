@@ -1,0 +1,118 @@
+{% load helpers %}
+{% include 'inc/messages.html' %}
+
+<!-- Cable Sync Table -->
+{% if cable_sync.table %}
+<form method="post" action="{% url 'plugins:netbox_librenms_plugin:sync_device_cables' cable_sync.object.pk %}">
+    {% csrf_token %}
+    {% if cable_sync.server_key %}<input type="hidden" name="server_key" value="{{ cable_sync.server_key }}">{% endif %}
+    <input type="hidden" id="selected_port" name="select" value="">
+    <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
+        <div>
+            <button type="submit" class="btn btn-primary">
+                <span class="spinner spinner-border d-none" id="sync-spinner"></span>
+                <span>Sync Selected Cables</span>
+            </button>
+            <a href="#" class="m-2" data-bs-toggle="modal" data-bs-target="#cableSyncHelpModal">
+                <i class="mdi mdi-help-circle"></i> info
+            </a>
+        </div>
+        {% if cable_sync.cache_expiry %}
+            <div id="cable-cache-countdown" class="me-3">
+                Cache expires in: <span id="cable-countdown-timer" data-expiry="{{ cable_sync.cache_expiry|date:'c' }}"></span>
+            </div>
+        {% endif %}
+    </div>
+
+    <div class="row mb-3">
+        <div class="col col-md-12">
+            <div class="d-flex justify-content-end align-items-center mb-3">
+                <button class="btn btn-sm btn-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#cableFilterSection" aria-expanded="false" aria-controls="cableFilterSection">
+                    <i class="mdi mdi-filter"></i> Toggle Filters
+                </button>
+            </div>
+            <div class="collapse mb-3" id="cableFilterSection">
+                <div class="mb-2">
+                    <small class="text-muted">
+                        <i class="mdi mdi-information"></i> Filters apply to currently displayed cables.
+                    </small>
+                </div>
+                <div class="filter-container d-flex gap-2">
+                    {% if cable_sync.table.attrs.id == "librenms-cable-table-vc" %}
+                    <input type="text" id="filter-vc-member" placeholder="Filter by VC Member" class="form-control">
+                    {% endif %}
+                    <input type="text" id="filter-local-port" placeholder="Filter by Local Port" class="form-control">
+                    <input type="text" id="filter-remote-port" placeholder="Filter by Remote Port" class="form-control">
+                    <input type="text" id="filter-remote-device" placeholder="Filter by Remote Device" class="form-control">
+                </div>
+            </div>
+            <style>
+                /* Your existing CSS rules */
+                .ts-wrapper.multi .ts-control {
+                    display: flex !important;
+                    flex-wrap: wrap;
+                    align-items: center;
+                }
+                /* Updated rules using min-width */
+                td[data-col="device_selection"] {
+                    width: 300px;
+                    min-width: 200px;
+                }
+                td[data-col="device_selection"] .ts-wrapper {
+                    width: 100%;
+                    max-width: 100%;
+                }
+            </style>
+            <div class="card">
+                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=cable_sync.table %}
+                {% include 'inc/table.html' with table=cable_sync.table %}
+                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=cable_sync.table %}
+            </div>
+        </div>
+    </div>
+</form>
+{% else %}
+<div class="card">
+    <div class="card-body text-center text-muted py-4">
+        <i class="mdi mdi-sync-off mdi-48px"></i>
+        <p class="mt-2 mb-0">No cable data loaded. Click <strong>Refresh Cables</strong> to fetch data from LibreNMS.</p>
+    </div>
+</div>
+{% endif %}
+<!-- Interface Type Help Modal -->
+<div class="modal fade" id="cableSyncHelpModal" tabindex="-1" aria-labelledby="cableSyncHelpModalLabel"
+    aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="cableSyncHelpModalLabel">NetBox Interface Sync Info</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <h5>Device Association</h5>
+                <p>The plugin uses two methods to associate LibreNMS devices with NetBox devices:</p>
+                <ol>
+                    <li><strong>LibreNMS ID (Recommended)</strong>
+                        <ul>
+                            <li>Uses the custom field 'librenms_id' on NetBox devices</li>
+                            <li>Automatically populated when viewing the LibreNMS Sync page if device is found.</li>
+                            <li>Can be manually entered in device custom fields</li>
+                            <li>Provides the most reliable device matching</li>
+                        </ul>
+                    </li>
+                    <li><strong>Device Name Fallback</strong>
+                        <ul>
+                            <li>Used when librenms_id is not available</li>
+                            <li>Matches are case-sensitive</li>
+                            <li>Less reliable due to potential naming differences</li>
+                        </ul>
+                    </li>
+                </ol>
+                <p>For best results, ensure the librenms_id custom field is populated on your devices.</p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>

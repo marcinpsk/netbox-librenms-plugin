@@ -1,0 +1,88 @@
+site_name: NetBox librenms Plugin
+site_url: https://bonzo81.github.io/netbox-librenms-plugin
+repo_url: https://github.com/bonzo81/netbox-librenms-plugin
+repo_name: /netbox-librenms-plugin
+#strict: true
+nav:
+  - Home: README.md
+  - Getting Started:
+    - Feature Overview: feature_list.md
+    - Initial Setup: usage_tips/README.md
+    - Custom Field Setup: usage_tips/custom_field.md
+    - Multi-Server Setup: usage_tips/multi_server_configuration.md
+    - Permissions & Access: usage_tips/permissions.md
+    - Suggested Workflow: usage_tips/suggested_workflow.md
+  - Import Devices:
+    - Overview: librenms_import/overview.md
+    - Searching for Devices: librenms_import/search.md
+    - Validation & Configuration: librenms_import/validation.md
+    - Import Settings: librenms_import/import_settings.md
+    - Background Jobs & Caching: librenms_import/background_jobs.md
+  - Sync & Configuration:
+    - Virtual Chassis: usage_tips/virtual_chassis.md
+    - Interface Mappings: usage_tips/interface_mappings.md
+  - Development:
+    - Overview: development/README.md
+    - Project Structure: development/structure.md
+    - Views & Inheritance: development/views.md
+    - Mixins: development/mixins.md
+    - Templates: development/templates.md
+    - Testing: development/testing.md
+  - Changelog: changelog.md
+  - Contributing: contributing.md
+
+theme:
+  name: material
+  language: en
+  #logo: assets/logo.png
+  palette:
+    scheme: preference
+    primary: indigo
+    accent: indigo
+  features:
+    - navigation.indexes
+    - navigation.instant
+    - navigation.tabs.sticky
+markdown_extensions:
+  - attr_list
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.critic
+  - pymdownx.caret
+  - pymdownx.mark
+  - pymdownx.tilde
+  - pymdownx.tabbed
+  - attr_list
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.highlight:
+      linenums: false
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - pymdownx.details
+  - admonition
+  - pymdownx.escapeall:
+      hardbreak: true
+      nbsp: true
+  - toc:
+      baselevel: 2
+      permalink: true
+  - meta
+plugins:
+  - include-markdown
+  - search:
+      lang: en
+  - mkdocstrings:
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com//netbox-librenms-plugin
+      name: Github
+  # to enable disqus, uncomment the following and put your disqus id below
+  # disqus: disqus_id
+# uncomment the following and put your google tracking id below to enable GA
+#google_analytics:
+  #- UA-xxx
+  #- auto
