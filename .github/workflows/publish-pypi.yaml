@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - master
+      - main
     tags:
       - '*'
 
@@ -44,7 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/netbox-librenms-plugin
+      url: https://pypi.org/p/netbox-librenms-experimental-plugin
     permissions:
       id-token: write  # IMPORTANT: mandatory for trusted publishing
 
