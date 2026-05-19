@@ -6,8 +6,8 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name =  "netbox-librenms-plugin"
-version = "0.4.6"
+name =  "netbox-librenms-experimental-plugin"
+version = "0.1.4"
 authors = [
     {name = "Andy Norwood"},
 ]
@@ -27,8 +27,8 @@ classifiers=[
 requires-python = ">=3.12.0"
 
 [project.urls]
-"Homepage" = "https://github.com/bonzo81/netbox-librenms-plugin/"
-"Bug Tracker" = "https://github.com/bonzo81/netbox-librenms-plugin/issues/"
+"Homepage" = "https://github.com/marcinpsk/netbox-librenms-plugin/"
+"Bug Tracker" = "https://github.com/marcinpsk/netbox-librenms-plugin/issues/"
 
 # New: Restrict package discovery to our plugin only
 [tool.setuptools]
