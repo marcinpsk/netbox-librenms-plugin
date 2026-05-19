@@ -22,6 +22,7 @@ def create_vm_from_librenms(
     use_sysname: bool = True,
     strip_domain: bool = False,
     role=None,
+    auto_create_ipam: bool | None = None,
 ):
     """
     Create a NetBox VirtualMachine from LibreNMS device data.
@@ -83,6 +84,22 @@ def create_vm_from_librenms(
         )
         set_librenms_device_id(vm, librenms_device_id, server_key)
         vm.save()
+
+        # Pre-create the LibreNMS-known IP in IPAM (global /32 or /128) so
+        # the user can later attach it to a VM interface and assign it as
+        # primary_ip4/6. We do not auto-set primary_ip4 here because
+        # VirtualMachine.clean() requires the IP be assigned to one of the
+        # VM's interfaces, which doesn't exist on a fresh import.
+        primary_ip = libre_device.get("ip")
+        if primary_ip:
+            from .ip_helpers import auto_create_ipam_enabled, get_or_create_global_ip
+
+            _auto_create = auto_create_ipam_enabled() if auto_create_ipam is None else bool(auto_create_ipam)
+            _ip, was_created = get_or_create_global_ip(primary_ip, auto_create=_auto_create)
+            if was_created and _ip is not None:
+                # Stash for caller to surface via Django messages (best-effort;
+                # callers that don't read this attribute simply skip the toast).
+                vm._librenms_created_ips = [str(_ip.address.ip)]
 
     logger.info(f"Created VM {vm.name} (ID: {vm.pk}) from LibreNMS device {libre_device['device_id']}")
     return vm
@@ -175,6 +192,7 @@ def bulk_import_vms(
             # Validate as VM
             use_sysname_opt = sync_options.get("use_sysname", True) if sync_options else True
             strip_domain_opt = sync_options.get("strip_domain", False) if sync_options else False
+            auto_create_ipam_opt = sync_options.get("auto_create_ipam") if sync_options else None
             validation = validate_device_for_import(
                 libre_device,
                 import_as_vm=True,
@@ -239,6 +257,7 @@ def bulk_import_vms(
                 use_sysname=use_sysname_opt,
                 strip_domain=strip_domain_opt,
                 server_key=api.server_key,
+                auto_create_ipam=auto_create_ipam_opt,
             )
 
             result["success"].append(

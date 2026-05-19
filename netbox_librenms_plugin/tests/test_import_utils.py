@@ -1723,11 +1723,22 @@ class TestSerialNumberMatching:
         assert result["existing_match_type"] == "serial"
         assert "not linked to LibreNMS" in result["warnings"][0]
 
-    def test_serial_match_diff_hostname_offers_hostname_differs(self):
-        """Serial matches but hostname differs offers hostname_differs action."""
+    def test_serial_match_diff_hostname_offers_role_choice(self):
+        """Serial matches but hostname differs offers a host/OOB role choice toggle.
+
+        Previously this returned `hostname_differs`. With the role-toggle work
+        (see device_validation_details.html + device_operations.py refactor),
+        when an existing NetBox device matches by serial but the names differ
+        AND neither host nor OOB role is conclusively chosen by the heuristic,
+        we now expose both `oob_candidate` and `promote_to_host` data blocks
+        and surface a role-choice toggle in the UI. Default action is
+        `oob_candidate` (least destructive).
+        """
         existing = MagicMock()
         existing.name = "old-hostname"
         existing.serial = "ABC123"
+        existing.pk = 7
+        existing.custom_field_data = {}
 
         self.mock_vm.objects.filter.return_value.first.return_value = None
 
@@ -1746,9 +1757,9 @@ class TestSerialNumberMatching:
         device_data = {"device_id": 1, "hostname": "new-hostname", "serial": "ABC123"}
         result = validate_device_for_import(device_data, include_vc_detection=False)
 
-        assert result["serial_action"] == "hostname_differs"
+        assert result["serial_action"] == "oob_candidate"
         assert result["existing_match_type"] == "serial"
-        assert "hostname differs" in result["warnings"][0]
+        assert result.get("oob_candidate") is not None
 
     def test_hostname_match_diff_serial_offers_update(self):
         """Hostname matches but serial differs offers update_serial action."""
@@ -2847,8 +2858,8 @@ class TestDeviceConflictActionView:
         # Serial should NOT be updated to '-'
         assert existing_device.serial == "EXISTING"
 
-    def test_missing_action_returns_400(self):
-        """Missing action or existing_device_id should return 400."""
+    def test_missing_action_returns_hx_noswap_response(self):
+        """Missing action or existing_device_id returns 200 with HX-Reswap=none."""
         view = self._create_view()
         request = MagicMock()
         request.user.has_perm.return_value = True
@@ -2856,10 +2867,11 @@ class TestDeviceConflictActionView:
 
         view.request = request
         response = view.post(request, device_id=10)
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
-    def test_unknown_action_returns_400(self):
-        """Unknown action should return 400."""
+    def test_unknown_action_returns_hx_noswap_response(self):
+        """Unknown action returns 200 with HX-Reswap=none."""
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
         view = self._create_view()
@@ -2884,7 +2896,8 @@ class TestDeviceConflictActionView:
             view.request = request
             response = view.post(request, device_id=10)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
 
     @patch("netbox_librenms_plugin.views.imports.actions.cache")
     @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
@@ -2929,8 +2942,8 @@ class TestDeviceConflictActionView:
 
     @patch("netbox_librenms_plugin.views.imports.actions.cache")
     @patch("netbox_librenms_plugin.views.imports.actions.get_import_device_cache_key")
-    def test_device_type_mismatch_blocked_without_force(self, mock_cache_key, mock_cache):
-        """Action should be blocked when device_type_mismatch is True and force is not set."""
+    def test_device_type_mismatch_blocked_without_force_returns_hx_noswap(self, mock_cache_key, mock_cache):
+        """Blocked mismatch returns 200 with HX-Reswap=none when force is not set."""
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
         view = self._create_view()
@@ -2956,7 +2969,8 @@ class TestDeviceConflictActionView:
             view.request = request
             response = view.post(request, device_id=10)
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
         existing_device.save.assert_not_called()
 
     @patch("netbox_librenms_plugin.views.imports.actions.cache")

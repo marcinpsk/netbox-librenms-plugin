@@ -234,7 +234,7 @@ class TestValidateDeviceStateMachine:
             ),
             patch(
                 "netbox_librenms_plugin.import_utils.device_operations.get_virtual_chassis_data",
-                return_value={"is_stack": False, "member_count": 0, "members": []},
+                return_value={"is_stack": False, "member_count": 0, "members": [], "detection_error": None},
             ),
             patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole", mock_role),
             patch("netbox_librenms_plugin.import_utils.device_operations.Cluster", mock_cluster),
@@ -533,7 +533,7 @@ class TestValidateDeviceForImport:
             ),
             patch(
                 "netbox_librenms_plugin.import_utils.device_operations.get_virtual_chassis_data",
-                return_value={"is_stack": False, "member_count": 0, "members": []},
+                return_value={"is_stack": False, "member_count": 0, "members": [], "detection_error": None},
             ),
             patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole", mock_device_role),
             patch("netbox_librenms_plugin.import_utils.device_operations.Cluster", mock_cluster),
@@ -590,16 +590,22 @@ class TestValidateDeviceForImport:
         api = self._make_api()
 
         patches = self._patch_all_db()
+        mock_vm_cls = MagicMock()
+        mock_vm_cls.objects.filter.return_value.first.return_value = None
         try:
             for p in patches:
                 p.start()
-            result = validate_device_for_import(libre_device, import_as_vm=True, api=api)
+            # Override with a controlled mock so we can assert the VM model was consulted
+            with patch("virtualization.models.VirtualMachine", mock_vm_cls):
+                result = validate_device_for_import(libre_device, import_as_vm=True, api=api)
         finally:
             for p in patches:
                 p.stop()
 
         assert result is not None
         assert result.get("import_as_vm") is True
+        # Verify VirtualMachine model (not Device) was used for the hostname lookup
+        mock_vm_cls.objects.filter.assert_called()
 
     def test_existing_device_detected(self):
         """When device with same librenms_id exists, sets existing_device in result."""
@@ -779,7 +785,7 @@ class TestValidateDeviceForImportEdgeCases:
             ),
             patch(
                 "netbox_librenms_plugin.import_utils.device_operations.get_virtual_chassis_data",
-                return_value={"is_stack": False, "member_count": 0, "members": []},
+                return_value={"is_stack": False, "member_count": 0, "members": [], "detection_error": None},
             ),
             patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole", mock_role),
             patch("netbox_librenms_plugin.import_utils.device_operations.Cluster", mock_cluster),
@@ -896,6 +902,8 @@ class TestValidateDeviceForImportEdgeCases:
             self._stop_patches(patches)
 
         assert result["virtual_chassis"] is not None
+        assert result["virtual_chassis"]["is_stack"] is True
+        assert result["virtual_chassis"]["member_count"] == 2
         mock_get_vc.assert_called_once()
         mock_update_vc.assert_called_once()
 
@@ -1055,7 +1063,7 @@ class TestValidateDeviceMoreEdgeCases:
             ),
             patch(
                 "netbox_librenms_plugin.import_utils.device_operations.get_virtual_chassis_data",
-                return_value={"is_stack": False, "member_count": 0, "members": []},
+                return_value={"is_stack": False, "member_count": 0, "members": [], "detection_error": None},
             ),
             patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole", mock_role),
             patch("netbox_librenms_plugin.import_utils.device_operations.Cluster", mock_cluster),
@@ -1397,6 +1405,12 @@ class TestImportSingleDeviceEdgeCases:
         mock_new_device.full_clean.assert_called_once()
         mock_new_device.save.assert_called_once()
         mock_set_id.assert_called_once()
+        # Verify Device was constructed with the resolved site, device_type, and role
+        mock_device_cls.assert_called_once()
+        call_kwargs = mock_device_cls.call_args[1]
+        assert call_kwargs["site"] is mock_site
+        assert call_kwargs["device_type"] is mock_dt
+        assert call_kwargs["role"] is mock_role
 
 
 class TestImportSingleDeviceMoreEdgeCases:
@@ -1665,3 +1679,699 @@ class TestValidateDeviceChassisMatch:
             device_patch.stop()
 
         assert result["device_type"].get("device_type") is chassis_dt
+
+
+class TestOOBDetection:
+    """Tests for OOB candidate detection in validate_device_for_import (Phase 2)."""
+
+    def _make_api(self, server_key="default"):
+        api = MagicMock()
+        api.server_key = server_key
+        return api
+
+    def _base_patches(self, mock_device_cls, mock_vm_cls=None):
+        """Return a list of common patches (start/stop must be called by caller).
+
+        Does NOT patch find_by_librenms_id — each test adds it explicitly so that
+        when the same target is patched twice the stop order (reversed) is clear.
+        """
+        if mock_vm_cls is None:
+            mock_vm_cls = MagicMock()
+            mock_vm_cls.objects.filter.return_value.first.return_value = None
+        return [
+            patch("netbox_librenms_plugin.import_utils.device_operations.Site"),
+            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceType"),
+            patch("netbox_librenms_plugin.import_utils.device_operations.DeviceRole"),
+            patch("netbox_librenms_plugin.import_utils.device_operations.cache"),
+            patch("ipam.models.IPAddress"),
+            patch("virtualization.models.VirtualMachine", new=mock_vm_cls),
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.match_librenms_hardware_to_device_type",
+                return_value={"matched": False},
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.find_matching_site",
+                return_value={"found": False, "site": None, "match_type": None},
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.find_matching_platform",
+                return_value={"found": False, "platform": None, "match_type": None},
+            ),
+        ]
+
+    # ------------------------------------------------------------------
+    # Case 1: Serial match + OOB regex → oob_candidate
+    # ------------------------------------------------------------------
+    def test_serial_match_oob_type_sets_oob_candidate(self):
+        """Serial matches + device os=idrac → serial_action='oob_candidate', oob_candidate populated."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        libre_device = {
+            "device_id": 17,
+            "hostname": "idrac-server01",
+            "sysName": "idrac-server01",
+            "hardware": "iDRAC9",
+            "serial": "ABC123",
+            "os": "idrac",
+            "ip": "10.0.0.5",
+            "version": "5.10.50",
+            "location": "",
+        }
+        api = self._make_api()
+
+        existing = MagicMock()
+        existing.name = "server01"
+        existing.custom_field_data = {"librenms_id": {"default": 42}}
+
+        mock_device_cls = MagicMock()
+        # hostname check → None, serial check → existing
+        mock_device_cls.objects.filter.return_value.first.side_effect = [None, existing]
+        mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+
+        patches = self._base_patches(mock_device_cls) + [
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id",
+                return_value=None,
+            ),
+            patch("netbox_librenms_plugin.import_utils.device_operations.Device", new=mock_device_cls),
+            patch("netbox_librenms_plugin.import_utils.device_operations.get_librenms_oob", return_value=None),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            result = validate_device_for_import(libre_device, api=api)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        assert result["serial_action"] == "oob_candidate"
+        assert result["oob_candidate"] is not None
+        assert result["oob_candidate"]["type"] == "idrac"
+        assert result["oob_candidate"]["ip"] == "10.0.0.5"
+        assert result["oob_candidate"]["version"] == "5.10.50"
+        assert result["can_import"] is False
+
+    # ------------------------------------------------------------------
+    # Case 2: Serial match + OOB regex + OOB already set → serial_action="link"
+    # ------------------------------------------------------------------
+    def test_serial_match_oob_already_linked_falls_back_to_link(self):
+        """Serial matches + OOB type + existing OOB already set → serial_action='link'."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        libre_device = {
+            "device_id": 17,
+            "hostname": "idrac-server01",
+            "sysName": "idrac-server01",
+            "hardware": "iDRAC9",
+            "serial": "ABC123",
+            "os": "idrac",
+            "ip": "10.0.0.5",
+            "version": "5.10.50",
+            "location": "",
+        }
+        api = self._make_api()
+
+        existing = MagicMock()
+        existing.name = "server01"
+        existing.custom_field_data = {"librenms_id": {"default": {"id": 42, "oob": {"id": 17, "type": "idrac"}}}}
+
+        mock_device_cls = MagicMock()
+        mock_device_cls.objects.filter.return_value.first.side_effect = [None, existing]
+        mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+
+        existing_oob = {"id": 17, "type": "idrac"}
+
+        patches = self._base_patches(mock_device_cls) + [
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id",
+                return_value=None,
+            ),
+            patch("netbox_librenms_plugin.import_utils.device_operations.Device", new=mock_device_cls),
+            patch("netbox_librenms_plugin.import_utils.device_operations.get_librenms_oob", return_value=existing_oob),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            result = validate_device_for_import(libre_device, api=api)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        assert result["serial_action"] == "link"
+        assert result["oob_candidate"] is None
+
+    # ------------------------------------------------------------------
+    # Case 3: Serial match + NOT an OOB type → link/hostname_differs unchanged
+    # ------------------------------------------------------------------
+    def test_serial_match_non_oob_type_uses_standard_logic(self):
+        """Serial matches but os=linux → standard serial_action (link or hostname_differs)."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        libre_device = {
+            "device_id": 42,
+            "hostname": "server01",
+            "sysName": "server01",
+            "hardware": "PowerEdge R640",
+            "serial": "ABC123",
+            "os": "linux",
+            "ip": "192.168.1.1",
+            "version": "",
+            "location": "",
+        }
+        api = self._make_api()
+
+        existing = MagicMock()
+        existing.name = "server01"
+
+        mock_device_cls = MagicMock()
+        # hostname check → None, serial check → existing
+        mock_device_cls.objects.filter.return_value.first.side_effect = [None, existing]
+        mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+
+        patches = self._base_patches(mock_device_cls) + [
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id",
+                return_value=None,
+            ),
+            patch("netbox_librenms_plugin.import_utils.device_operations.Device", new=mock_device_cls),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            result = validate_device_for_import(libre_device, api=api)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        assert result["serial_action"] in ("link", "hostname_differs")
+        assert result["oob_candidate"] is None
+
+    # ------------------------------------------------------------------
+    # Case 4: result dict always has oob_candidate key (even when not set)
+    # ------------------------------------------------------------------
+    def test_result_always_contains_oob_candidate_key(self):
+        """result dict always includes oob_candidate key regardless of detection path."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        libre_device = {
+            "device_id": 1,
+            "hostname": "sw01",
+            "sysName": "sw01",
+            "hardware": "SomeSwitch",
+            "serial": "",
+            "os": "ios",
+            "ip": "",
+            "version": "",
+            "location": "",
+        }
+        api = self._make_api()
+
+        mock_device_cls = MagicMock()
+        mock_device_cls.objects.filter.return_value.first.return_value = None
+        mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+
+        patches = self._base_patches(mock_device_cls) + [
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id",
+                return_value=None,
+            ),
+            patch("netbox_librenms_plugin.import_utils.device_operations.Device", new=mock_device_cls),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            result = validate_device_for_import(libre_device, api=api)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        assert "oob_candidate" in result
+        assert result["oob_candidate"] is None
+
+    # ------------------------------------------------------------------
+    # Case 4b: Inverse-OOB — existing NetBox device named like an OOB,
+    # already linked to a different LibreNMS id, incoming is the host.
+    # ------------------------------------------------------------------
+    def test_serial_match_inverse_oob_sets_promote_to_host(self):
+        """Existing device named 'idrac-*' linked to libre #99; incoming host (os=linux) shares serial → promote_to_host."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        libre_device = {
+            "device_id": 42,
+            "hostname": "eve-ng-02",
+            "sysName": "eve-ng-02",
+            "hardware": "Dell PowerEdge R770",
+            "serial": "ABC123",
+            "os": "linux",
+            "ip": "10.0.0.10",
+            "version": "",
+            "location": "",
+        }
+        api = self._make_api()
+
+        existing = MagicMock()
+        existing.name = "idrac-jhw6nc4"
+        existing.cf = {"librenms_id": {"default": {"id": 99}}}
+
+        mock_device_cls = MagicMock()
+        mock_device_cls.objects.filter.return_value.first.side_effect = [None, existing]
+        mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+
+        patches = self._base_patches(mock_device_cls) + [
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id",
+                return_value=None,
+            ),
+            patch("netbox_librenms_plugin.import_utils.device_operations.Device", new=mock_device_cls),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            result = validate_device_for_import(libre_device, api=api)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        assert result["serial_action"] == "promote_to_host"
+        assert result["promote_to_host"] == {
+            "existing_libre_id": 99,
+            "existing_oob_type": "idrac",
+        }
+        assert result["existing_librenms_link"] == {
+            "host_id": 99,
+            "oob_id": None,
+            "oob_type": None,
+        }
+        assert result["can_import"] is False
+
+    def test_serial_match_inverse_oob_skipped_when_existing_already_has_oob(self):
+        """If existing device already has an OOB linked, do NOT offer promote_to_host."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        libre_device = {
+            "device_id": 42,
+            "hostname": "eve-ng-02",
+            "sysName": "eve-ng-02",
+            "hardware": "Dell PowerEdge R770",
+            "serial": "ABC123",
+            "os": "linux",
+            "ip": "10.0.0.10",
+            "version": "",
+            "location": "",
+        }
+        api = self._make_api()
+
+        existing = MagicMock()
+        existing.name = "idrac-jhw6nc4"
+        # Both host id and OOB already set — the merge has already happened.
+        existing.cf = {"librenms_id": {"default": {"id": 100, "oob": {"id": 99, "type": "idrac"}}}}
+
+        mock_device_cls = MagicMock()
+        mock_device_cls.objects.filter.return_value.first.side_effect = [None, existing]
+        mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+
+        patches = self._base_patches(mock_device_cls) + [
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id",
+                return_value=None,
+            ),
+            patch("netbox_librenms_plugin.import_utils.device_operations.Device", new=mock_device_cls),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            result = validate_device_for_import(libre_device, api=api)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        assert result["serial_action"] != "promote_to_host"
+        assert result["promote_to_host"] is None
+        assert result["existing_librenms_link"]["oob_id"] == 99
+
+    def test_serial_role_choice_available_offers_both_options_when_feasible(self):
+        """When existing has a different LibreNMS host id linked, no OOB, and no name match,
+        both oob_candidate and promote_to_host are populated and serial_role_choice_available
+        signals the UI to render the host/OOB toggle."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        libre_device = {
+            "device_id": 42,
+            "hostname": "eve-ng-02",
+            "sysName": "eve-ng-02",
+            "hardware": "Dell PowerEdge R770",
+            "serial": "ABC123",
+            "os": "linux",
+            "ip": "10.0.0.10",
+            "version": "",
+            "location": "",
+        }
+        api = self._make_api()
+
+        existing = MagicMock()
+        existing.name = "idrac-jhw6nc4"  # OOB pattern in name -> heuristic picks promote
+        existing.cf = {"librenms_id": {"default": {"id": 25}}}
+
+        mock_device_cls = MagicMock()
+        mock_device_cls.objects.filter.return_value.first.side_effect = [None, existing]
+        mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+
+        patches = self._base_patches(mock_device_cls) + [
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id",
+                return_value=None,
+            ),
+            patch("netbox_librenms_plugin.import_utils.device_operations.Device", new=mock_device_cls),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            result = validate_device_for_import(libre_device, api=api)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        # Heuristic chose promote_to_host (existing name suggests OOB, host link demote-able).
+        assert result["serial_action"] == "promote_to_host"
+        # Toggle is available so the user can flip to "Add as OOB" instead.
+        assert result["serial_role_choice_available"] is True
+        assert result["oob_candidate"] is not None
+        assert result["oob_candidate"]["device"] is existing
+        assert result["promote_to_host"] is not None
+        assert result["promote_to_host"]["existing_libre_id"] == 25
+
+    def test_serial_role_choice_not_available_when_names_match_and_no_link(self):
+        """Exact name match with no existing LibreNMS link -> simple link case, no toggle."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        libre_device = {
+            "device_id": 42,
+            "hostname": "server01",
+            "sysName": "server01",
+            "hardware": "PowerEdge R640",
+            "serial": "XYZ789",
+            "os": "linux",
+            "ip": "192.168.1.1",
+            "version": "",
+            "location": "",
+        }
+        api = self._make_api()
+
+        existing = MagicMock()
+        existing.name = "server01"
+        existing.cf = {}  # not linked
+
+        mock_device_cls = MagicMock()
+        mock_device_cls.objects.filter.return_value.first.side_effect = [None, existing]
+        mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+
+        patches = self._base_patches(mock_device_cls) + [
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id",
+                return_value=None,
+            ),
+            patch("netbox_librenms_plugin.import_utils.device_operations.Device", new=mock_device_cls),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            result = validate_device_for_import(libre_device, api=api)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        assert result["serial_action"] == "link"
+        assert result.get("serial_role_choice_available") is False
+        assert result["oob_candidate"] is None
+        assert result["promote_to_host"] is None
+
+    def test_serial_match_inverse_oob_requires_oob_pattern_in_name(self):
+        """Existing device without OOB pattern in its name but with a different LibreNMS link
+        is now treated as an ambiguous host/OOB chassis pair: both options are populated and a
+        UI role-toggle is offered, defaulting to oob_candidate (least-destructive)."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        libre_device = {
+            "device_id": 42,
+            "hostname": "eve-ng-02",
+            "sysName": "eve-ng-02",
+            "hardware": "Dell PowerEdge R770",
+            "serial": "ABC123",
+            "os": "linux",
+            "ip": "10.0.0.10",
+            "version": "",
+            "location": "",
+        }
+        api = self._make_api()
+
+        existing = MagicMock()
+        existing.name = "old-server-name"  # no OOB pattern
+        existing.cf = {"librenms_id": {"default": {"id": 99}}}
+
+        mock_device_cls = MagicMock()
+        mock_device_cls.objects.filter.return_value.first.side_effect = [None, existing]
+        mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+
+        patches = self._base_patches(mock_device_cls) + [
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id",
+                return_value=None,
+            ),
+            patch("netbox_librenms_plugin.import_utils.device_operations.Device", new=mock_device_cls),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            result = validate_device_for_import(libre_device, api=api)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        assert result["serial_action"] == "oob_candidate"
+        assert result["serial_role_choice_available"] is True
+        assert result["oob_candidate"] is not None
+        assert result["promote_to_host"] is not None
+        assert result["promote_to_host"]["existing_libre_id"] == 99
+        # existing link state is still surfaced
+        assert result["existing_librenms_link"]["host_id"] == 99
+
+    # ------------------------------------------------------------------
+    # Stage 2: two-NetBox-device merge detection
+    # ------------------------------------------------------------------
+    def test_merge_candidates_detected_when_hostname_and_serial_match_different_devices(self):
+        """Hostname matches device A, serial matches different device B (A has link) → merge_netbox_devices."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        libre_device = {
+            "device_id": 42,
+            "hostname": "eve-ng-02",
+            "sysName": "eve-ng-02",
+            "hardware": "Dell PowerEdge R770",
+            "serial": "ABC123",
+            "os": "linux",
+            "ip": "10.0.0.10",
+            "version": "",
+            "location": "",
+        }
+        api = self._make_api()
+
+        host_named = MagicMock()
+        host_named.name = "eve-ng-02"
+        host_named.pk = 100
+        host_named.serial = "ABC123"  # same — skips serial-conflict path inside hostname branch
+        host_named.cf = {"librenms_id": {"default": {"id": 42}}}
+        host_named.custom_field_data = {"librenms_id": {"default": {"id": 42}}}
+
+        oob_named = MagicMock()
+        oob_named.name = "idrac-jhw6nc4"
+        oob_named.pk = 200
+        oob_named.serial = "ABC123"
+        oob_named.cf = {"librenms_id": {"default": {"id": 99}}}
+        oob_named.custom_field_data = {"librenms_id": {"default": {"id": 99}}}
+
+        mock_device_cls = MagicMock()
+        # filter().first() — hostname lookup → host_named
+        mock_device_cls.objects.filter.return_value.first.return_value = host_named
+        # filter().exclude().first() — used by my merge-detect branch to find the serial-twin
+        mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = oob_named
+        # isinstance(existing_device, Device) check — make it accept MagicMock objects.
+
+        patches = self._base_patches(mock_device_cls) + [
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id",
+                return_value=None,
+            ),
+            patch("netbox_librenms_plugin.import_utils.device_operations.Device", new=mock_device_cls),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            result = validate_device_for_import(libre_device, api=api)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        assert result["serial_action"] == "merge_netbox_devices"
+        assert result["merge_candidates"] is not None
+        assert result["merge_candidates"]["host_named"]["pk"] == 100
+        assert result["merge_candidates"]["host_named"]["name"] == "eve-ng-02"
+        assert result["merge_candidates"]["oob_named"]["pk"] == 200
+        assert result["merge_candidates"]["oob_named"]["name"] == "idrac-jhw6nc4"
+        assert result["merge_candidates"]["host_named"]["librenms_link"]["host_id"] == 42
+        assert result["merge_candidates"]["oob_named"]["librenms_link"]["host_id"] == 99
+        assert result["can_import"] is False
+
+    def test_merge_candidates_skipped_when_neither_device_has_librenms_link(self):
+        """Two different devices share serial but neither has librenms link → conservative skip."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        libre_device = {
+            "device_id": 42,
+            "hostname": "eve-ng-02",
+            "sysName": "eve-ng-02",
+            "hardware": "Dell PowerEdge R770",
+            "serial": "ABC123",
+            "os": "linux",
+            "ip": "10.0.0.10",
+            "version": "",
+            "location": "",
+        }
+        api = self._make_api()
+
+        host_named = MagicMock()
+        host_named.name = "eve-ng-02"
+        host_named.pk = 100
+        host_named.serial = "ABC123"
+        host_named.cf = {}  # no librenms link
+        host_named.custom_field_data = {}
+
+        oob_named = MagicMock()
+        oob_named.name = "idrac-jhw6nc4"
+        oob_named.pk = 200
+        oob_named.serial = "ABC123"
+        oob_named.cf = {}
+        oob_named.custom_field_data = {}
+
+        mock_device_cls = MagicMock()
+        mock_device_cls.objects.filter.return_value.first.return_value = host_named
+        mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = oob_named
+
+        patches = self._base_patches(mock_device_cls) + [
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id",
+                return_value=None,
+            ),
+            patch("netbox_librenms_plugin.import_utils.device_operations.Device", new=mock_device_cls),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            result = validate_device_for_import(libre_device, api=api)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        assert result["serial_action"] != "merge_netbox_devices"
+        assert result["merge_candidates"] is None
+
+    def test_merge_candidates_skipped_when_only_one_device(self):
+        """Hostname matches, no other device by serial → no merge candidates."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        libre_device = {
+            "device_id": 42,
+            "hostname": "eve-ng-02",
+            "sysName": "eve-ng-02",
+            "hardware": "Dell PowerEdge R770",
+            "serial": "ABC123",
+            "os": "linux",
+            "ip": "10.0.0.10",
+            "version": "",
+            "location": "",
+        }
+        api = self._make_api()
+
+        host_named = MagicMock()
+        host_named.name = "eve-ng-02"
+        host_named.pk = 100
+        host_named.serial = "ABC123"
+        host_named.cf = {"librenms_id": {"default": {"id": 42}}}
+        host_named.custom_field_data = {"librenms_id": {"default": {"id": 42}}}
+
+        mock_device_cls = MagicMock()
+        mock_device_cls.objects.filter.return_value.first.return_value = host_named
+        # No serial twin
+        mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+
+        patches = self._base_patches(mock_device_cls) + [
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id",
+                return_value=None,
+            ),
+            patch("netbox_librenms_plugin.import_utils.device_operations.Device", new=mock_device_cls),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            result = validate_device_for_import(libre_device, api=api)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        assert result["serial_action"] != "merge_netbox_devices"
+        assert result["merge_candidates"] is None
+
+    # ------------------------------------------------------------------
+    # Case 5: Re-import via OOB id → existing_match_type = "librenms_oob"
+    # ------------------------------------------------------------------
+    def test_reimport_via_oob_id_sets_match_type_librenms_oob(self):
+        """find_by_librenms_id returns device when OOB id matches → existing_match_type='librenms_oob'."""
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        libre_device = {
+            "device_id": 17,
+            "hostname": "idrac-server01",
+            "sysName": "idrac-server01",
+            "hardware": "iDRAC9",
+            "serial": "ABC123",
+            "os": "idrac",
+            "ip": "10.0.0.5",
+            "version": "5.10.50",
+            "location": "",
+        }
+        api = self._make_api()
+
+        existing = MagicMock()
+        existing.name = "server01"
+
+        # Simulate: find_by_librenms_id matched on OOB id (id=17 is oob.id)
+        existing_oob = {"id": 17, "type": "idrac"}
+
+        mock_device_cls = MagicMock()
+        mock_device_cls.objects.filter.return_value.first.return_value = None
+        mock_device_cls.objects.filter.return_value.exclude.return_value.first.return_value = None
+
+        # find_by_librenms_id: first call for VM returns None, second call for Device returns existing
+        find_by_id_mock = MagicMock(side_effect=[None, existing])
+
+        patches = self._base_patches(mock_device_cls) + [
+            patch("netbox_librenms_plugin.import_utils.device_operations.Device", new=mock_device_cls),
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.find_by_librenms_id",
+                new=find_by_id_mock,
+            ),
+            patch(
+                "netbox_librenms_plugin.import_utils.device_operations.get_librenms_oob",
+                return_value=existing_oob,
+            ),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            result = validate_device_for_import(libre_device, api=api)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        assert result["existing_match_type"] == "librenms_oob"
+        assert result["existing_device"] is existing
