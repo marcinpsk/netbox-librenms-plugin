@@ -740,6 +740,81 @@ class TestGetLibreNMSReturnCacheStatus:
         assert from_cache is False
 
 
+class TestPortStackLagPatternFilterSet:
+    """Unit tests for PortStackLagPatternFilterSet (added in this PR).
+
+    The filter set must declare icontains filters for librenms_os,
+    lag_name_pattern, and description so the list view's search box works
+    as expected.  These tests do not touch the database — they verify the
+    FilterSet's declared fields and filter configurations.
+    """
+
+    def _get_filterset_class(self):
+        from netbox_librenms_plugin.filters import PortStackLagPatternFilterSet
+
+        return PortStackLagPatternFilterSet
+
+    def test_filterset_class_exists(self):
+        """PortStackLagPatternFilterSet must be importable from filters."""
+        cls = self._get_filterset_class()
+        assert cls is not None
+
+    def test_librenms_os_filter_declared(self):
+        """librenms_os filter must exist on the filterset."""
+        import django_filters
+
+        cls = self._get_filterset_class()
+        assert "librenms_os" in cls.declared_filters
+        assert isinstance(cls.declared_filters["librenms_os"], django_filters.CharFilter)
+
+    def test_lag_name_pattern_filter_declared(self):
+        """lag_name_pattern filter must exist on the filterset."""
+        import django_filters
+
+        cls = self._get_filterset_class()
+        assert "lag_name_pattern" in cls.declared_filters
+        assert isinstance(cls.declared_filters["lag_name_pattern"], django_filters.CharFilter)
+
+    def test_description_filter_declared(self):
+        """description filter must exist on the filterset."""
+        import django_filters
+
+        cls = self._get_filterset_class()
+        assert "description" in cls.declared_filters
+        assert isinstance(cls.declared_filters["description"], django_filters.CharFilter)
+
+    def test_librenms_os_uses_icontains(self):
+        """librenms_os filter must use icontains for case-insensitive matching."""
+        cls = self._get_filterset_class()
+        f = cls.declared_filters["librenms_os"]
+        assert f.lookup_expr == "icontains"
+
+    def test_lag_name_pattern_uses_icontains(self):
+        """lag_name_pattern filter must use icontains."""
+        cls = self._get_filterset_class()
+        f = cls.declared_filters["lag_name_pattern"]
+        assert f.lookup_expr == "icontains"
+
+    def test_description_uses_icontains(self):
+        """description filter must use icontains."""
+        cls = self._get_filterset_class()
+        f = cls.declared_filters["description"]
+        assert f.lookup_expr == "icontains"
+
+    def test_meta_fields_list(self):
+        """Meta.fields must include all three filter fields."""
+        cls = self._get_filterset_class()
+        expected = {"librenms_os", "lag_name_pattern", "description"}
+        assert expected == set(cls.Meta.fields)
+
+    def test_meta_model_is_port_stack_lag_pattern(self):
+        """Meta.model must be PortStackLagPattern."""
+        from netbox_librenms_plugin.models import PortStackLagPattern
+
+        cls = self._get_filterset_class()
+        assert cls.Meta.model is PortStackLagPattern
+
+
 class TestCacheKeyServerKeyIsolation:
     """Test that cache keys are isolated per server key (Thread 38)."""
 

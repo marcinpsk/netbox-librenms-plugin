@@ -246,3 +246,80 @@ class TestAddToLibreSNMPV3Validation:
             }
         )
         assert form.is_valid(), form.errors
+
+
+# =============================================================================
+# TestPortStackLagPatternForms — new forms added in this PR
+# =============================================================================
+
+
+class TestPortStackLagPatternFilterForm:
+    """Tests for PortStackLagPatternFilterForm (added in this PR).
+
+    The filter form must declare the expected fields so the list-view
+    search/filter panel renders correctly.  No database access required.
+    """
+
+    def _get_form_class(self):
+        from netbox_librenms_plugin.forms import PortStackLagPatternFilterForm
+
+        return PortStackLagPatternFilterForm
+
+    def test_form_class_importable(self):
+        assert self._get_form_class() is not None
+
+    def test_librenms_os_field_present(self):
+        cls = self._get_form_class()
+        form = cls(data={})
+        assert "librenms_os" in form.fields
+
+    def test_lag_name_pattern_field_present(self):
+        cls = self._get_form_class()
+        form = cls(data={})
+        assert "lag_name_pattern" in form.fields
+
+    def test_librenms_os_not_required(self):
+        cls = self._get_form_class()
+        form = cls(data={})
+        assert form.fields["librenms_os"].required is False
+
+    def test_lag_name_pattern_not_required(self):
+        cls = self._get_form_class()
+        form = cls(data={})
+        assert form.fields["lag_name_pattern"].required is False
+
+    def test_model_attribute(self):
+        from netbox_librenms_plugin.models import PortStackLagPattern
+
+        cls = self._get_form_class()
+        assert cls.model is PortStackLagPattern
+
+    def test_empty_data_is_valid(self):
+        """An empty filter form (no search terms) must be valid — it simply
+        returns an unfiltered queryset."""
+        cls = self._get_form_class()
+        form = cls(data={})
+        assert form.is_valid(), form.errors
+
+    def test_partial_data_is_valid(self):
+        """Only librenms_os provided — form must still be valid."""
+        cls = self._get_form_class()
+        form = cls(data={"librenms_os": "ios"})
+        assert form.is_valid(), form.errors
+
+
+class TestImportSettingsFormAutoCreateIpamRemoved:
+    """The auto_create_ipam_default field was removed from ImportSettingsForm in
+    this PR.  The form must no longer expose that field to prevent legacy POST
+    data from silently setting the now-deleted model attribute."""
+
+    def test_auto_create_ipam_default_not_in_fields(self):
+        from netbox_librenms_plugin.forms import ImportSettingsForm
+
+        form = ImportSettingsForm()
+        assert "auto_create_ipam_default" not in form.fields
+
+    def test_meta_fields_do_not_include_auto_create_ipam(self):
+        from netbox_librenms_plugin.forms import ImportSettingsForm
+
+        assert "auto_create_ipam_default" not in ImportSettingsForm.Meta.fields

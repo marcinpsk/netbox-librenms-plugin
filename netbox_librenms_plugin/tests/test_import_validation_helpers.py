@@ -366,3 +366,364 @@ class TestValidationStateUpdates:
 
         assert validation["can_import"] is True  # No issues
         assert validation["is_ready"] is False  # But not ready without cluster
+
+
+# =============================================================================
+# TestApplyOobDetectionResult - 6 tests
+# =============================================================================
+
+
+class TestApplyOobDetectionResult:
+    """Tests for apply_oob_detection_result helper."""
+
+    def _base_result(self):
+        return {
+            "serial_action": None,
+            "oob_candidate": None,
+            "promote_to_host": None,
+            "serial_role_choice_available": False,
+            "warnings": [],
+        }
+
+    def test_sets_serial_action(self):
+        from netbox_librenms_plugin.import_validation_helpers import apply_oob_detection_result
+
+        result = self._base_result()
+        apply_oob_detection_result(
+            result,
+            serial_action="oob_candidate",
+            oob_candidate=None,
+            promote_to_host=None,
+            serial_role_choice_available=False,
+        )
+        assert result["serial_action"] == "oob_candidate"
+
+    def test_clears_stale_merge_candidates(self):
+        """Non-merge path must drop merge-only state so a reused dict can't keep
+        stale merge UI data from a prior evaluation."""
+        from netbox_librenms_plugin.import_validation_helpers import apply_oob_detection_result
+
+        result = self._base_result()
+        result["merge_candidates"] = {"host_named": {"pk": 1}, "oob_named": {"pk": 2}}
+        apply_oob_detection_result(
+            result,
+            serial_action="oob_candidate",
+            oob_candidate=None,
+            promote_to_host=None,
+            serial_role_choice_available=False,
+        )
+        assert result["merge_candidates"] is None
+
+    def test_sets_oob_candidate_when_provided(self):
+        from netbox_librenms_plugin.import_validation_helpers import apply_oob_detection_result
+
+        result = self._base_result()
+        candidate = {"device": object(), "type": "idrac", "version": None, "ip": "10.0.0.1"}
+        apply_oob_detection_result(
+            result,
+            serial_action="oob_candidate",
+            oob_candidate=candidate,
+            promote_to_host=None,
+            serial_role_choice_available=False,
+        )
+        assert result["oob_candidate"] is candidate
+
+    def test_clears_oob_candidate_when_none(self):
+        from netbox_librenms_plugin.import_validation_helpers import apply_oob_detection_result
+
+        existing = {"device": object(), "type": "ilo", "version": None, "ip": None}
+        result = self._base_result()
+        result["oob_candidate"] = existing
+        apply_oob_detection_result(
+            result,
+            serial_action="link",
+            oob_candidate=None,
+            promote_to_host=None,
+            serial_role_choice_available=False,
+        )
+        # oob_candidate=None means "no candidate" -- field must be cleared to None
+        # so stale values from a previous call do not persist.
+        assert result["oob_candidate"] is None
+
+    def test_clears_promote_to_host_when_none(self):
+        from netbox_librenms_plugin.import_validation_helpers import apply_oob_detection_result
+
+        # Seed a stale promote_to_host so a regression that forgot to clear it (or stored
+        # a None sentinel instead of removing the key) would be caught here.
+        stale = {"existing_libre_id": 9, "existing_oob_type": "idrac", "existing_device": object()}
+        result = self._base_result()
+        result["promote_to_host"] = stale
+        apply_oob_detection_result(
+            result,
+            serial_action="link",
+            oob_candidate=None,
+            promote_to_host=None,
+            serial_role_choice_available=False,
+        )
+        # promote_to_host=None must clear the field entirely (the "absent otherwise"
+        # contract), not preserve the stale value nor store a None sentinel.
+        assert "promote_to_host" not in result
+
+    def test_sets_promote_to_host_when_provided(self):
+        from netbox_librenms_plugin.import_validation_helpers import apply_oob_detection_result
+
+        result = self._base_result()
+        promo = {"existing_libre_id": 7, "existing_oob_type": "idrac", "existing_device": object()}
+        apply_oob_detection_result(
+            result,
+            serial_action="promote_to_host",
+            oob_candidate=None,
+            promote_to_host=promo,
+            serial_role_choice_available=False,
+        )
+        assert result["promote_to_host"] is promo
+
+    def test_serial_role_choice_available_flag(self):
+        from netbox_librenms_plugin.import_validation_helpers import apply_oob_detection_result
+
+        result = self._base_result()
+        apply_oob_detection_result(
+            result,
+            serial_action="oob_candidate",
+            oob_candidate={"device": object(), "type": "oob", "version": None, "ip": None},
+            promote_to_host={"existing_libre_id": 3, "existing_oob_type": "oob", "existing_device": object()},
+            serial_role_choice_available=True,
+        )
+        assert result["serial_role_choice_available"] is True
+
+    def test_appends_warnings(self):
+        from netbox_librenms_plugin.import_validation_helpers import apply_oob_detection_result
+
+        result = self._base_result()
+        result["warnings"] = ["pre-existing"]
+        apply_oob_detection_result(
+            result,
+            serial_action="link",
+            oob_candidate=None,
+            promote_to_host=None,
+            serial_role_choice_available=False,
+            warnings=["new warning 1", "new warning 2"],
+        )
+        assert result["warnings"] == ["pre-existing", "new warning 1", "new warning 2"]
+
+
+# =============================================================================
+# TestApplyMergeCandidates - 4 tests
+# =============================================================================
+
+
+class TestApplyMergeCandidates:
+    """Tests for apply_merge_candidates helper."""
+
+    def _base_result(self):
+        return {
+            "serial_action": None,
+            "merge_candidates": None,
+            "can_import": True,
+            "warnings": [],
+        }
+
+    def test_sets_serial_action_to_merge(self):
+        from netbox_librenms_plugin.import_validation_helpers import apply_merge_candidates
+
+        result = self._base_result()
+        apply_merge_candidates(
+            result,
+            host_named={"pk": 1, "name": "router-01", "librenms_link": {"host_id": 10}},
+            oob_named={"pk": 2, "name": "router-01-idrac", "librenms_link": None},
+            warning="Two devices found",
+        )
+        assert result["serial_action"] == "merge_netbox_devices"
+
+    def test_sets_merge_candidates_dict(self):
+        from netbox_librenms_plugin.import_validation_helpers import apply_merge_candidates
+
+        result = self._base_result()
+        host = {"pk": 1, "name": "router-01", "librenms_link": {"host_id": 10}}
+        oob = {"pk": 2, "name": "router-01-idrac", "librenms_link": None}
+        apply_merge_candidates(result, host_named=host, oob_named=oob, warning="w")
+        assert result["merge_candidates"] == {"host_named": host, "oob_named": oob}
+
+    def test_sets_can_import_false(self):
+        from netbox_librenms_plugin.import_validation_helpers import apply_merge_candidates
+
+        result = self._base_result()
+        result["can_import"] = True
+        apply_merge_candidates(
+            result,
+            host_named={"pk": 1, "name": "h", "librenms_link": None},
+            oob_named={"pk": 2, "name": "o", "librenms_link": None},
+            warning="merge needed",
+        )
+        assert result["can_import"] is False
+
+    def test_appends_warning(self):
+        from netbox_librenms_plugin.import_validation_helpers import apply_merge_candidates
+
+        result = self._base_result()
+        result["warnings"] = ["existing"]
+        apply_merge_candidates(
+            result,
+            host_named={"pk": 1, "name": "h", "librenms_link": None},
+            oob_named={"pk": 2, "name": "o", "librenms_link": None},
+            warning="merge warning",
+        )
+
+    def test_clears_serial_duplicate_and_confirmed(self):
+        """Merge path is the single source of truth: stale serial_duplicate /
+        serial_confirmed flags set by a previous hostname-first evaluation
+        must be cleared so no 'serial conflict' badge lingers alongside
+        the 'merge these devices' action."""
+        from netbox_librenms_plugin.import_validation_helpers import apply_merge_candidates
+
+        result = self._base_result()
+        result["serial_duplicate"] = True
+        result["serial_confirmed"] = True
+        apply_merge_candidates(
+            result,
+            host_named={"pk": 1, "name": "h", "librenms_link": None},
+            oob_named={"pk": 2, "name": "o", "librenms_link": None},
+            warning="merge",
+        )
+        assert result["serial_duplicate"] is False
+        assert result["serial_confirmed"] is False
+
+    def test_removes_promote_to_host_key(self):
+        """'absent otherwise' contract: the merge path has no promotion target,
+        so any stale promote_to_host key must be removed (not set to None)."""
+        from netbox_librenms_plugin.import_validation_helpers import apply_merge_candidates
+
+        result = self._base_result()
+        result["promote_to_host"] = {"existing_libre_id": 5, "existing_oob_type": "idrac"}
+        apply_merge_candidates(
+            result,
+            host_named={"pk": 1, "name": "h", "librenms_link": None},
+            oob_named={"pk": 2, "name": "o", "librenms_link": None},
+            warning="merge",
+        )
+        assert "promote_to_host" not in result
+
+    def test_clears_oob_candidate(self):
+        """Merge path clears any stale oob_candidate that may have been set
+        by a prior serial-detection pass on the same result dict."""
+        from netbox_librenms_plugin.import_validation_helpers import apply_merge_candidates
+
+        result = self._base_result()
+        result["oob_candidate"] = {"device": object(), "type": "idrac", "version": None, "ip": "10.0.0.1"}
+        apply_merge_candidates(
+            result,
+            host_named={"pk": 1, "name": "h", "librenms_link": None},
+            oob_named={"pk": 2, "name": "o", "librenms_link": None},
+            warning="merge",
+        )
+        assert result["oob_candidate"] is None
+
+    def test_sets_serial_role_choice_available_false(self):
+        """The merge path has no role toggle — serial_role_choice_available must be False."""
+        from netbox_librenms_plugin.import_validation_helpers import apply_merge_candidates
+
+        result = self._base_result()
+        result["serial_role_choice_available"] = True
+        apply_merge_candidates(
+            result,
+            host_named={"pk": 1, "name": "h", "librenms_link": None},
+            oob_named={"pk": 2, "name": "o", "librenms_link": None},
+            warning="merge",
+        )
+        assert result["serial_role_choice_available"] is False
+
+    def test_initialises_warnings_if_missing(self):
+        """apply_merge_candidates must not crash when 'warnings' key absent."""
+        from netbox_librenms_plugin.import_validation_helpers import apply_merge_candidates
+
+        result = self._base_result()
+        del result["warnings"]
+        apply_merge_candidates(
+            result,
+            host_named={"pk": 1, "name": "h", "librenms_link": None},
+            oob_named={"pk": 2, "name": "o", "librenms_link": None},
+            warning="late warning",
+        )
+        assert "late warning" in result["warnings"]
+
+
+# =============================================================================
+# TestApplyOobDetectionResultAdditional — edge cases not covered in the base class
+# =============================================================================
+
+
+class TestApplyOobDetectionResultAdditional:
+    """Additional edge-case tests for apply_oob_detection_result."""
+
+    def _base_result(self):
+        return {
+            "serial_action": None,
+            "oob_candidate": None,
+            "serial_role_choice_available": False,
+            "warnings": [],
+        }
+
+    def test_no_warnings_arg_does_not_raise(self):
+        """Omitting the warnings argument (defaults to None) must not raise."""
+        from netbox_librenms_plugin.import_validation_helpers import apply_oob_detection_result
+
+        result = self._base_result()
+        # Should not raise even with no warnings kwarg
+        apply_oob_detection_result(
+            result,
+            serial_action=None,
+            oob_candidate=None,
+            promote_to_host=None,
+            serial_role_choice_available=False,
+        )
+        # warnings list must still exist and be empty (or pre-existing content preserved)
+        assert "warnings" in result
+        assert result["serial_action"] is None
+
+    def test_empty_warnings_list_does_not_append(self):
+        """warnings=[] must not add any entries to result['warnings']."""
+        from netbox_librenms_plugin.import_validation_helpers import apply_oob_detection_result
+
+        result = self._base_result()
+        result["warnings"] = ["pre-existing"]
+        apply_oob_detection_result(
+            result,
+            serial_action="link",
+            oob_candidate=None,
+            promote_to_host=None,
+            serial_role_choice_available=False,
+            warnings=[],
+        )
+        assert result["warnings"] == ["pre-existing"]
+
+    def test_initialises_warnings_key_when_absent(self):
+        """If result dict lacks 'warnings', apply_oob_detection_result must create it."""
+        from netbox_librenms_plugin.import_validation_helpers import apply_oob_detection_result
+
+        result = self._base_result()
+        del result["warnings"]
+        apply_oob_detection_result(
+            result,
+            serial_action=None,
+            oob_candidate=None,
+            promote_to_host=None,
+            serial_role_choice_available=False,
+            warnings=["new warning"],
+        )
+        assert result["warnings"] == ["new warning"]
+
+    def test_serial_action_none_clears_field(self):
+        """Passing serial_action=None must set the field to None (not leave stale value)."""
+        from netbox_librenms_plugin.import_validation_helpers import apply_oob_detection_result
+
+        result = self._base_result()
+        result["serial_action"] = "oob_candidate"
+        apply_oob_detection_result(
+            result,
+            serial_action=None,
+            oob_candidate=None,
+            promote_to_host=None,
+            serial_role_choice_available=False,
+        )
+        assert result["serial_action"] is None
+        assert result["warnings"] == ["existing", "merge warning"]
