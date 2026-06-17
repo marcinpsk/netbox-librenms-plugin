@@ -3135,7 +3135,7 @@ class TestGetSerialPortSensors:
             self._make_sensor(12, sensor_type="tempSensor", port_num=5),  # wrong type
         ]
         mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": sensors})
-        with mock.patch("requests.get", return_value=mock_resp):
+        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
             success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is True
@@ -3150,7 +3150,7 @@ class TestGetSerialPortSensors:
 
         sensors = ["bad-string", None, self._make_sensor(12, port_num=7)]
         mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": sensors})
-        with mock.patch("requests.get", return_value=mock_resp):
+        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
             success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is True
@@ -3161,7 +3161,7 @@ class TestGetSerialPortSensors:
         import unittest.mock as mock
 
         mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": []})
-        with mock.patch("requests.get", return_value=mock_resp):
+        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
             success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is True
@@ -3174,7 +3174,7 @@ class TestGetSerialPortSensors:
         import unittest.mock as mock
 
         mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "message": "no sensors key"})
-        with mock.patch("requests.get", return_value=mock_resp):
+        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
             success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is False
@@ -3186,7 +3186,7 @@ class TestGetSerialPortSensors:
         import unittest.mock as mock
 
         mock_resp = mock_response_factory(status_code=200, json_data={"status": "ok", "sensors": ""})
-        with mock.patch("requests.get", return_value=mock_resp):
+        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
             success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is False
@@ -3198,7 +3198,7 @@ class TestGetSerialPortSensors:
         mock_resp = mock_response_factory(
             status_code=200, json_data={"status": "error", "message": "something went wrong"}
         )
-        with mock.patch("requests.get", return_value=mock_resp):
+        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=mock_resp):
             success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is False
@@ -3209,7 +3209,7 @@ class TestGetSerialPortSensors:
         import requests as req
 
         http_err = req.exceptions.HTTPError(response=mock.MagicMock(status_code=404))
-        with mock.patch("requests.get", side_effect=http_err):
+        with mock.patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=http_err):
             success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is False
@@ -3219,7 +3219,9 @@ class TestGetSerialPortSensors:
         import unittest.mock as mock
         import requests as req
 
-        with mock.patch("requests.get", side_effect=req.exceptions.ConnectionError("refused")):
+        with mock.patch(
+            "netbox_librenms_plugin.librenms_api.requests.get", side_effect=req.exceptions.ConnectionError("refused")
+        ):
             success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
         assert success is False
