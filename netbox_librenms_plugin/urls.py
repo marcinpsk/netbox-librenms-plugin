@@ -136,6 +136,7 @@ from .views import (
     RemoveServerMappingView,
     SetPreferredServerView,
     SaveUserPrefView,
+    CableRemotePickerView,
     SingleCableVerifyView,
     SingleInterfaceVerifyView,
     SingleModuleVerifyView,
@@ -337,6 +338,12 @@ urlpatterns = [
         "device/<int:pk>/sync-cables/",
         SyncCablesView.as_view(),
         name="sync_device_cables",
+    ),
+    # Cable remote-end picker (modal + search/ports fragments + pick POST)
+    path(
+        "device/<int:pk>/cable-remote-picker/",
+        CableRemotePickerView.as_view(),
+        name="cable_remote_picker",
     ),
     # Sync IP addresses URL
     path(
