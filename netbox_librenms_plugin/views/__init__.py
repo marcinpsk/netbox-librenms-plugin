@@ -118,6 +118,15 @@ from .mapping_views import (  # noqa: F401
     PortStackLagPatternEditView,
     PortStackLagPatternListView,
     PortStackLagPatternView,
+    SerialSensorTypePatternBulkDeleteView,
+    SerialSensorTypePatternBulkExportYAMLView,
+    SerialSensorTypePatternBulkImportView,
+    SerialSensorTypePatternChangeLogView,
+    SerialSensorTypePatternCreateView,
+    SerialSensorTypePatternDeleteView,
+    SerialSensorTypePatternEditView,
+    SerialSensorTypePatternListView,
+    SerialSensorTypePatternView,
 )
 from .imports.actions import (  # noqa: F401
     AddAsOOBView,
