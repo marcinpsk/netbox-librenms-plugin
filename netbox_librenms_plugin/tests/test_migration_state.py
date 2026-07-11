@@ -68,3 +68,22 @@ def test_plugin_migrations_do_not_redeclare_squashed_core_ancestors():
                     f"{migration_key} repeats squashed core dependency {dependency}; "
                     "the plugin parent already reaches it"
                 )
+
+
+def test_migration_0013_serial_sensor_field_help_text_matches_model():
+    """Same drift guard for SerialSensorTypePattern: migration 0013's fields must carry the model's help_text, else makemigrations tracks a phantom AlterField."""
+    from netbox_librenms_plugin.models import SerialSensorTypePattern
+
+    mod = importlib.import_module("netbox_librenms_plugin.migrations.0013_serialsensortypepattern")
+    create_op = next(
+        op
+        for op in mod.Migration.operations
+        if op.__class__.__name__ == "CreateModel" and op.name == "SerialSensorTypePattern"
+    )
+    migration_fields = dict(create_op.fields)
+
+    for field_name in ("sensor_type", "port_name_pattern"):
+        model_help = SerialSensorTypePattern._meta.get_field(field_name).help_text
+        assert migration_fields[field_name].help_text == model_help, (
+            f"{field_name}: migration help_text drifted from the model"
+        )
