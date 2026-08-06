@@ -7,7 +7,7 @@ from dcim.choices import InterfaceTypeChoices
 from dcim.models import DeviceType, Manufacturer, ModuleType, Platform
 from django.core.exceptions import ValidationError
 from django.db import models
-from django.db.models.functions import Lower
+from django.db.models.functions import Lower, Trim
 from django.urls import reverse
 from netbox.models import NetBoxModel
 from utilities.fields import ColorField
