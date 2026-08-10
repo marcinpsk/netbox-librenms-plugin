@@ -80,11 +80,13 @@ def _seeded_model_rows():
     """Yield ``(model, lookup_field, value_field, rows)`` for every data-migration seed."""
     import importlib
 
-    from netbox_librenms_plugin.models import PortStackLagPattern
+    from netbox_librenms_plugin.models import PortStackLagPattern, SerialSensorTypePattern
 
-    # The migration module name starts with a digit, so import syntax cannot reach it.
+    # The migration module names start with a digit, so import syntax cannot reach them.
     lag = importlib.import_module("netbox_librenms_plugin.migrations.0013_portstacklagpattern")
+    serial = importlib.import_module("netbox_librenms_plugin.migrations.0015_serialsensortypepattern")
     yield PortStackLagPattern, "librenms_os", "lag_name_pattern", lag.INITIAL_LAG_PATTERNS
+    yield SerialSensorTypePattern, "sensor_type", "port_name_pattern", serial.INITIAL_SERIAL_SENSOR_TYPES
 
 
 def _seeded_sap_rows():
@@ -201,7 +203,7 @@ def restore_seeded_state(*, force):
 
 @pytest.fixture(autouse=True)
 def _restore_migration_seeded_rows(request):
-    """Restore data-migration seeds before tests after a transactional test flushes them."""
+    """Reseed data migrations before a test, so a transactional flush cannot empty LAG or serial recognition."""
     # Gate on the marker, not on request.fixturenames: pytest-django pulls "db" in dynamically
     # from its own autouse fixture, so it is still absent from the closure at this point.
     global _transactional_seed_restore_required
@@ -227,7 +229,7 @@ def _restore_migration_seeded_rows(request):
 
 @pytest.fixture(scope="session", autouse=True)
 def _reseed_after_transactional_flush(django_db_setup, django_db_blocker):
-    """Restore data-migration seeds after the last transactional test for the next reused-database run."""
+    """Leave the reused database seeded, so the next run keeps LAG and serial recognition."""
     with django_db_blocker.unblock():
         restore_seeded_state(force=True)
 
