@@ -1765,11 +1765,12 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         view.setup(self._request(user, {"server_key": "default"}))
 
         link_data = {
+            "_source": "serial",
             "local_port": "ttyS1",
             "netbox_local_interface_id": csp.pk,
             "netbox_remote_interface_id": cp.pk,
         }
-        result = view.handle_serial_cable_creation(link_data, {"local_port_id": "ttyS1"})
+        result = view.handle_cable_creation(link_data, {"local_port_id": "ttyS1"})
 
         assert result["status"] == "missing_remote"  # out-of-scope ports resolve to nothing
         assert not Cable.objects.filter(terminations__termination_id=csp.pk).exists()
@@ -1797,8 +1798,9 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         view = SyncCablesView()
         view.setup(self._request(user, {"server_key": "default"}))
 
-        result = view.handle_serial_cable_creation(
+        result = view.handle_cable_creation(
             {
+                "_source": "serial",
                 "local_port": "ttyS1",
                 "netbox_local_interface_id": csp.pk,
                 "netbox_remote_interface_id": cp.pk,
