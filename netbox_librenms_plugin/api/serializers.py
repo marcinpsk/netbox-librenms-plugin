@@ -12,6 +12,7 @@ from netbox_librenms_plugin.models import (
     NormalizationRule,
     PlatformMapping,
     PortStackLagPattern,
+    SerialSensorTypePattern,
 )
 
 
@@ -163,6 +164,16 @@ class PortStackLagPatternSerializer(NetBoxModelSerializer):
         model = PortStackLagPattern
         fields = ["id", "url", "display", "librenms_os", "lag_name_pattern", "sap_name_pattern", "description"]
         brief_fields = ("id", "url", "display", "librenms_os", "lag_name_pattern", "description")
+
+
+class SerialSensorTypePatternSerializer(NetBoxModelSerializer):
+    """Serialize SerialSensorTypePattern model for REST API."""
+
+    class Meta:
+        """Meta options for SerialSensorTypePatternSerializer."""
+
+        model = SerialSensorTypePattern
+        fields = ["id", "sensor_type", "port_name_pattern", "description"]
 
 
 @extend_schema_serializer(component_name="LibreNMSSyncJobStatus")
