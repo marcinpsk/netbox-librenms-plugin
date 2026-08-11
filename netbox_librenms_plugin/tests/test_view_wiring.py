@@ -1772,11 +1772,11 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         }
         result = view.handle_cable_creation(link_data, {"local_port_id": "ttyS1"})
 
-        assert result["status"] == "missing_remote"  # out-of-scope ports resolve to nothing
+        assert result["status"] == "invalid"
         assert not Cable.objects.filter(terminations__termination_id=csp.pk).exists()
 
-    def test_serial_cable_sync_requires_change_permission_on_console_ports(self):
-        """Cable creation changes both console terminations, so view-only grants are insufficient."""
+    def test_serial_cable_sync_requires_remote_change_permission(self):
+        """A view-only remote console port is reported as missing remote data."""
         from dcim.models import Cable, ConsolePort, ConsoleServerPort, Device
 
         from netbox_librenms_plugin.tests.conftest import make_serial_device
@@ -1789,7 +1789,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             "scope-serial-view",
             [
                 (Device, "view", None),
-                (ConsoleServerPort, "view", None),
+                (ConsoleServerPort, "change", None),
                 (ConsolePort, "view", None),
                 (Cable, "add", None),
                 (Cable, "change", None),
