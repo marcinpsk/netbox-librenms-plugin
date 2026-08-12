@@ -9,20 +9,29 @@ real message framework. The LibreNMS HTTP boundary is never touched (server_key 
 module type carries no interface templates so adoption resolves to a real no-op).
 """
 
+from copy import deepcopy
+
 import pytest
 from django.contrib.auth import get_user_model
 from django.contrib.messages.storage.fallback import FallbackStorage
 from django.test import RequestFactory
 
-from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
+from netbox_librenms_plugin.tests.conftest import configured_server_key
+
+SERVER_KEY = configured_server_key()
 
 
 @pytest.fixture(autouse=True)
 def _configure_default_server(settings):
     """Configure the server key used by these real request tests."""
-    configure_librenms_servers(
-        settings, {"default": {"librenms_url": "https://default.example.com", "api_token": "test-token"}}
-    )
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"]["servers"] = {
+        "default": {
+            "librenms_url": "https://default.example.com",
+            "api_token": "test-token",
+        }
+    }
+    settings.PLUGINS_CONFIG = plugin_config
 
 
 def _seed(name, *, port_id_on_interface):
@@ -52,8 +61,8 @@ def _seed(name, *, port_id_on_interface):
 
     iface = Interface.objects.create(device=device, name="Gi0/1", type="1000base-t", module=module)
     if port_id_on_interface is not None:
-        # Pre-bind the LibreNMS port_id for server_key "default" so the rebind is a genuine no-op.
-        iface.custom_field_data = {"librenms_id": {"default": port_id_on_interface}}
+        # Pre-bind the port ID under the real server so the rebind is a genuine no-op.
+        iface.custom_field_data = {"librenms_id": {SERVER_KEY: port_id_on_interface}}
         iface.save()
     return device, module, iface
 
@@ -63,7 +72,7 @@ def _post(device, module, *, port_id, ifname):
         f"/modules/{device.pk}/interface/",
         data={
             "module_id": str(module.pk),
-            "server_key": "default",
+            "server_key": SERVER_KEY,
             "librenms_port_id": str(port_id),
             "librenms_ifname": ifname,
         },
