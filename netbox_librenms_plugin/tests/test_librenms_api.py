@@ -3562,3 +3562,4 @@ class TestGetSerialPortSensors:
 
         assert success is False
         assert "Invalid JSON" in msg
+        assert "Error connecting" not in msg
