@@ -8,6 +8,7 @@ and depth tracking.  inventory-rebased branch only.
 
 import re
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -2479,6 +2480,7 @@ class TestModuleMutationScopes:
             user=user,
         )
         view = UpdateModuleSerialView()
+        view._librenms_api = SimpleNamespace(server_key="production")
 
         _post(view, request, pk=page.pk)
 
@@ -4339,7 +4341,8 @@ class TestPKValidationErrorPaths:
     def test_update_serial_non_numeric_module_id(self):
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
 
-        view = object.__new__(UpdateModuleSerialView)
+        view = UpdateModuleSerialView()
+        view._librenms_api = SimpleNamespace(server_key="production")
         view.required_object_permissions = {}
         device = _make_device()
         request = _make_request(
@@ -4597,7 +4600,8 @@ class TestUpdateModuleSerialViewBehavior:
     def _view(self):
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
 
-        v = object.__new__(UpdateModuleSerialView)
+        v = UpdateModuleSerialView()
+        v._librenms_api = SimpleNamespace(server_key="production")
         v.required_object_permissions = {}
         return v
 
@@ -4833,7 +4837,8 @@ class TestAddBayTemplateViewPostValidation:
     def _make_view(self):
         from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
 
-        view = object.__new__(AddBayTemplateView)
+        view = AddBayTemplateView()
+        view._librenms_api = SimpleNamespace(server_key="production")
         # Bypass perm checks: require_all_permissions returns None on success.
         view.require_all_permissions = MagicMock(return_value=None)
         return view
@@ -4905,7 +4910,8 @@ class TestAddBayTemplateViewGetValidation:
     def _make_view(self):
         from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
 
-        view = object.__new__(AddBayTemplateView)
+        view = AddBayTemplateView()
+        view._librenms_api = SimpleNamespace(server_key="production")
         view.require_all_permissions = MagicMock(return_value=None)
         return view
 
@@ -4970,7 +4976,8 @@ class TestAddBayTemplateViewMappingCheckbox:
     def _make_view(self):
         from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
 
-        view = object.__new__(AddBayTemplateView)
+        view = AddBayTemplateView()
+        view._librenms_api = SimpleNamespace(server_key="production")
         view.require_all_permissions = MagicMock(return_value=None)
         view._instantiate_template_on_existing = MagicMock(return_value=0)
         return view
@@ -5368,7 +5375,8 @@ class TestAddBayTemplateViewRegexMapping:
     def _make_view(self):
         from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
 
-        view = object.__new__(AddBayTemplateView)
+        view = AddBayTemplateView()
+        view._librenms_api = SimpleNamespace(server_key="production")
         view.require_all_permissions = MagicMock(return_value=None)
         view._instantiate_template_on_existing = MagicMock(return_value=0)
         return view

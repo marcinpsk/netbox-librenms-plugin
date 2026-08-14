@@ -13,6 +13,12 @@ from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views import View
 
+from netbox_librenms_plugin.sync_cache import (
+    SyncTab,
+    apply_request_cache_transition,
+    render_sync_cache_miss,
+    schedule_request_cache_mutation,
+)
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
     coerce_positive_int as _coerce_positive_int,
@@ -70,8 +76,30 @@ def _modules_redirect_response(request, sync_url, server_key=None):
     if request.headers.get("HX-Request") == "true":
         response = HttpResponse(status=204)
         response["HX-Redirect"] = target
+        return apply_request_cache_transition(request, response)
+    return apply_request_cache_transition(request, redirect(target))
+
+
+def _modules_cache_missing_response(request, sync_url, server_key):
+    """Render an empty HTMX module tab, or preserve the classic redirect contract."""
+    if response := render_sync_cache_miss(request, "Modules"):
         return response
-    return redirect(target)
+    messages.error(request, "No cached inventory data. Please refresh modules first.")
+    return _modules_redirect_response(request, sync_url, server_key)
+
+
+def _schedule_module_cache_mutation(request, page_device, server_key):
+    """Publish one module-tab transition after a committed module action."""
+    schedule_request_cache_mutation(request, page_device, SyncTab.MODULES, server_key)
+
+
+def _module_bind_result_changed(bind_result):
+    """Return whether an interface bind or template adoption changed NetBox."""
+    return bool(
+        bind_result
+        and bind_result.get("status") == "bound"
+        and (bind_result.get("changed") or bind_result.get("adopted_count"))
+    )
 
 
 def _extract_inventory_list(cached_payload):
@@ -741,11 +769,6 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         changeable_components = _restricted_module_component_querysets(self)
         changeable_interfaces = changeable_components[Interface]
         deletable_interfaces = self.restricted_queryset(Interface, "delete")
-        # Validate the posted server_key against configured servers, else fall back to the active
-        # client server (resolve_posted_server_key). A blank key (e.g. a fallback render where
-        # module_sync.server_key is empty) OR a forged/unconfigured one must degrade rather than scope
-        # the bind under a bogus namespace — without a usable key `if bind_item and server_key` below is
-        # skipped and the module installs but its interface is never bound to its LibreNMS port_id.
         server_key = self.resolve_posted_server_key(request.POST)
         bind_item = _resolve_single_install_binding_item(request, target_device, server_key, self.get_cache_key)
         serial = request.POST.get("serial", "").strip()
@@ -843,6 +866,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                     "Installed module, but interface binding was skipped: "
                     f"{bind_result.get('reason', 'unknown reason')}",
                 )
+            _schedule_module_cache_mutation(request, page_device, server_key)
         except _ModuleComponentAdoptionUnavailable as exc:
             messages.error(request, f"A matching {exc.component_label} is not available for module adoption.")
         except (ValidationError, IntegrityError) as e:
@@ -901,8 +925,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         sync_device = _get_sync_device_for_inventory(target_device, server_key)
         cached_data = _get_cached_inventory_for_device(sync_device, server_key, self.get_cache_key)
         if not cached_data:
-            messages.error(request, "No cached inventory data. Please refresh modules first.")
-            return _modules_redirect_response(request, sync_url, server_key)
+            return _modules_cache_missing_response(request, sync_url, server_key)
 
         # Load ignore rules so the branch respects the same filters shown in the table
         from netbox_librenms_plugin.utils import get_enabled_ignore_rules
@@ -943,6 +966,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         installed = []
         skipped = []
         failed = []
+        bound_any = False
 
         try:
             with transaction.atomic():
@@ -980,11 +1004,15 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         )
                         if bind_result and bind_result["status"] != "bound":
                             skipped.append(f"{result['name']}: {bind_result['reason']}")
+                        elif bind_result and bind_result["status"] == "bound":
+                            bound_any = bound_any or _module_bind_result_changed(bind_result)
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Branch install failed: {e}")
             return _modules_redirect_response(request, sync_url, server_key)
 
         _report_install_results(request, installed, skipped, failed)
+        if installed or bound_any:
+            _schedule_module_cache_mutation(request, page_device, server_key)
         return _modules_redirect_response(request, sync_url, server_key)
 
     def _collect_branch(self, parent_index, inventory_data, ignore_rules=None, device_serial="", index_map=None):
@@ -1476,8 +1504,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         sync_device = _get_sync_device_for_inventory(page_device, server_key)
         cached_data = _get_cached_inventory_for_device(sync_device, server_key, self.get_cache_key)
         if not cached_data:
-            messages.error(request, "No cached inventory data. Please refresh modules first.")
-            return _modules_redirect_response(request, sync_url, server_key)
+            return _modules_cache_missing_response(request, sync_url, server_key)
 
         try:
             # Use dict.fromkeys to preserve order while deduplicating
@@ -1518,6 +1545,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         norm_rules_bay = preload_normalization_rules("module_bay")
 
         installed, skipped, failed = [], [], []
+        bound_any = False
 
         invalid_selection_seen = False
         try:
@@ -1580,6 +1608,8 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         )
                         if bind_result and bind_result["status"] != "bound":
                             skipped.append(f"{result['name']}: {bind_result['reason']}")
+                        elif bind_result and bind_result["status"] == "bound":
+                            bound_any = bound_any or _module_bind_result_changed(bind_result)
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Install failed: {e}")
             return _modules_redirect_response(request, sync_url, server_key)
@@ -1588,10 +1618,17 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             _warn_invalid_selected_device(request)
 
         _report_install_results(request, installed, skipped, failed)
+        if installed or bound_any:
+            _schedule_module_cache_mutation(request, page_device, server_key)
         return _modules_redirect_response(request, sync_url, server_key)
 
 
-class UpdateModuleSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
+class UpdateModuleSerialView(
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+    LibreNMSAPIMixin,
+    View,
+):
     """Update the serial number of an already-installed module from LibreNMS inventory data."""
 
     def post(self, request, pk):
@@ -1613,12 +1650,13 @@ class UpdateModuleSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
         if serial.lower() in _PLACEHOLDER_VALUES:
             serial = ""
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+        server_key = self.resolve_posted_server_key(request.POST)
 
         try:
             module_id = int(request.POST.get("module_id"))
         except (TypeError, ValueError):
             messages.error(request, "Missing or invalid module ID.")
-            return _modules_redirect_response(request, sync_url)
+            return _modules_redirect_response(request, sync_url, server_key)
 
         try:
             with transaction.atomic():
@@ -1631,18 +1669,24 @@ class UpdateModuleSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
                 )
                 if not module:
                     messages.error(request, "Module no longer exists.")
-                    return _modules_redirect_response(request, sync_url)
-                module.serial = serial
-                module.full_clean()
-                module.save()
-            messages.success(
-                request,
-                f"Updated serial for {module.module_type.model} in {module.module_bay.name} to '{serial}'.",
-            )
+                    return _modules_redirect_response(request, sync_url, server_key)
+                changed = module.serial != serial
+                if changed:
+                    module.serial = serial
+                    module.full_clean()
+                    module.save(update_fields=["serial"])
+            if changed:
+                messages.success(
+                    request,
+                    f"Updated serial for {module.module_type.model} in {module.module_bay.name} to '{serial}'.",
+                )
+                _schedule_module_cache_mutation(request, page_device, server_key)
+            else:
+                messages.info(request, "The module serial already matches LibreNMS. No change was needed.")
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Failed to update serial: {e}")
 
-        return _modules_redirect_response(request, sync_url)
+        return _modules_redirect_response(request, sync_url, server_key)
 
 
 class UpdateModuleInterfaceView(
@@ -1765,6 +1809,7 @@ class UpdateModuleInterfaceView(
                             # carries the bound interface's LibreNMS identity, not just the
                             # adoption tally.
                             "port_id": bind_result.get("port_id"),
+                            "changed": bind_result.get("changed", False),
                             "adopted_count": (bind_result.get("adopted_count") or 0)
                             + (adopt_result.get("adopted_count") or 0),
                         }
@@ -1774,6 +1819,8 @@ class UpdateModuleInterfaceView(
         elif bind_result.get("status") == "bound":
             location = f"{module.module_type.model} in {module.module_bay.name}"
             messages.success(request, _module_interface_update_message(bind_result, location))
+            if _module_bind_result_changed(bind_result):
+                _schedule_module_cache_mutation(request, page_device, server_key)
         else:
             messages.warning(
                 request,
@@ -2020,8 +2067,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         cached_payload = cache.get(self.get_cache_key(sync_device, "inventory", server_key=server_key))
         cached_data = _extract_inventory_list(cached_payload)
         if not cached_data:
-            messages.error(request, "No cached inventory data. Please refresh modules first.")
-            return _modules_redirect_response(request, sync_url, server_key)
+            return _modules_cache_missing_response(request, sync_url, server_key)
 
         librenms_item = next(
             (item for item in cached_data if item.get("entPhysicalIndex") == ent_index_int),
@@ -2181,6 +2227,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                     "Replaced module, but interface binding was skipped: "
                     f"{bind_result.get('reason', 'unknown reason')}",
                 )
+            _schedule_module_cache_mutation(request, page_device, server_key)
         except _ModuleComponentAdoptionUnavailable as exc:
             messages.error(request, f"A matching {exc.component_label} is not available for module adoption.")
         except _SerialConflictAmbiguous as exc:
@@ -2208,7 +2255,12 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         return _modules_redirect_response(request, sync_url, server_key)
 
 
-class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
+class MoveModuleView(
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+    LibreNMSAPIMixin,
+    View,
+):
     """
     Move an existing module from its current location to a target bay.
 
@@ -2241,13 +2293,14 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
         if invalid_selected_device:
             _warn_invalid_selected_device(request)
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+        server_key = self.resolve_posted_server_key(request.POST)
 
         try:
             conflict_module_id = int(request.POST.get("conflict_module_id"))
             target_bay_id = int(request.POST.get("target_bay_id"))
         except (TypeError, ValueError):
             messages.error(request, "Missing or invalid conflict_module_id/target_bay_id.")
-            return _modules_redirect_response(request, sync_url)
+            return _modules_redirect_response(request, sync_url, server_key)
 
         # Optional: current occupant of target bay
         raw_module_id = request.POST.get("module_id")
@@ -2270,7 +2323,7 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
                 )
                 if not target_bay:
                     messages.error(request, "Module bay no longer exists.")
-                    return _modules_redirect_response(request, sync_url)
+                    return _modules_redirect_response(request, sync_url, server_key)
 
                 # Re-fetch with row lock to prevent concurrent modifications. Scoped like the
                 # primary lookup: this module's device and bay are reassigned below, and its pk
@@ -2285,7 +2338,7 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
                 )
                 if not conflict_module:
                     messages.error(request, "Module no longer exists.")
-                    return _modules_redirect_response(request, sync_url)
+                    return _modules_redirect_response(request, sync_url, server_key)
 
                 # Remove whatever is currently in the target bay (if provided and different).
                 # Scoped by "delete": the device and bay filters prove where the row sits, not that
@@ -2316,13 +2369,19 @@ class MoveModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View)
                 moved_msg += f" from {from_device}"
             moved_msg += f"/{from_bay} to {target_bay.name}."
             messages.success(request, moved_msg)
+            _schedule_module_cache_mutation(request, page_device, server_key)
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Move failed: {e}")
 
-        return _modules_redirect_response(request, sync_url)
+        return _modules_redirect_response(request, sync_url, server_key)
 
 
-class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
+class AddBayTemplateView(
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+    LibreNMSAPIMixin,
+    View,
+):
     """
     Create a missing ModuleBayTemplate on a Device Type or Module Type so the
     user can install a sub-component without leaving the modules sync tab.
@@ -2592,6 +2651,7 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
             "mapping_exists": mapping_exists,
             "mapping_pattern": mapping_pattern,
             "mapping_default_kind": "regex" if mapping_pattern else "exact",
+            "server_key": request.GET.get("server_key", ""),
         }
         return render(request, "netbox_librenms_plugin/htmx/add_bay_template_modal.html", context)
 
@@ -2623,17 +2683,18 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
 
         device = self.restrict_object_or_404(Device, pk=pk)
         sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+        server_key = self.resolve_posted_server_key(request.POST)
 
         try:
             target_pk = int(request.POST.get("target_pk", ""))
         except (TypeError, ValueError):
             messages.error(request, "Missing or invalid target_pk for bay template.")
-            return _modules_redirect_response(request, sync_url)
+            return _modules_redirect_response(request, sync_url, server_key)
 
         name = (request.POST.get("name") or "").strip()
         if not name:
             messages.error(request, "Bay template name is required.")
-            return _modules_redirect_response(request, sync_url)
+            return _modules_redirect_response(request, sync_url, server_key)
         position = (request.POST.get("position") or "").strip()
         label = (request.POST.get("label") or "").strip()
         description = (request.POST.get("description") or "").strip()
@@ -2724,7 +2785,8 @@ class AddBayTemplateView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
                 )
             else:
                 messages.success(request, f"Added bay template '{name}' to {target}.{instantiate_note}")
+            _schedule_module_cache_mutation(request, device, server_key)
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Failed to add bay template: {e}")
 
-        return _modules_redirect_response(request, sync_url)
+        return _modules_redirect_response(request, sync_url, server_key)

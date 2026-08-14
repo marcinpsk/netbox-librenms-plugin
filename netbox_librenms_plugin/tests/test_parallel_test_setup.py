@@ -233,3 +233,27 @@ def test_settings_module_exports_the_stripped_redis_host():
     assert result.returncode == 0, result.stderr
     assert "HOST='redis'" in result.stdout, result.stdout
     assert "CACHE_HOST='redis'" in result.stdout, result.stdout
+
+
+def test_isolated_settings_exclude_unrelated_installed_plugins(settings):
+    """Do not import sibling worktrees while resolving URLs for this plugin's tests."""
+    assert settings.PLUGINS == ["netbox_librenms_plugin"]
+    assert set(settings.PLUGINS_CONFIG) == {"netbox_librenms_plugin"}
+
+
+def test_librenms_config_mock_is_not_applied_to_unrelated_tests(settings):
+    """A helper plugin must not replace the configured server catalog globally."""
+    from copy import deepcopy
+
+    from netbox.plugins import get_plugin_config
+
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"]["servers"] = {
+        "isolated": {
+            "librenms_url": "https://isolated.example.com",
+            "api_token": "test-token",
+        }
+    }
+    settings.PLUGINS_CONFIG = plugin_config
+
+    assert get_plugin_config("netbox_librenms_plugin", "servers") == plugin_config["netbox_librenms_plugin"]["servers"]
