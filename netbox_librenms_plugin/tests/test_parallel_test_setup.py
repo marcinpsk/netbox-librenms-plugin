@@ -235,6 +235,23 @@ def test_settings_module_exports_the_stripped_redis_host():
     assert "CACHE_HOST='redis'" in result.stdout, result.stdout
 
 
+def test_playwright_state_machine_has_a_required_separate_ci_job():
+    """Run browser behavior independently from the NetBox test matrix."""
+    workflow = (REPOSITORY_ROOT / ".github/workflows/test.yaml").read_text()
+    requirements = (REPOSITORY_ROOT / "requirements_dev.txt").read_text()
+    setup = (REPOSITORY_ROOT / ".devcontainer/scripts/setup.sh").read_text()
+    browser_tests = (REPOSITORY_ROOT / "netbox_librenms_plugin/tests/browser/test_sync_cache_browser.py").read_text()
+
+    assert "playwright>=" in requirements
+    assert "pytest.importorskip" not in browser_tests
+    assert "browser-tests:" in workflow
+    assert "pip install -r requirements_dev.txt" in workflow
+    assert "python -m playwright install --with-deps chromium" in workflow
+    assert "--ignore=netbox_librenms_plugin/tests/browser" in workflow
+    assert "pytest -c netbox_librenms_plugin/tests/browser/pytest.ini" in workflow
+    assert "python -m playwright install --with-deps chromium" in setup
+
+
 def test_isolated_settings_exclude_unrelated_installed_plugins(settings):
     """Do not import sibling worktrees while resolving URLs for this plugin's tests."""
     assert settings.PLUGINS == ["netbox_librenms_plugin"]
