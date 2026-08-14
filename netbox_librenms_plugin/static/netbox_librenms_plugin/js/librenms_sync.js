@@ -2560,11 +2560,12 @@ function handleCableChange(select, value) {
         updateBulkActionButton();
     };
     const rollbackToLastVerified = () => {
-        if (select._lastVerifiedMember == null) return;
-        if (select.tomselect && typeof select.tomselect.setValue === 'function') {
-            select.tomselect.setValue(select._lastVerifiedMember, true);
-        } else {
-            select.value = select._lastVerifiedMember;
+        if (select._lastVerifiedMember != null) {
+            if (select.tomselect && typeof select.tomselect.setValue === 'function') {
+                select.tomselect.setValue(select._lastVerifiedMember, true);
+            } else {
+                select.value = select._lastVerifiedMember;
+            }
         }
         restoreControls();
     };
