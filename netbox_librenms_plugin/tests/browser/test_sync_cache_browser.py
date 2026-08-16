@@ -5,23 +5,11 @@ from html import escape
 from pathlib import Path
 
 import pytest
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-
+from playwright import sync_api as playwright
 
 SCRIPT_PATH = Path(__file__).parents[2] / "static" / "netbox_librenms_plugin" / "js" / "librenms_sync.js"
 TEMPLATE_DIR = Path(__file__).parents[2] / "templates" / "netbox_librenms_plugin"
 STYLE_PATH = Path(__file__).parents[2] / "static" / "netbox_librenms_plugin" / "css" / "librenms_sync.css"
-# NetBox 4.6.5 and 4.7 bundle htmx 2.0.10 (4.4.0 bundles 2.0.6), so the vendored copy tracks NetBox.
-HTMX_PATH = Path(__file__).parent / "vendor" / "htmx.min.js"
-# NetBox imports HTMX as a module, so a NetBox page has no `htmx` global. The function wrapper keeps
-# the same shape here and publishes the API under another name for the tests that need it.
-HTMX_SCRIPT = f"window.htmxTest = (function () {{\n{HTMX_PATH.read_text()}\n; return htmx; }})();"
-
-
-def _add_page_scripts(page):
-    """Load HTMX and then the plugin script into the current page, the way a NetBox page does."""
-    page.add_script_tag(content=HTMX_SCRIPT)
-    page.add_script_tag(path=str(SCRIPT_PATH))
 
 
 # ===========================================================================
@@ -89,7 +77,7 @@ def _load_selection_page(page, rows, *, url=SELECTION_PAGE_URL, auto_select=True
         lambda route: route.fulfill(status=200, content_type="text/html", body=html),
     )
     page.goto(url)
-    _add_page_scripts(page)
+    page.add_script_tag(path=str(SCRIPT_PATH))
     page.evaluate("initializeCheckboxes()")
 
 
@@ -311,7 +299,7 @@ class TestCrossPageSelection:
         page.check("#cb-4304")
 
         page.goto(f"{SELECTION_PAGE_URL}?page=2")
-        _add_page_scripts(page)
+        page.add_script_tag(path=str(SCRIPT_PATH))
         page.evaluate("initializeCheckboxes()")
 
         assert "4304" in _checked_values(page)
@@ -415,22 +403,7 @@ def _replace_fixture_markup(html, old, new):
     return html.replace(old, new)
 
 
-def _fragment_loader(tab, content_id):
-    """Mirror the hidden loader element librenms_sync_base.html puts in every tab pane."""
-    return (
-        f'<span class="d-none" data-fragment-loader hx-get="https://plugin.example.com/fragment/{tab}"'
-        f' hx-trigger="librenms:load-fragment" hx-target="#{content_id}"'
-        f' hx-sync="#{content_id}:abort" hx-swap="innerHTML"></span>'
-    )
-
-
-def _page_html(
-    initial_state,
-    contract=None,
-    active_tab="interfaces",
-    valid_states=None,
-    action_form=False,
-):
+def _page_html(initial_state, contract=None, active_tab="interfaces", valid_states=None):
     state = json.dumps(initial_state)
     contract = contract or {
         "interfaces": {"content_id": "interface-sync-content", "label": "Interface"},
@@ -448,14 +421,6 @@ def _page_html(
     contract_json = json.dumps(serialized_contract)
     interface_content_id = contract["interfaces"]["content_id"]
     ip_content_id = contract["ipaddresses"]["content_id"]
-    interface_action = '<button id="interface-action">Sync</button>'
-    if action_form:
-        interface_action = (
-            '<form id="interface-action-form" hx-post="https://plugin.example.com/action/interfaces"'
-            ' hx-target="#interface-sync-content" hx-swap="innerHTML"'
-            ' hx-sync="#interface-sync-content:drop">'
-            '<button id="interface-action" type="submit">Sync</button></form>'
-        )
     return f"""
         <div id="librenms-sync-cache-state"
              data-status-url="https://plugin.example.com/status"
@@ -474,13 +439,13 @@ def _page_html(
                    aria-controls="ipaddresses">IP Addresses</a></li>
           </ul>
         <div id="interfaces" class="tab-pane{" active" if active_tab == "interfaces" else ""}"
-             data-tab-id="interfaces">
-          {_fragment_loader("interfaces", interface_content_id)}
-          <div id="{interface_content_id}">{interface_action}</div>
+             data-tab-id="interfaces"
+             data-fragment-url="https://plugin.example.com/fragment/interfaces">
+          <div id="{interface_content_id}"><button id="interface-action">Sync</button></div>
         </div>
         <div id="ipaddresses" class="tab-pane{" active" if active_tab == "ipaddresses" else ""}"
-             data-tab-id="ipaddresses">
-          {_fragment_loader("ipaddresses", ip_content_id)}
+             data-tab-id="ipaddresses"
+             data-fragment-url="https://plugin.example.com/fragment/ipaddresses">
           <div id="{ip_content_id}"><button id="ip-action">Sync</button></div>
         </div>
         </div>
@@ -490,7 +455,7 @@ def _page_html(
     """
 
 
-def test_server_contract_drives_cache_content_replacement(page):
+def test_server_contract_drives_cache_content_replacement():
     """The browser must use the tab metadata supplied by the server."""
     initial = {
         "interfaces": _state("before-interfaces"),
@@ -510,36 +475,44 @@ def test_server_contract_drives_cache_content_replacement(page):
         "ipaddresses": {"content_id": "ipaddress-sync-content", "label": "IP address"},
     }
 
-    page.set_content(_page_html(initial, contract))
-    _add_page_scripts(page)
-    page.evaluate(
-        "status => { initializeSyncCacheConsistency(); return reconcileSyncCacheStatus(status); }",
-        current,
-    )
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial, contract))
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate(
+            "status => { initializeSyncCacheConsistency(); return reconcileSyncCacheStatus(status); }",
+            current,
+        )
 
-    assert page.locator("#interface-action").count() == 0
-    assert "Network port data" in page.locator("#custom-interface-content").inner_text()
+        assert page.locator("#interface-action").count() == 0
+        assert "Network port data" in page.locator("#custom-interface-content").inner_text()
+        browser.close()
 
 
-def test_server_contract_defines_valid_wire_states(page):
+def test_server_contract_defines_valid_wire_states():
     """The browser must validate status states against the server contract."""
     initial = {
         "interfaces": _state("before-interfaces", state="source_ready"),
         "ipaddresses": _state("before-ip", state="source_ready"),
     }
 
-    page.set_content(_page_html(initial, valid_states=["source_ready"]))
-    page.route(
-        "https://plugin.example.com/status?*",
-        lambda route: route.fulfill(json={"tabs": initial}),
-    )
-    _add_page_scripts(page)
-    page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
-    page.wait_for_function("syncCacheController().checking === null")
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial, valid_states=["source_ready"]))
+        page.route(
+            "https://plugin.example.com/status?*",
+            lambda route: route.fulfill(json={"tabs": initial}),
+        )
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
+        page.wait_for_function("syncCacheController().checking === null")
 
-    assert page.evaluate("syncCacheController().lastCheckFailed") is False
-    assert page.locator("#interface-action").count() == 1
-    assert not page.locator("#modal-force-action").is_disabled()
+        assert page.evaluate("syncCacheController().lastCheckFailed") is False
+        assert page.locator("#interface-action").count() == 1
+        assert not page.locator("#modal-force-action").is_disabled()
+        browser.close()
 
 
 def _state(
@@ -570,7 +543,7 @@ def _state(
     return state
 
 
-def test_outer_tab_navigation_uses_the_rendered_status_as_the_next_baseline(page):
+def test_outer_tab_navigation_uses_the_rendered_status_as_the_next_baseline():
     """A status response started before navigation must not overwrite server-rendered state."""
     initial = {
         "interfaces": _state("before-interfaces"),
@@ -590,78 +563,75 @@ def test_outer_tab_navigation_uses_the_rendered_status_as_the_next_baseline(page
     }
     fragment_requests = []
 
-    page.set_content(_page_html(initial))
-    _add_page_scripts(page)
-    page.evaluate("document.dispatchEvent(new Event('DOMContentLoaded')); initializeScripts();")
-    page.evaluate(
-        """() => {
-            const realFetch = window.fetch;
-            window.statusRequestStarted = false;
-            window.releaseStatus = null;
-            window.fetch = (input, init) => {
-                if (String(input).includes('/status?')) {
-                    window.statusRequestStarted = true;
-                    return new Promise(resolve => {
-                        window.releaseStatus = () => resolve(new Response(
-                            JSON.stringify({tabs: window.staleStatus}),
-                            {status: 200, headers: {'Content-Type': 'application/json'}}
-                        ));
-                    });
-                }
-                return realFetch(input, init);
-            };
-        }"""
-    )
-    page.route(
-        "https://plugin.example.com/fragment/ipaddresses?*",
-        lambda route: (fragment_requests.append(route.request.url), route.fulfill(body="<p>Reloaded</p>")),
-    )
-    page.evaluate(
-        """() => {
-            window.inFlightStatus = checkSyncCacheStatus();
-            window.statusRequestSettled = false;
-            window.inFlightStatus.then(() => { window.statusRequestSettled = true; });
-        }"""
-    )
-    page.wait_for_function("window.statusRequestStarted === true")
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("document.dispatchEvent(new Event('DOMContentLoaded')); initializeScripts();")
+        page.evaluate(
+            """() => {
+                const realFetch = window.fetch;
+                window.statusRequestStarted = false;
+                window.releaseStatus = null;
+                window.fetch = (input, init) => {
+                    if (String(input).includes('/status?')) {
+                        window.statusRequestStarted = true;
+                        return new Promise(resolve => {
+                            window.releaseStatus = () => resolve(new Response(
+                                JSON.stringify({tabs: window.staleStatus}),
+                                {status: 200, headers: {'Content-Type': 'application/json'}}
+                            ));
+                        });
+                    }
+                    return realFetch(input, init);
+                };
+            }"""
+        )
+        page.route(
+            "https://plugin.example.com/fragment/ipaddresses?*",
+            lambda route: (fragment_requests.append(route.request.url), route.fulfill(body="<p>Reloaded</p>")),
+        )
+        page.evaluate(
+            """() => {
+                window.inFlightStatus = checkSyncCacheStatus();
+                window.statusRequestSettled = false;
+                window.inFlightStatus.then(() => { window.statusRequestSettled = true; });
+            }"""
+        )
+        page.wait_for_function("window.statusRequestStarted === true")
 
-    page.evaluate(
-        """payload => {
-            const region = document.querySelector('#librenms-sync-tabs');
-            region.outerHTML = '<div id="librenms-sync-tabs" data-active-tab="ipaddresses">'
-                + '<script id="librenms-sync-rendered-status" type="application/json">'
-                + JSON.stringify(payload.status)
-                + '</script>'
-                + '<div id="interfaces" class="tab-pane" data-tab-id="interfaces">'
-                + payload.interfaceLoader
-                + '<div id="interface-sync-content"><p>Server-rendered interface rows</p></div>'
-                + '</div>'
-                + '<div id="ipaddresses" class="tab-pane active" data-tab-id="ipaddresses">'
-                + payload.ipLoader
-                + '<div id="ipaddress-sync-content"><p>Server-rendered IP rows</p></div>'
-                + '</div></div>';
-            const swapped = document.querySelector('#librenms-sync-tabs');
-            // In production this markup arrives through a real HTMX swap, which processes it.
-            window.htmxTest.process(swapped);
-            swapped.dispatchEvent(new CustomEvent('htmx:afterSwap', {bubbles: true}));
-        }""",
-        {
-            "status": rendered,
-            "interfaceLoader": _fragment_loader("interfaces", "interface-sync-content"),
-            "ipLoader": _fragment_loader("ipaddresses", "ipaddress-sync-content"),
-        },
-    )
-    assert page.evaluate("syncCacheController().status.ipaddresses.revision") == "rendered-ipaddresses"
+        page.evaluate(
+            """status => {
+                const region = document.querySelector('#librenms-sync-tabs');
+                region.outerHTML = '<div id="librenms-sync-tabs" data-active-tab="ipaddresses">'
+                    + '<script id="librenms-sync-rendered-status" type="application/json">'
+                    + JSON.stringify(status)
+                    + '</script>'
+                    + '<div id="interfaces" class="tab-pane" data-tab-id="interfaces" '
+                    + 'data-fragment-url="https://plugin.example.com/fragment/interfaces"></div>'
+                    + '<div id="ipaddresses" class="tab-pane active" data-tab-id="ipaddresses" '
+                    + 'data-fragment-url="https://plugin.example.com/fragment/ipaddresses">'
+                    + '<div id="ipaddress-sync-content"><p>Server-rendered IP rows</p></div>'
+                    + '</div></div>';
+                document.querySelector('#librenms-sync-tabs').dispatchEvent(
+                    new CustomEvent('htmx:afterSwap', {bubbles: true})
+                );
+            }""",
+            rendered,
+        )
+        assert page.evaluate("syncCacheController().status.ipaddresses.revision") == "rendered-ipaddresses"
 
-    page.evaluate("status => { window.staleStatus = status; window.releaseStatus(); }", stale)
-    page.wait_for_function("window.statusRequestSettled === true")
+        page.evaluate("status => { window.staleStatus = status; window.releaseStatus(); }", stale)
+        page.wait_for_function("window.statusRequestSettled === true")
 
-    assert fragment_requests == []
-    assert page.locator("#ipaddress-sync-content").inner_text() == "Server-rendered IP rows"
-    assert page.evaluate("syncCacheController().status.ipaddresses.revision") == "rendered-ipaddresses"
+        assert fragment_requests == []
+        assert page.locator("#ipaddress-sync-content").inner_text() == "Server-rendered IP rows"
+        assert page.evaluate("syncCacheController().status.ipaddresses.revision") == "rendered-ipaddresses"
+        browser.close()
 
 
-def test_cold_tab_does_not_show_stale_state_before_first_refresh(page):
+def test_cold_tab_does_not_show_stale_state_before_first_refresh():
     """A tab with no snapshot history must retain its initial refresh state."""
     initial = {
         "interfaces": _state(None, state="missing", available=False),
@@ -675,13 +645,17 @@ def test_cold_tab_does_not_show_stale_state_before_first_refresh(page):
         '<button id="interface-refresh">Refresh Interfaces</button>',
     )
 
-    page.set_content(html)
-    _add_page_scripts(page)
-    page.evaluate("initializeSyncCacheConsistency()")
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(html)
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency()")
 
-    assert page.locator("#interface-refresh").count() == 1
-    assert not page.locator("#interfaces-tab").evaluate("node => node.classList.contains('sync-cache-unavailable')")
-    assert "cache is unavailable" not in page.locator("#interface-sync-content").inner_text()
+        assert page.locator("#interface-refresh").count() == 1
+        assert not page.locator("#interfaces-tab").evaluate("node => node.classList.contains('sync-cache-unavailable')")
+        assert "cache is unavailable" not in page.locator("#interface-sync-content").inner_text()
+        browser.close()
 
 
 def test_cache_reads_carry_the_csrf_token(page):
@@ -713,7 +687,7 @@ def test_cache_reads_carry_the_csrf_token(page):
         ),
     )
     page.set_content('<input type="hidden" name="csrfmiddlewaretoken" value="test-csrf-token">' + _page_html(initial))
-    _add_page_scripts(page)
+    page.add_script_tag(path=str(SCRIPT_PATH))
     page.evaluate(
         """
         async () => {
@@ -737,7 +711,7 @@ def _serve_sync_page(page, html, url=SYNC_PAGE_URL):
         lambda route: route.fulfill(status=200, content_type="text/html", body=html),
     )
     page.goto(url)
-    _add_page_scripts(page)
+    page.add_script_tag(path=str(SCRIPT_PATH))
 
 
 def test_cache_reads_carry_the_browser_url(page):
@@ -850,7 +824,7 @@ def test_a_cache_fragment_load_does_not_recheck_the_cache_status(page):
         lambda route: route.fulfill(body='<span id="restored">restored</span>', content_type="text/html"),
     )
     page.set_content(_page_html(initial))
-    _add_page_scripts(page)
+    page.add_script_tag(path=str(SCRIPT_PATH))
     page.evaluate("async () => { initializeSyncCacheConsistency(); await loadSyncCacheFragment('interfaces'); }")
 
     assert page.locator("#restored").count() == 1
@@ -884,7 +858,7 @@ def test_module_verify_carries_the_browser_url(page):
     assert verify.value.headers.get("hx-current-url") == SYNC_PAGE_URL
 
 
-def test_cold_tab_does_not_flash_stale_during_tab_navigation(page):
+def test_cold_tab_does_not_flash_stale_during_tab_navigation():
     """Checking a never-refreshed tab must not briefly mark it stale."""
     initial = {
         "interfaces": _state("interfaces-ready"),
@@ -892,37 +866,43 @@ def test_cold_tab_does_not_flash_stale_during_tab_navigation(page):
     }
     initial["ipaddresses"]["timestamp"] = None
 
-    page.route(
-        "https://plugin.example.com/page*",
-        lambda route: route.fulfill(body=_page_html(initial), content_type="text/html"),
-    )
-    page.route(
-        "https://plugin.example.com/status?*",
-        lambda route: route.fulfill(json={"tabs": initial}),
-    )
-    page.goto("https://plugin.example.com/page")
-    _add_page_scripts(page)
-    page.evaluate(
-        """
-        () => {
-            initializeSyncCacheConsistency();
-            const tab = document.querySelector('#ipaddresses-tab');
-            new MutationObserver(() => {
-                if (tab.classList.contains('sync-cache-unavailable')) {
-                    sessionStorage.setItem('ip-state-flashed', 'true');
-                }
-            }).observe(tab, { attributes: true, attributeFilter: ['class'] });
-        }
-        """
-    )
-    page.locator("#ipaddresses-tab").click()
-    page.wait_for_url("**/page?tab=ipaddresses")
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.route(
+            "https://plugin.example.com/page*",
+            lambda route: route.fulfill(body=_page_html(initial), content_type="text/html"),
+        )
+        page.route(
+            "https://plugin.example.com/status?*",
+            lambda route: route.fulfill(json={"tabs": initial}),
+        )
+        page.goto("https://plugin.example.com/page")
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate(
+            """
+            () => {
+                initializeSyncCacheConsistency();
+                const tab = document.querySelector('#ipaddresses-tab');
+                new MutationObserver(() => {
+                    if (tab.classList.contains('sync-cache-unavailable')) {
+                        sessionStorage.setItem('ip-state-flashed', 'true');
+                    }
+                }).observe(tab, { attributes: true, attributeFilter: ['class'] });
+            }
+            """
+        )
+        page.locator("#ipaddresses-tab").click()
+        page.wait_for_url("**/page?tab=ipaddresses")
 
-    assert page.evaluate("sessionStorage.getItem('ip-state-flashed')") is None
-    assert not page.locator("#ipaddresses-tab").evaluate("node => node.classList.contains('sync-cache-unavailable')")
+        assert page.evaluate("sessionStorage.getItem('ip-state-flashed')") is None
+        assert not page.locator("#ipaddresses-tab").evaluate(
+            "node => node.classList.contains('sync-cache-unavailable')"
+        )
+        browser.close()
 
 
-def test_status_check_queues_one_follow_up_while_a_request_is_in_flight(page):
+def test_status_check_queues_one_follow_up_while_a_request_is_in_flight():
     """A second trigger must observe state that changed during the first request."""
     initial = {
         "interfaces": _state("interfaces-ready"),
@@ -944,25 +924,31 @@ def test_status_check_queues_one_follow_up_while_a_request_is_in_flight(page):
         requests.append(route.request.url)
         route.fulfill(json={"tabs": payloads[min(len(requests) - 1, 1)]})
 
-    page.set_content(_page_html(initial))
-    page.route("https://plugin.example.com/status?*", serve_status)
-    _add_page_scripts(page)
-    page.evaluate(
-        """
-        () => {
-            initializeSyncCacheConsistency();
-            checkSyncCacheStatus();
-            checkSyncCacheStatus();
-        }
-        """
-    )
-    page.wait_for_function("document.querySelector('#ipaddresses-tab').classList.contains('sync-cache-unavailable')")
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.route("https://plugin.example.com/status?*", serve_status)
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate(
+            """
+            () => {
+                initializeSyncCacheConsistency();
+                checkSyncCacheStatus();
+                checkSyncCacheStatus();
+            }
+            """
+        )
+        page.wait_for_function(
+            "document.querySelector('#ipaddresses-tab').classList.contains('sync-cache-unavailable')"
+        )
 
-    assert len(requests) == 2
-    assert page.locator("#ipaddresses-tab").evaluate("node => node.classList.contains('sync-cache-unavailable')")
+        assert len(requests) == 2
+        assert page.locator("#ipaddresses-tab").evaluate("node => node.classList.contains('sync-cache-unavailable')")
+        browser.close()
 
 
-def test_healthy_tab_click_navigates_without_bootstrap_global(page):
+def test_healthy_tab_click_navigates_without_bootstrap_global():
     """A ready tab must load when NetBox does not expose Bootstrap as a global."""
     initial = {
         "interfaces": _state("interfaces-ready"),
@@ -973,23 +959,27 @@ def test_healthy_tab_click_navigates_without_bootstrap_global(page):
         active_tab = "ipaddresses" if "tab=ipaddresses" in route.request.url else "interfaces"
         route.fulfill(body=_page_html(initial, active_tab=active_tab), content_type="text/html")
 
-    page.route("https://plugin.example.com/page*", serve_page)
-    page.route(
-        "https://plugin.example.com/status?*",
-        lambda route: route.fulfill(json={"tabs": initial}),
-    )
-    page.goto("https://plugin.example.com/page")
-    _add_page_scripts(page)
-    page.evaluate("initializeSyncCacheConsistency()")
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.route("https://plugin.example.com/page*", serve_page)
+        page.route(
+            "https://plugin.example.com/status?*",
+            lambda route: route.fulfill(json={"tabs": initial}),
+        )
+        page.goto("https://plugin.example.com/page")
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency()")
 
-    assert page.evaluate("typeof bootstrap") == "undefined"
-    page.locator("#ipaddresses-tab").click()
-    page.wait_for_url("**/page?tab=ipaddresses")
+        assert page.evaluate("typeof bootstrap") == "undefined"
+        page.locator("#ipaddresses-tab").click()
+        page.wait_for_url("**/page?tab=ipaddresses")
 
-    assert page.locator("#ipaddresses").evaluate("node => node.classList.contains('active')")
+        assert page.locator("#ipaddresses").evaluate("node => node.classList.contains('active')")
+        browser.close()
 
 
-def test_refreshing_one_tab_does_not_mark_never_refreshed_tabs_stale(page):
+def test_refreshing_one_tab_does_not_mark_never_refreshed_tabs_stale():
     """A successful refresh must not change untouched cold-tab affordances."""
     initial = {
         "interfaces": _state(None, state="missing", available=False),
@@ -1002,17 +992,23 @@ def test_refreshing_one_tab_does_not_mark_never_refreshed_tabs_stale(page):
         "ipaddresses": initial["ipaddresses"],
     }
 
-    page.set_content(_page_html(initial))
-    _add_page_scripts(page)
-    page.evaluate(
-        "status => { initializeSyncCacheConsistency(); return reconcileSyncCacheStatus(status); }",
-        refreshed,
-    )
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate(
+            "status => { initializeSyncCacheConsistency(); return reconcileSyncCacheStatus(status); }",
+            refreshed,
+        )
 
-    assert not page.locator("#ipaddresses-tab").evaluate("node => node.classList.contains('sync-cache-unavailable')")
+        assert not page.locator("#ipaddresses-tab").evaluate(
+            "node => node.classList.contains('sync-cache-unavailable')"
+        )
+        browser.close()
 
 
-def test_cache_state_uses_theme_rails_without_resizing(page):
+def test_cache_state_uses_theme_rails_without_resizing():
     """Available and unavailable states must not add text or change tab dimensions."""
     initial = {
         "interfaces": _state("interfaces-ready"),
@@ -1028,41 +1024,45 @@ def test_cache_state_uses_theme_rails_without_resizing(page):
         ),
     }
 
-    page.set_content(_page_html(initial))
-    page.add_style_tag(path=str(STYLE_PATH))
-    _add_page_scripts(page)
-    page.evaluate(
-        """
-        () => {
-            document.documentElement.style.setProperty('--tblr-warning', 'rgb(245, 159, 0)');
-            document.documentElement.style.setProperty('--tblr-success', 'rgb(47, 179, 68)');
-            document.documentElement.style.setProperty('--tblr-border-radius', '4px');
-            initializeSyncCacheConsistency();
-        }
-        """
-    )
-    width_before = page.locator("#ipaddresses-tab").evaluate("node => node.getBoundingClientRect().width")
-    tab = page.locator("#ipaddresses-tab")
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.add_style_tag(path=str(STYLE_PATH))
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate(
+            """
+            () => {
+                document.documentElement.style.setProperty('--tblr-warning', 'rgb(245, 159, 0)');
+                document.documentElement.style.setProperty('--tblr-success', 'rgb(47, 179, 68)');
+                document.documentElement.style.setProperty('--tblr-border-radius', '4px');
+                initializeSyncCacheConsistency();
+            }
+            """
+        )
+        width_before = page.locator("#ipaddresses-tab").evaluate("node => node.getBoundingClientRect().width")
+        tab = page.locator("#ipaddresses-tab")
 
-    assert tab.evaluate("node => node.classList.contains('sync-cache-ready')")
-    assert tab.evaluate("node => getComputedStyle(node, '::before').backgroundColor") == "rgb(47, 179, 68)"
+        assert tab.evaluate("node => node.classList.contains('sync-cache-ready')")
+        assert tab.evaluate("node => getComputedStyle(node, '::before').backgroundColor") == "rgb(47, 179, 68)"
 
-    page.evaluate("status => reconcileSyncCacheStatus(status)", invalidated)
-    width_after = tab.evaluate("node => node.getBoundingClientRect().width")
+        page.evaluate("status => reconcileSyncCacheStatus(status)", invalidated)
+        width_after = tab.evaluate("node => node.getBoundingClientRect().width")
 
-    assert width_after == width_before
-    assert tab.inner_text() == "IP Addresses"
-    assert tab.evaluate("node => node.classList.contains('sync-cache-unavailable')")
-    assert tab.get_attribute("title") == "Cached data is unavailable. Refresh this tab."
-    assert tab.get_attribute("aria-label") == "IP Addresses. Cached data is unavailable."
-    assert tab.evaluate("node => getComputedStyle(node, '::before').height") == "3px"
-    assert tab.evaluate("node => getComputedStyle(node, '::before').backgroundColor") == "rgb(245, 159, 0)"
+        assert width_after == width_before
+        assert tab.inner_text() == "IP Addresses"
+        assert tab.evaluate("node => node.classList.contains('sync-cache-unavailable')")
+        assert tab.get_attribute("title") == "Cached data is unavailable. Refresh this tab."
+        assert tab.get_attribute("aria-label") == "IP Addresses. Cached data is unavailable."
+        assert tab.evaluate("node => getComputedStyle(node, '::before').height") == "3px"
+        assert tab.evaluate("node => getComputedStyle(node, '::before').backgroundColor") == "rgb(245, 159, 0)"
 
-    page.evaluate("document.documentElement.style.setProperty('--tblr-warning', 'rgb(255, 193, 7)')")
-    assert tab.evaluate("node => getComputedStyle(node, '::before').backgroundColor") == "rgb(255, 193, 7)"
+        page.evaluate("document.documentElement.style.setProperty('--tblr-warning', 'rgb(255, 193, 7)')")
+        assert tab.evaluate("node => getComputedStyle(node, '::before').backgroundColor") == "rgb(255, 193, 7)"
+        browser.close()
 
 
-def test_selecting_an_unavailable_tab_acknowledges_its_attention_state(page):
+def test_selecting_an_unavailable_tab_acknowledges_its_attention_state():
     initial = {
         "interfaces": _state("interfaces-ready"),
         "ipaddresses": _state(
@@ -1073,31 +1073,35 @@ def test_selecting_an_unavailable_tab_acknowledges_its_attention_state(page):
         ),
     }
 
-    page.route(
-        "https://plugin.example.com/page*",
-        lambda route: route.fulfill(
-            body=_page_html(
-                initial,
-                active_tab="ipaddresses" if "tab=ipaddresses" in route.request.url else "interfaces",
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.route(
+            "https://plugin.example.com/page*",
+            lambda route: route.fulfill(
+                body=_page_html(
+                    initial,
+                    active_tab="ipaddresses" if "tab=ipaddresses" in route.request.url else "interfaces",
+                ),
+                content_type="text/html",
             ),
-            content_type="text/html",
-        ),
-    )
-    page.goto("https://plugin.example.com/page")
-    _add_page_scripts(page)
-    page.evaluate("initializeSyncCacheConsistency()")
-    tab = page.locator("#ipaddresses-tab")
-    assert tab.evaluate("node => node.classList.contains('sync-cache-unavailable')")
+        )
+        page.goto("https://plugin.example.com/page")
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency()")
+        tab = page.locator("#ipaddresses-tab")
+        assert tab.evaluate("node => node.classList.contains('sync-cache-unavailable')")
 
-    tab.click()
-    page.wait_for_url("**/page?tab=ipaddresses")
-    selected_tab = page.locator("#ipaddresses-tab")
+        tab.click()
+        page.wait_for_url("**/page?tab=ipaddresses")
+        selected_tab = page.locator("#ipaddresses-tab")
 
-    assert not selected_tab.evaluate("node => node.classList.contains('sync-cache-unavailable')")
-    assert selected_tab.get_attribute("title") is None
+        assert not selected_tab.evaluate("node => node.classList.contains('sync-cache-unavailable')")
+        assert selected_tab.get_attribute("title") is None
+        browser.close()
 
 
-def test_acknowledged_status_does_not_restore_unavailable_attention(page):
+def test_acknowledged_status_does_not_restore_unavailable_attention():
     initial = {
         "interfaces": _state("interfaces-ready"),
         "ipaddresses": _state(
@@ -1109,14 +1113,20 @@ def test_acknowledged_status_does_not_restore_unavailable_attention(page):
         ),
     }
 
-    page.set_content(_page_html(initial))
-    _add_page_scripts(page)
-    page.evaluate("initializeSyncCacheConsistency()")
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency()")
 
-    assert not page.locator("#ipaddresses-tab").evaluate("node => node.classList.contains('sync-cache-unavailable')")
+        assert not page.locator("#ipaddresses-tab").evaluate(
+            "node => node.classList.contains('sync-cache-unavailable')"
+        )
+        browser.close()
 
 
-def test_focus_check_clears_invalidated_rows_and_reports_anonymous_actor(page):
+def test_focus_check_clears_invalidated_rows_and_reports_anonymous_actor():
     initial = {
         "interfaces": _state("before-interfaces"),
         "ipaddresses": _state("before-ip"),
@@ -1131,51 +1141,59 @@ def test_focus_check_clears_invalidated_rows_and_reports_anonymous_actor(page):
         ),
     }
 
-    page.set_content(_page_html(initial))
-    page.route(
-        "https://plugin.example.com/status?*",
-        lambda route: route.fulfill(json={"tabs": current}),
-    )
-    _add_page_scripts(page)
-    page.evaluate("initializeSyncCacheConsistency(); window.dispatchEvent(new Event('blur'))")
-    page.evaluate("window.dispatchEvent(new Event('focus'))")
-    page.wait_for_function("document.querySelector('#ipaddress-sync-content').dataset.cacheEmpty === 'true'")
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.route(
+            "https://plugin.example.com/status?*",
+            lambda route: route.fulfill(json={"tabs": current}),
+        )
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency(); window.dispatchEvent(new Event('blur'))")
+        page.evaluate("window.dispatchEvent(new Event('focus'))")
+        page.wait_for_function("document.querySelector('#ipaddress-sync-content').dataset.cacheEmpty === 'true'")
 
-    assert page.locator("#ip-action").count() == 0
-    assert page.locator("#ipaddresses-tab").evaluate("node => node.classList.contains('sync-cache-unavailable')")
-    notice = page.locator("#librenms-sync-cache-notices").inner_text()
-    assert "Some sync data was cleared because another user synchronized data from LibreNMS." in notice
-    assert "Interface data" not in notice
-    assert "another user synchronized Interface data" in page.locator("#ipaddress-sync-content").inner_text()
+        assert page.locator("#ip-action").count() == 0
+        assert page.locator("#ipaddresses-tab").evaluate("node => node.classList.contains('sync-cache-unavailable')")
+        notice = page.locator("#librenms-sync-cache-notices").inner_text()
+        assert "Some sync data was cleared because another user synchronized data from LibreNMS." in notice
+        assert "Interface data" not in notice
+        assert "another user synchronized Interface data" in page.locator("#ipaddress-sync-content").inner_text()
+        browser.close()
 
 
-def test_cache_status_failure_disables_every_loaded_sync_control(page):
+def test_cache_status_failure_disables_every_loaded_sync_control():
     """A failed status check must fail closed across tabs and an open modal."""
     initial = {
         "interfaces": _state("before-interfaces"),
         "ipaddresses": _state("before-ip"),
     }
 
-    console_errors = []
-    page.on("console", lambda message: console_errors.append(message.text) if message.type == "error" else None)
-    page.set_content(_page_html(initial))
-    page.route(
-        "https://plugin.example.com/status?*",
-        lambda route: route.fulfill(status=503),
-    )
-    _add_page_scripts(page)
-    page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
-    page.wait_for_function("syncCacheController().lastCheckFailed === true")
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        console_errors = []
+        page.on("console", lambda message: console_errors.append(message.text) if message.type == "error" else None)
+        page.set_content(_page_html(initial))
+        page.route(
+            "https://plugin.example.com/status?*",
+            lambda route: route.fulfill(status=503),
+        )
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
+        page.wait_for_function("syncCacheController().lastCheckFailed === true")
 
-    assert page.locator("#interface-action").count() == 0
-    assert page.locator("#ip-action").count() == 0
-    assert page.locator("#modal-force-action").is_disabled()
-    assert "could not be verified" in page.locator("#interface-sync-content").inner_text()
-    assert "could not be verified" in page.locator("#ipaddress-sync-content").inner_text()
-    assert any("HTTP 503" in message for message in console_errors), console_errors
+        assert page.locator("#interface-action").count() == 0
+        assert page.locator("#ip-action").count() == 0
+        assert page.locator("#modal-force-action").is_disabled()
+        assert "could not be verified" in page.locator("#interface-sync-content").inner_text()
+        assert "could not be verified" in page.locator("#ipaddress-sync-content").inner_text()
+        assert any("HTTP 503" in message for message in console_errors), console_errors
+        browser.close()
 
 
-def test_successful_cache_status_check_restores_only_fail_closed_modal_controls(page):
+def test_successful_cache_status_check_restores_only_fail_closed_modal_controls():
     """A transient status failure must not leave an open modal permanently disabled."""
     initial = {
         "interfaces": _state("before-interfaces"),
@@ -1191,33 +1209,41 @@ def test_successful_cache_status_check_restores_only_fail_closed_modal_controls(
         else:
             route.fulfill(json={"tabs": initial})
 
-    page.set_content(_page_html(initial))
-    page.evaluate(
-        """() => {
-            const control = document.createElement('button');
-            control.id = 'modal-already-disabled';
-            control.disabled = true;
-            document.querySelector('#htmx-modal-content form').append(control);
-        }"""
-    )
-    page.route("https://plugin.example.com/status?*", status_response)
-    page.route(
-        "https://plugin.example.com/fragment/interfaces?*",
-        lambda route: route.fulfill(body='<button id="restored-interface-action">Sync</button>'),
-    )
-    _add_page_scripts(page)
-    page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
-    page.wait_for_function("syncCacheController().lastCheckFailed === true && syncCacheController().checking === null")
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.evaluate(
+            """() => {
+                const control = document.createElement('button');
+                control.id = 'modal-already-disabled';
+                control.disabled = true;
+                document.querySelector('#htmx-modal-content form').append(control);
+            }"""
+        )
+        page.route("https://plugin.example.com/status?*", status_response)
+        page.route(
+            "https://plugin.example.com/fragment/interfaces?*",
+            lambda route: route.fulfill(body='<button id="restored-interface-action">Sync</button>'),
+        )
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
+        page.wait_for_function(
+            "syncCacheController().lastCheckFailed === true && syncCacheController().checking === null"
+        )
 
-    assert page.locator("#modal-force-action").is_disabled()
-    assert page.locator("#modal-already-disabled").is_disabled()
+        assert page.locator("#modal-force-action").is_disabled()
+        assert page.locator("#modal-already-disabled").is_disabled()
 
-    page.evaluate("checkSyncCacheStatus()")
-    page.wait_for_function("syncCacheController().lastCheckFailed === false && syncCacheController().checking === null")
+        page.evaluate("checkSyncCacheStatus()")
+        page.wait_for_function(
+            "syncCacheController().lastCheckFailed === false && syncCacheController().checking === null"
+        )
 
-    assert not page.locator("#modal-force-action").is_disabled()
-    assert page.locator("#modal-already-disabled").is_disabled()
-    assert page.locator("#restored-interface-action").count() == 1
+        assert not page.locator("#modal-force-action").is_disabled()
+        assert page.locator("#modal-already-disabled").is_disabled()
+        assert page.locator("#restored-interface-action").count() == 1
+        browser.close()
 
 
 def test_verified_missing_snapshot_restores_pane_controls_but_not_modal_controls(page):
@@ -1245,7 +1271,7 @@ def test_verified_missing_snapshot_restores_pane_controls_but_not_modal_controls
         }"""
     )
     page.route("https://plugin.example.com/status?*", status_response)
-    _add_page_scripts(page)
+    page.add_script_tag(path=str(SCRIPT_PATH))
     page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
     page.wait_for_function("syncCacheController().lastCheckFailed === true && syncCacheController().checking === null")
 
@@ -1278,7 +1304,7 @@ def test_the_tab_templates_keep_the_refresh_button_outside_the_cached_content(te
     assert refresh < content, f"{template}: the refresh button moved inside #{content_id}"
 
 
-def test_available_status_without_a_usable_fragment_keeps_modal_controls_disabled(page):
+def test_available_status_without_a_usable_fragment_keeps_modal_controls_disabled():
     """A status response alone must not restore controls after fail-closed content loss."""
     initial = {
         "interfaces": _state("before-interfaces"),
@@ -1294,50 +1320,62 @@ def test_available_status_without_a_usable_fragment_keeps_modal_controls_disable
         else:
             route.fulfill(json={"tabs": initial})
 
-    page.set_content(_page_html(initial))
-    page.route("https://plugin.example.com/status?*", status_response)
-    page.route(
-        "https://plugin.example.com/fragment/interfaces?*",
-        lambda route: route.fulfill(status=503),
-    )
-    _add_page_scripts(page)
-    page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
-    page.wait_for_function("syncCacheController().lastCheckFailed === true && syncCacheController().checking === null")
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.route("https://plugin.example.com/status?*", status_response)
+        page.route(
+            "https://plugin.example.com/fragment/interfaces?*",
+            lambda route: route.fulfill(status=503),
+        )
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
+        page.wait_for_function(
+            "syncCacheController().lastCheckFailed === true && syncCacheController().checking === null"
+        )
 
-    page.evaluate("checkSyncCacheStatus()")
-    page.wait_for_function("syncCacheController().lastCheckFailed === false && syncCacheController().checking === null")
+        page.evaluate("checkSyncCacheStatus()")
+        page.wait_for_function(
+            "syncCacheController().lastCheckFailed === false && syncCacheController().checking === null"
+        )
 
-    assert page.locator("#modal-force-action").is_disabled()
-    assert "could not be restored" in page.locator("#interface-sync-content").inner_text()
+        assert page.locator("#modal-force-action").is_disabled()
+        assert "could not be restored" in page.locator("#interface-sync-content").inner_text()
+        browser.close()
 
 
-def test_hung_cache_status_request_times_out_and_fails_closed(page):
+def test_hung_cache_status_request_times_out_and_fails_closed():
     """A stalled status request must release the controller and remove stale controls."""
     initial = {
         "interfaces": _state("before-interfaces"),
         "ipaddresses": _state("before-ip"),
     }
 
-    page.clock.install()
-    page.set_content(_page_html(initial))
-    stalled_routes = []
-    page.route("https://plugin.example.com/status?*", lambda route: stalled_routes.append(route))
-    _add_page_scripts(page)
-    page.evaluate("() => { initializeSyncCacheConsistency(); checkSyncCacheStatus(); }")
-    assert page.locator("#interfaces-tab").evaluate("node => node.classList.contains('sync-cache-ready')")
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.clock.install()
+        page.set_content(_page_html(initial))
+        stalled_routes = []
+        page.route("https://plugin.example.com/status?*", lambda route: stalled_routes.append(route))
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("() => { initializeSyncCacheConsistency(); checkSyncCacheStatus(); }")
+        assert page.locator("#interfaces-tab").evaluate("node => node.classList.contains('sync-cache-ready')")
 
-    page.clock.fast_forward(20_000)
-    page.clock.resume()
-    page.wait_for_function("syncCacheController().lastCheckFailed === true", timeout=1_000)
+        page.clock.fast_forward(20_000)
+        page.clock.resume()
+        page.wait_for_function("syncCacheController().lastCheckFailed === true", timeout=1_000)
 
-    assert page.evaluate("syncCacheController().checking") is None
-    assert page.locator("#interface-action").count() == 0
-    assert not page.locator("#interfaces-tab").evaluate("node => node.classList.contains('sync-cache-ready')")
-    for route in stalled_routes:
-        route.abort()
+        assert page.evaluate("syncCacheController().checking") is None
+        assert page.locator("#interface-action").count() == 0
+        assert not page.locator("#interfaces-tab").evaluate("node => node.classList.contains('sync-cache-ready')")
+        for route in stalled_routes:
+            route.abort()
+        browser.close()
 
 
-def test_hung_cache_fragment_request_times_out_and_fails_closed(page):
+def test_hung_cache_fragment_request_times_out_and_fails_closed():
     """A stalled fragment request must release the controller and remove stale controls."""
     initial = {
         "interfaces": _state("before-interfaces"),
@@ -1348,165 +1386,39 @@ def test_hung_cache_fragment_request_times_out_and_fails_closed(page):
         "interfaces": _state("after-interfaces"),
     }
 
-    page.clock.install()
-    page.set_content(_page_html(initial))
-    stalled_routes = []
-    page.route(
-        "https://plugin.example.com/status?*",
-        lambda route: route.fulfill(json={"tabs": current}),
-    )
-    page.route("https://plugin.example.com/fragment/interfaces?*", lambda route: stalled_routes.append(route))
-    _add_page_scripts(page)
-    with page.expect_request("https://plugin.example.com/fragment/interfaces?*"):
-        page.evaluate("() => { initializeSyncCacheConsistency(); checkSyncCacheStatus(); }")
-    page.wait_for_function("syncCacheController().status.interfaces.revision === 'after-interfaces'")
-    assert page.evaluate("syncCacheController().checking !== null")
-    assert page.evaluate("syncCacheController().lastCheckFailed") is False
-    assert page.locator("#interfaces-tab").evaluate("node => node.classList.contains('sync-cache-ready')")
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.clock.install()
+        page.set_content(_page_html(initial))
+        stalled_routes = []
+        page.route(
+            "https://plugin.example.com/status?*",
+            lambda route: route.fulfill(json={"tabs": current}),
+        )
+        page.route("https://plugin.example.com/fragment/interfaces?*", lambda route: stalled_routes.append(route))
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        with page.expect_request("https://plugin.example.com/fragment/interfaces?*"):
+            page.evaluate("() => { initializeSyncCacheConsistency(); checkSyncCacheStatus(); }")
+        page.wait_for_function("syncCacheController().status.interfaces.revision === 'after-interfaces'")
+        assert page.evaluate("syncCacheController().checking !== null")
+        assert page.evaluate("syncCacheController().lastCheckFailed") is False
+        assert page.locator("#interfaces-tab").evaluate("node => node.classList.contains('sync-cache-ready')")
 
-    page.clock.fast_forward(20_000)
-    page.clock.resume()
-    page.wait_for_function("syncCacheController().lastCheckFailed === true", timeout=1_000)
+        page.clock.fast_forward(20_000)
+        page.clock.resume()
+        page.wait_for_function("syncCacheController().lastCheckFailed === true", timeout=1_000)
 
-    assert page.evaluate("syncCacheController().checking") is None
-    assert page.locator("#interface-action").count() == 0
-    assert not page.locator("#interfaces-tab").evaluate("node => node.classList.contains('sync-cache-ready')")
-    assert stalled_routes
-    for route in stalled_routes:
-        route.abort()
-
-
-FRAGMENT_URL_PREFIX = "https://plugin.example.com/fragment/interfaces"
-ACTION_URL = "https://plugin.example.com/action/interfaces"
-# Count the loader's htmx lifecycle events, so a test can tell a dropped restore from an issued one.
-LOADER_EVENT_COUNTER = """() => {
-    window.loaderEvents = { trigger: 0, request: 0 };
-    const loader = document.querySelector('#interfaces [data-fragment-loader]');
-    loader.addEventListener('htmx:trigger', () => { window.loaderEvents.trigger += 1; });
-    loader.addEventListener('htmx:beforeRequest', () => { window.loaderEvents.request += 1; });
-}"""
+        assert page.evaluate("syncCacheController().checking") is None
+        assert page.locator("#interface-action").count() == 0
+        assert not page.locator("#interfaces-tab").evaluate("node => node.classList.contains('sync-cache-ready')")
+        assert stalled_routes
+        for route in stalled_routes:
+            route.abort()
+        browser.close()
 
 
-def _race_states():
-    initial = {
-        "interfaces": _state("before-interfaces"),
-        "ipaddresses": _state("before-ip"),
-    }
-    return initial, {**initial, "interfaces": _state("after-interfaces")}
-
-
-def test_action_supersedes_an_in_flight_cache_restore(page):
-    """A module action must abort an in-flight cache restore so the older fragment cannot replace its response."""
-    initial, current = _race_states()
-    fragment_routes = []
-
-    page.set_content(_page_html(initial, action_form=True))
-    page.route(
-        "https://plugin.example.com/status?*",
-        lambda route: route.fulfill(json={"tabs": current}),
-    )
-    page.route(f"{FRAGMENT_URL_PREFIX}?*", lambda route: fragment_routes.append(route))
-    page.route(
-        ACTION_URL,
-        lambda route: route.fulfill(body='<span id="after-action">After action</span>'),
-    )
-    _add_page_scripts(page)
-    with page.expect_request(f"{FRAGMENT_URL_PREFIX}?*"):
-        page.evaluate("() => { initializeSyncCacheConsistency(); checkSyncCacheStatus(); }")
-    page.wait_for_function("document.querySelector('[data-fragment-loader]').classList.contains('htmx-request')")
-
-    # The fixed loader aborts its request when the action is posted; the unfixed one keeps it in flight.
-    try:
-        with page.expect_event(
-            "requestfailed", lambda request: request.url.startswith(FRAGMENT_URL_PREFIX), timeout=2_000
-        ):
-            page.locator("#interface-action").click()
-        restore_aborted = True
-    except PlaywrightTimeoutError:
-        restore_aborted = False
-    page.locator("#after-action").wait_for()
-    if not restore_aborted:
-        fragment_routes[0].fulfill(body='<span id="stale">Stale restore</span>')
-    page.wait_for_function("syncCacheController().checking === null")
-
-    assert page.locator("#stale").count() == 0
-    assert page.locator("#after-action").count() == 1
-    assert restore_aborted
-    assert page.evaluate("syncCacheController().lastCheckFailed") is False
-    assert "could not be restored" not in page.locator("#interface-sync-content").inner_text()
-    assert page.locator("#interfaces-tab").evaluate("node => node.classList.contains('sync-cache-ready')")
-
-
-def test_cache_restore_is_dropped_behind_an_in_flight_action(page):
-    """A restore that arrives during a module action must not be issued, so it cannot replace the action's response."""
-    initial, current = _race_states()
-    action_routes = []
-    fragment_routes = []
-
-    page.set_content(_page_html(initial, action_form=True))
-    page.route(
-        "https://plugin.example.com/status?*",
-        lambda route: route.fulfill(json={"tabs": current}),
-    )
-    page.route(ACTION_URL, lambda route: action_routes.append(route))
-    page.route(f"{FRAGMENT_URL_PREFIX}?*", lambda route: fragment_routes.append(route))
-    _add_page_scripts(page)
-    page.evaluate("initializeSyncCacheConsistency()")
-    page.evaluate(LOADER_EVENT_COUNTER)
-    with page.expect_request(ACTION_URL):
-        page.locator("#interface-action").click()
-    page.evaluate("() => { checkSyncCacheStatus(); }")
-    page.wait_for_function("window.loaderEvents.trigger === 1")
-
-    assert page.evaluate("window.loaderEvents.request") == 0, "the restore was issued during the action"
-    action_routes[0].fulfill(body='<span id="after-action">After action</span>')
-    page.locator("#after-action").wait_for()
-    page.wait_for_function("syncCacheController().checking === null")
-
-    assert fragment_routes == []
-    assert page.locator("#after-action").count() == 1
-    assert "could not be restored" not in page.locator("#interface-sync-content").inner_text()
-    assert page.evaluate("syncCacheController().lastCheckFailed") is False
-    assert page.evaluate("syncCacheController().pendingRestores.size") == 0
-
-
-def test_failed_action_reissues_a_dropped_cache_restore(page):
-    """A restore dropped behind an action must run after the action fails, or the tab keeps stale rows."""
-    initial, current = _race_states()
-    action_routes = []
-    fragment_requests = []
-
-    def restore_fragment(route):
-        fragment_requests.append(route.request.url)
-        route.fulfill(body='<span id="restored">Restored</span>')
-
-    page.set_content(_page_html(initial, action_form=True))
-    page.route(
-        "https://plugin.example.com/status?*",
-        lambda route: route.fulfill(json={"tabs": current}),
-    )
-    page.route(ACTION_URL, lambda route: action_routes.append(route))
-    page.route(f"{FRAGMENT_URL_PREFIX}?*", restore_fragment)
-    _add_page_scripts(page)
-    page.evaluate("initializeSyncCacheConsistency()")
-    page.evaluate(LOADER_EVENT_COUNTER)
-    with page.expect_request(ACTION_URL):
-        page.locator("#interface-action").click()
-    page.evaluate("() => { checkSyncCacheStatus(); }")
-    page.wait_for_function("window.loaderEvents.trigger === 1")
-
-    assert page.evaluate("window.loaderEvents.request") == 0, "the restore was issued during the action"
-    action_routes[0].fulfill(status=500)
-    page.locator("#restored").wait_for()
-    page.wait_for_function("syncCacheController().checking === null")
-
-    assert fragment_requests == [f"{FRAGMENT_URL_PREFIX}?server_key=primary"]
-    assert page.evaluate("window.loaderEvents") == {"trigger": 2, "request": 1}
-    assert page.evaluate("syncCacheController().lastCheckFailed") is False
-    assert page.evaluate("syncCacheController().pendingRestores.size") == 0
-
-
-def test_valid_status_recovers_when_the_initial_state_is_malformed(page):
+def test_valid_status_recovers_when_the_initial_state_is_malformed():
     """The stable tab contract must validate status when initial state parsing fails."""
     current = {
         "interfaces": _state("current-interfaces"),
@@ -1518,22 +1430,26 @@ def test_valid_status_recovers_when_the_initial_state_is_malformed(page):
         '<script id="librenms-sync-cache-initial" type="application/json">{malformed</script>',
     )
 
-    page.set_content(html)
-    page.route(
-        "https://plugin.example.com/status?*",
-        lambda route: route.fulfill(json={"tabs": current}),
-    )
-    page.route(
-        "https://plugin.example.com/fragment/interfaces?*",
-        lambda route: route.fulfill(body='<button id="interface-action">Sync</button>'),
-    )
-    _add_page_scripts(page)
-    page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
-    page.wait_for_function("syncCacheController().checking === null")
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(html)
+        page.route(
+            "https://plugin.example.com/status?*",
+            lambda route: route.fulfill(json={"tabs": current}),
+        )
+        page.route(
+            "https://plugin.example.com/fragment/interfaces?*",
+            lambda route: route.fulfill(body='<button id="interface-action">Sync</button>'),
+        )
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
+        page.wait_for_function("syncCacheController().checking === null")
 
-    assert page.evaluate("syncCacheController().lastCheckFailed") is False
-    assert page.locator("#interface-action").count() == 1
-    assert page.locator("#ip-action").count() == 1
+        assert page.evaluate("syncCacheController().lastCheckFailed") is False
+        assert page.locator("#interface-action").count() == 1
+        assert page.locator("#ip-action").count() == 1
+        browser.close()
 
 
 @pytest.mark.parametrize(
@@ -1551,7 +1467,7 @@ def test_valid_status_recovers_when_the_initial_state_is_malformed(page):
         ),
     ],
 )
-def test_invalid_cache_contract_stops_status_requests_and_fails_closed(page, contract_text):
+def test_invalid_cache_contract_stops_status_requests_and_fails_closed(contract_text):
     """An immutable contract error must require reload instead of retrying requests."""
     initial = {
         "interfaces": _state("before-interfaces"),
@@ -1564,26 +1480,30 @@ def test_invalid_cache_contract_stops_status_requests_and_fails_closed(page, con
         attempts += 1
         route.fulfill(json={"tabs": initial})
 
-    page.set_content(_page_html(initial))
-    page.locator("#librenms-sync-cache-contract").evaluate(
-        "(node, text) => { node.textContent = text; }",
-        contract_text,
-    )
-    page.route("https://plugin.example.com/status?*", status_response)
-    _add_page_scripts(page)
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.locator("#librenms-sync-cache-contract").evaluate(
+            "(node, text) => { node.textContent = text; }",
+            contract_text,
+        )
+        page.route("https://plugin.example.com/status?*", status_response)
+        page.add_script_tag(path=str(SCRIPT_PATH))
 
-    page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
-    page.wait_for_function("syncCacheController().checking === null")
-    page.evaluate("checkSyncCacheStatus()")
+        page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
+        page.wait_for_function("syncCacheController().checking === null")
+        page.evaluate("checkSyncCacheStatus()")
 
-    assert attempts == 0
-    assert page.evaluate("syncCacheController().lastCheckFailed") is True
-    assert page.locator("#interface-action").is_disabled()
-    assert page.locator("#ip-action").is_disabled()
-    assert page.locator("#modal-force-action").is_disabled()
+        assert attempts == 0
+        assert page.evaluate("syncCacheController().lastCheckFailed") is True
+        assert page.locator("#interface-action").is_disabled()
+        assert page.locator("#ip-action").is_disabled()
+        assert page.locator("#modal-force-action").is_disabled()
+        browser.close()
 
 
-def test_fragment_failure_logs_the_http_status_and_clears_the_content(page):
+def test_fragment_failure_logs_the_http_status_and_clears_the_content():
     """A fragment failure must retain its diagnostic while failing closed."""
     initial = {
         "interfaces": _state("before-interfaces"),
@@ -1594,70 +1514,82 @@ def test_fragment_failure_logs_the_http_status_and_clears_the_content(page):
         "interfaces": _state("after-interfaces", state="locally_changed", source_tab="interfaces"),
     }
 
-    console_errors = []
-    page.on("console", lambda message: console_errors.append(message.text) if message.type == "error" else None)
-    page.set_content(_page_html(initial))
-    page.route(
-        "https://plugin.example.com/status?*",
-        lambda route: route.fulfill(json={"tabs": current}),
-    )
-    page.route(
-        "https://plugin.example.com/fragment/interfaces?*",
-        lambda route: route.fulfill(status=503),
-    )
-    _add_page_scripts(page)
-    page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
-    page.wait_for_function("document.querySelector('#interface-sync-content').dataset.cacheEmpty === 'true'")
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        console_errors = []
+        page.on("console", lambda message: console_errors.append(message.text) if message.type == "error" else None)
+        page.set_content(_page_html(initial))
+        page.route(
+            "https://plugin.example.com/status?*",
+            lambda route: route.fulfill(json={"tabs": current}),
+        )
+        page.route(
+            "https://plugin.example.com/fragment/interfaces?*",
+            lambda route: route.fulfill(status=503),
+        )
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
+        page.wait_for_function("document.querySelector('#interface-sync-content').dataset.cacheEmpty === 'true'")
 
-    assert any("HTTP 503" in message for message in console_errors), console_errors
-    assert "could not be restored" in page.locator("#interface-sync-content").inner_text()
+        assert any("HTTP 503" in message for message in console_errors), console_errors
+        assert "could not be restored" in page.locator("#interface-sync-content").inner_text()
+        browser.close()
 
 
-def test_malformed_cache_status_disables_every_loaded_sync_control(page):
+def test_malformed_cache_status_disables_every_loaded_sync_control():
     """A successful response with an invalid schema must fail closed."""
     initial = {
         "interfaces": _state("before-interfaces"),
         "ipaddresses": _state("before-ip"),
     }
 
-    page.set_content(_page_html(initial))
-    page.route(
-        "https://plugin.example.com/status?*",
-        lambda route: route.fulfill(json={"tabs": None}),
-    )
-    _add_page_scripts(page)
-    page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
-    page.wait_for_function("syncCacheController().checking === null")
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.route(
+            "https://plugin.example.com/status?*",
+            lambda route: route.fulfill(json={"tabs": None}),
+        )
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
+        page.wait_for_function("syncCacheController().checking === null")
 
-    assert page.locator("#interface-action").count() == 0
-    assert page.locator("#ip-action").count() == 0
-    assert page.locator("#modal-force-action").is_disabled()
-    assert page.evaluate("syncCacheController().lastCheckFailed") is True
+        assert page.locator("#interface-action").count() == 0
+        assert page.locator("#ip-action").count() == 0
+        assert page.locator("#modal-force-action").is_disabled()
+        assert page.evaluate("syncCacheController().lastCheckFailed") is True
+        browser.close()
 
 
-def test_null_cache_status_disables_every_loaded_sync_control(page):
+def test_null_cache_status_disables_every_loaded_sync_control():
     """A null JSON response must fail closed like every other invalid schema."""
     initial = {
         "interfaces": _state("before-interfaces"),
         "ipaddresses": _state("before-ip"),
     }
 
-    page.set_content(_page_html(initial))
-    page.route(
-        "https://plugin.example.com/status?*",
-        lambda route: route.fulfill(body="null", content_type="application/json"),
-    )
-    _add_page_scripts(page)
-    page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
-    page.wait_for_function("syncCacheController().checking === null")
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.route(
+            "https://plugin.example.com/status?*",
+            lambda route: route.fulfill(body="null", content_type="application/json"),
+        )
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
+        page.wait_for_function("syncCacheController().checking === null")
 
-    assert page.locator("#interface-action").count() == 0
-    assert page.locator("#ip-action").count() == 0
-    assert page.locator("#modal-force-action").is_disabled()
-    assert page.evaluate("syncCacheController().lastCheckFailed") is True
+        assert page.locator("#interface-action").count() == 0
+        assert page.locator("#ip-action").count() == 0
+        assert page.locator("#modal-force-action").is_disabled()
+        assert page.evaluate("syncCacheController().lastCheckFailed") is True
+        browser.close()
 
 
-def test_changed_source_comparison_restores_from_cache_fragment(page):
+def test_changed_source_comparison_restores_from_cache_fragment():
     initial = {
         "interfaces": _state("before"),
         "ipaddresses": _state("before-ip"),
@@ -1667,144 +1599,82 @@ def test_changed_source_comparison_restores_from_cache_fragment(page):
         "ipaddresses": _state("before-ip"),
     }
 
-    page.set_content(_page_html(initial))
-    page.route(
-        "https://plugin.example.com/status?*",
-        lambda route: route.fulfill(json={"tabs": current}),
-    )
-    page.route(
-        "https://plugin.example.com/fragment/interfaces?*",
-        lambda route: route.fulfill(body='<div id="restored-comparison">Current comparison</div>'),
-    )
-    _add_page_scripts(page)
-    page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
-
-    assert page.locator("#restored-comparison").inner_text() == "Current comparison"
-
-
-def test_restored_content_keeps_its_htmx_bindings(page):
-    """Restored rows must act through HTMX, so the fragment has to arrive through an HTMX swap."""
-    initial = {
-        "interfaces": _state("before"),
-        "ipaddresses": _state("before-ip"),
-    }
-    current = {
-        "interfaces": _state("after"),
-        "ipaddresses": initial["ipaddresses"],
-    }
-
-    page.set_content(_page_html(initial))
-    page.route(
-        "https://plugin.example.com/status?*",
-        lambda route: route.fulfill(json={"tabs": current}),
-    )
-    page.route(
-        "https://plugin.example.com/fragment/interfaces?*",
-        lambda route: route.fulfill(
-            body='<form hx-post="https://plugin.example.com/action" hx-target="#interface-sync-content"'
-            ' hx-swap="innerHTML"><button id="restored-action" type="submit">Go</button></form>'
-        ),
-    )
-    page.route(
-        "https://plugin.example.com/action",
-        lambda route: route.fulfill(body='<p id="swapped">done</p>'),
-    )
-    _add_page_scripts(page)
-    # NetBox imports HTMX as a module: with no htmx global, HTML the page inserts itself stays unbound.
-    assert page.evaluate("typeof htmx") == "undefined"
-
-    page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
-    page.wait_for_selector("#restored-action")
-    with page.expect_request("https://plugin.example.com/action") as action:
-        page.click("#restored-action")
-
-    assert action.value.headers.get("hx-request") == "true"
-    assert page.locator("#interface-sync-content #swapped").inner_text() == "done"
-
-
-def test_tab_navigation_during_a_restore_drops_the_late_fragment(page):
-    """A fragment answered after the tab region was swapped belongs to the previous page state."""
-    initial = {
-        "interfaces": _state("before"),
-        "ipaddresses": _state("before-ip"),
-    }
-    current = {
-        "interfaces": _state("after"),
-        "ipaddresses": initial["ipaddresses"],
-    }
-    pending_routes = []
-
-    page.set_content(_page_html(initial))
-    page.route(
-        "https://plugin.example.com/status?*",
-        lambda route: route.fulfill(json={"tabs": current}),
-    )
-    page.route("https://plugin.example.com/fragment/interfaces?*", lambda route: pending_routes.append(route))
-    _add_page_scripts(page)
-    with page.expect_request("https://plugin.example.com/fragment/interfaces?*"):
-        page.evaluate("() => { initializeSyncCacheConsistency(); checkSyncCacheStatus(); }")
-
-    page.evaluate(
-        """() => document.querySelector('#librenms-sync-tabs').dispatchEvent(
-            new CustomEvent('htmx:afterSwap', {bubbles: true})
-        )"""
-    )
-    pending_routes[0].fulfill(body='<div id="late-comparison">Late comparison</div>')
-    page.wait_for_function("syncCacheController().checking === null")
-
-    assert page.locator("#late-comparison").count() == 0
-    assert page.locator("#interface-action").count() == 1
-
-
-def test_countdown_expiry_removes_rows_and_sync_controls(page):
-    initial = {
-        "interfaces": _state("before"),
-        "ipaddresses": _state("before-ip"),
-    }
-
-    page.set_content(
-        _replace_fixture_markup(
-            _page_html(initial),
-            '<button id="interface-action">Sync</button>',
-            '<span id="countdown-timer" data-expiry="2000-01-01T00:00:00Z"></span>'
-            '<button id="interface-action">Sync</button>',
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.route(
+            "https://plugin.example.com/status?*",
+            lambda route: route.fulfill(json={"tabs": current}),
         )
-    )
-    _add_page_scripts(page)
-    page.evaluate("initializeSyncCacheConsistency(); initializeCountdown('countdown-timer')")
+        page.route(
+            "https://plugin.example.com/fragment/interfaces?*",
+            lambda route: route.fulfill(body='<div id="restored-comparison">Current comparison</div>'),
+        )
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency(); checkSyncCacheStatus()")
 
-    assert page.locator("#interface-action").count() == 0
-    assert "cache expired" in page.locator("#interface-sync-content").inner_text()
-    assert page.locator("#interfaces-tab").evaluate(
-        "node => !node.classList.contains('sync-cache-ready') && !node.classList.contains('sync-cache-unavailable')"
-    )
-    assert page.locator("#interfaces-tab").get_attribute("title") is None
+        assert page.locator("#restored-comparison").inner_text() == "Current comparison"
+        browser.close()
 
 
-def test_hidden_tab_countdown_changes_available_rail_to_unavailable_without_interaction(page):
+def test_countdown_expiry_removes_rows_and_sync_controls():
     initial = {
         "interfaces": _state("before"),
         "ipaddresses": _state("before-ip"),
     }
 
-    page.set_content(
-        _replace_fixture_markup(
-            _page_html(initial),
-            '<button id="ip-action">Sync</button>',
-            '<span id="ip-countdown-timer" data-expiry="2000-01-01T00:00:00Z"></span>'
-            '<button id="ip-action">Sync</button>',
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            _replace_fixture_markup(
+                _page_html(initial),
+                '<button id="interface-action">Sync</button>',
+                '<span id="countdown-timer" data-expiry="2000-01-01T00:00:00Z"></span>'
+                '<button id="interface-action">Sync</button>',
+            )
         )
-    )
-    _add_page_scripts(page)
-    page.evaluate("initializeSyncCacheConsistency(); initializeCountdown('ip-countdown-timer')")
-    tab = page.locator("#ipaddresses-tab")
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency(); initializeCountdown('countdown-timer')")
 
-    assert not tab.evaluate("node => node.classList.contains('sync-cache-ready')")
-    assert tab.evaluate("node => node.classList.contains('sync-cache-unavailable')")
-    assert page.locator("#ip-action").count() == 0
+        assert page.locator("#interface-action").count() == 0
+        assert "cache expired" in page.locator("#interface-sync-content").inner_text()
+        assert page.locator("#interfaces-tab").evaluate(
+            "node => !node.classList.contains('sync-cache-ready') && !node.classList.contains('sync-cache-unavailable')"
+        )
+        assert page.locator("#interfaces-tab").get_attribute("title") is None
+        browser.close()
 
 
-def test_failed_retry_updates_an_already_invalidated_tab_without_a_new_revision(page):
+def test_hidden_tab_countdown_changes_available_rail_to_unavailable_without_interaction():
+    initial = {
+        "interfaces": _state("before"),
+        "ipaddresses": _state("before-ip"),
+    }
+
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            _replace_fixture_markup(
+                _page_html(initial),
+                '<button id="ip-action">Sync</button>',
+                '<span id="ip-countdown-timer" data-expiry="2000-01-01T00:00:00Z"></span>'
+                '<button id="ip-action">Sync</button>',
+            )
+        )
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeSyncCacheConsistency(); initializeCountdown('ip-countdown-timer')")
+        tab = page.locator("#ipaddresses-tab")
+
+        assert not tab.evaluate("node => node.classList.contains('sync-cache-ready')")
+        assert tab.evaluate("node => node.classList.contains('sync-cache-unavailable')")
+        assert page.locator("#ip-action").count() == 0
+        browser.close()
+
+
+def test_failed_retry_updates_an_already_invalidated_tab_without_a_new_revision():
     initial = {
         "interfaces": _state("mutation", state="locally_changed", source_tab="interfaces"),
         "ipaddresses": _state(
@@ -1826,19 +1696,23 @@ def test_failed_retry_updates_an_already_invalidated_tab_without_a_new_revision(
         ),
     }
 
-    page.set_content(_page_html(initial))
-    _add_page_scripts(page)
-    page.evaluate(
-        "status => { initializeSyncCacheConsistency(); return reconcileSyncCacheStatus(status); }",
-        current,
-    )
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate(
+            "status => { initializeSyncCacheConsistency(); return reconcileSyncCacheStatus(status); }",
+            current,
+        )
 
-    text = page.locator("#ipaddress-sync-content").inner_text()
-    assert "synchronized Interface data" in text
-    assert "latest LibreNMS refresh failed" in text
+        text = page.locator("#ipaddress-sync-content").inner_text()
+        assert "synchronized Interface data" in text
+        assert "latest LibreNMS refresh failed" in text
+        browser.close()
 
 
-def test_initiating_mutation_reports_one_toast_even_when_only_another_server_was_cleared(page):
+def test_initiating_mutation_reports_one_toast_even_when_only_another_server_was_cleared():
     initial = {
         "interfaces": _state("before-interfaces"),
         "ipaddresses": _state("before-ip"),
@@ -1855,29 +1729,33 @@ def test_initiating_mutation_reports_one_toast_even_when_only_another_server_was
         "revisions": {"primary:interfaces": "mutation"},
     }
 
-    page.route(
-        "https://plugin.example.com/page",
-        lambda route: route.fulfill(body=_page_html(initial), content_type="text/html"),
-    )
-    page.route(
-        "https://plugin.example.com/status?*",
-        lambda route: route.fulfill(json={"tabs": current}),
-    )
-    page.goto("https://plugin.example.com/page")
-    _add_page_scripts(page)
-    page.evaluate(
-        "payload => { initializeSyncCacheConsistency(); "
-        "document.dispatchEvent(new CustomEvent('librenmsCacheChanged', { detail: payload })); }",
-        payload,
-    )
-    page.wait_for_function("document.querySelector('#librenms-sync-cache-notices') !== null")
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.route(
+            "https://plugin.example.com/page",
+            lambda route: route.fulfill(body=_page_html(initial), content_type="text/html"),
+        )
+        page.route(
+            "https://plugin.example.com/status?*",
+            lambda route: route.fulfill(json={"tabs": current}),
+        )
+        page.goto("https://plugin.example.com/page")
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate(
+            "payload => { initializeSyncCacheConsistency(); "
+            "document.dispatchEvent(new CustomEvent('librenmsCacheChanged', { detail: payload })); }",
+            payload,
+        )
+        page.wait_for_function("document.querySelector('#librenms-sync-cache-notices') !== null")
 
-    notices = page.locator("#librenms-sync-cache-notices .alert")
-    assert notices.count() == 1
-    assert "Other sync tabs were cleared" in notices.inner_text()
+        notices = page.locator("#librenms-sync-cache-notices .alert")
+        assert notices.count() == 1
+        assert "Other sync tabs were cleared" in notices.inner_text()
+        browser.close()
 
 
-def test_ready_refresh_restores_an_active_tab_after_local_invalidation(page):
+def test_ready_refresh_restores_an_active_tab_after_local_invalidation():
     initial = {
         "interfaces": _state("before"),
         "ipaddresses": _state("before-ip"),
@@ -1896,23 +1774,27 @@ def test_ready_refresh_restores_an_active_tab_after_local_invalidation(page):
         "ipaddresses": invalidated["ipaddresses"],
     }
 
-    page.set_content(_page_html(initial))
-    page.route(
-        "https://plugin.example.com/fragment/interfaces?*",
-        lambda route: route.fulfill(body='<div id="ready-comparison">Refreshed comparison</div>'),
-    )
-    _add_page_scripts(page)
-    page.evaluate(
-        "async states => { initializeSyncCacheConsistency(); "
-        "await reconcileSyncCacheStatus(states.invalidated); "
-        "await reconcileSyncCacheStatus(states.refreshed); }",
-        {"invalidated": invalidated, "refreshed": refreshed},
-    )
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.route(
+            "https://plugin.example.com/fragment/interfaces?*",
+            lambda route: route.fulfill(body='<div id="ready-comparison">Refreshed comparison</div>'),
+        )
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate(
+            "async states => { initializeSyncCacheConsistency(); "
+            "await reconcileSyncCacheStatus(states.invalidated); "
+            "await reconcileSyncCacheStatus(states.refreshed); }",
+            {"invalidated": invalidated, "refreshed": refreshed},
+        )
 
-    assert page.locator("#ready-comparison").inner_text() == "Refreshed comparison"
+        assert page.locator("#ready-comparison").inner_text() == "Refreshed comparison"
+        browser.close()
 
 
-def test_ready_revision_restores_when_invalidation_and_refresh_collapse(page):
+def test_ready_revision_restores_when_invalidation_and_refresh_collapse():
     """A focus check must reload data even when it misses the invalidated revision."""
     initial = {
         "interfaces": _state("before"),
@@ -1923,21 +1805,25 @@ def test_ready_revision_restores_when_invalidation_and_refresh_collapse(page):
         "ipaddresses": initial["ipaddresses"],
     }
 
-    page.set_content(_page_html(initial))
-    page.route(
-        "https://plugin.example.com/fragment/interfaces?*",
-        lambda route: route.fulfill(body='<div id="collapsed-refresh">Refreshed comparison</div>'),
-    )
-    _add_page_scripts(page)
-    page.evaluate(
-        "status => { initializeSyncCacheConsistency(); return reconcileSyncCacheStatus(status); }",
-        refreshed,
-    )
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.route(
+            "https://plugin.example.com/fragment/interfaces?*",
+            lambda route: route.fulfill(body='<div id="collapsed-refresh">Refreshed comparison</div>'),
+        )
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate(
+            "status => { initializeSyncCacheConsistency(); return reconcileSyncCacheStatus(status); }",
+            refreshed,
+        )
 
-    assert page.locator("#collapsed-refresh").inner_text() == "Refreshed comparison"
+        assert page.locator("#collapsed-refresh").inner_text() == "Refreshed comparison"
+        browser.close()
 
 
-def test_missing_snapshot_without_reason_shows_generic_warning(page):
+def test_missing_snapshot_without_reason_shows_generic_warning():
     """An unexplained cache disappearance must not blame another user."""
     initial = {
         "interfaces": _state("before"),
@@ -1948,19 +1834,23 @@ def test_missing_snapshot_without_reason_shows_generic_warning(page):
         "ipaddresses": initial["ipaddresses"],
     }
 
-    page.set_content(_page_html(initial))
-    _add_page_scripts(page)
-    page.evaluate(
-        "status => { initializeSyncCacheConsistency(); return reconcileSyncCacheStatus(status); }",
-        missing,
-    )
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate(
+            "status => { initializeSyncCacheConsistency(); return reconcileSyncCacheStatus(status); }",
+            missing,
+        )
 
-    warning = page.locator("#interface-sync-content").inner_text()
-    assert "cache is unavailable" in warning
-    assert "another user" not in warning
+        warning = page.locator("#interface-sync-content").inner_text()
+        assert "cache is unavailable" in warning
+        assert "another user" not in warning
+        browser.close()
 
 
-def test_cross_user_refresh_failure_shows_shared_failure_reason(page):
+def test_cross_user_refresh_failure_shows_shared_failure_reason():
     """A refresh failure must explain the shared state without naming the actor."""
     initial = {
         "interfaces": _state("before"),
@@ -1979,19 +1869,23 @@ def test_cross_user_refresh_failure_shows_shared_failure_reason(page):
         ),
     }
 
-    page.set_content(_page_html(initial))
-    _add_page_scripts(page)
-    page.evaluate(
-        "status => { initializeSyncCacheConsistency(); return reconcileSyncCacheStatus(status); }",
-        failed,
-    )
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate(
+            "status => { initializeSyncCacheConsistency(); return reconcileSyncCacheStatus(status); }",
+            failed,
+        )
 
-    warning = page.locator("#ipaddress-sync-content").inner_text()
-    assert "another user attempted to refresh" in warning
-    assert "refresh failed" in warning
+        warning = page.locator("#ipaddress-sync-content").inner_text()
+        assert "another user attempted to refresh" in warning
+        assert "refresh failed" in warning
+        browser.close()
 
 
-def test_refreshed_hidden_tab_stays_marked_until_server_rendered_navigation(page):
+def test_refreshed_hidden_tab_stays_marked_until_server_rendered_navigation():
     """A hidden tab with replaced rows must retain its unavailable state."""
     initial = {
         "interfaces": _state("before"),
@@ -2011,19 +1905,23 @@ def test_refreshed_hidden_tab_stays_marked_until_server_rendered_navigation(page
         "ipaddresses": _state("refresh", state="ready", source_tab="ipaddresses"),
     }
 
-    page.set_content(_page_html(initial))
-    _add_page_scripts(page)
-    page.evaluate(
-        "async states => { initializeSyncCacheConsistency(); "
-        "await reconcileSyncCacheStatus(states.invalidated); "
-        "await reconcileSyncCacheStatus(states.refreshed); }",
-        {"invalidated": invalidated, "refreshed": refreshed},
-    )
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate(
+            "async states => { initializeSyncCacheConsistency(); "
+            "await reconcileSyncCacheStatus(states.invalidated); "
+            "await reconcileSyncCacheStatus(states.refreshed); }",
+            {"invalidated": invalidated, "refreshed": refreshed},
+        )
 
-    assert page.locator("#ipaddresses-tab").evaluate("node => node.classList.contains('sync-cache-unavailable')")
+        assert page.locator("#ipaddresses-tab").evaluate("node => node.classList.contains('sync-cache-unavailable')")
+        browser.close()
 
 
-def test_initiating_inline_mutation_rebuilds_its_source_fragment(page):
+def test_initiating_inline_mutation_rebuilds_its_source_fragment():
     initial = {
         "interfaces": _state("before"),
         "ipaddresses": _state("before-ip"),
@@ -2043,28 +1941,32 @@ def test_initiating_inline_mutation_rebuilds_its_source_fragment(page):
         "revisions": {"primary:interfaces": "mutation"},
     }
 
-    page.route(
-        "https://plugin.example.com/page",
-        lambda route: route.fulfill(body=_page_html(initial), content_type="text/html"),
-    )
-    page.route("https://plugin.example.com/status?*", lambda route: route.fulfill(json={"tabs": current}))
-    page.route(
-        "https://plugin.example.com/fragment/interfaces?*",
-        lambda route: route.fulfill(body='<div id="inline-comparison">Updated inline comparison</div>'),
-    )
-    page.goto("https://plugin.example.com/page")
-    _add_page_scripts(page)
-    page.evaluate(
-        "payload => { initializeSyncCacheConsistency(); "
-        "document.dispatchEvent(new CustomEvent('librenmsCacheChanged', { detail: payload })); }",
-        payload,
-    )
-    page.wait_for_selector("#inline-comparison")
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.route(
+            "https://plugin.example.com/page",
+            lambda route: route.fulfill(body=_page_html(initial), content_type="text/html"),
+        )
+        page.route("https://plugin.example.com/status?*", lambda route: route.fulfill(json={"tabs": current}))
+        page.route(
+            "https://plugin.example.com/fragment/interfaces?*",
+            lambda route: route.fulfill(body='<div id="inline-comparison">Updated inline comparison</div>'),
+        )
+        page.goto("https://plugin.example.com/page")
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate(
+            "payload => { initializeSyncCacheConsistency(); "
+            "document.dispatchEvent(new CustomEvent('librenmsCacheChanged', { detail: payload })); }",
+            payload,
+        )
+        page.wait_for_selector("#inline-comparison")
 
-    assert page.locator("#inline-comparison").inner_text() == "Updated inline comparison"
+        assert page.locator("#inline-comparison").inner_text() == "Updated inline comparison"
+        browser.close()
 
 
-def test_cleanup_failure_removes_controls_from_every_planned_tab(page):
+def test_cleanup_failure_removes_controls_from_every_planned_tab():
     initial = {
         "interfaces": _state("before"),
         "ipaddresses": _state("before-ip"),
@@ -2080,21 +1982,25 @@ def test_cleanup_failure_removes_controls_from_every_planned_tab(page):
         "revisions": {},
     }
 
-    page.set_content(_page_html(initial))
-    page.route("https://plugin.example.com/status?*", lambda route: route.fulfill(json={"tabs": initial}))
-    _add_page_scripts(page)
-    page.evaluate(
-        "payload => { initializeSyncCacheConsistency(); "
-        "document.dispatchEvent(new CustomEvent('librenmsCacheChanged', { detail: payload })); }",
-        payload,
-    )
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.route("https://plugin.example.com/status?*", lambda route: route.fulfill(json={"tabs": initial}))
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate(
+            "payload => { initializeSyncCacheConsistency(); "
+            "document.dispatchEvent(new CustomEvent('librenmsCacheChanged', { detail: payload })); }",
+            payload,
+        )
 
-    assert page.locator("#ip-action").count() == 0
-    assert "cleanup could not be verified" in page.locator("#ipaddress-sync-content").inner_text()
-    assert page.locator("#ipaddresses-tab").evaluate("node => node.classList.contains('sync-cache-unavailable')")
+        assert page.locator("#ip-action").count() == 0
+        assert "cleanup could not be verified" in page.locator("#ipaddress-sync-content").inner_text()
+        assert page.locator("#ipaddresses-tab").evaluate("node => node.classList.contains('sync-cache-unavailable')")
+        browser.close()
 
 
-def test_cleanup_failure_notice_survives_a_later_informational_event(page):
+def test_cleanup_failure_notice_survives_a_later_informational_event():
     """A later success must not hide the reload instruction from a failed cleanup."""
     initial = {
         "interfaces": _state("before"),
@@ -2115,24 +2021,28 @@ def test_cleanup_failure_notice_survives_a_later_informational_event(page):
         "revisions": {},
     }
 
-    page.set_content(_page_html(initial))
-    page.route("https://plugin.example.com/status?*", lambda route: route.fulfill(json={"tabs": initial}))
-    _add_page_scripts(page)
-    page.evaluate(
-        "payloads => { initializeSyncCacheConsistency(); "
-        "payloads.forEach(payload => document.dispatchEvent("
-        "new CustomEvent('librenmsCacheChanged', { detail: payload }))); }",
-        [failed, succeeded],
-    )
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.route("https://plugin.example.com/status?*", lambda route: route.fulfill(json={"tabs": initial}))
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate(
+            "payloads => { initializeSyncCacheConsistency(); "
+            "payloads.forEach(payload => document.dispatchEvent("
+            "new CustomEvent('librenmsCacheChanged', { detail: payload }))); }",
+            [failed, succeeded],
+        )
 
-    notice = page.locator("#librenms-sync-cache-notices .alert")
-    assert notice.count() == 1
-    assert notice.evaluate("node => node.classList.contains('alert-danger')")
-    assert "related cache cleanup failed" in notice.inner_text()
-    assert "Other sync tabs were cleared" not in notice.inner_text()
+        notice = page.locator("#librenms-sync-cache-notices .alert")
+        assert notice.count() == 1
+        assert notice.evaluate("node => node.classList.contains('alert-danger')")
+        assert "related cache cleanup failed" in notice.inner_text()
+        assert "Other sync tabs were cleared" not in notice.inner_text()
+        browser.close()
 
 
-def test_blocked_cache_notice_can_render_after_danger_is_dismissed(page):
+def test_blocked_cache_notice_can_render_after_danger_is_dismissed():
     """A danger notice must not consume the revision of a blocked later notice."""
     initial = {
         "interfaces": _state("before"),
@@ -2153,29 +2063,33 @@ def test_blocked_cache_notice_can_render_after_danger_is_dismissed(page):
         "revisions": {},
     }
 
-    page.set_content(_page_html(initial))
-    page.route("https://plugin.example.com/status?*", lambda route: route.fulfill(json={"tabs": initial}))
-    _add_page_scripts(page)
-    page.evaluate(
-        "payloads => { initializeSyncCacheConsistency(); "
-        "payloads.forEach(payload => document.dispatchEvent("
-        "new CustomEvent('librenmsCacheChanged', { detail: payload }))); }",
-        [failed, succeeded],
-    )
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.route("https://plugin.example.com/status?*", lambda route: route.fulfill(json={"tabs": initial}))
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate(
+            "payloads => { initializeSyncCacheConsistency(); "
+            "payloads.forEach(payload => document.dispatchEvent("
+            "new CustomEvent('librenmsCacheChanged', { detail: payload }))); }",
+            [failed, succeeded],
+        )
 
-    page.locator("#librenms-sync-cache-notices .btn-close").click()
-    page.evaluate(
-        "payload => document.dispatchEvent(new CustomEvent('librenmsCacheChanged', { detail: payload }))",
-        succeeded,
-    )
+        page.locator("#librenms-sync-cache-notices .btn-close").click()
+        page.evaluate(
+            "payload => document.dispatchEvent(new CustomEvent('librenmsCacheChanged', { detail: payload }))",
+            succeeded,
+        )
 
-    notice = page.locator("#librenms-sync-cache-notices .alert")
-    assert notice.count() == 1
-    assert notice.evaluate("node => node.classList.contains('alert-info')")
-    assert "Other sync tabs were cleared" in notice.inner_text()
+        notice = page.locator("#librenms-sync-cache-notices .alert")
+        assert notice.count() == 1
+        assert notice.evaluate("node => node.classList.contains('alert-info')")
+        assert "Other sync tabs were cleared" in notice.inner_text()
+        browser.close()
 
 
-def test_invalidation_reason_includes_relative_time(page):
+def test_invalidation_reason_includes_relative_time():
     initial = {
         "interfaces": _state("before"),
         "ipaddresses": _state("before-ip"),
@@ -2190,17 +2104,21 @@ def test_invalidation_reason_includes_relative_time(page):
         ),
     }
 
-    page.set_content(_page_html(initial))
-    _add_page_scripts(page)
-    page.evaluate(
-        "status => { initializeSyncCacheConsistency(); return reconcileSyncCacheStatus(status); }",
-        current,
-    )
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(_page_html(initial))
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate(
+            "status => { initializeSyncCacheConsistency(); return reconcileSyncCacheStatus(status); }",
+            current,
+        )
 
-    assert "ago" in page.locator("#ipaddress-sync-content").inner_text()
+        assert "ago" in page.locator("#ipaddress-sync-content").inner_text()
+        browser.close()
 
 
-def test_failed_cable_verify_restores_controls_without_a_member_baseline(page):
+def test_failed_cable_verify_restores_controls_without_a_member_baseline():
     """A failed first verification must not leave the row controls disabled."""
     html = """
         <input type="hidden" name="csrfmiddlewaretoken" value="test-csrf">
@@ -2220,13 +2138,18 @@ def test_failed_cable_verify_restores_controls_without_a_member_baseline(page):
         </div>
     """
 
-    page.route(
-        "https://plugin.example.com/verify-cable/",
-        lambda route: route.fulfill(status=503, body="verification unavailable"),
-    )
-    page.set_content(html)
-    page.add_script_tag(path=str(SCRIPT_PATH))
-    with page.expect_response("https://plugin.example.com/verify-cable/"):
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        page = browser.new_page()
+        pending_route = None
+
+        def hold_verify_route(route):
+            nonlocal pending_route
+            pending_route = route
+
+        page.route("https://plugin.example.com/verify-cable/", hold_verify_route)
+        page.set_content(html)
+        page.add_script_tag(path=str(SCRIPT_PATH))
         page.evaluate(
             """
             () => {
@@ -2235,15 +2158,32 @@ def test_failed_cable_verify_restores_controls_without_a_member_baseline(page):
             }
             """
         )
-    page.wait_for_function(
-        """
-        () => {
-            const selection = document.querySelector('input[name="select"]');
-            const action = document.querySelector('td[data-col="actions"] button');
-            return selection && action && !selection.disabled && !action.disabled;
-        }
-        """
-    )
+        page.wait_for_function(
+            """
+            () => {
+                const row = document.querySelector('#member')?.closest('tr');
+                const selection = row?.querySelector('input[name="select"]');
+                const action = row?.querySelector('td[data-col="actions"] button');
+                return selection?.disabled && action?.disabled;
+            }
+            """
+        )
 
-    assert not page.locator('input[name="select"]').is_disabled()
-    assert not page.locator('td[data-col="actions"] button').is_disabled()
+        assert pending_route is not None
+        pending_route.fulfill(status=503, body="verification unavailable")
+
+        page.wait_for_function(
+            """
+            () => {
+                const row = document.querySelector('#member')?.closest('tr');
+                const selection = row?.querySelector('input[name="select"]');
+                const action = row?.querySelector('td[data-col="actions"] button');
+                return selection && action && !selection.disabled && !action.disabled;
+            }
+            """
+        )
+
+        row = page.locator("#member").locator("xpath=ancestor::tr[1]")
+        assert not row.locator('input[name="select"]').is_disabled()
+        assert not row.locator('td[data-col="actions"] button').is_disabled()
+        browser.close()
