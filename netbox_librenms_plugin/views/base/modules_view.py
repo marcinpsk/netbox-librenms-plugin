@@ -811,7 +811,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     continue
                 top_items.append(item)
                 continue
-            phys_class = item.get("entPhysicalClass")
+            phys_class = _normalize_librenms_text(item.get("entPhysicalClass"))
             admitted_by_rule = False
             if phys_class not in INVENTORY_CLASSES:
                 if not _class_is_included(item, ignore_rules):
@@ -850,7 +850,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 if current_idx in transparent_indices:
                     current_idx = ancestor.get("entPhysicalContainedIn", 0)
                     continue
-                anc_class = ancestor.get("entPhysicalClass")
+                anc_class = _normalize_librenms_text(ancestor.get("entPhysicalClass"))
                 if anc_class in INVENTORY_CLASSES:
                     anc_model = _normalize_librenms_text(ancestor.get("entPhysicalModelName")).lower()
                     if anc_model in _GENERIC_CONTAINER_MODELS:
@@ -2290,7 +2290,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 i
                 for i in index_map.values()
                 if i.get("entPhysicalContainedIn") == parent_with_model_idx
-                and i.get("entPhysicalClass") not in _NON_HARDWARE_CLASSES
+                and _normalize_librenms_text(i.get("entPhysicalClass")) not in _NON_HARDWARE_CLASSES
             ],
             key=lambda x: (
                 int(x.get("entPhysicalParentRelPos") or 0)
