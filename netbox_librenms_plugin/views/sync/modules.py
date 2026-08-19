@@ -17,7 +17,6 @@ from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
     render_sync_cache_miss,
-    schedule_collateral_cache_invalidation,
     schedule_request_cache_mutation,
 )
 from netbox_librenms_plugin.utils import (
@@ -39,6 +38,7 @@ from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
+    SyncPageClaimMixin,
 )
 
 logger = logging.getLogger(__name__)
@@ -97,11 +97,6 @@ def _modules_cache_missing_response(request, sync_url, server_key):
 def _schedule_module_cache_mutation(request, page_device, server_key):
     """Publish one module-tab transition after a committed module action."""
     schedule_request_cache_mutation(request, page_device, SyncTab.MODULES, server_key)
-
-
-def _invalidate_collateral_module_devices(request, page_device, server_key, *changed_devices):
-    """Drop snapshots for devices a module action changed besides the page device."""
-    schedule_collateral_cache_invalidation(request, page_device, changed_devices, SyncTab.MODULES, server_key)
 
 
 def _module_bind_result_changed(bind_result):
@@ -2251,7 +2246,6 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                     f"{bind_result.get('reason', 'unknown reason')}",
                 )
             _schedule_module_cache_mutation(request, page_device, server_key)
-            _invalidate_collateral_module_devices(request, page_device, server_key, target_device, conflict_device)
         except _ModuleComponentAdoptionUnavailable as exc:
             messages.error(request, f"A matching {exc.component_label} is not available for module adoption.")
         except _SerialConflictAmbiguous as exc:
@@ -2397,8 +2391,6 @@ class MoveModuleView(
             messages.success(request, moved_msg)
             if server_key:
                 _schedule_module_cache_mutation(request, page_device, server_key)
-            # Not gated on server_key: the move changed NetBox on both devices whatever the page viewed.
-            _invalidate_collateral_module_devices(request, page_device, server_key, target_device, source_device)
         except (ValidationError, IntegrityError) as e:
             messages.error(request, f"Move failed: {e}")
 
@@ -2409,6 +2401,7 @@ class AddBayTemplateView(
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
     LibreNMSAPIMixin,
+    SyncPageClaimMixin,
     View,
 ):
     """
