@@ -1652,9 +1652,12 @@ class UpdateModuleSerialView(
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
     LibreNMSAPIMixin,
+    SyncPageClaimMixin,
     View,
 ):
     """Update the serial number of an already-installed module from LibreNMS inventory data."""
+
+    SYNC_PAGE_MODEL_LABEL = "dcim.device"
 
     def post(self, request, pk):
         from dcim.models import Device, Module
@@ -2277,6 +2280,7 @@ class MoveModuleView(
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
     LibreNMSAPIMixin,
+    SyncPageClaimMixin,
     View,
 ):
     """
@@ -2287,6 +2291,8 @@ class MoveModuleView(
     the module_bay (and device when moving cross-device) rather than deleting
     and recreating, preserving the module's history.
     """
+
+    SYNC_PAGE_MODEL_LABEL = "dcim.device"
 
     def post(self, request, pk):
         from dcim.models import Device, Module, ModuleBay
@@ -2411,6 +2417,8 @@ class AddBayTemplateView(
     GET renders a pre-filled modal fragment that targets ``#htmx-modal-content``;
     POST creates the bay template and redirects back to the modules tab.
     """
+
+    SYNC_PAGE_MODEL_LABEL = "dcim.device"
 
     TARGET_KINDS = ("device_type", "module_type")
 

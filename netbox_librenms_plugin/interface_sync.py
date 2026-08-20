@@ -38,14 +38,28 @@ def get_netbox_interface_type(librenms_interface, *, speed_converter=convert_spe
 
 
 def assign_interface_mac(interface, mac_address):
-    """Assign one MAC address to an interface when LibreNMS supplies it."""
+    """
+    Assign one MAC address to an interface when LibreNMS supplies it.
+
+    Args:
+        interface: The Interface or VMInterface being written.
+        mac_address: The MAC LibreNMS reported, if any.
+
+    Returns:
+        bool: Whether the assignment changed anything, so the caller does not have to read
+            the relation back to find out.
+    """
     if not mac_address:
-        return
+        return False
     existing_mac = interface.mac_addresses.filter(mac_address=mac_address).first()
     mac_obj = existing_mac or MACAddress.objects.create(mac_address=mac_address)
+    # The lookup above is scoped to this interface, so a miss means add() attaches it.
+    changed = existing_mac is None
     interface.mac_addresses.add(mac_obj)
     if hasattr(interface, "primary_mac_address"):
+        changed = changed or interface.primary_mac_address_id != mac_obj.pk
         interface.primary_mac_address = mac_obj
+    return changed
 
 
 def update_interface_from_port(
@@ -73,9 +87,6 @@ def update_interface_from_port(
         field_name: getattr(interface, field_name) for field_name in tracked_fields if hasattr(interface, field_name)
     }
     before_custom_fields = deepcopy(interface.custom_field_data)
-    before_mac_ids = (
-        set(interface.mac_addresses.values_list("pk", flat=True)) if hasattr(interface, "mac_addresses") else set()
-    )
     field_mapping = {
         interface_name_field: "name",
         "ifType": "type",
@@ -130,18 +141,16 @@ def update_interface_from_port(
             else (admin_status.lower() == "up" if isinstance(admin_status, str) else bool(admin_status))
         )
 
+    mac_changed = False
     if "mac_address" not in exclude_columns:
-        assign_interface_mac(interface, librenms_interface.get("ifPhysAddress"))
+        mac_changed = assign_interface_mac(interface, librenms_interface.get("ifPhysAddress"))
 
     fields_changed = before_custom_fields != interface.custom_field_data or any(
         getattr(interface, field_name) != value for field_name, value in before_fields.items()
     )
-    after_mac_ids = (
-        set(interface.mac_addresses.values_list("pk", flat=True)) if hasattr(interface, "mac_addresses") else set()
-    )
     if fields_changed:
         interface.save()
-    return fields_changed or before_mac_ids != after_mac_ids
+    return fields_changed or mac_changed
 
 
 @transaction.atomic
