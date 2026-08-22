@@ -23,7 +23,6 @@ from netbox_librenms_plugin.tests.parallel import (
     pytest_xdist_auto_num_workers,
 )
 
-
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
 
@@ -63,7 +62,7 @@ def test_pyyaml_is_declared_for_the_direct_test_import():
 def test_xdist_worker_gets_private_postgresql_and_redis_databases():
     """Assign one PostgreSQL database and two Redis databases to a worker."""
     assert isolated_test_database_name("test_netbox_librenms", "gw3") == "test_netbox_librenms_gw3"
-    assert isolated_redis_databases("gw3") == (3, 11)
+    assert isolated_redis_databases("gw3") == (3, MAX_PARALLEL_WORKERS + 3)
 
 
 def test_serial_run_keeps_default_database_targets():
@@ -470,6 +469,47 @@ def test_playwright_state_machine_has_a_required_separate_ci_job():
     assert "python -m playwright install --with-deps chromium" in setup
     # A developer outside the devcontainer and CI installs the browser from the guide.
     assert "python -m playwright install chromium" in testing_guide
+
+
+def test_root_pytest_config_excludes_the_separate_browser_suite():
+    """A bare root pytest run must not collect tests owned by the browser config."""
+    browser_path = "netbox_librenms_plugin/tests/browser"
+    environment = {name: value for name, value in os.environ.items() if not name.startswith("PYTEST_")}
+    browser_environment = {
+        name: value
+        for name, value in environment.items()
+        if name not in {"DJANGO_SETTINGS_MODULE", "NETBOX_CONFIGURATION"}
+    }
+    root_collection = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", "--no-cov", "-n", "0"],
+        capture_output=True,
+        text=True,
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        check=False,
+    )
+    browser_collection = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-c",
+            f"{browser_path}/pytest.ini",
+            browser_path,
+            "--collect-only",
+            "-q",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPOSITORY_ROOT,
+        env=browser_environment,
+        check=False,
+    )
+
+    assert root_collection.returncode == 0, root_collection.stderr
+    assert "test_sync_cache_browser.py" not in root_collection.stdout
+    assert browser_collection.returncode == 0, browser_collection.stderr
+    assert "test_sync_cache_browser.py" in browser_collection.stdout
 
 
 def test_isolated_settings_exclude_unrelated_installed_plugins(settings):
