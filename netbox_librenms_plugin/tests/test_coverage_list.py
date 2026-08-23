@@ -520,7 +520,7 @@ class TestGetView:
 
                             with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
                                 with patch(
-                                    "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
+                                    "netbox_librenms_plugin.views.imports.list.get_active_cached_searches_for_servers"
                                 ) as mock_searches:
                                     mock_searches.return_value = []
 
@@ -559,7 +559,7 @@ class TestGetView:
 
                             with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
                                 with patch(
-                                    "netbox_librenms_plugin.views.imports.list.get_active_cached_searches",
+                                    "netbox_librenms_plugin.views.imports.list.get_active_cached_searches_for_servers",
                                     return_value=[],
                                 ):
                                     with patch.object(view, "get_server_info", return_value={}):
@@ -597,7 +597,7 @@ class TestGetView:
 
                         with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
                             with patch(
-                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
+                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches_for_servers"
                             ) as mock_searches:
                                 mock_searches.return_value = []
 
@@ -634,7 +634,7 @@ class TestGetView:
 
                         with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
                             with patch(
-                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
+                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches_for_servers"
                             ) as mock_searches:
                                 mock_searches.return_value = []
 
@@ -673,7 +673,7 @@ class TestGetView:
 
                         with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
                             with patch(
-                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
+                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches_for_servers"
                             ) as mock_searches:
                                 mock_searches.return_value = []
 
@@ -717,7 +717,7 @@ class TestGetView:
 
                         with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
                             with patch(
-                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
+                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches_for_servers"
                             ) as mock_searches:
                                 mock_searches.return_value = []
 
@@ -845,7 +845,7 @@ class TestGetView:
 
                                         with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
                                             with patch(
-                                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
+                                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches_for_servers"
                                             ) as mock_searches:
                                                 mock_searches.return_value = []
 
@@ -891,7 +891,7 @@ class TestGetView:
 
                                 with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
                                     with patch(
-                                        "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
+                                        "netbox_librenms_plugin.views.imports.list.get_active_cached_searches_for_servers"
                                     ) as mock_searches:
                                         mock_searches.return_value = []
 
@@ -927,7 +927,7 @@ class TestGetView:
 
                         with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
                             with patch(
-                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
+                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches_for_servers"
                             ) as mock_searches:
                                 mock_searches.return_value = []
 
@@ -963,7 +963,7 @@ class TestGetView:
 
                         with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
                             with patch(
-                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
+                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches_for_servers"
                             ) as mock_searches:
                                 mock_searches.return_value = []
 
@@ -999,7 +999,7 @@ class TestGetView:
 
                         with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
                             with patch(
-                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
+                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches_for_servers"
                             ) as mock_searches:
                                 mock_searches.return_value = []
 
@@ -1038,7 +1038,7 @@ class TestGetView:
 
                         with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
                             with patch(
-                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
+                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches_for_servers"
                             ) as mock_searches:
                                 mock_searches.return_value = []
 
@@ -1107,7 +1107,7 @@ class TestGetViewFilterFields:
 
                         with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
                             with patch(
-                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
+                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches_for_servers"
                             ) as mock_searches:
                                 mock_searches.return_value = []
 
@@ -1172,7 +1172,7 @@ class TestGetViewFilterFields:
 
                         with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
                             with patch(
-                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
+                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches_for_servers"
                             ) as mock_searches:
                                 mock_searches.return_value = []
 
@@ -1237,7 +1237,7 @@ class TestGetViewFilterFields:
 
                         with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
                             with patch(
-                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
+                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches_for_servers"
                             ) as mock_searches:
                                 mock_searches.return_value = []
 
@@ -1289,7 +1289,7 @@ class TestGetViewFilterFields:
 
                         with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
                             with patch(
-                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
+                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches_for_servers"
                             ) as mock_searches:
                                 mock_searches.return_value = []
 
@@ -1347,7 +1347,7 @@ class TestGetViewFilterFields:
 
                         with patch("netbox_librenms_plugin.views.imports.list.DeviceImportTable"):
                             with patch(
-                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches"
+                                "netbox_librenms_plugin.views.imports.list.get_active_cached_searches_for_servers"
                             ) as mock_searches:
                                 mock_searches.return_value = []
 
