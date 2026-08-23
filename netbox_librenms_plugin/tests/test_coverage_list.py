@@ -14,6 +14,8 @@ Conventions:
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 class TestGetRequiredPermission:
     """Tests for get_required_permission()."""
@@ -81,6 +83,21 @@ class TestShouldUseBackgroundJob:
 
 class TestLoadJobResults:
     """Tests for _load_job_results()."""
+
+    @pytest.fixture(autouse=True)
+    def _configured_job_server(self):
+        """Bind completed jobs to one configured server without loading settings."""
+        with (
+            patch(
+                "netbox_librenms_plugin.server_selection.LibreNMSAPI.get_available_servers",
+                return_value={"default": "Default LibreNMS"},
+            ),
+            patch(
+                "netbox_librenms_plugin.views.imports.list.LibreNMSImportView.rebind_api_for_server",
+                side_effect=lambda server_key: server_key,
+            ),
+        ):
+            yield
 
     def test_job_not_found_returns_empty(self):
         """Returns [] when job doesn't exist (DoesNotExist path lines 79-81)."""
