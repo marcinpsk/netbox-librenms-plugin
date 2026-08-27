@@ -66,11 +66,7 @@ def _real_port(**overrides):
 
 
 def _user_with_perms(tag, perm_specs):
-    """Real user granted exactly ``perm_specs`` = [(action, Model), ...] via NetBox ObjectPermissions.
-
-    Lets a test drive the view's real ``has_perm`` from a precise, real permission set (instead of a
-    mocked ``has_perm`` side-effect), so the perm→table-flag mapping is exercised end to end.
-    """
+    """Grant a real user the exact permissions needed to exercise the permission-to-table-flag mapping."""
     from core.models import ObjectType
     from django.contrib.auth import get_user_model
     from users.models import ObjectPermission
@@ -778,12 +774,7 @@ class TestSingleModuleVerifyView:
 
     @pytest.mark.django_db
     def test_success_propagates_can_change_interface_to_verify_table(self):
-        """Verify-row table keeps Update Interface available for a user with real change perms.
-
-        Device is resolved through the real restrict() lookup and every table flag is driven by the
-        view's REAL ``has_perm`` against a precise NetBox permission grant — only the module-inventory
-        pipeline / table render (a separate rendering boundary) stays stubbed.
-        """
+        """Verify that real lookup and change permissions keep Update Interface available in the verification table."""
         import json
 
         from dcim.models import Interface, Module, ModuleBayTemplate, ModuleType
@@ -1568,14 +1559,7 @@ class TestSaveVlanGroupOverridesView:
 
 @pytest.mark.django_db
 class TestSaveVlanGroupOverridesRealCacheBackend:
-    """Drive SaveVlanGroupOverridesView against a REAL cache backend, not a MagicMock.
-
-    The MagicMock-cache tests above synthesise a ``.ttl()`` on the cache; ``cache.ttl()``
-    is a django-redis extension that every other Django backend (e.g. the LocMemCache
-    NetBox falls back to) lacks, so those tests stay green even though the raw ``cache.ttl()``
-    call raised ``AttributeError`` mid-request. These exercise the real view against a real
-    LocMemCache so the backend-agnostic ``cache_remaining_ttl`` guard is actually tested.
-    """
+    """Verify that SaveVlanGroupOverridesView handles real cache backends with and without ttl()."""
 
     def _post(self, device, cache_backend, *, vid_group_map=None):
         import json

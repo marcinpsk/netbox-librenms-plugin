@@ -1646,12 +1646,7 @@ class TestSyncIPAddressesViewProcessIpSync:
         assert IPAddress.objects.get(address="10.0.0.1/24").assigned_object == vmiface
 
     def test_ambiguous_port_id_binds_by_name(self):
-        """Two interfaces share a port id (id ambiguous), but the row names one uniquely → it binds by name.
-
-        This is what the rendered IP table shows (its render drops the ambiguous id and links by name),
-        so the sync must agree and NOT drop the row into skipped_no_interface. by_name is fail-closed
-        (obj's own interface wins), so the fall-through binds only to the uniquely-named interface.
-        """
+        """Verify that an ambiguous port ID binds through the row's unique interface name instead of skipping."""
         from ipam.models import IPAddress
 
         view = self._setup_view()
