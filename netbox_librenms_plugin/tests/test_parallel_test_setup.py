@@ -539,6 +539,16 @@ def test_playwright_state_machine_has_a_required_separate_ci_job():
     assert "python -m playwright install chromium" in testing_guide
 
 
+def test_browser_tests_take_their_page_from_the_shared_fixture():
+    """A hand-rolled launch skips the teardown that closes the browser after a failing test."""
+    browser_directory = REPOSITORY_ROOT / "netbox_librenms_plugin/tests/browser"
+    modules = sorted(browser_directory.glob("test_*.py"))
+
+    assert modules, "the scan found no browser module, so the check below would pass vacuously"
+    hand_rolled = sorted(path.name for path in modules if "chromium.launch(" in path.read_text())
+    assert not hand_rolled, f"take the page from the shared `page` fixture in conftest.py instead: {hand_rolled}"
+
+
 def test_root_pytest_config_excludes_the_separate_browser_suite():
     """A bare root pytest run must not collect tests owned by the browser config."""
     browser_path = "netbox_librenms_plugin/tests/browser"
