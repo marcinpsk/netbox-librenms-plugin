@@ -1378,7 +1378,10 @@ class TestBulkImportDevicesViewPost:
         mock_vm_import.assert_not_called()
         assert response.status_code == 200
         assert response.content == b""
-        assert response["HX-Redirect"] == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key={server_key}"
+        assert (
+            response["HX-Redirect"]
+            == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key={server_key}"
+        )
         assert view_message_texts(request, "error") == [
             "You do not have permission to import these rows (missing: dcim.add_device, dcim.change_device)."
         ]
@@ -2472,7 +2475,9 @@ class TestBulkImportDevicesViewErrorPaths:
         result = post_view(view, request)
 
         assert result.status_code == 302
-        assert result["Location"] == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key={server_key}"
+        assert (
+            result["Location"] == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key={server_key}"
+        )
         assert view_message_texts(request, "error") == ["No devices selected for import"]
 
     def test_post_invalid_device_id_htmx_returns_400(self, settings, librenms_server):
@@ -2505,7 +2510,10 @@ class TestBulkImportDevicesViewErrorPaths:
         response = post_view(view, request)
 
         assert response.status_code == 302
-        assert response["Location"] == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key={server_key}"
+        assert (
+            response["Location"]
+            == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key={server_key}"
+        )
         assert view_message_texts(request, "error") == ["Invalid device identifier supplied"]
 
     def test_post_permission_denied(self, settings, librenms_server):
@@ -3563,7 +3571,7 @@ class TestDeviceConflictActionBranches:
 
         self._assert_htmx_error(
             response,
-            "Device has a legacy bare-integer librenms_id; use 'Convert mapping' "
+            "Object has a legacy bare-integer librenms_id; use 'Convert mapping' "
             "to migrate to the multi-server format before linking.",
         )
         reloaded = Device.objects.get(pk=target.pk)
@@ -4866,7 +4874,10 @@ class TestBulkImportDevicesViewBasicPaths:
         assert imported.device_type_id == mapping_source.device_type_id
         assert imported.role_id == mapping_source.role_id
         assert response.status_code == 302
-        assert response["Location"] == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key={server_key}"
+        assert (
+            response["Location"]
+            == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key={server_key}"
+        )
 
     def test_background_mode_returns_job_json(self):
         """Background mode: should_use_background_job returns True for superuser."""
@@ -4908,7 +4919,10 @@ class TestBulkImportDevicesViewBasicPaths:
         mock_bulk_import.assert_called_once()
         assert mock_bulk_import.call_args.kwargs["sync_options"]["vc_detection_enabled"] is True
         assert response.status_code == 302
-        assert response["Location"] == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key={server_key}"
+        assert (
+            response["Location"]
+            == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key={server_key}"
+        )
 
 
 @pytest.mark.django_db
@@ -4984,7 +4998,10 @@ class TestBulkImportDevicesMorePaths:
         mock_device_import.assert_not_called()
         mock_vm_import.assert_not_called()
         assert response.status_code == 302
-        assert response["Location"] == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key=bulk-more-invalid-cluster"
+        assert (
+            response["Location"]
+            == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key=bulk-more-invalid-cluster"
+        )
         assert "Invalid cluster or role selection supplied" in view_message_texts(request, "error")
 
     @pytest.mark.parametrize(
@@ -5146,7 +5163,10 @@ class TestBulkImportDevicesMorePaths:
         assert imported.role_id == mapped_device.role_id
         assert imported.rack_id == rack.pk
         assert response.status_code == 302
-        assert response["Location"] == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key=bulk-more-valid-mapping"
+        assert (
+            response["Location"]
+            == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key=bulk-more-valid-mapping"
+        )
 
     def test_vc_detection_disabled_in_post_is_passed_to_device_import(self, settings):
         """vc_detection_enabled=off from POST must propagate to bulk import call."""
@@ -5168,7 +5188,10 @@ class TestBulkImportDevicesMorePaths:
         call_kwargs = mock_bulk_import.call_args.kwargs
         assert call_kwargs["sync_options"]["vc_detection_enabled"] is False
         assert response.status_code == 302
-        assert response["Location"] == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key=bulk-more-vc-off"
+        assert (
+            response["Location"]
+            == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key=bulk-more-vc-off"
+        )
 
     def test_invalid_role_and_rack_values_log_warning(self, settings, caplog):
         """Lines 534-535, 544-546: invalid role_id/rack_id → warning."""
@@ -5192,7 +5215,10 @@ class TestBulkImportDevicesMorePaths:
         mock_import.assert_called_once()
         assert mock_import.call_args.kwargs["manual_mappings_per_device"] == {}
         assert response.status_code == 302
-        assert response["Location"] == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key=bulk-more-invalid-mapping"
+        assert (
+            response["Location"]
+            == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key=bulk-more-invalid-mapping"
+        )
 
     def test_import_with_success_messages(self, settings, monkeypatch):
         """Lines 683, 688, 693: success/fail/skipped messages."""
@@ -5241,7 +5267,10 @@ class TestBulkImportDevicesMorePaths:
         assert "Failed to import 1 device" in sent_messages
         assert "Skipped 1 existing device" in sent_messages
         assert response.status_code == 302
-        assert response["Location"] == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key={server_key}"
+        assert (
+            response["Location"]
+            == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key={server_key}"
+        )
 
     def test_vm_import_triggers_bulk_import_vms(self, settings):
         """Line 651-668: vm_imports non-empty → bulk_import_vms called."""
@@ -5266,7 +5295,10 @@ class TestBulkImportDevicesMorePaths:
         mock_vm_import.assert_called_once()
         assert mock_vm_import.call_args.args[0] == {1: {"cluster_id": existing_vm.cluster_id}}
         assert response.status_code == 302
-        assert response["Location"] == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key=bulk-more-vm"
+        assert (
+            response["Location"]
+            == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key=bulk-more-vm"
+        )
 
     def test_htmx_request_returns_oob_rows(self, settings, monkeypatch):
         """Lines 701-761: HTMX request → returns OOB row HTML."""
@@ -5338,7 +5370,10 @@ class TestBulkImportDevicesMorePaths:
 
         assert view_message_texts(request, "error") == ["No permission"]
         assert response.status_code == 302
-        assert response["Location"] == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key=bulk-more-import-denied"
+        assert (
+            response["Location"]
+            == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key=bulk-more-import-denied"
+        )
 
     def test_background_no_workers_falls_back_to_sync(self, settings):
         """Line 612-615: background requested but no workers → sync fallback."""
@@ -5363,7 +5398,10 @@ class TestBulkImportDevicesMorePaths:
         warnings = view_message_texts(request, "warning")
         assert any("Background job requested but no workers available" in message for message in warnings)
         assert response.status_code == 302
-        assert response["Location"] == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key=bulk-more-no-workers"
+        assert (
+            response["Location"]
+            == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key=bulk-more-no-workers"
+        )
 
 
 @pytest.mark.django_db
@@ -5432,7 +5470,10 @@ class TestBulkImportEdgePaths:
         assert imported.cluster_id == existing_vm.cluster_id
         assert imported.role_id == role_source.role_id
         assert response.status_code == 302
-        assert response["Location"] == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key={server_key}"
+        assert (
+            response["Location"]
+            == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key={server_key}"
+        )
 
     def test_permission_denied_htmx_returns_htmx_redirect(self, settings):
         """Line 664: PermissionDenied during import with HX-Request → HX-Redirect."""
@@ -5455,7 +5496,10 @@ class TestBulkImportEdgePaths:
             response = post_view(view, request)
 
         assert response.status_code == 200
-        assert response["HX-Redirect"] == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key={server_key}"
+        assert (
+            response["HX-Redirect"]
+            == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key={server_key}"
+        )
         assert view_message_texts(request, "error") == ["No permission"]
 
     def test_background_with_workers_enqueues_job(self, settings):
@@ -5490,7 +5534,9 @@ class TestBulkImportEdgePaths:
         mock_enqueue.assert_called_once()
         # The redirect response must actually be returned, not just produced.
         assert result.status_code == 302
-        assert result["Location"] == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key={server_key}"
+        assert (
+            result["Location"] == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key={server_key}"
+        )
 
         # ...and the enqueued job must carry the request's inputs forward, not be enqueued
         # empty: the selected device id (parsed to int), the active server namespace, and
@@ -5542,7 +5588,10 @@ class TestBulkImportEdgePaths:
         mock_enqueue.assert_called_once()
         assert mock_enqueue.call_args.kwargs["libre_devices_cache"] == {}
         assert response.status_code == 302
-        assert response["Location"] == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key={server_key}"
+        assert (
+            response["Location"]
+            == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key={server_key}"
+        )
 
 
 @pytest.mark.django_db
@@ -6272,7 +6321,10 @@ class TestBulkImportDevicesViewCollisionGate:
         # Gate cleared (distinct devices) → the importer ran.
         mock_import.assert_called_once()
         assert response.status_code == 302
-        assert response["Location"] == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key={server_key}"
+        assert (
+            response["Location"]
+            == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key={server_key}"
+        )
 
     def test_background_batch_defers_collision_precheck_to_job(self, settings):
         """A batch routed to a background job must NOT run the collision pre-check synchronously. It is deferred to ImportDevicesJob (which re-runs it), so the request does not pay the validation cost. The job is enqueued and the sync detector is never called."""
@@ -6308,7 +6360,10 @@ class TestBulkImportDevicesViewCollisionGate:
         mock_enqueue.assert_called_once()
         mock_detect.assert_not_called()
         assert response.status_code == 200
-        assert response["HX-Redirect"] == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key={server_key}"
+        assert (
+            response["HX-Redirect"]
+            == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key={server_key}"
+        )
 
     def test_colliding_batch_non_htmx_message_is_object_neutral(self, settings, monkeypatch):
         """The non-HTMX collision message uses ``NetBox object`` for batches that can contain VMs."""
@@ -6348,7 +6403,10 @@ class TestBulkImportDevicesViewCollisionGate:
         assert "NetBox device" not in toast
         assert "colliding device" not in toast
         assert response.status_code == 302
-        assert response["Location"] == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key={server_key}"
+        assert (
+            response["Location"]
+            == f"{url_for('plugins:netbox_librenms_plugin:librenms_import')}?server_key={server_key}"
+        )
 
 
 # ---------------------------------------------------------------------------
