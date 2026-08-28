@@ -1,4 +1,6 @@
+from drf_spectacular.utils import extend_schema_serializer
 from netbox.api.serializers import NetBoxModelSerializer
+from rest_framework import serializers
 
 from netbox_librenms_plugin.models import (
     CarrierAutoInstallRule,
@@ -13,6 +15,7 @@ from netbox_librenms_plugin.models import (
 )
 
 
+@extend_schema_serializer(component_name="LibreNMSInterfaceTypeMapping")
 class InterfaceTypeMappingSerializer(NetBoxModelSerializer):
     """Serialize InterfaceTypeMapping model for REST API."""
 
@@ -24,6 +27,7 @@ class InterfaceTypeMappingSerializer(NetBoxModelSerializer):
         brief_fields = ("id", "url", "display", "librenms_type", "netbox_type", "description")
 
 
+@extend_schema_serializer(component_name="LibreNMSDeviceTypeMapping")
 class DeviceTypeMappingSerializer(NetBoxModelSerializer):
     """Serialize DeviceTypeMapping model for REST API."""
 
@@ -35,6 +39,7 @@ class DeviceTypeMappingSerializer(NetBoxModelSerializer):
         brief_fields = ("id", "url", "display", "librenms_hardware", "netbox_device_type", "description")
 
 
+@extend_schema_serializer(component_name="LibreNMSModuleTypeMapping")
 class ModuleTypeMappingSerializer(NetBoxModelSerializer):
     """Serialize ModuleTypeMapping model for REST API."""
 
@@ -46,6 +51,7 @@ class ModuleTypeMappingSerializer(NetBoxModelSerializer):
         brief_fields = ("id", "url", "display", "librenms_model", "netbox_module_type", "description")
 
 
+@extend_schema_serializer(component_name="LibreNMSModuleBayMapping")
 class ModuleBayMappingSerializer(NetBoxModelSerializer):
     """Serialize ModuleBayMapping model for REST API."""
 
@@ -67,6 +73,7 @@ class ModuleBayMappingSerializer(NetBoxModelSerializer):
         brief_fields = ("id", "url", "display", "librenms_name", "netbox_bay_name", "description")
 
 
+@extend_schema_serializer(component_name="LibreNMSNormalizationRule")
 class NormalizationRuleSerializer(NetBoxModelSerializer):
     """Serialize NormalizationRule model for REST API."""
 
@@ -88,6 +95,7 @@ class NormalizationRuleSerializer(NetBoxModelSerializer):
         brief_fields = ("id", "url", "display", "scope", "match_pattern", "description")
 
 
+@extend_schema_serializer(component_name="LibreNMSInventoryIgnoreRule")
 class InventoryIgnoreRuleSerializer(NetBoxModelSerializer):
     """Serialize InventoryIgnoreRule model for REST API."""
 
@@ -110,6 +118,7 @@ class InventoryIgnoreRuleSerializer(NetBoxModelSerializer):
         brief_fields = ("id", "url", "display", "name", "description")
 
 
+@extend_schema_serializer(component_name="LibreNMSPlatformMapping")
 class PlatformMappingSerializer(NetBoxModelSerializer):
     """Serialize PlatformMapping model for REST API."""
 
@@ -121,6 +130,7 @@ class PlatformMappingSerializer(NetBoxModelSerializer):
         brief_fields = ("id", "url", "display", "librenms_os", "netbox_platform", "description")
 
 
+@extend_schema_serializer(component_name="LibreNMSCarrierAutoInstallRule")
 class CarrierAutoInstallRuleSerializer(NetBoxModelSerializer):
     """Serialize CarrierAutoInstallRule model for REST API."""
 
@@ -143,6 +153,7 @@ class CarrierAutoInstallRuleSerializer(NetBoxModelSerializer):
         brief_fields = ("id", "url", "display", "device_type_pattern", "description")
 
 
+@extend_schema_serializer(component_name="LibreNMSPortStackLagPattern")
 class PortStackLagPatternSerializer(NetBoxModelSerializer):
     """Serialize PortStackLagPattern model for REST API."""
 
@@ -152,3 +163,19 @@ class PortStackLagPatternSerializer(NetBoxModelSerializer):
         model = PortStackLagPattern
         fields = ["id", "url", "display", "librenms_os", "lag_name_pattern", "sap_name_pattern", "description"]
         brief_fields = ("id", "url", "display", "librenms_os", "lag_name_pattern", "description")
+
+
+@extend_schema_serializer(component_name="LibreNMSSyncJobStatus")
+class SyncJobStatusSerializer(serializers.Serializer):
+    """Serialize the sync_job_status response so the endpoint documents a concrete shape."""
+
+    status = serializers.ChoiceField(choices=["updated", "no_change"])
+    db_status = serializers.CharField()
+    rq_status = serializers.CharField()
+
+
+@extend_schema_serializer(component_name="LibreNMSJobError")
+class JobErrorSerializer(serializers.Serializer):
+    """Serialize the sync_job_status error response."""
+
+    error = serializers.CharField()
