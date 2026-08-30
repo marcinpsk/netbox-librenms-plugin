@@ -52,7 +52,7 @@ class DeviceStatusListView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
             # Check LibreNMS status for each device
             for device in queryset:
                 try:
-                    librenms_id = self.librenms_api.get_librenms_id(device)
+                    librenms_id, _lookup_error = self.resolve_librenms_id(device)
                     device_status_map[device.pk] = bool(librenms_id)
                 except Exception:
                     device_status_map[device.pk] = False
@@ -98,7 +98,7 @@ class VMStatusListView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Object
             # Check LibreNMS status for each VM
             for vm in queryset:
                 try:
-                    librenms_id = self.librenms_api.get_librenms_id(vm)
+                    librenms_id, _lookup_error = self.resolve_librenms_id(vm)
                     vm_status_map[vm.pk] = bool(librenms_id)
                 except Exception:
                     vm_status_map[vm.pk] = False
