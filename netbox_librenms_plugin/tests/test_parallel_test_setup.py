@@ -1,5 +1,6 @@
 """Tests for isolated parallel test workers."""
 
+import ast
 import os
 import re
 import subprocess
@@ -607,6 +608,22 @@ def test_testing_guide_requires_a_test_database_only_for_database_backed_tests()
 
     assert "The database-backed suite needs a test database" in testing_guide
     assert "No database connection required" not in testing_guide
+
+
+def test_testing_guide_template_keeps_project_imports_inside_the_test_method():
+    """The starter template must not import Django-dependent project modules during collection."""
+    testing_guide = (REPOSITORY_ROOT / "docs/development/testing.md").read_text()
+    template_section = testing_guide.split("### Basic Test Template", maxsplit=1)[1]
+    template = template_section.split("```python", maxsplit=1)[1].split("```", maxsplit=1)[0]
+    module = ast.parse(template)
+
+    project_imports = [
+        node
+        for node in module.body
+        if isinstance(node, ast.ImportFrom) and node.module.startswith("netbox_librenms_plugin")
+    ]
+
+    assert not project_imports, "move project imports inside the template test method"
 
 
 def test_browser_tests_take_their_page_from_the_shared_fixture():
