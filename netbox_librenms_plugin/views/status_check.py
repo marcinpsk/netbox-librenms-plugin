@@ -46,6 +46,7 @@ class DeviceStatusListView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
 
             # Create a list to store device IDs and their status
             device_status_map = {}
+            lookup_errors = set()
 
             # Apply filters
             queryset = self.filterset(self.request.GET, queryset=queryset).qs
@@ -55,10 +56,13 @@ class DeviceStatusListView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Ob
                 try:
                     librenms_id, lookup_error = self.resolve_librenms_id(device)
                     if lookup_error is not None:
-                        messages.error(self.request, lookup_error.message)
+                        lookup_errors.add(lookup_error.message)
                     device_status_map[device.pk] = bool(librenms_id)
                 except Exception:
                     device_status_map[device.pk] = False
+
+            for error in sorted(lookup_errors):
+                messages.error(self.request, error)
 
             # Annotate the queryset with the status values
             case_when = []
@@ -94,6 +98,7 @@ class VMStatusListView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Object
 
             # Create a list to store VM IDs and their status
             vm_status_map = {}
+            lookup_errors = set()
 
             # Apply filters
             queryset = self.filterset(self.request.GET, queryset=queryset).qs
@@ -103,10 +108,13 @@ class VMStatusListView(LibreNMSPermissionMixin, LibreNMSAPIMixin, generic.Object
                 try:
                     librenms_id, lookup_error = self.resolve_librenms_id(vm)
                     if lookup_error is not None:
-                        messages.error(self.request, lookup_error.message)
+                        lookup_errors.add(lookup_error.message)
                     vm_status_map[vm.pk] = bool(librenms_id)
                 except Exception:
                     vm_status_map[vm.pk] = False
+
+            for error in sorted(lookup_errors):
+                messages.error(self.request, error)
 
             # Annotate the queryset with the status values
             case_when = []
