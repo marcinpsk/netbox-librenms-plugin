@@ -6,7 +6,7 @@ and assert the result. The maintainer can't generate every vendor/topology witho
 so the project accepts **community-contributed, anonymized data shapes** that become tests
 automatically.
 
-A *recording* is one device scenario: the LibreNMS responses captured verbatim plus an
+A *recording* is one device scenario: the LibreNMS response shape with anonymized values plus an
 `expected` block describing the outcome. Recordings live in
 `netbox_librenms_plugin/data_shapes/recordings/*.json`; `netbox_librenms_plugin/tests/test_recordings.py`
 parametrizes over them, so **a new JSON with an `expected` block is a new passing test, no code required**.
