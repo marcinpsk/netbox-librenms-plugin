@@ -2643,6 +2643,7 @@ function handleCableChange(select, value) {
                 select._lastVerifiedMember = value;
                 restoreControls();
             } else {
+                console.error('Cable verification rejected:', data.error || data.message || 'Unknown error');
                 rollbackToLastVerified();
             }
         })
