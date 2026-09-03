@@ -1817,8 +1817,8 @@ def test_cable_refresh_without_a_cached_snapshot_reports_failure_not_success(
     assert state["state"] == SyncTabState.REFRESH_FAILED.value
 
 
-def _drop_snapshot_write(device, tab):
-    """Patch cache.set to skip only the tab's snapshot key; return the patch and the keys it skipped."""
+def _drop_snapshot_write(monkeypatch, device, tab):
+    """Make cache.set skip only the tab's snapshot key; return the keys it skipped."""
     snapshot_key = SyncCacheConsistency(device).snapshot_key(tab, "primary")
     real_set = cache.set
     skipped = []
@@ -1829,34 +1829,24 @@ def _drop_snapshot_write(device, tab):
             return
         real_set(key, *args, **kwargs)
 
-    return patch("django.core.cache.cache.set", side_effect=drop_snapshot_write), skipped
+    monkeypatch.setattr(cache, "set", drop_snapshot_write)
+    return skipped
 
 
 @pytest.mark.django_db
-def test_interface_refresh_without_a_cached_snapshot_reports_failure_not_success(client, settings):
+def test_interface_refresh_without_a_cached_snapshot_reports_failure_not_success(
+    client, settings, primary_librenms, monkeypatch
+):
     """A lost interface snapshot records a failed refresh and shows no success toast."""
     _configure_servers(settings)
     device = make_device("cache-interface-nosnap", librenms_cf={"primary": {"id": 663}})
     user = make_superuser("cache-interface-nosnap-user")
     client.force_login(user)
-
-    def librenms_response(url, **_kwargs):
-        if url.endswith("/api/v0/devices/663/ports"):
-            return _json_response(url, {"status": "ok", "ports": []})
-        raise AssertionError(f"Unexpected LibreNMS request: {url}")
-
-    drop_write, skipped = _drop_snapshot_write(device, SyncTab.INTERFACES)
+    primary_librenms.register("/api/v0/devices/663/ports", {"status": "ok", "ports": []})
+    skipped = _drop_snapshot_write(monkeypatch, device, SyncTab.INTERFACES)
 
     url = reverse("plugins:netbox_librenms_plugin:device_interface_sync", kwargs={"pk": device.pk})
-    with (
-        drop_write,
-        patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response),
-    ):
-        response = client.post(
-            url,
-            {"server_key": "primary", "interface_name_field": "ifName"},
-            HTTP_HX_REQUEST="true",
-        )
+    response = client.post(url, {"server_key": "primary", "interface_name_field": "ifName"}, HTTP_HX_REQUEST="true")
 
     assert response.status_code == 200
     assert b"Interface data refreshed successfully" not in response.content
@@ -1868,32 +1858,20 @@ def test_interface_refresh_without_a_cached_snapshot_reports_failure_not_success
 
 
 @pytest.mark.django_db
-def test_ip_address_refresh_without_a_cached_snapshot_reports_failure_not_success(client, settings):
+def test_ip_address_refresh_without_a_cached_snapshot_reports_failure_not_success(
+    client, settings, primary_librenms, monkeypatch
+):
     """A lost IP address snapshot records a failed refresh and shows no success toast."""
     _configure_servers(settings)
     device = make_device("cache-ip-nosnap", librenms_cf={"primary": {"id": 664}})
     user = make_superuser("cache-ip-nosnap-user")
     client.force_login(user)
-
-    def librenms_response(url, **_kwargs):
-        if url.endswith("/api/v0/devices/664/ip"):
-            return _json_response(url, {"status": "ok", "addresses": []})
-        if url.endswith("/api/v0/devices/664"):
-            return _json_response(url, {"status": "ok", "devices": [{"device_id": 664}]})
-        raise AssertionError(f"Unexpected LibreNMS request: {url}")
-
-    drop_write, skipped = _drop_snapshot_write(device, SyncTab.IP_ADDRESSES)
+    primary_librenms.register("/api/v0/devices/664/ip", {"status": "ok", "addresses": []})
+    primary_librenms.register("/api/v0/devices/664", {"status": "ok", "devices": [{"device_id": 664}]})
+    skipped = _drop_snapshot_write(monkeypatch, device, SyncTab.IP_ADDRESSES)
 
     url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", kwargs={"pk": device.pk})
-    with (
-        drop_write,
-        patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response),
-    ):
-        response = client.post(
-            url,
-            {"server_key": "primary", "interface_name_field": "ifName"},
-            HTTP_HX_REQUEST="true",
-        )
+    response = client.post(url, {"server_key": "primary", "interface_name_field": "ifName"}, HTTP_HX_REQUEST="true")
 
     assert response.status_code == 200
     assert b"IP address data refreshed successfully" not in response.content
@@ -1905,26 +1883,19 @@ def test_ip_address_refresh_without_a_cached_snapshot_reports_failure_not_succes
 
 
 @pytest.mark.django_db
-def test_vlan_refresh_without_a_cached_snapshot_reports_failure_not_success(client, settings):
+def test_vlan_refresh_without_a_cached_snapshot_reports_failure_not_success(
+    client, settings, primary_librenms, monkeypatch
+):
     """A lost VLAN snapshot records a failed refresh and shows no success toast."""
     _configure_servers(settings)
     device = make_device("cache-vlan-nosnap", librenms_cf={"primary": {"id": 665}})
     user = make_superuser("cache-vlan-nosnap-user")
     client.force_login(user)
-
-    def librenms_response(url, **_kwargs):
-        if url.endswith("/api/v0/resources/vlans"):
-            return _json_response(url, {"status": "ok", "vlans": []})
-        raise AssertionError(f"Unexpected LibreNMS request: {url}")
-
-    drop_write, skipped = _drop_snapshot_write(device, SyncTab.VLANS)
+    primary_librenms.register("/api/v0/resources/vlans", {"status": "ok", "vlans": []})
+    skipped = _drop_snapshot_write(monkeypatch, device, SyncTab.VLANS)
 
     url = reverse("plugins:netbox_librenms_plugin:device_vlan_sync", kwargs={"pk": device.pk})
-    with (
-        drop_write,
-        patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response),
-    ):
-        response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
+    response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
 
     assert response.status_code == 200
     assert b"VLAN data refreshed successfully" not in response.content
@@ -1936,30 +1907,21 @@ def test_vlan_refresh_without_a_cached_snapshot_reports_failure_not_success(clie
 
 
 @pytest.mark.django_db
-def test_module_refresh_without_a_cached_snapshot_reports_failure_not_success(client, settings):
+def test_module_refresh_without_a_cached_snapshot_reports_failure_not_success(
+    client, settings, primary_librenms, monkeypatch
+):
     """A lost module snapshot records a failed refresh and shows no success toast."""
     _configure_servers(settings)
     device = make_device("cache-module-nosnap", librenms_cf={"primary": {"id": 666}})
     user = make_superuser("cache-module-nosnap-user")
     client.force_login(user)
-
-    def librenms_response(url, **_kwargs):
-        if url.endswith("/api/v0/inventory/666/all"):
-            return _json_response(url, {"status": "ok", "inventory": []})
-        if url.endswith("/api/v0/devices/666/ports"):
-            return _json_response(url, {"status": "ok", "ports": []})
-        if url.endswith("/api/v0/devices/666/transceivers"):
-            return _json_response(url, {"status": "ok", "transceivers": []})
-        raise AssertionError(f"Unexpected LibreNMS request: {url}")
-
-    drop_write, skipped = _drop_snapshot_write(device, SyncTab.MODULES)
+    primary_librenms.register("/api/v0/inventory/666/all", {"status": "ok", "inventory": []})
+    primary_librenms.register("/api/v0/devices/666/ports", {"status": "ok", "ports": []})
+    primary_librenms.register("/api/v0/devices/666/transceivers", {"status": "ok", "transceivers": []})
+    skipped = _drop_snapshot_write(monkeypatch, device, SyncTab.MODULES)
 
     url = reverse("plugins:netbox_librenms_plugin:device_module_sync", kwargs={"pk": device.pk})
-    with (
-        drop_write,
-        patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response),
-    ):
-        response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
+    response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
 
     assert response.status_code == 200
     assert b"Inventory data refreshed successfully" not in response.content
