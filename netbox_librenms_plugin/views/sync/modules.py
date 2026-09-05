@@ -2006,7 +2006,12 @@ class ModuleMismatchPreviewView(
             return HttpResponse("Inventory item not found in cache.", status=400)
 
         librenms_model = (librenms_item.get("entPhysicalModelName") or "").strip() or "-"
-        librenms_serial = (librenms_item.get("entPhysicalSerialNum") or "").strip()
+        manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
+        # The preview sits beside the stored module serial, which the install path writes through
+        # this same normalization, so the raw inventory value would read as a mismatch.
+        librenms_serial = normalize_inventory_serial(
+            librenms_item.get("entPhysicalSerialNum"), manufacturer=manufacturer
+        )
         if librenms_serial.lower() in _PLACEHOLDER_VALUES:
             librenms_serial = ""
 
@@ -2014,7 +2019,6 @@ class ModuleMismatchPreviewView(
         from netbox_librenms_plugin.utils import resolve_module_type
 
         module_types = get_module_types_indexed()
-        manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
         matched_type = resolve_module_type(
             librenms_model if librenms_model != "-" else "", module_types, manufacturer=manufacturer
         )
@@ -2199,14 +2203,16 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
             return _modules_action_response(request, page_device, server_key)
 
         model_name = (librenms_item.get("entPhysicalModelName") or "").strip()
-        serial = (librenms_item.get("entPhysicalSerialNum") or "").strip()
+        manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
+        # The replacement is stored and matched against serials the install path already
+        # normalized, so a raw vendor marker here would never match either.
+        serial = normalize_inventory_serial(librenms_item.get("entPhysicalSerialNum"), manufacturer=manufacturer)
         if serial.lower() in _PLACEHOLDER_VALUES:
             serial = ""
 
         module_types = get_module_types_indexed()
         from netbox_librenms_plugin.utils import resolve_module_type
 
-        manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
         matched_type = resolve_module_type(model_name, module_types, manufacturer=manufacturer)
 
         if not matched_type:
