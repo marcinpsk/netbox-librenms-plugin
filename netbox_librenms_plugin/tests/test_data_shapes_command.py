@@ -1,0 +1,200 @@
+"""Tests for the librenms_recordings management command (validate / rebuild-manifest)."""
+
+import json
+from io import StringIO
+
+import pytest
+from django.core.management import call_command
+from django.core.management.base import CommandError
+
+from netbox_librenms_plugin.data_shapes import recordings_store as store
+from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
+from netbox_librenms_plugin.tests.recordings import load_recording
+
+
+def _run(**kwargs):
+    out = StringIO()
+    call_command("librenms_recordings", stdout=out, **kwargs)
+    return out.getvalue()
+
+
+def test_validate_clean_recording_reports_novelty(tmp_path):
+    """A schema-valid, PII-clean recording validates and reports a novelty verdict."""
+    rec = anonymize_recording(load_recording("cisco-stackwise-3member"))
+    path = tmp_path / "rec.json"
+    path.write_text(json.dumps(rec))
+
+    output = _run(validate=str(path))
+
+    assert "schema-valid and PII-clean" in output
+    assert "Novelty: likely-covered" in output
+
+
+def test_validate_accepts_capture_before_outcome_promotion(tmp_path):
+    """Captured submissions have no expected outcomes until a maintainer promotes them."""
+    rec = anonymize_recording(load_recording("cisco-stackwise-3member"))
+    rec.pop("expected")
+    path = tmp_path / "captured.json"
+    path.write_text(json.dumps(rec))
+
+    output = _run(validate=str(path))
+
+    assert "schema-valid and PII-clean" in output
+
+
+def test_validate_uses_shipped_manifest_not_bundled_recordings(tmp_path, monkeypatch):
+    """Wheel installs ship manifest.json but NOT the recordings, so novelty must classify against the shipped manifest (load_manifest), not a manifest rebuilt from load_bundled_recordings — which is empty in a wheel and would mark every submission new."""
+    rec = anonymize_recording(load_recording("cisco-stackwise-3member"))
+    path = tmp_path / "rec.json"
+    path.write_text(json.dumps(rec))
+
+    # Simulate the wheel: no packaged recordings, but the shipped manifest is still present.
+    monkeypatch.setattr(store, "load_bundled_recordings", lambda: [])
+
+    output = _run(validate=str(path))
+
+    # The recording's shape IS in the shipped manifest, so it must classify as covered, not new.
+    assert "Novelty: likely-covered" in output
+
+
+def test_validate_rejects_residual_pii(tmp_path):
+    """A recording with residual PII (an IP in a preserved label) is rejected."""
+    rec = load_recording("cisco-stackwise-3member")
+    rec["responses"]["GET /api/v0/devices/1000"]["devices"][0]["entPhysicalName"] = "core 10.7.8.9"
+    rec = anonymize_recording(rec)  # entPhysicalName is preserved, so the IP survives
+    path = tmp_path / "rec.json"
+    path.write_text(json.dumps(rec))
+
+    with pytest.raises(CommandError, match="contains PII"):
+        _run(validate=str(path))
+
+
+def test_validate_pii_error_omits_raw_value(tmp_path):
+    """The PII-rejection error reports only the kind + JSON path, never the raw sensitive value — this command runs in CI, so echoing the value would leak exactly what the scan exists to catch."""
+    rec = load_recording("cisco-stackwise-3member")
+    rec["responses"]["GET /api/v0/devices/1000"]["devices"][0]["entPhysicalName"] = "core 10.7.8.9"
+    rec = anonymize_recording(rec)
+    path = tmp_path / "rec.json"
+    path.write_text(json.dumps(rec))
+
+    with pytest.raises(CommandError) as exc:
+        _run(validate=str(path))
+
+    msg = str(exc.value)
+    assert "10.7.8.9" not in msg  # the raw PII value must not appear in the error
+    assert "entPhysicalName" in msg  # the JSON path is still reported so the finding is locatable
+
+
+def test_action_flags_are_mutually_exclusive():
+    """--validate / --rebuild-manifest / --list are alternatives; combining them is rejected at parse time (argparse SystemExit) rather than silently running only the first. Parse real CLI args — call_command kwargs bypass the mutually-exclusive group."""
+    from netbox_librenms_plugin.management.commands.librenms_recordings import Command
+
+    parser = Command().create_parser("manage.py", "librenms_recordings")
+    # Django's CommandParser.error raises CommandError (not SystemExit) on a parse error.
+    with pytest.raises(CommandError, match="not allowed with argument"):
+        parser.parse_args(["--validate", "x", "--list"])
+    # A single action still parses fine.
+    assert parser.parse_args(["--list"]).list is True
+
+
+def test_validate_rejects_bad_schema(tmp_path):
+    """A recording missing required schema fields is rejected before any PII/novelty work."""
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps({"name": "x", "responses": {}}))  # no schema_version/device_id, empty responses
+
+    with pytest.raises(CommandError, match="Invalid recording schema"):
+        _run(validate=str(path))
+
+
+def test_rebuild_manifest_writes_signatures(tmp_path, monkeypatch):
+    """--rebuild-manifest writes one {name, signature} entry per bundled recording."""
+    # Point the command at an isolated recordings dir so the real repo file isn't clobbered.
+    rec_dir = tmp_path / "recordings"
+    rec_dir.mkdir()
+    for name in ("cisco-stackwise-3member", "juniper-vc-2member", "cisco-lag-and-subinterface"):
+        (rec_dir / f"{name}.json").write_text(json.dumps(load_recording(name)))
+    monkeypatch.setattr(store, "RECORDINGS_DIR", rec_dir)
+    monkeypatch.setattr(store, "MANIFEST_PATH", rec_dir / "manifest.json")
+
+    output = _run(**{"rebuild_manifest": True})
+
+    manifest = json.loads((rec_dir / "manifest.json").read_text())
+    assert {e["name"] for e in manifest} == {
+        "cisco-stackwise-3member",
+        "juniper-vc-2member",
+        "cisco-lag-and-subinterface",
+    }
+    assert all("signature" in e for e in manifest)
+    assert "Wrote 3 signature(s)" in output
+
+
+def test_rebuild_manifest_writes_atomically(tmp_path, monkeypatch):
+    """Write the manifest atomically so a crash cannot leave novelty classification unavailable."""
+    from pathlib import Path
+
+    rec_dir = tmp_path / "recordings"
+    rec_dir.mkdir()
+    (rec_dir / "cisco-stackwise-3member.json").write_text(json.dumps(load_recording("cisco-stackwise-3member")))
+    manifest_path = rec_dir / "manifest.json"
+    # A pre-existing good manifest that must remain intact in place right up to the atomic swap.
+    manifest_path.write_text(json.dumps([{"name": "old", "signature": {}}]) + "\n")
+    monkeypatch.setattr(store, "RECORDINGS_DIR", rec_dir)
+    monkeypatch.setattr(store, "MANIFEST_PATH", manifest_path)
+
+    seen = {}
+    real_replace = Path.replace
+
+    def spy_replace(self, target):
+        # At replace time the temp source must already hold the COMPLETE new manifest and the live
+        # manifest must still be its previous content — proving it was never truncated in place.
+        seen["src_content"] = self.read_text()
+        seen["target"] = str(target)
+        seen["target_before"] = Path(target).read_text()
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", spy_replace)
+
+    _run(**{"rebuild_manifest": True})
+
+    # The write went through an atomic temp + replace onto the manifest path (never a direct
+    # truncating write_text): on the old code Path.replace was never called and `seen` stays empty.
+    assert seen.get("target") == str(manifest_path)
+    assert [e["name"] for e in json.loads(seen["src_content"])] == ["cisco-stackwise-3member"]
+    # The previous manifest survived intact right up to the atomic swap.
+    assert [e["name"] for e in json.loads(seen["target_before"])] == ["old"]
+    # No leftover temp file, and the final manifest is the rebuilt one.
+    assert not (rec_dir / "manifest.json.tmp").exists()
+    assert [e["name"] for e in json.loads(manifest_path.read_text())] == ["cisco-stackwise-3member"]
+
+
+def test_rebuild_manifest_excludes_manifest_itself(tmp_path, monkeypatch):
+    """A pre-existing manifest.json is not loaded back in as a recording on rebuild."""
+    rec_dir = tmp_path / "recordings"
+    rec_dir.mkdir()
+    (rec_dir / "cisco-stackwise-3member.json").write_text(json.dumps(load_recording("cisco-stackwise-3member")))
+    (rec_dir / "manifest.json").write_text(json.dumps([{"name": "stale", "signature": {}}]))
+    monkeypatch.setattr(store, "RECORDINGS_DIR", rec_dir)
+    monkeypatch.setattr(store, "MANIFEST_PATH", rec_dir / "manifest.json")
+
+    _run(**{"rebuild_manifest": True})
+
+    manifest = json.loads((rec_dir / "manifest.json").read_text())
+    assert [e["name"] for e in manifest] == ["cisco-stackwise-3member"]
+
+
+def test_rebuild_manifest_refuses_to_wipe_when_no_recordings(tmp_path, monkeypatch):
+    """In a wheel install the recordings aren't packaged (only manifest.json ships), so --rebuild-manifest finds zero recordings; it must refuse rather than overwrite the shipped manifest with an empty list."""
+    rec_dir = tmp_path / "recordings"
+    rec_dir.mkdir()
+    manifest_path = rec_dir / "manifest.json"
+    original = [{"name": "cisco-stackwise-3member", "signature": {"os": "os-abc123"}}]
+    manifest_path.write_text(json.dumps(original))  # a populated, shipped manifest...
+    # ...but NO recording JSON fixtures alongside it (the wheel-install situation).
+    monkeypatch.setattr(store, "RECORDINGS_DIR", rec_dir)
+    monkeypatch.setattr(store, "MANIFEST_PATH", manifest_path)
+
+    with pytest.raises(CommandError, match="No recordings found"):
+        _run(**{"rebuild_manifest": True})
+
+    # The shipped manifest is left intact, not wiped to [].
+    assert json.loads(manifest_path.read_text()) == original

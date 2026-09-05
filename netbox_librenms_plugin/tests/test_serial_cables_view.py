@@ -809,7 +809,10 @@ class TestNormalCableLinkQueryBound:
             view.request = request
             with CaptureQueriesContext(connection) as captured:
                 view.enrich_links_data(
-                    selected_links, local_device, server_key=configured_server_key(), sync_device=local_device
+                    selected_links,
+                    local_device,
+                    server_key=configured_server_key(),
+                    sync_device=local_device,
                 )
             return len(captured)
 

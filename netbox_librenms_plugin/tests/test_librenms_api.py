@@ -2351,6 +2351,26 @@ class TestGetPortStack:
             assert success is False, f"{bad!r} should fail"
             assert "mappings" in data
 
+    @pytest.mark.parametrize(
+        "mapping",
+        [
+            {"high_port_id": 1},
+            {"low_port_id": 2},
+        ],
+    )
+    def test_mapping_without_both_port_ids_fails_closed(self, mock_librenms_api, librenms_server, mapping):
+        """Each mapping must identify both relationship endpoints."""
+        librenms_server.register(
+            "/api/v0/devices/5/port_stack",
+            {"status": "ok", "mappings": [mapping]},
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, data = mock_librenms_api.get_port_stack(5)
+
+        assert success is False
+        assert "mappings" in data
+
     def test_non_object_payload_fails_not_empty(self, mock_librenms_api, librenms_server):
         """A non-object top-level payload (list/string/null) is malformed, not 'no relationships'."""
         path = "/api/v0/devices/5/port_stack"
@@ -3070,6 +3090,18 @@ class TestResolvePortRelationships:
         stack = [{"high_port_id": 501, "low_port_id": 502}]
         result = mock_librenms_api.resolve_port_relationships(ports, stack, lag_patterns={})
         assert result == {"lag_members": {501: 502}, "sub_interfaces": {}}
+
+    def test_none_ports_and_port_stack_return_empty_maps(self, mock_librenms_api):
+        """A 0-port device can surface ports/port_stack as None (e.g. `ports_data["ports"]` is null on a 0-port iosxr device); resolution must treat that as 'nothing to resolve', not crash iterating None."""
+        # ports is None (null "ports" body), port_stack a valid list — must not raise.
+        result = mock_librenms_api.resolve_port_relationships(None, NOKIA_PORT_STACK[:1], lag_patterns={})
+        assert result == {"lag_members": {}, "sub_interfaces": {}}
+        # port_stack is None (null "mappings"), ports a valid list — must not raise.
+        result = mock_librenms_api.resolve_port_relationships(NOKIA_PORTS, None, lag_patterns={})
+        assert result == {"lag_members": {}, "sub_interfaces": {}}
+        # Both None — the full 0-port shape.
+        result = mock_librenms_api.resolve_port_relationships(None, None, lag_patterns={})
+        assert result == {"lag_members": {}, "sub_interfaces": {}}
 
     @pytest.mark.django_db
     def test_db_patterns_scoped_to_device_os(self, mock_librenms_api):
