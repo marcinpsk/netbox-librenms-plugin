@@ -417,7 +417,7 @@ class SingleModuleVerifyView(
             if parent_idx is not None:
                 children_by_parent.setdefault(parent_idx, []).append(inventory_item)
 
-        ignore_rules = get_enabled_ignore_rules()
+        ignore_rules = get_enabled_ignore_rules(manufacturer)
         device_serial = (getattr(selected_device, "serial", None) or "").strip()
         ignore_cache = {
             inventory_item["entPhysicalIndex"]: _check_ignore_rules(
