@@ -222,6 +222,27 @@ Rules are **suggest-only** — no module is installed automatically. The user cl
 
 ---
 
+## Serial Sensor Types
+
+Console servers expose their serial lines as LibreNMS **state sensors**, not interface-table rows. A Serial Sensor Type entry makes one vendor's `sensor_type` recognized by the Cables tab's serial console-port sync and names the matching local ConsoleServerPorts (`{N}` = the sensor's port number).
+
+Ships pre-seeded with Avocent ACS (`acsSerialPortTable` → `ttyS{N}`) and Cisco IOS async lines (`OLD-CISCO-TS-MIB::ltsLineTable` → `Line {N}`). Matching is exact, including case; deleting a row stops recognizing that vendor (there is no hidden fallback). See [Cable Sync](cable_sync.md) for the full serial-ports flow.
+
+**Fields:**
+- `sensor_type` — the LibreNMS sensor_type, matched exactly (case-sensitive), case-insensitively unique
+- `port_name_pattern` — local ConsoleServerPort name template; must contain `{N}`
+- `description` — optional free text; included in the YAML export
+
+**YAML format:**
+
+```yaml
+- sensor_type: acsSerialPortTable
+  port_name_pattern: "ttyS{N}"
+  description: "Avocent ACS serial lines"
+```
+
+---
+
 ## Bulk Import / Export
 
 All mapping types support NetBox's standard bulk YAML import. Click the **Import** button next to any mapping list. You can also export existing mappings as YAML for backup or cross-environment migration using the **Export** action on the list page.

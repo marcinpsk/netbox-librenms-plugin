@@ -10,6 +10,7 @@ from django.db import models
 from django.db.models.functions import Lower
 from django.urls import reverse
 from netbox.models import NetBoxModel
+from utilities.fields import ColorField
 
 from netbox_librenms_plugin.utils import validate_regex_field
 
@@ -30,7 +31,8 @@ def _trim_python_whitespace(expression):
 
 
 def _validate_replacement_template(compiled: re.Pattern, replacement: str) -> None:
-    """Verify that *replacement* is a valid back-reference template for *compiled*.
+    """
+    Verify that *replacement* is a valid back-reference template for *compiled*.
 
     ``re.sub(pattern, replacement, test_string)`` only evaluates group references
     when the pattern actually matches the test string.  Using the pattern text
@@ -43,7 +45,13 @@ def _validate_replacement_template(compiled: re.Pattern, replacement: str) -> No
     references are validated correctly), guaranteeing a match and ensuring all
     back-references are exercised.
 
-    Raises ``re.error`` or ``IndexError`` if the replacement is invalid.
+    Args:
+        compiled (re.Pattern): The compiled pattern whose capture groups the template can reference.
+        replacement (str): The replacement template to validate.
+
+    Raises:
+        re.error: If the replacement is invalid.
+        IndexError: If the replacement is invalid.
     """
     n = compiled.groups
     if n == 0:
@@ -98,6 +106,26 @@ class LibreNMSSettings(models.Model):
     remember_interface_name_per_platform = models.BooleanField(
         default=False,
         help_text="Remember each user's ifName or ifDescr choice separately for each device platform",
+    )
+
+    # Cable-sync provenance settings. DB/UI-managed (Settings page) rather than PLUGINS_CONFIG,
+    # so changing them needs no NetBox restart. This uses the same split as the
+    # SerialSensorTypePattern rows.
+    cable_sync_tag = models.CharField(
+        max_length=100,
+        default="librenms",
+        help_text="Provenance tag added to cables that cable sync creates or adopts",
+    )
+
+    cable_sync_tag_color = ColorField(
+        default="009688",
+        help_text="Color of the auto-created provenance tag and of the cables themselves",
+    )
+
+    cable_sync_description = models.CharField(
+        max_length=200,
+        default="Synced from LibreNMS",
+        help_text="Cable description; the acting server key is appended, e.g. 'Synced from LibreNMS (production)'",
     )
 
     def save(self, *args, **kwargs):
@@ -1056,6 +1084,12 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
         not re-globalize every vendor's regex); otherwise the patterns whose ``librenms_os``
         matches after the same trim/lower normalization as the database constraint. Patterns
         that fail to compile are skipped and logged.
+
+        Args:
+            device_os (str | None): The LibreNMS OS name, or None to load every stored pattern.
+
+        Returns:
+            list[re.Pattern]: The compiled patterns that apply to the specified OS.
         """
         queryset = cls._patterns_for_os_queryset(device_os)
         if queryset is None:
@@ -1175,3 +1209,86 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
 
     def __str__(self):
         return f"{self.librenms_os} -> {self.lag_name_pattern}"
+
+
+class SerialSensorTypePattern(FullCleanOnSaveMixin, NetBoxModel):
+    """
+    Maps a LibreNMS ``sensor_type`` to the local ConsoleServerPort name pattern for serial rows.
+
+    Console servers expose their serial lines as state sensors (not ifTable rows); a row here
+    makes a vendor's ``sensor_type`` recognized by the Cables tab's serial mapper and names the
+    matching local ports (``{N}`` = the sensor's port number). Ships seeded with Avocent ACS
+    (``acsSerialPortTable`` -> ``ttyS{N}``) and Cisco IOS async lines (``OLD-CISCO-TS-MIB::ltsLineTable`` ->
+    ``Line {N}``). Deleting a row disables that vendor — there is no code-level fallback map.
+    """
+
+    sensor_type = models.CharField(
+        max_length=100,
+        help_text=(
+            "LibreNMS sensor_type identifying a vendor's serial-port state sensors "
+            "(e.g. 'acsSerialPortTable', 'OLD-CISCO-TS-MIB::ltsLineTable'). Matching is exact, including case."
+        ),
+    )
+    port_name_pattern = models.CharField(
+        max_length=100,
+        default="ttyS{N}",
+        help_text=(
+            "Local ConsoleServerPort name template; {N} is replaced by the sensor's port number. Example: ttyS{N}"
+        ),
+    )
+    description = models.TextField(blank=True)
+
+    def clean(self):
+        """Validate sensor_type is non-blank (case preserved) and the pattern carries {N}."""
+        super().clean()
+        sensor_type = (self.sensor_type or "").strip()
+        if not sensor_type:
+            raise ValidationError({"sensor_type": "sensor_type must not be blank."})
+        # Do NOT lowercase: recognition compares against LibreNMS payload values exactly
+        # (map_sensors_to_serial_links keys its type map by the raw sensor_type string).
+        self.sensor_type = sensor_type
+        pattern = (self.port_name_pattern or "").strip()
+        if "{N}" not in pattern:
+            raise ValidationError(
+                {
+                    "port_name_pattern": (
+                        "Pattern must contain the {N} port-number placeholder — without it "
+                        "every port on the device would get the same name."
+                    )
+                }
+            )
+        self.port_name_pattern = pattern
+
+    def get_absolute_url(self):
+        """Return URL for this pattern's detail page."""
+        return reverse("plugins:netbox_librenms_plugin:serialsensortypepattern_detail", args=[self.pk])
+
+    def to_yaml(self):
+        data = {
+            "sensor_type": self.sensor_type,
+            "port_name_pattern": self.port_name_pattern,
+            "description": self.description,
+        }
+        return yaml.dump(data, sort_keys=False)
+
+    class Meta:
+        """Meta options for SerialSensorTypePattern."""
+
+        ordering = ["sensor_type"]
+        verbose_name = "Serial Sensor Type"
+        verbose_name_plural = "Serial Sensor Types"
+        constraints = [
+            # Case-insensitive uniqueness even though matching is exact-case: a case-variant of
+            # an existing type could never match real payloads alongside it, so the near-dupe is
+            # almost certainly a typo — refuse it at the DB level instead of silently keeping a
+            # row that can never fire. Use the same trim expression as PortStackLagPattern's
+            # migration 0014 constraint. A write that skips clean(), such as bulk_create, could
+            # otherwise park a padded near-duplicate next to the real row.
+            models.UniqueConstraint(
+                Lower(_trim_python_whitespace("sensor_type")),
+                name="unique_serialsensortypepattern_sensor_type_ci",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.sensor_type} -> {self.port_name_pattern}"

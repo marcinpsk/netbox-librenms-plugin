@@ -12,6 +12,7 @@ from netbox_librenms_plugin.models import (
     NormalizationRule,
     PlatformMapping,
     PortStackLagPattern,
+    SerialSensorTypePattern,
 )
 
 
@@ -363,6 +364,40 @@ class PortStackLagPatternTable(NetBoxTable):
             "librenms_os",
             "lag_name_pattern",
             "sap_name_pattern",
+            "description",
+            "actions",
+        )
+        attrs = {"class": "table table-hover table-headings table-striped"}
+
+
+class SerialSensorTypePatternTable(NetBoxTable):
+    """Table for displaying SerialSensorTypePattern data."""
+
+    # Same rationale as PortStackLagPatternTable: keep NetBoxTable's default pk ToggleColumn
+    # (input name="pk") — only generic NetBox views and BulkExportYAMLView render this table,
+    # and they all read request.POST.getlist("pk").
+    sensor_type = tables.Column(verbose_name="Sensor Type", linkify=True)
+    port_name_pattern = tables.Column(verbose_name="Port Name Pattern")
+    description = tables.Column(verbose_name="Description", linkify=False)
+    actions = columns.ActionsColumn(actions=("edit", "delete"))
+
+    class Meta:
+        """Meta options for SerialSensorTypePatternTable."""
+
+        model = SerialSensorTypePattern
+        fields = (
+            "pk",
+            "id",
+            "sensor_type",
+            "port_name_pattern",
+            "description",
+            "actions",
+        )
+        default_columns = (
+            "pk",
+            "id",
+            "sensor_type",
+            "port_name_pattern",
             "description",
             "actions",
         )

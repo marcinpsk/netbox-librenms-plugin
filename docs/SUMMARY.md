@@ -19,6 +19,7 @@
   * [Out-of-Band Management](usage_tips/oob_management.md)
   * [Interface Mappings](usage_tips/interface_mappings.md)
   * [Module Sync](usage_tips/module_sync.md)
+  * [Cable Sync](usage_tips/cable_sync.md)
   * [Mapping Rules](usage_tips/mapping_rules.md)
 * [Development](development/README.md)
   * [Overview](development/README.md)

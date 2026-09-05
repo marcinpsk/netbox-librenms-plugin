@@ -1041,17 +1041,22 @@ def test_cable_sync_invalidates_other_tabs_after_creating_a_cable(
     """A committed cable must clear comparisons that depend on current topology."""
     _configure_servers(settings)
     device = make_device("cache-cable-writer", librenms_cf={"primary": {"id": 63}})
-    remote_device = make_device("cache-cable-remote")
+    remote_device = make_device("cache-cable-remote", librenms_cf={"primary": {"id": 64}})
     local = make_interface(device, "Ethernet1", iface_type="1000base-t")
     remote = make_interface(remote_device, "Ethernet2", iface_type="1000base-t")
+    set_librenms_device_id(local, 7201, "primary")
+    set_librenms_device_id(remote, 7202, "primary")
+    local.save(update_fields=["custom_field_data"])
+    remote.save(update_fields=["custom_field_data"])
     links_payload = {
         "links": [
             {
                 "local_port_id": 7201,
                 "local_port": local.name,
-                "netbox_local_interface_id": local.pk,
-                "netbox_remote_device_id": remote_device.pk,
-                "netbox_remote_interface_id": remote.pk,
+                "remote_port_id": 7202,
+                "remote_port": remote.name,
+                "remote_device": remote_device.name,
+                "remote_device_id": 64,
             }
         ]
     }
@@ -1061,7 +1066,17 @@ def test_cable_sync_invalidates_other_tabs_after_creating_a_cable(
     client.force_login(make_superuser("cache-cable-writer-user"))
     url = reverse("plugins:netbox_librenms_plugin:sync_device_cables", kwargs={"pk": device.pk})
     with django_capture_on_commit_callbacks(execute=True):
-        response = client.post(url, {"server_key": "primary", "select": "7201"})
+        response = client.post(
+            url,
+            {
+                "server_key": "primary",
+                "select": "7201",
+                "expected_local_id_7201": local.pk,
+                "expected_local_device_id_7201": device.pk,
+                "expected_remote_id_7201": remote.pk,
+                "expected_remote_device_id_7201": remote_device.pk,
+            },
+        )
 
     assert response.status_code == 302
     assert Cable.objects.filter(terminations__termination_id=local.pk).exists()
@@ -1711,8 +1726,8 @@ def test_htmx_module_cache_miss_replaces_active_tab_with_warning(client, setting
 
 
 @pytest.mark.django_db
-def test_partial_cable_refresh_renders_no_syncable_rows(client, settings):
-    """An incomplete cable refresh must not show rows without a backing snapshot."""
+def test_partial_cable_refresh_keeps_rows_from_available_sources(client, settings):
+    """An OOB fetch failure must retain actionable host rows in the cached snapshot."""
     _configure_servers(settings)
     device = make_device(
         "cache-cable-partial",
@@ -1759,10 +1774,13 @@ def test_partial_cable_refresh_renders_no_syncable_rows(client, settings):
         response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
 
     assert response.status_code == 200
-    assert b"Cable refresh was incomplete" in response.content
-    assert b"Sync Selected Cables" not in response.content
-    assert b'name="select"' not in response.content
-    assert cache.get(_cache_key("links", device, "primary")) is None
+    assert b"OOB controller links fetch failed" in response.content
+    assert b"Cable data is incomplete" in response.content
+    assert b"Sync Selected Cables" in response.content
+    assert b'name="select"' in response.content
+    cached = cache.get(_cache_key("links", device, "primary"))
+    assert cached["incomplete_sources"] == ["OOB"]
+    assert cached["links"][0]["local_port_id"] == 7471
 
 
 @pytest.mark.django_db

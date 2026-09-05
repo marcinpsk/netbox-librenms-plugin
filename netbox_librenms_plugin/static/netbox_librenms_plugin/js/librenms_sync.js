@@ -1737,6 +1737,10 @@ function initializeVCMemberSelect() {
             cableSelects.forEach(select => {
                 if (select.tomselect && !select.dataset.cableSelectInitialized) {
                     select.dataset.cableSelectInitialized = 'true';
+                    if (typeof select._lastVerifiedMember === 'undefined') {
+                        const selectedOption = select.querySelector('option[selected]');
+                        select._lastVerifiedMember = selectedOption ? selectedOption.value : select.value;
+                    }
                     select.tomselect.on('change', function (value) {
                         handleCableChange(select, value);
                     });
@@ -2520,18 +2524,65 @@ function handleInterfaceChange(select, value) {
  * @param {string} value - Selected device ID
  */
 function handleCableChange(select, value) {
+    // Resolve the row from the changed <select> itself: other loaded tabs carry their own
+    // tr[data-interface] rows, so a document-wide lookup can land on one of theirs.
+    const row = select.closest('tr');
+    const verifyContext = row?.closest('[data-cable-verify-url]');
+    const verifyUrl = verifyContext?.dataset.cableVerifyUrl;
     const csrfToken = getCsrfToken();
-    if (!csrfToken) return;  // missing token → abort rather than throw on `.value`
+    if (!csrfToken || !row || !verifyUrl) return;
 
-    fetch('/plugins/librenms_plugin/verify-cable/', {
+    if (select._cableVerifyController) {
+        select._cableVerifyController.abort();
+    }
+    const controller = new AbortController();
+    select._cableVerifyController = controller;
+
+    const selection = row.querySelector('td[data-col="selection"] input[name="select"]');
+    if (selection && !selection.dataset.verifyLocked) {
+        selection.dataset.verifyLocked = '1';
+        selection.dataset.wasDisabled = selection.disabled ? '1' : '0';
+        selection.disabled = true;
+    }
+    row.querySelectorAll('td[data-col="actions"] button:not([disabled])').forEach((button) => {
+        button.disabled = true;
+        button.dataset.verifyLocked = '1';
+    });
+
+    const restoreControls = () => {
+        if (selection?.dataset.verifyLocked) {
+            selection.disabled = selection.dataset.wasDisabled === '1';
+            delete selection.dataset.verifyLocked;
+            delete selection.dataset.wasDisabled;
+        }
+        row.querySelectorAll('td[data-col="actions"] button[data-verify-locked]').forEach((button) => {
+            button.disabled = false;
+            delete button.dataset.verifyLocked;
+        });
+        updateBulkActionButton();
+    };
+    const rollbackToLastVerified = () => {
+        if (select._lastVerifiedMember != null) {
+            if (select.tomselect && typeof select.tomselect.setValue === 'function') {
+                select.tomselect.setValue(select._lastVerifiedMember, true);
+            } else {
+                select.value = select._lastVerifiedMember;
+            }
+        }
+        restoreControls();
+    };
+
+    fetch(verifyUrl, {
         method: 'POST',
+        signal: controller.signal,
         headers: {
             'Content-Type': 'application/json',
             'X-CSRFToken': csrfToken
         },
         body: JSON.stringify({
             device_id: value,
-            local_port_id: select.dataset.interface,
+            origin_device_id: verifyContext?.dataset.cableOriginDeviceId || null,
+            row_id: select.dataset.interface,
             server_key: document.querySelector('input[name="server_key"]')?.value || null
         })
     })
@@ -2542,19 +2593,64 @@ function handleCableChange(select, value) {
             return response.json();
         })
         .then(data => {
-            const row = document.querySelector(`tr[data-interface="${select.dataset.rowId}"]`);
-
             if (data.status === 'success' && row) {
                 const formattedRow = data.formatted_row;
-                row.querySelector('td[data-col="local_port"]').innerHTML = formattedRow.local_port;
-                row.querySelector('td[data-col="remote_port"]').innerHTML = formattedRow.remote_port;
-                row.querySelector('td[data-col="remote_device"]').innerHTML = formattedRow.remote_device;
-                row.querySelector('td[data-col="cable_status"]').innerHTML = formattedRow.cable_status;
-                row.querySelector('td[data-col="actions"]').innerHTML = formattedRow.actions;
+                // Replace each cell content if present. A missing cell must not throw here: the
+                // success branch still has to restore the row controls below.
+                const cellMap = {
+                    local_port: formattedRow.local_port,
+                    remote_port: formattedRow.remote_port,
+                    remote_device: formattedRow.remote_device,
+                    cable_status: formattedRow.cable_status,
+                    actions: formattedRow.actions
+                };
+                for (const [col, html] of Object.entries(cellMap)) {
+                    const cell = row.querySelector(`td[data-col="${col}"]`);
+                    if (cell) {
+                        cell.innerHTML = html;
+                    } else {
+                        console.warn(`Cable row missing data-col="${col}" cell — skipping update`);
+                    }
+                }
+                const actionsCell = row.querySelector('td[data-col="actions"]');
+                if (selection) {
+                    delete selection.dataset.verifyLocked;
+                    delete selection.dataset.wasDisabled;
+                    selection.disabled = !formattedRow.can_create_cable;
+                    if (selection.disabled) selection.checked = false;
+                    const expectedValues = {
+                        expected_local_id: formattedRow.expected_local_id,
+                        expected_local_device_id: formattedRow.expected_local_device_id,
+                        expected_remote_id: formattedRow.expected_remote_id,
+                        expected_remote_device_id: formattedRow.expected_remote_device_id
+                    };
+                    Object.entries(expectedValues).forEach(([prefix, expectedValue]) => {
+                        const expectedName = `${prefix}_${select.dataset.interface}`;
+                        let expectedInput = row.querySelector(`input[name="${expectedName}"]`);
+                        if (!expectedInput) {
+                            expectedInput = document.createElement('input');
+                            expectedInput.type = 'hidden';
+                            expectedInput.name = expectedName;
+                            selection.closest('td').appendChild(expectedInput);
+                        }
+                        expectedInput.value = expectedValue || '';
+                    });
+                    updateBulkActionButton();
+                }
+                if (typeof htmx !== 'undefined' && actionsCell) {
+                    htmx.process(actionsCell);
+                }
+                select._lastVerifiedMember = value;
+                restoreControls();
+            } else {
+                console.error('Cable verification rejected:', data.error || data.message || 'Unknown error');
+                rollbackToLastVerified();
             }
         })
         .catch(error => {
+            if (error.name === 'AbortError') return;
             console.error('Error verifying cable:', error.message);
+            rollbackToLastVerified();
         });
 }
 
@@ -3285,6 +3381,17 @@ function initializeVCReportButtons() {
                 });
         });
     });
+}
+
+/**
+ * Show the shared #htmx-modal. Global companion to closeHtmxModal() for inline scripts
+ * shipped inside OOB-swapped modal content: htmx 2.x fires no afterSettle targeting an
+ * innerHTML OOB swap's target, so the page's afterSettle auto-show handler never sees
+ * OOB-delivered modal content — the OOB block calls this directly instead.
+ */
+function openHtmxModal() {
+    updateHtmxModalLabel();
+    showModal(document.getElementById('htmx-modal'));
 }
 
 function closeHtmxModal() {

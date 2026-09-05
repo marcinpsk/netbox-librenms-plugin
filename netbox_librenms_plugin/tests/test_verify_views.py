@@ -72,21 +72,48 @@ class TestSingleCableVerifyView:
         return view
 
     @pytest.mark.django_db
-    @patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device")
-    @patch("netbox_librenms_plugin.views.base.cables_view.cache")
-    def test_vc_no_resolvable_sync_device_returns_empty_row(self, mock_cache, mock_sync):
-        """VC where get_librenms_sync_device returns None -> empty row, no crash."""
-        device = _real_vc_device("cbl-nosync")
-        mock_sync.return_value = None
+    def test_vc_no_resolvable_sync_device_falls_back_to_the_page_device(self):
+        """Verify a virtual chassis without a resolvable sync member reads the authorized page device snapshot."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_interface, make_virtual_chassis_members
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
+
+        _virtual_chassis, (device, _sibling) = make_virtual_chassis_members("cbl-nosync")
+        device.vc_position = None
+        device.save(update_fields=["vc_position"])
+        assert get_librenms_sync_device(device, server_key="default") is None
+
+        interface = make_interface(device, "Gi0/42")
         view, request = _real_verify_view(
-            SingleCableVerifyView, {"device_id": device.pk, "local_port_id": "42"}, _verify_superuser("cbl-nosync")
+            SingleCableVerifyView, {"device_id": device.pk, "row_id": "42"}, _verify_superuser("cbl-nosync")
         )
-        response = view.post(request)
+        cache_key = view.get_cache_key(device, "links", "default")
+        cache.set(
+            cache_key,
+            {
+                "links": [
+                    {
+                        "local_port": interface.name,
+                        "local_port_id": 42,
+                        "remote_port": "",
+                        "remote_device": "",
+                        "_source": "main",
+                    }
+                ]
+            },
+            timeout=300,
+        )
+
+        try:
+            response = view.post(request)
+        finally:
+            cache.delete(cache_key)
 
         data = json.loads(response.content)
         assert data["status"] == "success"
         assert data["formatted_row"]["cable_status"] == "Missing Ports"
-        mock_cache.get.assert_not_called()
+        assert f"/dcim/interfaces/{interface.pk}/" in data["formatted_row"]["local_port"]
 
     @pytest.mark.django_db
     @patch("netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device")
@@ -2105,3 +2132,59 @@ def test_verify_rejects_a_device_id_beyond_the_bigint_range():
 
     assert response.status_code == 400
     assert json_module.loads(response.content)["message"] == "No device ID provided"
+
+
+@pytest.mark.django_db
+def test_cable_verify_selects_the_cached_row_named_by_row_id():
+    """Verify a populated cable cache selects the row named by row_id instead of returning the default row."""
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.utils import assign_cable_row_ids
+    from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
+
+    device = _make_gate_device(name="cbl-rowid-device")
+    links = [
+        {
+            "local_port_id": 10,
+            "local_port": "ttyS0",
+            "remote_port": "console-A",
+            "remote_hostname": "peer-a",
+            "remote_port_id": 20,
+        },
+        {
+            "local_port_id": 11,
+            "local_port": "ttyS1",
+            "remote_port": "console-B",
+            "remote_hostname": "peer-b",
+            "remote_port_id": 21,
+        },
+    ]
+    with_row_ids = assign_cable_row_ids(links)
+    second_row_id = with_row_ids[1]["row_id"]
+    assert second_row_id != with_row_ids[0]["row_id"], "the two rows must be distinguishable"
+
+    view_probe = SingleCableVerifyView()
+    cache_key = view_probe.get_cache_key(device, "links", "default")
+    cache.set(cache_key, {"links": links}, timeout=300)
+
+    def _render(row_id, tag):
+        view, request = _real_verify_view(
+            SingleCableVerifyView,
+            {"device_id": device.pk, "row_id": row_id},
+            _verify_superuser(f"cbl-rowid-{tag}"),
+        )
+        response = view.post(request)
+        data = json.loads(response.content)
+        assert data["status"] == "success"
+        return json.dumps(data["formatted_row"])
+
+    try:
+        second = _render(second_row_id, "second")
+        first = _render(with_row_ids[0]["row_id"], "first")
+    finally:
+        cache.delete(cache_key)
+
+    # Each row_id must select its own row: asserting only one direction would pass just as well
+    # if the view always returned the same row.
+    assert "console-B" in second and "console-A" not in second
+    assert "console-A" in first and "console-B" not in first

@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-
 SCRIPT_PATH = Path(__file__).parents[2] / "static" / "netbox_librenms_plugin" / "js" / "librenms_sync.js"
 TEMPLATE_DIR = Path(__file__).parents[2] / "templates" / "netbox_librenms_plugin"
 STYLE_PATH = Path(__file__).parents[2] / "static" / "netbox_librenms_plugin" / "css" / "librenms_sync.css"
@@ -2198,3 +2197,227 @@ def test_invalidation_reason_includes_relative_time(page):
     )
 
     assert "ago" in page.locator("#ipaddress-sync-content").inner_text()
+
+
+def test_failed_cable_verify_restores_controls_without_a_member_baseline(page):
+    """A failed first verification must not leave the row controls disabled."""
+    html = """
+        <input type="hidden" name="csrfmiddlewaretoken" value="test-csrf">
+        <div data-cable-verify-url="https://plugin.example.com/verify-cable/">
+          <table>
+            <tr data-interface="row-1">
+              <td data-col="selection"><input type="checkbox" name="select"></td>
+              <td data-col="device_selection">
+                <select id="member" data-row-id="row-1" data-interface="row-1">
+                  <option value="1">Member one</option>
+                  <option value="2" selected>Member two</option>
+                </select>
+              </td>
+              <td data-col="actions"><button type="button">Sync Cable</button></td>
+            </tr>
+          </table>
+        </div>
+    """
+
+    pending_route = None
+
+    def hold_verify_route(route):
+        nonlocal pending_route
+        pending_route = route
+
+    page.route("https://plugin.example.com/verify-cable/", hold_verify_route)
+    page.set_content(html)
+    _add_page_scripts(page)
+    # handleCableChange disables the row before it calls fetch, so waiting on the disabled
+    # controls alone can outrun the route handler that captures pending_route.
+    with page.expect_request("https://plugin.example.com/verify-cable/"):
+        page.evaluate(
+            """
+            () => {
+                const select = document.querySelector('#member');
+                handleCableChange(select, select.value);
+            }
+            """
+        )
+    page.wait_for_function(
+        """
+        () => {
+            const row = document.querySelector('#member')?.closest('tr');
+            const selection = row?.querySelector('input[name="select"]');
+            const action = row?.querySelector('td[data-col="actions"] button');
+            return selection?.disabled && action?.disabled;
+        }
+        """
+    )
+
+    assert pending_route is not None
+    pending_route.fulfill(status=503, body="verification unavailable")
+
+    page.wait_for_function(
+        """
+        () => {
+            const row = document.querySelector('#member')?.closest('tr');
+            const selection = row?.querySelector('input[name="select"]');
+            const action = row?.querySelector('td[data-col="actions"] button');
+            return selection && action && !selection.disabled && !action.disabled;
+        }
+        """
+    )
+
+    row = page.locator("#member").locator("xpath=ancestor::tr[1]")
+    assert not row.locator('input[name="select"]').is_disabled()
+    assert not row.locator('td[data-col="actions"] button').is_disabled()
+
+
+def _cable_row_sharing_its_identity_html():
+    """Return one cable row whose row identity is also carried by an earlier loaded table."""
+    return """
+        <input type="hidden" name="csrfmiddlewaretoken" value="token">
+        <table id="librenms-interface-table"><tbody>
+          <tr data-interface="7018">
+            <td data-col="selection"><input type="checkbox" name="select"></td>
+            <td data-col="cable_status">interface row</td>
+          </tr>
+        </tbody></table>
+        <div data-cable-verify-url="https://plugin.example.com/verify" data-cable-origin-device-id="7">
+          <table id="librenms-cable-table-vc"><tbody>
+            <tr data-interface="7018">
+              <td data-col="selection"><input type="checkbox" name="select"></td>
+              <td data-col="device_selection">
+                <select id="device_selection_7018" data-row-id="7018" data-interface="7018">
+                  <option value="7" selected>Member 7</option>
+                </select>
+              </td>
+              <td data-col="local_port">Ethernet1</td>
+              <td data-col="remote_port">Ethernet2</td>
+              <td data-col="remote_device">remote</td>
+              <td data-col="cable_status">Not connected</td>
+              <td data-col="actions"><button id="row-action">Sync</button></td>
+            </tr>
+          </tbody></table>
+        </div>
+    """
+
+
+def test_cable_verify_updates_the_row_that_owns_the_changed_select(page):
+    """A row identity another loaded table also carries must not divert the verify."""
+    page.set_content(_cable_row_sharing_its_identity_html())
+    _add_page_scripts(page)
+    page.evaluate(
+        """() => {
+            window.fetch = () => Promise.resolve({
+                ok: true,
+                json: () => Promise.resolve({
+                    status: 'success',
+                    formatted_row: {
+                        local_port: 'Ethernet1',
+                        remote_port: 'Ethernet2',
+                        remote_device: 'remote',
+                        cable_status: 'Connected',
+                        actions: '<button id="new-action">Resync</button>',
+                        can_create_cable: true
+                    }
+                })
+            });
+            handleCableChange(document.getElementById('device_selection_7018'), '7');
+        }"""
+    )
+
+    page.wait_for_selector("#new-action", timeout=5000)
+    cable_row = page.locator("#librenms-cable-table-vc tr")
+    assert cable_row.locator('td[data-col="cable_status"]').inner_text() == "Connected"
+    interface_row = page.locator("#librenms-interface-table tr")
+    assert interface_row.locator('td[data-col="cable_status"]').inner_text() == "interface row"
+
+
+def _cable_row_html(*, with_actions_cell):
+    """Return one cable row, optionally rendered without its actions cell."""
+    actions_cell = '<td data-col="actions"><button id="row-action">Sync</button></td>' if with_actions_cell else ""
+    return f"""
+        <input type="hidden" name="csrfmiddlewaretoken" value="token">
+        <div data-cable-verify-url="https://plugin.example.com/verify" data-cable-origin-device-id="7">
+          <table id="librenms-cable-table"><tbody>
+            <tr data-interface="row-1">
+              <td data-col="selection"><input type="checkbox" name="select"></td>
+              <td data-col="device_selection">
+                <select id="member-select" data-row-id="row-1" data-interface="row-1">
+                  <option value="7" selected>Member 7</option>
+                </select>
+              </td>
+              <td data-col="local_port">Ethernet1</td>
+              <td data-col="remote_port">Ethernet2</td>
+              <td data-col="remote_device">remote</td>
+              <td data-col="cable_status">Not connected</td>
+              {actions_cell}
+            </tr>
+          </tbody></table>
+        </div>
+    """
+
+
+def test_cable_verify_completes_for_a_row_rendered_without_its_actions_cell(page):
+    """A row missing the actions cell must still complete the verify instead of erroring out."""
+    page.set_content(_cable_row_html(with_actions_cell=False))
+    _add_page_scripts(page)
+    page.evaluate(
+        """() => {
+            window.warnings = [];
+            window.errors = [];
+            console.warn = (message) => window.warnings.push(String(message));
+            console.error = (message) => window.errors.push(String(message));
+            window.fetch = () => Promise.resolve({
+                ok: true,
+                json: () => Promise.resolve({
+                    status: 'success',
+                    formatted_row: {
+                        local_port: 'Ethernet1',
+                        remote_port: 'Ethernet2',
+                        remote_device: 'remote',
+                        cable_status: 'Connected',
+                        actions: '<button>Sync</button>',
+                        can_create_cable: true
+                    }
+                })
+            });
+            handleCableChange(document.getElementById('member-select'), '7');
+        }"""
+    )
+
+    page.wait_for_function("document.getElementById('member-select')._lastVerifiedMember !== undefined")
+    assert page.evaluate("document.getElementById('member-select')._lastVerifiedMember") == "7"
+    assert page.locator('td[data-col="cable_status"]').inner_text() == "Connected"
+    assert page.evaluate("window.errors") == []
+    assert any('data-col="actions"' in warning for warning in page.evaluate("window.warnings"))
+    assert page.evaluate("document.querySelector('input[name=\"select\"]').disabled") is False
+
+
+def test_cable_verify_updates_every_cell_of_a_complete_row(page):
+    """The guarded update must still replace each cell a rendered row carries."""
+    page.set_content(_cable_row_html(with_actions_cell=True))
+    _add_page_scripts(page)
+    page.evaluate(
+        """() => {
+            window.warnings = [];
+            console.warn = (message) => window.warnings.push(String(message));
+            window.fetch = () => Promise.resolve({
+                ok: true,
+                json: () => Promise.resolve({
+                    status: 'success',
+                    formatted_row: {
+                        local_port: 'Ethernet9',
+                        remote_port: 'Ethernet8',
+                        remote_device: 'other-remote',
+                        cable_status: 'Connected',
+                        actions: '<button id="new-action">Resync</button>',
+                        can_create_cable: true
+                    }
+                })
+            });
+            handleCableChange(document.getElementById('member-select'), '7');
+        }"""
+    )
+
+    page.wait_for_selector("#new-action")
+    assert page.locator('td[data-col="local_port"]').inner_text() == "Ethernet9"
+    assert page.locator('td[data-col="remote_device"]').inner_text() == "other-remote"
+    assert page.evaluate("window.warnings") == []

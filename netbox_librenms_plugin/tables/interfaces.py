@@ -105,7 +105,7 @@ class LibreNMSInterfaceTable(tables.Table):
                 "data-enabled": lambda record: (
                     str(record.get("ifAdminStatus")).lower() if record.get("ifAdminStatus") is not None else ""
                 ),
-                "data-port-id": lambda record: str(record.get("port_id", "")),
+                "data-port-id": lambda record: str(record.get("port_id") or ""),
                 "data-member-of-lag": lambda record: str(record.get("librenms_lag_port_id") or ""),
                 "data-lag-name": lambda record: str(record.get("librenms_lag_name") or ""),
                 "data-parent-port-id": lambda record: str(record.get("librenms_parent_port_id") or ""),
@@ -168,6 +168,7 @@ class LibreNMSInterfaceTable(tables.Table):
     def render_vlans(self, value, record):
         """
         Render VLANs column showing untagged and tagged VLANs.
+
         Format: "100(U), 200(T), 300(T)" or "100(U)" for access ports.
 
         Color logic:
@@ -179,6 +180,13 @@ class LibreNMSInterfaceTable(tables.Table):
         Compact display: shows up to 3 VLANs inline, then summarizes.
         An edit button opens the VLAN detail modal.
         Hidden inputs store per-VLAN group assignments for form submission.
+
+        Args:
+            value (object): The column value.
+            record (dict): The interface table row.
+
+        Returns:
+            SafeString: The rendered VLAN summary and controls.
         """
         untagged = record.get("untagged_vlan")
         tagged = record.get("tagged_vlans", [])
@@ -214,7 +222,7 @@ class LibreNMSInterfaceTable(tables.Table):
         # _sync_interface_vlans() reads vlan_group_<canonical port id>_<vid>, so a raw value such
         # as "010" would render a key the view never looks up and the override would be dropped.
         canonical_port_id = normalize_librenms_port_id(record.get("port_id"))
-        row_key = str(canonical_port_id) if canonical_port_id is not None else str(record.get("port_id", ""))
+        row_key = str(canonical_port_id) if canonical_port_id is not None else str(record.get("port_id") or "")
 
         # Build compact colored summary (show up to 3 VLANs, summarize rest)
         vlan_group_map = record.get("vlan_group_map", {})
@@ -531,6 +539,9 @@ class LibreNMSInterfaceTable(tables.Table):
         :meth:`VCInterfaceTable.render_device_selection` (the per-row member dropdown) need the
         member list; resolving it here keeps ``members.all()`` to a single query per render
         instead of one per row (an N+1 on a large chassis table).
+
+        Returns:
+            list[Device]: The chassis members available to this table.
         """
         device = self.device
         if device is None or not getattr(device, "virtual_chassis", None):
@@ -550,8 +561,11 @@ class LibreNMSInterfaceTable(tables.Table):
 
         :meth:`_resolve_row_member_id` is hit per row from BOTH the relationship sync button and
         the VC member dropdown, and its name-based fallback otherwise issues a
-        ``members.get(vc_position=...)`` query per unresolved row — quadratic query load on a
-        large chassis table. Resolving from this map keeps it O(1) per row (one prefetch total).
+        ``members.get(vc_position=...)`` query per unresolved row. This creates a quadratic query
+        load on a large chassis table. Resolving from this map keeps it O(1) per row (one prefetch total).
+
+        Returns:
+            dict[int, Device]: The chassis members keyed by virtual chassis position.
         """
         return {member.vc_position: member for member in self._vc_members if member.vc_position is not None}
 
@@ -567,6 +581,12 @@ class LibreNMSInterfaceTable(tables.Table):
         (1) the matched NetBox interface's device, (2) the row-selected object stamped during
         enrichment or the cross-page verify path, (3) the shared guarded name heuristic for an
         unbound physical row, (4) the viewed device.
+
+        Args:
+            record (dict): The interface table row whose owner is resolved.
+
+        Returns:
+            int | str: The owning object's ID, or an empty string when no device is available.
         """
         nb_iface = record.get("netbox_interface")
         if nb_iface is not None and getattr(nb_iface, "device_id", None):
@@ -661,7 +681,7 @@ class LibreNMSInterfaceTable(tables.Table):
             and target_resolvable
             and not self.migrated_to_marker
         ):
-            port_id = record.get("port_id", "")
+            port_id = record.get("port_id") or ""
             # Resolve the owning member the same way the VC member dropdown does, so the button's
             # data-object-id and the dropdown agree (the JS posts the dropdown value, so a
             # disagreement would 404). See _resolve_row_member_id.
@@ -775,11 +795,19 @@ class LibreNMSInterfaceTable(tables.Table):
         return format_html('<span class="text-danger">{}</span>', combined_display)
 
     def get_interface_mapping(self, librenms_type, speed):
-        """Get interface type mapping based on type and speed.
+        """
+        Get interface type mapping based on type and speed.
 
         Resolves from a single in-memory snapshot of the (small, static)
         InterfaceTypeMapping table, built on first use, so a table render doesn't
         issue 1-2 queries per interface row.
+
+        Args:
+            librenms_type (str): The LibreNMS interface type.
+            speed (int | None): The interface speed in kilobits per second.
+
+        Returns:
+            InterfaceTypeMapping | None: The exact or type-only mapping, if one exists.
         """
         if getattr(self, "_interface_type_mapping_cache", None) is None:
             cache = {}
@@ -907,15 +935,23 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
 
     def render_device_selection(self, value, record):
         """
-        Renders a device selection dropdown for virtual chassis members.
-        Determines the selected member based on interface type and name.
-        Returns an HTML select element with appropriate member options.
+        Render a device selection dropdown for virtual chassis members.
+
+        The method determines the selected member based on interface type and name.
+        It returns an HTML select element with appropriate member options.
+
+        Args:
+            value (object): The column value.
+            record (dict): The interface table row.
+
+        Returns:
+            SafeString: The HTML select element with the available member options.
         """
         # Reuse the per-render member prefetch (see _vc_members) so the dropdown doesn't re-query
         # the chassis members for every row (N+1 on a large chassis).
         members = self._vc_members
         interface_name = record.get(self.interface_name_field)
-        port_id = record.get("port_id", "")
+        port_id = record.get("port_id") or ""
 
         # Default the dropdown to the same owner the relationship sync button resolves (matched
         # NetBox interface's device → cross-page selection → name heuristic), so the JS — which

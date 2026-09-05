@@ -27,6 +27,7 @@ RULE_LIST_ROUTES = [
     "normalizationrule_list",
     "carrierautoinstallrule_list",
     "portstacklagpattern_list",
+    "serialsensortypepattern_list",
 ]
 
 

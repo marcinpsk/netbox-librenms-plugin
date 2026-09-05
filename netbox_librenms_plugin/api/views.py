@@ -23,6 +23,7 @@ from netbox_librenms_plugin.filters import (
     NormalizationRuleFilterSet,
     PlatformMappingFilterSet,
     PortStackLagPatternFilterSet,
+    SerialSensorTypePatternFilterSet,
 )
 from netbox_librenms_plugin.jobs import FilterDevicesJob, ImportDevicesJob
 from netbox_librenms_plugin.models import (
@@ -35,6 +36,7 @@ from netbox_librenms_plugin.models import (
     NormalizationRule,
     PlatformMapping,
     PortStackLagPattern,
+    SerialSensorTypePattern,
 )
 
 from .serializers import (
@@ -48,6 +50,7 @@ from .serializers import (
     NormalizationRuleSerializer,
     PlatformMappingSerializer,
     PortStackLagPatternSerializer,
+    SerialSensorTypePatternSerializer,
     SyncJobStatusSerializer,
 )
 
@@ -158,6 +161,16 @@ class PortStackLagPatternViewSet(NetBoxModelViewSet):
 
     queryset = PortStackLagPattern.objects.all()
     serializer_class = PortStackLagPatternSerializer
+
+
+class SerialSensorTypePatternViewSet(NetBoxModelViewSet):
+    """API viewset for SerialSensorTypePattern CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+    filterset_class = SerialSensorTypePatternFilterSet
+
+    queryset = SerialSensorTypePattern.objects.all()
+    serializer_class = SerialSensorTypePatternSerializer
 
 
 @extend_schema(

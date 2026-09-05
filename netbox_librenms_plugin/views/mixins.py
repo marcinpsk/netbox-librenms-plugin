@@ -705,6 +705,26 @@ class LibreNMSAPIMixin:
         # so live fetches and cache writes target the same server.
         return api.server_key
 
+    def rebind_api_for_server_or_default(self, server_key):
+        """
+        Rebind to *server_key*, degrading to the session/default server's RESOLVED key.
+
+        For ACTION paths that must still render something after a failed rebind (a stale tab or a
+        forged form carrying a key that names no configured server). Reading
+        :attr:`active_server_key` alone is not enough there: the rebind failed before binding a
+        client, so it answers the literal ``"default"`` — which in a multi-server setup is not a
+        configured key, and namespaces the cache write under a bogus server no other render reads.
+        The blank rebind goes through the same fail-closed builder, so a misconfigured default
+        degrades to ``active_server_key`` instead of raising.
+
+        Args:
+            server_key (str | None): The requested (untrusted) server key.
+
+        Returns:
+            str: A resolved server key to scope the cache read/write and the re-render to.
+        """
+        return self.rebind_api_for_server(server_key) or self.rebind_api_for_server(None) or self.active_server_key
+
     def resolve_get_render_server_key(self, request, server_key=None):
         """
         Resolve and rebind ``self.librenms_api`` for a GET-render cache read.
@@ -1112,10 +1132,10 @@ class VlanAssignmentMixin:
           precedence over auto-selection.
 
         Args:
-            port (dict): The port record to update.
-            lookup_maps (dict): The VLAN lookup maps used for group selection.
-            device (Device): The device that supplies the scope hierarchy.
-            vlan_group_overrides (dict | None): User-selected VLAN groups keyed by VID.
+            port (dict): The LibreNMS port record to update.
+            lookup_maps (dict): The VLAN lookup maps for the row's device.
+            device (Device): The device used for scope-specific group selection.
+            vlan_group_overrides (dict | None): Optional apply-to-all selections keyed by VID.
         """
         vid_to_groups = lookup_maps.get("vid_to_groups", {})
         untagged_vid = port.get("untagged_vlan")
