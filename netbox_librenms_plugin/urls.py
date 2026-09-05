@@ -134,6 +134,7 @@ from .views import (
     PortStackLagPatternListView,
     PortStackLagPatternView,
     RemoveServerMappingView,
+    SetPreferredServerView,
     SaveUserPrefView,
     SingleCableVerifyView,
     SingleInterfaceVerifyView,
@@ -417,6 +418,11 @@ urlpatterns = [
         "devices/<int:pk>/remove-server-mapping/",
         RemoveServerMappingView.as_view(),
         name="remove_server_mapping",
+    ),
+    path(
+        "devices/<int:pk>/preferred-server/",
+        SetPreferredServerView.as_view(),
+        name="set_preferred_server",
     ),
     path(
         "devices/<int:pk>/convert-legacy-id/",

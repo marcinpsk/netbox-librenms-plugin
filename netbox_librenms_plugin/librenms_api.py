@@ -2,9 +2,11 @@ import logging
 import math
 import urllib.parse
 from dataclasses import dataclass
+from uuid import uuid4
 
 import requests
 from django.core.cache import cache
+from django.db import transaction
 from netbox.plugins import get_plugin_config
 
 # HTTP request timeout constants (in seconds)
@@ -22,6 +24,10 @@ DEVICE_INFO_CACHE_TIMEOUT = 60
 HTTP_NOT_FOUND = 404
 
 logger = logging.getLogger(__name__)
+
+
+class LibreNMSIDConflictError(ValueError):
+    """A LibreNMS device ID is already assigned to another NetBox object."""
 
 
 @dataclass(frozen=True)
@@ -315,9 +321,10 @@ class LibreNMSAPI:
         else:
             # Legacy single-server configuration
             legacy_url = get_plugin_config("netbox_librenms_plugin", "librenms_url")
-            if legacy_url:
+            legacy_token = get_plugin_config("netbox_librenms_plugin", "api_token")
+            if legacy_url and legacy_token:
                 return {"default": f"Default Server ({legacy_url})"}
-            return {"default": "Default Server"}
+            return {}
 
     def get_stored_librenms_id(self, obj, server_key=None):
         """
@@ -430,7 +437,7 @@ class LibreNMSAPI:
         Generate a unique cache key for an object.
 
         Args:
-            obj: NetBox device or VM object
+            obj: NetBox object with model metadata and an optional primary key
             server_key: LibreNMS server key to scope the key to; defaults to this
                 client's bound ``server_key``. Pass an explicit key when reading on
                 behalf of a different (scoped) server than the client is bound to.
@@ -439,25 +446,62 @@ class LibreNMSAPI:
             str: Cache key
         """
         object_type = obj._meta.model_name
+        object_id = obj.pk
+        if object_id is None:
+            object_id = getattr(obj, "_librenms_cache_identity", None)
+            if object_id is None:
+                object_id = f"unsaved-{uuid4().hex}"
+                obj._librenms_cache_identity = object_id
         resolved_key = server_key if server_key is not None else getattr(self, "server_key", "default")
-        return f"librenms_device_id_{object_type}_{obj.pk}_{resolved_key}"
+        return f"librenms_device_id_{object_type}_{object_id}_{resolved_key}"
 
     def _store_librenms_id(self, obj, librenms_id):
         """
-        Store in custom field if available
+        Persist a saved device/VM mapping, or cache the ID for another object.
 
         Args:
-            obj: NetBox device or VM object
+            obj: NetBox object associated with the LibreNMS ID
             librenms_id: LibreNMS device ID
 
         Returns:
             None
         """
-        if "librenms_id" in obj.cf:
-            from netbox_librenms_plugin.utils import set_librenms_device_id
+        from dcim.models import Device
+        from virtualization.models import VirtualMachine
 
-            set_librenms_device_id(obj, librenms_id, self.server_key)
-            obj.save(update_fields=["custom_field_data"])
+        can_persist_mapping = (
+            isinstance(obj, (Device, VirtualMachine))
+            and obj.pk is not None
+            and not obj._state.adding
+            and "librenms_id" in obj.cf
+        )
+        if can_persist_mapping:
+            from netbox_librenms_plugin.utils import (
+                AmbiguousLibreNMSIdError,
+                lock_librenms_id_assignment,
+                set_librenms_device_id,
+            )
+
+            with transaction.atomic():
+                try:
+                    locked_obj, conflict = lock_librenms_id_assignment(
+                        librenms_id,
+                        self.server_key,
+                        owner_queryset=type(obj).objects.all(),
+                        owner_pk=obj.pk,
+                    )
+                except AmbiguousLibreNMSIdError as exc:
+                    # resolve_librenms_id turns only LibreNMSIDConflictError into a user-facing
+                    # message, so an ambiguous claim would otherwise reach the view as a 500.
+                    raise LibreNMSIDConflictError(str(exc)) from None
+                if conflict is not None:
+                    object_label = "VM" if conflict._meta.model_name == "virtualmachine" else "device"
+                    raise LibreNMSIDConflictError(
+                        f"LibreNMS ID {librenms_id} is already assigned to {object_label} '{conflict.name}'"
+                    )
+                set_librenms_device_id(locked_obj, librenms_id, self.server_key)
+                locked_obj.save(update_fields=["custom_field_data"])
+            obj.custom_field_data = locked_obj.custom_field_data
         else:
             # Use cache as fallback
             cache_key = self._get_cache_key(obj)
