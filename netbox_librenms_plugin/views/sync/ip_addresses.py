@@ -16,6 +16,12 @@ from virtualization.models import VirtualMachine, VMInterface
 from netbox_librenms_plugin.constants import is_supported_interface_name_field
 from netbox_librenms_plugin.interface_sync import resolve_or_create_interface_from_port
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix
+from netbox_librenms_plugin.sync_cache import (
+    SyncTab,
+    apply_request_cache_transition,
+    render_sync_cache_miss,
+    schedule_request_cache_mutation,
+)
 from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
     get_librenms_device_id,
@@ -203,6 +209,12 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         )
 
         if not cached_snapshot or not cached_snapshot["ip_addresses"]:
+            if response := render_sync_cache_miss(
+                request,
+                "IP Addresses",
+                retarget="#ipaddress-sync-content",
+            ):
+                return response
             messages.error(request, "Cache has expired. Please refresh the IP data.")
             return self.redirect_to_ip_tab(request, obj)
         cached_ips = cached_snapshot["ip_addresses"]
@@ -247,6 +259,15 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         for error in dict.fromkeys(intent_errors.values()):
             messages.error(request, error)
 
+        if results["mutated"]:
+            schedule_request_cache_mutation(
+                request,
+                obj,
+                SyncTab.IP_ADDRESSES,
+                post_server_key,
+                source_fragment_required=bool(results["conflicts"]),
+            )
+
         if results["conflicts"]:
             conflict_context = {
                 "conflicts": results["conflicts"],
@@ -260,18 +281,20 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             }
             if request.headers.get("HX-Request") != "true":
                 conflict_context["full_page"] = True
-                return render(
+                response = render(
                     request,
                     "netbox_librenms_plugin/ip_address_conflicts_page.html",
                     conflict_context,
                 )
-            return render(
-                request,
-                "netbox_librenms_plugin/htmx/ip_address_conflicts.html",
-                conflict_context,
-            )
+            else:
+                response = render(
+                    request,
+                    "netbox_librenms_plugin/htmx/ip_address_conflicts.html",
+                    conflict_context,
+                )
+            return apply_request_cache_transition(request, response)
 
-        return self.redirect_to_ip_tab(request, obj)
+        return apply_request_cache_transition(request, self.redirect_to_ip_tab(request, obj))
 
     @staticmethod
     def _interface_identity(interface):
@@ -312,11 +335,18 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         return intents, errors
 
     def get_management_ip(self, obj):
-        """Return the LibreNMS management/polling IP for *obj*, or None.
+        """
+        Return the LibreNMS management/polling IP for *obj*, or None.
 
         Used to decide which synced IP (if any) should become the object's
         Primary IP. Best-effort: any lookup failure yields None so the sync
         itself is never blocked.
+
+        Args:
+            obj (Device | VirtualMachine): The object whose management IP to read.
+
+        Returns:
+            str | None: The management/polling IP, or None if the lookup fails or has no result.
         """
         try:
             librenms_id = self.librenms_api.get_librenms_id(obj)
@@ -675,11 +705,22 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         return index, duplicates
 
     def _prelock_ip_hosts(self, request, selected_ips, cached_index, duplicate_cached_rows, force_intents):
-        """Acquire every valid batch host lock in one deterministic order.
+        """
+        Acquire every valid batch host lock in one deterministic order.
 
         The transaction remains open across the batch. Acquire host advisory locks before the
         first Device, virtual-chassis, VM, or interface row lock so opposite row orders cannot
         hold one host lock while waiting for a shared owner scope.
+
+        Args:
+            request (HttpRequest): The request that contains the VRF selections.
+            selected_ips (list[str]): The selected cached IP row identifiers.
+            cached_index (dict[str, dict]): The cached rows indexed by canonical CIDR.
+            duplicate_cached_rows (set[str]): The canonical row identifiers that occur more than once.
+            force_intents (dict[str, dict]): The confirmed IP changes indexed by canonical row identifier.
+
+        Returns:
+            set[str]: The acquired advisory lock identities.
         """
         lock_entries = {}
         for selected_ip in selected_ips:
@@ -1018,11 +1059,25 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         cached_ports_by_id=None,
         interface_name_field=None,
     ):
-        """Create or update IP addresses in NetBox from cached LibreNMS data.
+        """
+        Create or update IP addresses in NetBox from cached LibreNMS data.
 
-        When the "set Primary IP" toggle is on, the synced IP that matches the
-        LibreNMS management IP — and ends up assigned to one of the object's
-        interfaces — is also set as the object's ``primary_ip4``/``primary_ip6``.
+        When the "set Primary IP" toggle is on, the synced IP that matches the LibreNMS management
+        IP and ends up assigned to one of the object's interfaces is also set as the object's
+        ``primary_ip4``/``primary_ip6``.
+
+        Args:
+            request (HttpRequest): The current HTTP request.
+            selected_ips (list[str]): The selected cached IP row identifiers.
+            cached_ips (list[dict]): The cached LibreNMS IP rows.
+            obj (Device | VirtualMachine): The object that owns the target interfaces.
+            object_type (str): The synced object type.
+            force_intents (dict[str, dict] | None): Confirmed IP changes indexed by canonical row identifier.
+            cached_ports_by_id (dict[str, dict] | None): Cached LibreNMS ports indexed by stable port ID.
+            interface_name_field (str | None): The configured LibreNMS interface name field.
+
+        Returns:
+            dict: The per-outcome row lists, errors, conflicts, and batch mutation state.
         """
         results = {
             "created": [],
@@ -1035,7 +1090,9 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             "skipped_no_interface": [],
             "errors": {},
             "conflicts": [],
+            "mutated": False,
         }
+        mutated_rows = set()
 
         set_primary = resolve_set_primary_ip(request)
         mgmt_ip = self.get_management_ip(obj) if set_primary else None
@@ -1060,6 +1117,9 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
         for selected_ip in selected_ips:
             row_id = str(selected_ip)
+            # Collect this row's mutations separately: two raw selections can canonicalize to the
+            # same row_id, so a failing row must not discard a committed row's key.
+            row_mutations = set()
             interface_creation_state_before_row = interface_creation_state
             interface_maps_before_row = (
                 (
@@ -1111,6 +1171,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         )
                         interfaces_by_name[interface.name] = interface
                         interfaces_by_pk[str(interface.pk)] = interface
+                        row_mutations.add(row_id)
 
                     if interface is not None:
                         locked_interface = self._lock_target_interface(obj, interface, interface_creation_state)
@@ -1156,6 +1217,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             vrf=vrf,
                         )
                         results["updated"].append(row_id)
+                        row_mutations.add(row_id)
                     else:
                         ip_obj, outcome, conflict = self._classify_ip_change(
                             row_id=row_id,
@@ -1177,6 +1239,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             results["conflicts"].append(conflict)
                             continue
                         results[outcome].append(row_id)
+                        if outcome in {"created", "updated"}:
+                            row_mutations.add(row_id)
 
                     # Primary-IP auto-match for the management IP. The no-interface case is
                     # handled above (the row was skipped before any write), so here the IP is
@@ -1203,6 +1267,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             results["primary_interface_not_eligible"].append(row_id)
                         elif self._set_primary_ip(obj, ip_obj):
                             results["primary_set"].append(row_id)
+                            row_mutations.add(row_id)
 
             except Exception as exc:
                 if interface_maps_before_row is not None:
@@ -1224,10 +1289,17 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         interface_creation_state["interfaces_by_port_id"].update(
                             {key: list(value) for key, value in interfaces_by_port_id_before.items()}
                         )
+                # The row's savepoint rolled back, so drop only this row's keys.
+                row_mutations.clear()
                 logger.warning("IP sync failed for %s: %s", row_id, exc, exc_info=True)
                 results["failed"].append(row_id)
                 results["errors"][row_id] = str(exc) or exc.__class__.__name__
+            finally:
+                # `finally`, not `else`: the conflict and no-interface paths leave the row with
+                # `continue`, which skips an `else` clause but keeps their committed writes.
+                mutated_rows.update(row_mutations)
 
+        results["mutated"] = bool(mutated_rows)
         return results
 
     def display_sync_results(self, request, results):

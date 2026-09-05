@@ -1576,9 +1576,11 @@ def normalize_inventory_serial(value, manufacturer=None, preloaded_rules=None) -
     serial = normalize_serial(value)
     if not serial:
         return serial
+    # Strip again: a rule that drops a prefix without its trailing space leaves the stored
+    # serial padded, which reads as a mismatch against the same serial normalized elsewhere.
     return apply_normalization_rules(
         serial, NormalizationRule.SCOPE_SERIAL, manufacturer=manufacturer, preloaded_rules=preloaded_rules
-    )
+    ).strip()
 
 
 def coerce_librenms_id(value) -> int | None:
@@ -2290,8 +2292,11 @@ def is_legacy_librenms_id(value) -> bool:
     Legacy = a bare integer (created before the multi-server JSON refactor) or a string that
     parses as an integer, i.e. NOT the per-server dict form and not absent. Uses ``int()``
     coercion (so a whitespace-padded ``" 42 "`` is legacy too), matching
-    :func:`coerce_librenms_id` / :func:`get_librenms_device_id` rather than a stricter
-    ``str.isdigit()`` check that would hide a valid legacy link.
+    :func:`get_librenms_device_id`, which resolves a top-level string with the same bare
+    ``int()``. NOTE: this is deliberately WIDER than :func:`coerce_librenms_id` and the
+    ``build_librenms_id_qs`` lookup predicates, which require ASCII digits. Narrowing it to
+    match them would make ``set_librenms_device_id`` treat a reader-resolvable value as
+    corrupt and reset the field to ``{}``, destroying the legacy link.
 
     Args:
         value: The raw ``custom_field_data["librenms_id"]`` value.

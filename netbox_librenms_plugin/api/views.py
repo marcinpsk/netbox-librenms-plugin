@@ -5,6 +5,7 @@ from core.models import Job
 from django.http import JsonResponse
 from django.utils import timezone
 from django_rq import get_queue
+from drf_spectacular.utils import extend_schema
 from netbox.api.viewsets import NetBoxModelViewSet
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import BasePermission, SAFE_METHODS
@@ -41,11 +42,13 @@ from .serializers import (
     DeviceTypeMappingSerializer,
     InterfaceTypeMappingSerializer,
     InventoryIgnoreRuleSerializer,
+    JobErrorSerializer,
     ModuleBayMappingSerializer,
     ModuleTypeMappingSerializer,
     NormalizationRuleSerializer,
     PlatformMappingSerializer,
     PortStackLagPatternSerializer,
+    SyncJobStatusSerializer,
 )
 
 logger = logging.getLogger(__name__)
@@ -157,6 +160,14 @@ class PortStackLagPatternViewSet(NetBoxModelViewSet):
     serializer_class = PortStackLagPatternSerializer
 
 
+@extend_schema(
+    request=None,
+    responses={
+        200: SyncJobStatusSerializer,
+        404: JobErrorSerializer,
+        500: JobErrorSerializer,
+    },
+)
 @api_view(["POST"])
 @permission_classes([LibreNMSPluginPermission])
 def sync_job_status(request, job_pk):

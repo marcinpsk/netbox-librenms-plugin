@@ -54,6 +54,73 @@ def test_interface_name_selector_visibility_follows_the_active_sync_tab(client, 
     assert f'data-platform-id="{platform.pk}"' in selector
 
 
+@pytest.mark.django_db
+def test_sync_tab_links_replace_the_server_rendered_region(client, settings):
+    """Tab links must work normally and enhance the same navigation through HTMX."""
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"]["servers"] = {
+        "default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}
+    }
+    settings.PLUGINS_CONFIG = plugin_config
+    device = make_device("htmx-sync-tabs")
+    winner = make_device("htmx-sync-tabs-winner")
+    mark_librenms_migrated(device, winner.pk, "default")
+    device.save(update_fields=["custom_field_data"])
+    client.force_login(make_superuser("htmx-sync-tabs-user"))
+
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
+        {"tab": "ipaddresses", "server_key": "default", "interface_name_field": "ifDescr"},
+    )
+
+    assert response.status_code == 200
+    html = response.content.decode()
+    marker = 'id="ipaddresses-tab"'
+    position = html.index(marker)
+    link = html[html.rfind("<a", 0, position) : html.index(">", position) + 1]
+    expected_query = "?tab=ipaddresses&amp;server_key=default&amp;interface_name_field=ifDescr"
+    assert f'href="{response.request["PATH_INFO"]}{expected_query}"' in link
+    assert f'hx-get="{response.request["PATH_INFO"]}{expected_query}"' in link
+    assert 'hx-target="#librenms-sync-tabs"' in link
+    assert 'hx-select="#librenms-sync-tabs"' in link
+    assert 'hx-swap="outerHTML"' in link
+    assert 'hx-push-url="true"' in link
+    assert 'hx-sync="#librenms-sync-tabs:replace"' in link
+    assert 'hx-include="#interface-name-field-selector"' in link
+    assert 'class="nav-link active"' in link
+    assert 'aria-selected="true"' in link
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("tab", ["interfaces", "ipaddresses"])
+def test_the_swapped_tab_region_carries_the_active_tab_marker(client, settings, tab):
+    """activeSyncTab() reads data-active-tab off the swapped container, so the swap must replace it."""
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"]["servers"] = {
+        "default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}
+    }
+    settings.PLUGINS_CONFIG = plugin_config
+    device = make_device(f"active-tab-marker-{tab}")
+    winner = make_device(f"active-tab-marker-winner-{tab}")
+    mark_librenms_migrated(device, winner.pk, "default")
+    device.save(update_fields=["custom_field_data"])
+    client.force_login(make_superuser(f"active-tab-marker-user-{tab}"))
+
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
+        {"tab": tab, "server_key": "default"},
+    )
+
+    assert response.status_code == 200
+    html = response.content.decode()
+    position = html.index('id="librenms-sync-tabs"')
+    region = html[html.rfind("<div", 0, position) : html.index(">", position) + 1]
+
+    # The marker sits on the element hx-select/hx-target name, so an innerHTML swap would
+    # leave the previous tab's value behind and activeSyncTab() would report the wrong tab.
+    assert f'data-active-tab="{tab}"' in region
+
+
 def _post_preference(client, value, platform_id=None):
     """Save one interface-name preference through the public JSON endpoint."""
     payload = {"key": "interface_name_field", "value": value}
@@ -187,7 +254,7 @@ def test_malformed_stored_interface_name_preferences_fall_back_safely():
     device.platform = platform
     device.save(update_fields=["platform"])
     user = make_superuser("malformed-interface-name-reader")
-    user.config.set(GLOBAL_PREFERENCE, "ifDescr", commit=False)
+    user.config.set(GLOBAL_PREFERENCE, "ifName", commit=False)
     user.config.set(PLATFORM_PREFERENCES, {str(platform.pk): {"field": "ifDescr"}}, commit=True)
 
-    assert get_interface_name_field(_request_for(user), device) == "ifDescr"
+    assert get_interface_name_field(_request_for(user), device) == "ifName"

@@ -15,6 +15,7 @@ from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.constants import is_supported_interface_name_field
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_librenms_ip_entry
+from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
@@ -441,6 +442,12 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             ):
                 cache.delete(cache_key)
                 return None
+            if getattr(self, "cache_only", False) and (
+                "mgmt_ip" not in cached_ip_data
+                or not isinstance(cached_ports_by_id, dict)
+                or any(item["port_id"] not in cached_ports_by_id for item in cached_ip_data["ip_addresses"])
+            ):
+                return None
             ip_data = cached_ip_data.get("ip_addresses", [])
             # Pre-upgrade entries cached before mgmt_ip was stored lack the key entirely
             # (distinct from a present-but-empty "" meaning "no mgmt IP"). Resolve it now —
@@ -539,6 +546,13 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         IP from a donor interface to the winner's same-named interface and rejects non-Interface (e.g.
         VMInterface) assignments, so VM-owned IPs are intentionally excluded. Gated on the marker so a
         non-migrated device pays no extra query.
+
+        Args:
+            obj (Device | VirtualMachine): The candidate donor object.
+            server_key (str | None): The LibreNMS server key for the migration marker.
+
+        Returns:
+            list[dict[str, int | str]]: The movable IP candidates, or an empty list.
         """
         from dcim.models import Device, Interface
         from django.contrib.contenttypes.models import ContentType
@@ -644,6 +658,11 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             # LibreNMS fetch failed (a genuine empty result yields a context with an
             # empty table). Report the failure rather than a misleading "no data".
             messages.error(request, "Failed to fetch IP addresses from LibreNMS; see server logs for details.")
+            SyncCacheConsistency(obj).mark_refresh_failure(
+                SyncTab.IP_ADDRESSES,
+                server_key,
+                actor_id=request_actor_id(request),
+            )
             return self.render_sync_partial(
                 request,
                 obj,
@@ -668,7 +687,18 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 },
             )
 
-        messages.success(request, "IP address data refreshed successfully.")
+        if SyncCacheConsistency(obj).mark_refresh_outcome(
+            SyncTab.IP_ADDRESSES,
+            server_key,
+            actor_id=request_actor_id(request),
+        ):
+            messages.success(request, "IP address data refreshed successfully.")
+        else:
+            messages.error(
+                request,
+                "IP address data could not be cached, so the tab has no snapshot to show. "
+                "Refresh again; see server logs for details.",
+            )
         return self.render_sync_partial(request, obj, server_key, {"ip_sync": context})
 
 
@@ -711,10 +741,17 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
 
         Mirrors :meth:`_get_object`'s resolution so the gate matches the model whose name/url/cache
         the response would expose: an explicit ``object_type`` gates on exactly that model; with no
-        type, resolve the id to its model (an existence check that reads no object data) — Device
+        type, resolve the id to its model (an existence check that reads no object data), Device
         first, then VirtualMachine. Fall back to requiring BOTH view perms (fail closed) when the id
         is unusable or resolves to neither, so a Device-only (or VM-only) caller can never read the
         other model's data through this endpoint.
+
+        Args:
+            object_id (int | str | None): The posted object ID.
+            object_type (str | None): The posted object type, if provided.
+
+        Returns:
+            list[tuple[str, type]]: The required model permissions.
         """
         if object_type == "device":
             return [("view", Device)]
@@ -734,8 +771,18 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
         Retrieve the object (Device or VirtualMachine) based on ID and optional type.
 
         Resolves through permission-restricted querysets: the POST gate only checks model-level
-        view perms, so a constrained grant must not resolve an out-of-scope id here — it 404s
+        view perms, so a constrained grant must not resolve an out-of-scope id here. It returns a 404
         instead of exposing the object's cached IP verify payload.
+
+        Args:
+            object_id (int): The object ID.
+            object_type (str | None): The object type, if provided.
+
+        Returns:
+            Device | VirtualMachine: The permitted object.
+
+        Raises:
+            Http404: If no permitted Device or VirtualMachine matches the request.
         """
         if object_type == "device":
             return self.restrict_object_or_404(Device, pk=object_id)
@@ -756,7 +803,17 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
     def _parse_ip_address(self, ip_address):
         """
         Parse IP address string into address and prefix length.
+
         Works with both IPv4 and IPv6 addresses.
+
+        Args:
+            ip_address (str): The IP address with its prefix length.
+
+        Returns:
+            tuple[str, int]: The host address and prefix length.
+
+        Raises:
+            ValueError: If the IP address or prefix length is invalid.
         """
         parsed = parse_address_with_prefix(ip_address)
         return str(parsed.ip), parsed.network.prefixlen

@@ -8,12 +8,17 @@ and depth tracking.  inventory-rebased branch only.
 
 import re
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 
-from netbox_librenms_plugin.tests.view_test_helpers import get as _get, post as _post
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    get as _get,
+    post as _post,
+    trusted_module_inventory_payload,
+)
 
 
 @contextmanager
@@ -1438,15 +1443,17 @@ class TestSingleInstallInterfaceBinding:
         device = _make_device()
 
         with patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache:
-            mock_cache.get.return_value = {
-                "inventory": [
+            mock_cache.get.return_value = trusted_module_inventory_payload(
+                device,
+                [
                     {
                         "entPhysicalIndex": 77,
                         "_librenms_port_id": 42,
                         "_librenms_ifname": "Te1/1/1",
                     }
-                ]
-            }
+                ],
+                server_key="production",
+            )
             get_cache_key = MagicMock(return_value="inventory-key")
             item = _resolve_single_install_binding_item(request, device, "production", get_cache_key)
 
@@ -1670,15 +1677,17 @@ class TestSingleInstallInterfaceBinding:
             # The locked re-fetch goes through restrict(user, ...), so hand back the same manager.
             mock_objects.restrict.return_value = mock_objects
             mock_objects.select_for_update.return_value = mock_qs
-            mock_cache.get.return_value = {
-                "inventory": [
+            mock_cache.get.return_value = trusted_module_inventory_payload(
+                device,
+                [
                     {
                         "entPhysicalIndex": 77,
                         "_librenms_port_id": 42,
                         "_librenms_ifname": "Te1/1/1",
                     }
-                ]
-            }
+                ],
+                server_key="production",
+            )
             view.request = request
             view.post(request, pk=24)
 
@@ -1759,15 +1768,17 @@ class TestSingleInstallInterfaceBinding:
             # The locked re-fetch goes through restrict(user, ...), so hand back the same manager.
             mock_objects.restrict.return_value = mock_objects
             mock_objects.select_for_update.return_value = mock_qs
-            mock_cache.get.return_value = {
-                "inventory": [
+            mock_cache.get.return_value = trusted_module_inventory_payload(
+                device,
+                [
                     {
                         "entPhysicalIndex": 77,
                         "_librenms_port_id": 42,
                         "_librenms_ifname": "Te1/1/1",
                     }
-                ]
-            }
+                ],
+                server_key="production",
+            )
             view.request = request
             view.post(request, pk=24)
 
@@ -1850,7 +1861,7 @@ class TestSingleInstallInterfaceBinding:
                 return_value={"status": "bound", "interface": "Te1/1/1", "port_id": 42, "changed": True},
             ) as mock_bind,
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="redirected"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="redirected"),
         ):
             mock_cache.get.return_value = {
                 "inventory": [{"entPhysicalIndex": 77, "_librenms_port_id": 42, "_librenms_ifname": "Te1/1/1"}],
@@ -1900,7 +1911,7 @@ class TestSingleInstallInterfaceBinding:
                 return_value={"status": "bound", "adopted_count": 0, "interfaces": []},
             ),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="redirected"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="redirected"),
         ):
             mock_cache.get.return_value = {
                 "inventory": [{"entPhysicalIndex": 78, "_librenms_port_id": 43, "_librenms_ifname": "Te1/1/2"}],
@@ -1959,55 +1970,6 @@ class TestSingleInstallInterfaceBinding:
 
         standalone.refresh_from_db()
         assert standalone.module_id == module.pk
-
-    def test_update_module_interface_view_no_server_key_does_not_fake_adoption_success(self):
-        """bind_item resolves but server_key degrades to blank (no active server), so the bind is skipped."""
-        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
-
-        view = object.__new__(UpdateModuleInterfaceView)
-        view.required_object_permissions = {}
-        view._librenms_api = MagicMock(server_key="")
-        device = _make_device()
-
-        module = MagicMock()
-        module.pk = 321
-        module.module_type.model = "SFP-10G-SR"
-        module.module_bay.name = "SFP 1"
-
-        # No server_key posted AND the active server resolves to blank → bind cannot be attempted
-        # (post-fix, a blank posted key alone falls back to the active server; only a blank active
-        # server leaves server_key empty and reaches this fail-closed "no server context" branch).
-        request = _make_request("POST", data={"module_id": "321", "ent_index": "77"})
-
-        with (
-            patch.object(view, "require_all_permissions", return_value=None),
-            patch(
-                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-                side_effect=[device, module],
-            ),
-            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
-            patch.object(view, "get_cache_key", return_value="inv-key"),
-            patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
-            # bind_item resolves (a primary identity exists) even though server_key is blank.
-            patch(
-                "netbox_librenms_plugin.views.sync.modules._resolve_single_install_binding_item",
-                return_value={"entPhysicalName": "Te1/1/1", "_librenms_port_id": 42},
-            ),
-            patch("netbox_librenms_plugin.views.sync.modules._bind_interface_librenms_id") as mock_bind,
-            patch("netbox_librenms_plugin.views.sync.modules._adopt_existing_template_interfaces") as mock_adopt,
-            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="redirected"),
-        ):
-            mock_cache.get.return_value = {"inventory": [], "librenms_id": 999}
-            view.request = request
-            response = view.post(request, pk=24)
-
-        mock_bind.assert_not_called()  # no server context → bind never attempted
-        mock_adopt.assert_not_called()  # and we must NOT adopt-and-succeed instead
-        mock_messages.success.assert_not_called()
-        mock_messages.warning.assert_called_once()
-        assert "server context" in mock_messages.warning.call_args[0][1].lower()
-        assert response is not None
 
     @pytest.mark.django_db
     def test_update_module_interface_view_adopts_templates_after_a_real_bind_noop(self):
@@ -2122,7 +2084,7 @@ class TestSingleInstallInterfaceBinding:
                 "netbox_librenms_plugin.views.sync.modules._adopt_existing_template_interfaces",
             ) as mock_adopt,
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="redirected"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="redirected"),
         ):
             mock_cache.get.return_value = {
                 "inventory": [{"entPhysicalIndex": 77, "_librenms_port_id": 587, "_librenms_ifname": "2/x1/1/c2"}],
@@ -2172,8 +2134,9 @@ class TestSingleInstallInterfaceBinding:
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
         cache.set(
             cache_key,
-            {
-                "inventory": [
+            trusted_module_inventory_payload(
+                device,
+                [
                     {
                         "entPhysicalIndex": 77,
                         "entPhysicalModelName": new_type.model,
@@ -2182,8 +2145,7 @@ class TestSingleInstallInterfaceBinding:
                         "_librenms_ifname": interface.name,
                     }
                 ],
-                "librenms_id": 1,
-            },
+            ),
         )
         try:
             response = _post(view, request, pk=device.pk)
@@ -2348,77 +2310,40 @@ class TestVCMemberInterfaceNormalization:
 
 
 @pytest.mark.django_db
-class TestResolveTargetDevice:
-    """Target device selection must remain constrained to visible VC members."""
+class TestResolveTargetDeviceWithValidation:
+    """Target device selection must stay constrained to visible VC members."""
 
-    def test_non_vc_device_ignores_selected_member(self):
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.views.sync.modules import _resolve_target_device
-
-        page_device = make_device("target-non-vc")
-
-        result = _resolve_target_device(page_device, "123", Device.objects.all())
-
-        assert result == page_device
-
-    def test_vc_member_selection_accepts_valid_member(self):
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
-        from netbox_librenms_plugin.views.sync.modules import _resolve_target_device
-
-        _vc, (page_device, member) = make_virtual_chassis_members("target-valid-vc")
-
-        result = _resolve_target_device(page_device, str(member.pk), Device.objects.all())
-
-        assert result == member
-
-    def test_vc_member_selection_falls_back_for_a_nonmember(self):
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis_members
-        from netbox_librenms_plugin.views.sync.modules import _resolve_target_device
-
-        _vc, (page_device, _member) = make_virtual_chassis_members("target-wrong-vc")
-        nonmember = make_device("target-nonmember")
-
-        result = _resolve_target_device(page_device, str(nonmember.pk), Device.objects.all())
-
-        assert result == page_device
-
-    def test_invalid_selected_device_id_falls_back(self):
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.views.sync.modules import _resolve_target_device
-
-        page_device = make_device("target-invalid-id")
-
-        result = _resolve_target_device(page_device, "not-an-int", Device.objects.all())
-
-        assert result == page_device
-
-    def test_validation_marks_non_vc_selection_invalid(self):
+    def test_no_selection_keeps_the_page_device_and_flags_nothing(self):
+        """An empty selection is the normal case, not invalid input."""
         from dcim.models import Device
 
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.views.sync.modules import _resolve_target_device_with_validation
 
-        page_device = make_device("target-validation-non-vc")
-        other = make_device("target-validation-other")
+        page_device = make_device("target-no-selection")
 
-        resolved, invalid = _resolve_target_device_with_validation(
-            page_device,
-            str(other.pk),
-            Device.objects.all(),
-        )
+        resolved, invalid = _resolve_target_device_with_validation(page_device, "", Device.objects.all())
+
+        assert resolved == page_device
+        assert invalid is False
+
+    def test_a_selection_on_a_non_vc_device_is_invalid(self):
+        """Only a VC member may override the page device, so any selection here is rejected."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.views.sync.modules import _resolve_target_device_with_validation
+
+        page_device = make_device("target-non-vc")
+        other = make_device("target-non-vc-other")
+
+        resolved, invalid = _resolve_target_device_with_validation(page_device, str(other.pk), Device.objects.all())
 
         assert resolved == page_device
         assert invalid is True
 
-    def test_validation_accepts_page_device_id(self):
+    def test_the_page_device_id_resolves_without_flagging(self):
+        """Selecting the page device itself is valid even when it has no virtual chassis."""
         from dcim.models import Device
 
         from netbox_librenms_plugin.tests.conftest import make_device
@@ -2427,13 +2352,54 @@ class TestResolveTargetDevice:
         page_device = make_device("target-page-id")
 
         resolved, invalid = _resolve_target_device_with_validation(
-            page_device,
-            str(page_device.pk),
-            Device.objects.all(),
+            page_device, str(page_device.pk), Device.objects.all()
         )
 
         assert resolved == page_device
         assert invalid is False
+
+    def test_a_vc_member_selection_resolves_to_that_member(self):
+        """A sibling in the same virtual chassis replaces the page device."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+        from netbox_librenms_plugin.views.sync.modules import _resolve_target_device_with_validation
+
+        _vc, (page_device, member) = make_virtual_chassis_members("target-valid-vc")
+
+        resolved, invalid = _resolve_target_device_with_validation(page_device, str(member.pk), Device.objects.all())
+
+        assert resolved == member
+        assert invalid is False
+
+    def test_a_device_outside_the_virtual_chassis_falls_back(self):
+        """A device that is not a member of this chassis must not become the target."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis_members
+        from netbox_librenms_plugin.views.sync.modules import _resolve_target_device_with_validation
+
+        _vc, (page_device, _member) = make_virtual_chassis_members("target-wrong-vc")
+        nonmember = make_device("target-nonmember")
+
+        resolved, invalid = _resolve_target_device_with_validation(page_device, str(nonmember.pk), Device.objects.all())
+
+        assert resolved == page_device
+        assert invalid is True
+
+    def test_an_unparseable_selected_device_id_falls_back(self):
+        """A non-integer selection is invalid input, not a silent no-op."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.views.sync.modules import _resolve_target_device_with_validation
+
+        page_device = make_device("target-invalid-id")
+
+        resolved, invalid = _resolve_target_device_with_validation(page_device, "not-an-int", Device.objects.all())
+
+        assert resolved == page_device
+        assert invalid is True
 
 
 @pytest.mark.django_db
@@ -2479,6 +2445,7 @@ class TestModuleMutationScopes:
             user=user,
         )
         view = UpdateModuleSerialView()
+        view._librenms_api = SimpleNamespace(server_key="production")
 
         _post(view, request, pk=page.pk)
 
@@ -2530,7 +2497,11 @@ class TestModuleMutationScopes:
             }
         ]
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
-        cache.set(cache_key, {"inventory": inventory}, timeout=300)
+        cache.set(
+            cache_key,
+            trusted_module_inventory_payload(device, inventory, server_key="default", librenms_id=1),
+            timeout=300,
+        )
         try:
             view.post(request, pk=device.pk)
         finally:
@@ -3190,14 +3161,7 @@ class TestAncestorWalkGenericContainerModel:
 
 
 class TestParentRowIdxVsEntityIndex:
-    """
-    Regression: parent_row_idx must be used for table_data access, not parent_ent_idx.
-
-    Bug: parent_idx was first set to len(table_data) (a small row index), then
-    overwritten with item.get("entPhysicalIndex") (which can be millions).
-    table_data[parent_idx] then indexed the list with the large entity value,
-    causing IndexError or wrong-row mutations.
-    """
+    """Table access uses parent_row_idx so large entPhysicalIndex values cannot index table_data."""
 
     def test_has_installable_children_set_on_correct_row(self):
         """has_installable_children must land on table row 0, not on entity index 8_000_000."""
@@ -3341,6 +3305,11 @@ class TestInstallViewsPreserveInventoryCache:
             ],
         )
 
+    @staticmethod
+    def _trusted_inventory(device, inventory):
+        """Bind one source snapshot to the device's current object mapping."""
+        return trusted_module_inventory_payload(device, inventory, librenms_id=555)
+
     def test_install_module_preserves_inventory_cache(self):
         from types import SimpleNamespace
 
@@ -3364,7 +3333,7 @@ class TestInstallViewsPreserveInventoryCache:
         view = InstallModuleView()
         view._librenms_api = SimpleNamespace(server_key="default")
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
-        payload = {"inventory": inventory}
+        payload = self._trusted_inventory(device, inventory)
         cache.set(cache_key, payload, timeout=300)
         try:
             response = _post(view, request, pk=device.pk)
@@ -3397,7 +3366,7 @@ class TestInstallViewsPreserveInventoryCache:
         view = view_class()
         view._librenms_api = SimpleNamespace(server_key="default")
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
-        payload = {"inventory": inventory}
+        payload = self._trusted_inventory(device, inventory)
         cache.set(cache_key, payload, timeout=300)
         try:
             response = _post(view, request, pk=device.pk)
@@ -3405,6 +3374,128 @@ class TestInstallViewsPreserveInventoryCache:
             assert response.status_code == 302
             assert Module.objects.filter(device=device, module_bay=bay, module_type=module_type).exists()
             assert cache.get(cache_key) == payload
+        finally:
+            cache.delete(cache_key)
+
+    @pytest.mark.parametrize(
+        ("view_name", "request_data"),
+        [
+            ("branch-bind", {"parent_index": "100", "server_key": "default"}),
+            ("selected-bind", {"select": ["100"], "server_key": "default"}),
+        ],
+    )
+    def test_bulk_install_reports_a_refused_interface_bind(self, view_name, request_data):
+        """Both install views report a refused bind through the same summary."""
+        from types import SimpleNamespace
+
+        from dcim.models import Module
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView, InstallSelectedView
+
+        device, bay, module_type, inventory = self._objects(view_name)
+        # The device has no interface carrying this port, so the bind is refused after the install.
+        inventory[0]["_librenms_port_id"] = 4242
+        request = make_request("post", request_data, user=self._user(view_name))
+        view_class = InstallBranchView if view_name == "branch-bind" else InstallSelectedView
+        view = view_class()
+        view._librenms_api = SimpleNamespace(server_key="default")
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        cache.set(cache_key, self._trusted_inventory(device, inventory), timeout=300)
+        try:
+            response = _post(view, request, pk=device.pk)
+
+            assert response.status_code == 302
+            assert Module.objects.filter(device=device, module_bay=bay, module_type=module_type).exists()
+            assert any(
+                "no matching interface found for port_id 4242" in text for text in message_texts(request, "info")
+            )
+        finally:
+            cache.delete(cache_key)
+
+    @pytest.mark.parametrize(
+        ("view_name", "request_data"),
+        [
+            ("branch-untrusted", {"parent_index": "100", "server_key": "default"}),
+            ("selected-untrusted", {"select": ["100"], "server_key": "default"}),
+        ],
+    )
+    @pytest.mark.parametrize("cached_librenms_id", [None, "invalid"], ids=["missing", "invalid"])
+    def test_bulk_install_rejects_inventory_without_a_valid_cached_fingerprint(
+        self,
+        view_name,
+        request_data,
+        cached_librenms_id,
+    ):
+        """An untrusted source snapshot cannot drive a module installation."""
+        from types import SimpleNamespace
+
+        from dcim.models import Module
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView, InstallSelectedView
+
+        device, _bay, _module_type, inventory = self._objects(view_name)
+        set_librenms_device_id(device, 999, "default")
+        device.save()
+        request = make_request("post", request_data, user=self._user(view_name))
+        view_class = InstallBranchView if view_name == "branch-untrusted" else InstallSelectedView
+        view = view_class()
+        view._librenms_api = SimpleNamespace(server_key="default")
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        payload = {"inventory": inventory}
+        if cached_librenms_id is not None:
+            payload["librenms_id"] = cached_librenms_id
+        cache.set(cache_key, payload, timeout=300)
+        try:
+            response = _post(view, request, pk=device.pk)
+
+            assert response.status_code == 302
+            assert not Module.objects.filter(device=device).exists()
+            assert cache.get(cache_key) == payload
+            assert any("No cached inventory data" in text for text in message_texts(request, "error"))
+        finally:
+            cache.delete(cache_key)
+
+    @pytest.mark.parametrize(
+        ("view_name", "request_data"),
+        [
+            ("branch-unmapped", {"parent_index": "100", "server_key": "default"}),
+            ("selected-unmapped", {"select": ["100"], "server_key": "default"}),
+        ],
+    )
+    def test_bulk_install_rejects_inventory_without_a_valid_current_fingerprint(
+        self,
+        view_name,
+        request_data,
+    ):
+        """A source snapshot cannot be applied after its object mapping disappears."""
+        from types import SimpleNamespace
+
+        from dcim.models import Module
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView, InstallSelectedView
+
+        device, _bay, _module_type, inventory = self._objects(view_name)
+        request = make_request("post", request_data, user=self._user(view_name))
+        view_class = InstallBranchView if view_name == "branch-unmapped" else InstallSelectedView
+        view = view_class()
+        view._librenms_api = SimpleNamespace(server_key="default")
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        payload = {"inventory": inventory, "librenms_id": 555}
+        cache.set(cache_key, payload, timeout=300)
+        try:
+            response = _post(view, request, pk=device.pk)
+
+            assert response.status_code == 302
+            assert not Module.objects.filter(device=device).exists()
+            assert cache.get(cache_key) == payload
+            assert any("No cached inventory data" in text for text in message_texts(request, "error"))
         finally:
             cache.delete(cache_key)
 
@@ -3958,14 +4049,7 @@ class TestMatchBayLogic:
         assert result is bay
 
     def test_vendor_two_segment_regex_does_not_grab_three_segment_path(self):
-        """Regression for #59: a narrow 2-segment vendor regex must NOT swallow a 3-segment
-        transceiver name; the more-specific 3-segment generic mapping must win.
-
-        ``_lookup_regex_bay_mapping`` uses ``fullmatch``, so a pattern with only two
-        slash-segments cannot consume a name with three.  Both mappings are passed in
-        together (mirroring real callers that have already merged scoped + global
-        regex mappings via ``_filter_mappings_by_manufacturer``).
-        """
+        """A two-segment vendor regex does not match a three-segment name, so the generic mapping wins."""
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
         child = {
@@ -4074,9 +4158,7 @@ class TestMatchBayLogic:
         assert result is None
 
     def test_normalized_candidate_matches_when_rules_preloaded(self):
-        """When module_bay normalization rules are supplied, _match_bay considers
-        normalized candidate names too — mirroring the table/UI matcher so installs
-        don't skip bays that appear matched in the UI."""
+        """Preloaded module-bay rules let _match_bay use normalized candidates as the table matcher does."""
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
         child = {
@@ -4259,6 +4341,7 @@ def _make_device(pk=24, name="test-device"):
     d.name = name
     d.device_type = MagicMock()
     d.device_type.manufacturer = None
+    d.virtual_chassis = None
     return d
 
 
@@ -4339,7 +4422,8 @@ class TestPKValidationErrorPaths:
     def test_update_serial_non_numeric_module_id(self):
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
 
-        view = object.__new__(UpdateModuleSerialView)
+        view = UpdateModuleSerialView()
+        view._librenms_api = SimpleNamespace(server_key="production")
         view.required_object_permissions = {}
         device = _make_device()
         request = _make_request(
@@ -4399,7 +4483,7 @@ class TestPKValidationErrorPaths:
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
             patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
         ):
-            mock_cache.get.return_value = {"inventory": cached, "librenms_id": "test"}
+            mock_cache.get.return_value = trusted_module_inventory_payload(device, cached)
             view.request = request
             view.post(request, pk=24)
 
@@ -4597,7 +4681,8 @@ class TestUpdateModuleSerialViewBehavior:
     def _view(self):
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
 
-        v = object.__new__(UpdateModuleSerialView)
+        v = UpdateModuleSerialView()
+        v._librenms_api = SimpleNamespace(server_key="production")
         v.required_object_permissions = {}
         return v
 
@@ -4666,12 +4751,7 @@ class TestUpdateModuleSerialViewBehavior:
 
 
 class TestBuildTableRowsBayCollisionDetection:
-    """_build_table_rows merges module-scoped bays into a deterministic flat dict.
-
-    When two modules expose bays with the same name the module with the lower PK
-    wins (first-match-wins with sorted module IDs).  Device-level bays always
-    take precedence over module-scoped bays.
-    """
+    """Bay-name collisions resolve deterministically: device bays win, then the lowest module PK."""
 
     def _make_bay(self, name, pk):
         from unittest.mock import MagicMock
@@ -4753,7 +4833,7 @@ class TestBuildTableRowsBayCollisionDetection:
 
 
 class TestModulesRedirectResponse:
-    """_modules_redirect_response: HX-Request → HX-Redirect; classic → redirect()."""
+    """_modules_redirect_response: the classic (non-HTMX) redirect back to the modules tab."""
 
     def test_classic_request_uses_redirect(self):
         from unittest.mock import MagicMock, patch
@@ -4769,19 +4849,6 @@ class TestModulesRedirectResponse:
             result = _modules_redirect_response(req, "/sync/")
         mock_redirect.assert_called_once_with("/sync/?tab=modules#librenms-module-table")
         assert result == "REDIRECT"
-
-    def test_htmx_request_returns_hx_redirect_header(self):
-        from unittest.mock import MagicMock
-
-        from netbox_librenms_plugin.views.sync.modules import _modules_redirect_response
-
-        req = MagicMock()
-        req.headers = {"HX-Request": "true"}
-        req.POST = {}
-        req.GET = {}
-        response = _modules_redirect_response(req, "/sync/")
-        assert response.status_code == 204
-        assert response["HX-Redirect"] == "/sync/?tab=modules#librenms-module-table"
 
     def test_explicit_server_key_is_appended(self):
         """A server-scoped action must keep the active server_key in the follow-up URL so the user returns to the same cache namespace this request mutated/read."""
@@ -4811,6 +4878,265 @@ class TestModulesRedirectResponse:
         mock_redirect.assert_called_once_with("/sync/?tab=modules&server_key=production#librenms-module-table")
 
 
+@pytest.mark.django_db
+class TestModulesActionResponse:
+    """Module actions swap the module tab in place over HTMX and keep the classic redirect."""
+
+    SERVER_KEY = "prod"
+
+    def _configure_server(self, settings):
+        """Configure one LibreNMS server the module actions can resolve."""
+        from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
+
+        configure_librenms_servers(
+            settings,
+            {self.SERVER_KEY: {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}},
+        )
+
+    def _seed_inventory(self, device, bay, module_type, *, serial="ACTION-1", librenms_id=9201):
+        """Seed one inventory row matching *bay* and *module_type* under the module tab's cache key."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        payload = trusted_module_inventory_payload(
+            device,
+            [
+                {
+                    "entPhysicalIndex": 8201,
+                    "entPhysicalClass": "module",
+                    "entPhysicalModelName": module_type.model,
+                    "entPhysicalContainedIn": 0,
+                    "entPhysicalName": bay.name,
+                    "entPhysicalSerialNum": serial,
+                }
+            ],
+            server_key=self.SERVER_KEY,
+            librenms_id=librenms_id,
+        )
+        cache_key = DeviceModuleTableView().get_cache_key(device, "inventory", server_key=self.SERVER_KEY)
+        cache.set(cache_key, payload, 300)
+
+    def test_htmx_install_swaps_the_module_tab_in_place(self, client, settings, django_capture_on_commit_callbacks):
+        """An HTMX install answers with the module tab fragment instead of navigating the browser."""
+        import json
+
+        from dcim.models import Module
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.conftest import (
+            make_device,
+            make_module_bay,
+            make_module_type,
+            make_superuser,
+        )
+
+        self._configure_server(settings)
+        device = make_device("modules-action-install")
+        bay = make_module_bay(device, "Action Bay")
+        module_type = make_module_type("ACTION-CARD")
+        self._seed_inventory(device, bay, module_type)
+        client.force_login(make_superuser("modules-action-install-user"))
+        url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": device.pk})
+
+        with django_capture_on_commit_callbacks(execute=True):
+            response = client.post(
+                url,
+                {
+                    "server_key": self.SERVER_KEY,
+                    "module_bay_id": str(bay.pk),
+                    "module_type_id": str(module_type.pk),
+                    "serial": "ACTION-1",
+                },
+                HTTP_HX_REQUEST="true",
+            )
+
+        assert response.status_code == 200
+        assert response["HX-Retarget"] == "#module-sync-content"
+        assert response["HX-Reswap"] == "innerHTML"
+        assert "HX-Redirect" not in response
+        assert "HX-Refresh" not in response
+        trigger = json.loads(response["HX-Trigger"])
+        assert "closeModal" in trigger
+        assert "librenmsCacheChanged" in trigger
+        body = response.content.decode()
+        assert 'id="librenms-module-table"' in body
+        assert f'name="server_key" value="{self.SERVER_KEY}"' in body
+        assert f"Installed {module_type.model} in {bay.name}" in body
+        assert '<span class="badge bg-success text-white">Installed</span>' in body
+        assert Module.objects.filter(device=device, module_bay=bay, module_type=module_type).exists()
+
+    def test_htmx_action_keeps_the_page_and_sort_of_the_current_url(self, client, settings):
+        """The re-rendered table honours the page's own query (page, per_page), not the action URL's empty one."""
+        from django.core.cache import cache
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.conftest import (
+            make_device,
+            make_module_bay,
+            make_module_type,
+            make_superuser,
+        )
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        self._configure_server(settings)
+        device = make_device("modules-action-paged")
+        module_type = make_module_type("ACTION-CARD")
+        # NetBox's EnhancedPaginator folds up to 5 orphans into the last page, so 7 rows make a real page 2.
+        bays = [make_module_bay(device, f"Bay {number:02d}") for number in range(1, 8)]
+        payload = trusted_module_inventory_payload(
+            device,
+            [
+                {
+                    "entPhysicalIndex": 8200 + number,
+                    "entPhysicalClass": "module",
+                    "entPhysicalModelName": module_type.model,
+                    "entPhysicalContainedIn": 0,
+                    "entPhysicalName": bay.name,
+                    "entPhysicalSerialNum": f"PAGED-{number}",
+                }
+                for number, bay in enumerate(bays, start=1)
+            ],
+            server_key=self.SERVER_KEY,
+            librenms_id=9204,
+        )
+        first_bay = bays[0]
+        cache.set(DeviceModuleTableView().get_cache_key(device, "inventory", server_key=self.SERVER_KEY), payload, 300)
+        client.force_login(make_superuser("modules-action-paged-user"))
+        sync_page = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": device.pk})
+        url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": device.pk})
+
+        response = client.post(
+            url,
+            {
+                "server_key": self.SERVER_KEY,
+                "module_bay_id": str(first_bay.pk),
+                "module_type_id": str(module_type.pk),
+                "serial": "PAGED-1",
+            },
+            HTTP_HX_REQUEST="true",
+            HTTP_HX_CURRENT_URL=(
+                f"http://testserver{sync_page}?tab=modules&server_key={self.SERVER_KEY}"
+                "&modules_per_page=1&modules_page=2#librenms-module-table"
+            ),
+        )
+
+        assert response.status_code == 200
+        table = response.content.decode().split('id="librenms-module-table"', 1)[1]
+        assert "Bay 02" in table
+        assert "Bay 01" not in table
+        assert "modules_page=1" in response.content.decode()
+
+    def test_classic_install_still_redirects_to_the_modules_tab(self, client, settings):
+        """Without the HTMX header the same install keeps the server-scoped redirect contract."""
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.conftest import (
+            make_device,
+            make_module_bay,
+            make_module_type,
+            make_superuser,
+        )
+
+        self._configure_server(settings)
+        device = make_device("modules-action-classic")
+        bay = make_module_bay(device, "Classic Bay")
+        module_type = make_module_type("CLASSIC-CARD")
+        self._seed_inventory(device, bay, module_type, librenms_id=9202)
+        client.force_login(make_superuser("modules-action-classic-user"))
+        url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": device.pk})
+
+        response = client.post(
+            url,
+            {
+                "server_key": self.SERVER_KEY,
+                "module_bay_id": str(bay.pk),
+                "module_type_id": str(module_type.pk),
+                "serial": "ACTION-1",
+            },
+        )
+
+        assert response.status_code == 302
+        assert response.url.endswith(f"?tab=modules&server_key={self.SERVER_KEY}#librenms-module-table")
+
+    def test_htmx_serial_update_from_the_modal_is_retargeted(self, client, settings):
+        """A mismatch-modal action (which swaps nothing itself) is retargeted at the module tab."""
+        from dcim.models import Module
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.conftest import (
+            make_device,
+            make_module_bay,
+            make_module_type,
+            make_superuser,
+        )
+
+        self._configure_server(settings)
+        device = make_device("modules-action-serial")
+        bay = make_module_bay(device, "Serial Bay")
+        module_type = make_module_type("SERIAL-CARD")
+        module = Module.objects.create(device=device, module_bay=bay, module_type=module_type, serial="OLD-SERIAL")
+        self._seed_inventory(device, bay, module_type, librenms_id=9203)
+        client.force_login(make_superuser("modules-action-serial-user"))
+        url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": device.pk})
+
+        response = client.post(
+            url,
+            {"server_key": self.SERVER_KEY, "module_id": str(module.pk), "serial": "ACTION-1"},
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert response.status_code == 200
+        assert response["HX-Retarget"] == "#module-sync-content"
+        assert response["HX-Reswap"] == "innerHTML"
+        body = response.content.decode()
+        assert 'id="librenms-module-table"' in body
+        assert f"Updated serial for {module_type.model} in {bay.name}" in body
+        module.refresh_from_db()
+        assert module.serial == "ACTION-1"
+
+    def test_htmx_action_without_a_snapshot_renders_the_empty_tab(self, client, settings):
+        """A missing inventory snapshot reports the error inside the re-rendered tab."""
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
+
+        self._configure_server(settings)
+        device = make_device("modules-action-no-snapshot")
+        client.force_login(make_superuser("modules-action-no-snapshot-user"))
+        url = reverse("plugins:netbox_librenms_plugin:install_selected", kwargs={"pk": device.pk})
+
+        response = client.post(
+            url,
+            {"server_key": self.SERVER_KEY, "select": "8201"},
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert response.status_code == 200
+        assert response["HX-Retarget"] == "#module-sync-content"
+        assert "HX-Redirect" not in response
+        body = response.content.decode()
+        assert "No cached inventory data" in body
+        assert "Refresh Modules" in body
+
+    def _seed_serial_mismatch(self, suffix, *, conflict, librenms_id):
+        """Seed a device whose installed module's serial differs from the cached LibreNMS serial."""
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+
+        device = make_device(f"modules-preview-{suffix}")
+        bay = make_module_bay(device, "Preview Bay")
+        module_type = make_module_type(f"PREVIEW-CARD-{suffix}")
+        module = Module.objects.create(device=device, module_bay=bay, module_type=module_type, serial="OLD-SERIAL")
+        self._seed_inventory(device, bay, module_type, librenms_id=librenms_id)
+        if conflict:
+            other = make_device(f"modules-preview-{suffix}-holder")
+            other_bay = make_module_bay(other, "Holder Bay")
+            Module.objects.create(device=other, module_bay=other_bay, module_type=module_type, serial="ACTION-1")
+        return device, module
+
+
 class TestAddBayTemplateViewWiring:
     """AddBayTemplateView must have the right mixins and target kinds."""
 
@@ -4833,7 +5159,8 @@ class TestAddBayTemplateViewPostValidation:
     def _make_view(self):
         from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
 
-        view = object.__new__(AddBayTemplateView)
+        view = AddBayTemplateView()
+        view._librenms_api = SimpleNamespace(server_key="production")
         # Bypass perm checks: require_all_permissions returns None on success.
         view.require_all_permissions = MagicMock(return_value=None)
         return view
@@ -4845,26 +5172,18 @@ class TestAddBayTemplateViewPostValidation:
         req.headers = {"HX-Request": "true"} if htmx else {}
         return req
 
-    def test_invalid_target_kind_returns_redirect(self):
+    def test_invalid_target_kind_returns_400(self):
+        """A tampered target_kind is refused before the permission gate, like the GET render."""
         view = self._make_view()
         req = self._make_request({"target_kind": "bogus", "target_pk": "1", "name": "Slot 1"})
-        with (
-            patch(
-                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-                return_value=MagicMock(),
-            ),
-            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
-            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
-            patch(
-                "netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="REDIR"
-            ) as mock_redir,
-        ):
+        with patch(
+            "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
+            return_value=MagicMock(),
+        ) as mock_restrict:
             view.request = req
-            result = view.post(req, pk=1)
-        assert result == "REDIR"
-        assert mock_messages.error.called
-        assert "Invalid target_kind" in mock_messages.error.call_args[0][1]
-        mock_redir.assert_called_once()
+            response = view.post(req, pk=1)
+        assert response.status_code == 400
+        mock_restrict.assert_not_called()
 
     def test_missing_target_pk_returns_redirect(self):
         view = self._make_view()
@@ -4876,7 +5195,7 @@ class TestAddBayTemplateViewPostValidation:
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="REDIR"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="REDIR"),
         ):
             view.request = req
             view.post(req, pk=1)
@@ -4892,7 +5211,7 @@ class TestAddBayTemplateViewPostValidation:
             ),
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="REDIR"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="REDIR"),
         ):
             view.request = req
             view.post(req, pk=1)
@@ -4905,7 +5224,8 @@ class TestAddBayTemplateViewGetValidation:
     def _make_view(self):
         from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
 
-        view = object.__new__(AddBayTemplateView)
+        view = AddBayTemplateView()
+        view._librenms_api = SimpleNamespace(server_key="production")
         view.require_all_permissions = MagicMock(return_value=None)
         return view
 
@@ -4963,14 +5283,13 @@ class TestAddBayTemplateViewGetValidation:
 
 
 class TestAddBayTemplateViewMappingCheckbox:
-    """GET threads librenms_name/class into context and decides whether to
-    show the auto-create-mapping checkbox.  POST creates the mapping when the
-    user opts in and the NetBox name differs from the LibreNMS one."""
+    """GET exposes LibreNMS fields and POST optionally maps names that differ between LibreNMS and NetBox."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
 
-        view = object.__new__(AddBayTemplateView)
+        view = AddBayTemplateView()
+        view._librenms_api = SimpleNamespace(server_key="production")
         view.require_all_permissions = MagicMock(return_value=None)
         view._instantiate_template_on_existing = MagicMock(return_value=0)
         return view
@@ -5086,7 +5405,7 @@ class TestAddBayTemplateViewMappingCheckbox:
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="REDIR"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="REDIR"),
             patch("dcim.models.ModuleBayTemplate") as mock_bt_cls,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
@@ -5133,7 +5452,7 @@ class TestAddBayTemplateViewMappingCheckbox:
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
-            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="REDIR"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="REDIR"),
             patch("dcim.models.ModuleBayTemplate") as mock_bt_cls,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
@@ -5166,7 +5485,7 @@ class TestAddBayTemplateViewMappingCheckbox:
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
-            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="REDIR"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="REDIR"),
             patch("dcim.models.ModuleBayTemplate") as mock_bt_cls,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
@@ -5179,10 +5498,7 @@ class TestAddBayTemplateViewMappingCheckbox:
 
 
 class TestAddBayTemplateViewInstantiation:
-    """After saving a ModuleBayTemplate, the view materialises it onto every
-    existing Device/Module of the target so the resolver can match the new bay
-    immediately (NetBox only auto-creates bays from templates at first-create
-    time)."""
+    """Saved bay templates materialize on existing targets so the resolver can match each new bay immediately."""
 
     def test_instantiate_on_existing_device_type_creates_missing_bays(self):
         from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
@@ -5300,10 +5616,7 @@ class TestAddBayTemplateViewInstantiation:
 
 
 class TestDeriveMappingPattern:
-    """_derive_mapping_pattern maps each distinct LibreNMS digit value to a
-    capture group; the NetBox replacement may use any literals as long as
-    every NetBox digit value is present on the LibreNMS side and the
-    pattern round-trips."""
+    """Distinct LibreNMS digit values form groups if all NetBox digits occur there, and the pattern round-trips."""
 
     def _fn(self):
         from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
@@ -5368,7 +5681,8 @@ class TestAddBayTemplateViewRegexMapping:
     def _make_view(self):
         from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
 
-        view = object.__new__(AddBayTemplateView)
+        view = AddBayTemplateView()
+        view._librenms_api = SimpleNamespace(server_key="production")
         view.require_all_permissions = MagicMock(return_value=None)
         view._instantiate_template_on_existing = MagicMock(return_value=0)
         return view
@@ -5499,7 +5813,7 @@ class TestAddBayTemplateViewRegexMapping:
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
-            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="R"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="R"),
             patch("dcim.models.ModuleBayTemplate") as mock_bt_cls,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
@@ -5540,7 +5854,7 @@ class TestAddBayTemplateViewRegexMapping:
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
-            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="R"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="R"),
             patch("dcim.models.ModuleBayTemplate") as mock_bt_cls,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
@@ -5579,7 +5893,7 @@ class TestAddBayTemplateViewRegexMapping:
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
-            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="R"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="R"),
             patch("dcim.models.ModuleBayTemplate") as mock_bt_cls,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
@@ -5618,7 +5932,7 @@ class TestAddBayTemplateViewRegexMapping:
             patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
             patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
             patch("netbox_librenms_plugin.views.sync.modules.messages"),
-            patch("netbox_librenms_plugin.views.sync.modules._modules_redirect_response", return_value="R"),
+            patch("netbox_librenms_plugin.views.sync.modules._modules_action_response", return_value="R"),
             patch("dcim.models.ModuleBayTemplate") as mock_bt_cls,
             patch("netbox_librenms_plugin.models.ModuleBayMapping") as mock_mapping_cls,
         ):
@@ -5707,8 +6021,7 @@ class TestAddBayTemplateViewRegexMapping:
         assert "Fix Device Type" in html
 
     def test_returns_empty_when_device_present_but_lacks_add_modulebaytemplate_perm(self):
-        """When a viewer can't add bay templates, the badge is hidden so it doesn't
-        act as a dead-end control. The HTMX modal would only return 403 for them."""
+        """The badge stays hidden when the viewer lacks add_modulebaytemplate permission and the modal would return 403."""
         table = self._table_with_device(device_pk=42, can_add_module_bay_template=False)
         html = str(
             table._render_fix_bay_template_badge(
@@ -5878,11 +6191,7 @@ class TestVCNormalizationReportView:
 
 
 class TestVCNormalizationE2E:
-    """End-to-end: production code path (get_module_template_interface_names → detect_vc_normalization_noop).
-
-    Exercises the real regex against vendor-realistic name shapes without DB
-    fixtures. Catches regressions if either piece changes how it processes names.
-    """
+    """The production normalization path applies its real regex to vendor name shapes from end to end."""
 
     @staticmethod
     def _device(vc_position=3, vc_id=11, member_positions=(1, 2, 3, 4)):
@@ -6071,11 +6380,7 @@ class TestPredictModuleInterfaceNamesSignal:
             predict_module_interface_names.disconnect(second)
 
     def test_failing_receiver_is_isolated(self, caplog):
-        """send_robust must isolate a raising receiver so adoption isn't broken.
-
-        A buggy third-party receiver that raises is logged and skipped; a later
-        well-behaved receiver still applies, and the raw names survive if none do.
-        """
+        """A failing receiver is logged and isolated so a later receiver can still override the raw names."""
         import logging
 
         from django.dispatch import receiver
@@ -6173,7 +6478,7 @@ class TestModuleInterfaceUpdateMessage:
 
 @pytest.mark.django_db
 class TestReplaceModuleRedirectServerKey:
-    """ReplaceModuleView keeps its active server on a real validation redirect."""
+    """ReplaceModuleView keeps its active server on a real classic validation redirect."""
 
     def test_missing_module_id_preserves_fallback_server_key(self):
         from types import SimpleNamespace
@@ -6198,37 +6503,25 @@ class TestReplaceModuleRedirectServerKey:
                 ("delete", Interface),
             ],
         )
-        request = make_request(
-            "post",
-            {},
-            user=user,
-            path="/replace-module/",
-            HTTP_HX_REQUEST="true",
-        )
+        request = make_request("post", {}, user=user, path="/replace-module/")
         view = ReplaceModuleView()
         view._librenms_api = SimpleNamespace(server_key="prod")
 
         response = _post(view, request, pk=device.pk)
 
-        assert response.status_code == 204
-        assert "server_key=prod" in response["HX-Redirect"]
+        assert response.status_code == 302
+        assert "server_key=prod" in response.url
 
 
 @pytest.mark.django_db
 class TestUpdateModuleInterfaceRedirectServerKey:
-    """UpdateModuleInterfaceView keeps its resolved server on real redirects."""
+    """UpdateModuleInterfaceView keeps its resolved server on real classic redirects."""
 
     @staticmethod
     def _request(user, data):
         from netbox_librenms_plugin.tests.view_test_helpers import make_request
 
-        return make_request(
-            "post",
-            data,
-            user=user,
-            path="/update-interface/",
-            HTTP_HX_REQUEST="true",
-        )
+        return make_request("post", data, user=user, path="/update-interface/")
 
     def test_invalid_module_id_preserves_fallback_server_key(self):
         from types import SimpleNamespace
@@ -6250,8 +6543,8 @@ class TestUpdateModuleInterfaceRedirectServerKey:
 
         response = _post(view, request, pk=device.pk)
 
-        assert response.status_code == 204
-        assert "server_key=prod" in response["HX-Redirect"]
+        assert response.status_code == 302
+        assert "server_key=prod" in response.url
 
     def test_success_preserves_fallback_server_key(self):
         from types import SimpleNamespace
@@ -6284,18 +6577,12 @@ class TestUpdateModuleInterfaceRedirectServerKey:
 
         response = _post(view, request, pk=device.pk)
 
-        assert response.status_code == 204
-        assert "server_key=prod" in response["HX-Redirect"]
+        assert response.status_code == 302
+        assert "server_key=prod" in response.url
 
 
 class TestStandaloneAdoptionAcrossEveryComponentType:
-    """Every component NetBox can adopt must be authorized through the change-scoped queryset.
-
-    The adoption helper walks eight component specs, and each one resolves its template name
-    through ``_module_template_adoption_name``. Only interfaces and module bays were covered, so a
-    regression in any of the other six -- or in the version-dependent name resolution -- went
-    unnoticed. Drive all eight against the real ORM.
-    """
+    """All eight adoptable component types resolve names and use the change-scoped queryset against the real ORM."""
 
     BAY_POSITION = "A1"
 

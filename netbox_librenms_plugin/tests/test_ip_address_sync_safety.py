@@ -18,6 +18,7 @@ from ipam.models import IPAddress, VRF
 from requests import Response
 
 from netbox_librenms_plugin.constants import INTERFACE_NAME_FIELDS
+from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncCacheConsistency, SyncTab, sync_snapshot_key
 from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_interface,
@@ -27,6 +28,11 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms, make_view
+
+
+def _ip_snapshot_key(obj):
+    """Return the production IP-addresses snapshot key, so a key-scheme change cannot pass silently."""
+    return sync_snapshot_key(obj, TAB_SPECS[SyncTab.IP_ADDRESSES].data_type, "default")
 
 
 def _json_response(url, payload, status=200):
@@ -294,7 +300,7 @@ def test_concurrent_global_ip_sync_creates_one_address(settings):
         set_librenms_device_id(interface, port_id, "default")
         interface.save(update_fields=["custom_field_data"])
         cache.set(
-            f"librenms_ip_addresses_device_{device.pk}_default",
+            _ip_snapshot_key(device),
             {
                 "ip_addresses": [
                     {
@@ -362,7 +368,7 @@ def test_concurrent_bulk_ip_sync_orders_host_locks_before_interface_scope(settin
         },
     ]
     cache.set(
-        f"librenms_ip_addresses_device_{device.pk}_default",
+        _ip_snapshot_key(device),
         {
             "ip_addresses": rows,
             "mgmt_ip": "",
@@ -461,9 +467,12 @@ def test_refresh_and_sync_accepts_an_already_prefixed_address(
     refresh_response = _refresh_ip_snapshot(client, device, librenms_address, prefix_length)
 
     assert refresh_response.status_code == 200
-    cached = cache.get(f"librenms_ip_addresses_device_{device.pk}_default")
+    cached = cache.get(_ip_snapshot_key(device))
     assert cached is not None, refresh_response.content.decode()
     assert cached["ip_addresses"][0]["ip_with_mask"] == expected_address
+    state = cache.get(SyncCacheConsistency(device).state_key(SyncTab.IP_ADDRESSES, "default"))
+    assert state is not None
+    assert state["state"] == "ready"
 
     sync_url = reverse(
         "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
@@ -508,7 +517,10 @@ def test_refresh_rejects_conflicting_embedded_and_separate_prefixes(client, sett
 
     assert response.status_code == 200
     assert b"Failed to fetch IP addresses from LibreNMS" in response.content
-    assert cache.get(f"librenms_ip_addresses_device_{device.pk}_default") is None
+    assert cache.get(_ip_snapshot_key(device)) is None
+    state = cache.get(SyncCacheConsistency(device).state_key(SyncTab.IP_ADDRESSES, "default"))
+    assert state is not None
+    assert state["state"] == "refresh_failed"
     assert not IPAddress.objects.filter(address="198.18.1.10/25").exists()
 
 
@@ -889,7 +901,7 @@ def test_create_missing_interfaces_rejects_legacy_snapshot_before_processing_row
     device = make_device("ip-create-missing-legacy", librenms_cf={"default": {"id": 42}})
     row_id = "198.18.12.20/24"
     cache.set(
-        f"librenms_ip_addresses_device_{device.pk}_default",
+        _ip_snapshot_key(device),
         {
             "ip_addresses": [
                 {
@@ -1242,10 +1254,12 @@ def test_create_missing_interfaces_rejects_ambiguous_cached_port_names(client, s
 
 
 @pytest.mark.django_db
-def test_interface_refresh_and_sync_preserve_the_ip_snapshot(client, settings):
-    """Independent interface cache work must not expire a still-live IP snapshot."""
+def test_interface_sync_keeps_its_source_snapshot_and_clears_the_ip_snapshot(
+    client, settings, django_capture_on_commit_callbacks
+):
+    """A committed Interface sync must clear stale IP data but keep its source data."""
     _configure_test_server(settings)
-    device = make_device("ip-cache-survives-interface-sync", librenms_cf={"default": {"id": 42}})
+    device = make_device("ip-cache-cleared-by-interface-sync", librenms_cf={"default": {"id": 42}})
     rows = [
         {
             "address": "198.18.16.10",
@@ -1274,10 +1288,11 @@ def test_interface_refresh_and_sync_preserve_the_ip_snapshot(client, settings):
             return _json_response(url, {"status": "ok", "ports": [port]})
         return ip_dispatcher(url, **kwargs)
 
-    client.force_login(make_superuser("ip-cache-survival-user"))
+    client.force_login(make_superuser("ip-cache-cleared-user"))
     ip_refresh_url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk])
     interface_refresh_url = reverse("plugins:netbox_librenms_plugin:device_interface_sync", args=[device.pk])
-    ip_cache_key = f"librenms_ip_addresses_device_{device.pk}_default"
+    ip_cache_key = sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].data_type, "default")
+    interface_cache_key = sync_snapshot_key(device, TAB_SPECS[SyncTab.INTERFACES].data_type, "default")
     with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
         assert (
             client.post(
@@ -1302,8 +1317,8 @@ def test_interface_refresh_and_sync_preserve_the_ip_snapshot(client, settings):
         "plugins:netbox_librenms_plugin:sync_selected_interfaces",
         kwargs={"object_type": "device", "object_id": device.pk},
     )
-    assert (
-        client.post(
+    with django_capture_on_commit_callbacks(execute=True):
+        response = client.post(
             interface_sync_url,
             {
                 "server_key": "default",
@@ -1311,51 +1326,11 @@ def test_interface_refresh_and_sync_preserve_the_ip_snapshot(client, settings):
                 "select": "7016",
                 "exclude_columns": "vlans",
             },
-        ).status_code
-        == 302
-    )
-    assert cache.get(ip_cache_key) is not None
-
-    ip_sync_url = reverse(
-        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-        kwargs={"object_type": "device", "pk": device.pk},
-    )
-    response = client.post(
-        ip_sync_url,
-        {
-            "server_key": "default",
-            "select": "198.18.16.10/24",
-            "vrf_198.18.16.10/24": "",
-        },
-    )
+        )
 
     assert response.status_code == 302
-    assert IPAddress.objects.get(address="198.18.16.10/24", vrf=None).assigned_object.name == "Ethernet1"
-
-
-@pytest.mark.django_db
-def test_expired_ip_snapshot_redirects_the_whole_htmx_page(client, settings):
-    """An expired snapshot must replace the stale tab and countdown, not load a page in the modal."""
-    _configure_test_server(settings)
-    device = make_device("ip-expired-htmx", librenms_cf={"default": {"id": 42}})
-    client.force_login(make_superuser("ip-expired-htmx-user"))
-    sync_url = reverse(
-        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-        kwargs={"object_type": "device", "pk": device.pk},
-    )
-
-    response = client.post(
-        sync_url,
-        {"server_key": "default", "select": "198.18.17.10/24"},
-        HTTP_HX_REQUEST="true",
-    )
-
-    assert response.status_code == 200
-    expected_url = (
-        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
-        + "?tab=ipaddresses&server_key=default"
-    )
-    assert response.headers["HX-Redirect"] == expected_url
+    assert cache.get(interface_cache_key) is not None
+    assert cache.get(ip_cache_key) is None
 
 
 @pytest.mark.django_db
@@ -1377,7 +1352,7 @@ def test_create_missing_interfaces_does_not_adopt_a_hidden_existing_interface(cl
     user = grant(user, "change", IPAddress)
     client.force_login(user)
     cache.set(
-        f"librenms_ip_addresses_device_{device.pk}_default",
+        _ip_snapshot_key(device),
         {
             "ip_addresses": [
                 {
@@ -1435,7 +1410,7 @@ def test_direct_ip_sync_post_does_not_mutate_a_migrated_donor(client, settings):
     interface.custom_field_data["librenms_id"] = {"default": 7019}
     interface.save(update_fields=["custom_field_data"])
     cache.set(
-        f"librenms_ip_addresses_device_{donor.pk}_default",
+        _ip_snapshot_key(donor),
         {
             "ip_addresses": [
                 {
@@ -1480,7 +1455,7 @@ def test_invalid_force_all_confirmation_reports_the_confirmation_error(client, s
     _configure_test_server(settings)
     device = make_device("invalid-force-confirmation", librenms_cf={"default": {"id": 42}})
     cache.set(
-        f"librenms_ip_addresses_device_{device.pk}_default",
+        _ip_snapshot_key(device),
         {
             "ip_addresses": [
                 {
@@ -1528,7 +1503,7 @@ def test_invalid_confirmation_is_not_reported_as_an_ip_address(client, settings)
     interface.save(update_fields=["custom_field_data"])
     row_id = "198.18.19.21/24"
     cache.set(
-        f"librenms_ip_addresses_device_{device.pk}_default",
+        _ip_snapshot_key(device),
         {
             "ip_addresses": [
                 {
@@ -1588,7 +1563,7 @@ def test_interface_scope_change_during_lock_is_reported_as_a_failure(client, set
     user = grant(user, "change", IPAddress)
     client.force_login(user)
     cache.set(
-        f"librenms_ip_addresses_device_{device.pk}_default",
+        _ip_snapshot_key(device),
         {
             "ip_addresses": [
                 {
@@ -1671,7 +1646,7 @@ def test_existing_ip_outside_change_scope_is_reported_without_mutation(client, s
     user = grant(user, "change", IPAddress, constraints={"pk": changeable_ip.pk})
     client.force_login(user)
     cache.set(
-        f"librenms_ip_addresses_device_{device.pk}_default",
+        _ip_snapshot_key(device),
         {
             "ip_addresses": [
                 {
@@ -1727,7 +1702,7 @@ def test_ip_sync_does_not_write_after_interface_owner_disappears(client, setting
     set_librenms_device_id(interface, 7021, "default")
     interface.save()
     cache.set(
-        f"librenms_ip_addresses_device_{device.pk}_default",
+        _ip_snapshot_key(device),
         {
             "ip_addresses": [
                 {
@@ -2163,7 +2138,7 @@ def test_configured_interface_name_field_survives_the_cache_round_trip(client, s
         refresh_response = client.post(refresh_url, {"server_key": "default"}, HTTP_HX_REQUEST="true")
 
     assert refresh_response.status_code == 200
-    cache_key = f"librenms_ip_addresses_device_{device.pk}_default"
+    cache_key = _ip_snapshot_key(device)
     assert cache.get(cache_key)["interface_name_field"] in INTERFACE_NAME_FIELDS
 
     render_response = client.get(
@@ -2185,7 +2160,7 @@ def test_sync_without_a_selection_reports_the_empty_selection_error(client, sett
     interface.custom_field_data["librenms_id"] = {"default": 7001}
     interface.save(update_fields=["custom_field_data"])
     cache.set(
-        f"librenms_ip_addresses_device_{device.pk}_default",
+        _ip_snapshot_key(device),
         {
             "ip_addresses": [
                 {
@@ -2234,7 +2209,7 @@ def test_create_missing_interfaces_requires_change_scope_for_the_new_interface(c
     user = grant(user, "change", IPAddress)
     client.force_login(user)
     cache.set(
-        f"librenms_ip_addresses_device_{device.pk}_default",
+        _ip_snapshot_key(device),
         {
             "ip_addresses": [
                 {
@@ -2296,7 +2271,7 @@ def test_create_missing_interfaces_is_refused_without_add_and_change_grants(clie
     user = grant(user, "change", IPAddress)
     client.force_login(user)
     cache.set(
-        f"librenms_ip_addresses_device_{device.pk}_default",
+        _ip_snapshot_key(device),
         {
             "ip_addresses": [
                 {
