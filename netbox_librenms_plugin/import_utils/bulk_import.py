@@ -548,11 +548,8 @@ def bulk_import_devices_shared(
                             f"{m.get('name', '')}/{m.get('model', '')}:{m.get('position', 0)}"
                             for m in vc_data.get("members", [])
                         )
-                        if member_parts:
-                            fingerprint = hashlib.sha256(",".join(member_parts).encode()).hexdigest()[:12]
-                            vc_domain = f"librenms-stack-{fingerprint}"
-                        else:
-                            vc_domain = f"librenms-{device_id}"
+                        fingerprint = hashlib.sha256(",".join(member_parts).encode()).hexdigest()[:12]
+                        vc_domain = f"librenms-stack-{fingerprint}"
 
                     # Only create VC if we haven't processed this stack yet.
                     # Permission was already validated before device import.
@@ -873,9 +870,6 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 else:
                     if hasattr(refreshed, "role") and refreshed.role:
                         apply_role_to_validation(validation, refreshed.role, is_vm=bool(validation.get("import_as_vm")))
-                    elif not validation.get("import_as_vm"):
-                        _reset_device_role(validation)
-                        remove_validation_issue(validation, "role")
                     recalculate_validation_status(validation, is_vm=bool(validation.get("import_as_vm")))
                     # Re-assert non-importable state: recalculate bases can_import on
                     # issues alone, but an existing matched device must never be import-ready.
@@ -1252,7 +1246,6 @@ def process_device_filters(
     show_disabled: bool,
     exclude_existing: bool = False,
     job=None,
-    request=None,
     return_cache_status: bool = False,
     use_sysname: bool = True,
     strip_domain: bool = False,
@@ -1272,7 +1265,6 @@ def process_device_filters(
         show_disabled: Whether to include disabled devices
         exclude_existing: Whether to exclude devices that already exist in NetBox
         job: Optional JobRunner instance for logging job events
-        request: Optional Django request for client disconnect detection (synchronous only)
         return_cache_status: When True, returns (devices, from_cache) tuple
         use_sysname: If True, prefer sysName over hostname for device name resolution
         strip_domain: If True, strip domain suffix from device name
@@ -1326,15 +1318,9 @@ def process_device_filters(
         else:
             logger.info(f"Pre-fetching VC data for {len(device_ids)} devices")
 
-        try:
-            prefetch_vc_data_for_devices(api, device_ids, force_refresh=clear_cache)
-            if job:
-                job.logger.info("Virtual chassis data pre-fetch completed")
-        except (BrokenPipeError, ConnectionError, IOError) as e:
-            if request:
-                logger.info(f"Client disconnected during VC prefetch: {e}")
-                return _empty_return(return_cache_status)
-            raise
+        prefetch_vc_data_for_devices(api, device_ids, force_refresh=clear_cache)
+        if job:
+            job.logger.info("Virtual chassis data pre-fetch completed")
 
     # Validate each device
     validated_devices = []
@@ -1392,21 +1378,15 @@ def process_device_filters(
                 continue
 
         # Not in cache or forcing refresh - validate now
-        try:
-            validation = validate_device_for_import(
-                device,
-                api=api,
-                include_vc_detection=vc_detection_enabled,
-                force_vc_refresh=False,
-                server_key=api.server_key,
-                use_sysname=use_sysname,
-                strip_domain=strip_domain,
-            )
-        except (BrokenPipeError, ConnectionError, IOError) as e:
-            if request:
-                logger.info(f"Client disconnected during device validation: {e}")
-                return _empty_return(return_cache_status)
-            raise
+        validation = validate_device_for_import(
+            device,
+            api=api,
+            include_vc_detection=vc_detection_enabled,
+            force_vc_refresh=False,
+            server_key=api.server_key,
+            use_sysname=use_sysname,
+            strip_domain=strip_domain,
+        )
 
         # Set VC detection metadata
         if not vc_detection_enabled:

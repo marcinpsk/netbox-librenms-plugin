@@ -96,6 +96,18 @@ def _oob_item_offsettable(item: dict) -> bool:
     return idx_ok and parent_ok
 
 
+def _class_is_included(item: dict, rules: list) -> bool:
+    """Return True when an include rule admits this item's entPhysicalClass.
+
+    INVENTORY_CLASSES lists the classes the sync table understands. A vendor that reports
+    real hardware under another class (Juniper returns Routing Engines as "other") would
+    otherwise be dropped before any matching runs, so an operator can admit the class with
+    a rule rather than waiting for the built-in list to grow.
+    """
+    phys_class = item.get("entPhysicalClass")
+    return any(rule.action == rule.ACTION_INCLUDE and rule.matches_class(phys_class) for rule in rules)
+
+
 def _check_ignore_rules(
     item: dict,
     parent_item: dict | None,
@@ -628,6 +640,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         from netbox_librenms_plugin.utils import (
             get_enabled_ignore_rules,
             load_bay_mappings,
+            normalize_inventory_serial,
             preload_normalization_rules,
         )
 
@@ -647,6 +660,18 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # _match_module_bay and resolve_module_type loops.
         self._norm_rules_bay = preload_normalization_rules("module_bay")
         self._norm_rules_type = preload_normalization_rules("module_type", manufacturer=manufacturer)
+        self._norm_rules_serial = preload_normalization_rules("serial", manufacturer=manufacturer)
+        # Rewrite the serials once for the whole inventory rather than per row: every consumer
+        # below (row display, status comparison, the install path) then reads the same value,
+        # and the rule lookup costs one query instead of one per item. Skip the walk entirely
+        # when no serial rule is configured, so an unused feature costs nothing.
+        if any(rules for (rule_scope, _), rules in (self._norm_rules_serial or {}).items() if rule_scope == "serial"):
+            for entity in inventory_data:
+                raw_serial = entity.get("entPhysicalSerialNum")
+                if raw_serial is not None:
+                    entity["entPhysicalSerialNum"] = normalize_inventory_serial(
+                        raw_serial, manufacturer=manufacturer, preloaded_rules=self._norm_rules_serial
+                    )
 
         # Pre-compute ignore rule results once to avoid calling _check_ignore_rules
         # twice per item (once in _find_transparent_indices, once in _collect_top_items).
@@ -683,7 +708,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         )
 
         # Sort top-level groups by status, keeping children after their parent
-        table_data = self._sort_with_hierarchy(table_data)
+        table_data = self._group_children_under_parents(table_data)
 
         # Bulk-detect serial conflicts for rows that can be replaced/installed
         self._detect_serial_conflicts(table_data)
@@ -755,8 +780,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 top_items.append(item)
                 continue
             phys_class = item.get("entPhysicalClass")
+            admitted_by_rule = False
             if phys_class not in INVENTORY_CLASSES:
-                continue
+                if not _class_is_included(item, ignore_rules):
+                    continue
+                admitted_by_rule = True
             idx = item.get("entPhysicalIndex")
             action = (
                 ignore_cache.get(idx)
@@ -801,6 +829,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 current_idx = ancestor.get("entPhysicalContainedIn", 0)
             if is_descendant:
                 continue
+            # Mark only rows that reach the table at top level. A Cisco converter is class
+            # "other" too, but it hangs under a container and keeps its own name.
+            if admitted_by_rule:
+                item["_class_included"] = True
             top_items.append(item)
         return top_items
 
@@ -1782,18 +1814,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     device_serial=device_serial,
                 )
 
-    def _sort_with_hierarchy(self, table_data):
-        """Sort table keeping children grouped under their parent."""
-        status_order = {
-            "Installed": 0,
-            "Serial Mismatch": 1,
-            "Type Mismatch": 2,
-            "Matched": 3,
-            "No Type": 4,
-            "No Bay": 5,
-            "Unmatched": 6,
-        }
+    def _group_children_under_parents(self, table_data):
+        """Keep every child row directly under its own top-level row, in inventory order.
 
+        The order is the LibreNMS inventory order the rows arrive in. Rows were once ordered
+        by status, which moved a row up the table the moment an install changed its status.
+        """
         # Group into top-level items with their children
         groups = []
         current_group = None
@@ -1803,9 +1829,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 groups.append(current_group)
             elif current_group is not None:
                 current_group["children"].append(row)
-
-        # Sort groups by parent status
-        groups.sort(key=lambda g: status_order.get(g["parent"]["status"], 99))
 
         # Flatten back
         result = []
@@ -2087,10 +2110,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         parent_bay = getattr(module, "module_bay", None)
         if not parent_bay:
             return True
-        try:
-            return int(parent_bay.position) == expected_fpc
-        except (TypeError, ValueError):
-            return False
+        # A Juniper bay position is "fpc/pic" and the descriptor names the FPC only, so read
+        # the first component. Every component must be numeric: a leading digit alone also
+        # starts "0/RP0", "0/FT0" and "2/x1", where it is a chassis index and not an FPC.
+        parts = str(parent_bay.position).split("/")
+        return all(part.isdigit() for part in parts) and int(parts[0]) == expected_fpc
 
     @staticmethod
     def _filter_mappings_by_manufacturer(mappings, manufacturer_id):
@@ -2362,6 +2386,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         phys_class = item.get("entPhysicalClass", "")
         name = item.get("entPhysicalName", "") or "-"
         description = item.get("entPhysicalDescr", "") or ""
+        # A class admitted by rule is hardware the vendor files outside the usual classes, and
+        # it tends to carry the model in entPhysicalName: a Juniper MX304 names both Routing
+        # Engines "JNP304-RE-S". The description holds the label that separates them.
+        if item.get("_class_included"):
+            name = description.strip() or name
 
         # OOB-controller modules come from a *separate* device. Comparing them against this
         # host's bays/types/installed modules is meaningless, and the host matching below could
