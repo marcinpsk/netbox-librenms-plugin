@@ -5530,9 +5530,9 @@ class TestNestSyntheticTransceivers:
 
 
 class TestRenderActionsPortIdentityFields:
-    """Install action form should preserve distinct ifName/ifDescr hidden values."""
+    """Install action form should name the inventory row the view resolves its identity from."""
 
-    def test_install_form_includes_distinct_ifname_and_ifdescr(self):
+    def test_install_form_posts_the_inventory_index(self):
         from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
 
         table = object.__new__(LibreNMSModuleTable)
@@ -5561,8 +5561,11 @@ class TestRenderActionsPortIdentityFields:
         with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/plugins/install-module/"):
             html = str(table.render_actions("", record))
 
-        assert 'name="librenms_ifname" value="TenGigabitEthernet1/1/1"' in html
-        assert 'name="librenms_ifdescr" value="Te1/1/1"' in html
+        # The view reads the serial and the port identity from the cached row for this index.
+        # Posted identity fields carry no _source marker, so they must not reach the view at all.
+        assert 'name="ent_index" value="77"' in html
+        assert "librenms_ifname" not in html
+        assert "librenms_ifdescr" not in html
 
     def test_interface_child_row_does_not_render_install_action(self):
         from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable

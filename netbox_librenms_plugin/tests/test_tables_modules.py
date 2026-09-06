@@ -507,14 +507,15 @@ class TestLibreNMSModuleTable:
             "can_install": True,
             "module_bay_id": 5,
             "module_type_id": 10,
-            "serial": "SN123",
+            "ent_physical_index": 123,
         }
         with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/install-url/"):
             result = str(table.render_actions(None, record))
 
         assert "Install" in result
         assert "/install-url/" in result
-        assert "SN123" in result
+        # The view reads the serial and the port identity from the cached row for this index.
+        assert 'name="ent_index" value="123"' in result
         assert "mdi-download" in result
         # The install form posts via HTMX so a single install swaps just the module table
         # in place instead of full-page reloading the whole sync view.

@@ -814,48 +814,27 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
     return {"status": "bound", "interface": candidate.name, "port_id": port_id, "changed": bool(update_fields)}
 
 
-def _resolve_single_install_binding_item(request, target_device, server_key, get_cache_key):
-    """Resolve inventory metadata for single-row install interface binding."""
+def _resolve_posted_inventory_row(request, page_device, target_device, server_key, get_cache_key):
+    """Resolve the posted ``ent_index`` to one writable cached row, else to a refusal response."""
     ent_index = _coerce_positive_int(request.POST.get("ent_index"))
-
-    if ent_index and server_key:
-        sync_device = _get_sync_device_for_inventory(target_device, server_key)
-        for item in _get_cached_inventory_for_device(sync_device, server_key, get_cache_key) or []:
-            item_index = _coerce_positive_int(item.get("entPhysicalIndex"))
-            if item_index == ent_index:
-                resolved = dict(item)
-                resolved["_binding_source"] = "cache"
-                return resolved
-
-    port_id = _coerce_positive_int(request.POST.get("librenms_port_id"))
-    ifname = (request.POST.get("librenms_ifname") or "").strip()
-    ifdescr = (request.POST.get("librenms_ifdescr") or "").strip()
-    name = (request.POST.get("inventory_name") or "").strip()
-    descr = (request.POST.get("inventory_descr") or "").strip()
-
-    fallback_item = {}
-    if port_id:
-        fallback_item["_librenms_port_id"] = port_id
-    if ifname:
-        fallback_item["_librenms_ifname"] = ifname
-    if ifdescr:
-        fallback_item["_librenms_ifdescr"] = ifdescr
-    if name:
-        fallback_item["entPhysicalName"] = name
-    if descr:
-        fallback_item["entPhysicalDescr"] = descr
-    if fallback_item:
-        fallback_item["_binding_source"] = "post_fallback"
-
-    return fallback_item or None
-
-
-def _oob_binding_item_response(request, bind_item, page_device, server_key):
-    """Refuse a binding item the OOB controller supplied, else return None."""
-    if bind_item and bind_item.get("_source") == OOB_INVENTORY_SOURCE:
+    if ent_index is None:
+        messages.error(request, "Missing or invalid inventory index.")
+        return None, _modules_action_response(request, page_device, server_key)
+    sync_device = _get_sync_device_for_inventory(target_device, server_key)
+    cached_data = _get_cached_inventory_for_device(sync_device, server_key, get_cache_key)
+    if cached_data is None:
+        return None, _modules_cache_missing_response(request, page_device, server_key)
+    librenms_item = next(
+        (item for item in cached_data if _coerce_positive_int(item.get("entPhysicalIndex")) == ent_index),
+        None,
+    )
+    if librenms_item is None:
+        messages.error(request, "Inventory item not found in cache.")
+        return None, _modules_action_response(request, page_device, server_key)
+    if librenms_item.get("_source") == OOB_INVENTORY_SOURCE:
         messages.error(request, OOB_INVENTORY_READ_ONLY_REASON)
-        return _modules_action_response(request, page_device, server_key)
-    return None
+        return None, _modules_action_response(request, page_device, server_key)
+    return librenms_item, None
 
 
 def _should_attempt_bind_for_result(result):
@@ -912,12 +891,6 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         if server_key is None:
             messages.error(request, NO_LIBRENMS_SERVER_MESSAGE)
             return _modules_action_response(request, page_device)
-        bind_item = _resolve_single_install_binding_item(request, target_device, server_key, self.get_cache_key)
-        if refusal := _oob_binding_item_response(request, bind_item, page_device, server_key):
-            return refusal
-        serial = request.POST.get("serial", "").strip()
-        if serial.lower() in _PLACEHOLDER_VALUES:
-            serial = ""
 
         try:
             module_bay_id = int(request.POST.get("module_bay_id"))
@@ -925,6 +898,22 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         except (TypeError, ValueError):
             messages.error(request, "Missing or invalid module bay/module type ID.")
             return _modules_action_response(request, page_device, server_key)
+
+        # Inventory metadata comes from the cached row for the posted ent_index, never from the
+        # form: posted fields carry no _source marker, so the OOB refusal cannot read them.
+        # A carrier install posts no index because the carrier is not an inventory row itself.
+        bind_item = None
+        serial = ""
+        if request.POST.get("ent_index"):
+            bind_item, refusal = _resolve_posted_inventory_row(
+                request, page_device, target_device, server_key, self.get_cache_key
+            )
+            if refusal:
+                return refusal
+            manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
+            serial = normalize_inventory_serial(bind_item.get("entPhysicalSerialNum"), manufacturer=manufacturer)
+            if serial.lower() in _PLACEHOLDER_VALUES:
+                serial = ""
 
         self.restrict_object_or_404(
             ModuleBay, pk=module_bay_id, device=target_device
@@ -1000,12 +989,6 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 messages.warning(
                     request,
                     f"VC member interface normalization applied: {vc_summary}.",
-                )
-            if bind_item and bind_item.get("_binding_source") == "post_fallback":
-                messages.warning(
-                    request,
-                    "Interface identity fallback used posted row metadata because a matching cached "
-                    "inventory row was unavailable. Verify the resulting binding.",
                 )
             if bind_result and bind_result.get("status") == "bound":
                 messages.info(
@@ -1879,24 +1862,11 @@ class UpdateModuleSerialView(
 
         # The serial comes from the selected cached row, never from the form: a replayed or
         # edited post would otherwise store a serial LibreNMS never reported.
-        ent_index = _coerce_positive_int(request.POST.get("ent_index"))
-        if ent_index is None:
-            messages.error(request, "Missing or invalid inventory index.")
-            return _modules_action_response(request, page_device, server_key)
-        sync_device = _get_sync_device_for_inventory(target_device, server_key)
-        cached_data = _get_cached_inventory_for_device(sync_device, server_key, self.get_cache_key)
-        if cached_data is None:
-            return _modules_cache_missing_response(request, page_device, server_key)
-        librenms_item = next(
-            (item for item in cached_data if _coerce_positive_int(item.get("entPhysicalIndex")) == ent_index),
-            None,
+        librenms_item, refusal = _resolve_posted_inventory_row(
+            request, page_device, target_device, server_key, self.get_cache_key
         )
-        if librenms_item is None:
-            messages.error(request, "Inventory item not found in cache.")
-            return _modules_action_response(request, page_device, server_key)
-        if librenms_item.get("_source") == OOB_INVENTORY_SOURCE:
-            messages.error(request, OOB_INVENTORY_READ_ONLY_REASON)
-            return _modules_action_response(request, page_device, server_key)
+        if refusal:
+            return refusal
         manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
         serial = normalize_inventory_serial(librenms_item.get("entPhysicalSerialNum"), manufacturer=manufacturer)
         if serial.lower() in _PLACEHOLDER_VALUES:
@@ -1968,8 +1938,10 @@ class UpdateModuleInterfaceView(
         changeable_interfaces = self.restricted_queryset(Interface, "change")
         # A blank or forged key degrades to the active server rather than scoping the bind under a
         # bogus namespace; see resolve_posted_server_key.
-        bind_item = _resolve_single_install_binding_item(request, target_device, server_key, self.get_cache_key)
-        if refusal := _oob_binding_item_response(request, bind_item, page_device, server_key):
+        bind_item, refusal = _resolve_posted_inventory_row(
+            request, page_device, target_device, server_key, self.get_cache_key
+        )
+        if refusal:
             return refusal
 
         module = self.restrict_object_or_404(Module, "view", pk=module_id, device=target_device)
@@ -1977,14 +1949,13 @@ class UpdateModuleInterfaceView(
         bind_result = None
         # The missing-server guard above already returned, so a resolved primary is always bound.
         try:
-            if bind_item:
-                bind_result = _bind_interface_librenms_id(
-                    target_device,
-                    bind_item,
-                    module.pk,
-                    server_key,
-                    changeable_interfaces,
-                )
+            bind_result = _bind_interface_librenms_id(
+                target_device,
+                bind_item,
+                module.pk,
+                server_key,
+                changeable_interfaces,
+            )
         except Exception:
             logger.exception(
                 "Unexpected error binding interface to module (device %s, module %s)",

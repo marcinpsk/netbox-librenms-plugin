@@ -1542,6 +1542,157 @@ class TestSingleInstallInterfaceBinding:
     """Single-row install should resolve inventory identity and bind interfaces."""
 
     @pytest.mark.django_db
+    def test_update_module_interface_refuses_an_unresolved_ent_index(self):
+        """Posted row metadata carries no _source, so an unknown ent_index must not bind at all."""
+        from types import SimpleNamespace
+
+        from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.tests.view_test_helpers import (
+            make_request,
+            make_user_with_perms,
+            message_texts,
+        )
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
+
+        device = make_device("update-interface-unresolved")
+        bay = ModuleBay.objects.create(device=device, name="Unresolved Bay")
+        module_type = ModuleType.objects.create(
+            manufacturer=device.device_type.manufacturer,
+            model="Unresolved Bind Module",
+        )
+        module = Module.objects.create(device=device, module_bay=bay, module_type=module_type, status="active")
+        interface = make_interface(device, "Ethernet1")
+        user = make_user_with_perms(
+            "update-interface-unresolved",
+            [("view", Device), ("view", Module), ("change", Interface)],
+        )
+        # The cached row for this port is OOB, so the guard refuses it when ent_index resolves.
+        inventory = [
+            {
+                "entPhysicalIndex": 8801,
+                "entPhysicalName": "Ethernet1",
+                "_librenms_port_id": 4501,
+                "_librenms_ifname": "Ethernet1",
+                "_source": "oob",
+            }
+        ]
+        view = UpdateModuleInterfaceView()
+        view._librenms_api = SimpleNamespace(server_key="default")
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        cache.set(
+            cache_key,
+            trusted_module_inventory_payload(device, inventory, librenms_id=881),
+            timeout=300,
+        )
+        # An ent_index the snapshot does not carry, plus the OOB row's identity in the hidden fields.
+        request = make_request(
+            "post",
+            {
+                "module_id": str(module.pk),
+                "ent_index": "9999",
+                "librenms_port_id": "4501",
+                "librenms_ifname": "Ethernet1",
+                "server_key": "default",
+            },
+            user=user,
+        )
+
+        try:
+            response = _post(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 302
+        assert "Inventory item not found in cache." in message_texts(request, "error")
+        interface.refresh_from_db()
+        assert get_librenms_device_id(interface, "default", auto_save=False) is None
+        assert interface.module_id is None
+
+    @pytest.mark.django_db
+    def test_install_module_refuses_an_unresolved_ent_index(self):
+        """An install must read its inventory metadata from the cache, never from the post."""
+        from types import SimpleNamespace
+
+        from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.tests.view_test_helpers import (
+            make_request,
+            make_user_with_perms,
+            message_texts,
+        )
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        device = make_device("install-module-unresolved")
+        bay = ModuleBay.objects.create(device=device, name="Unresolved Slot")
+        module_type = ModuleType.objects.create(
+            manufacturer=device.device_type.manufacturer,
+            model="Unresolved Install Module",
+        )
+        interface = make_interface(device, "Ethernet1")
+        user = make_user_with_perms(
+            "install-module-unresolved",
+            [
+                ("view", Device),
+                ("view", ModuleBay),
+                ("view", ModuleType),
+                ("add", Module),
+                ("add", Interface),
+                ("change", Interface),
+                ("delete", Interface),
+            ],
+        )
+        inventory = [
+            {
+                "entPhysicalIndex": 8801,
+                "entPhysicalName": "Ethernet1",
+                "entPhysicalSerialNum": "REALSERIAL",
+                "_librenms_port_id": 4501,
+                "_librenms_ifname": "Ethernet1",
+                "_source": "oob",
+            }
+        ]
+        view = InstallModuleView()
+        view._librenms_api = SimpleNamespace(server_key="default")
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        cache.set(
+            cache_key,
+            trusted_module_inventory_payload(device, inventory, librenms_id=881),
+            timeout=300,
+        )
+        request = make_request(
+            "post",
+            {
+                "module_bay_id": str(bay.pk),
+                "module_type_id": str(module_type.pk),
+                "serial": "FORGED",
+                "ent_index": "9999",
+                "librenms_port_id": "4501",
+                "librenms_ifname": "Ethernet1",
+                "server_key": "default",
+            },
+            user=user,
+        )
+
+        try:
+            response = _post(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 302
+        assert "Inventory item not found in cache." in message_texts(request, "error")
+        assert not Module.objects.filter(device=device).exists()
+        interface.refresh_from_db()
+        assert get_librenms_device_id(interface, "default", auto_save=False) is None
+        assert interface.module_id is None
+
+    @pytest.mark.django_db
     def test_update_module_interface_refuses_an_oob_binding_row(self):
         """OOB rows are read-only, so a crafted ent_index must not bind a host interface."""
         from types import SimpleNamespace
@@ -1605,191 +1756,173 @@ class TestSingleInstallInterfaceBinding:
         assert get_librenms_device_id(interface, "default", auto_save=False) is None
         assert interface.module_id is None
 
-    def test_resolve_single_install_binding_item_uses_cache_row_by_ent_index(self):
-        from netbox_librenms_plugin.views.sync.modules import _resolve_single_install_binding_item
+    @pytest.mark.django_db
+    def test_carrier_install_without_an_ent_index_still_installs_with_no_serial(self):
+        """The carrier is not an inventory row, so its button posts no index and no serial."""
+        from types import SimpleNamespace
 
-        request = _make_request(
-            "POST",
-            data={
-                "ent_index": "77",
-                "server_key": "production",
-            },
-        )
-        device = _make_device()
+        from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
 
-        with patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache:
-            mock_cache.get.return_value = trusted_module_inventory_payload(
-                device,
-                [
-                    {
-                        "entPhysicalIndex": 77,
-                        "_librenms_port_id": 42,
-                        "_librenms_ifname": "Te1/1/1",
-                    }
-                ],
-                server_key="production",
-            )
-            get_cache_key = MagicMock(return_value="inventory-key")
-            item = _resolve_single_install_binding_item(request, device, "production", get_cache_key)
-
-        assert item["_librenms_port_id"] == 42
-        assert item["_librenms_ifname"] == "Te1/1/1"
-        assert item["_binding_source"] == "cache"
-        get_cache_key.assert_called_once()
-
-    def test_resolve_single_install_binding_item_falls_back_to_posted_hidden_fields(self):
-        from netbox_librenms_plugin.views.sync.modules import _resolve_single_install_binding_item
-
-        request = _make_request(
-            "POST",
-            data={
-                "librenms_port_id": "56284",
-                "librenms_ifname": "TenGigabitEthernet1/1/1",
-                "librenms_ifdescr": "Te1/1/1",
-                "inventory_name": "Te1/1/1",
-                "inventory_descr": "10G transceiver",
-            },
-        )
-        device = _make_device()
-
-        with patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache:
-            get_cache_key = MagicMock(return_value="inventory-key")
-            item = _resolve_single_install_binding_item(request, device, "production", get_cache_key)
-
-        assert item["_librenms_port_id"] == 56284
-        assert item["_librenms_ifname"] == "TenGigabitEthernet1/1/1"
-        assert item["_librenms_ifdescr"] == "Te1/1/1"
-        assert item["entPhysicalName"] == "Te1/1/1"
-        assert item["entPhysicalDescr"] == "10G transceiver"
-        assert item["_binding_source"] == "post_fallback"
-        mock_cache.get.assert_not_called()
-
-    def test_resolve_single_install_binding_item_falls_back_when_cached_device_context_mismatch(self):
-        from netbox_librenms_plugin.views.sync.modules import _resolve_single_install_binding_item
-
-        request = _make_request(
-            "POST",
-            data={
-                "ent_index": "77",
-                "server_key": "production",
-                "librenms_port_id": "56284",
-                "librenms_ifname": "TenGigabitEthernet1/1/1",
-                "inventory_name": "Te1/1/1",
-            },
-        )
-        device = _make_device()
-
-        with (
-            patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.sync.modules.get_librenms_device_id", return_value=999),
-        ):
-            mock_cache.get.return_value = {
-                "librenms_id": 555,
-                "inventory": [
-                    {
-                        "entPhysicalIndex": 77,
-                        "_librenms_port_id": 42,
-                        "_librenms_ifname": "Te1/1/1",
-                    }
-                ],
-            }
-            get_cache_key = MagicMock(return_value="inventory-key")
-            item = _resolve_single_install_binding_item(request, device, "production", get_cache_key)
-
-        assert item["_librenms_port_id"] == 56284
-        assert item["_librenms_ifname"] == "TenGigabitEthernet1/1/1"
-        assert item["_binding_source"] == "post_fallback"
-
-    def test_install_module_view_warns_when_binding_uses_post_fallback(self):
-        from contextlib import contextmanager
-
-        from dcim.models import ModuleBay
-
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
         from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
-        view = object.__new__(InstallModuleView)
-        view.required_object_permissions = {}
-        view._librenms_api = MagicMock(server_key="production")
-        device = _make_device()
-
-        module_bay = MagicMock()
-        module_bay.name = "Slot 1"
-        module_bay.installed_module = None
-
-        module_type = MagicMock()
-        module_type.pk = 5
-        module_type.model = "SFP-10G-SR"
-
-        new_module = MagicMock()
-        new_module.pk = 321
-
-        request = _make_request(
-            "POST",
-            data={
-                "module_bay_id": "10",
-                "module_type_id": "5",
-                "serial": "SN1",
-                "server_key": "production",
-                "ent_index": "77",
-                "librenms_port_id": "42",
-                "librenms_ifname": "Te1/1/1",
+        device = make_device("install-module-carrier")
+        bay = ModuleBay.objects.create(device=device, name="Carrier Slot")
+        module_type = ModuleType.objects.create(
+            manufacturer=device.device_type.manufacturer,
+            model="Carrier Module",
+        )
+        user = make_user_with_perms(
+            "install-module-carrier",
+            [
+                ("view", Device),
+                ("view", ModuleBay),
+                ("view", ModuleType),
+                ("add", Module),
+                ("add", Interface),
+                ("change", Interface),
+                ("delete", Interface),
+            ],
+        )
+        view = InstallModuleView()
+        view._librenms_api = SimpleNamespace(server_key="default")
+        request = make_request(
+            "post",
+            {
+                "module_bay_id": str(bay.pk),
+                "module_type_id": str(module_type.pk),
+                "server_key": "default",
             },
+            user=user,
         )
 
-        @contextmanager
-        def noop_atomic():
-            yield
+        response = _post(view, request, pk=device.pk)
 
-        mock_qs = MagicMock()
-        mock_qs.filter.return_value.first.return_value = module_bay
+        assert response.status_code == 302
+        module = Module.objects.get(device=device, module_bay=bay)
+        assert module.module_type_id == module_type.pk
+        assert module.serial == ""
 
-        with (
-            patch.object(view, "require_all_permissions", return_value=None),
-            patch(
-                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-                side_effect=[device, module_bay, module_type],
-            ),
-            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
-            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
-            # This block replaces transaction.atomic with a no-op, so the real duplicate-serial
-            # guard cannot run its locked query. It is covered for real in test_view_wiring.py.
-            patch("netbox_librenms_plugin.views.sync.modules._module_already_on_device", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules._lock_page_device_serials"),
-            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_messages,
-            patch("netbox_librenms_plugin.views.sync.modules.redirect"),
-            patch("dcim.models.Module") as mock_module_cls,
-            patch.object(ModuleBay, "objects") as mock_objects,
-            patch.object(view, "get_cache_key", return_value="inv-key"),
-            patch("netbox_librenms_plugin.views.sync.modules.cache") as mock_cache,
-            patch("netbox_librenms_plugin.views.sync.modules.get_librenms_device_id", return_value=999),
-            patch(
-                "netbox_librenms_plugin.views.sync.modules._bind_interface_librenms_id",
-                return_value={"status": "bound", "interface": "Te1/1/1", "port_id": 42},
-            ),
-        ):
-            mock_tx.atomic = noop_atomic
-            mock_module_cls.return_value = new_module
-            # The locked re-fetch goes through restrict(user, ...), so hand back the same manager.
-            mock_objects.restrict.return_value = mock_objects
-            mock_objects.select_for_update.return_value = mock_qs
-            # Mismatched cache context triggers posted fallback path.
-            mock_cache.get.return_value = {
-                "librenms_id": 555,
-                "inventory": [
-                    {
-                        "entPhysicalIndex": 77,
-                        "_librenms_port_id": 42,
-                        "_librenms_ifname": "Te1/1/1",
-                    }
-                ],
-            }
-            view.request = request
-            view.post(request, pk=24)
+    @pytest.mark.django_db
+    def test_resolve_posted_inventory_row_returns_the_cache_row_for_ent_index(self):
+        """The resolver hands back the cached row itself, so the caller reads its _source marker."""
+        from types import SimpleNamespace
 
-        assert any(
-            "Interface identity fallback used posted row metadata" in str(call)
-            for call in mock_messages.warning.call_args_list
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser
+        from netbox_librenms_plugin.views.sync.modules import (
+            UpdateModuleInterfaceView,
+            _resolve_posted_inventory_row,
         )
+
+        device = make_device("resolve-row-hit")
+        view = UpdateModuleInterfaceView()
+        view._librenms_api = SimpleNamespace(server_key="default")
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        cache.set(
+            cache_key,
+            trusted_module_inventory_payload(
+                device,
+                [{"entPhysicalIndex": 77, "_librenms_port_id": 42, "_librenms_ifname": "Te1/1/1"}],
+                librenms_id=771,
+            ),
+            timeout=300,
+        )
+        request = make_request("post", {"ent_index": "77", "server_key": "default"}, user=make_superuser())
+
+        try:
+            item, refusal = _resolve_posted_inventory_row(request, device, device, "default", view.get_cache_key)
+        finally:
+            cache.delete(cache_key)
+
+        assert refusal is None
+        assert item["_librenms_port_id"] == 42
+        assert item["_librenms_ifname"] == "Te1/1/1"
+
+    @pytest.mark.django_db
+    def test_resolve_posted_inventory_row_refuses_a_missing_ent_index(self):
+        """Without an index there is no row to read, so the resolver refuses instead of guessing."""
+        from types import SimpleNamespace
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import (
+            make_request,
+            make_superuser,
+            message_texts,
+        )
+        from netbox_librenms_plugin.views.sync.modules import (
+            UpdateModuleInterfaceView,
+            _resolve_posted_inventory_row,
+        )
+
+        device = make_device("resolve-row-no-index")
+        view = UpdateModuleInterfaceView()
+        view._librenms_api = SimpleNamespace(server_key="default")
+        request = make_request(
+            "post",
+            {"librenms_port_id": "56284", "librenms_ifname": "Te1/1/1", "server_key": "default"},
+            user=make_superuser(),
+        )
+
+        item, refusal = _resolve_posted_inventory_row(request, device, device, "default", view.get_cache_key)
+
+        assert item is None
+        assert refusal is not None
+        assert "Missing or invalid inventory index." in message_texts(request, "error")
+
+    @pytest.mark.django_db
+    def test_resolve_posted_inventory_row_refuses_a_stale_cache_snapshot(self):
+        """A snapshot taken under a different LibreNMS device ID must not resolve any row."""
+        from types import SimpleNamespace
+
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import (
+            make_request,
+            make_superuser,
+            message_texts,
+        )
+        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.views.sync.modules import (
+            UpdateModuleInterfaceView,
+            _resolve_posted_inventory_row,
+        )
+
+        device = make_device("resolve-row-stale")
+        view = UpdateModuleInterfaceView()
+        view._librenms_api = SimpleNamespace(server_key="default")
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        cache.set(
+            cache_key,
+            trusted_module_inventory_payload(
+                device,
+                [{"entPhysicalIndex": 77, "_librenms_port_id": 42, "_librenms_ifname": "Te1/1/1"}],
+                librenms_id=555,
+            ),
+            timeout=300,
+        )
+        # Re-map the device: the snapshot now describes a LibreNMS device this one is not.
+        set_librenms_device_id(device, 999, "default")
+        device.save(update_fields=["custom_field_data"])
+        device.cf = device.custom_field_data
+        request = make_request(
+            "post",
+            {"ent_index": "77", "librenms_port_id": "56284", "server_key": "default"},
+            user=make_superuser(),
+        )
+
+        try:
+            item, refusal = _resolve_posted_inventory_row(request, device, device, "default", view.get_cache_key)
+        finally:
+            cache.delete(cache_key)
+
+        assert item is None
+        assert refusal is not None
+        assert "No cached inventory data. Please refresh modules first." in message_texts(request, "error")
 
     def test_install_module_view_binds_interface_after_install(self):
         from contextlib import contextmanager
@@ -2114,6 +2247,7 @@ class TestSingleInstallInterfaceBinding:
     @pytest.mark.django_db
     def test_update_module_interface_view_adopts_real_template_interfaces(self):
         from dcim.models import Device, Interface, InterfaceTemplate, Module, ModuleBay, ModuleType
+        from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
@@ -2147,13 +2281,28 @@ class TestSingleInstallInterfaceBinding:
         )
         request = make_request(
             "post",
-            {"module_id": str(module.pk), "server_key": "default"},
+            {"module_id": str(module.pk), "server_key": "default", "ent_index": "77"},
             user=user,
         )
         view = UpdateModuleInterfaceView()
         view._librenms_api = MagicMock(server_key="default")
+        # The cached row carries no port identity, so the primary bind is a real no-op and only
+        # the template adoption can attach the standalone interface.
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        cache.set(
+            cache_key,
+            trusted_module_inventory_payload(
+                device,
+                [{"entPhysicalIndex": 77, "entPhysicalName": "Te1/1/1"}],
+                librenms_id=771,
+            ),
+            timeout=300,
+        )
 
-        _post(view, request, pk=device.pk)
+        try:
+            _post(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
 
         standalone.refresh_from_db()
         assert standalone.module_id == module.pk
@@ -2213,15 +2362,17 @@ class TestSingleInstallInterfaceBinding:
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
         cache.set(
             cache_key,
-            {
-                "inventory": [
+            trusted_module_inventory_payload(
+                device,
+                [
                     {
                         "entPhysicalIndex": 77,
                         "_librenms_port_id": 587,
                         "_librenms_ifname": primary.name,
                     }
-                ]
-            },
+                ],
+                librenms_id=772,
+            ),
             timeout=300,
         )
         try:
@@ -5311,7 +5462,7 @@ class TestModulesActionResponse:
                     "server_key": self.SERVER_KEY,
                     "module_bay_id": str(bay.pk),
                     "module_type_id": str(module_type.pk),
-                    "serial": "ACTION-1",
+                    "ent_index": "8201",
                 },
                 HTTP_HX_REQUEST="true",
             )

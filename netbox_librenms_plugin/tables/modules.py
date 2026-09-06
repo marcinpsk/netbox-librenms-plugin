@@ -569,14 +569,8 @@ class LibreNMSModuleTable(tables.Table):
                     '<input type="hidden" name="server_key" value="{}">'
                     '<input type="hidden" name="selected_device_id" value="{}">'
                     '<input type="hidden" name="ent_index" value="{}">'
-                    '<input type="hidden" name="librenms_port_id" value="{}">'
-                    '<input type="hidden" name="librenms_ifname" value="{}">'
-                    '<input type="hidden" name="librenms_ifdescr" value="{}">'
-                    '<input type="hidden" name="inventory_name" value="{}">'
-                    '<input type="hidden" name="inventory_descr" value="{}">'
                     '<input type="hidden" name="module_bay_id" value="{}">'
                     '<input type="hidden" name="module_type_id" value="{}">'
-                    '<input type="hidden" name="serial" value="{}">'
                     '<button type="submit" class="btn btn-sm btn-success" title="Install module in bay">'
                     '<i class="mdi mdi-download"></i> Install'
                     "</button></form>",
@@ -586,14 +580,8 @@ class LibreNMSModuleTable(tables.Table):
                     self.server_key,
                     record.get("selected_device_id") or self.device.pk,
                     record.get("ent_physical_index", ""),
-                    record.get("librenms_port_id", ""),
-                    record.get("librenms_ifname") or "",
-                    record.get("librenms_ifdescr") or "",
-                    record.get("name") or "",
-                    record.get("description") or "",
                     record.get("module_bay_id", ""),
                     record.get("module_type_id", ""),
-                    record.get("serial") or "",
                 )
             )
 
@@ -662,10 +650,13 @@ class LibreNMSModuleTable(tables.Table):
                 )
             )
 
+        # Like Update Serial: the view resolves the row through the cache, so a row with no
+        # inventory index has no usable action.
         if (
             getattr(self, "can_change_interface", False)
             and record.get("can_update_interface_binding")
             and record.get("installed_module_id")
+            and record.get("ent_physical_index")
         ):
             url = reverse("plugins:netbox_librenms_plugin:update_module_interface", kwargs={"pk": self.device.pk})
             buttons.append(
@@ -681,11 +672,6 @@ class LibreNMSModuleTable(tables.Table):
                     '<input type="hidden" name="selected_device_id" value="{}">'
                     '<input type="hidden" name="module_id" value="{}">'
                     '<input type="hidden" name="ent_index" value="{}">'
-                    '<input type="hidden" name="librenms_port_id" value="{}">'
-                    '<input type="hidden" name="librenms_ifname" value="{}">'
-                    '<input type="hidden" name="librenms_ifdescr" value="{}">'
-                    '<input type="hidden" name="inventory_name" value="{}">'
-                    '<input type="hidden" name="inventory_descr" value="{}">'
                     '<button type="submit" class="btn btn-sm btn-outline-warning ms-1"'
                     ' title="Associate matching NetBox interface with installed module">'
                     '<i class="mdi mdi-link-variant"></i> Update Interface'
@@ -697,11 +683,6 @@ class LibreNMSModuleTable(tables.Table):
                     record.get("selected_device_id") or self.device.pk,
                     record["installed_module_id"],
                     record.get("ent_physical_index", ""),
-                    record.get("librenms_port_id", ""),
-                    record.get("librenms_ifname") or "",
-                    record.get("librenms_ifdescr") or "",
-                    record.get("name") or "",
-                    record.get("description") or "",
                 )
             )
 
@@ -795,7 +776,6 @@ class LibreNMSModuleTable(tables.Table):
                         '<input type="hidden" name="selected_device_id" value="{}">'
                         '<input type="hidden" name="module_bay_id" value="{}">'
                         '<input type="hidden" name="module_type_id" value="{}">'
-                        '<input type="hidden" name="serial" value="">'
                         '<button type="submit" class="btn btn-sm btn-success ms-1"'
                         " title=\"Install carrier {} into empty bay '{}'\">"
                         '<i class="mdi mdi-puzzle-plus-outline"></i> Install {} into &#39;{}&#39;'
