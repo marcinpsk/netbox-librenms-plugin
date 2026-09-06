@@ -554,8 +554,10 @@ class LibreNMSModuleTable(tables.Table):
 
         buttons = []
 
-        # Single install button (requires add permission)
-        if self.can_add_module and record.get("can_install"):
+        # Single install button (requires add permission). The view resolves the row by index, so a
+        # row without one can only submit a form the view refuses; the carrier action below has no
+        # inventory row of its own and stays indexless.
+        if self.can_add_module and record.get("can_install") and record.get("ent_physical_index"):
             url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": self.device.pk})
             buttons.append(
                 format_html(

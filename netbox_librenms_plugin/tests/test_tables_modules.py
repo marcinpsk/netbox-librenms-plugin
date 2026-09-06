@@ -577,7 +577,7 @@ class TestLibreNMSModuleTable:
         device.pk = 5
         table = self._make_table(device=device)
         table.csrf_token = "my-csrf-value"
-        record = {"can_install": True, "module_bay_id": 1, "module_type_id": 1, "serial": ""}
+        record = {"can_install": True, "module_bay_id": 1, "module_type_id": 1, "ent_physical_index": 31}
         with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
             result = str(table.render_actions(None, record))
 
@@ -735,7 +735,7 @@ class TestLibreNMSModuleTable:
 
     # One record per row action that posts through HTMX.
     _HTMX_ROW_ACTIONS = {
-        "install": {"can_install": True, "module_bay_id": 1, "module_type_id": 2, "serial": "S1"},
+        "install": {"can_install": True, "module_bay_id": 1, "module_type_id": 2, "ent_physical_index": 32},
         "install_branch": {"has_installable_children": True, "ent_physical_index": 5},
         "update_serial": {"can_update_serial": True, "installed_module_id": 42, "ent_physical_index": 88},
         "update_interface": {
@@ -815,7 +815,7 @@ class TestLibreNMSModuleTable:
             "can_install": True,
             "module_bay_id": 1,
             "module_type_id": 2,
-            "serial": "SN",
+            "ent_physical_index": 33,
             "can_update_serial": True,
             "installed_module_id": 99,
         }
@@ -844,6 +844,22 @@ class TestLibreNMSModuleTable:
 
         assert "Install" not in result
         assert "Update Serial" in result
+
+    def test_render_actions_install_hidden_without_an_inventory_index(self):
+        """InstallModuleView resolves the row by index, so a row with no index has no standard action."""
+        device = MagicMock()
+        device.pk = 25
+        table = self._make_table(device=device)
+        record = {
+            "can_install": True,
+            "module_bay_id": 5,
+            "module_type_id": 10,
+            "ent_physical_index": "",
+        }
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/install-url/"):
+            result = str(table.render_actions(None, record))
+
+        assert "Install" not in result
 
     def test_render_actions_update_serial_hidden_without_an_inventory_index(self):
         """UpdateModuleSerialView reads the serial from the cached row, so a row with no index has no action."""
