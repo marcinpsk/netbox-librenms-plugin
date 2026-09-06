@@ -3563,6 +3563,8 @@ class TestInstallViewsPreserveInventoryCache:
             for query in captured.captured_queries
             if "normalizationrule" in query["sql"].lower() and "'serial'" in query["sql"]
         ]
+        # An empty match would make the count check below pass without reading a single query.
+        assert serial_rule_queries, "the SQL filter matched no serial normalization rule query"
         # One preload for the unscoped rules, one lazy fill for the device manufacturer.
         assert len(serial_rule_queries) <= 2, (
             f"the serial normalization rules were queried {len(serial_rule_queries)} times "
