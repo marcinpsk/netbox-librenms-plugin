@@ -860,6 +860,22 @@ class TestLibreNMSModuleTable:
 
         assert "Update Serial" not in result
 
+    def test_render_actions_update_interface_hidden_without_an_inventory_index(self):
+        """The bind reads its metadata from the cached row, so a row with no index has no action."""
+        device = MagicMock()
+        device.pk = 24
+        table = self._make_table(device=device, can_change_interface=True)
+        record = {
+            "can_update_interface_binding": True,
+            "installed_module_id": 99,
+            "librenms_port_id": 4501,
+            "ent_physical_index": "",
+        }
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
+            result = str(table.render_actions(None, record))
+
+        assert "Update Interface" not in result
+
     def test_render_actions_replace_requires_both_add_and_change(self):
         """Replace button only shown when user has both add and change."""
         device = MagicMock()
