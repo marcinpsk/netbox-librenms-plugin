@@ -1208,7 +1208,10 @@ def test_unchanged_module_serial_preserves_other_snapshots(client, settings, dja
         module_type=module_type,
         serial="UNCHANGED-SERIAL",
     )
-    inventory_payload = {"inventory": [{"entPhysicalIndex": 8102}]}
+    inventory_payload = {
+        "librenms_id": 641,
+        "inventory": [{"entPhysicalIndex": 8102, "entPhysicalSerialNum": module.serial}],
+    }
     _seed_snapshot("inventory", device, "primary", inventory_payload)
     _seed_snapshot("ports", device, "primary")
     client.force_login(make_superuser("cache-module-unchanged-user"))
@@ -1220,7 +1223,7 @@ def test_unchanged_module_serial_preserves_other_snapshots(client, settings, dja
             {
                 "server_key": "primary",
                 "module_id": str(module.pk),
-                "serial": module.serial,
+                "ent_index": "8102",
             },
         )
 
@@ -1245,12 +1248,18 @@ def test_module_mutation_without_posted_server_uses_active_namespace(
         model="Cache Scoped Module",
     )
     module = Module.objects.create(device=device, module_bay=bay, module_type=module_type, serial="OLD")
+    _seed_snapshot(
+        "inventory",
+        device,
+        "primary",
+        {"librenms_id": 642, "inventory": [{"entPhysicalIndex": 8103, "entPhysicalSerialNum": "NEW"}]},
+    )
     _seed_snapshot("ports", device, "primary")
     client.force_login(make_superuser("cache-module-missing-server-user"))
     url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": device.pk})
 
     with django_capture_on_commit_callbacks(execute=True):
-        response = client.post(url, {"module_id": str(module.pk), "serial": "NEW"})
+        response = client.post(url, {"module_id": str(module.pk), "ent_index": "8103"})
 
     assert response.status_code == 302
     module.refresh_from_db()
@@ -1456,12 +1465,12 @@ def test_a_response_built_inside_the_transaction_reports_the_committed_cleanup(s
 
 
 @pytest.mark.django_db
-def test_module_serial_update_without_a_usable_server_invalidates_the_source_snapshot(
+def test_module_serial_update_without_a_usable_server_refuses_the_write(
     client,
     settings,
     django_capture_on_commit_callbacks,
 ):
-    """A NetBox-only module write without cleanup ownership must invalidate its source snapshot."""
+    """The serial comes from the server-scoped inventory snapshot, so no server means no write."""
     server_key = _configured_server_key(settings)
     device = make_device("cache-serial-without-server", librenms_cf={server_key: {"id": 645}})
     bay = ModuleBay.objects.create(device=device, name="Slot 1")
@@ -1472,20 +1481,16 @@ def test_module_serial_update_without_a_usable_server_invalidates_the_source_sna
     module = Module.objects.create(device=device, module_bay=bay, module_type=module_type, serial="OLD")
     configure_no_librenms_servers(settings)
     _seed_snapshot("inventory", device, server_key)
-    assert cache.get(_cache_key("inventory", device, server_key)) is not None
     client.force_login(make_superuser("cache-serial-without-server-user"))
     url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": device.pk})
 
     with django_capture_on_commit_callbacks(execute=True):
-        response = client.post(url, {"module_id": str(module.pk), "serial": "NEW"})
+        response = client.post(url, {"module_id": str(module.pk), "ent_index": "8104"})
 
     assert response.status_code == 302
     module.refresh_from_db()
-    assert module.serial == "NEW"
-    assert cache.get(_cache_key("inventory", device, server_key)) is None
-    state = cache.get(SyncCacheConsistency(device).state_key(SyncTab.MODULES, server_key))
-    assert state is not None
-    assert state["state"] == SyncTabState.INVALIDATED.value
+    assert module.serial == "OLD"
+    assert cache.get(_cache_key("inventory", device, server_key)) is not None
 
 
 @pytest.mark.django_db

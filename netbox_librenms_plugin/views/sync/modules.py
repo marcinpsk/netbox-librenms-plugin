@@ -1843,7 +1843,7 @@ class UpdateModuleSerialView(
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
     LibreNMSAPIMixin,
-    SyncSubjectClaimMixin,
+    CacheMixin,
     View,
 ):
     """Update the serial number of an already-installed module from LibreNMS inventory data."""
@@ -1866,16 +1866,41 @@ class UpdateModuleSerialView(
         )
         if invalid_selected_device:
             _warn_invalid_selected_device(request)
-        serial = request.POST.get("serial", "").strip()
-        if serial.lower() in _PLACEHOLDER_VALUES:
-            serial = ""
         server_key = self.resolve_posted_server_key_or_none(request.POST)
+        if server_key is None:
+            messages.error(request, NO_LIBRENMS_SERVER_MESSAGE)
+            return _modules_action_response(request, page_device)
 
         try:
             module_id = int(request.POST.get("module_id"))
         except (TypeError, ValueError):
             messages.error(request, "Missing or invalid module ID.")
             return _modules_action_response(request, page_device, server_key)
+
+        # The serial comes from the selected cached row, never from the form: a replayed or
+        # edited post would otherwise store a serial LibreNMS never reported.
+        ent_index = _coerce_positive_int(request.POST.get("ent_index"))
+        if ent_index is None:
+            messages.error(request, "Missing or invalid inventory index.")
+            return _modules_action_response(request, page_device, server_key)
+        sync_device = _get_sync_device_for_inventory(target_device, server_key)
+        cached_data = _get_cached_inventory_for_device(sync_device, server_key, self.get_cache_key)
+        if cached_data is None:
+            return _modules_cache_missing_response(request, page_device, server_key)
+        librenms_item = next(
+            (item for item in cached_data if _coerce_positive_int(item.get("entPhysicalIndex")) == ent_index),
+            None,
+        )
+        if librenms_item is None:
+            messages.error(request, "Inventory item not found in cache.")
+            return _modules_action_response(request, page_device, server_key)
+        if librenms_item.get("_source") == OOB_INVENTORY_SOURCE:
+            messages.error(request, OOB_INVENTORY_READ_ONLY_REASON)
+            return _modules_action_response(request, page_device, server_key)
+        manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
+        serial = normalize_inventory_serial(librenms_item.get("entPhysicalSerialNum"), manufacturer=manufacturer)
+        if serial.lower() in _PLACEHOLDER_VALUES:
+            serial = ""
 
         try:
             with transaction.atomic():

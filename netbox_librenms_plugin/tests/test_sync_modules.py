@@ -3509,53 +3509,6 @@ class TestParentRowIdxVsEntityIndex:
 class TestInstallViewsPreserveInventoryCache:
     """Install views preserve valid inventory and reject stale inventory."""
 
-    @staticmethod
-    def _objects(suffix):
-        from dcim.models import ModuleBay, ModuleType
-
-        from netbox_librenms_plugin.tests.conftest import make_device
-
-        device = make_device(f"cache-install-{suffix}")
-        bay = ModuleBay.objects.create(device=device, name=f"Slot {suffix}")
-        module_type = ModuleType.objects.create(
-            manufacturer=device.device_type.manufacturer,
-            model=f"Cache Module {suffix}",
-        )
-        inventory = [
-            {
-                "entPhysicalIndex": 100,
-                "entPhysicalClass": "module",
-                "entPhysicalModelName": module_type.model,
-                "entPhysicalContainedIn": 0,
-                "entPhysicalName": bay.name,
-            }
-        ]
-        return device, bay, module_type, inventory
-
-    @staticmethod
-    def _user(suffix):
-        from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
-
-        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
-
-        return make_user_with_perms(
-            f"cache-install-{suffix}",
-            [
-                ("view", Device),
-                ("view", ModuleBay),
-                ("view", ModuleType),
-                ("add", Module),
-                ("add", Interface),
-                ("change", Interface),
-                ("delete", Interface),
-            ],
-        )
-
-    @staticmethod
-    def _trusted_inventory(device, inventory):
-        """Bind one source snapshot to the device's current object mapping."""
-        return trusted_module_inventory_payload(device, inventory, librenms_id=555)
-
     def test_batch_install_preloads_the_serial_normalization_rules_once(self):
         """The serial scope is queried once for the batch, not once per inventory row."""
         from types import SimpleNamespace
@@ -5040,78 +4993,119 @@ class TestInstallModuleViewBehavior:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.django_db
 class TestUpdateModuleSerialViewBehavior:
-    """Behavioral tests for UpdateModuleSerialView.post happy path."""
+    """UpdateModuleSerialView writes the serial the selected cached inventory row carries."""
 
-    def _view(self):
+    @staticmethod
+    def _objects(suffix):
+        from dcim.models import Module, ModuleBay, ModuleType
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device(f"serial-update-{suffix}")
+        bay = ModuleBay.objects.create(device=device, name="Slot 1")
+        module_type = ModuleType.objects.create(
+            manufacturer=device.device_type.manufacturer,
+            model=f"Serial Module {suffix}",
+        )
+        module = Module.objects.create(
+            device=device,
+            module_bay=bay,
+            module_type=module_type,
+            serial="OLD-SN",
+            status="active",
+        )
+        return device, module
+
+    @staticmethod
+    def _user(suffix):
+        from dcim.models import Device, Module
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+        return make_user_with_perms(f"serial-update-{suffix}", [("view", Device), ("change", Module)])
+
+    def _post_update(self, device, inventory, data, user):
+        from types import SimpleNamespace
+
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
 
-        v = UpdateModuleSerialView()
-        v._librenms_api = SimpleNamespace(server_key="production")
-        v.required_object_permissions = {}
-        return v
+        view = UpdateModuleSerialView()
+        view._librenms_api = SimpleNamespace(server_key="default")
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        cache.set(
+            cache_key,
+            trusted_module_inventory_payload(device, inventory, librenms_id=771),
+            timeout=300,
+        )
+        request = make_request("post", data, user=user)
+        try:
+            return _post(view, request, pk=device.pk), request
+        finally:
+            cache.delete(cache_key)
 
-    def test_updates_serial_successfully(self):
-        """POST with valid module_id and new serial updates the module and shows success."""
-        from contextlib import contextmanager
+    def test_persists_the_cached_serial_not_the_posted_one(self):
+        """A replayed or edited form must not store a serial LibreNMS never reported."""
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts
 
-        from dcim.models import Module
-
-        view = self._view()
-        device = _make_device()
-
-        module = MagicMock()
-        module.pk = 42
-        module.serial = "OLD-SN"
-        module.module_type = MagicMock()
-        module.module_type.model = "XCM-7s"
-        module.module_bay = MagicMock()
-        module.module_bay.name = "Slot 1"
-
-        request = _make_request(
-            "POST",
-            data={
-                "module_id": "42",
-                "serial": "NEW-SN",
+        device, module = self._objects("cached")
+        inventory = [{"entPhysicalIndex": 900, "entPhysicalSerialNum": "LNMS-SN"}]
+        response, request = self._post_update(
+            device,
+            inventory,
+            {
+                "module_id": str(module.pk),
+                "ent_index": "900",
+                "serial": "FORGED-SN",
+                "server_key": "default",
             },
+            self._user("cached"),
         )
 
-        @contextmanager
-        def noop_atomic():
-            yield
+        assert response.status_code == 302
+        module.refresh_from_db()
+        assert module.serial == "LNMS-SN"
+        assert any("LNMS-SN" in text for text in message_texts(request, "success"))
 
-        mock_qs = MagicMock()
-        mock_qs.select_related.return_value.filter.return_value.first.return_value = module
+    def test_refuses_an_oob_inventory_row(self):
+        """OOB controller inventory is read-only, so its serial must never reach a host module."""
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts
 
-        with (
-            patch.object(view, "require_all_permissions", return_value=None),
-            patch(
-                "netbox_librenms_plugin.views.mixins.NetBoxObjectPermissionMixin.restrict_object_or_404",
-                return_value=device,
-            ),
-            patch("netbox_librenms_plugin.views.sync.modules.reverse", return_value="/sync/"),
-            patch("netbox_librenms_plugin.views.sync.modules.transaction") as mock_tx,
-            # This block replaces transaction.atomic with a no-op, so the real duplicate-serial
-            # guard cannot run its locked query. It is covered for real in test_view_wiring.py.
-            patch("netbox_librenms_plugin.views.sync.modules._module_already_on_device", return_value=None),
-            patch("netbox_librenms_plugin.views.sync.modules._lock_page_device_serials"),
-            patch("netbox_librenms_plugin.views.sync.modules.messages") as mock_msg,
-            patch("netbox_librenms_plugin.views.sync.modules.redirect") as mock_redirect,
-            patch.object(Module, "objects") as mock_objects,
-        ):
-            mock_tx.atomic = noop_atomic
-            # Both reads go through restrict(user, ...), so hand back the same manager.
-            mock_objects.restrict.return_value = mock_objects
-            mock_objects.select_for_update.return_value = mock_qs
-            view.request = request
-            view.post(request, pk=24)
+        device, module = self._objects("oob")
+        inventory = [{"entPhysicalIndex": 901, "entPhysicalSerialNum": "OOB-SN", "_source": "oob"}]
+        response, request = self._post_update(
+            device,
+            inventory,
+            {"module_id": str(module.pk), "ent_index": "901", "server_key": "default"},
+            self._user("oob"),
+        )
 
-        assert module.serial == "NEW-SN"
-        module.full_clean.assert_called_once()
-        module.save.assert_called_once()
-        mock_msg.success.assert_called_once()
-        assert "NEW-SN" in mock_msg.success.call_args[0][1]
-        mock_redirect.assert_called_once()
+        assert response.status_code == 302
+        assert "OOB controller inventory is read-only" in message_texts(request, "error")
+        module.refresh_from_db()
+        assert module.serial == "OLD-SN"
+
+    def test_reports_an_inventory_index_that_is_not_cached(self):
+        """A row the snapshot does not carry is refused instead of writing a blank serial."""
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts
+
+        device, module = self._objects("missing")
+        inventory = [{"entPhysicalIndex": 902, "entPhysicalSerialNum": "LNMS-SN"}]
+        response, request = self._post_update(
+            device,
+            inventory,
+            {"module_id": str(module.pk), "ent_index": "903", "server_key": "default"},
+            self._user("missing"),
+        )
+
+        assert response.status_code == 302
+        assert "Inventory item not found in cache." in message_texts(request, "error")
+        module.refresh_from_db()
+        assert module.serial == "OLD-SN"
 
 
 # =============================================================================
@@ -5451,7 +5445,7 @@ class TestModulesActionResponse:
 
         response = client.post(
             url,
-            {"server_key": self.SERVER_KEY, "module_id": str(module.pk), "serial": "ACTION-1"},
+            {"server_key": self.SERVER_KEY, "module_id": str(module.pk), "ent_index": "8201"},
             HTTP_HX_REQUEST="true",
         )
 

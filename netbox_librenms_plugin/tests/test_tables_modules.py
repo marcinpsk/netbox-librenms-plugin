@@ -591,13 +591,16 @@ class TestLibreNMSModuleTable:
             "can_update_serial": True,
             "installed_module_id": 42,
             "serial": "NS225161205",
+            "ent_physical_index": 8201,
         }
         with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
             result = str(table.render_actions(None, record))
 
         assert "Update Serial" in result
         assert "update-module-serial" in result or "/url/" in result
-        assert "NS225161205" in result
+        # The action reads the serial from the cached row, so the form posts the row index.
+        assert '<input type="hidden" name="ent_index" value="8201">' in result
+        assert "NS225161205" not in result
         assert "mdi-sync" in result
         # Posts via HTMX so the update swaps just the module table in place (with the
         # closest-row spinner) instead of full-page reloading the whole sync view.

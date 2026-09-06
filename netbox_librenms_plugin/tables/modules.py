@@ -640,7 +640,7 @@ class LibreNMSModuleTable(tables.Table):
                     '<input type="hidden" name="server_key" value="{}">'
                     '<input type="hidden" name="selected_device_id" value="{}">'
                     '<input type="hidden" name="module_id" value="{}">'
-                    '<input type="hidden" name="serial" value="{}">'
+                    '<input type="hidden" name="ent_index" value="{}">'
                     '<button type="submit" class="btn btn-sm btn-warning ms-1"'
                     ' title="Update serial in NetBox to match LibreNMS">'
                     '<i class="mdi mdi-sync"></i> Update Serial'
@@ -651,7 +651,7 @@ class LibreNMSModuleTable(tables.Table):
                     self.server_key,
                     record.get("selected_device_id") or self.device.pk,
                     record["installed_module_id"],
-                    record.get("serial") or "",
+                    record.get("ent_physical_index") or "",
                 )
             )
 

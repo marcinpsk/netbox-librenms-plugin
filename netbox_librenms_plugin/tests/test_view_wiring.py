@@ -2209,8 +2209,13 @@ class TestGatedViewsRefuseOutOfScopeObjects:
     def test_module_serial_update_refuses_a_module_outside_the_grant(self):
         """UpdateModuleSerialView writes the serial of a module whose pk comes from the POST, filtered only by device."""
         from dcim.models import Device, Module
+        from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import (
+            message_texts,
+            trusted_module_inventory_payload,
+        )
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
 
         page_device = make_device("scope-modserial-page")
@@ -2232,13 +2237,34 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         view = UpdateModuleSerialView()
         request = self._request(
             user,
-            {"server_key": "default", "module_id": str(module.pk), "serial": "HIJACKED"},
+            {"server_key": "default", "module_id": str(module.pk), "ent_index": "4001"},
         )
         view.setup(request)
-        view.post(request, pk=page_device.pk)
+        # The serial now comes from the cached row, so the snapshot has to carry it for the grant
+        # filter to be the only thing that stops the write. Derive the namespace the view resolves
+        # rather than naming a server: the configured set differs between environments.
+        server_key = view.resolve_posted_server_key_or_none(request.POST)
+        assert server_key is not None, "this test needs a resolvable server namespace"
+        cache_key = view.get_cache_key(page_device, "inventory", server_key=server_key)
+        cache.set(
+            cache_key,
+            trusted_module_inventory_payload(
+                page_device,
+                [{"entPhysicalIndex": 4001, "entPhysicalSerialNum": "HIJACKED"}],
+                server_key=server_key,
+                librenms_id=901,
+            ),
+            timeout=300,
+        )
+        try:
+            view.post(request, pk=page_device.pk)
+        finally:
+            cache.delete(cache_key)
 
         module.refresh_from_db()
         assert module.serial == "ORIGINAL"
+        # Names the reason, so a row the view never resolved cannot pass this test.
+        assert "Module no longer exists." in message_texts(request, "error")
 
     def test_module_replace_refuses_to_delete_the_target_outside_the_delete_grant(self):
         """Replace deletes its target, so change access alone must not authorize the operation."""
