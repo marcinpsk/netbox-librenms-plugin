@@ -12,6 +12,7 @@ from django.urls import reverse
 from django.views import View
 from virtualization.models import VirtualMachine, VMInterface
 
+from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.interface_relationships import (
     build_interface_index,
     filter_interface_index,
@@ -153,7 +154,7 @@ class SyncInterfacesView(
                 self._auto_selected_port_ids.update(added - visible_port_ids)
         host_port_id_counts = {}
         for port in ports_data:
-            if port.get("_source") == "oob":
+            if port.get("_source") == OOB_INVENTORY_SOURCE:
                 continue
             port_id = normalize_librenms_port_id(port.get("port_id"))
             if port_id is not None:
@@ -314,7 +315,8 @@ class SyncInterfacesView(
         ports_by_id = {
             port_id: port
             for port in ports_data
-            if (port_id := normalize_librenms_port_id(port.get("port_id"))) is not None and port.get("_source") != "oob"
+            if (port_id := normalize_librenms_port_id(port.get("port_id"))) is not None
+            and port.get("_source") != OOB_INVENTORY_SOURCE
         }
         candidate_port_ids = [
             ports_by_id[port_id].get("port_id", port_id)
@@ -429,7 +431,7 @@ class SyncInterfacesView(
         valid_name_port_ids = {
             normalize_librenms_port_id(port.get("port_id"))
             for port in ports_data
-            if port.get("_source") != "oob"
+            if port.get("_source") != OOB_INVENTORY_SOURCE
             and syncable_interface_name(port, interface_name_field, relationship_writer_model) is not None
         }
         selected_edge_source_ids &= {str(port_id) for port_id in valid_name_port_ids if port_id is not None}
@@ -440,7 +442,7 @@ class SyncInterfacesView(
             # already skips them. Exclude them here too: on a page where an OOB row shares the host display
             # name, adding its port_id would let the LAG/parent pass persist links on the hidden controller
             # row instead of the host interface.
-            if port.get("_source") == "oob":
+            if port.get("_source") == OOB_INVENTORY_SOURCE:
                 continue
             pid = normalize_librenms_port_id(port.get("port_id"))
             if pid is None or pid not in unique_host_port_ids:
@@ -821,7 +823,7 @@ class SyncInterfacesView(
                     # sync_interface(). They must not sync onto the host — and skipping them prevents
                     # a main/OOB interface-name collision (both "eth0") from double-processing one
                     # selection and overwriting the host interface with the OOB row's port_id/attrs.
-                    if port.get("_source") == "oob":
+                    if port.get("_source") == OOB_INVENTORY_SOURCE:
                         continue
                     port_id = normalize_librenms_port_id(port.get("port_id"))
 
@@ -840,7 +842,7 @@ class SyncInterfacesView(
         auto_selected_port_ids = getattr(self, "_auto_selected_port_ids", set())
         owners = {}
         for port in ports_data:
-            if port.get("_source") == "oob":
+            if port.get("_source") == OOB_INVENTORY_SOURCE:
                 continue
             port_id = normalize_librenms_port_id(port.get("port_id"))
             if (
@@ -1656,7 +1658,7 @@ class _BaseRelationshipSyncView(
         duplicate_port_ids = set()
         for port in ports:
             normalized_id = normalize_librenms_port_id(port.get("port_id"))
-            if port.get("_source") == "oob" or normalized_id is None:
+            if port.get("_source") == OOB_INVENTORY_SOURCE or normalized_id is None:
                 continue
             if normalized_id in ports_by_id:
                 duplicate_port_ids.add(normalized_id)
