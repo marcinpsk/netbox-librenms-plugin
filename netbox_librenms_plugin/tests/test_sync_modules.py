@@ -3492,6 +3492,113 @@ class TestInstallViewsPreserveInventoryCache:
         """Bind one source snapshot to the device's current object mapping."""
         return trusted_module_inventory_payload(device, inventory, librenms_id=555)
 
+    def test_batch_install_preloads_the_serial_normalization_rules_once(self):
+        """The serial scope is queried once for the batch, not once per inventory row."""
+        from types import SimpleNamespace
+
+        from dcim.models import Module, ModuleBay, ModuleType
+        from django.core.cache import cache
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
+        from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
+
+        device = make_device("serial-rule-preload")
+        module_type = ModuleType.objects.create(
+            manufacturer=device.device_type.manufacturer,
+            model="Serial Rule Module",
+        )
+        inventory = []
+        for position in range(1, 4):
+            bay = ModuleBay.objects.create(device=device, name=f"Slot {position}")
+            inventory.append(
+                {
+                    "entPhysicalIndex": 200 + position,
+                    "entPhysicalClass": "module",
+                    "entPhysicalModelName": module_type.model,
+                    "entPhysicalContainedIn": 0,
+                    "entPhysicalName": bay.name,
+                    "entPhysicalSerialNum": f"S/N SERIAL{position}",
+                }
+            )
+        request = make_request(
+            "post",
+            {"select": [str(item["entPhysicalIndex"]) for item in inventory], "server_key": "default"},
+            user=self._user("serial-rule-preload"),
+        )
+        view = InstallSelectedView()
+        view._librenms_api = SimpleNamespace(server_key="default")
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        cache.set(cache_key, self._trusted_inventory(device, inventory), timeout=300)
+
+        try:
+            with CaptureQueriesContext(connection) as captured:
+                response = _post(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 302
+        assert Module.objects.filter(device=device).count() == len(inventory)
+        serial_rule_queries = [
+            query["sql"]
+            for query in captured.captured_queries
+            if "normalizationrule" in query["sql"].lower() and "'serial'" in query["sql"]
+        ]
+        # One preload for the unscoped rules, one lazy fill for the device manufacturer.
+        assert len(serial_rule_queries) <= 2, (
+            f"the serial normalization rules were queried {len(serial_rule_queries)} times "
+            f"for {len(inventory)} inventory rows"
+        )
+
+    @staticmethod
+    def _objects(suffix):
+        from dcim.models import ModuleBay, ModuleType
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device(f"cache-install-{suffix}")
+        bay = ModuleBay.objects.create(device=device, name=f"Slot {suffix}")
+        module_type = ModuleType.objects.create(
+            manufacturer=device.device_type.manufacturer,
+            model=f"Cache Module {suffix}",
+        )
+        inventory = [
+            {
+                "entPhysicalIndex": 100,
+                "entPhysicalClass": "module",
+                "entPhysicalModelName": module_type.model,
+                "entPhysicalContainedIn": 0,
+                "entPhysicalName": bay.name,
+            }
+        ]
+        return device, bay, module_type, inventory
+
+    @staticmethod
+    def _user(suffix):
+        from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+        return make_user_with_perms(
+            f"cache-install-{suffix}",
+            [
+                ("view", Device),
+                ("view", ModuleBay),
+                ("view", ModuleType),
+                ("add", Module),
+                ("add", Interface),
+                ("change", Interface),
+                ("delete", Interface),
+            ],
+        )
+
+    @staticmethod
+    def _trusted_inventory(device, inventory):
+        """Bind one source snapshot to the device's current object mapping."""
+        return trusted_module_inventory_payload(device, inventory, librenms_id=555)
+
     def test_install_module_preserves_inventory_cache(self):
         from types import SimpleNamespace
 
