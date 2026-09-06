@@ -736,7 +736,7 @@ class TestLibreNMSModuleTable:
     _HTMX_ROW_ACTIONS = {
         "install": {"can_install": True, "module_bay_id": 1, "module_type_id": 2, "serial": "S1"},
         "install_branch": {"has_installable_children": True, "ent_physical_index": 5},
-        "update_serial": {"can_update_serial": True, "installed_module_id": 42, "serial": "S2"},
+        "update_serial": {"can_update_serial": True, "installed_module_id": 42, "ent_physical_index": 88},
         "update_interface": {
             "can_update_interface_binding": True,
             "installed_module_id": 42,
@@ -836,12 +836,28 @@ class TestLibreNMSModuleTable:
             "serial": "SN",
             "can_update_serial": True,
             "installed_module_id": 99,
+            "ent_physical_index": 99,
         }
         with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
             result = str(table.render_actions(None, record))
 
         assert "Install" not in result
         assert "Update Serial" in result
+
+    def test_render_actions_update_serial_hidden_without_an_inventory_index(self):
+        """UpdateModuleSerialView reads the serial from the cached row, so a row with no index has no action."""
+        device = MagicMock()
+        device.pk = 23
+        table = self._make_table(device=device)
+        record = {
+            "can_update_serial": True,
+            "installed_module_id": 99,
+            "ent_physical_index": "",
+        }
+        with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
+            result = str(table.render_actions(None, record))
+
+        assert "Update Serial" not in result
 
     def test_render_actions_replace_requires_both_add_and_change(self):
         """Replace button only shown when user has both add and change."""

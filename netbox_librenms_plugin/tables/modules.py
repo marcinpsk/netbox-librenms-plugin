@@ -626,7 +626,14 @@ class LibreNMSModuleTable(tables.Table):
             )
 
         # Update serial button for serial mismatch rows (requires change)
-        if self.can_change_module and record.get("can_update_serial") and record.get("installed_module_id"):
+        # The view resolves the serial through the cached row for ent_index, so a row without one
+        # can only post a value the view rejects.
+        if (
+            self.can_change_module
+            and record.get("can_update_serial")
+            and record.get("installed_module_id")
+            and record.get("ent_physical_index")
+        ):
             url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": self.device.pk})
             buttons.append(
                 format_html(
