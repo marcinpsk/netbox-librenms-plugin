@@ -850,6 +850,14 @@ def _resolve_single_install_binding_item(request, target_device, server_key, get
     return fallback_item or None
 
 
+def _oob_binding_item_response(request, bind_item, page_device, server_key):
+    """Refuse a binding item the OOB controller supplied, else return None."""
+    if bind_item and bind_item.get("_source") == OOB_INVENTORY_SOURCE:
+        messages.error(request, OOB_INVENTORY_READ_ONLY_REASON)
+        return _modules_action_response(request, page_device, server_key)
+    return None
+
+
 def _should_attempt_bind_for_result(result):
     """Return True when a module install result carries a bindable module context."""
     if result.get("status") == "installed":
@@ -905,6 +913,8 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             messages.error(request, NO_LIBRENMS_SERVER_MESSAGE)
             return _modules_action_response(request, page_device)
         bind_item = _resolve_single_install_binding_item(request, target_device, server_key, self.get_cache_key)
+        if refusal := _oob_binding_item_response(request, bind_item, page_device, server_key):
+            return refusal
         serial = request.POST.get("serial", "").strip()
         if serial.lower() in _PLACEHOLDER_VALUES:
             serial = ""
@@ -1934,6 +1944,8 @@ class UpdateModuleInterfaceView(
         # A blank or forged key degrades to the active server rather than scoping the bind under a
         # bogus namespace; see resolve_posted_server_key.
         bind_item = _resolve_single_install_binding_item(request, target_device, server_key, self.get_cache_key)
+        if refusal := _oob_binding_item_response(request, bind_item, page_device, server_key):
+            return refusal
 
         module = self.restrict_object_or_404(Module, "view", pk=module_id, device=target_device)
 

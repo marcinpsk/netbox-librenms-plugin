@@ -1541,6 +1541,70 @@ class TestModuleInterfaceHelpers:
 class TestSingleInstallInterfaceBinding:
     """Single-row install should resolve inventory identity and bind interfaces."""
 
+    @pytest.mark.django_db
+    def test_update_module_interface_refuses_an_oob_binding_row(self):
+        """OOB rows are read-only, so a crafted ent_index must not bind a host interface."""
+        from types import SimpleNamespace
+
+        from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.tests.view_test_helpers import (
+            make_request,
+            make_user_with_perms,
+            message_texts,
+        )
+        from netbox_librenms_plugin.utils import get_librenms_device_id
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
+
+        device = make_device("update-interface-oob")
+        bay = ModuleBay.objects.create(device=device, name="OOB Bay")
+        module_type = ModuleType.objects.create(
+            manufacturer=device.device_type.manufacturer,
+            model="OOB Bind Module",
+        )
+        module = Module.objects.create(device=device, module_bay=bay, module_type=module_type, status="active")
+        interface = make_interface(device, "Ethernet1")
+        user = make_user_with_perms(
+            "update-interface-oob",
+            [("view", Device), ("view", Module), ("change", Interface)],
+        )
+        # Everything a successful bind needs, so only _source="oob" can stop it.
+        inventory = [
+            {
+                "entPhysicalIndex": 8801,
+                "entPhysicalName": "Ethernet1",
+                "_librenms_port_id": 4501,
+                "_librenms_ifname": "Ethernet1",
+                "_source": "oob",
+            }
+        ]
+        view = UpdateModuleInterfaceView()
+        view._librenms_api = SimpleNamespace(server_key="default")
+        cache_key = view.get_cache_key(device, "inventory", server_key="default")
+        cache.set(
+            cache_key,
+            trusted_module_inventory_payload(device, inventory, librenms_id=881),
+            timeout=300,
+        )
+        request = make_request(
+            "post",
+            {"module_id": str(module.pk), "ent_index": "8801", "server_key": "default"},
+            user=user,
+        )
+
+        try:
+            response = _post(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 302
+        assert "OOB controller inventory is read-only" in message_texts(request, "error")
+        interface.refresh_from_db()
+        assert get_librenms_device_id(interface, "default", auto_save=False) is None
+        assert interface.module_id is None
+
     def test_resolve_single_install_binding_item_uses_cache_row_by_ent_index(self):
         from netbox_librenms_plugin.views.sync.modules import _resolve_single_install_binding_item
 
