@@ -1,6 +1,8 @@
 {% load helpers %}
 {% include 'inc/messages.html' %}
 
+{% include "netbox_librenms_plugin/inc/_ipam_permission_notice.html" with hidden_ipam_permissions=interface_sync.hidden_ipam_permissions %}
+
 <!-- Interface Sync Table -->
 {% if interface_sync.table %}
 
