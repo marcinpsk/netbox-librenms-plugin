@@ -326,7 +326,7 @@ def _refresh_ip_snapshot(client, device, address, prefix_length):
     """Refresh one IP row through the real view and cache pipeline."""
     refresh_url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk])
     with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
+        "netbox_librenms_plugin.librenms_api._session.get",
         side_effect=_librenms_ip_response(address, prefix_length, device_name=device.name),
     ):
         return client.post(
@@ -688,7 +688,7 @@ def test_refresh_rejects_conflicting_embedded_and_separate_prefixes(client, sett
 
     refresh_url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk])
     with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
+        "netbox_librenms_plugin.librenms_api._session.get",
         side_effect=_librenms_ip_response(
             "198.18.1.10/25",
             24,
@@ -812,7 +812,7 @@ def test_bulk_sync_applies_safe_rows_and_forces_only_selected_conflicts(client, 
     client.force_login(make_superuser("ip-bulk-conflicts-user"))
     refresh_url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk])
     with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
+        "netbox_librenms_plugin.librenms_api._session.get",
         side_effect=_librenms_ip_rows_response(rows, device_name=device.name),
     ):
         refresh_response = client.post(
@@ -891,7 +891,7 @@ def test_confirmation_replays_create_missing_when_the_target_name_turns_ambiguou
     client.force_login(make_superuser("ip-conflict-vc-user"))
     refresh_url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[page_device.pk])
     with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
+        "netbox_librenms_plugin.librenms_api._session.get",
         side_effect=_librenms_ip_rows_response(rows, device_name=page_device.name),
     ):
         assert (
@@ -969,7 +969,7 @@ def test_row_action_syncs_only_its_ip_when_another_row_is_checked(client, settin
     client.force_login(make_superuser("ip-row-action-user"))
     refresh_url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk])
     with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
+        "netbox_librenms_plugin.librenms_api._session.get",
         side_effect=_librenms_ip_rows_response(rows, device_name=device.name),
     ):
         refresh_response = client.post(
@@ -1035,7 +1035,7 @@ def test_create_missing_interfaces_materializes_one_interface_for_bulk_ip_rows(c
     client.force_login(make_superuser("ip-create-missing-interface-user"))
     refresh_url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk])
     with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
+        "netbox_librenms_plugin.librenms_api._session.get",
         side_effect=_librenms_ip_rows_response(rows, device_name=device.name),
     ):
         refresh_response = client.post(
@@ -1174,7 +1174,7 @@ def test_create_missing_interfaces_reuses_interface_catalog_for_bulk_rows(client
     client.force_login(make_superuser("ip-create-missing-catalog-user"))
     refresh_url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk])
     with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
+        "netbox_librenms_plugin.librenms_api._session.get",
         side_effect=_librenms_ip_rows_response(rows, device_name=device.name),
     ):
         assert (
@@ -1320,7 +1320,7 @@ def test_create_missing_interface_resolves_the_virtual_chassis_member(client, se
     client.force_login(make_superuser("ip-create-vc-user"))
     refresh_url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[page_device.pk])
     with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
+        "netbox_librenms_plugin.librenms_api._session.get",
         side_effect=_librenms_ip_rows_response(rows, device_name=page_device.name),
     ):
         assert (
@@ -1373,7 +1373,7 @@ def test_create_missing_interface_supports_virtual_machine_ip_sync(client, setti
     client.force_login(make_superuser("ip-create-vm-user"))
     refresh_url = reverse("plugins:netbox_librenms_plugin:vm_ipaddress_sync", args=[virtual_machine.pk])
     with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
+        "netbox_librenms_plugin.librenms_api._session.get",
         side_effect=_librenms_ip_rows_response(rows, device_name=virtual_machine.name),
     ):
         assert (
@@ -1490,7 +1490,7 @@ def test_create_missing_interfaces_rejects_ambiguous_cached_port_names(client, s
     client.force_login(make_superuser("ip-create-ambiguous-user"))
     refresh_url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk])
     with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
+        "netbox_librenms_plugin.librenms_api._session.get",
         side_effect=_librenms_ip_rows_response(rows, device_name=device.name),
     ):
         assert (
@@ -1564,7 +1564,7 @@ def test_interface_sync_keeps_its_source_snapshot_and_clears_the_ip_snapshot(
     interface_refresh_url = reverse("plugins:netbox_librenms_plugin:device_interface_sync", args=[device.pk])
     ip_cache_key = sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].data_type, "default")
     interface_cache_key = sync_snapshot_key(device, TAB_SPECS[SyncTab.INTERFACES].data_type, "default")
-    with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=librenms_response):
+    with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=librenms_response):
         assert (
             client.post(
                 ip_refresh_url,
@@ -2407,7 +2407,7 @@ def test_configured_interface_name_field_survives_the_cache_round_trip(client, s
 
     refresh_url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk])
     with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
+        "netbox_librenms_plugin.librenms_api._session.get",
         side_effect=_librenms_ip_response("198.18.31.10", 24, device_name=device.name),
     ):
         refresh_response = client.post(refresh_url, {"server_key": "default"}, HTTP_HX_REQUEST="true")
@@ -2624,7 +2624,7 @@ def test_create_missing_interfaces_toggle_survives_a_table_refresh(client, setti
 
     def _refresh(payload):
         with patch(
-            "netbox_librenms_plugin.librenms_api.requests.get",
+            "netbox_librenms_plugin.librenms_api._session.get",
             side_effect=_librenms_ip_rows_response(rows, device_name=device.name),
         ):
             response = client.post(refresh_url, payload, HTTP_HX_REQUEST="true")
@@ -2778,7 +2778,7 @@ def test_duplicate_source_addresses_have_independent_vrf_controls_and_writes(
     client.force_login(make_superuser("duplicate-source-addresses-user"))
     refresh_url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk])
     with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
+        "netbox_librenms_plugin.librenms_api._session.get",
         side_effect=_librenms_ip_rows_response(source_rows, device_name=device.name),
     ):
         refreshed = client.post(
@@ -2819,7 +2819,7 @@ def test_duplicate_source_addresses_have_independent_vrf_controls_and_writes(
         kwargs={"object_type": "device", "pk": device.pk},
     )
     with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
+        "netbox_librenms_plugin.librenms_api._session.get",
         side_effect=_librenms_ip_rows_response(
             source_rows,
             device_name=device.name,
@@ -2900,7 +2900,7 @@ def test_cached_naming_field_change_matches_the_interface_created_by_sync(client
         }
     ]
     with patch(
-        "netbox_librenms_plugin.librenms_api.requests.get",
+        "netbox_librenms_plugin.librenms_api._session.get",
         side_effect=_librenms_ip_rows_response(rows, device_name=device.name),
     ):
         refreshed = client.post(

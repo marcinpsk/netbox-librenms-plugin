@@ -5,6 +5,7 @@ This module provides 100% test coverage for netbox_librenms_plugin/librenms_api.
 with particular focus on HTTP method correctness to prevent regression bugs.
 """
 
+import inspect
 from unittest.mock import MagicMock, patch
 
 import re
@@ -18,6 +19,56 @@ from netbox_librenms_plugin.tests import test_librenms_api_helpers
 # Bind the helper's autouse fixture into this module so it patches the config here only.
 # `pytest_plugins` would register it session-wide and shadow PLUGINS_CONFIG for later tests.
 mock_librenms_config = test_librenms_api_helpers.mock_librenms_config
+
+
+class TestApiTokenStaysOnItsHost:
+    """A redirect off the configured LibreNMS must not carry the API token with it.
+
+    ``requests`` drops only ``Authorization`` when a redirect crosses hosts and forwards every
+    other header, so ``X-Auth-Token`` reached whatever answered the redirect.
+    """
+
+    @staticmethod
+    def _redirect(from_url, to_url):
+        """Return a real (redirected request, original response) pair for the auth rebuild."""
+        original = requests.Request("GET", from_url, headers={"X-Auth-Token": "secret-token"}).prepare()
+        response = requests.Response()
+        response.request = original
+        redirected = original.copy()
+        redirected.url = to_url
+        return redirected, response
+
+    def test_a_cross_host_redirect_drops_the_token(self):
+        from netbox_librenms_plugin.librenms_api import _TokenScopedSession
+
+        redirected, response = self._redirect(
+            "https://librenms.example/api/v0/devices", "https://elsewhere.example/api/v0/devices"
+        )
+
+        _TokenScopedSession().rebuild_auth(redirected, response)
+
+        assert "X-Auth-Token" not in redirected.headers
+
+    def test_a_same_host_redirect_keeps_the_token(self):
+        """A reverse proxy in front of LibreNMS may redirect within the host; that must still work."""
+        from netbox_librenms_plugin.librenms_api import _TokenScopedSession
+
+        redirected, response = self._redirect(
+            "https://librenms.example/api/v0/devices", "https://librenms.example/api/v0/devices/"
+        )
+
+        _TokenScopedSession().rebuild_auth(redirected, response)
+
+        assert redirected.headers["X-Auth-Token"] == "secret-token"
+
+    def test_the_client_issues_its_requests_through_that_session(self):
+        """The guard is only worth anything if the shared session is what the client calls."""
+        from netbox_librenms_plugin import librenms_api
+
+        assert isinstance(librenms_api._session, librenms_api._TokenScopedSession)
+        source = inspect.getsource(librenms_api)
+        assert "requests.get(" not in source, "a call site still bypasses the token-scoped session"
+        assert "requests.post(" not in source, "a call site still bypasses the token-scoped session"
 
 
 # =============================================================================
@@ -298,7 +349,7 @@ class TestLibreNMSAPIInit:
 class TestLibreNMSAPIConnection:
     """Test connection testing functionality."""
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_connection_success(self, mock_get, mock_librenms_config):
         """Verify successful connection test."""
         mock_get.return_value.status_code = 200
@@ -317,7 +368,7 @@ class TestLibreNMSAPIConnection:
         mock_get.assert_called_once()
         assert "/api/v0/system" in mock_get.call_args[0][0]
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_connection_auth_failure_401(self, mock_get, mock_librenms_config):
         """Verify 401 unauthorized handling."""
         mock_get.return_value.status_code = 401
@@ -329,7 +380,7 @@ class TestLibreNMSAPIConnection:
 
         assert result.get("error") is True
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_connection_auth_failure_403(self, mock_get, mock_librenms_config):
         """Verify 403 forbidden handling."""
         mock_get.return_value.status_code = 403
@@ -341,7 +392,7 @@ class TestLibreNMSAPIConnection:
 
         assert result.get("error") is True
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_connection_timeout(self, mock_get, mock_librenms_config):
         """Verify timeout exception handling."""
         mock_get.side_effect = requests.exceptions.Timeout("Connection timed out")
@@ -363,9 +414,9 @@ class TestLibreNMSAPIConnection:
 class TestLibreNMSAPIHttpMethods:
     """Verify that each API method keeps its required HTTP verb during refactoring."""
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.delete")
-    @patch("netbox_librenms_plugin.librenms_api.requests.post")
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.delete")
+    @patch("netbox_librenms_plugin.librenms_api._session.post")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_device_info_uses_get(self, mock_get, mock_post, mock_delete, mock_librenms_config):
         """Verify get_device_info uses GET, never DELETE."""
         mock_get.return_value.status_code = 200
@@ -383,9 +434,9 @@ class TestLibreNMSAPIHttpMethods:
         mock_delete.assert_not_called()
         mock_post.assert_not_called()
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.delete")
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
-    @patch("netbox_librenms_plugin.librenms_api.requests.post")
+    @patch("netbox_librenms_plugin.librenms_api._session.delete")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.post")
     def test_add_device_uses_post(self, mock_post, mock_get, mock_delete, mock_librenms_config):
         """Verify add_device uses POST."""
         mock_post.return_value.status_code = 200
@@ -405,8 +456,8 @@ class TestLibreNMSAPIHttpMethods:
         mock_post.assert_called_once()
         mock_delete.assert_not_called()
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.delete")
-    @patch("netbox_librenms_plugin.librenms_api.requests.patch")
+    @patch("netbox_librenms_plugin.librenms_api._session.delete")
+    @patch("netbox_librenms_plugin.librenms_api._session.patch")
     def test_update_device_field_uses_patch(self, mock_patch, mock_delete, mock_librenms_config):
         """Verify update_device_field uses PATCH."""
         mock_patch.return_value.status_code = 200
@@ -420,8 +471,8 @@ class TestLibreNMSAPIHttpMethods:
         mock_patch.assert_called_once()
         mock_delete.assert_not_called()
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.delete")
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.delete")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_device_id_by_ip_uses_get(self, mock_get, mock_delete, mock_librenms_config):
         """Verify get_device_id_by_ip uses GET."""
         mock_get.return_value.status_code = 200
@@ -438,8 +489,8 @@ class TestLibreNMSAPIHttpMethods:
         mock_get.assert_called_once()
         mock_delete.assert_not_called()
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.delete")
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.delete")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_device_id_by_hostname_uses_get(self, mock_get, mock_delete, mock_librenms_config):
         """Verify get_device_id_by_hostname uses GET."""
         mock_get.return_value.status_code = 200
@@ -456,8 +507,8 @@ class TestLibreNMSAPIHttpMethods:
         mock_get.assert_called_once()
         mock_delete.assert_not_called()
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.delete")
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.delete")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_ports_uses_get(self, mock_get, mock_delete, mock_librenms_config):
         """Verify get_ports uses GET."""
         mock_get.return_value.status_code = 200
@@ -471,8 +522,8 @@ class TestLibreNMSAPIHttpMethods:
         mock_get.assert_called_once()
         mock_delete.assert_not_called()
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.delete")
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.delete")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_locations_uses_get(self, mock_get, mock_delete, mock_librenms_config):
         """Verify get_locations uses GET."""
         mock_get.return_value.status_code = 200
@@ -486,8 +537,8 @@ class TestLibreNMSAPIHttpMethods:
         mock_get.assert_called_once()
         mock_delete.assert_not_called()
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.delete")
-    @patch("netbox_librenms_plugin.librenms_api.requests.post")
+    @patch("netbox_librenms_plugin.librenms_api._session.delete")
+    @patch("netbox_librenms_plugin.librenms_api._session.post")
     def test_add_location_uses_post(self, mock_post, mock_delete, mock_librenms_config):
         """Verify add_location uses POST."""
         mock_post.return_value.status_code = 200
@@ -504,8 +555,8 @@ class TestLibreNMSAPIHttpMethods:
         mock_post.assert_called_once()
         mock_delete.assert_not_called()
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.delete")
-    @patch("netbox_librenms_plugin.librenms_api.requests.patch")
+    @patch("netbox_librenms_plugin.librenms_api._session.delete")
+    @patch("netbox_librenms_plugin.librenms_api._session.patch")
     def test_update_location_uses_patch(self, mock_patch, mock_delete, mock_librenms_config):
         """Verify update_location uses PATCH."""
         mock_patch.return_value.status_code = 200
@@ -522,8 +573,8 @@ class TestLibreNMSAPIHttpMethods:
         mock_patch.assert_called_once()
         mock_delete.assert_not_called()
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.delete")
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.delete")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_device_links_uses_get(self, mock_get, mock_delete, mock_librenms_config):
         """Verify get_device_links uses GET."""
         mock_get.return_value.status_code = 200
@@ -537,8 +588,8 @@ class TestLibreNMSAPIHttpMethods:
         mock_get.assert_called_once()
         mock_delete.assert_not_called()
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.delete")
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.delete")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_device_ips_uses_get(self, mock_get, mock_delete, mock_librenms_config):
         """Verify get_device_ips uses GET."""
         mock_get.return_value.status_code = 200
@@ -552,8 +603,8 @@ class TestLibreNMSAPIHttpMethods:
         mock_get.assert_called_once()
         mock_delete.assert_not_called()
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.delete")
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.delete")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_port_by_id_uses_get(self, mock_get, mock_delete, mock_librenms_config):
         """Verify get_port_by_id uses GET."""
         mock_get.return_value.status_code = 200
@@ -567,8 +618,8 @@ class TestLibreNMSAPIHttpMethods:
         mock_get.assert_called_once()
         mock_delete.assert_not_called()
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.delete")
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.delete")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_device_inventory_uses_get(self, mock_get, mock_delete, mock_librenms_config):
         """Verify get_device_inventory uses GET."""
         mock_get.return_value.status_code = 200
@@ -582,8 +633,8 @@ class TestLibreNMSAPIHttpMethods:
         mock_get.assert_called_once()
         mock_delete.assert_not_called()
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.delete")
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.delete")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_poller_groups_uses_get(self, mock_get, mock_delete, mock_librenms_config):
         """Verify get_poller_groups uses GET."""
         mock_get.return_value.status_code = 200
@@ -597,8 +648,8 @@ class TestLibreNMSAPIHttpMethods:
         mock_get.assert_called_once()
         mock_delete.assert_not_called()
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.delete")
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.delete")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_inventory_filtered_uses_get(self, mock_get, mock_delete, mock_librenms_config):
         """Verify get_inventory_filtered uses GET."""
         mock_get.return_value.status_code = 200
@@ -616,8 +667,8 @@ class TestLibreNMSAPIHttpMethods:
         mock_get.assert_called_once()
         mock_delete.assert_not_called()
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.delete")
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.delete")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_list_devices_uses_get(self, mock_get, mock_delete, mock_librenms_config):
         """Verify list_devices uses GET."""
         mock_get.return_value.status_code = 200
@@ -631,7 +682,7 @@ class TestLibreNMSAPIHttpMethods:
         mock_get.assert_called_once()
         mock_delete.assert_not_called()
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_test_connection_uses_get(self, mock_get, mock_librenms_config):
         """Verify test_connection uses GET."""
         mock_get.return_value.status_code = 200
@@ -763,7 +814,7 @@ class TestLibreNMSAPIDeviceLookup:
         mock_hostname_lookup.assert_not_called()
 
     @patch("netbox_librenms_plugin.librenms_api.cache")
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_librenms_id_by_ip_lookup(self, mock_get, mock_cache, mock_librenms_config):
         """Performs IP lookup and caches result."""
         mock_cache.get.return_value = None
@@ -789,7 +840,7 @@ class TestLibreNMSAPIDeviceLookup:
         mock_cache.set.assert_called_once()
 
     @patch("netbox_librenms_plugin.librenms_api.cache")
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_librenms_id_by_hostname_lookup(self, mock_get, mock_cache, mock_librenms_config):
         """Falls back to hostname lookup."""
         mock_cache.get.return_value = None
@@ -826,7 +877,7 @@ class TestLibreNMSAPIDeviceLookup:
         result = api.get_librenms_id(device)
         assert result == 77
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_device_id_by_ip_not_found(self, mock_get, mock_librenms_config):
         """Returns None when IP not found in LibreNMS."""
         mock_get.return_value.status_code = 200
@@ -839,7 +890,7 @@ class TestLibreNMSAPIDeviceLookup:
 
         assert result is None
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_device_id_by_hostname_not_found(self, mock_get, mock_librenms_config):
         """Returns None when hostname not found."""
         mock_get.return_value.status_code = 200
@@ -861,7 +912,7 @@ class TestLibreNMSAPIDeviceLookup:
 class TestLibreNMSAPIDeviceOperations:
     """Test device CRUD operations."""
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.post")
+    @patch("netbox_librenms_plugin.librenms_api._session.post")
     def test_add_device_success(self, mock_post, mock_librenms_config):
         """Verify successful device addition."""
         mock_post.return_value.status_code = 200
@@ -884,7 +935,7 @@ class TestLibreNMSAPIDeviceOperations:
         assert result[0] is True
         assert result[1] == "Device added successfully."
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.post")
+    @patch("netbox_librenms_plugin.librenms_api._session.post")
     def test_add_device_snmpv1_success(self, mock_post, mock_librenms_config):
         """Verify successful device addition using SNMPv1."""
         mock_post.return_value.status_code = 200
@@ -912,7 +963,7 @@ class TestLibreNMSAPIDeviceOperations:
         assert payload["snmpver"] == "v1"
         assert payload["community"] == "public"
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.post")
+    @patch("netbox_librenms_plugin.librenms_api._session.post")
     def test_add_device_duplicate_error(self, mock_post, mock_librenms_config):
         """Verify duplicate device handling."""
         mock_post.return_value.status_code = 200
@@ -935,7 +986,7 @@ class TestLibreNMSAPIDeviceOperations:
         assert result[0] is False
         assert "Device already exists" in result[1]
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.post")
+    @patch("netbox_librenms_plugin.librenms_api._session.post")
     def test_add_device_snmpv3_success(self, mock_post, mock_librenms_config):
         """Verify successful device addition using SNMPv3 with all required fields."""
         mock_post.return_value.status_code = 200
@@ -975,7 +1026,7 @@ class TestLibreNMSAPIDeviceOperations:
         # Ensure community is NOT included for v3
         assert "community" not in payload
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.patch")
+    @patch("netbox_librenms_plugin.librenms_api._session.patch")
     def test_update_device_field_success(self, mock_patch, mock_librenms_config):
         """Verify successful device field update."""
         mock_patch.return_value.status_code = 200
@@ -992,7 +1043,7 @@ class TestLibreNMSAPIDeviceOperations:
         assert success is True
         assert "updated" in message.lower()
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_device_info_success(self, mock_get, mock_librenms_config):
         """Verify retrieving device info."""
         mock_get.return_value.status_code = 200
@@ -1010,7 +1061,7 @@ class TestLibreNMSAPIDeviceOperations:
         assert device_data is not None
         assert device_data["device_id"] == 123
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_device_info_not_found(self, mock_get, mock_librenms_config):
         """Empty devices list returns (False, None) without raising."""
         mock_get.return_value.status_code = 200
@@ -1024,7 +1075,7 @@ class TestLibreNMSAPIDeviceOperations:
         assert success is False
         assert result is None
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_device_info_caches_success(self, mock_get, mock_librenms_config):
         """A successful lookup is cached: a second call within the TTL skips the HTTP request."""
         mock_get.return_value.status_code = 200
@@ -1042,7 +1093,7 @@ class TestLibreNMSAPIDeviceOperations:
         assert first == second == (True, {"device_id": 7777, "hostname": "cached-device"})
         assert mock_get.call_count == 1  # second call served from cache, not re-fetched
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_device_info_does_not_cache_failure(self, mock_get, mock_librenms_config):
         """Failures are never cached, so a transient error doesn't persist for the cache window."""
         mock_get.side_effect = requests.exceptions.Timeout("boom")
@@ -1059,7 +1110,7 @@ class TestLibreNMSAPIDeviceOperations:
         assert first_failure.status_code is None
         assert mock_get.call_count == 2  # not cached → re-attempted on the next call
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_device_info_use_cache_false_bypasses_stale_cache(self, mock_get, mock_librenms_config):
         """use_cache=False refetches live data instead of returning a stale cached payload, and refreshes the cache."""
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
@@ -1090,7 +1141,7 @@ class TestLibreNMSAPIDeviceOperations:
         # ...and that live fetch refreshes the cache, so subsequent cached reads see the correction.
         assert api.get_device_info(device_id=424242) == (True, {"device_id": 424242, "hostname": "fresh"})
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_cache_only_reads_a_snapshot_even_when_live_cache_is_disabled(self, mock_get, mock_librenms_config):
         """A cache-only read must use an existing snapshot regardless of the live-read flag."""
         from django.core.cache import cache
@@ -1113,7 +1164,7 @@ class TestLibreNMSAPIDeviceOperations:
         mock_get.side_effect = AssertionError("cache-only lookup contacted LibreNMS")
         assert api.get_device_info(device_id=424243, use_cache=False, cache_only=True) == expected
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_cache_only_miss_does_not_contact_librenms(self, mock_get, mock_librenms_config):
         """A cache-only miss returns a miss without crossing the HTTP boundary."""
         from django.core.cache import cache
@@ -1126,7 +1177,7 @@ class TestLibreNMSAPIDeviceOperations:
         assert api.get_device_info(device_id=424244, use_cache=False, cache_only=True) == (False, None)
         mock_get.assert_not_called()
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_list_devices_with_filters(self, mock_get, mock_librenms_config):
         """Verify listing devices with filter parameter."""
         mock_get.return_value.status_code = 200
@@ -1152,7 +1203,7 @@ class TestLibreNMSAPIDeviceOperations:
 class TestLibreNMSAPILocationOperations:
     """Test location CRUD operations."""
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_locations_success(self, mock_get, mock_librenms_config):
         """Verify retrieving all locations."""
         mock_get.return_value.status_code = 200
@@ -1169,7 +1220,7 @@ class TestLibreNMSAPILocationOperations:
         assert success is True
         assert len(locations) == 1
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.post")
+    @patch("netbox_librenms_plugin.librenms_api._session.post")
     def test_add_location_success(self, mock_post, mock_librenms_config):
         """Verify successful location addition."""
         mock_post.return_value.status_code = 200
@@ -1187,7 +1238,7 @@ class TestLibreNMSAPILocationOperations:
         assert result_dict["id"] == "5"
         assert "message" in result_dict
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.post")
+    @patch("netbox_librenms_plugin.librenms_api._session.post")
     def test_add_location_error(self, mock_post, mock_librenms_config):
         """Verify location addition error handling."""
         mock_post.return_value.status_code = 500
@@ -1204,7 +1255,7 @@ class TestLibreNMSAPILocationOperations:
         assert success is False
         assert "Invalid location data" in error_msg
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.patch")
+    @patch("netbox_librenms_plugin.librenms_api._session.patch")
     def test_update_location_success(self, mock_patch, mock_librenms_config):
         """Verify successful location update."""
         mock_patch.return_value.status_code = 200
@@ -1220,7 +1271,7 @@ class TestLibreNMSAPILocationOperations:
 
         assert success is True
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.patch")
+    @patch("netbox_librenms_plugin.librenms_api._session.patch")
     def test_update_location_not_found(self, mock_patch, mock_librenms_config):
         """Verify updating non-existent location."""
         mock_patch.return_value.status_code = 404
@@ -1245,7 +1296,7 @@ class TestLibreNMSAPILocationOperations:
 class TestLibreNMSAPIPortsAndInventory:
     """Test ports and inventory operations."""
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_ports_all(self, mock_get, mock_librenms_config):
         """Verify retrieving all ports for a device."""
         mock_get.return_value.status_code = 200
@@ -1263,7 +1314,7 @@ class TestLibreNMSAPIPortsAndInventory:
         assert "ports" in data
         assert len(data["ports"]) == 2
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_port_by_id_success(self, mock_get, mock_librenms_config):
         """Verify retrieving port by ID."""
         mock_get.return_value.status_code = 200
@@ -1280,7 +1331,7 @@ class TestLibreNMSAPIPortsAndInventory:
         assert success is True
         assert port_data is not None
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_port_by_id_error(self, mock_get, mock_librenms_config):
         """Verify handling of port retrieval error."""
         mock_get.side_effect = requests.exceptions.RequestException("Connection error")
@@ -1293,7 +1344,7 @@ class TestLibreNMSAPIPortsAndInventory:
         assert success is False
         assert isinstance(error_msg, str)
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_device_inventory_success(self, mock_get, mock_librenms_config):
         """Verify retrieving device inventory."""
         mock_get.return_value.status_code = 200
@@ -1310,7 +1361,7 @@ class TestLibreNMSAPIPortsAndInventory:
         assert success is True
         assert len(inventory) == 1
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_inventory_filtered_by_class(self, mock_get, mock_librenms_config):
         """Verify filtering inventory by physical class."""
         mock_get.return_value.status_code = 200
@@ -1327,7 +1378,7 @@ class TestLibreNMSAPIPortsAndInventory:
         assert success is True
         assert len(inventory) == 1
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_inventory_filtered_by_container(self, mock_get, mock_librenms_config):
         """Verify filtering inventory by container."""
         mock_get.return_value.status_code = 200
@@ -1343,7 +1394,7 @@ class TestLibreNMSAPIPortsAndInventory:
 
         assert success is True
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_device_links_success(self, mock_get, mock_librenms_config):
         """Verify retrieving device links."""
         mock_get.return_value.status_code = 200
@@ -1361,7 +1412,7 @@ class TestLibreNMSAPIPortsAndInventory:
         assert "links" in links_dict
         assert len(links_dict["links"]) == 1
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_device_links_no_links_404_is_empty_not_failure(self, mock_get, mock_librenms_config):
         """Verify a no-links 404 returns an empty success so serial cable sync retains the cache snapshot."""
         import requests as _requests
@@ -1380,7 +1431,7 @@ class TestLibreNMSAPIPortsAndInventory:
         assert success is True
         assert data == {"status": "ok", "links": []}
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_device_links_missing_device_404_is_a_failure(self, mock_get, mock_librenms_config):
         """A 404 for an unknown device must not be converted to an empty link list."""
         import requests as _requests
@@ -1399,7 +1450,7 @@ class TestLibreNMSAPIPortsAndInventory:
         assert success is False
         assert data == "Device not found"
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_device_links_librenms_no_links_message_is_empty_success(self, mock_get, mock_librenms_config):
         """LibreNMS also reports an empty link set as ``Links do not exist``."""
         import requests as _requests
@@ -1418,7 +1469,7 @@ class TestLibreNMSAPIPortsAndInventory:
         assert success is True
         assert data == {"status": "ok", "links": []}
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_device_links_non_404_http_error_still_fails(self, mock_get, mock_librenms_config):
         """A genuine server error (500) must still surface as a failure — only a 404 means 'no links'."""
         import requests as _requests
@@ -1436,7 +1487,7 @@ class TestLibreNMSAPIPortsAndInventory:
 
         assert success is False
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_device_ips_success(self, mock_get, mock_librenms_config):
         """Verify retrieving device IP addresses."""
         mock_get.return_value.status_code = 200
@@ -1453,7 +1504,7 @@ class TestLibreNMSAPIPortsAndInventory:
         assert success is True
         assert len(ips) == 1
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_device_ips_empty(self, mock_get, mock_librenms_config):
         """Verify handling device with no IPs."""
         mock_get.return_value.status_code = 200
@@ -1467,7 +1518,7 @@ class TestLibreNMSAPIPortsAndInventory:
         assert success is True
         assert len(ips) == 0
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_device_ips_404_is_empty_not_failure(self, mock_get, mock_librenms_config):
         """LibreNMS 404s /devices/{id}/ip for a device with no IPs — a successful empty result, not a fetch failure."""
         import requests
@@ -1492,7 +1543,7 @@ class TestLibreNMSAPIPortsAndInventory:
         assert success is True
         assert ips == []
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_device_ips_404_empty_message_is_case_insensitive(self, mock_get, mock_librenms_config):
         """LibreNMS capitalization changes do not turn its stable no-address response into a failure."""
         response = mock_get.return_value
@@ -1512,7 +1563,7 @@ class TestLibreNMSAPIPortsAndInventory:
         assert success is True
         assert ips == []
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_device_ips_404_for_missing_device_remains_a_failure(self, mock_get, mock_librenms_config):
         """Only LibreNMS's explicit empty-IP response is an empty success; a stale device id stays visible."""
         import requests
@@ -1541,7 +1592,7 @@ class TestLibreNMSAPIPortsAndInventory:
 class TestLibreNMSAPIPollerAndDevices:
     """Test poller groups and device listing operations."""
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_poller_groups_success(self, mock_get, mock_librenms_config):
         """Verify retrieving poller groups."""
         mock_get.return_value.status_code = 200
@@ -1558,7 +1609,7 @@ class TestLibreNMSAPIPollerAndDevices:
         assert success is True
         assert len(groups) == 1
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_get_poller_groups_empty(self, mock_get, mock_librenms_config):
         """Verify handling empty poller groups."""
         mock_get.return_value.status_code = 200
@@ -1575,7 +1626,7 @@ class TestLibreNMSAPIPollerAndDevices:
         assert success is True
         assert len(groups) == 0
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_list_devices_all(self, mock_get, mock_librenms_config):
         """Verify listing all devices."""
         mock_get.return_value.status_code = 200
@@ -1592,7 +1643,7 @@ class TestLibreNMSAPIPollerAndDevices:
         assert success is True
         assert len(devices) == 3
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_list_devices_empty(self, mock_get, mock_librenms_config):
         """Verify handling empty device list."""
         mock_get.return_value.status_code = 200
@@ -1615,7 +1666,7 @@ class TestLibreNMSAPIPollerAndDevices:
 class TestLibreNMSAPIErrorHandling:
     """Test error handling and edge cases."""
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_network_error_handling(self, mock_get, mock_librenms_config):
         """Verify handling of network errors."""
         mock_get.side_effect = requests.exceptions.ConnectionError("Network unreachable")
@@ -1629,7 +1680,7 @@ class TestLibreNMSAPIErrorHandling:
         assert isinstance(result, LibreNMSLookupError)
         assert result.status_code is None
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_timeout_error_handling(self, mock_get, mock_librenms_config):
         """Verify handling of timeout errors."""
         mock_get.side_effect = requests.exceptions.Timeout("Request timed out")
@@ -1643,7 +1694,7 @@ class TestLibreNMSAPIErrorHandling:
         assert isinstance(result, LibreNMSLookupError)
         assert result.status_code is None
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_invalid_json_response(self, mock_get, mock_librenms_config):
         """Verify handling of invalid JSON responses — ValueError is now caught gracefully."""
         mock_get.return_value.status_code = 200
@@ -1658,7 +1709,7 @@ class TestLibreNMSAPIErrorHandling:
         assert success is False
         assert result is None
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_http_500_error_handling(self, mock_get, mock_librenms_config):
         """Verify that direct status handling classifies a 500 as server failure, not a missing device or malformed payload."""
         mock_get.return_value.status_code = 500
@@ -1676,7 +1727,7 @@ class TestLibreNMSAPIErrorHandling:
         assert isinstance(result, LibreNMSLookupError)
         assert result.status_code == 500
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.post")
+    @patch("netbox_librenms_plugin.librenms_api._session.post")
     def test_malformed_api_response(self, mock_post, mock_librenms_config):
         """Verify handling of malformed API responses."""
         mock_post.return_value.status_code = 200
@@ -1696,7 +1747,7 @@ class TestLibreNMSAPIErrorHandling:
         # Should handle missing fields gracefully
         assert result[0] is False
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_ssl_verification_error(self, mock_get, mock_librenms_config):
         """Verify handling of SSL verification errors."""
         mock_get.side_effect = requests.exceptions.SSLError("SSL certificate verification failed")
@@ -1833,7 +1884,7 @@ class TestVlanEntryDictGuard:
 class TestGetDeviceInfoResponseShape:
     """Cover response-shape branches in get_device_info()."""
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_non_dict_device_entry_returns_failure(self, mock_get, mock_librenms_config):
         """A non-dict entry in the devices list must not propagate as truthy data."""
         mock_get.return_value.status_code = 200
@@ -1847,7 +1898,7 @@ class TestGetDeviceInfoResponseShape:
         assert success is False
         assert data is None
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_missing_devices_key_returns_failure(self, mock_get, mock_librenms_config):
         """KeyError on missing 'devices' must be caught and return (False, None)."""
         mock_get.return_value.status_code = 200
@@ -1865,7 +1916,7 @@ class TestGetDeviceInfoResponseShape:
 class TestGetDeviceTransceiversResponseShape:
     """Cover response-shape branches in get_device_transceivers()."""
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_success_returns_transceiver_list(self, mock_get, mock_librenms_config):
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = {
@@ -1885,7 +1936,7 @@ class TestGetDeviceTransceiversResponseShape:
         assert len(data) == 2
         assert data[0]["serial"] == "SN1"
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_invalid_json_returns_failure(self, mock_get, mock_librenms_config):
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.side_effect = ValueError("bad json")
@@ -1899,7 +1950,7 @@ class TestGetDeviceTransceiversResponseShape:
         assert "Invalid JSON" in msg
         assert "Error connecting" not in msg
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_non_dict_response_returns_failure(self, mock_get, mock_librenms_config):
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = ["unexpected", "list"]
@@ -1912,7 +1963,7 @@ class TestGetDeviceTransceiversResponseShape:
         assert success is False
         assert "Unexpected" in msg
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_missing_transceivers_key_uses_server_message(self, mock_get, mock_librenms_config):
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = {"status": "ok", "message": "no transceivers MIB"}
@@ -1925,7 +1976,7 @@ class TestGetDeviceTransceiversResponseShape:
         assert success is False
         assert msg == "no transceivers MIB"
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_status_not_ok_returns_failure(self, mock_get, mock_librenms_config):
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = {
@@ -1942,7 +1993,7 @@ class TestGetDeviceTransceiversResponseShape:
         assert success is False
         assert msg == "device offline"
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_transceivers_not_list_returns_failure(self, mock_get, mock_librenms_config):
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = {
@@ -1958,7 +2009,7 @@ class TestGetDeviceTransceiversResponseShape:
         assert success is False
         assert "Unexpected" in msg
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_malformed_transceiver_entry_returns_failure(self, mock_get, mock_librenms_config):
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = {
@@ -1974,7 +2025,7 @@ class TestGetDeviceTransceiversResponseShape:
         assert success is False
         assert "Malformed" in msg
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_request_exception_returns_failure(self, mock_get, mock_librenms_config):
         mock_get.side_effect = requests.exceptions.ConnectionError("boom")
 
@@ -1990,7 +2041,7 @@ class TestGetDeviceTransceiversResponseShape:
 class TestGetDeviceVlansResponseShape:
     """Cover response-shape branches in get_device_vlans()."""
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_success_filters_by_device_id(self, mock_get, mock_librenms_config):
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = {
@@ -2010,7 +2061,7 @@ class TestGetDeviceVlansResponseShape:
         assert len(vlans) == 1
         assert vlans[0]["vlan_vlan"] == 10
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_vlans_not_list_returns_failure(self, mock_get, mock_librenms_config):
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = {
@@ -2027,7 +2078,7 @@ class TestGetDeviceVlansResponseShape:
         assert success is False
         assert msg == "bad payload"
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_non_dict_item_in_vlans_returns_failure(self, mock_get, mock_librenms_config):
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = {
@@ -2043,7 +2094,7 @@ class TestGetDeviceVlansResponseShape:
         assert success is False
         assert "invalid item shape" in msg
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_status_not_ok_returns_failure(self, mock_get, mock_librenms_config):
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = {"status": "error", "message": "nope"}
@@ -2056,7 +2107,7 @@ class TestGetDeviceVlansResponseShape:
         assert success is False
         assert msg == "nope"
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_non_dict_response_returns_failure(self, mock_get, mock_librenms_config):
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = ["unexpected"]
@@ -2069,7 +2120,7 @@ class TestGetDeviceVlansResponseShape:
         assert success is False
         assert msg == "Unexpected response format"
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_http_404_returns_dedicated_message(self, mock_get, mock_librenms_config):
         response = MagicMock(status_code=404)
         mock_get.return_value.raise_for_status.side_effect = requests.exceptions.HTTPError(response=response)
@@ -2082,7 +2133,7 @@ class TestGetDeviceVlansResponseShape:
         assert success is False
         assert msg == "VLANs resource not found"
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_value_error_returns_connection_message(self, mock_get, mock_librenms_config):
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.side_effect = ValueError("bad json")
@@ -2099,7 +2150,7 @@ class TestGetDeviceVlansResponseShape:
 class TestGetPortVlanDetailsResponseShape:
     """Cover response-shape branches in get_port_vlan_details()."""
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_success_returns_port_dict(self, mock_get, mock_librenms_config):
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = {
@@ -2115,7 +2166,7 @@ class TestGetPortVlanDetailsResponseShape:
         assert success is True
         assert port["port_id"] == 11
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_non_dict_response_returns_failure(self, mock_get, mock_librenms_config):
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = ["unexpected"]
@@ -2128,7 +2179,7 @@ class TestGetPortVlanDetailsResponseShape:
         assert success is False
         assert msg == "Unexpected response format"
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_status_not_ok_uses_server_message(self, mock_get, mock_librenms_config):
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = {"status": "error", "message": "no port"}
@@ -2141,7 +2192,7 @@ class TestGetPortVlanDetailsResponseShape:
         assert success is False
         assert msg == "no port"
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_missing_port_list_returns_failure(self, mock_get, mock_librenms_config):
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = {"status": "ok", "port": {"port_id": 11}}
@@ -2154,7 +2205,7 @@ class TestGetPortVlanDetailsResponseShape:
         assert success is False
         assert "missing 'port' list" in msg
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_empty_port_list_returns_not_found(self, mock_get, mock_librenms_config):
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = {"status": "ok", "port": []}
@@ -2167,7 +2218,7 @@ class TestGetPortVlanDetailsResponseShape:
         assert success is False
         assert msg == "Port not found"
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_non_dict_port_entry_returns_failure(self, mock_get, mock_librenms_config):
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = {"status": "ok", "port": ["bad-entry"]}
@@ -2180,7 +2231,7 @@ class TestGetPortVlanDetailsResponseShape:
         assert success is False
         assert "invalid 'port' entry" in msg
 
-    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    @patch("netbox_librenms_plugin.librenms_api._session.get")
     def test_request_exception_returns_failure(self, mock_get, mock_librenms_config):
         mock_get.side_effect = requests.exceptions.ConnectionError("net down")
 
@@ -2319,7 +2370,7 @@ class TestGetPortStack:
         fake_response = MagicMock()
         fake_response.raise_for_status = MagicMock()
         fake_response.json.side_effect = ValueError("Expecting value: line 1 column 1 (char 0)")
-        with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_response):
+        with patch("netbox_librenms_plugin.librenms_api._session.get", return_value=fake_response):
             success, data = mock_librenms_api.get_port_stack(5)
 
         assert success is False
@@ -2334,7 +2385,7 @@ class TestGetPortStack:
         fake_response = MagicMock()
         fake_response.raise_for_status = MagicMock()
         fake_response.json.side_effect = _requests.exceptions.JSONDecodeError("Expecting value", "", 0)
-        with patch("netbox_librenms_plugin.librenms_api.requests.get", return_value=fake_response):
+        with patch("netbox_librenms_plugin.librenms_api._session.get", return_value=fake_response):
             success, data = mock_librenms_api.get_port_stack(5)
 
         assert success is False
@@ -3583,7 +3634,7 @@ class TestGetSerialPortSensors:
         import requests as req
 
         with mock.patch(
-            "netbox_librenms_plugin.librenms_api.requests.get", side_effect=req.exceptions.ConnectionError("refused")
+            "netbox_librenms_plugin.librenms_api._session.get", side_effect=req.exceptions.ConnectionError("refused")
         ):
             success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
 
