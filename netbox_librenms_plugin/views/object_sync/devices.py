@@ -489,6 +489,14 @@ class SingleModuleVerifyView(
             can_add_module_bay_mapping=(
                 has_write_permission and request.user.has_perm("netbox_librenms_plugin.add_modulebaymapping")
             ),
+            # _map_existing_bay() also reads Device and ModuleBay, so the button that opens it
+            # must not appear for a user the modal will refuse.
+            can_map_existing_bay=(
+                has_write_permission
+                and request.user.has_perm("netbox_librenms_plugin.add_modulebaymapping")
+                and request.user.has_perm("dcim.view_device")
+                and request.user.has_perm("dcim.view_modulebay")
+            ),
             can_add_module_type_mapping=(
                 has_write_permission and request.user.has_perm("netbox_librenms_plugin.add_moduletypemapping")
             ),
@@ -822,6 +830,12 @@ class DeviceModuleTableView(BaseModuleTableView):
             ),
             can_add_module_bay_mapping=(
                 has_write_permission and user.has_perm("netbox_librenms_plugin.add_modulebaymapping")
+            ),
+            can_map_existing_bay=(
+                has_write_permission
+                and user.has_perm("netbox_librenms_plugin.add_modulebaymapping")
+                and user.has_perm("dcim.view_device")
+                and user.has_perm("dcim.view_modulebay")
             ),
             can_add_module_type_mapping=(
                 has_write_permission and user.has_perm("netbox_librenms_plugin.add_moduletypemapping")

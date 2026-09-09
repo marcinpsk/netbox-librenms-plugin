@@ -777,7 +777,7 @@ class TestSingleModuleVerifyView:
         """Verify that real lookup and change permissions keep Update Interface available in the verification table."""
         import json
 
-        from dcim.models import Interface, Module, ModuleBayTemplate, ModuleType
+        from dcim.models import Interface, Module, ModuleBay, ModuleBayTemplate, ModuleType
         from django.http import JsonResponse
         from django.test import RequestFactory
 
@@ -794,6 +794,7 @@ class TestSingleModuleVerifyView:
             "mod-canchange",
             [
                 ("view", type(device)),  # dcim.Device — object-perm gate + restrict
+                ("view", ModuleBay),  # the map-existing modal reads bays, so its button needs this
                 ("change", LibreNMSSettings),  # plugin write (has_write_permission)
                 ("add", Module),
                 ("change", Module),
@@ -871,6 +872,7 @@ class TestSingleModuleVerifyView:
             can_add_module_type=True,
             can_add_carrier_rule=True,
             can_add_module_bay_mapping=True,
+            can_map_existing_bay=True,
             can_add_module_type_mapping=True,
         )
 
@@ -1715,6 +1717,8 @@ class TestDeviceModuleTableView:
             side_effect=lambda p: (
                 p
                 in {
+                    "dcim.view_device",
+                    "dcim.view_modulebay",
                     "dcim.add_module",
                     "dcim.change_module",
                     "dcim.change_interface",
@@ -1753,6 +1757,7 @@ class TestDeviceModuleTableView:
             can_add_module_type=True,
             can_add_carrier_rule=True,
             can_add_module_bay_mapping=True,
+            can_map_existing_bay=True,
             can_add_module_type_mapping=True,
         )
         assert result is mock_table
