@@ -165,6 +165,39 @@ class TestTrailingSlashResilience:
         assert response.status_code == 404, response.status_code
 
 
+class TestMappingBulkImportViewsAreRegistered:
+    """Every mapping bulk-import view must be in NetBox's model-view registry.
+
+    An explicit urls.py entry keeps the endpoint reachable, so a missing
+    @register_model_view is invisible to a URL test: only the registry drives NetBox's
+    model URL and UI integration. Ten of the eleven views carried the decorator and one
+    did not, so assert the whole class rather than the one instance.
+    """
+
+    def test_every_bulk_import_view_is_registered(self):
+        import inspect
+
+        from netbox.registry import registry
+
+        from netbox_librenms_plugin.views import mapping_views
+
+        views = [
+            (name, obj)
+            for name, obj in inspect.getmembers(mapping_views, inspect.isclass)
+            if name.endswith("BulkImportView") and obj.__module__ == mapping_views.__name__
+        ]
+        assert views, "no bulk-import views found — the discovery above stopped matching"
+
+        registered = registry["views"]["netbox_librenms_plugin"]
+
+        def registered_names(model):
+            # Each entry is a list of {"name": ..., "view": ..., ...} records.
+            return {entry["name"] for entry in registered.get(model._meta.model_name, [])}
+
+        missing = [name for name, view in views if "bulk_import" not in registered_names(view.queryset.model)]
+        assert not missing, f"bulk-import views missing @register_model_view: {missing}"
+
+
 class TestCacheMixinWiring:
     """Views that cache LibreNMS data must have CacheMixin and expose get_cache_key."""
 
