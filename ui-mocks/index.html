@@ -4,290 +4,263 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sync tab UI proposals — netbox-librenms-plugin</title>
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"
-      integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
-<link href="https://cdn.jsdelivr.net/npm/@mdi/font@7.4.47/css/materialdesignicons.min.css" rel="stylesheet"
-      integrity="sha384-HphS8cQyN+eYiJ5PMbzShG6qZdRtvHPVLPkYb8JwMkmNgaIxrFVDhQe3jIbq3EZ2" crossorigin="anonymous">
+
+<!-- NetBox 4.7.0's own stylesheets, copied unmodified from project-static/dist -->
+<link rel="stylesheet" href="assets/netbox-external.css">
+<link rel="stylesheet" href="assets/netbox.css">
+<!-- the plugin's own stylesheet, copied unmodified -->
+<link rel="stylesheet" href="assets/librenms_sync.css">
+
 <style>
-  body { background: var(--bs-body-bg); }
-  .wrap { max-width: 1180px; }
-  .mock {
-    border: 1px solid var(--bs-border-color);
-    border-radius: .5rem;
-    padding: 1rem 1.25rem 1.25rem;
-    background: var(--bs-tertiary-bg);
+  /* Page furniture for this mock-up only. Nothing below styles the plugin UI itself. */
+  .mk-mockpage { max-width: 1560px; }
+  .mk-demo {
+    border: 1px solid var(--tblr-border-color);
+    border-radius: var(--tblr-border-radius);
+    background: var(--tblr-bg-surface);
+    padding: .25rem 1.25rem 1.25rem;
   }
-  .mock h2 { font-size: 1.4rem; }
-  /* the highlight ring used to point at the element under discussion */
-  .spot { outline: 2px dashed var(--bs-orange); outline-offset: 4px; border-radius: .25rem; }
-  .spot-ok { outline: 2px dashed var(--bs-success); outline-offset: 4px; border-radius: .25rem; }
-  .tag {
-    font-size: .7rem; text-transform: uppercase; letter-spacing: .04em;
-    font-weight: 600; padding: .15rem .45rem; border-radius: .25rem;
+  .mk-spot { outline: 2px dashed var(--tblr-orange); outline-offset: 4px; border-radius: var(--tblr-border-radius); }
+  .mk-spot-ok { outline: 2px dashed var(--tblr-green); outline-offset: 4px; border-radius: var(--tblr-border-radius); }
+  .mk-tag { font-size: .7rem; text-transform: uppercase; letter-spacing: .04em; font-weight: 600;
+         padding: .15rem .45rem; border-radius: var(--tblr-border-radius); }
+  .mk-tag-now { background: color-mix(in oklab, var(--tblr-orange) 22%, transparent); }
+  .mk-tag-new { background: color-mix(in oklab, var(--tblr-green) 22%, transparent); }
+  .mk-fake-table {
+    border: 1px dashed var(--tblr-border-color); border-radius: var(--tblr-border-radius);
+    padding: .6rem .8rem; color: var(--tblr-secondary); font-size: .85rem;
   }
-  .tag-now { background: rgba(var(--bs-warning-rgb), .18); color: var(--bs-warning-text-emphasis); }
-  .tag-new { background: rgba(var(--bs-success-rgb), .18); color: var(--bs-success-text-emphasis); }
-  .form-check-input-sm { width: .95em; height: .95em; margin-top: .2em; }
-  .color-key .badge { font-weight: 500; }
-  .fake-table {
-    border: 1px solid var(--bs-border-color); border-radius: .375rem;
-    background: var(--bs-body-bg); padding: .5rem .75rem; color: var(--bs-secondary-color);
-    font-size: .85rem;
-  }
-  .nav-tabs .nav-link { cursor: pointer; }
-  .note { border-left: 3px solid var(--bs-primary); padding-left: .85rem; }
-  .prop-head { display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap; }
-  .scrollx { overflow-x: auto; }
-  code { font-size: .85em; }
-  .legend { font-size: .85rem; }
-  .legend .swatch {
-    display: inline-block; width: 1.1rem; height: 0; vertical-align: middle;
-    border-top: 2px dashed currentColor; margin-right: .35rem;
-  }
+  .mk-prop-head { display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap; }
+  .mk-note { border-left: 3px solid var(--tblr-primary); padding-left: .85rem; }
+  .mk-legend { display: flex; gap: 1.5rem; align-items: center; flex-wrap: wrap; }
+  .mk-legend > span { display: inline-flex; align-items: center; gap: .4rem; white-space: nowrap; }
+  .mk-legend .mk-swatch { display: block; width: 1.4rem; border-top: 2px dashed currentColor; }
+  /* the plugin styles its tab strip through #librenmsSync; this page has one strip, so the real
+     rule applies as written and nothing here needs to duplicate it */
 </style>
 </head>
 <body>
-<div class="container wrap py-4">
+<div class="page">
+<div class="page-wrapper">
+<div class="page-body">
+<div class="container-xl mk-mockpage">
 
-  <div class="d-flex justify-content-between align-items-start mb-2 gap-3">
+  <div class="d-flex justify-content-between align-items-start mb-3 gap-3">
     <div>
-      <h1 class="h3 mb-1">Sync tab UI proposals</h1>
-      <p class="text-secondary mb-0">
-        Mock-ups only. Nothing here is wired to a backend, and no plugin code has been changed.
-      </p>
+      <h1 class="page-title mb-1">Sync tab UI proposals</h1>
+      <div class="text-secondary">
+        Static mock-ups for the consistency and clutter points raised on the sync tabs. Nothing is
+        wired to a backend and no plugin code has been changed. Rendered with NetBox 4.7.0's own
+        stylesheets and the plugin's own <code>librenms_sync.css</code>, so spacing and colour match
+        the real page.
+      </div>
     </div>
-    <button class="btn btn-sm btn-outline-secondary flex-shrink-0" id="themeBtn" type="button">
+    <button class="btn btn-outline-secondary btn-sm flex-shrink-0" id="themeBtn" type="button">
       <i class="mdi mdi-theme-light-dark"></i> Theme
     </button>
   </div>
 
-  <div class="alert alert-secondary mt-3">
-    <div class="fw-semibold mb-1">The comment these answer</div>
-    <blockquote class="mb-0 fst-italic">
-      "The UI change is making me think there is further UI improvements around consistency and
-      clutter. Top on my list are the cache count down, as it moves position on different tabs.
-      I think it should be consistently left of the refresh button. Then there is the interface tab
-      sync option check boxes. They take a lot of space and add visual clutter. I think we could
-      consolidate the exclude options and the auto select lag into either a expandable toggle or
-      maybe modal to the right of the sync buttons."
-    </blockquote>
+  <div class="mk-legend text-secondary small mb-3">
+    <span class="text-orange"><span class="mk-swatch"></span>today's behaviour</span>
+    <span class="text-green"><span class="mk-swatch"></span>what the proposal changes</span>
   </div>
-
-  <p class="legend text-secondary">
-    <span class="text-warning"><span class="swatch"></span>today's behaviour</span>
-    &nbsp;&nbsp;
-    <span class="text-success"><span class="swatch"></span>what the proposal changes</span>
-  </p>
 
   <hr class="my-4">
 
   <!-- ============================================================ -->
   <!-- PART 1 — CACHE COUNTDOWN                                     -->
   <!-- ============================================================ -->
-  <h2 class="h4" id="part1">1 &middot; The cache countdown moves between tabs</h2>
+  <h2 class="h2" id="part1">1 &middot; The cache countdown moves between tabs</h2>
   <p class="text-secondary">
-    Today each tab renders its own countdown inside its own content fragment, so it lands in a
-    different row, in a different order, on every tab. Click through the tabs below and watch the
-    dashed box jump.
+    Each tab renders its own countdown inside its own content fragment, so it lands in a different
+    row, in a different order, on every tab. Switch tabs below with <strong>Today</strong> selected
+    and watch the dashed box jump; then switch to <strong>Proposed</strong> and do the same.
   </p>
 
-  <!-- ---- 1a. today ---- -->
-  <div class="prop-head mb-2">
-    <span class="tag tag-now">Today</span>
-    <span class="text-secondary small">five tabs, five positions</span>
+  <div class="btn-group mb-3" role="group">
+    <input type="radio" class="btn-check" name="mode" id="modeToday" checked>
+    <label class="btn btn-outline-primary" for="modeToday">Today</label>
+    <input type="radio" class="btn-check" name="mode" id="modeNew">
+    <label class="btn btn-outline-primary" for="modeNew">Proposed</label>
   </div>
 
-  <div class="mock mb-4">
-    <ul class="nav nav-tabs mb-3" id="todayTabs">
-      <li class="nav-item"><a class="nav-link active" data-tab="interfaces">Interfaces</a></li>
-      <li class="nav-item"><a class="nav-link" data-tab="cables">Cables</a></li>
-      <li class="nav-item"><a class="nav-link" data-tab="ipaddresses">IP Addresses</a></li>
-      <li class="nav-item"><a class="nav-link" data-tab="vlans">VLANs</a></li>
-      <li class="nav-item"><a class="nav-link" data-tab="modules">Modules</a></li>
-    </ul>
-
-    <!-- Interfaces (today) -->
-    <div class="tab-body" data-body="interfaces">
-      <div class="d-flex justify-content-between align-items-center mb-3">
-        <h2 class="h4 mb-0">Interface Sync</h2>
-        <button class="btn btn-outline-primary">Refresh Interfaces</button>
-      </div>
-      <div class="d-flex justify-content-between align-items-center mt-3 mb-3 flex-wrap gap-2">
-        <div class="d-flex align-items-center gap-2 flex-wrap">
-          <button class="btn btn-primary">Sync Selected Interfaces</button>
-          <a href="#" class="m-2" onclick="return false"><i class="mdi mdi-help-circle"></i> info</a>
-          <div class="d-flex align-items-center ms-2">
-            <input class="form-check-input form-check-input-sm me-1" type="checkbox" checked>
-            <label class="form-check-label small mb-0">Auto-select LAG members &amp; parents</label>
-          </div>
-        </div>
-      </div>
-      <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
-        <div><button class="btn btn-secondary" disabled>Bulk Edit VC Member</button></div>
-        <div class="ms-auto d-flex align-items-center">
-          <div class="me-3 spot"><small>Cache expires in: <span class="cd">12m 04s</span></small></div>
-          <div class="color-key me-3">
-            <span class="badge text-bg-success">Matching</span>
-            <span class="badge text-bg-warning">Mismatched</span>
-            <span class="badge text-bg-danger">Not in NetBox</span>
-          </div>
-        </div>
-        <button class="btn btn-sm btn-secondary"><i class="mdi mdi-filter"></i> Toggle Filters</button>
-      </div>
-      <div class="fake-table">interface table &hellip;</div>
-      <p class="small text-secondary mt-2 mb-0">
-        Second row, right side, before the colour key. The filter button sits after it.
-      </p>
+  <div class="mk-demo mb-3">
+    <!-- the plugin's own tab strip markup -->
+    <div class="d-flex justify-content-between align-items-center">
+      <ul class="nav nav-tabs mt-3" id="librenmsSync" role="tablist">
+        <li class="nav-item" role="presentation">
+          <a class="nav-link active sync-cache-ready" data-tab="interfaces" role="tab" aria-selected="true">Interfaces</a>
+        </li>
+        <li class="nav-item" role="presentation">
+          <a class="nav-link sync-cache-ready" data-tab="cables" role="tab" aria-selected="false">Cables</a>
+        </li>
+        <li class="nav-item" role="presentation">
+          <a class="nav-link sync-cache-ready" data-tab="ipaddresses" role="tab" aria-selected="false">IP Addresses</a>
+        </li>
+        <li class="nav-item" role="presentation">
+          <a class="nav-link sync-cache-unavailable" data-tab="vlans" role="tab" aria-selected="false">VLANs</a>
+        </li>
+        <li class="nav-item" role="presentation">
+          <a class="nav-link sync-cache-ready" data-tab="modules" role="tab" aria-selected="false">Modules</a>
+        </li>
+      </ul>
     </div>
 
-    <!-- Cables (today) -->
-    <div class="tab-body d-none" data-body="cables">
+    <div class="tab-content mt-3">
+      <!-- header row: this is where the proposal puts the countdown -->
       <div class="d-flex justify-content-between align-items-center mb-3">
-        <h2 class="h4 mb-0">Cable Sync</h2>
-        <button class="btn btn-outline-primary">Refresh Cables</button>
-      </div>
-      <div class="d-flex justify-content-between align-items-center mt-3 mb-3 flex-wrap gap-2">
-        <div>
-          <button class="btn btn-primary">Sync Selected Cables</button>
-          <a href="#" class="m-2" onclick="return false"><i class="mdi mdi-help-circle"></i> info</a>
+        <h2 class="mb-0" id="tabTitle">Interface Sync</h2>
+        <div class="btn-list align-items-center">
+          <span id="cdNew" class="text-secondary d-none">
+            <i class="mdi mdi-clock-outline"></i> Cache expires in <span class="mk-cd">12m 04s</span>
+          </span>
+          <button class="btn btn-outline-primary" id="tabRefresh" type="button">Refresh Interfaces</button>
         </div>
-        <div class="me-3 spot"><small>Cache expires in: <span class="cd">12m 04s</span></small></div>
       </div>
-      <div class="d-flex justify-content-end align-items-center mb-3">
-        <button class="btn btn-sm btn-secondary"><i class="mdi mdi-filter"></i> Toggle Filters</button>
-      </div>
-      <div class="fake-table">cable table &hellip;</div>
-      <p class="small text-secondary mt-2 mb-0">
-        First row, right side, no colour key. The trailing <code>me-3</code> leaves it floating short
-        of the edge.
-      </p>
-    </div>
 
-    <!-- IP addresses (today) -->
-    <div class="tab-body d-none" data-body="ipaddresses">
-      <div class="d-flex justify-content-between align-items-center mb-3">
-        <h2 class="h4 mb-0">IP Address Sync</h2>
-        <button class="btn btn-outline-primary">Refresh IP Addresses</button>
-      </div>
-      <div class="d-flex justify-content-between align-items-center mt-3 mb-3 flex-wrap gap-2">
-        <div class="d-flex align-items-center gap-3 flex-wrap">
-          <button class="btn btn-primary">Sync Selected IP Addresses</button>
-          <div class="form-check form-switch mb-0">
-            <input class="form-check-input" type="checkbox" checked>
-            <label class="form-check-label small">Set Primary IP</label>
-          </div>
-          <div class="form-check form-switch mb-0">
-            <input class="form-check-input" type="checkbox">
-            <label class="form-check-label small">Create missing interfaces</label>
+      <!-- Interfaces body -->
+      <div class="tab-body" data-body="interfaces">
+        <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
+          <div class="d-flex align-items-center gap-2">
+            <button type="button" class="btn btn-primary">Sync Selected Interfaces</button>
+            <a href="#" class="m-2" onclick="return false"><i class="mdi mdi-help-circle"></i> info</a>
+            <div class="d-flex align-items-center ms-2">
+              <input class="form-check-input form-check-input-sm me-1" type="checkbox" checked>
+              <label class="form-check-label small mb-0">Auto-select LAG members &amp; parents</label>
+            </div>
           </div>
         </div>
-        <div class="me-3 spot"><small>Cache expires in: <span class="cd">12m 04s</span></small></div>
+        <div class="row mb-3"><div class="col col-md-12">
+          <div class="d-flex justify-content-between align-items-center mb-3">
+            <div><button type="button" class="btn btn-secondary" disabled>Bulk Edit VC Member</button></div>
+            <div class="ms-auto d-flex align-items-center">
+              <div class="me-3 mk-cd-old" data-where="interfaces">Cache expires in: <span class="mk-cd">12m 04s</span></div>
+              <div class="color-key me-3">
+                <span class="badge text-success text-white">Matching values</span>
+                <span class="badge text-warning text-white">Mismatched values</span>
+                <span class="badge text-danger text-white">Not present in NetBox</span>
+              </div>
+            </div>
+            <button class="btn btn-sm btn-secondary" type="button"><i class="mdi mdi-filter"></i> Toggle Filters</button>
+          </div>
+          <div class="mk-fake-table">interface table &hellip;</div>
+        </div></div>
+        <p class="small text-secondary mb-0 mk-pos-note">
+          Second row, right side, before the colour key. The filter button sits after it.
+        </p>
       </div>
-      <div class="d-flex justify-content-end align-items-center mb-3">
-        <button class="btn btn-sm btn-secondary"><i class="mdi mdi-filter"></i> Toggle Filters</button>
-      </div>
-      <div class="fake-table">IP address table &hellip;</div>
-      <p class="small text-secondary mt-2 mb-0">
-        First row, right side, after two toggle switches.
-      </p>
-    </div>
 
-    <!-- VLANs (today) -->
-    <div class="tab-body d-none" data-body="vlans">
-      <div class="d-flex justify-content-between align-items-center mb-3">
-        <h2 class="h4 mb-0">VLAN Sync</h2>
-        <button class="btn btn-outline-primary">Refresh VLANs</button>
-      </div>
-      <div class="d-flex justify-content-between align-items-center mt-3 mb-3 flex-wrap gap-2">
-        <div>
-          <button class="btn btn-primary">Sync Selected VLANs</button>
-          <small class="text-secondary ms-2">
-            <i class="mdi mdi-information-outline"></i> Select a VLAN Group for each row&hellip;
-          </small>
+      <!-- Cables body -->
+      <div class="tab-body d-none" data-body="cables">
+        <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
+          <div>
+            <button type="button" class="btn btn-primary">Sync Selected Cables</button>
+            <a href="#" class="m-2" onclick="return false"><i class="mdi mdi-help-circle"></i> info</a>
+          </div>
+          <div class="me-3 mk-cd-old" data-where="cables">Cache expires in: <span class="mk-cd">12m 04s</span></div>
         </div>
-        <div class="ms-auto d-flex align-items-center">
-          <div class="me-3 spot"><small>Cache expires in: <span class="cd">12m 04s</span></small></div>
-          <div class="color-key me-3">
-            <span class="badge text-bg-success">Matching</span>
-            <span class="badge text-bg-warning">Mismatched</span>
-            <span class="badge text-bg-danger">Not in NetBox</span>
+        <div class="row mb-3"><div class="col col-md-12">
+          <div class="d-flex justify-content-end align-items-center mb-3">
+            <button class="btn btn-sm btn-secondary" type="button"><i class="mdi mdi-filter"></i> Toggle Filters</button>
+          </div>
+          <div class="mk-fake-table">cable table &hellip;</div>
+        </div></div>
+        <p class="small text-secondary mb-0 mk-pos-note">
+          First row, right side, no colour key. The trailing <code>me-3</code> leaves it floating
+          short of the edge.
+        </p>
+      </div>
+
+      <!-- IP addresses body -->
+      <div class="tab-body d-none" data-body="ipaddresses">
+        <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
+          <div class="d-flex align-items-center gap-3">
+            <button type="button" class="btn btn-primary">Sync Selected IP Addresses</button>
+            <div class="form-check form-switch mb-0">
+              <input class="form-check-input" type="checkbox" checked id="mockPrimaryIp">
+              <label class="form-check-label small" for="mockPrimaryIp">Set Primary IP</label>
+            </div>
+            <div class="form-check form-switch mb-0">
+              <input class="form-check-input" type="checkbox" id="mockCreateIfaces">
+              <label class="form-check-label small" for="mockCreateIfaces">Create missing interfaces</label>
+            </div>
+          </div>
+          <div class="me-3 mk-cd-old" data-where="ipaddresses">Cache expires in: <span class="mk-cd">12m 04s</span></div>
+        </div>
+        <div class="row mb-3"><div class="col col-md-12">
+          <div class="d-flex justify-content-end align-items-center mb-3">
+            <button class="btn btn-sm btn-secondary" type="button"><i class="mdi mdi-filter"></i> Toggle Filters</button>
+          </div>
+          <div class="mk-fake-table">IP address table &hellip;</div>
+        </div></div>
+        <p class="small text-secondary mb-0 mk-pos-note">
+          First row, right side, after two toggle switches.
+        </p>
+      </div>
+
+      <!-- VLANs body -->
+      <div class="tab-body d-none" data-body="vlans">
+        <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
+          <div>
+            <button type="button" class="btn btn-primary">Sync Selected VLANs</button>
+            <small class="text-secondary ms-2">
+              <i class="mdi mdi-information-outline"></i> Select a VLAN Group for each row, or leave
+              empty for global VLANs
+            </small>
+          </div>
+          <div class="ms-auto d-flex align-items-center">
+            <div class="me-3 mk-cd-old" data-where="vlans">Cache expires in: <span class="mk-cd">12m 04s</span></div>
+            <div class="color-key me-3">
+              <span class="badge text-success text-white">Matching values</span>
+              <span class="badge text-warning text-white">Mismatched values</span>
+              <span class="badge text-danger text-white">Not present in NetBox</span>
+            </div>
           </div>
         </div>
+        <div class="row mb-3"><div class="col col-md-12">
+          <div class="mk-fake-table">VLAN table &hellip;</div>
+        </div></div>
+        <p class="small text-secondary mb-0 mk-pos-note">
+          First row, right side, before the colour key, and this tab has no filter button.
+        </p>
       </div>
-      <div class="fake-table">VLAN table &hellip;</div>
-      <p class="small text-secondary mt-2 mb-0">
-        First row, right side, before the colour key, and there is no filter button on this tab.
-      </p>
-    </div>
 
-    <!-- Modules (today) -->
-    <div class="tab-body d-none" data-body="modules">
-      <div class="d-flex justify-content-between align-items-center mb-3">
-        <h2 class="h4 mb-0">Module Sync</h2>
-        <button class="btn btn-outline-primary">Refresh Modules</button>
+      <!-- Modules body -->
+      <div class="tab-body d-none" data-body="modules">
+        <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
+          <div>
+            <span class="text-secondary">Showing inventory items from LibreNMS matched against
+              NetBox module bays and module types.</span>
+          </div>
+          <div class="me-3 mk-cd-old" data-where="modules">Cache expires in: <span class="mk-cd">12m 04s</span></div>
+        </div>
+        <div class="noprint mb-3">
+          <button type="button" class="btn btn-primary"><i class="mdi mdi-package-down"></i> Install Selected</button>
+        </div>
+        <div class="mk-fake-table">module table &hellip;</div>
+        <p class="small text-secondary mb-0 mt-2 mk-pos-note">
+          First row, right side, opposite a sentence of help text, and above the action button rather
+          than below it.
+        </p>
       </div>
-      <div class="d-flex justify-content-between align-items-center mt-3 mb-3 flex-wrap gap-2">
-        <div><span class="text-secondary small">Showing inventory items from LibreNMS matched against
-          NetBox module bays and module types.</span></div>
-        <div class="me-3 spot"><small>Cache expires in: <span class="cd">12m 04s</span></small></div>
-      </div>
-      <div class="mb-3"><button class="btn btn-primary"><i class="mdi mdi-package-down"></i> Install Selected</button></div>
-      <div class="fake-table">module table &hellip;</div>
-      <p class="small text-secondary mt-2 mb-0">
-        First row, right side, opposite a sentence of help text. Above the action button, not below it.
-      </p>
     </div>
   </div>
 
-  <!-- ---- 1b. proposal ---- -->
-  <div class="prop-head mb-2">
-    <span class="tag tag-new">Proposal</span>
-    <strong>Move it into the tab header, immediately left of Refresh</strong>
-  </div>
-  <p class="text-secondary">
-    One shared include, rendered in the header row that already holds the Refresh button. Same place
-    on all five tabs, and it reads as a caption for the button it belongs to. Switch tabs to confirm
-    it no longer moves.
-  </p>
-
-  <div class="mock mb-3">
-    <ul class="nav nav-tabs mb-3" id="newTabs">
-      <li class="nav-item"><a class="nav-link active" data-tab="interfaces">Interfaces</a></li>
-      <li class="nav-item"><a class="nav-link" data-tab="cables">Cables</a></li>
-      <li class="nav-item"><a class="nav-link" data-tab="ipaddresses">IP Addresses</a></li>
-      <li class="nav-item"><a class="nav-link" data-tab="vlans">VLANs</a></li>
-      <li class="nav-item"><a class="nav-link" data-tab="modules">Modules</a></li>
-    </ul>
-    <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
-      <h2 class="h4 mb-0" id="newTitle">Interface Sync</h2>
-      <div class="d-flex align-items-center gap-2">
-        <span class="spot-ok text-secondary small">
-          <i class="mdi mdi-clock-outline"></i> Cache expires in <span class="cd">12m 04s</span>
-        </span>
-        <button class="btn btn-outline-primary" id="newRefresh">Refresh Interfaces</button>
-      </div>
-    </div>
-    <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
-      <button class="btn btn-primary" id="newSync">Sync Selected Interfaces</button>
-      <div class="color-key">
-        <span class="badge text-bg-success">Matching</span>
-        <span class="badge text-bg-warning">Mismatched</span>
-        <span class="badge text-bg-danger">Not in NetBox</span>
-      </div>
-    </div>
-    <div class="fake-table" id="newTable">interface table &hellip;</div>
-  </div>
-
-  <div class="note text-secondary small mb-4">
-    <strong class="d-block text-body">Worth knowing before this is built</strong>
-    The countdown currently lives inside the content fragment, which is the element HTMX replaces on
-    refresh. The header row is outside that target, so moving the countdown there means a refresh no
-    longer repaints it. It needs either an out-of-band swap or the header moved inside the swap
-    target. Also, the five tabs use five element ids
-    (<code>countdown-timer</code>, <code>cable-countdown-timer</code>, <code>ip-countdown-timer</code>,
-    <code>vlan-countdown-timer</code>, <code>module-countdown-timer</code>) and five
-    <code>window.*CountdownInterval</code> globals, all initialised from one generic helper. A shared
-    include collapses that to one id and one timer.
+  <div class="mk-note text-secondary small mb-4">
+    <strong class="d-block text-body">Each tab has its own cooldown, so this stays five timers</strong>
+    The five countdowns are not one clock shown five times. Each tab caches under its own key
+    (<code>interfaces</code>, <code>links</code>/<code>ports</code>, <code>ip_addresses</code>,
+    <code>vlans</code>, <code>inventory</code>) and computes <code>cache_expiry</code> at its own
+    fetch time, so refreshing one tab does not reset the others. All five tab panes are also in the
+    DOM at once, only one carrying <code>show active</code>, so the five ids and five intervals have
+    to stay. The coloured bar on each tab above comes from the same per-tab cache state.
+    <span class="d-block mt-1">What can be shared is the <em>markup</em>: one include, rendered once
+    per tab with that tab's own expiry and id, placed in the header row. That fixes the position
+    without touching the timers.</span>
+    <span class="d-block mt-1"><strong class="text-body">One thing to settle first:</strong> the
+    countdown currently sits inside the content fragment, which is exactly the element each tab's
+    Refresh replaces. The header row is outside that target, so moving it there means a refresh stops
+    repainting it. It needs an out-of-band swap, or the header brought inside the swap target.</span>
   </div>
 
   <hr class="my-4">
@@ -295,37 +268,37 @@
   <!-- ============================================================ -->
   <!-- PART 2 — INTERFACE SYNC OPTIONS                              -->
   <!-- ============================================================ -->
-  <h2 class="h4" id="part2">2 &middot; The interface tab's sync options</h2>
+  <h2 class="h2" id="part2">2 &middot; The interface tab's sync options</h2>
 
-  <div class="prop-head mb-2">
-    <span class="tag tag-now">Today</span>
+  <div class="mk-prop-head mb-2">
+    <span class="mk-tag mk-tag-now">Today</span>
     <span class="text-secondary small">eight controls competing with the action button</span>
   </div>
 
-  <div class="mock mb-4">
-    <div class="d-flex justify-content-between align-items-center mt-2 mb-3 flex-wrap gap-2">
-      <div class="d-flex align-items-center gap-2 flex-wrap">
-        <button class="btn btn-primary">Sync Selected Interfaces</button>
+  <div class="mk-demo mb-4">
+    <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
+      <div class="d-flex align-items-center gap-2">
+        <button type="button" class="btn btn-primary">Sync Selected Interfaces</button>
         <a href="#" class="m-2" onclick="return false"><i class="mdi mdi-help-circle"></i> info</a>
-        <div class="d-flex align-items-center ms-2 spot">
+        <div class="d-flex align-items-center ms-2 mk-spot">
           <input class="form-check-input form-check-input-sm me-1" type="checkbox" checked>
           <label class="form-check-label small mb-0">Auto-select LAG members &amp; parents</label>
         </div>
       </div>
       <div class="ms-auto d-flex align-items-center">
-        <div class="d-flex align-items-center gap-2 me-2 flex-wrap spot">
+        <div class="exclude-columns-section d-flex align-items-center gap-2 me-2 mk-spot">
           <h6 class="mb-0">Exclude from Sync:</h6>
-          <div class="d-flex align-items-center"><span class="small me-1">Type</span><input class="form-check-input form-check-input-sm" type="checkbox"></div>
-          <div class="d-flex align-items-center"><span class="small me-1">Speed</span><input class="form-check-input form-check-input-sm" type="checkbox"></div>
-          <div class="d-flex align-items-center"><span class="small me-1">VLANs</span><input class="form-check-input form-check-input-sm" type="checkbox"></div>
-          <div class="d-flex align-items-center"><span class="small me-1">MAC</span><input class="form-check-input form-check-input-sm" type="checkbox"></div>
-          <div class="d-flex align-items-center"><span class="small me-1">MTU</span><input class="form-check-input form-check-input-sm" type="checkbox"></div>
-          <div class="d-flex align-items-center"><span class="small me-1">Enabled</span><input class="form-check-input form-check-input-sm" type="checkbox"></div>
-          <div class="d-flex align-items-center"><span class="small me-1">Description</span><input class="form-check-input form-check-input-sm" type="checkbox"></div>
+          <div class="d-flex align-items-center m-0"><span class="small me-1">Type</span><input class="form-check-input form-check-input-sm" type="checkbox"></div>
+          <div class="d-flex align-items-center m-1"><span class="small me-1">Speed</span><input class="form-check-input form-check-input-sm" type="checkbox"></div>
+          <div class="d-flex align-items-center m-1"><span class="small me-1">VLANs</span><input class="form-check-input form-check-input-sm" type="checkbox"></div>
+          <div class="d-flex align-items-center m-1"><span class="small me-1">MAC</span><input class="form-check-input form-check-input-sm" type="checkbox"></div>
+          <div class="d-flex align-items-center m-1"><span class="small me-1">MTU</span><input class="form-check-input form-check-input-sm" type="checkbox"></div>
+          <div class="d-flex align-items-center m-1"><span class="small me-1">Enabled</span><input class="form-check-input form-check-input-sm" type="checkbox"></div>
+          <div class="d-flex align-items-center m-1"><span class="small me-1">Description</span><input class="form-check-input form-check-input-sm" type="checkbox"></div>
         </div>
       </div>
     </div>
-    <div class="fake-table">interface table &hellip;</div>
+    <div class="mk-fake-table">interface table &hellip;</div>
     <p class="small text-secondary mt-2 mb-0">
       Seven exclude checkboxes plus the LAG toggle, all permanently on screen. On a narrow window the
       row wraps and pushes the table down.
@@ -333,29 +306,29 @@
   </div>
 
   <!-- Proposal A -->
-  <div class="prop-head mb-2">
-    <span class="tag tag-new">Proposal A</span>
+  <div class="mk-prop-head mb-2">
+    <span class="mk-tag mk-tag-new">Proposal A</span>
     <strong>Dropdown panel, right of the sync button</strong>
     <span class="text-secondary small">one click, stays on the page</span>
   </div>
 
-  <div class="mock mb-4">
-    <div class="d-flex justify-content-between align-items-center mt-2 mb-3 flex-wrap gap-2">
+  <div class="mk-demo mb-4">
+    <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
       <div class="d-flex align-items-center gap-2">
-        <button class="btn btn-primary">Sync Selected Interfaces</button>
-        <div class="dropdown spot-ok">
+        <button type="button" class="btn btn-primary">Sync Selected Interfaces</button>
+        <div class="dropdown mk-spot-ok">
           <button class="btn btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown"
                   data-bs-auto-close="outside" type="button">
             <i class="mdi mdi-tune-variant"></i> Sync options
-            <span class="badge text-bg-secondary ms-1" id="badgeA">0</span>
+            <span class="badge bg-secondary-lt ms-1" id="badgeA">0</span>
           </button>
-          <div class="dropdown-menu p-3" style="min-width: 22rem;">
+          <div class="dropdown-menu p-3" style="min-width: 23rem;">
             <div class="form-check form-switch mb-2">
               <input class="form-check-input optA" type="checkbox" id="lagA" checked>
               <label class="form-check-label small" for="lagA">Auto-select LAG members &amp; parents</label>
             </div>
             <hr class="my-2">
-            <div class="small fw-semibold mb-2 text-secondary">Exclude from sync</div>
+            <div class="small fw-bold mb-2 text-secondary">Exclude from sync</div>
             <div class="row row-cols-2 g-1">
               <div class="col"><div class="form-check"><input class="form-check-input optA" type="checkbox" id="exA1"><label class="form-check-label small" for="exA1">Type</label></div></div>
               <div class="col"><div class="form-check"><input class="form-check-input optA" type="checkbox" id="exA2"><label class="form-check-label small" for="exA2">Speed</label></div></div>
@@ -366,51 +339,52 @@
               <div class="col"><div class="form-check"><input class="form-check-input optA" type="checkbox" id="exA7"><label class="form-check-label small" for="exA7">Description</label></div></div>
             </div>
             <hr class="my-2">
-            <button class="btn btn-sm btn-link p-0" type="button" id="resetA">Reset to defaults</button>
+            <button class="btn btn-link btn-sm p-0" type="button" id="resetA">Reset to defaults</button>
           </div>
         </div>
         <a href="#" class="ms-1" onclick="return false"><i class="mdi mdi-help-circle"></i> info</a>
       </div>
       <div class="color-key">
-        <span class="badge text-bg-success">Matching</span>
-        <span class="badge text-bg-warning">Mismatched</span>
-        <span class="badge text-bg-danger">Not in NetBox</span>
+        <span class="badge text-success text-white">Matching values</span>
+        <span class="badge text-warning text-white">Mismatched values</span>
+        <span class="badge text-danger text-white">Not present in NetBox</span>
       </div>
     </div>
-    <div class="fake-table">interface table &hellip;</div>
+    <div class="mk-fake-table">interface table &hellip;</div>
     <p class="small text-secondary mt-2 mb-0">
-      The badge counts options that differ from the default, so a non-default setting is still
-      visible without opening the panel. Try it: tick an exclude box and the badge moves.
+      The badge counts options that differ from the default, so a non-default setting stays visible
+      without opening the panel. Tick an exclude box and watch it move.
     </p>
   </div>
 
   <!-- Proposal B -->
-  <div class="prop-head mb-2">
-    <span class="tag tag-new">Proposal B</span>
+  <div class="mk-prop-head mb-2">
+    <span class="mk-tag mk-tag-new">Proposal B</span>
     <strong>Modal</strong>
     <span class="text-secondary small">most room, an explicit Apply step</span>
   </div>
 
-  <div class="mock mb-4">
-    <div class="d-flex justify-content-between align-items-center mt-2 mb-3 flex-wrap gap-2">
+  <div class="mk-demo mb-4">
+    <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
       <div class="d-flex align-items-center gap-2">
-        <button class="btn btn-primary">Sync Selected Interfaces</button>
-        <button class="btn btn-outline-secondary spot-ok" data-bs-toggle="modal" data-bs-target="#optModal" type="button">
+        <button type="button" class="btn btn-primary">Sync Selected Interfaces</button>
+        <button class="btn btn-outline-secondary mk-spot-ok" data-bs-toggle="modal"
+                data-bs-target="#optModal" type="button">
           <i class="mdi mdi-tune-variant"></i> Sync options
-          <span class="badge text-bg-secondary ms-1" id="badgeB">0</span>
+          <span class="badge bg-secondary-lt ms-1" id="badgeB">0</span>
         </button>
         <a href="#" class="ms-1" onclick="return false"><i class="mdi mdi-help-circle"></i> info</a>
       </div>
       <div class="color-key">
-        <span class="badge text-bg-success">Matching</span>
-        <span class="badge text-bg-warning">Mismatched</span>
-        <span class="badge text-bg-danger">Not in NetBox</span>
+        <span class="badge text-success text-white">Matching values</span>
+        <span class="badge text-warning text-white">Mismatched values</span>
+        <span class="badge text-danger text-white">Not present in NetBox</span>
       </div>
     </div>
-    <div class="fake-table">interface table &hellip;</div>
+    <div class="mk-fake-table">interface table &hellip;</div>
     <p class="small text-secondary mt-2 mb-0">
-      Room for a one-line explanation per option, which the current inline labels cannot fit. The
-      cost is a dialog between the user and the sync button, for settings that are usually left alone.
+      Room for a one-line explanation per option, which the inline labels cannot fit. The cost is a
+      dialog in front of the sync button, for settings that are usually left alone.
     </p>
   </div>
 
@@ -431,7 +405,7 @@
             </div>
           </div>
           <hr>
-          <div class="fw-semibold mb-1">Exclude from sync</div>
+          <div class="fw-bold mb-1">Exclude from sync</div>
           <div class="form-text mb-2">Columns left unchanged in NetBox when the sync runs.</div>
           <div class="row row-cols-1 row-cols-md-2 g-2">
             <div class="col"><div class="form-check"><input class="form-check-input optB" type="checkbox" id="exB1"><label class="form-check-label" for="exB1">Type</label></div></div>
@@ -453,27 +427,27 @@
   </div>
 
   <!-- Proposal C -->
-  <div class="prop-head mb-2">
-    <span class="tag tag-new">Proposal C</span>
+  <div class="mk-prop-head mb-2">
+    <span class="mk-tag mk-tag-new">Proposal C</span>
     <strong>Inline expandable row</strong>
-    <span class="text-secondary small">same pattern as Toggle Filters</span>
+    <span class="text-secondary small">the same pattern as Toggle Filters</span>
   </div>
 
-  <div class="mock mb-4">
-    <div class="d-flex justify-content-between align-items-center mt-2 mb-3 flex-wrap gap-2">
+  <div class="mk-demo mb-4">
+    <div class="noprint d-flex justify-content-between align-items-center mt-3 mb-3">
       <div class="d-flex align-items-center gap-2">
-        <button class="btn btn-primary">Sync Selected Interfaces</button>
-        <button class="btn btn-outline-secondary spot-ok" type="button" data-bs-toggle="collapse"
+        <button type="button" class="btn btn-primary">Sync Selected Interfaces</button>
+        <button class="btn btn-outline-secondary mk-spot-ok" type="button" data-bs-toggle="collapse"
                 data-bs-target="#optCollapse">
           <i class="mdi mdi-tune-variant"></i> Sync options
-          <span class="badge text-bg-secondary ms-1" id="badgeC">0</span>
+          <span class="badge bg-secondary-lt ms-1" id="badgeC">0</span>
         </button>
         <a href="#" class="ms-1" onclick="return false"><i class="mdi mdi-help-circle"></i> info</a>
       </div>
       <div class="color-key">
-        <span class="badge text-bg-success">Matching</span>
-        <span class="badge text-bg-warning">Mismatched</span>
-        <span class="badge text-bg-danger">Not in NetBox</span>
+        <span class="badge text-success text-white">Matching values</span>
+        <span class="badge text-warning text-white">Mismatched values</span>
+        <span class="badge text-danger text-white">Not present in NetBox</span>
       </div>
     </div>
     <div class="collapse mb-3" id="optCollapse">
@@ -482,7 +456,7 @@
           <input class="form-check-input optC" type="checkbox" id="lagC" checked>
           <label class="form-check-label small" for="lagC">Auto-select LAG members &amp; parents</label>
         </div>
-        <div class="small fw-semibold mb-2 text-secondary">Exclude from sync</div>
+        <div class="small fw-bold mb-2 text-secondary">Exclude from sync</div>
         <div class="d-flex flex-wrap gap-3">
           <div class="form-check"><input class="form-check-input optC" type="checkbox" id="exC1"><label class="form-check-label small" for="exC1">Type</label></div>
           <div class="form-check"><input class="form-check-input optC" type="checkbox" id="exC2"><label class="form-check-label small" for="exC2">Speed</label></div>
@@ -494,14 +468,14 @@
         </div>
       </div>
     </div>
-    <div class="fake-table">interface table &hellip;</div>
+    <div class="mk-fake-table">interface table &hellip;</div>
     <p class="small text-secondary mt-2 mb-0">
-      Reuses the collapse pattern the tab already uses for filters, so there is no new interaction to
+      Reuses the collapse pattern this tab already uses for filters, so there is no new interaction to
       learn. It still pushes the table down while open, which is the thing the other two avoid.
     </p>
   </div>
 
-  <div class="note text-secondary small mb-4">
+  <div class="mk-note text-secondary small mb-5">
     <strong class="d-block text-body">Trade-offs, briefly</strong>
     <strong>A</strong> keeps everything on one screen and needs no new template file; the panel is
     cramped on a narrow window.
@@ -509,78 +483,83 @@
     action.
     <strong>C</strong> matches an existing pattern on the same tab, but reintroduces the vertical
     shift when open.
-    All three keep the same field names, so the POST payload does not change. The badge count is the
-    part that matters for either choice: without it, a non-default exclude becomes invisible, which
-    is worse than today's clutter.
+    All three keep the same field names (<code>auto_select_lag_members</code>,
+    <code>exclude_columns</code>), so the POST payload does not change. The badge count is the part
+    that matters whichever is chosen: without it, a non-default exclude becomes invisible, which is
+    worse than today's clutter.
   </div>
 
-  <hr class="my-4">
-  <p class="text-secondary small mb-5">
-    Static mock-ups for discussion on
-    <a href="https://github.com/bonzo81/netbox-librenms-plugin/pull/337">bonzo81/netbox-librenms-plugin#337</a>.
-    Bootstrap 5.3 and Material Design Icons are loaded from a CDN; the plugin itself is untouched.
-  </p>
-
+</div>
+</div>
+</div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
-        integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
+        integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
+        crossorigin="anonymous"></script>
 <script>
-// theme toggle
+// NetBox sets data-bs-theme on <html> from setmode.js; this mirrors it.
 document.getElementById('themeBtn').addEventListener('click', () => {
   const el = document.documentElement;
   el.dataset.bsTheme = el.dataset.bsTheme === 'dark' ? 'light' : 'dark';
 });
 
-// "today" tab switcher
-document.querySelectorAll('#todayTabs .nav-link').forEach(link => {
-  link.addEventListener('click', () => {
-    document.querySelectorAll('#todayTabs .nav-link').forEach(l => l.classList.remove('active'));
-    link.classList.add('active');
-    document.querySelectorAll('.tab-body').forEach(b => b.classList.add('d-none'));
-    document.querySelector(`[data-body="${link.dataset.tab}"]`).classList.remove('d-none');
-  });
-});
-
-// "proposal" tab switcher — only the labels change, the countdown stays put
-const NEW_TABS = {
-  interfaces:  ['Interface Sync',  'Refresh Interfaces',  'Sync Selected Interfaces',   'interface table …'],
-  cables:      ['Cable Sync',      'Refresh Cables',      'Sync Selected Cables',       'cable table …'],
-  ipaddresses: ['IP Address Sync', 'Refresh IP Addresses','Sync Selected IP Addresses', 'IP address table …'],
-  vlans:       ['VLAN Sync',       'Refresh VLANs',       'Sync Selected VLANs',        'VLAN table …'],
-  modules:     ['Module Sync',     'Refresh Modules',     'Install Selected',           'module table …'],
+const TABS = {
+  interfaces:  ['Interface Sync',  'Refresh Interfaces'],
+  cables:      ['Cable Sync',      'Refresh Cables'],
+  ipaddresses: ['IP Address Sync', 'Refresh IP Addresses'],
+  vlans:       ['VLAN Sync',       'Refresh VLANs'],
+  modules:     ['Module Sync',     'Refresh Modules'],
 };
-document.querySelectorAll('#newTabs .nav-link').forEach(link => {
-  link.addEventListener('click', () => {
-    document.querySelectorAll('#newTabs .nav-link').forEach(l => l.classList.remove('active'));
-    link.classList.add('active');
-    const [title, refresh, sync, table] = NEW_TABS[link.dataset.tab];
-    document.getElementById('newTitle').textContent = title;
-    document.getElementById('newRefresh').textContent = refresh;
-    document.getElementById('newSync').textContent = sync;
-    document.getElementById('newTable').textContent = table;
+
+function showTab(tab) {
+  document.querySelectorAll('#librenmsSync .nav-link').forEach(l => {
+    const on = l.dataset.tab === tab;
+    l.classList.toggle('active', on);
+    l.setAttribute('aria-selected', on ? 'true' : 'false');
   });
+  document.querySelectorAll('.tab-body').forEach(b => b.classList.add('d-none'));
+  document.querySelector(`[data-body="${tab}"]`).classList.remove('d-none');
+  const [title, refresh] = TABS[tab];
+  document.getElementById('tabTitle').textContent = title;
+  document.getElementById('tabRefresh').textContent = refresh;
+}
+document.querySelectorAll('#librenmsSync .nav-link').forEach(link => {
+  link.addEventListener('click', e => { e.preventDefault(); showTab(link.dataset.tab); });
 });
 
-// live countdown, so the mock reads like the real thing
+// Today vs Proposed: the same page, the countdown in its current place or in the header row
+function applyMode() {
+  const proposed = document.getElementById('modeNew').checked;
+  document.getElementById('cdNew').classList.toggle('d-none', !proposed);
+  document.getElementById('cdNew').classList.toggle('mk-spot-ok', proposed);
+  document.querySelectorAll('.mk-cd-old').forEach(el => {
+    el.classList.toggle('d-none', proposed);
+    el.classList.toggle('mk-spot', !proposed);
+  });
+  document.querySelectorAll('.mk-pos-note').forEach(el => el.classList.toggle('d-none', proposed));
+}
+document.querySelectorAll('input[name="mode"]').forEach(r => r.addEventListener('change', applyMode));
+applyMode();
+
+// one ticking clock in the mock, standing in for whichever tab is on screen
 let remaining = 12 * 60 + 4;
 setInterval(() => {
   if (remaining > 0) remaining -= 1;
   const m = Math.floor(remaining / 60), s = remaining % 60;
   const text = `${m}m ${String(s).padStart(2, '0')}s`;
-  document.querySelectorAll('.cd').forEach(el => el.textContent = text);
+  document.querySelectorAll('.mk-cd').forEach(el => el.textContent = text);
 }, 1000);
 
-// badge counts: how many options differ from the default
-// default = LAG on, nothing excluded
+// badge counts: options that differ from the default (LAG on, nothing excluded)
 function wireBadge(optClass, badgeId, lagId, resetId) {
   const badge = document.getElementById(badgeId);
   const opts = () => Array.from(document.querySelectorAll('.' + optClass));
   function recount() {
     const n = opts().filter(o => o.id === lagId ? !o.checked : o.checked).length;
     badge.textContent = n;
-    badge.classList.toggle('text-bg-secondary', n === 0);
-    badge.classList.toggle('text-bg-primary', n > 0);
+    badge.classList.toggle('bg-secondary-lt', n === 0);
+    badge.classList.toggle('bg-primary-lt', n > 0);
   }
   opts().forEach(o => o.addEventListener('change', recount));
   if (resetId) {
