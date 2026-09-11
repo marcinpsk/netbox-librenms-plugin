@@ -1,0 +1,599 @@
+<!doctype html>
+<html lang="en" data-bs-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sync tab UI proposals — netbox-librenms-plugin</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"
+      integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
+<link href="https://cdn.jsdelivr.net/npm/@mdi/font@7.4.47/css/materialdesignicons.min.css" rel="stylesheet"
+      integrity="sha384-HphS8cQyN+eYiJ5PMbzShG6qZdRtvHPVLPkYb8JwMkmNgaIxrFVDhQe3jIbq3EZ2" crossorigin="anonymous">
+<style>
+  body { background: var(--bs-body-bg); }
+  .wrap { max-width: 1180px; }
+  .mock {
+    border: 1px solid var(--bs-border-color);
+    border-radius: .5rem;
+    padding: 1rem 1.25rem 1.25rem;
+    background: var(--bs-tertiary-bg);
+  }
+  .mock h2 { font-size: 1.4rem; }
+  /* the highlight ring used to point at the element under discussion */
+  .spot { outline: 2px dashed var(--bs-orange); outline-offset: 4px; border-radius: .25rem; }
+  .spot-ok { outline: 2px dashed var(--bs-success); outline-offset: 4px; border-radius: .25rem; }
+  .tag {
+    font-size: .7rem; text-transform: uppercase; letter-spacing: .04em;
+    font-weight: 600; padding: .15rem .45rem; border-radius: .25rem;
+  }
+  .tag-now { background: rgba(var(--bs-warning-rgb), .18); color: var(--bs-warning-text-emphasis); }
+  .tag-new { background: rgba(var(--bs-success-rgb), .18); color: var(--bs-success-text-emphasis); }
+  .form-check-input-sm { width: .95em; height: .95em; margin-top: .2em; }
+  .color-key .badge { font-weight: 500; }
+  .fake-table {
+    border: 1px solid var(--bs-border-color); border-radius: .375rem;
+    background: var(--bs-body-bg); padding: .5rem .75rem; color: var(--bs-secondary-color);
+    font-size: .85rem;
+  }
+  .nav-tabs .nav-link { cursor: pointer; }
+  .note { border-left: 3px solid var(--bs-primary); padding-left: .85rem; }
+  .prop-head { display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap; }
+  .scrollx { overflow-x: auto; }
+  code { font-size: .85em; }
+  .legend { font-size: .85rem; }
+  .legend .swatch {
+    display: inline-block; width: 1.1rem; height: 0; vertical-align: middle;
+    border-top: 2px dashed currentColor; margin-right: .35rem;
+  }
+</style>
+</head>
+<body>
+<div class="container wrap py-4">
+
+  <div class="d-flex justify-content-between align-items-start mb-2 gap-3">
+    <div>
+      <h1 class="h3 mb-1">Sync tab UI proposals</h1>
+      <p class="text-secondary mb-0">
+        Mock-ups only. Nothing here is wired to a backend, and no plugin code has been changed.
+      </p>
+    </div>
+    <button class="btn btn-sm btn-outline-secondary flex-shrink-0" id="themeBtn" type="button">
+      <i class="mdi mdi-theme-light-dark"></i> Theme
+    </button>
+  </div>
+
+  <div class="alert alert-secondary mt-3">
+    <div class="fw-semibold mb-1">The comment these answer</div>
+    <blockquote class="mb-0 fst-italic">
+      "The UI change is making me think there is further UI improvements around consistency and
+      clutter. Top on my list are the cache count down, as it moves position on different tabs.
+      I think it should be consistently left of the refresh button. Then there is the interface tab
+      sync option check boxes. They take a lot of space and add visual clutter. I think we could
+      consolidate the exclude options and the auto select lag into either a expandable toggle or
+      maybe modal to the right of the sync buttons."
+    </blockquote>
+  </div>
+
+  <p class="legend text-secondary">
+    <span class="text-warning"><span class="swatch"></span>today's behaviour</span>
+    &nbsp;&nbsp;
+    <span class="text-success"><span class="swatch"></span>what the proposal changes</span>
+  </p>
+
+  <hr class="my-4">
+
+  <!-- ============================================================ -->
+  <!-- PART 1 — CACHE COUNTDOWN                                     -->
+  <!-- ============================================================ -->
+  <h2 class="h4" id="part1">1 &middot; The cache countdown moves between tabs</h2>
+  <p class="text-secondary">
+    Today each tab renders its own countdown inside its own content fragment, so it lands in a
+    different row, in a different order, on every tab. Click through the tabs below and watch the
+    dashed box jump.
+  </p>
+
+  <!-- ---- 1a. today ---- -->
+  <div class="prop-head mb-2">
+    <span class="tag tag-now">Today</span>
+    <span class="text-secondary small">five tabs, five positions</span>
+  </div>
+
+  <div class="mock mb-4">
+    <ul class="nav nav-tabs mb-3" id="todayTabs">
+      <li class="nav-item"><a class="nav-link active" data-tab="interfaces">Interfaces</a></li>
+      <li class="nav-item"><a class="nav-link" data-tab="cables">Cables</a></li>
+      <li class="nav-item"><a class="nav-link" data-tab="ipaddresses">IP Addresses</a></li>
+      <li class="nav-item"><a class="nav-link" data-tab="vlans">VLANs</a></li>
+      <li class="nav-item"><a class="nav-link" data-tab="modules">Modules</a></li>
+    </ul>
+
+    <!-- Interfaces (today) -->
+    <div class="tab-body" data-body="interfaces">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h2 class="h4 mb-0">Interface Sync</h2>
+        <button class="btn btn-outline-primary">Refresh Interfaces</button>
+      </div>
+      <div class="d-flex justify-content-between align-items-center mt-3 mb-3 flex-wrap gap-2">
+        <div class="d-flex align-items-center gap-2 flex-wrap">
+          <button class="btn btn-primary">Sync Selected Interfaces</button>
+          <a href="#" class="m-2" onclick="return false"><i class="mdi mdi-help-circle"></i> info</a>
+          <div class="d-flex align-items-center ms-2">
+            <input class="form-check-input form-check-input-sm me-1" type="checkbox" checked>
+            <label class="form-check-label small mb-0">Auto-select LAG members &amp; parents</label>
+          </div>
+        </div>
+      </div>
+      <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+        <div><button class="btn btn-secondary" disabled>Bulk Edit VC Member</button></div>
+        <div class="ms-auto d-flex align-items-center">
+          <div class="me-3 spot"><small>Cache expires in: <span class="cd">12m 04s</span></small></div>
+          <div class="color-key me-3">
+            <span class="badge text-bg-success">Matching</span>
+            <span class="badge text-bg-warning">Mismatched</span>
+            <span class="badge text-bg-danger">Not in NetBox</span>
+          </div>
+        </div>
+        <button class="btn btn-sm btn-secondary"><i class="mdi mdi-filter"></i> Toggle Filters</button>
+      </div>
+      <div class="fake-table">interface table &hellip;</div>
+      <p class="small text-secondary mt-2 mb-0">
+        Second row, right side, before the colour key. The filter button sits after it.
+      </p>
+    </div>
+
+    <!-- Cables (today) -->
+    <div class="tab-body d-none" data-body="cables">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h2 class="h4 mb-0">Cable Sync</h2>
+        <button class="btn btn-outline-primary">Refresh Cables</button>
+      </div>
+      <div class="d-flex justify-content-between align-items-center mt-3 mb-3 flex-wrap gap-2">
+        <div>
+          <button class="btn btn-primary">Sync Selected Cables</button>
+          <a href="#" class="m-2" onclick="return false"><i class="mdi mdi-help-circle"></i> info</a>
+        </div>
+        <div class="me-3 spot"><small>Cache expires in: <span class="cd">12m 04s</span></small></div>
+      </div>
+      <div class="d-flex justify-content-end align-items-center mb-3">
+        <button class="btn btn-sm btn-secondary"><i class="mdi mdi-filter"></i> Toggle Filters</button>
+      </div>
+      <div class="fake-table">cable table &hellip;</div>
+      <p class="small text-secondary mt-2 mb-0">
+        First row, right side, no colour key. The trailing <code>me-3</code> leaves it floating short
+        of the edge.
+      </p>
+    </div>
+
+    <!-- IP addresses (today) -->
+    <div class="tab-body d-none" data-body="ipaddresses">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h2 class="h4 mb-0">IP Address Sync</h2>
+        <button class="btn btn-outline-primary">Refresh IP Addresses</button>
+      </div>
+      <div class="d-flex justify-content-between align-items-center mt-3 mb-3 flex-wrap gap-2">
+        <div class="d-flex align-items-center gap-3 flex-wrap">
+          <button class="btn btn-primary">Sync Selected IP Addresses</button>
+          <div class="form-check form-switch mb-0">
+            <input class="form-check-input" type="checkbox" checked>
+            <label class="form-check-label small">Set Primary IP</label>
+          </div>
+          <div class="form-check form-switch mb-0">
+            <input class="form-check-input" type="checkbox">
+            <label class="form-check-label small">Create missing interfaces</label>
+          </div>
+        </div>
+        <div class="me-3 spot"><small>Cache expires in: <span class="cd">12m 04s</span></small></div>
+      </div>
+      <div class="d-flex justify-content-end align-items-center mb-3">
+        <button class="btn btn-sm btn-secondary"><i class="mdi mdi-filter"></i> Toggle Filters</button>
+      </div>
+      <div class="fake-table">IP address table &hellip;</div>
+      <p class="small text-secondary mt-2 mb-0">
+        First row, right side, after two toggle switches.
+      </p>
+    </div>
+
+    <!-- VLANs (today) -->
+    <div class="tab-body d-none" data-body="vlans">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h2 class="h4 mb-0">VLAN Sync</h2>
+        <button class="btn btn-outline-primary">Refresh VLANs</button>
+      </div>
+      <div class="d-flex justify-content-between align-items-center mt-3 mb-3 flex-wrap gap-2">
+        <div>
+          <button class="btn btn-primary">Sync Selected VLANs</button>
+          <small class="text-secondary ms-2">
+            <i class="mdi mdi-information-outline"></i> Select a VLAN Group for each row&hellip;
+          </small>
+        </div>
+        <div class="ms-auto d-flex align-items-center">
+          <div class="me-3 spot"><small>Cache expires in: <span class="cd">12m 04s</span></small></div>
+          <div class="color-key me-3">
+            <span class="badge text-bg-success">Matching</span>
+            <span class="badge text-bg-warning">Mismatched</span>
+            <span class="badge text-bg-danger">Not in NetBox</span>
+          </div>
+        </div>
+      </div>
+      <div class="fake-table">VLAN table &hellip;</div>
+      <p class="small text-secondary mt-2 mb-0">
+        First row, right side, before the colour key, and there is no filter button on this tab.
+      </p>
+    </div>
+
+    <!-- Modules (today) -->
+    <div class="tab-body d-none" data-body="modules">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h2 class="h4 mb-0">Module Sync</h2>
+        <button class="btn btn-outline-primary">Refresh Modules</button>
+      </div>
+      <div class="d-flex justify-content-between align-items-center mt-3 mb-3 flex-wrap gap-2">
+        <div><span class="text-secondary small">Showing inventory items from LibreNMS matched against
+          NetBox module bays and module types.</span></div>
+        <div class="me-3 spot"><small>Cache expires in: <span class="cd">12m 04s</span></small></div>
+      </div>
+      <div class="mb-3"><button class="btn btn-primary"><i class="mdi mdi-package-down"></i> Install Selected</button></div>
+      <div class="fake-table">module table &hellip;</div>
+      <p class="small text-secondary mt-2 mb-0">
+        First row, right side, opposite a sentence of help text. Above the action button, not below it.
+      </p>
+    </div>
+  </div>
+
+  <!-- ---- 1b. proposal ---- -->
+  <div class="prop-head mb-2">
+    <span class="tag tag-new">Proposal</span>
+    <strong>Move it into the tab header, immediately left of Refresh</strong>
+  </div>
+  <p class="text-secondary">
+    One shared include, rendered in the header row that already holds the Refresh button. Same place
+    on all five tabs, and it reads as a caption for the button it belongs to. Switch tabs to confirm
+    it no longer moves.
+  </p>
+
+  <div class="mock mb-3">
+    <ul class="nav nav-tabs mb-3" id="newTabs">
+      <li class="nav-item"><a class="nav-link active" data-tab="interfaces">Interfaces</a></li>
+      <li class="nav-item"><a class="nav-link" data-tab="cables">Cables</a></li>
+      <li class="nav-item"><a class="nav-link" data-tab="ipaddresses">IP Addresses</a></li>
+      <li class="nav-item"><a class="nav-link" data-tab="vlans">VLANs</a></li>
+      <li class="nav-item"><a class="nav-link" data-tab="modules">Modules</a></li>
+    </ul>
+    <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+      <h2 class="h4 mb-0" id="newTitle">Interface Sync</h2>
+      <div class="d-flex align-items-center gap-2">
+        <span class="spot-ok text-secondary small">
+          <i class="mdi mdi-clock-outline"></i> Cache expires in <span class="cd">12m 04s</span>
+        </span>
+        <button class="btn btn-outline-primary" id="newRefresh">Refresh Interfaces</button>
+      </div>
+    </div>
+    <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+      <button class="btn btn-primary" id="newSync">Sync Selected Interfaces</button>
+      <div class="color-key">
+        <span class="badge text-bg-success">Matching</span>
+        <span class="badge text-bg-warning">Mismatched</span>
+        <span class="badge text-bg-danger">Not in NetBox</span>
+      </div>
+    </div>
+    <div class="fake-table" id="newTable">interface table &hellip;</div>
+  </div>
+
+  <div class="note text-secondary small mb-4">
+    <strong class="d-block text-body">Worth knowing before this is built</strong>
+    The countdown currently lives inside the content fragment, which is the element HTMX replaces on
+    refresh. The header row is outside that target, so moving the countdown there means a refresh no
+    longer repaints it. It needs either an out-of-band swap or the header moved inside the swap
+    target. Also, the five tabs use five element ids
+    (<code>countdown-timer</code>, <code>cable-countdown-timer</code>, <code>ip-countdown-timer</code>,
+    <code>vlan-countdown-timer</code>, <code>module-countdown-timer</code>) and five
+    <code>window.*CountdownInterval</code> globals, all initialised from one generic helper. A shared
+    include collapses that to one id and one timer.
+  </div>
+
+  <hr class="my-4">
+
+  <!-- ============================================================ -->
+  <!-- PART 2 — INTERFACE SYNC OPTIONS                              -->
+  <!-- ============================================================ -->
+  <h2 class="h4" id="part2">2 &middot; The interface tab's sync options</h2>
+
+  <div class="prop-head mb-2">
+    <span class="tag tag-now">Today</span>
+    <span class="text-secondary small">eight controls competing with the action button</span>
+  </div>
+
+  <div class="mock mb-4">
+    <div class="d-flex justify-content-between align-items-center mt-2 mb-3 flex-wrap gap-2">
+      <div class="d-flex align-items-center gap-2 flex-wrap">
+        <button class="btn btn-primary">Sync Selected Interfaces</button>
+        <a href="#" class="m-2" onclick="return false"><i class="mdi mdi-help-circle"></i> info</a>
+        <div class="d-flex align-items-center ms-2 spot">
+          <input class="form-check-input form-check-input-sm me-1" type="checkbox" checked>
+          <label class="form-check-label small mb-0">Auto-select LAG members &amp; parents</label>
+        </div>
+      </div>
+      <div class="ms-auto d-flex align-items-center">
+        <div class="d-flex align-items-center gap-2 me-2 flex-wrap spot">
+          <h6 class="mb-0">Exclude from Sync:</h6>
+          <div class="d-flex align-items-center"><span class="small me-1">Type</span><input class="form-check-input form-check-input-sm" type="checkbox"></div>
+          <div class="d-flex align-items-center"><span class="small me-1">Speed</span><input class="form-check-input form-check-input-sm" type="checkbox"></div>
+          <div class="d-flex align-items-center"><span class="small me-1">VLANs</span><input class="form-check-input form-check-input-sm" type="checkbox"></div>
+          <div class="d-flex align-items-center"><span class="small me-1">MAC</span><input class="form-check-input form-check-input-sm" type="checkbox"></div>
+          <div class="d-flex align-items-center"><span class="small me-1">MTU</span><input class="form-check-input form-check-input-sm" type="checkbox"></div>
+          <div class="d-flex align-items-center"><span class="small me-1">Enabled</span><input class="form-check-input form-check-input-sm" type="checkbox"></div>
+          <div class="d-flex align-items-center"><span class="small me-1">Description</span><input class="form-check-input form-check-input-sm" type="checkbox"></div>
+        </div>
+      </div>
+    </div>
+    <div class="fake-table">interface table &hellip;</div>
+    <p class="small text-secondary mt-2 mb-0">
+      Seven exclude checkboxes plus the LAG toggle, all permanently on screen. On a narrow window the
+      row wraps and pushes the table down.
+    </p>
+  </div>
+
+  <!-- Proposal A -->
+  <div class="prop-head mb-2">
+    <span class="tag tag-new">Proposal A</span>
+    <strong>Dropdown panel, right of the sync button</strong>
+    <span class="text-secondary small">one click, stays on the page</span>
+  </div>
+
+  <div class="mock mb-4">
+    <div class="d-flex justify-content-between align-items-center mt-2 mb-3 flex-wrap gap-2">
+      <div class="d-flex align-items-center gap-2">
+        <button class="btn btn-primary">Sync Selected Interfaces</button>
+        <div class="dropdown spot-ok">
+          <button class="btn btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown"
+                  data-bs-auto-close="outside" type="button">
+            <i class="mdi mdi-tune-variant"></i> Sync options
+            <span class="badge text-bg-secondary ms-1" id="badgeA">0</span>
+          </button>
+          <div class="dropdown-menu p-3" style="min-width: 22rem;">
+            <div class="form-check form-switch mb-2">
+              <input class="form-check-input optA" type="checkbox" id="lagA" checked>
+              <label class="form-check-label small" for="lagA">Auto-select LAG members &amp; parents</label>
+            </div>
+            <hr class="my-2">
+            <div class="small fw-semibold mb-2 text-secondary">Exclude from sync</div>
+            <div class="row row-cols-2 g-1">
+              <div class="col"><div class="form-check"><input class="form-check-input optA" type="checkbox" id="exA1"><label class="form-check-label small" for="exA1">Type</label></div></div>
+              <div class="col"><div class="form-check"><input class="form-check-input optA" type="checkbox" id="exA2"><label class="form-check-label small" for="exA2">Speed</label></div></div>
+              <div class="col"><div class="form-check"><input class="form-check-input optA" type="checkbox" id="exA3"><label class="form-check-label small" for="exA3">VLANs</label></div></div>
+              <div class="col"><div class="form-check"><input class="form-check-input optA" type="checkbox" id="exA4"><label class="form-check-label small" for="exA4">MAC</label></div></div>
+              <div class="col"><div class="form-check"><input class="form-check-input optA" type="checkbox" id="exA5"><label class="form-check-label small" for="exA5">MTU</label></div></div>
+              <div class="col"><div class="form-check"><input class="form-check-input optA" type="checkbox" id="exA6"><label class="form-check-label small" for="exA6">Enabled</label></div></div>
+              <div class="col"><div class="form-check"><input class="form-check-input optA" type="checkbox" id="exA7"><label class="form-check-label small" for="exA7">Description</label></div></div>
+            </div>
+            <hr class="my-2">
+            <button class="btn btn-sm btn-link p-0" type="button" id="resetA">Reset to defaults</button>
+          </div>
+        </div>
+        <a href="#" class="ms-1" onclick="return false"><i class="mdi mdi-help-circle"></i> info</a>
+      </div>
+      <div class="color-key">
+        <span class="badge text-bg-success">Matching</span>
+        <span class="badge text-bg-warning">Mismatched</span>
+        <span class="badge text-bg-danger">Not in NetBox</span>
+      </div>
+    </div>
+    <div class="fake-table">interface table &hellip;</div>
+    <p class="small text-secondary mt-2 mb-0">
+      The badge counts options that differ from the default, so a non-default setting is still
+      visible without opening the panel. Try it: tick an exclude box and the badge moves.
+    </p>
+  </div>
+
+  <!-- Proposal B -->
+  <div class="prop-head mb-2">
+    <span class="tag tag-new">Proposal B</span>
+    <strong>Modal</strong>
+    <span class="text-secondary small">most room, an explicit Apply step</span>
+  </div>
+
+  <div class="mock mb-4">
+    <div class="d-flex justify-content-between align-items-center mt-2 mb-3 flex-wrap gap-2">
+      <div class="d-flex align-items-center gap-2">
+        <button class="btn btn-primary">Sync Selected Interfaces</button>
+        <button class="btn btn-outline-secondary spot-ok" data-bs-toggle="modal" data-bs-target="#optModal" type="button">
+          <i class="mdi mdi-tune-variant"></i> Sync options
+          <span class="badge text-bg-secondary ms-1" id="badgeB">0</span>
+        </button>
+        <a href="#" class="ms-1" onclick="return false"><i class="mdi mdi-help-circle"></i> info</a>
+      </div>
+      <div class="color-key">
+        <span class="badge text-bg-success">Matching</span>
+        <span class="badge text-bg-warning">Mismatched</span>
+        <span class="badge text-bg-danger">Not in NetBox</span>
+      </div>
+    </div>
+    <div class="fake-table">interface table &hellip;</div>
+    <p class="small text-secondary mt-2 mb-0">
+      Room for a one-line explanation per option, which the current inline labels cannot fit. The
+      cost is a dialog between the user and the sync button, for settings that are usually left alone.
+    </p>
+  </div>
+
+  <div class="modal fade" id="optModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Interface sync options</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <div class="form-check form-switch mb-3">
+            <input class="form-check-input optB" type="checkbox" id="lagB" checked>
+            <label class="form-check-label" for="lagB">Auto-select LAG members &amp; parents</label>
+            <div class="form-text">
+              Checking a LAG or portchannel row also checks its members. Checking a sub-interface
+              also selects its parent.
+            </div>
+          </div>
+          <hr>
+          <div class="fw-semibold mb-1">Exclude from sync</div>
+          <div class="form-text mb-2">Columns left unchanged in NetBox when the sync runs.</div>
+          <div class="row row-cols-1 row-cols-md-2 g-2">
+            <div class="col"><div class="form-check"><input class="form-check-input optB" type="checkbox" id="exB1"><label class="form-check-label" for="exB1">Type</label></div></div>
+            <div class="col"><div class="form-check"><input class="form-check-input optB" type="checkbox" id="exB2"><label class="form-check-label" for="exB2">Speed</label></div></div>
+            <div class="col"><div class="form-check"><input class="form-check-input optB" type="checkbox" id="exB3"><label class="form-check-label" for="exB3">VLANs</label></div></div>
+            <div class="col"><div class="form-check"><input class="form-check-input optB" type="checkbox" id="exB4"><label class="form-check-label" for="exB4">MAC</label></div></div>
+            <div class="col"><div class="form-check"><input class="form-check-input optB" type="checkbox" id="exB5"><label class="form-check-label" for="exB5">MTU</label></div></div>
+            <div class="col"><div class="form-check"><input class="form-check-input optB" type="checkbox" id="exB6"><label class="form-check-label" for="exB6">Enabled</label></div></div>
+            <div class="col"><div class="form-check"><input class="form-check-input optB" type="checkbox" id="exB7"><label class="form-check-label" for="exB7">Description</label></div></div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-link me-auto" type="button" id="resetB">Reset to defaults</button>
+          <button class="btn btn-secondary" data-bs-dismiss="modal" type="button">Cancel</button>
+          <button class="btn btn-primary" data-bs-dismiss="modal" type="button">Apply</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Proposal C -->
+  <div class="prop-head mb-2">
+    <span class="tag tag-new">Proposal C</span>
+    <strong>Inline expandable row</strong>
+    <span class="text-secondary small">same pattern as Toggle Filters</span>
+  </div>
+
+  <div class="mock mb-4">
+    <div class="d-flex justify-content-between align-items-center mt-2 mb-3 flex-wrap gap-2">
+      <div class="d-flex align-items-center gap-2">
+        <button class="btn btn-primary">Sync Selected Interfaces</button>
+        <button class="btn btn-outline-secondary spot-ok" type="button" data-bs-toggle="collapse"
+                data-bs-target="#optCollapse">
+          <i class="mdi mdi-tune-variant"></i> Sync options
+          <span class="badge text-bg-secondary ms-1" id="badgeC">0</span>
+        </button>
+        <a href="#" class="ms-1" onclick="return false"><i class="mdi mdi-help-circle"></i> info</a>
+      </div>
+      <div class="color-key">
+        <span class="badge text-bg-success">Matching</span>
+        <span class="badge text-bg-warning">Mismatched</span>
+        <span class="badge text-bg-danger">Not in NetBox</span>
+      </div>
+    </div>
+    <div class="collapse mb-3" id="optCollapse">
+      <div class="card card-body">
+        <div class="form-check form-switch mb-2">
+          <input class="form-check-input optC" type="checkbox" id="lagC" checked>
+          <label class="form-check-label small" for="lagC">Auto-select LAG members &amp; parents</label>
+        </div>
+        <div class="small fw-semibold mb-2 text-secondary">Exclude from sync</div>
+        <div class="d-flex flex-wrap gap-3">
+          <div class="form-check"><input class="form-check-input optC" type="checkbox" id="exC1"><label class="form-check-label small" for="exC1">Type</label></div>
+          <div class="form-check"><input class="form-check-input optC" type="checkbox" id="exC2"><label class="form-check-label small" for="exC2">Speed</label></div>
+          <div class="form-check"><input class="form-check-input optC" type="checkbox" id="exC3"><label class="form-check-label small" for="exC3">VLANs</label></div>
+          <div class="form-check"><input class="form-check-input optC" type="checkbox" id="exC4"><label class="form-check-label small" for="exC4">MAC</label></div>
+          <div class="form-check"><input class="form-check-input optC" type="checkbox" id="exC5"><label class="form-check-label small" for="exC5">MTU</label></div>
+          <div class="form-check"><input class="form-check-input optC" type="checkbox" id="exC6"><label class="form-check-label small" for="exC6">Enabled</label></div>
+          <div class="form-check"><input class="form-check-input optC" type="checkbox" id="exC7"><label class="form-check-label small" for="exC7">Description</label></div>
+        </div>
+      </div>
+    </div>
+    <div class="fake-table">interface table &hellip;</div>
+    <p class="small text-secondary mt-2 mb-0">
+      Reuses the collapse pattern the tab already uses for filters, so there is no new interaction to
+      learn. It still pushes the table down while open, which is the thing the other two avoid.
+    </p>
+  </div>
+
+  <div class="note text-secondary small mb-4">
+    <strong class="d-block text-body">Trade-offs, briefly</strong>
+    <strong>A</strong> keeps everything on one screen and needs no new template file; the panel is
+    cramped on a narrow window.
+    <strong>B</strong> has room to explain each option, at the cost of a dialog in front of a routine
+    action.
+    <strong>C</strong> matches an existing pattern on the same tab, but reintroduces the vertical
+    shift when open.
+    All three keep the same field names, so the POST payload does not change. The badge count is the
+    part that matters for either choice: without it, a non-default exclude becomes invisible, which
+    is worse than today's clutter.
+  </div>
+
+  <hr class="my-4">
+  <p class="text-secondary small mb-5">
+    Static mock-ups for discussion on
+    <a href="https://github.com/bonzo81/netbox-librenms-plugin/pull/337">bonzo81/netbox-librenms-plugin#337</a>.
+    Bootstrap 5.3 and Material Design Icons are loaded from a CDN; the plugin itself is untouched.
+  </p>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+        integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
+<script>
+// theme toggle
+document.getElementById('themeBtn').addEventListener('click', () => {
+  const el = document.documentElement;
+  el.dataset.bsTheme = el.dataset.bsTheme === 'dark' ? 'light' : 'dark';
+});
+
+// "today" tab switcher
+document.querySelectorAll('#todayTabs .nav-link').forEach(link => {
+  link.addEventListener('click', () => {
+    document.querySelectorAll('#todayTabs .nav-link').forEach(l => l.classList.remove('active'));
+    link.classList.add('active');
+    document.querySelectorAll('.tab-body').forEach(b => b.classList.add('d-none'));
+    document.querySelector(`[data-body="${link.dataset.tab}"]`).classList.remove('d-none');
+  });
+});
+
+// "proposal" tab switcher — only the labels change, the countdown stays put
+const NEW_TABS = {
+  interfaces:  ['Interface Sync',  'Refresh Interfaces',  'Sync Selected Interfaces',   'interface table …'],
+  cables:      ['Cable Sync',      'Refresh Cables',      'Sync Selected Cables',       'cable table …'],
+  ipaddresses: ['IP Address Sync', 'Refresh IP Addresses','Sync Selected IP Addresses', 'IP address table …'],
+  vlans:       ['VLAN Sync',       'Refresh VLANs',       'Sync Selected VLANs',        'VLAN table …'],
+  modules:     ['Module Sync',     'Refresh Modules',     'Install Selected',           'module table …'],
+};
+document.querySelectorAll('#newTabs .nav-link').forEach(link => {
+  link.addEventListener('click', () => {
+    document.querySelectorAll('#newTabs .nav-link').forEach(l => l.classList.remove('active'));
+    link.classList.add('active');
+    const [title, refresh, sync, table] = NEW_TABS[link.dataset.tab];
+    document.getElementById('newTitle').textContent = title;
+    document.getElementById('newRefresh').textContent = refresh;
+    document.getElementById('newSync').textContent = sync;
+    document.getElementById('newTable').textContent = table;
+  });
+});
+
+// live countdown, so the mock reads like the real thing
+let remaining = 12 * 60 + 4;
+setInterval(() => {
+  if (remaining > 0) remaining -= 1;
+  const m = Math.floor(remaining / 60), s = remaining % 60;
+  const text = `${m}m ${String(s).padStart(2, '0')}s`;
+  document.querySelectorAll('.cd').forEach(el => el.textContent = text);
+}, 1000);
+
+// badge counts: how many options differ from the default
+// default = LAG on, nothing excluded
+function wireBadge(optClass, badgeId, lagId, resetId) {
+  const badge = document.getElementById(badgeId);
+  const opts = () => Array.from(document.querySelectorAll('.' + optClass));
+  function recount() {
+    const n = opts().filter(o => o.id === lagId ? !o.checked : o.checked).length;
+    badge.textContent = n;
+    badge.classList.toggle('text-bg-secondary', n === 0);
+    badge.classList.toggle('text-bg-primary', n > 0);
+  }
+  opts().forEach(o => o.addEventListener('change', recount));
+  if (resetId) {
+    document.getElementById(resetId).addEventListener('click', () => {
+      opts().forEach(o => o.checked = (o.id === lagId));
+      recount();
+    });
+  }
+  recount();
+}
+wireBadge('optA', 'badgeA', 'lagA', 'resetA');
+wireBadge('optB', 'badgeB', 'lagB', 'resetB');
+wireBadge('optC', 'badgeC', 'lagC', null);
+</script>
+</body>
+</html>
