@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sync tab UI proposals — netbox-librenms-plugin</title>
+<title>UI proposals | netbox-librenms-plugin</title>
+<link rel="icon" href="../assets/images/favicon.png">
 
 <!-- NetBox 4.7.0's own stylesheets, copied unmodified from project-static/dist -->
 <link rel="stylesheet" href="assets/netbox-external.css">
@@ -12,7 +13,7 @@
 <link rel="stylesheet" href="assets/librenms_sync.css">
 
 <style>
-  /* Page furniture for this mock-up only. Nothing below styles the plugin UI itself. */
+  /* Mock-only furniture and layout. NetBox's styles still provide every control and colour. */
   .mk-mockpage { max-width: 1560px; }
   .mk-demo {
     border: 1px solid var(--tblr-border-color);
@@ -35,6 +36,50 @@
   .mk-legend { display: flex; gap: 1.5rem; align-items: center; flex-wrap: wrap; }
   .mk-legend > span { display: inline-flex; align-items: center; gap: .4rem; white-space: nowrap; }
   .mk-legend .mk-swatch { display: block; width: 1.4rem; border-top: 2px dashed currentColor; }
+  .mk-page-nav .btn.active { pointer-events: none; }
+  .mk-prototype-switcher {
+    position: fixed; left: 50%; bottom: 1rem; z-index: 1080; transform: translateX(-50%);
+    display: flex; align-items: center; gap: .35rem; padding: .35rem;
+    border: 1px solid var(--tblr-border-color); border-radius: 999px;
+    background: var(--tblr-bg-surface); box-shadow: var(--tblr-shadow-dropdown);
+  }
+  .mk-prototype-switcher .btn { border-radius: 999px; }
+  .mk-prototype-label { min-width: 13rem; text-align: center; font-size: .85rem; font-weight: 600; }
+  .mk-import-toolbar { position: relative; z-index: 3; }
+  .mk-import-table { table-layout: fixed; width: 100%; }
+  .mk-import-table th, .mk-import-table td { vertical-align: middle; }
+  .mk-import-table .mk-select-col { width: 2.75rem; }
+  .mk-import-table .mk-name-col { width: 22%; }
+  .mk-import-table .mk-location-col { width: 14%; }
+  .mk-import-table .mk-hardware-col { width: 13%; }
+  .mk-import-table .mk-config-col { width: 25%; }
+  .mk-import-table .mk-action-col { width: 13.5rem; }
+  .mk-import-table [data-column="hostname"], .mk-import-table [data-column="sysname"] { width: 13rem; }
+  .mk-import-table .form-select { min-width: 0; }
+  .mk-import-table .dropdown-menu { min-width: 21rem; }
+  .mk-source-label { font-size: .7rem; letter-spacing: .025em; text-transform: uppercase; }
+  .mk-state-line { min-height: 1.25rem; }
+  .mk-detail-row > td { padding: 0 !important; background: var(--tblr-bg-surface-secondary); }
+  .mk-detail-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem; padding: 1rem 1.25rem; }
+  .mk-queue-layout { display: grid; grid-template-columns: minmax(21rem, .9fr) minmax(27rem, 1.1fr); gap: 1rem; }
+  .mk-queue-item { cursor: pointer; border-left: 3px solid transparent; }
+  .mk-queue-item.active { border-left-color: var(--tblr-primary); background: var(--tblr-primary-lt); }
+  .mk-inspector { position: sticky; top: 1rem; }
+  .mk-field-pair { display: grid; grid-template-columns: 8.5rem minmax(0, 1fr); gap: .75rem; align-items: start; }
+  .mk-import-note { max-width: 70rem; }
+  [data-column][hidden] { display: none !important; }
+  @media (max-width: 991.98px) {
+    .mk-detail-grid, .mk-queue-layout { grid-template-columns: 1fr; }
+    .mk-inspector { position: static; }
+    .mk-import-table .mk-location-col, .mk-import-table .mk-hardware-col { display: none; }
+    .mk-import-table .mk-name-col { width: 31%; }
+    .mk-import-table .mk-config-col { width: auto; }
+  }
+  @media (max-width: 767.98px) {
+    .mk-prototype-label { min-width: 9rem; }
+    .mk-import-table .mk-action-col { width: 8rem; }
+    .mk-import-table .mk-action-copy { display: none; }
+  }
   /* the plugin styles its tab strip through #librenmsSync; this page has one strip, so the real
      rule applies as written and nothing here needs to duplicate it */
 </style>
@@ -47,28 +92,33 @@
 
   <div class="d-flex justify-content-between align-items-start mb-3 gap-3">
     <div>
-      <h1 class="page-title mb-1">Sync tab UI proposals</h1>
-      <div class="text-secondary">
+      <h1 class="page-title mb-1" id="mockPageTitle">Sync tab UI proposals</h1>
+      <div class="text-secondary" id="mockPageDescription">
         Static mock-ups for the consistency and clutter points raised on the sync tabs. Nothing is
         wired to a backend and no plugin code has been changed. Rendered with NetBox 4.7.0's own
-        stylesheets and the plugin's own <code>librenms_sync.css</code>, so spacing and colour match
-        the real page.
+        stylesheets and the plugin's own <code>librenms_sync.css</code>.
       </div>
     </div>
-    <button class="btn btn-outline-secondary btn-sm flex-shrink-0" id="themeBtn" type="button">
-      <i class="mdi mdi-theme-light-dark"></i> Theme
+    <button class="btn btn-outline-secondary btn-sm flex-shrink-0" id="themeBtn" type="button" aria-pressed="false">
+      <i class="mdi mdi-weather-night" id="themeIcon"></i> <span id="themeLabel">Dark mode</span>
     </button>
   </div>
 
-  <div class="mk-legend text-secondary small mb-3">
+  <div class="btn-group mk-page-nav mb-3" role="group" aria-label="Mock-up page">
+    <a class="btn btn-outline-primary" id="syncPageLink" href="?view=sync">Sync tab</a>
+    <a class="btn btn-outline-primary" id="importPageLink" href="?view=import&amp;variant=A">Import results</a>
+  </div>
+
+  <div class="mk-legend text-secondary small mb-3" id="syncLegend">
     <span class="text-orange"><span class="mk-swatch"></span>today's behaviour</span>
     <span class="text-green"><span class="mk-swatch"></span>what the proposal changes</span>
   </div>
 
+  <section id="syncMocks">
   <hr class="my-4">
 
   <!-- ============================================================ -->
-  <!-- PART 1 — CACHE COUNTDOWN                                     -->
+  <!-- PART 1: CACHE COUNTDOWN                                      -->
   <!-- ============================================================ -->
   <h2 class="h2" id="part1">1 &middot; The cache countdown moves between tabs</h2>
   <p class="text-secondary">
@@ -266,7 +316,7 @@
   <hr class="my-4">
 
   <!-- ============================================================ -->
-  <!-- PART 2 — INTERFACE SYNC OPTIONS                              -->
+  <!-- PART 2: INTERFACE SYNC OPTIONS                               -->
   <!-- ============================================================ -->
   <h2 class="h2" id="part2">2 &middot; The interface tab's sync options</h2>
 
@@ -488,20 +538,451 @@
     that matters whichever is chosen: without it, a non-default exclude becomes invisible, which is
     worse than today's clutter.
   </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- IMPORT RESULTS PROTOTYPE                                    -->
+  <!-- Three variants of the import results page, switchable via   -->
+  <!-- ?view=import&variant=, on the existing ui-mocks route.       -->
+  <!-- ============================================================ -->
+  <section id="importMocks" hidden>
+    <div class="alert alert-info mb-3" role="status">
+      <div class="d-flex gap-2">
+        <i class="mdi mdi-information-outline fs-3"></i>
+        <div>
+          <strong class="d-block">What these proposals keep fixed</strong>
+          <span class="small">
+            The intended NetBox name is primary. Device role stays a required workflow control.
+            Rack, cluster, source names, and virtual-chassis detail appear only when they apply.
+            Column preferences can hide context, but never selection, required setup, or actions.
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Proposal A -->
+    <article data-import-variant="A">
+      <div class="mk-prop-head mb-2">
+        <span class="mk-tag mk-tag-new">Proposal A</span>
+        <strong>Focused table with attached options</strong>
+        <span class="text-secondary small">recommended, closest to a native NetBox object list</span>
+      </div>
+      <p class="text-secondary mk-import-note">
+        Keep the repeated decision inline and pin the workflow columns. Put optional context behind
+        the standard Columns menu. Put row-specific choices in an attached dropdown, the same
+        compact pattern selected for Sync Proposal A.
+      </p>
+
+      <div class="card mb-3">
+        <div class="card-header d-flex justify-content-between align-items-center gap-2 flex-wrap">
+          <div>
+            <h2 class="card-title mb-0">Import Devices from LibreNMS</h2>
+            <span class="text-secondary small">4 results from Lab</span>
+          </div>
+          <span class="text-secondary small"><i class="mdi mdi-clock-outline"></i> Cache expires in <strong>4m 42s</strong></span>
+        </div>
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-center gap-2 flex-wrap mb-3 mk-import-toolbar">
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+              <button type="button" class="btn btn-outline-primary" id="selectReadyA"><i class="mdi mdi-checkbox-multiple-marked"></i> Select ready</button>
+              <button type="button" class="btn btn-outline-secondary" id="clearSelectionA">Clear selection</button>
+              <span class="text-secondary small" id="selectionCountA">0 selected</span>
+            </div>
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+              <div class="dropdown">
+                <button class="btn btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown" data-bs-auto-close="outside" type="button">
+                  <i class="mdi mdi-tune-variant"></i> Import options
+                  <span class="badge bg-primary-lt ms-1" id="importOptionsBadgeA">1</span>
+                </button>
+                <div class="dropdown-menu dropdown-menu-end p-3" style="min-width: 22rem;">
+                  <div class="small fw-bold text-secondary mb-2">NetBox name</div>
+                  <div class="form-check form-switch mb-2">
+                    <input class="form-check-input" type="checkbox" id="useSysnameImport" checked>
+                    <label class="form-check-label" for="useSysnameImport">Use SNMP sysName</label>
+                  </div>
+                  <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="stripDomainImport" checked>
+                    <label class="form-check-label" for="stripDomainImport">Remove domain suffix</label>
+                  </div>
+                  <hr class="my-2">
+                  <button class="btn btn-link btn-sm p-0" type="button">Reset to defaults</button>
+                </div>
+              </div>
+              <span class="badge bg-primary-lt" id="importNameSummaryA">Name: sysName, domain removed</span>
+              <div class="dropdown">
+                <button class="btn btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown" data-bs-auto-close="outside" type="button">
+                  <i class="mdi mdi-view-column-outline"></i> Columns
+                  <span class="badge bg-secondary-lt ms-1" id="columnCountA">2</span>
+                </button>
+                <div class="dropdown-menu dropdown-menu-end p-3" style="min-width: 20rem;">
+                  <div class="small fw-bold text-secondary mb-2">Always shown</div>
+                  <div class="form-check"><input class="form-check-input" type="checkbox" checked disabled id="colNameLocked"><label class="form-check-label" for="colNameLocked">NetBox name</label></div>
+                  <div class="form-check"><input class="form-check-input" type="checkbox" checked disabled id="colSetupLocked"><label class="form-check-label" for="colSetupLocked">Required setup and actions</label></div>
+                  <hr class="my-2">
+                  <div class="small fw-bold text-secondary mb-2">LibreNMS context</div>
+                  <div class="form-check"><input class="form-check-input mk-col-toggle" type="checkbox" checked data-column="location" id="colLocation"><label class="form-check-label" for="colLocation">Location</label></div>
+                  <div class="form-check"><input class="form-check-input mk-col-toggle" type="checkbox" checked data-column="hardware" id="colHardware"><label class="form-check-label" for="colHardware">Hardware</label></div>
+                  <div class="form-check"><input class="form-check-input mk-col-toggle" type="checkbox" data-column="hostname" id="colHostname"><label class="form-check-label" for="colHostname">Hostname</label></div>
+                  <div class="form-check"><input class="form-check-input mk-col-toggle" type="checkbox" data-column="sysname" id="colSysname"><label class="form-check-label" for="colSysname">System name</label></div>
+                </div>
+              </div>
+              <button type="button" class="btn btn-success" disabled id="importSelectedA"><i class="mdi mdi-download"></i> Import selected</button>
+            </div>
+          </div>
+
+          <div class="table-responsive">
+            <table class="table table-hover object-list mk-import-table mb-0" id="focusedImportTable">
+              <thead>
+                <tr>
+                  <th class="mk-select-col"><input class="form-check-input" type="checkbox" aria-label="Select all"></th>
+                  <th class="mk-name-col">NetBox object</th>
+                  <th class="mk-location-col" data-column="location">Location</th>
+                  <th class="mk-hardware-col" data-column="hardware">Hardware</th>
+                  <th data-column="hostname" hidden>Hostname</th>
+                  <th data-column="sysname" hidden>System name</th>
+                  <th class="mk-config-col">Import setup</th>
+                  <th class="mk-action-col text-end">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><input class="form-check-input" type="checkbox" disabled aria-label="Select core-lab-01" id="selectA1"></td>
+                  <td>
+                    <div class="d-flex align-items-center gap-1 flex-wrap">
+                      <strong data-import-name data-hostname="core-lab-01.example.test" data-sysname="core-lab-01.example.test">core-lab-01</strong><span class="badge bg-blue-lt" id="kindBadgeA1">Device</span>
+                    </div>
+                    <div class="text-secondary small" data-import-name-source>From sysName, domain removed</div>
+                  </td>
+                  <td data-column="location"><span class="text-body">Lab</span><div class="small text-secondary">Site matched</div></td>
+                  <td data-column="hardware">MODEL-24X<div class="small text-success"><i class="mdi mdi-check"></i> Type matched</div></td>
+                  <td data-column="hostname" hidden>core-lab-01.example.test</td>
+                  <td data-column="sysname" hidden>core-lab-01.example.test</td>
+                  <td>
+                    <label class="mk-source-label text-danger" for="roleA1" id="roleLabelA1">Role required</label>
+                    <div class="d-flex gap-1 align-items-center">
+                      <select class="form-select form-select-sm" id="roleA1"><option selected>Select role...</option><option>Network</option><option>Server</option></select>
+                      <select class="form-select form-select-sm" id="clusterA1" hidden><option selected>Select cluster...</option><option>Lab Cluster</option></select>
+                      <div class="dropdown">
+                        <button class="btn btn-sm btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown" data-bs-auto-close="outside" type="button" title="More import settings" aria-label="More import settings"><i class="mdi mdi-tune"></i><span class="badge bg-primary-lt ms-1" id="rowOptionsBadgeA1" hidden>1</span></button>
+                        <div class="dropdown-menu dropdown-menu-end p-3">
+                          <div id="placementA1">
+                            <div class="small fw-bold mb-2">Optional placement</div>
+                            <label class="form-label small" for="rackA1">Rack</label>
+                            <select class="form-select form-select-sm mb-3" id="rackA1"><option>No rack</option><option>Row A / Rack 01</option></select>
+                          </div>
+                          <div class="small fw-bold mb-2">Object type</div>
+                          <button class="btn btn-outline-primary btn-sm w-100" type="button" id="convertVmA1"><i class="mdi mdi-monitor"></i> Configure as virtual machine</button>
+                        </div>
+                      </div>
+                    </div>
+                  </td>
+                  <td class="text-end">
+                    <div class="btn-group btn-group-sm"><button class="btn btn-success" type="button" disabled id="importA1"><i class="mdi mdi-download"></i> <span class="mk-action-copy">Import</span></button><button class="btn btn-outline-danger" type="button" id="detailsA1"><i class="mdi mdi-alert-circle"></i> <span class="mk-action-copy">Details</span></button></div>
+                  </td>
+                </tr>
+                <tr>
+                  <td><input class="form-check-input" type="checkbox" aria-label="Select access-lab-02"></td>
+                  <td>
+                    <div class="d-flex align-items-center gap-1 flex-wrap"><strong data-import-name data-hostname="198.18.0.22" data-sysname="access-lab-02.example.test">access-lab-02</strong><span class="badge bg-blue-lt">Device</span><button class="badge bg-cyan-lt border-0" type="button"><i class="mdi mdi-server-network"></i> Stack, 3</button></div>
+                    <div class="text-secondary small" data-import-name-source>From sysName, domain removed</div>
+                  </td>
+                  <td data-column="location">Lab / Row A<div class="small text-secondary">Rack 01 selected</div></td>
+                  <td data-column="hardware">MODEL-48P<div class="small text-success"><i class="mdi mdi-check"></i> Type matched</div></td>
+                  <td data-column="hostname" hidden>198.18.0.22</td>
+                  <td data-column="sysname" hidden>access-lab-02.example.test</td>
+                  <td>
+                    <label class="mk-source-label text-secondary" for="roleA2">Device role</label>
+                    <div class="d-flex gap-1 align-items-center"><select class="form-select form-select-sm" id="roleA2"><option>Network</option><option>Server</option></select><button class="btn btn-sm btn-outline-secondary" type="button" title="Rack 01 and device options" aria-label="Rack 01 and device options"><i class="mdi mdi-tune"></i><span class="badge bg-primary-lt ms-1">1</span></button></div>
+                  </td>
+                  <td class="text-end"><div class="btn-group btn-group-sm"><button class="btn btn-success" type="button"><i class="mdi mdi-download"></i> <span class="mk-action-copy">Import</span></button><button class="btn btn-outline-primary" type="button" aria-label="Details"><i class="mdi mdi-information-outline"></i></button></div></td>
+                </tr>
+                <tr>
+                  <td><input class="form-check-input" type="checkbox" aria-label="Select compute-lab-03"></td>
+                  <td><div class="d-flex align-items-center gap-1 flex-wrap"><strong data-import-name data-hostname="compute-lab-03.example.test" data-sysname="compute-lab-03">compute-lab-03</strong><span class="badge bg-purple-lt">Virtual machine</span></div><div class="text-secondary small" data-import-name-source>From sysName, domain removed</div></td>
+                  <td data-column="location">Lab<div class="small text-secondary">Source context only</div></td>
+                  <td data-column="hardware">Generic VM</td>
+                  <td data-column="hostname" hidden>compute-lab-03.example.test</td>
+                  <td data-column="sysname" hidden>compute-lab-03</td>
+                  <td>
+                    <label class="mk-source-label text-secondary" for="clusterA3">Cluster required for current importer</label>
+                    <div class="d-flex gap-1 align-items-center">
+                      <select class="form-select form-select-sm" id="clusterA3"><option>Lab Cluster</option></select>
+                      <div class="dropdown">
+                        <button class="btn btn-sm btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown" data-bs-auto-close="outside" type="button" title="VM role and import options" aria-label="VM role and import options"><i class="mdi mdi-tune"></i><span class="badge bg-primary-lt ms-1" id="vmOptionsBadgeA3" hidden>1</span></button>
+                        <div class="dropdown-menu dropdown-menu-end p-3">
+                          <label class="form-label small" for="vmRoleA3">VM role <span class="text-secondary">(optional)</span></label>
+                          <select class="form-select form-select-sm mb-3" id="vmRoleA3"><option>No role</option><option>Server</option></select>
+                          <button class="btn btn-outline-primary btn-sm w-100" type="button"><i class="mdi mdi-server"></i> Configure as device</button>
+                        </div>
+                      </div>
+                    </div>
+                  </td>
+                  <td class="text-end"><div class="btn-group btn-group-sm"><button class="btn btn-success" type="button"><i class="mdi mdi-download"></i> <span class="mk-action-copy">Import</span></button><button class="btn btn-outline-primary" type="button" aria-label="Details"><i class="mdi mdi-information-outline"></i></button></div></td>
+                </tr>
+                <tr>
+                  <td><input class="form-check-input" type="checkbox" disabled aria-label="Existing edge-lab-04"></td>
+                  <td><a href="#" onclick="return false"><strong>edge-lab-04</strong> <i class="mdi mdi-open-in-new"></i></a><div class="text-secondary small">Existing NetBox device</div></td>
+                  <td data-column="location">Lab</td>
+                  <td data-column="hardware">MODEL-8X<div class="small text-warning"><i class="mdi mdi-alert"></i> Serial differs</div></td>
+                  <td data-column="hostname" hidden>edge-lab-04.example.test</td>
+                  <td data-column="sysname" hidden>edge-lab-04.example.test</td>
+                  <td><span class="badge bg-yellow-lt">Review existing match</span><div class="small text-secondary">Import setup is not applicable</div></td>
+                  <td class="text-end"><div class="btn-group btn-group-sm"><button class="btn btn-secondary" type="button" aria-label="Open existing device"><i class="mdi mdi-open-in-new"></i></button><button class="btn btn-outline-warning" type="button"><i class="mdi mdi-alert"></i> <span class="mk-action-copy">Conflict</span></button></div></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="mk-note text-secondary small mb-5">
+        <strong class="d-block text-body">Why this is the leading option</strong>
+        It keeps NetBox table alignment and user-selected context columns. The proposed name replaces
+        the redundant default hostname and system-name pair. Role stays inline because it is the
+        repeated required choice. Rack and VM conversion stay attached to the row and leave a badge
+        when a non-default value is active. Cluster is not a permanent column.
+      </div>
+    </article>
+
+    <!-- Proposal B -->
+    <article data-import-variant="B" hidden>
+      <div class="mk-prop-head mb-2">
+        <span class="mk-tag mk-tag-new">Proposal B</span>
+        <strong>Summary table with expandable rows</strong>
+        <span class="text-secondary small">smallest table, more vertical movement</span>
+      </div>
+      <p class="text-secondary mk-import-note">
+        Make every row easy to scan first. Expand only the rows that need configuration or source
+        comparison. This removes all optional columns, but a repeated role assignment takes one
+        extra click per unresolved row.
+      </p>
+
+      <div class="card mb-3">
+        <div class="card-header d-flex justify-content-between align-items-center gap-2 flex-wrap">
+          <div><h2 class="card-title mb-0">Import Devices from LibreNMS</h2><span class="text-secondary small">4 results, 2 need attention</span></div>
+          <div class="btn-list"><button class="btn btn-outline-secondary" type="button"><i class="mdi mdi-tune-variant"></i> Import options <span class="badge bg-primary-lt ms-1">2</span></button><button class="btn btn-success" type="button" disabled><i class="mdi mdi-download"></i> Import selected</button></div>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-hover object-list mb-0">
+            <thead><tr><th class="w-1"></th><th>NetBox object</th><th>Matched destination</th><th>Readiness</th><th class="text-end">Actions</th></tr></thead>
+            <tbody>
+              <tr>
+                <td><input class="form-check-input" type="checkbox" disabled aria-label="Select core-lab-01"></td>
+                <td><strong>core-lab-01</strong> <span class="badge bg-blue-lt">Device</span><div class="small text-secondary">sysName, domain removed</div></td>
+                <td><div>Lab</div><div class="small text-secondary">MODEL-24X</div></td>
+                <td><span class="badge bg-red-lt">Role required</span></td>
+                <td class="text-end"><button class="btn btn-sm btn-primary" type="button" data-bs-toggle="collapse" data-bs-target="#detailB1" aria-expanded="true"><i class="mdi mdi-chevron-up"></i> Configure</button></td>
+              </tr>
+              <tr class="collapse show mk-detail-row" id="detailB1">
+                <td colspan="5">
+                  <div class="mk-detail-grid">
+                    <div>
+                      <div class="mk-source-label text-secondary mb-1">Source identity</div>
+                      <div class="mk-field-pair small"><span class="text-secondary">Hostname</span><span>core-lab-01.example.test</span></div>
+                      <div class="mk-field-pair small"><span class="text-secondary">System name</span><span>core-lab-01.example.test</span></div>
+                    </div>
+                    <div>
+                      <label class="form-label required" for="roleB1">Device role</label>
+                      <select class="form-select form-select-sm" id="roleB1"><option selected>Select role...</option><option>Network</option><option>Server</option></select>
+                    </div>
+                    <div>
+                      <label class="form-label" for="rackB1">Rack <span class="text-secondary">(optional)</span></label>
+                      <select class="form-select form-select-sm mb-2" id="rackB1"><option>No rack</option><option>Row A / Rack 01</option></select>
+                      <button class="btn btn-outline-secondary btn-sm" type="button"><i class="mdi mdi-monitor"></i> Configure as VM</button>
+                    </div>
+                  </div>
+                </td>
+              </tr>
+              <tr>
+                <td><input class="form-check-input" type="checkbox" checked aria-label="Select access-lab-02"></td>
+                <td><strong>access-lab-02</strong> <span class="badge bg-blue-lt">Device</span> <span class="badge bg-cyan-lt">Stack, 3</span><div class="small text-secondary">sysName, domain removed</div></td>
+                <td><div>Lab / Row A / Rack 01</div><div class="small text-secondary">MODEL-48P</div></td>
+                <td><span class="badge bg-green-lt">Ready</span></td>
+                <td class="text-end"><div class="btn-group btn-group-sm"><button class="btn btn-success" type="button"><i class="mdi mdi-download"></i> Import</button><button class="btn btn-outline-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#detailB2" aria-label="Expand details"><i class="mdi mdi-chevron-down"></i></button></div></td>
+              </tr>
+              <tr class="collapse mk-detail-row" id="detailB2"><td colspan="5"><div class="mk-detail-grid"><div><div class="mk-source-label text-secondary">Source identity</div><div>198.18.0.22 / access-lab-02.example.test</div></div><div><div class="mk-source-label text-secondary">Device role</div><div>Network</div></div><div><div class="mk-source-label text-secondary">Virtual chassis</div><button class="btn btn-outline-info btn-sm mt-1" type="button">View 3 members</button></div></div></td></tr>
+              <tr>
+                <td><input class="form-check-input" type="checkbox" checked aria-label="Select compute-lab-03"></td>
+                <td><strong>compute-lab-03</strong> <span class="badge bg-purple-lt">Virtual machine</span><div class="small text-secondary">hostname</div></td>
+                <td><div>Lab Cluster</div><div class="small text-secondary">Generic VM</div></td>
+                <td><span class="badge bg-green-lt">Ready</span></td>
+                <td class="text-end"><div class="btn-group btn-group-sm"><button class="btn btn-success" type="button"><i class="mdi mdi-download"></i> Import</button><button class="btn btn-outline-secondary" type="button" aria-label="Expand details"><i class="mdi mdi-chevron-down"></i></button></div></td>
+              </tr>
+              <tr>
+                <td><input class="form-check-input" type="checkbox" disabled aria-label="Existing edge-lab-04"></td>
+                <td><a href="#" onclick="return false"><strong>edge-lab-04</strong></a><div class="small text-secondary">Existing NetBox device</div></td>
+                <td><div>Lab</div><div class="small text-secondary">MODEL-8X</div></td>
+                <td><span class="badge bg-yellow-lt">Conflict</span></td>
+                <td class="text-end"><button class="btn btn-sm btn-outline-warning" type="button"><i class="mdi mdi-alert"></i> Review</button></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="mk-note text-secondary small mb-5">
+        <strong class="d-block text-body">Trade-off</strong>
+        This is the narrowest conventional table and gives validation details enough space. It
+        weakens the common workflow because an operator must open each row before choosing its role.
+        Expanded rows also interrupt comparison and move later results down the page.
+      </div>
+    </article>
+
+    <!-- Proposal C -->
+    <article data-import-variant="C" hidden>
+      <div class="mk-prop-head mb-2">
+        <span class="mk-tag mk-tag-new">Proposal C</span>
+        <strong>State queue with a persistent inspector</strong>
+        <span class="text-secondary small">best for complex review, least like a NetBox list</span>
+      </div>
+      <p class="text-secondary mk-import-note">
+        Separate scanning from editing. The left side is a compact work queue. The right side owns
+        all source comparison, placement, object type, and validation for the active row. Clicking a
+        row does not select it for import.
+      </p>
+
+      <div class="d-flex justify-content-between align-items-center gap-2 flex-wrap mb-3">
+        <div class="btn-list"><button class="btn btn-outline-primary" type="button">Select all ready</button><span class="text-secondary small">0 selected</span></div>
+        <div class="btn-list"><button class="btn btn-outline-secondary" type="button"><i class="mdi mdi-tune-variant"></i> Import options <span class="badge bg-primary-lt ms-1">2</span></button><button class="btn btn-success" type="button" disabled><i class="mdi mdi-download"></i> Import selected</button></div>
+      </div>
+
+      <div class="mk-queue-layout mb-3">
+        <div>
+          <div class="d-flex justify-content-between align-items-center mb-2"><h3 class="h4 mb-0">Needs setup</h3><span class="badge bg-red-lt">1</span></div>
+          <div class="list-group mb-3">
+            <button class="list-group-item list-group-item-action mk-queue-item active" type="button" data-inspector-row="core-lab-01">
+              <div class="d-flex align-items-center gap-2">
+                <input class="form-check-input" type="checkbox" disabled aria-label="Select core-lab-01" onclick="event.stopPropagation()">
+                <div class="flex-grow-1 text-start"><strong>core-lab-01</strong><div class="small text-secondary">Lab · MODEL-24X</div></div>
+                <span class="badge bg-red-lt">Role required</span>
+              </div>
+            </button>
+          </div>
+          <div class="d-flex justify-content-between align-items-center mb-2"><h3 class="h4 mb-0">Ready to import</h3><span class="badge bg-green-lt">2</span></div>
+          <div class="list-group mb-3">
+            <button class="list-group-item list-group-item-action mk-queue-item" type="button" data-inspector-row="access-lab-02">
+              <div class="d-flex align-items-center gap-2"><input class="form-check-input" type="checkbox" aria-label="Select access-lab-02" onclick="event.stopPropagation()"><div class="flex-grow-1 text-start"><strong>access-lab-02</strong> <span class="badge bg-cyan-lt">Stack, 3</span><div class="small text-secondary">Lab / Row A / Rack 01</div></div><span class="badge bg-green-lt">Ready</span></div>
+            </button>
+            <button class="list-group-item list-group-item-action mk-queue-item" type="button" data-inspector-row="compute-lab-03">
+              <div class="d-flex align-items-center gap-2"><input class="form-check-input" type="checkbox" aria-label="Select compute-lab-03" onclick="event.stopPropagation()"><div class="flex-grow-1 text-start"><strong>compute-lab-03</strong> <span class="badge bg-purple-lt">VM</span><div class="small text-secondary">Lab Cluster</div></div><span class="badge bg-green-lt">Ready</span></div>
+            </button>
+          </div>
+          <div class="d-flex justify-content-between align-items-center mb-2"><h3 class="h4 mb-0">Existing objects</h3><span class="badge bg-yellow-lt">1</span></div>
+          <div class="list-group">
+            <button class="list-group-item list-group-item-action mk-queue-item" type="button" data-inspector-row="edge-lab-04">
+              <div class="d-flex align-items-center gap-2"><i class="mdi mdi-link-variant"></i><div class="flex-grow-1 text-start"><strong>edge-lab-04</strong><div class="small text-secondary">Existing NetBox device</div></div><span class="badge bg-yellow-lt">Conflict</span></div>
+            </button>
+          </div>
+        </div>
+
+        <div class="card mk-inspector" id="importInspector">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <div><h2 class="card-title mb-0" id="inspectorName">core-lab-01</h2><span class="text-secondary small" id="inspectorSubtitle">New device · needs setup</span></div>
+            <span class="badge bg-blue-lt" id="inspectorKind">Device</span>
+          </div>
+          <div class="card-body">
+            <div class="mk-source-label text-secondary mb-2">LibreNMS identity</div>
+            <div class="mk-field-pair mb-1"><span class="text-secondary">Hostname</span><span id="inspectorHostname">core-lab-01.example.test</span></div>
+            <div class="mk-field-pair mb-3"><span class="text-secondary">System name</span><span id="inspectorSysname">core-lab-01.example.test</span></div>
+
+            <div id="inspectorSetupFields">
+              <div class="mk-source-label text-secondary mb-2">Import as</div>
+              <div class="btn-group mb-3" role="group">
+                <input class="btn-check" type="radio" name="kindC" id="kindDeviceC" checked><label class="btn btn-outline-primary" for="kindDeviceC"><i class="mdi mdi-server"></i> Device</label>
+                <input class="btn-check" type="radio" name="kindC" id="kindVmC"><label class="btn btn-outline-primary" for="kindVmC"><i class="mdi mdi-monitor"></i> Virtual machine</label>
+              </div>
+
+              <div id="deviceFieldsC">
+                <label class="form-label required" for="roleC">Device role</label>
+                <select class="form-select mb-3" id="roleC"><option selected>Select role...</option><option>Network</option><option>Server</option></select>
+                <label class="form-label" for="rackC">Rack <span class="text-secondary">(optional)</span></label>
+                <select class="form-select" id="rackC"><option>No rack</option><option>Row A / Rack 01</option></select>
+              </div>
+              <div id="vmFieldsC" hidden>
+                <label class="form-label required" for="clusterC">Cluster</label>
+                <select class="form-select mb-3" id="clusterC"><option selected>Select cluster...</option><option>Lab Cluster</option></select>
+                <label class="form-label" for="vmRoleC">Role <span class="text-secondary">(optional)</span></label>
+                <select class="form-select" id="vmRoleC"><option>No role</option><option>Server</option></select>
+              </div>
+            </div>
+          </div>
+          <div class="card-footer d-flex justify-content-between align-items-center">
+            <button class="btn btn-outline-secondary" type="button"><i class="mdi mdi-information-outline"></i> Validation details</button>
+            <button class="btn btn-success" type="button" disabled id="inspectorAction"><i class="mdi mdi-download"></i> Import</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="mk-note text-secondary small mb-5">
+        <strong class="d-block text-body">Trade-off</strong>
+        The inspector gives conflicts, OOB reconciliation, and virtual-chassis members a deep and
+        stable home. It costs screen width and creates two meanings for row focus: inspected versus
+        selected for import. It also abandons the familiar NetBox table interface.
+      </div>
+    </article>
+
+    <div class="mk-prototype-switcher" id="prototypeSwitcher" aria-label="Import proposal switcher">
+      <button class="btn btn-sm btn-outline-secondary" type="button" id="previousVariant" aria-label="Previous proposal"><i class="mdi mdi-arrow-left"></i></button>
+      <span class="mk-prototype-label" id="prototypeLabel">A · Focused table</span>
+      <button class="btn btn-sm btn-outline-secondary" type="button" id="nextVariant" aria-label="Next proposal"><i class="mdi mdi-arrow-right"></i></button>
+    </div>
+  </section>
 
 </div>
 </div>
 </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
-        integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
-        crossorigin="anonymous"></script>
 <script>
+// The mock uses Bootstrap markup and NetBox CSS, but stays runnable without a network dependency.
+document.querySelectorAll('[data-bs-toggle="dropdown"]').forEach(button => {
+  button.addEventListener('click', event => {
+    event.stopPropagation();
+    const menu = button.parentElement.querySelector('.dropdown-menu');
+    document.querySelectorAll('.dropdown-menu.show').forEach(openMenu => {
+      if (openMenu !== menu) openMenu.classList.remove('show');
+    });
+    menu?.classList.toggle('show');
+  });
+});
+document.querySelectorAll('.dropdown-menu').forEach(menu => menu.addEventListener('click', event => event.stopPropagation()));
+document.addEventListener('click', () => document.querySelectorAll('.dropdown-menu.show').forEach(menu => menu.classList.remove('show')));
+
+document.querySelectorAll('[data-bs-toggle="collapse"]').forEach(button => {
+  button.addEventListener('click', () => {
+    const target = document.querySelector(button.dataset.bsTarget);
+    target?.classList.toggle('show');
+    button.setAttribute('aria-expanded', target?.classList.contains('show') ? 'true' : 'false');
+  });
+});
+
+document.querySelectorAll('[data-bs-toggle="modal"]').forEach(button => {
+  button.addEventListener('click', () => {
+    const modal = document.querySelector(button.dataset.bsTarget);
+    if (!modal) return;
+    modal.classList.add('show');
+    modal.style.display = 'block';
+    modal.setAttribute('aria-modal', 'true');
+  });
+});
+document.querySelectorAll('[data-bs-dismiss="modal"]').forEach(button => {
+  button.addEventListener('click', () => {
+    const modal = button.closest('.modal');
+    if (!modal) return;
+    modal.classList.remove('show');
+    modal.style.display = '';
+    modal.removeAttribute('aria-modal');
+  });
+});
+
 // NetBox sets data-bs-theme on <html> from setmode.js; this mirrors it.
 document.getElementById('themeBtn').addEventListener('click', () => {
   const el = document.documentElement;
   el.dataset.bsTheme = el.dataset.bsTheme === 'dark' ? 'light' : 'dark';
+  const isDark = el.dataset.bsTheme === 'dark';
+  document.getElementById('themeBtn').setAttribute('aria-pressed', isDark ? 'true' : 'false');
+  document.getElementById('themeIcon').className = isDark ? 'mdi mdi-white-balance-sunny' : 'mdi mdi-weather-night';
+  document.getElementById('themeLabel').textContent = isDark ? 'Light mode' : 'Dark mode';
 });
 
 const TABS = {
@@ -573,6 +1054,231 @@ function wireBadge(optClass, badgeId, lagId, resetId) {
 wireBadge('optA', 'badgeA', 'lagA', 'resetA');
 wireBadge('optB', 'badgeB', 'lagB', 'resetB');
 wireBadge('optC', 'badgeC', 'lagC', null);
+
+const IMPORT_VARIANTS = {
+  A: 'Focused table',
+  B: 'Expandable rows',
+  C: 'Work queue + inspector',
+};
+
+function currentImportVariant() {
+  const requested = new URLSearchParams(window.location.search).get('variant') || 'A';
+  return Object.hasOwn(IMPORT_VARIANTS, requested) ? requested : 'A';
+}
+
+function showMockPage() {
+  const params = new URLSearchParams(window.location.search);
+  const isImport = params.get('view') === 'import';
+  document.getElementById('syncMocks').hidden = isImport;
+  document.getElementById('syncLegend').hidden = isImport;
+  document.getElementById('importMocks').hidden = !isImport;
+  document.getElementById('syncPageLink').classList.toggle('active', !isImport);
+  document.getElementById('importPageLink').classList.toggle('active', isImport);
+  document.getElementById('mockPageTitle').textContent = isImport
+    ? 'LibreNMS import results proposals'
+    : 'Sync tab UI proposals';
+  document.getElementById('mockPageDescription').innerHTML = isImport
+    ? 'Three static import-result layouts, aligned with Sync Proposal A and rendered with NetBox 4.7.0 styles. Use the floating switcher or the left and right arrow keys.'
+    : 'Static mock-ups for the consistency and clutter points raised on the sync tabs. Nothing is wired to a backend and no plugin code has been changed. Rendered with NetBox 4.7.0 styles and the plugin\'s own <code>librenms_sync.css</code>.';
+  if (isImport) showImportVariant(currentImportVariant(), false);
+}
+
+function showImportVariant(key, updateUrl = true) {
+  document.querySelectorAll('[data-import-variant]').forEach(article => {
+    article.hidden = article.dataset.importVariant !== key;
+  });
+  document.getElementById('prototypeLabel').textContent = `${key} · ${IMPORT_VARIANTS[key]}`;
+  if (updateUrl) {
+    const url = new URL(window.location.href);
+    url.searchParams.set('view', 'import');
+    url.searchParams.set('variant', key);
+    window.history.replaceState({}, '', url);
+  }
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function cycleImportVariant(offset) {
+  const keys = Object.keys(IMPORT_VARIANTS);
+  const currentIndex = keys.indexOf(currentImportVariant());
+  showImportVariant(keys[(currentIndex + offset + keys.length) % keys.length]);
+}
+
+document.getElementById('previousVariant').addEventListener('click', () => cycleImportVariant(-1));
+document.getElementById('nextVariant').addEventListener('click', () => cycleImportVariant(1));
+document.addEventListener('keydown', event => {
+  if (document.getElementById('importMocks').hidden || !['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+  const target = event.target;
+  if (target.matches('input, select, textarea, [contenteditable]')) return;
+  event.preventDefault();
+  cycleImportVariant(event.key === 'ArrowLeft' ? -1 : 1);
+});
+
+function updateOptionalColumns() {
+  const toggles = Array.from(document.querySelectorAll('.mk-col-toggle'));
+  toggles.forEach(toggle => {
+    document.querySelectorAll(`#focusedImportTable [data-column="${toggle.dataset.column}"]`).forEach(cell => {
+      cell.hidden = !toggle.checked;
+    });
+  });
+  document.getElementById('columnCountA').textContent = toggles.filter(toggle => toggle.checked).length;
+  const extraNameColumns = toggles.filter(toggle => toggle.checked && ['hostname', 'sysname'].includes(toggle.dataset.column)).length;
+  document.getElementById('focusedImportTable').style.minWidth = extraNameColumns
+    ? `calc(100% + ${extraNameColumns * 13}rem)`
+    : '';
+}
+document.querySelectorAll('.mk-col-toggle').forEach(toggle => toggle.addEventListener('change', updateOptionalColumns));
+updateOptionalColumns();
+
+function updateImportNamesA() {
+  const useSysname = document.getElementById('useSysnameImport').checked;
+  const stripDomain = document.getElementById('stripDomainImport').checked;
+  const sourceKey = useSysname ? 'sysname' : 'hostname';
+  const sourceLabel = useSysname ? 'sysName' : 'hostname';
+  document.querySelectorAll('[data-import-name]').forEach(name => {
+    const source = name.dataset[sourceKey];
+    const isIpv4 = /^\d{1,3}(?:\.\d{1,3}){3}$/.test(source);
+    name.textContent = stripDomain && !isIpv4 ? source.split('.')[0] : source;
+    const summary = name.closest('td').querySelector('[data-import-name-source]');
+    if (summary) summary.textContent = `From ${sourceLabel}, domain ${stripDomain ? 'removed' : 'kept'}`;
+  });
+  const changedCount = Number(!useSysname) + Number(stripDomain);
+  const badge = document.getElementById('importOptionsBadgeA');
+  badge.textContent = changedCount;
+  badge.classList.toggle('bg-primary-lt', changedCount > 0);
+  badge.classList.toggle('bg-secondary-lt', changedCount === 0);
+  document.getElementById('importNameSummaryA').textContent = `Name: ${sourceLabel}, domain ${stripDomain ? 'removed' : 'kept'}`;
+}
+document.getElementById('useSysnameImport').addEventListener('change', updateImportNamesA);
+document.getElementById('stripDomainImport').addEventListener('change', updateImportNamesA);
+updateImportNamesA();
+
+const selectableRowsA = () => Array.from(document.querySelectorAll('#focusedImportTable tbody > tr > td:first-child > input[type="checkbox"]'));
+function updateSelectionA() {
+  const count = selectableRowsA().filter(checkbox => checkbox.checked && !checkbox.disabled).length;
+  document.getElementById('selectionCountA').textContent = `${count} selected`;
+  const importButton = document.getElementById('importSelectedA');
+  importButton.disabled = count === 0;
+  importButton.innerHTML = `<i class="mdi mdi-download"></i> Import selected${count ? ` (${count})` : ''}`;
+}
+selectableRowsA().forEach(checkbox => checkbox.addEventListener('change', updateSelectionA));
+document.getElementById('selectReadyA').addEventListener('click', () => {
+  selectableRowsA().forEach(checkbox => { if (!checkbox.disabled) checkbox.checked = true; });
+  updateSelectionA();
+});
+document.getElementById('clearSelectionA').addEventListener('click', () => {
+  selectableRowsA().forEach(checkbox => { checkbox.checked = false; });
+  updateSelectionA();
+});
+
+let rowA1IsVm = false;
+function updateRowOptionsA1() {
+  document.getElementById('rowOptionsBadgeA1').hidden = !rowA1IsVm && document.getElementById('rackA1').selectedIndex === 0;
+}
+function updateRowReadinessA1() {
+  const ready = rowA1IsVm
+    ? document.getElementById('clusterA1').selectedIndex > 0
+    : document.getElementById('roleA1').selectedIndex > 0;
+  const checkbox = document.getElementById('selectA1');
+  checkbox.disabled = !ready;
+  if (!ready) checkbox.checked = false;
+  document.getElementById('importA1').disabled = !ready;
+  const label = document.getElementById('roleLabelA1');
+  label.textContent = rowA1IsVm
+    ? (ready ? 'Cluster' : 'Cluster required')
+    : (ready ? 'Device role' : 'Role required');
+  label.classList.toggle('text-danger', !ready);
+  label.classList.toggle('text-secondary', ready);
+  const details = document.getElementById('detailsA1');
+  details.classList.toggle('btn-outline-danger', !ready);
+  details.classList.toggle('btn-outline-primary', ready);
+  updateSelectionA();
+}
+function setRowKindA1(isVm) {
+  rowA1IsVm = isVm;
+  document.getElementById('roleA1').hidden = isVm;
+  document.getElementById('clusterA1').hidden = !isVm;
+  document.getElementById('placementA1').hidden = isVm;
+  const badge = document.getElementById('kindBadgeA1');
+  badge.textContent = isVm ? 'Virtual machine' : 'Device';
+  badge.className = `badge ${isVm ? 'bg-purple-lt' : 'bg-blue-lt'}`;
+  const label = document.getElementById('roleLabelA1');
+  label.textContent = isVm ? 'Cluster required' : 'Role required';
+  const button = document.getElementById('convertVmA1');
+  button.innerHTML = isVm
+    ? '<i class="mdi mdi-server"></i> Keep as device'
+    : '<i class="mdi mdi-monitor"></i> Configure as virtual machine';
+  updateRowOptionsA1();
+  updateRowReadinessA1();
+}
+document.getElementById('roleA1').addEventListener('change', updateRowReadinessA1);
+document.getElementById('clusterA1').addEventListener('change', updateRowReadinessA1);
+document.getElementById('rackA1').addEventListener('change', updateRowOptionsA1);
+document.getElementById('convertVmA1').addEventListener('click', () => setRowKindA1(!rowA1IsVm));
+document.getElementById('vmRoleA3').addEventListener('change', () => {
+  document.getElementById('vmOptionsBadgeA3').hidden = document.getElementById('vmRoleA3').selectedIndex === 0;
+});
+updateSelectionA();
+
+const INSPECTOR_ROWS = {
+  'core-lab-01': {
+    subtitle: 'New device · needs setup', kind: 'Device', kindClass: 'bg-blue-lt',
+    hostname: 'core-lab-01.example.test', sysname: 'core-lab-01.example.test', isVm: false,
+    role: 'Select role...', rack: 'No rack', cluster: 'Select cluster...', action: 'Import', canAct: false, isExisting: false,
+  },
+  'access-lab-02': {
+    subtitle: 'New stack · ready to import', kind: 'Device · stack', kindClass: 'bg-cyan-lt',
+    hostname: '198.18.0.22', sysname: 'access-lab-02.example.test', isVm: false,
+    role: 'Network', rack: 'Row A / Rack 01', cluster: 'Select cluster...', action: 'Import', canAct: true, isExisting: false,
+  },
+  'compute-lab-03': {
+    subtitle: 'New virtual machine · ready to import', kind: 'Virtual machine', kindClass: 'bg-purple-lt',
+    hostname: 'compute-lab-03.example.test', sysname: 'compute-lab-03', isVm: true,
+    role: 'No role', rack: 'No rack', cluster: 'Lab Cluster', action: 'Import', canAct: true, isExisting: false,
+  },
+  'edge-lab-04': {
+    subtitle: 'Existing device · serial conflict', kind: 'Existing', kindClass: 'bg-yellow-lt',
+    hostname: 'edge-lab-04.example.test', sysname: 'edge-lab-04.example.test', isVm: false,
+    role: 'Network', rack: 'No rack', cluster: 'Select cluster...', action: 'Review conflict', canAct: true, isExisting: true,
+  },
+};
+
+function setInspectorKind(isVm) {
+  document.getElementById('kindDeviceC').checked = !isVm;
+  document.getElementById('kindVmC').checked = isVm;
+  document.getElementById('deviceFieldsC').hidden = isVm;
+  document.getElementById('vmFieldsC').hidden = !isVm;
+}
+
+document.querySelectorAll('[data-inspector-row]').forEach(item => {
+  item.addEventListener('click', () => {
+    const key = item.dataset.inspectorRow;
+    const row = INSPECTOR_ROWS[key];
+    document.querySelectorAll('[data-inspector-row]').forEach(candidate => candidate.classList.toggle('active', candidate === item));
+    document.getElementById('inspectorName').textContent = key;
+    document.getElementById('inspectorSubtitle').textContent = row.subtitle;
+    document.getElementById('inspectorHostname').textContent = row.hostname;
+    document.getElementById('inspectorSysname').textContent = row.sysname;
+    const kind = document.getElementById('inspectorKind');
+    kind.textContent = row.kind;
+    kind.className = `badge ${row.kindClass}`;
+    document.getElementById('inspectorSetupFields').hidden = row.isExisting;
+    setInspectorKind(row.isVm);
+    document.getElementById('roleC').value = row.role;
+    document.getElementById('rackC').value = row.rack;
+    document.getElementById('clusterC').value = row.cluster;
+    document.getElementById('vmRoleC').value = row.role;
+    const action = document.getElementById('inspectorAction');
+    action.disabled = !row.canAct;
+    action.className = `btn ${row.action === 'Review conflict' ? 'btn-outline-warning' : 'btn-success'}`;
+    action.innerHTML = row.action === 'Review conflict'
+      ? '<i class="mdi mdi-alert"></i> Review conflict'
+      : '<i class="mdi mdi-download"></i> Import';
+  });
+});
+document.getElementById('kindDeviceC').addEventListener('change', () => setInspectorKind(false));
+document.getElementById('kindVmC').addEventListener('change', () => setInspectorKind(true));
+
+showMockPage();
 </script>
 </body>
 </html>
