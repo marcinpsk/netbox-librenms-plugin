@@ -41,7 +41,11 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
     make_virtual_chassis_members,
 )
-from netbox_librenms_plugin.utils import mark_librenms_migrated, set_librenms_device_id
+from netbox_librenms_plugin.utils import (
+    mark_librenms_migrated,
+    module_inventory_binding_token,
+    set_librenms_device_id,
+)
 from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
 
@@ -1224,6 +1228,7 @@ def test_unchanged_module_serial_preserves_other_snapshots(client, settings, dja
                 "server_key": "primary",
                 "module_id": str(module.pk),
                 "ent_index": "8102",
+                "inventory_binding": module_inventory_binding_token(device.pk, "primary", module.pk, 8102),
             },
         )
 
@@ -1259,7 +1264,14 @@ def test_module_mutation_without_posted_server_uses_active_namespace(
     url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": device.pk})
 
     with django_capture_on_commit_callbacks(execute=True):
-        response = client.post(url, {"module_id": str(module.pk), "ent_index": "8103"})
+        response = client.post(
+            url,
+            {
+                "module_id": str(module.pk),
+                "ent_index": "8103",
+                "inventory_binding": module_inventory_binding_token(device.pk, "primary", module.pk, 8103),
+            },
+        )
 
     assert response.status_code == 302
     module.refresh_from_db()

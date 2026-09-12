@@ -9,6 +9,7 @@ from utilities.paginator import EnhancedPaginator
 
 from netbox_librenms_plugin.utils import (
     get_table_paginate_count,
+    module_inventory_binding_token,
     netbox_relocates_module_subtree,
     oob_badge_html,
     render_vc_member_options,
@@ -627,6 +628,12 @@ class LibreNMSModuleTable(tables.Table):
             and record.get("ent_physical_index")
         ):
             url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": self.device.pk})
+            inventory_binding = module_inventory_binding_token(
+                record.get("selected_device_id") or self.device.pk,
+                self.server_key,
+                record["installed_module_id"],
+                record.get("ent_physical_index"),
+            )
             buttons.append(
                 format_html(
                     # hx-post: the view answers with the module tab fragment, swapped into
@@ -640,6 +647,7 @@ class LibreNMSModuleTable(tables.Table):
                     '<input type="hidden" name="selected_device_id" value="{}">'
                     '<input type="hidden" name="module_id" value="{}">'
                     '<input type="hidden" name="ent_index" value="{}">'
+                    '<input type="hidden" name="inventory_binding" value="{}">'
                     '<button type="submit" class="btn btn-sm btn-warning ms-1"'
                     ' title="Update serial in NetBox to match LibreNMS">'
                     '<i class="mdi mdi-sync"></i> Update Serial'
@@ -651,6 +659,7 @@ class LibreNMSModuleTable(tables.Table):
                     record.get("selected_device_id") or self.device.pk,
                     record["installed_module_id"],
                     record.get("ent_physical_index") or "",
+                    inventory_binding,
                 )
             )
 
@@ -663,6 +672,12 @@ class LibreNMSModuleTable(tables.Table):
             and record.get("ent_physical_index")
         ):
             url = reverse("plugins:netbox_librenms_plugin:update_module_interface", kwargs={"pk": self.device.pk})
+            inventory_binding = module_inventory_binding_token(
+                record.get("selected_device_id") or self.device.pk,
+                self.server_key,
+                record["installed_module_id"],
+                record.get("ent_physical_index"),
+            )
             buttons.append(
                 format_html(
                     # hx-post: the view answers with the module tab fragment, swapped into
@@ -676,6 +691,7 @@ class LibreNMSModuleTable(tables.Table):
                     '<input type="hidden" name="selected_device_id" value="{}">'
                     '<input type="hidden" name="module_id" value="{}">'
                     '<input type="hidden" name="ent_index" value="{}">'
+                    '<input type="hidden" name="inventory_binding" value="{}">'
                     '<button type="submit" class="btn btn-sm btn-outline-warning ms-1"'
                     ' title="Associate matching NetBox interface with installed module">'
                     '<i class="mdi mdi-link-variant"></i> Update Interface'
@@ -687,6 +703,7 @@ class LibreNMSModuleTable(tables.Table):
                     record.get("selected_device_id") or self.device.pk,
                     record["installed_module_id"],
                     record.get("ent_physical_index", ""),
+                    inventory_binding,
                 )
             )
 

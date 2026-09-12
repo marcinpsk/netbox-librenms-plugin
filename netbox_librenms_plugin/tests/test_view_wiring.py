@@ -2249,6 +2249,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             message_texts,
             trusted_module_inventory_payload,
         )
+        from netbox_librenms_plugin.utils import module_inventory_binding_token
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
 
         page_device = make_device("scope-modserial-page")
@@ -2278,6 +2279,14 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         # rather than naming a server: the configured set differs between environments.
         server_key = view.resolve_posted_server_key_or_none(request.POST)
         assert server_key is not None, "this test needs a resolvable server namespace"
+        post_data = request.POST.copy()
+        post_data["inventory_binding"] = module_inventory_binding_token(
+            page_device.pk,
+            server_key,
+            module.pk,
+            4001,
+        )
+        request.POST = post_data
         cache_key = view.get_cache_key(page_device, "inventory", server_key=server_key)
         cache.set(
             cache_key,

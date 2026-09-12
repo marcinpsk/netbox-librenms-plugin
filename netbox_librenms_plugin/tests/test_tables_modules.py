@@ -585,6 +585,8 @@ class TestLibreNMSModuleTable:
 
     def test_render_actions_serial_mismatch_renders_update_serial_button(self):
         """can_update_serial=True renders an Update Serial form button."""
+        from netbox_librenms_plugin.utils import module_inventory_binding_matches
+
         device = MagicMock()
         device.pk = 6
         table = self._make_table(device=device)
@@ -601,6 +603,8 @@ class TestLibreNMSModuleTable:
         assert "update-module-serial" in result or "/url/" in result
         # The action reads the serial from the cached row, so the form posts the row index.
         assert '<input type="hidden" name="ent_index" value="8201">' in result
+        binding = next(tag["value"] for tag in open_tags(result, "input") if tag.get("name") == "inventory_binding")
+        assert module_inventory_binding_matches(binding, 6, "", 42, 8201)
         assert "NS225161205" not in result
         assert "mdi-sync" in result
         # Posts via HTMX so the update swaps just the module table in place (with the
@@ -642,6 +646,8 @@ class TestLibreNMSModuleTable:
 
     def test_render_actions_can_update_interface_renders_button(self):
         """Installed row with a safe interface candidate renders Update Interface."""
+        from netbox_librenms_plugin.utils import module_inventory_binding_matches
+
         device = MagicMock()
         device.pk = 81
         table = self._make_table(device=device, can_change_interface=True)
@@ -661,6 +667,8 @@ class TestLibreNMSModuleTable:
         assert "Update Interface" in result
         assert "mdi-link-variant" in result
         assert 'name="module_id" value="42"' in result
+        binding = next(tag["value"] for tag in open_tags(result, "input") if tag.get("name") == "inventory_binding")
+        assert module_inventory_binding_matches(binding, 81, "", 42, 77)
         # Posts via HTMX so the update swaps just the module table in place (with the
         # closest-row spinner) instead of full-page reloading the whole sync view.
         assert 'hx-post="/url/"' in result

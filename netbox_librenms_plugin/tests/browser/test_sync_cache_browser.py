@@ -52,7 +52,8 @@ def _selection_row_markup(row):
     if row.get("lag_name"):
         attrs.append(f'data-lag-name="{esc(row["lag_name"])}"')
     companion = (
-        f'<select name="device_selection_{esc(row["port_id"])}"><option value="7">m7</option></select>'
+        f'<select name="device_selection_{esc(row["port_id"])}">'
+        '<option value="7">m7</option><option value="9">m9</option></select>'
         if row.get("companion")
         else ""
     )
@@ -401,6 +402,18 @@ class TestCrossPageSelection:
             page.click("#do-sync")
 
         assert ("device_selection_4303", "7") in _selection_form_pairs(request_info.value.post_data)
+
+    def test_a_companion_input_is_restored_when_its_row_returns(self, page):
+        rows = [dict(JUNOS_ROWS[0], companion=True), JUNOS_ROWS[2]]
+        _load_selection_page(page, rows, url=f"{SELECTION_PAGE_URL}?page=1")
+        page.select_option('[name="device_selection_4303"]', "9")
+        page.check("#cb-4303")
+
+        _load_selection_page(page, [JUNOS_ROWS[1]], url=f"{SELECTION_PAGE_URL}?page=2")
+        _load_selection_page(page, rows, url=f"{SELECTION_PAGE_URL}?page=1")
+
+        assert "4303" in _checked_values(page)
+        assert page.locator('[name="device_selection_4303"]').input_value() == "9"
 
 
 def _selection_form_pairs(post_data):

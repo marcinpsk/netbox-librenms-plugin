@@ -8,6 +8,7 @@ from typing import Optional
 
 import netaddr
 from dcim.models import Device, Interface
+from django.core import signing
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import IntegrityError
 from django.db.models import Count, Max, Q
@@ -40,6 +41,36 @@ logger = logging.getLogger(__name__)
 # rejected only by CPython's int_max_str_digits limit, which a host may raise or disable.
 _ASCII_POSITIVE_INTEGER_RE = re.compile(r"^[ \t\r\n\f\v]*\+?[0-9]{1,19}[ \t\r\n\f\v]*$")
 _CABLE_ROW_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+_MODULE_INVENTORY_BINDING_SALT = "netbox_librenms_plugin.module_inventory_binding"
+
+
+def _module_inventory_binding_payload(device_id, server_key, module_id, ent_index):
+    """Return the canonical fields that bind one rendered module action to its inventory row."""
+    return {
+        "device_id": device_id,
+        "server_key": server_key,
+        "module_id": module_id,
+        "ent_index": ent_index,
+    }
+
+
+def module_inventory_binding_token(device_id, server_key, module_id, ent_index) -> str:
+    """Sign the device, server, module, and inventory index rendered by one module action."""
+    return signing.dumps(
+        _module_inventory_binding_payload(device_id, server_key, module_id, ent_index),
+        salt=_MODULE_INVENTORY_BINDING_SALT,
+    )
+
+
+def module_inventory_binding_matches(token, device_id, server_key, module_id, ent_index) -> bool:
+    """Return whether a signed module action still names the submitted inventory-row binding."""
+    if not isinstance(token, str) or not token:
+        return False
+    try:
+        payload = signing.loads(token, salt=_MODULE_INVENTORY_BINDING_SALT)
+    except signing.BadSignature:
+        return False
+    return payload == _module_inventory_binding_payload(device_id, server_key, module_id, ent_index)
 
 
 def cable_snapshot_token(cached_payload) -> str:

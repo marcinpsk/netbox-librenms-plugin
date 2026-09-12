@@ -30,6 +30,7 @@ from netbox_librenms_plugin.utils import (
     get_module_template_interface_names,
     get_module_types_indexed,
     get_vc_member_positions,
+    module_inventory_binding_matches,
     netbox_relocates_module_subtree,
     normalize_inventory_serial,
     normalize_serial,
@@ -814,7 +815,7 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
     return {"status": "bound", "interface": candidate.name, "port_id": port_id, "changed": bool(update_fields)}
 
 
-def _resolve_posted_inventory_row(request, page_device, target_device, server_key, get_cache_key):
+def _resolve_posted_inventory_row(request, page_device, target_device, server_key, get_cache_key, *, module_id=None):
     """Resolve the posted ``ent_index`` to one writable cached row, else to a refusal response."""
     ent_index = _coerce_positive_int(request.POST.get("ent_index"))
     if ent_index is None:
@@ -833,6 +834,15 @@ def _resolve_posted_inventory_row(request, page_device, target_device, server_ke
         return None, _modules_action_response(request, page_device, server_key)
     if librenms_item.get("_source") == OOB_INVENTORY_SOURCE:
         messages.error(request, OOB_INVENTORY_READ_ONLY_REASON)
+        return None, _modules_action_response(request, page_device, server_key)
+    if module_id is not None and not module_inventory_binding_matches(
+        request.POST.get("inventory_binding"),
+        target_device.pk,
+        server_key,
+        module_id,
+        ent_index,
+    ):
+        messages.error(request, "Inventory row does not match the selected module.")
         return None, _modules_action_response(request, page_device, server_key)
     return librenms_item, None
 
@@ -1863,7 +1873,12 @@ class UpdateModuleSerialView(
         # The serial comes from the selected cached row, never from the form: a replayed or
         # edited post would otherwise store a serial LibreNMS never reported.
         librenms_item, refusal = _resolve_posted_inventory_row(
-            request, page_device, target_device, server_key, self.get_cache_key
+            request,
+            page_device,
+            target_device,
+            server_key,
+            self.get_cache_key,
+            module_id=module_id,
         )
         if refusal:
             return refusal
@@ -1939,7 +1954,12 @@ class UpdateModuleInterfaceView(
         # A blank or forged key degrades to the active server rather than scoping the bind under a
         # bogus namespace; see resolve_posted_server_key.
         bind_item, refusal = _resolve_posted_inventory_row(
-            request, page_device, target_device, server_key, self.get_cache_key
+            request,
+            page_device,
+            target_device,
+            server_key,
+            self.get_cache_key,
+            module_id=module_id,
         )
         if refusal:
             return refusal

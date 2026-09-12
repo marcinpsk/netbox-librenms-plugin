@@ -56,12 +56,20 @@ ENT_INDEX = 4077
 
 
 def _post(device, module):
+    from netbox_librenms_plugin.utils import module_inventory_binding_token
+
     request = RequestFactory().post(
         f"/modules/{device.pk}/interface/",
         data={
             "module_id": str(module.pk),
             "server_key": SERVER_KEY,
             "ent_index": str(ENT_INDEX),
+            "inventory_binding": module_inventory_binding_token(
+                device.pk,
+                SERVER_KEY,
+                module.pk,
+                ENT_INDEX,
+            ),
         },
     )
     request.user = get_user_model().objects.create_superuser(username=f"mib-{device.pk}", email="", password="x")
