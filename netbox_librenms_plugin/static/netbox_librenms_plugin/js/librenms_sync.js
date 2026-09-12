@@ -1497,7 +1497,18 @@ function _rowCompanionInputs(row) {
  * @returns {boolean}
  */
 function _isSelectionCompanionName(name) {
-    return Boolean(name) && (name.startsWith('device_selection_') || name.startsWith('vlan_group_'));
+    const cableSnapshotPrefixes = [
+        'expected_local_id_',
+        'expected_local_device_id_',
+        'expected_remote_id_',
+        'expected_remote_device_id_',
+    ];
+    return (
+        Boolean(name) &&
+        (name.startsWith('device_selection_') ||
+            name.startsWith('vlan_group_') ||
+            cableSnapshotPrefixes.some((prefix) => name.startsWith(prefix)))
+    );
 }
 
 /**
@@ -2715,6 +2726,10 @@ function handleCableChange(select, value) {
                         }
                         expectedInput.value = expectedValue || '';
                     });
+                    const table = row.closest('table');
+                    if (table && SELECTABLE_TABLE_IDS.includes(table.id)) {
+                        persistTableSelection(table);
+                    }
                     updateBulkActionButton();
                 }
                 select._lastVerifiedMember = value;
