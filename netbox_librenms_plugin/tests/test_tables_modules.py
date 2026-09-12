@@ -594,7 +594,7 @@ class TestLibreNMSModuleTable:
             "can_update_serial": True,
             "installed_module_id": 42,
             "serial": "NS225161205",
-            "ent_physical_index": 8201,
+            "ent_physical_index": "8201",
         }
         with patch("netbox_librenms_plugin.tables.modules.reverse", return_value="/url/"):
             result = str(table.render_actions(None, record))

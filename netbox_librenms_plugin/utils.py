@@ -47,10 +47,10 @@ _MODULE_INVENTORY_BINDING_SALT = "netbox_librenms_plugin.module_inventory_bindin
 def _module_inventory_binding_payload(device_id, server_key, module_id, ent_index):
     """Return the canonical fields that bind one rendered module action to its inventory row."""
     return {
-        "device_id": device_id,
+        "device_id": coerce_positive_int(device_id),
         "server_key": server_key,
-        "module_id": module_id,
-        "ent_index": ent_index,
+        "module_id": coerce_positive_int(module_id),
+        "ent_index": coerce_positive_int(ent_index),
     }
 
 
