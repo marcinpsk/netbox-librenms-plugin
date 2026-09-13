@@ -135,7 +135,8 @@ def test_a_failed_preview_is_reported_inside_the_modal(page):
 
 
 def test_a_preview_that_never_reaches_the_server_is_reported_too(page):
-    """A transport-level failure fires htmx:sendError, not htmx:responseError.
+    """
+    A transport-level failure fires htmx:sendError, not htmx:responseError.
 
     Without a listener for it the click produces no request, no modal and no message, which reads
     to the user as a dead button.

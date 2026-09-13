@@ -389,7 +389,8 @@ def _lock_mapping_in_scope(view, model, lookup, duplicate_message):
 
 
 def _visible_conflict_label(view, id_conflict):
-    """Return ``(object_label, name)`` when the viewer may see *id_conflict*, else ``None``.
+    """
+    Return ``(object_label, name)`` when the viewer may see *id_conflict*, else ``None``.
 
     The scope check is a disclosure control, so it lives in one place: a second copy could drift
     and let a caller name an object outside the viewer's scope.
@@ -957,7 +958,7 @@ def _apply_user_selections_to_validation(
 class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
     """HTMX view to confirm bulk imports before execution."""
 
-    def post(self, request):
+    def post(self, request):  # noqa: C901
         """Render a confirmation modal for selected devices before bulk import."""
         # Check write permission before showing import confirmation
         if error := self.require_write_permission():
@@ -1163,7 +1164,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             return False
         return request.POST.get("use_background_job") == "on"
 
-    def post(self, request):  # noqa: PLR0912 - branching keeps responses explicit
+    def post(self, request):  # noqa: C901, PLR0912
         """Import selected devices from LibreNMS into NetBox."""
         # Check write permission before any import operation
         if error := self.require_write_permission():
@@ -1943,7 +1944,7 @@ class DeviceConflictActionView(
 ):
     """HTMX view to resolve device conflicts (link, update, update serial)."""
 
-    def post(self, request, device_id):
+    def post(self, request, device_id):  # noqa: C901
         """Resolve a device conflict by linking, updating, or syncing serial."""
         if error := self.require_write_permission():
             return error
@@ -2319,7 +2320,7 @@ class AddDeviceTypeMappingView(
 ):
     """HTMX view to create a DeviceTypeMapping from the import validation modal."""
 
-    def post(self, request, device_id):
+    def post(self, request, device_id):  # noqa: C901
         """Create a DeviceTypeMapping linking the LibreNMS hardware string to a NetBox DeviceType."""
         from netbox_librenms_plugin.models import DeviceTypeMapping
 
@@ -2569,7 +2570,7 @@ class CreatePlatformFromImportView(
             },
         )
 
-    def post(self, request, device_id):
+    def post(self, request, device_id):  # noqa: C901
         """Create platform + optional mapping + optional device assignment, then return OOB swaps."""
         from dcim.models import Manufacturer, Platform
 
@@ -2866,7 +2867,7 @@ class AddAsOOBView(
 ):
     """HTMX view to link a LibreNMS OOB controller device to an existing NetBox Device."""
 
-    def post(self, request, device_id):
+    def post(self, request, device_id):  # noqa: C901
         """Attach a LibreNMS OOB identity to the matched NetBox device."""
         if error := self.require_write_permission():
             return error
@@ -3479,8 +3480,7 @@ class PromoteToHostView(
     LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View
 ):
     """
-    Promote an incoming LibreNMS host device to be the *primary* link of an existing
-    NetBox device whose current LibreNMS link is the OOB controller.
+    Promote a LibreNMS host to the primary link of an existing NetBox device.
 
     The existing NetBox device's current ``librenms_id.{server_key}.id`` is moved into
     the ``oob`` slot (preserving its bare-int → dict-form transition), and the incoming
@@ -3488,7 +3488,7 @@ class PromoteToHostView(
     is a reassignment, not an import.
     """
 
-    def post(self, request, device_id):
+    def post(self, request, device_id):  # noqa: C901
         if error := self.require_write_permission():
             return error
 
@@ -3700,7 +3700,7 @@ class MergeNetBoxDevicesView(
     Stage-2b "Migrated to X" tab.
     """
 
-    def post(self, request, device_id):
+    def post(self, request, device_id):  # noqa: C901
         if error := self.require_write_permission():
             return error
 
@@ -4015,7 +4015,7 @@ class AddPlatformMappingView(
 ):
     """HTMX view to create a PlatformMapping from the import validation modal."""
 
-    def post(self, request, device_id):
+    def post(self, request, device_id):  # noqa: C901
         """Create a PlatformMapping linking the LibreNMS OS string to a NetBox Platform."""
         if error := self.require_write_permission():
             return error

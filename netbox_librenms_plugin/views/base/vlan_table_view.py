@@ -27,7 +27,8 @@ class BaseVLANTableView(
     VlanAssignmentMixin, LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View
 ):
     """
-    Base view for VLAN synchronization table.
+    Build the VLAN synchronization table.
+
     Fetches LibreNMS VLAN data and compares with NetBox.
     """
 

@@ -32,6 +32,8 @@ def create_vm_from_librenms(
         validation: Validation result from validate_device_for_import with import_as_vm=True
         use_sysname: If True, prefer sysName; if False, use hostname
         server_key: LibreNMS server key used to store the librenms_id custom field
+        strip_domain: If True, remove the domain suffix from the VM name.
+        role: Optional NetBox device role. The validated role is used when this is None.
 
     Returns:
         Created VirtualMachine instance

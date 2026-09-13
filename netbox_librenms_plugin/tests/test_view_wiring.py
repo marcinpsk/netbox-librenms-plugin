@@ -716,7 +716,7 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
     RAW_TERMINALS = frozenset({"get", "filter", "get_or_create"})
 
     @classmethod
-    def _scan_tree(cls, tree, label):
+    def _scan_tree(cls, tree, label):  # noqa: C901
         """Return {(label, class, line)} for gated classes in *tree* that resolve by raw pk."""
         import ast
 

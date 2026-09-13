@@ -47,9 +47,7 @@ INTERFACE_NAME_SELECTOR_TABS = ("interfaces", "cables", "ipaddresses")
 class BaseLibreNMSSyncView(
     LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectPermissionMixin, generic.ObjectListView
 ):
-    """
-    Base view for LibreNMS sync information.
-    """
+    """Base view for LibreNMS sync information."""
 
     queryset = None  # Will be set in subclasses
     model = None  # Will be set in subclasses

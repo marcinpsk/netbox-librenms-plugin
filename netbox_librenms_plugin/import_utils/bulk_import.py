@@ -345,7 +345,8 @@ def classify_bulk_precheck(collisions, unresolved, device_ids, vm_imports) -> Bu
 
 
 def stack_dedup_key(vc_data, device_id):
-    """Return the dedup key shared by every LibreNMS device in one physical stack.
+    """
+    Return the dedup key shared by every LibreNMS device in one physical stack.
 
     Member serials identify a stack best. Without them a fingerprint over member
     name/model/position still groups the members. With no member identity at all
@@ -367,7 +368,7 @@ def stack_dedup_key(vc_data, device_id):
     return f"librenms-stack-{fingerprint}"
 
 
-def bulk_import_devices_shared(
+def bulk_import_devices_shared(  # noqa: C901
     device_ids: List[int],
     server_key: str = None,
     sync_options: dict = None,
@@ -821,7 +822,7 @@ def _reassert_new_import_blockers(validation: dict) -> None:
                 validation["issues"].append(msg)
 
 
-def _refresh_existing_device(validation: dict, libre_device: dict = None, server_key: str = "default") -> None:
+def _refresh_existing_device(validation: dict, libre_device: dict = None, server_key: str = "default") -> None:  # noqa: C901
     """
     Refresh existing_device from DB to pick up changes made in NetBox since caching.
 
@@ -1267,7 +1268,7 @@ def _empty_return(return_cache_status: bool):
     return ([], False) if return_cache_status else []
 
 
-def process_device_filters(
+def process_device_filters(  # noqa: C901
     api: LibreNMSAPI,
     filters: dict,
     vc_detection_enabled: bool,

@@ -241,7 +241,8 @@ class LibreNMSModuleTable(tables.Table):
 
     @staticmethod
     def _unmatched_bay_html(record):
-        """Report where this row's serial already sits in NetBox, when bay matching found nothing.
+        """
+        Report where this row's serial already sits in NetBox, when bay matching found nothing.
 
         A failed bay match does not mean the part is absent. The serial may already name an
         installed module, and saying only "No matching bay" hides that from the operator who
@@ -539,7 +540,7 @@ class LibreNMSModuleTable(tables.Table):
             label,
         )
 
-    def render_actions(self, value, record):
+    def render_actions(self, value, record):  # noqa: C901
         """Render install button for matched modules and install branch for parents."""
         if not self.device:
             return ""

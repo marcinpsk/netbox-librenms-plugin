@@ -15,9 +15,7 @@ from netbox_librenms_plugin.utils import coerce_librenms_id, get_librenms_sync_d
 
 
 class DeviceStatusTable(DeviceTable):
-    """
-    Table for displaying device LibreNMS status.
-    """
+    """Table for displaying device LibreNMS status."""
 
     librenms_status = Column(
         verbose_name="LibreNMS Status",
@@ -86,7 +84,8 @@ class DeviceStatusTable(DeviceTable):
 
 class DeviceImportTable(tables.Table):
     """
-    Table for displaying LibreNMS devices available for import.
+    Display LibreNMS devices available for import.
+
     Shows validation status and provides import actions.
     Uses plain django_tables2.Table since we're working with dictionaries, not model instances.
     """

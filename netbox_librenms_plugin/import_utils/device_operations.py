@@ -560,7 +560,7 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
     }
 
 
-def validate_device_for_import(
+def validate_device_for_import(  # noqa: C901
     libre_device: dict,
     import_as_vm: bool = False,
     api: "LibreNMSAPI" = None,
@@ -588,12 +588,14 @@ def validate_device_for_import(
         libre_device: Device data from LibreNMS
         import_as_vm: If True, validate for VM import instead of device import
         api: Optional LibreNMSAPI instance for virtual chassis detection
+        server_key: LibreNMS server key for stored identifiers and API data.
         include_vc_detection: Skip VC detection when False to speed up bulk operations
         collision_only: Return after existing-object and collision-candidate matching. This skips
             site, device type, role, platform, rack, and virtual-chassis import prerequisites.
         force_vc_refresh: When True, bypass cached VC data and re-query LibreNMS
         use_sysname: If True, prefer sysName over hostname (matches import behaviour)
         strip_domain: If True, strip domain suffix from device name
+        preloaded_device_type_rules: Optional device-type normalization rules keyed for lookup.
 
     Returns:
         dict: Validation result with structure (the key set is pinned by
@@ -1660,7 +1662,7 @@ def validate_device_for_import(
         return result
 
 
-def import_single_device(
+def import_single_device(  # noqa: C901
     device_id: int,
     server_key: str = None,
     validation: dict = None,

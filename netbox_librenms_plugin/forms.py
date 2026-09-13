@@ -145,7 +145,8 @@ def _get_librenms_poller_group_choices(server_key=None):
 
 class ServerConfigForm(NetBoxModelForm):
     """
-    Form for selecting the active LibreNMS server from configured servers.
+    Select the active LibreNMS server from the configured servers.
+
     Handles server configuration changes only.
     """
 
@@ -165,8 +166,9 @@ class ServerConfigForm(NetBoxModelForm):
 
 class ImportSettingsForm(NetBoxModelForm):
     """
-    Form for configuring device import settings including naming patterns
-    and virtual chassis member naming.
+    Configure device import settings.
+
+    Set naming patterns and virtual chassis member names.
     """
 
     vc_member_name_pattern = forms.CharField(
@@ -360,7 +362,9 @@ class ImportSettingsForm(NetBoxModelForm):
 # Keep for backward compatibility if needed elsewhere
 class LibreNMSSettingsForm(ServerConfigForm):
     """
-    Deprecated: Use ServerConfigForm or ImportSettingsForm instead.
+    Provide the deprecated combined settings form.
+
+    Use ServerConfigForm or ImportSettingsForm instead.
     Kept for backward compatibility.
     """
 
@@ -369,8 +373,9 @@ class LibreNMSSettingsForm(ServerConfigForm):
 
 class InterfaceTypeMappingForm(NetBoxModelForm):
     """
-    Form for creating and editing interface type mappings between LibreNMS and NetBox.
-    Allows mapping of LibreNMS interface types and speeds to NetBox interface types.
+    Create and edit interface type mappings between LibreNMS and NetBox.
+
+    Map LibreNMS interface types and speeds to NetBox interface types.
     """
 
     class Meta:
@@ -380,8 +385,9 @@ class InterfaceTypeMappingForm(NetBoxModelForm):
 
 class InterfaceTypeMappingImportForm(NetBoxModelImportForm):
     """
-    Form for bulk importing interface type mappings from CSV/JSON/YAML.
-    Supports importing LibreNMS interface type and speed mappings to NetBox interface types.
+    Import interface type mappings from CSV, JSON, or YAML.
+
+    Import LibreNMS interface type and speed mappings to NetBox interface types.
     """
 
     netbox_type = CSVChoiceField(
@@ -397,8 +403,9 @@ class InterfaceTypeMappingImportForm(NetBoxModelImportForm):
 
 class InterfaceTypeMappingFilterForm(NetBoxModelFilterSetForm):
     """
-    Form for filtering interface type mappings based on LibreNMS and NetBox attributes.
-    Provides filtering options for LibreNMS type, speed, and NetBox type.
+    Filter interface type mappings by LibreNMS and NetBox attributes.
+
+    Filter by LibreNMS type, speed, and NetBox type.
     """
 
     librenms_type = forms.CharField(required=False, label="LibreNMS Type")
@@ -868,7 +875,8 @@ class PortStackLagPatternFilterForm(NetBoxModelFilterSetForm):
 
 
 class LocationMappingForm(NetBoxModelForm):
-    """Form for creating and editing LibreNMS location-value to NetBox-object mappings.
+    """
+    Form for creating and editing LibreNMS location-value to NetBox-object mappings.
 
     The target object is stored as a generic foreign key. The form exposes one
     optional selector per supported NetBox type; the selector matching the chosen
@@ -933,7 +941,8 @@ LOCATION_MAPPING_IMPORT_MODELS = {
 
 
 class CaseInsensitiveCSVModelChoiceField(CSVModelChoiceField):
-    """Resolve a CSV value against ``to_field_name`` without case sensitivity.
+    """
+    Resolve a CSV value against ``to_field_name`` without case sensitivity.
 
     Resolution stays on ``self.queryset`` so NetBox's ``restrict_form_fields()``
     still scopes the lookup to objects the importing user may view.
@@ -958,7 +967,8 @@ class CaseInsensitiveCSVModelChoiceField(CSVModelChoiceField):
 
 
 class LocationMappingImportForm(NetBoxModelImportForm):
-    """Form for bulk importing location mappings.
+    """
+    Form for bulk importing location mappings.
 
     ``netbox_object`` is the name of the target object. For ``location`` and
     ``rack`` field types, supply ``parent_site`` to disambiguate names that are
@@ -1038,9 +1048,7 @@ class LocationMappingFilterForm(NetBoxModelFilterSetForm):
 
 
 class BaseSNMPForm(forms.Form):
-    """
-    Base form with fields shared by both SNMPv1/v2c and SNMPv3 LibreNMS device forms.
-    """
+    """Base form with fields shared by both SNMPv1/v2c and SNMPv3 LibreNMS device forms."""
 
     hostname = forms.CharField(
         label="Hostname/IP",
@@ -1095,7 +1103,8 @@ class BaseSNMPForm(forms.Form):
 
 class AddToLibreSNMPV1V2(BaseSNMPForm):
     """
-    Form for adding devices to LibreNMS using SNMPv1 or SNMPv2c authentication.
+    Add devices to LibreNMS with SNMPv1 or SNMPv2c authentication.
+
     Collects hostname/IP and SNMP community string information.
     The SNMP version (v1 or v2c) is selected via a toggle button in the template.
     """
@@ -1114,7 +1123,8 @@ AddToLIbreSNMPV1V2 = AddToLibreSNMPV1V2
 
 class AddToLibreSNMPV3(BaseSNMPForm):
     """
-    Form for adding devices to LibreNMS using SNMPv3 authentication.
+    Add devices to LibreNMS with SNMPv3 authentication.
+
     Provides comprehensive SNMPv3 configuration options including authentication and encryption settings.
     """
 
@@ -1183,9 +1193,7 @@ AddToLIbreSNMPV3 = AddToLibreSNMPV3
 
 
 class DeviceStatusFilterForm(NetBoxModelFilterSetForm):
-    """
-    Filter form for Device Status view - shows NetBox devices and their LibreNMS status.
-    """
+    """Filter form for Device Status view - shows NetBox devices and their LibreNMS status."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -1207,7 +1215,8 @@ _USE_INSTALLATION_DEFAULT_SERVER = object()
 
 class LibreNMSImportFilterForm(forms.Form):
     """
-    Filter form for LibreNMS Import view - shows LibreNMS devices for import.
+    Filter the LibreNMS devices available for import.
+
     Uses a simple Django form instead of NetBox model forms.
     """
 
@@ -1421,9 +1430,7 @@ class LibreNMSImportFilterForm(forms.Form):
 
 
 class VirtualMachineStatusFilterForm(NetBoxModelFilterSetForm):
-    """
-    Form for filtering virtual machine status information in NetBox.
-    """
+    """Form for filtering virtual machine status information in NetBox."""
 
     def __init__(self, *args, **kwargs):
         """Initialize the form and remove the filter_id field if it exists."""
@@ -1441,7 +1448,8 @@ class VirtualMachineStatusFilterForm(NetBoxModelFilterSetForm):
 
 class DeviceImportConfigForm(forms.Form):
     """
-    Form for configuring import of LibreNMS devices with missing prerequisites.
+    Configure imports for LibreNMS devices with missing prerequisites.
+
     Allows user to manually map LibreNMS device data to NetBox objects.
     """
 

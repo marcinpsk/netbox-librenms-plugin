@@ -188,7 +188,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
 
         return validated_devices
 
-    def get(self, request, *args, **kwargs):  # noqa: D401 - inherited doc
+    def get(self, request, *args, **kwargs):  # noqa: C901, D401
         """Render the import table backed by LibreNMS data."""
         libre_filter_fields = (
             "librenms_location",

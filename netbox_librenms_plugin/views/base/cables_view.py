@@ -89,7 +89,8 @@ _SUB_UNIT_RE = re.compile(r"^(?P<physical>.+)\.\d+$")
 
 
 def _drop_masked_sub_units(rows):
-    """Drop a neighbour row for a sub-unit whose own physical port is reported beside it.
+    """
+    Drop a neighbour row for a sub-unit whose own physical port is reported beside it.
 
     A router advertises LLDP from the physical port and from each sub-unit configured on
     it, so one local port can report the same neighbour several times. A cable terminates
@@ -208,9 +209,7 @@ _RAW_LINK_KEYS = frozenset(
 
 
 class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
-    """
-    Base view for synchronizing cable information from LibreNMS.
-    """
+    """Base view for synchronizing cable information from LibreNMS."""
 
     model = None  # To be defined in subclasses
     partial_template_name = "netbox_librenms_plugin/_cable_sync_content.html"
@@ -226,7 +225,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         return None
 
     def get_ports_data(self, obj, server_key=None):
-        """Get ports data without affecting cache"""
+        """Get ports data without affecting cache."""
         # Scope to the POST-resolved server when provided; else the shared degrading resolver
         # (avoids a GET 500 on a missing/misconfigured default).
         server_key = server_key or self._render_server_key()
@@ -515,7 +514,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         return links_data
 
     def get_device_by_id_or_name(self, remote_device_id, hostname, server_key=None):
-        """Try to find device in NetBox first by librenms_id custom field, then by name"""
+        """Try to find device in NetBox first by librenms_id custom field, then by name."""
         if server_key is None:
             server_key = self._render_server_key()
         # First try matching by LibreNMS ID. The remote device_id is the remote device's OWN
@@ -569,7 +568,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
             )
 
     def enrich_local_port(self, link, obj, server_key=None):
-        """Add local port URL if interface exists in NetBox"""
+        """Add local port URL if interface exists in NetBox."""
         # Merged OOB-controller rows are context-only: their local port lives on the
         # CONTROLLER, not the host, so a shared name (or colliding stored librenms_id)
         # must not bind a host interface — that would render a wrong local_port_url and
@@ -605,7 +604,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
                 link["netbox_local_interface_id"] = interface.pk
 
     def enrich_remote_port(self, link, device, server_key=None):
-        """Add remote port URL if device and interface exist in NetBox"""
+        """Add remote port URL if device and interface exist in NetBox."""
         remote_port = link.get("remote_port")
         if isinstance(remote_port, str) and remote_port:
             netbox_remote_interface = None
@@ -644,7 +643,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         return link
 
     def check_cable_status(self, link):
-        """Check cable status and add cable URL if cable exists in NetBox"""
+        """Check cable status and add cable URL if cable exists in NetBox."""
         local_interface_id = link.get("netbox_local_interface_id")
         remote_interface_id = link.get("netbox_remote_interface_id")
 
@@ -683,7 +682,7 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
         return link
 
     def process_remote_device(self, link, remote_hostname, remote_device_id, server_key=None):
-        """Process remote device data and add remote device URL if device exists in NetBox"""
+        """Process remote device data and add remote device URL if device exists in NetBox."""
         device, found, error_message = self.get_device_by_id_or_name(
             remote_device_id, remote_hostname, server_key=server_key
         )
@@ -939,16 +938,14 @@ class BaseCableTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObject
 
 
 class SingleCableVerifyView(BaseCableTableView):
-    """
-    View to verify a single cable link between two devices.
-    """
+    """View to verify a single cable link between two devices."""
 
     # Read-only verify endpoint: require object-view permission (mirrors the interface/module
     # verify views). Without it any user with mere plugin-view rights could POST an arbitrary
     # device id and read back that device's rendered cable/topology rows.
     required_object_permissions = {"POST": [("view", Device)]}
 
-    def post(self, request):
+    def post(self, request):  # noqa: C901
         data, err = parse_request_json(request)
         if err:
             return err

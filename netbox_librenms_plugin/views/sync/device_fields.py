@@ -479,7 +479,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         ],
     }
 
-    def post(self, request, pk):
+    def post(self, request, pk):  # noqa: C901
         """Create a new platform (or reuse an existing one) and assign it to the device."""
         # Read inputs before the permission check so required perms can adapt:
         # reusing an existing platform needs no "add Platform" permission, and the
@@ -1095,7 +1095,7 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             server_key = resolve_configured_server_key(fallback)
         return redirect_with_server_key(request, url, server_key)
 
-    def post(self, request, pk):
+    def post(self, request, pk):  # noqa: C901
         raw_object_type = request.POST.get("object_type", "device")
         object_type = _normalize_sync_object_type(raw_object_type)
         if object_type is None:

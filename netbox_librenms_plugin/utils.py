@@ -905,7 +905,7 @@ def build_vc_normalization_report(diagnostic: dict) -> str:
     return "\n".join(lines)
 
 
-def get_librenms_sync_device(device: Device, server_key: str = None) -> Optional[Device]:
+def get_librenms_sync_device(device: Device, server_key: str = None) -> Optional[Device]:  # noqa: C901
     """
     Determine which Virtual Chassis member should handle LibreNMS sync operations.
 
@@ -1012,7 +1012,7 @@ def get_librenms_sync_device(device: Device, server_key: str = None) -> Optional
 
 def get_table_paginate_count(request: HttpRequest, table_prefix: str) -> int:
     """
-    Extends Netbox pagination to support multiple tables by using table-specific prefixes
+    Extends Netbox pagination to support multiple tables by using table-specific prefixes.
 
     Args:
         request: HTTP request object
@@ -1692,7 +1692,8 @@ LOCATION_PARSE_MAX_INPUT_LEN = 512
 
 
 def _normalise_location_value(location):
-    """Return the location name as a string.
+    """
+    Return the location name as a string.
 
     LibreNMS 26.5.0 returns the location as a relationship object
     (e.g. ``{"id": 1, "location": "Site A", "lat": ..., "lng": ...}``)
@@ -1774,7 +1775,8 @@ def parse_librenms_location(location_string: str, pattern: str, is_regex: bool =
 
 
 def get_location_parse_settings():
-    """Return the configured (pattern, is_regex) for parsing LibreNMS locations.
+    """
+    Return the configured (pattern, is_regex) for parsing LibreNMS locations.
 
     Falls back to ("", False) — i.e. whole-string matching — if the settings
     row cannot be read, so import behaviour degrades gracefully rather than
@@ -2049,7 +2051,8 @@ def normalize_serial(value) -> str:
 
 
 def find_devices_by_serial(serial: str, limit: int = 2) -> list:
-    """Return up to *limit* Devices whose stored serial matches an already-normalized *serial*.
+    """
+    Return up to *limit* Devices whose stored serial matches an already-normalized *serial*.
 
     The exact lookup uses the serial index that migration 0012 creates. That migration also
     canonicalizes existing rows, but a row written afterwards by another tool can hold padding
@@ -2080,7 +2083,8 @@ def find_devices_by_serial(serial: str, limit: int = 2) -> list:
 
 
 def normalize_inventory_serial(value, manufacturer=None, preloaded_rules=None) -> str:
-    """Trim a LibreNMS serial, then apply the serial-scope NormalizationRule chain.
+    """
+    Trim a LibreNMS serial, then apply the serial-scope NormalizationRule chain.
 
     Vendors decorate the ENTITY-MIB serial: Juniper reports "S/N BCFB9793". Keeping that
     transformation in a rule shows the operator why a stored serial differs from the raw
@@ -2595,8 +2599,7 @@ def build_librenms_id_qs(server_key, value):
 
 def find_by_librenms_id(model, librenms_id, server_key: str = "default", *, select_for_update: bool = False):
     """
-    Return the first object of *model* whose ``librenms_id`` JSON field contains
-    *librenms_id* under *server_key*.
+    Return the first object whose ``librenms_id`` contains the specified ID and server key.
 
     Raises :class:`AmbiguousLibreNMSIdError` when the id resolves to more than one
     distinct object (duplicate host-only, duplicate OOB-only, or host vs. a different
@@ -2958,8 +2961,7 @@ def is_legacy_librenms_id(value) -> bool:
 
 def migrate_legacy_librenms_id(obj, server_key: str = "default") -> bool:
     """
-    Migrate a legacy bare-integer ``librenms_id`` custom field to the JSON dict format,
-    scoped to *server_key*.
+    Migrate a legacy bare-integer ``librenms_id`` custom field to the scoped JSON format.
 
     Only performs the migration when the current value is a bare integer, i.e. a record
     created before the multi-server JSON refactor.  The integer is assumed to belong to
@@ -3040,8 +3042,7 @@ def _get_netbox_version_tuple():
 
 def netbox_clean_reads_parent_virtual_chassis():
     """
-    Return True when the running NetBox raises ``AttributeError`` while validating a
-    parent interface on another virtual chassis member.
+    Return whether NetBox raises ``AttributeError`` for a cross-member parent interface.
 
     NetBox 4.4.0 (issue #20197) dereferences ``self.parent.virtual_chassis`` in
     ``Interface.clean()``; 4.4.1 fixed it. When the version cannot be detected we keep the
@@ -3057,7 +3058,8 @@ def netbox_clean_reads_parent_virtual_chassis():
 
 
 def netbox_relocates_module_subtree():
-    """Return True when the running NetBox moves a module's whole subtree with it.
+    """
+    Return True when the running NetBox moves a module's whole subtree with it.
 
     NetBox 4.7 (issue #15289) relocates the module's components, its own module bays and any
     child modules installed in them, and re-resolves template-derived names for the destination
@@ -3075,8 +3077,7 @@ def netbox_relocates_module_subtree():
 
 def netbox_resolves_module_token_per_leaf():
     """
-    Return True when the running NetBox resolves a single ``{module}`` token
-    in a modular component template to the leaf module bay's position.
+    Return whether NetBox resolves one ``{module}`` token to the leaf bay position.
 
     NetBox 4.5.6 (issue #20467) changed single-token resolution to use the
     leaf bay's position instead of the root ancestor's. With that fix in
@@ -3193,7 +3194,7 @@ def _coerce_link_id_or_raise(raw, *, owner, name, server_key, kind):
     return coerced
 
 
-def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:
+def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:  # noqa: C901
     """
     Merge donor's ``librenms_id[server_key]`` link state into winner's.
 
@@ -4174,7 +4175,8 @@ def resolve_module_type(
 
 
 def slashless_route_aliases(patterns):
-    """Return an alias for each ``path()`` route in *patterns*, without its trailing slash.
+    """
+    Return an alias for each ``path()`` route in *patterns*, without its trailing slash.
 
     NetBox runs with ``APPEND_SLASH``, so a request that reaches Django with its trailing slash
     already removed is answered with a 301 back to the slashed form. Anything in front of NetBox

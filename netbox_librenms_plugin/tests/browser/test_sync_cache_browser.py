@@ -2227,7 +2227,8 @@ def _modal_script(marker):
 
 
 def test_the_bay_chooser_blocks_next_until_a_bay_is_selected(page):
-    """Step one must not open the review step with no bay chosen.
+    """
+    Step one must not open the review step with no bay chosen.
 
     The mapping kind is derived by the server from the bay picked here, so an empty selection
     would review a mapping onto nothing. The kind itself is no longer decided client-side: the

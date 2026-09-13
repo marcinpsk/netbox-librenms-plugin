@@ -196,7 +196,7 @@ def build_server_mappings(owner, active_key=None, *, plugin_config=None) -> tupl
     return tuple(mappings)
 
 
-def resolve_object_server(page_object, requested_key=None, installation_default_key=None) -> ObjectServerSelection:
+def resolve_object_server(page_object, requested_key=None, installation_default_key=None) -> ObjectServerSelection:  # noqa: C901
     """Resolve the active server for an object page without contacting LibreNMS."""
     requested_key = requested_key.strip() if isinstance(requested_key, str) else None
     requested_key = requested_key or None

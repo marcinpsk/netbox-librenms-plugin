@@ -187,7 +187,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             return HttpResponse("", headers={"HX-Redirect": url})
         return redirect(url)
 
-    def post(self, request, object_type, pk):
+    def post(self, request, object_type, pk):  # noqa: C901
         """Sync selected IP addresses from LibreNMS into NetBox."""
         # Check both plugin write and NetBox object permissions (owner read included).
         self.required_object_permissions = self._required_permissions(object_type)
@@ -1009,7 +1009,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 interface_name_field=interface_name_field,
             )
 
-    def _process_ip_sync(
+    def _process_ip_sync(  # noqa: C901
         self,
         request,
         selected_ips,

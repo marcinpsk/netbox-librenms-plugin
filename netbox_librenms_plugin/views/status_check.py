@@ -28,7 +28,8 @@ DISCOVERY_CONFLICT_MESSAGE = (
 
 class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, generic.ObjectListView):
     """
-    Check the status of NetBox devices in LibreNMS.
+    Check NetBox device status in LibreNMS.
+
     Shows NetBox devices with their LibreNMS status.
     """
 
@@ -47,9 +48,7 @@ class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gen
         return get_permission_for_model(Device, "view")
 
     def get_queryset(self, request):
-        """
-        Override get_queryset to return filtered devices and check LibreNMS status
-        """
+        """Override get_queryset to return filtered devices and check LibreNMS status."""
         # Only get devices if filters are applied
         if self.request.GET:
             queryset = (
@@ -97,9 +96,7 @@ class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gen
 
 
 class VMStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, generic.ObjectListView):
-    """
-    Check the status of virtual machines in NetBox against LibreNMS
-    """
+    """Check the status of virtual machines in NetBox against LibreNMS."""
 
     queryset = VirtualMachine.objects.select_related("cluster", "site")
     table = VMStatusTable

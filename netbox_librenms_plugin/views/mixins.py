@@ -276,7 +276,8 @@ class LibreNMSWritePermissionMixin(LibreNMSPermissionMixin):
 
 
 class LibreNMSGenericPermissionMixin:
-    """Add plugin read access to a NetBox generic view's object permission gate.
+    """
+    Add plugin read access to a NetBox generic view's object permission gate.
 
     Use this only with NetBox generic views that inherit
     ``ObjectPermissionRequiredMixin`` and define a queryset. It deliberately
@@ -952,9 +953,7 @@ class SyncSubjectClaimMixin:
 
 
 class CacheMixin(SyncSubjectClaimMixin):
-    """
-    A mixin class that provides caching functionality.
-    """
+    """A mixin class that provides caching functionality."""
 
     # Every routed cache view is a device sync page unless it declares its own model.
     SYNC_SUBJECT_MODEL_LABEL = "dcim.device"
@@ -973,9 +972,7 @@ class CacheMixin(SyncSubjectClaimMixin):
         return sync_snapshot_key(obj, data_type, server_key)
 
     def get_last_fetched_key(self, obj, data_type="ports", server_key=None):
-        """
-        Get the cache key for the last fetched time of the object.
-        """
+        """Get the cache key for the last fetched time of the object."""
         from netbox_librenms_plugin.sync_cache import sync_last_fetched_key
 
         return sync_last_fetched_key(obj, data_type, server_key)

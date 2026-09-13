@@ -95,7 +95,8 @@ def build_librenms_api(server_key):
 
 
 class LibreNMSUnreachable(Exception):
-    """The LibreNMS server did not answer, so a run that needs it cannot continue.
+    """
+    The LibreNMS server did not answer, so a run that needs it cannot continue.
 
     Raised by the device fetch itself. LibreNMS answers a search that matches nothing
     with 200 and an empty list, so a failed fetch never means "no devices matched". The
@@ -104,9 +105,7 @@ class LibreNMSUnreachable(Exception):
 
 
 class LibreNMSAPI:
-    """
-    Client to interact with the LibreNMS API and retrieve interface data for devices.
-    """
+    """Client to interact with the LibreNMS API and retrieve interface data for devices."""
 
     @staticmethod
     def _is_usable_server_config(config):
@@ -373,8 +372,10 @@ class LibreNMSAPI:
 
     def get_librenms_id(self, obj):
         """
+        Return the object's configured or discovered LibreNMS ID.
+
         Args:
-            obj: NetBox object with a librenms_id custom field or discovery identity
+            obj: NetBox object with a librenms_id custom field or discovery identity.
 
         Returns:
             int: LibreNMS device ID if found, None otherwise
@@ -755,7 +756,7 @@ class LibreNMSAPI:
         except requests.exceptions.RequestException as e:
             return False, f"Error connecting to LibreNMS: {str(e)}"
 
-    def resolve_port_relationships(
+    def resolve_port_relationships(  # noqa: C901
         self,
         ports: list,
         port_stack: list,
@@ -891,7 +892,7 @@ class LibreNMSAPI:
                 continue
             filtered_port_pairs.append((high_port, low_port))
 
-        def _resolve_with(field: str) -> tuple[dict, dict]:
+        def _resolve_with(field: str) -> tuple[dict, dict]:  # noqa: C901
             by_name: dict[str, dict] = {}
             ambiguous_names: set[str] = set()
             for port in ports_with_id:
@@ -1034,7 +1035,7 @@ class LibreNMSAPI:
         Add a device to LibreNMS.
 
         Args:
-            Dictionary containing device data including:
+            data: Dictionary containing device data including:
                 - hostname: Device hostname or IP
                 - snmp_version: SNMP version (v1, v2c, or v3)
                 - force_add: Skip checks for duplicate device and SNMP reachability (optional, default False)
@@ -1242,7 +1243,7 @@ class LibreNMSAPI:
         Get links for a specific device from LibreNMS.
 
         Args:
-            hostname: LibreNMS Device ID
+            device_id: LibreNMS device ID.
 
         Returns:
             tuple: (success: bool, data: dict)
@@ -1324,6 +1325,7 @@ class LibreNMSAPI:
     def get_device_inventory(self, device_id):
         """
         Fetch complete inventory for a device from LibreNMS.
+
         Useful for getting component details like chassis serial numbers for Virtual Chassis.
 
         Route: /api/v0/inventory/{device_id}/all
@@ -1468,6 +1470,7 @@ class LibreNMSAPI:
     def get_inventory_filtered(self, device_id, ent_physical_class=None, ent_physical_contained_in=None):
         """
         Fetch filtered inventory from LibreNMS with optional filtering.
+
         Uses query parameters if supported, falls back to client-side filtering.
 
         Route: /api/v0/inventory/{device_id}
@@ -1698,6 +1701,7 @@ class LibreNMSAPI:
     def get_port_vlan_details(self, port_id: int) -> tuple[bool, dict | str]:
         """
         Fetch detailed VLAN associations for a single port.
+
         Required for trunk ports to get the tagged VLANs list.
 
         Route: /api/v0/ports/{port_id}?with=vlans
