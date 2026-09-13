@@ -1829,6 +1829,43 @@ def test_partial_cable_refresh_renders_no_syncable_rows(client, settings):
 
 
 @pytest.mark.django_db
+def test_cable_refresh_refuses_an_ambiguous_server_key(client, settings):
+    """QueryDict.get() keeps the LAST repeated value, so an ambiguous POST could refresh another server."""
+    _configure_servers(settings)
+    device = make_device(
+        "cache-cable-ambiguous",
+        librenms_cf={"primary": {"id": 671}, "secondary": {"id": 672}},
+    )
+    client.force_login(make_superuser("cache-cable-ambiguous-user"))
+    url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", kwargs={"pk": device.pk})
+
+    def refuse(request_url, *args, **kwargs):
+        raise AssertionError(f"an ambiguous selection must fetch nothing, got: {request_url}")
+
+    with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=refuse):
+        response = client.post(url, {"server_key": ["primary", "secondary"]}, HTTP_HX_REQUEST="true")
+
+    assert response.status_code == 200
+    assert b"Select exactly one configured LibreNMS server." in response.content
+    assert b"no longer configured" not in response.content
+
+
+@pytest.mark.django_db
+def test_cable_refresh_reports_a_single_unconfigured_server_key(client, settings):
+    _configure_servers(settings)
+    device = make_device("cache-cable-unconfigured", librenms_cf={"primary": {"id": 672}})
+    client.force_login(make_superuser("cache-cable-unconfigured-user"))
+    url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", kwargs={"pk": device.pk})
+
+    with patch("netbox_librenms_plugin.librenms_api.requests.get") as request:
+        response = client.post(url, {"server_key": "removed"}, HTTP_HX_REQUEST="true")
+
+    request.assert_not_called()
+    assert response.status_code == 200
+    assert b"Selected LibreNMS server is no longer configured." in response.content
+
+
+@pytest.mark.django_db
 def test_cable_refresh_without_a_cached_snapshot_reports_failure_not_success(client, settings):
     """The toast must agree with the tab state: no snapshot means no success message."""
     _configure_servers(settings)
