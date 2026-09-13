@@ -35,7 +35,8 @@ class TestPortStackLagPattern:
         assert model.compiled_sap_patterns_for_os("junos") == []
 
     def test_the_unscoped_lag_read_is_a_superset_of_every_scoped_read(self):
-        """The refresh gates the scoped LAG read on a name signal measured with the unscoped set.
+        """
+        The refresh gates the scoped LAG read on a name signal measured with the unscoped set.
 
         That gate is only safe while the unscoped read returns every stored row, so a scoped
         pattern can never match a name the unscoped signal missed. Narrowing the None case would
@@ -52,7 +53,8 @@ class TestPortStackLagPattern:
         assert r"^Port-Channel\d+$" in unscoped
 
     def test_an_unknown_os_applies_every_stored_sap_rule(self):
-        """The SAP reader over-skips rather than under-skips, the opposite of the LAG reader.
+        """
+        The SAP reader over-skips rather than under-skips, the opposite of the LAG reader.
 
         An unmatched LAG regex invents a relationship; an unmatched SAP regex only suppresses
         one. So an OS this model cannot resolve must keep every vendor's SAP rule, which is also
@@ -223,9 +225,10 @@ class TestPortStackLagPattern:
             "plugins-api:netbox_librenms_plugin-api:portstacklagpattern-detail",
             args=[response.json()["id"]],
         )
-        response = client.patch(
+        response = client.generic(
+            "PATCH",
             detail_url,
-            {"description": "Updated through API"},
+            data='{"description": "Updated through API"}',
             content_type="application/json",
         )
         assert response.status_code == 200
@@ -357,10 +360,8 @@ class TestMigration0014Preflight:
 
         return SimpleNamespace(connection=connection)
 
-    def test_preflight_lowercases_mixed_case_rows(self):
+    def test_preflight_lowercases_mixed_case_rows(self, monkeypatch):
         """A mixed-case librenms_os an old full_clean-bypassing path left behind is canonicalized to lowercase."""
-        from unittest.mock import patch
-
         from django.db import connection
         from django.db.migrations.executor import MigrationExecutor
 
@@ -377,8 +378,8 @@ class TestMigration0014Preflight:
         # own, so the CI constraint permits it). The preflight must then canonicalize it. Use a
         # distinctive OS name so it can't collide with a migration-seeded default pattern.
         PortStackLagPattern.objects.bulk_create([PortStackLagPattern(librenms_os="ZZOSX", lag_name_pattern=r"^zz\d+$")])
-        with patch.object(historical_model, "full_clean", lambda self, *a, **k: None):
-            self._preflight()(historical_apps, self._schema_editor())
+        monkeypatch.setattr(historical_model, "full_clean", lambda self, *a, **k: None)
+        self._preflight()(historical_apps, self._schema_editor())
         assert PortStackLagPattern.objects.filter(librenms_os="zzosx").exists()
         assert not PortStackLagPattern.objects.filter(librenms_os="ZZOSX").exists()
 
@@ -429,10 +430,8 @@ class TestMigration0014Preflight:
 
         assert PortStackLagPattern.objects.get(pk=pk).librenms_os == "zzbad"
 
-    def test_preflight_strips_surrounding_whitespace(self):
+    def test_preflight_strips_surrounding_whitespace(self, monkeypatch):
         """A whitespace-padded librenms_os a bypassing path left behind is canonicalized to .strip().lower() (matching clean()), not left with surrounding spaces behind the Lower()-only constraint."""
-        from unittest.mock import patch
-
         from django.db import connection
         from django.db.migrations.executor import MigrationExecutor
 
@@ -461,8 +460,8 @@ class TestMigration0014Preflight:
         assert PortStackLagPattern.objects.get(pk=pk).librenms_os == " ZZWS "
         # Stub the historical model's full_clean so ONLY the migration's rewrite can normalize the
         # row — otherwise a save-time strip could pass this test even if the migration itself is wrong.
-        with patch.object(historical_model, "full_clean", lambda self, *a, **k: None):
-            self._preflight()(historical_apps, self._schema_editor())
+        monkeypatch.setattr(historical_model, "full_clean", lambda self, *a, **k: None)
+        self._preflight()(historical_apps, self._schema_editor())
         # Exact canonical value, not a DB filter: trailing/leading-space equality is collation-fuzzy
         # and would let " zzws " match "zzws".
         assert PortStackLagPattern.objects.get(pk=pk).librenms_os == "zzws"
