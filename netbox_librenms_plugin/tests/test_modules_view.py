@@ -195,7 +195,8 @@ class TestInventoryClassIncludeRule:
 
     def test_the_row_name_falls_back_to_the_description(self):
         """Both Routing Engines report entPhysicalName "JNP304-RE-S", so the name cannot
-        tell them apart. The description carries "Routing Engine 0" and "1"."""
+        tell them apart. The description carries "Routing Engine 0" and "1".
+        """
         collected = self._collect(self._inventory(), [self._include_rule()])
         view = _make_view()
         names = [
@@ -207,7 +208,8 @@ class TestInventoryClassIncludeRule:
 
     def test_a_numeric_description_still_names_the_rule_admitted_row(self):
         """LibreNMS sends an all-digit entPhysicalDescr as a JSON number, which the name
-        fallback stripped directly."""
+        fallback stripped directly.
+        """
         inventory = self._inventory()
         inventory[1]["entPhysicalDescr"] = 20250907
         collected = self._collect(inventory, [self._include_rule()])
@@ -6006,6 +6008,15 @@ def test_vc_inventory_ignore_rules_follow_each_attributed_member(client, setting
             "entPhysicalSerialNum": member.serial,
             "entPhysicalContainedIn": 0,
         },
+        {
+            "entPhysicalIndex": 94,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "OOB Member policy item",
+            "entPhysicalModelName": "OOB-MODEL",
+            "entPhysicalParentRelPos": 2,
+            "entPhysicalContainedIn": 0,
+            "_source": "oob",
+        },
     ]
     payload = trusted_module_inventory_payload(page, inventory, librenms_id=9302)
     cache.set(DeviceModuleTableView().get_cache_key(page, "inventory", server_key="default"), payload, 300)
@@ -6019,5 +6030,6 @@ def test_vc_inventory_ignore_rules_follow_each_attributed_member(client, setting
 
     assert response.status_code == 200
     rows = list(response.context["module_sync"]["table"].data)
-    assert [row["name"] for row in rows] == ["Page policy item"]
-    assert rows[0]["selected_device_id"] == member.pk
+    assert {row["name"] for row in rows} == {"OOB Member policy item", "Page policy item"}
+    assert next(row for row in rows if row["name"] == "OOB Member policy item")["status"] == "OOB"
+    assert next(row for row in rows if row["name"] == "Page policy item")["selected_device_id"] == member.pk

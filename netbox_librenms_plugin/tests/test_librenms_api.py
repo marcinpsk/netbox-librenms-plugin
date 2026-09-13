@@ -103,6 +103,35 @@ class TestApiTokenStaysOnItsHost:
 class TestLibreNMSAPIInit:
     """Test LibreNMSAPI initialization and configuration loading."""
 
+    def test_init_rejects_cleartext_non_loopback_server(self, mock_librenms_config):
+        """A client must not send its API token to a remote server over cleartext HTTP."""
+        mock_config = mock_librenms_config["mock_config"]
+        mock_config.return_value = {
+            "default": {
+                "librenms_url": "http://librenms.example.test",
+                "api_token": "test-token",
+            }
+        }
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        with pytest.raises(ValueError, match="HTTPS"):
+            LibreNMSAPI(server_key="default")
+
+    def test_init_allows_cleartext_loopback_server(self, mock_librenms_config):
+        """Local test and development servers may use HTTP without crossing a network."""
+        mock_config = mock_librenms_config["mock_config"]
+        mock_config.return_value = {
+            "default": {
+                "librenms_url": "http://127.0.0.1:8000",
+                "api_token": "test-token",
+            }
+        }
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        assert LibreNMSAPI(server_key="default").librenms_url == "http://127.0.0.1:8000"
+
     def test_init_with_multi_server_config(self, mock_librenms_config):
         """Verify initialization with multi-server configuration."""
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
@@ -2725,7 +2754,8 @@ class TestResolvePortRelationships:
 
     def test_sap_rows_stay_excluded_from_the_name_derived_sub_interface_fallback(self, mock_librenms_api):
         """Rule 2 skips a SAP pair, but the name-derived fallback walks every port with an id,
-        not the filtered pairs, so a SAP child can still be recorded as a sub-interface."""
+        not the filtered pairs, so a SAP child can still be recorded as a sub-interface.
+        """
         ports = [
             {"port_id": 301, "ifName": "lag-1:10", "ifDescr": "lag-1:10", "ifType": "ipForward"},
             {"port_id": 302, "ifName": "lag-1:10.100", "ifDescr": "lag-1:10.100", "ifType": "ipForward"},
