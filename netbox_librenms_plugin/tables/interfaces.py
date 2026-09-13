@@ -40,9 +40,7 @@ _RELATIONSHIP_STATUS_MAP = {
 
 
 class LibreNMSInterfaceTable(tables.Table):
-    """
-    Table for displaying LibreNMS interface data.
-    """
+    """Table for displaying LibreNMS interface data."""
 
     # NetBox object class these rows sync against. Driven by the table subclass rather than
     # a runtime ``self.device.cluster`` probe — a cluster-less VM has a falsy ``cluster`` and
@@ -165,7 +163,7 @@ class LibreNMSInterfaceTable(tables.Table):
         attrs={"td": {"data-col": "vlans"}},
     )
 
-    def render_vlans(self, value, record):
+    def render_vlans(self, value, record):  # noqa: C901
         """
         Render VLANs column showing untagged and tagged VLANs.
 
@@ -375,12 +373,12 @@ class LibreNMSInterfaceTable(tables.Table):
         return int(group_id_str) if group_id_str else None
 
     def render_speed(self, value, record):
-        """Render interface speed with appropriate styling based on comparison with NetBox"""
+        """Render interface speed with appropriate styling based on comparison with NetBox."""
         kbps_value = convert_speed_to_kbps(value)
         return self._render_field(humanize_speed(kbps_value), record, "ifSpeed", "speed")
 
     def render_name(self, value, record):
-        """Render interface name with appropriate styling based on comparison with NetBox"""
+        """Render interface name with appropriate styling based on comparison with NetBox."""
         rendered = self._render_field(value, record, self.interface_name_field, "name")
         badges = oob_badge_html(record)
         if record.get("_dedup_conflict"):
@@ -415,28 +413,28 @@ class LibreNMSInterfaceTable(tables.Table):
         return display_value, "text-danger"
 
     def _parse_enabled_status(self, value):
-        """Convert interface status value to boolean enabled state"""
+        """Convert interface status value to boolean enabled state."""
         if isinstance(value, str):
             return value.lower() == "up"
         return bool(value)
 
     def render_enabled(self, value, record):
-        """Render interface enabled status with appropriate styling based on comparison with NetBox"""
+        """Render interface enabled status with appropriate styling based on comparison with NetBox."""
         enabled = self._parse_enabled_status(value)
         display_value, css_class = self._get_interface_status_display(enabled, record)
         return format_html('<span class="{}">{}</span>', css_class, display_value)
 
     def render_description(self, value, record):
-        """Render interface description with appropriate styling based on comparison with NetBox"""
+        """Render interface description with appropriate styling based on comparison with NetBox."""
         return self._render_field(value, record, "ifAlias", "description")
 
     def render_mac_address(self, value, record):
-        """Render MAC address with appropriate styling based on comparison with NetBox"""
+        """Render MAC address with appropriate styling based on comparison with NetBox."""
         formatted_mac = format_mac_address(value)
         return self._render_field(formatted_mac, record, "ifPhysAddress", "mac_address")
 
     def render_mtu(self, value, record):
-        """Render MTU with appropriate styling based on comparison with NetBox"""
+        """Render MTU with appropriate styling based on comparison with NetBox."""
         return self._render_field(value, record, "ifMtu", "mtu")
 
     def render_librenms_id(self, value, record):
@@ -635,6 +633,7 @@ class LibreNMSInterfaceTable(tables.Table):
             btn_class (str): The sync-button CSS class (lag-sync-btn / parent-sync-btn).
             data_related_key (str): The data attribute carrying the related port_id.
             type_label (str): The short relationship label ("LAG" / "Parent").
+            target_resolvable: Whether the relationship target can be resolved for synchronization.
 
         Returns:
             SafeString: The pill markup (plus a sync button when applicable).
@@ -745,7 +744,6 @@ class LibreNMSInterfaceTable(tables.Table):
 
     def _render_field(self, value, record, librenms_key, netbox_key):
         """Render a field value with appropriate styling based on the comparison with NetBox."""
-
         # value is an untrusted LibreNMS field (ifName, description, MAC, …). Use format_html so
         # it is auto-escaped — a device reporting e.g. ifName="<img src=x onerror=alert(1)>" must
         # not render as live HTML (stored XSS, issue #105). The class names stay literal.
@@ -773,7 +771,7 @@ class LibreNMSInterfaceTable(tables.Table):
         return format_html('<span class="text-success">{}</span>', value)
 
     def render_type(self, value, record):
-        """Render interface type with appropriate styling based on comparison with NetBox"""
+        """Render interface type with appropriate styling based on comparison with NetBox."""
         speed = convert_speed_to_kbps(record.get("ifSpeed", 0))
         mapping = self.get_interface_mapping(value, speed)
         tooltip_value, icon = self.render_mapping_tooltip(value, speed, mapping)
@@ -822,7 +820,7 @@ class LibreNMSInterfaceTable(tables.Table):
         )
 
     def render_mapping_tooltip(self, value, speed, mapping):
-        """Render tooltip for interface type mapping"""
+        """Render tooltip for interface type mapping."""
         if mapping:
             display = mapping.netbox_type
             icon = format_html(
@@ -836,8 +834,7 @@ class LibreNMSInterfaceTable(tables.Table):
         return display, icon
 
     def format_interface_data(self, port_data, device):
-        """Format single interface data using table rendering logic"""
-
+        """Format single interface data using table rendering logic."""
         # Add NetBox interface data
         interface_name = port_data.get(self.interface_name_field)
 
@@ -902,7 +899,7 @@ class LibreNMSInterfaceTable(tables.Table):
         return formatted_data
 
     def configure(self, request):
-        """Configure the table with pagination and other options"""
+        """Configure the table with pagination and other options."""
         paginate = {
             "paginator_class": EnhancedPaginator,
             "per_page": get_table_paginate_count(request, self.prefix),
@@ -912,9 +909,7 @@ class LibreNMSInterfaceTable(tables.Table):
 
 
 class VCInterfaceTable(LibreNMSInterfaceTable):
-    """
-    Table for displaying Virtual Chassis interface data.
-    """
+    """Table for displaying Virtual Chassis interface data."""
 
     device_selection = tables.Column(
         verbose_name="Virtual Chassis member",
@@ -1004,9 +999,7 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
 
 
 class LibreNMSVMInterfaceTable(LibreNMSInterfaceTable):
-    """
-    Table for displaying LibreNMS VM interface data.
-    """
+    """Table for displaying LibreNMS VM interface data."""
 
     # These rows sync against VirtualMachine objects regardless of whether the VM has a cluster.
     sync_object_type = "virtualmachine"
