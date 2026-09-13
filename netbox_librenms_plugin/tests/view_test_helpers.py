@@ -1,4 +1,5 @@
-"""Shared drivers for tests that call a view's ``get``/``post`` directly.
+"""
+Shared drivers for tests that call a view's ``get``/``post`` directly.
 
 Production always reaches a view through ``dispatch()``, which runs ``View.setup()`` and binds
 ``self.request``. The object-scoped lookups read it, so a test that calls ``view.post(request, ...)``

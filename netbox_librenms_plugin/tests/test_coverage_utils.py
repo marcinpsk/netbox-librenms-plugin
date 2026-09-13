@@ -34,7 +34,8 @@ def _add_primary_ip(device, tag):
 
 @pytest.mark.django_db
 class TestSerialScopeNormalization:
-    """Juniper prefixes ENTITY-MIB serials with a literal "S/N ".
+    """
+    Juniper prefixes ENTITY-MIB serials with a literal "S/N ".
 
     The rewrite is a NormalizationRule rather than compiled-in, so an operator can see why a
     stored serial differs from the raw inventory and add the next vendor without a release.

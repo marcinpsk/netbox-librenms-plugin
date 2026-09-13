@@ -5,7 +5,7 @@ Targets:
 - cables.py lines 147-149 (exception path in process_interface_sync)
 - devices.py lines 77, 81-82 (port_association_mode, invalid poller_group)
 - locations.py lines 26-28, 32-35, 44-49 (get_table, get_context_data, get_queryset)
-- vlans.py lines 134-139 (grouped VLAN update/skip paths)
+- vlans.py lines 134-139 (grouped VLAN update/skip paths).
 """
 
 import pytest
