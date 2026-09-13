@@ -269,6 +269,19 @@ def test_interface_verify_application_failure_is_reported():
     assert "console.error('Interface verification rejected:', data.error || data.message" in rejected
 
 
+def test_cable_verify_application_failure_is_reported():
+    """A 2xx cable rejection must expose its server-provided reason before rollback."""
+    handler = _js_block(
+        _js_source(),
+        "function handleCableChange(select, value)",
+        "Handle VC member selection change for module verification",
+    )
+    rejection_log = "console.error('Cable verification rejected:', data.error || data.message || 'Unknown error');"
+
+    assert rejection_log in handler
+    assert handler.index(rejection_log) < handler.index("rollbackToLastVerified();", handler.index(rejection_log))
+
+
 def test_relationship_sync_missing_data_shows_alert_icon():
     """A relationship button with incomplete data must show a visible failure state."""
     rejected = _js_block(
@@ -1821,6 +1834,69 @@ class TestInterfaceContextVirtualChassisOwner:
         )
         assert port["vlan_group_map"][100]["group_id"] == ""
         assert port["missing_vlans"] == [100]
+
+    def test_verify_response_preserves_apply_to_all_vlan_group(self, client):
+        """A row verify must apply the cached group before rendering its hidden input."""
+        import json
+
+        from django.core.cache import cache
+        from django.urls import reverse
+        from ipam.models import VLANGroup
+
+        from netbox_librenms_plugin.tests.conftest import configured_server_key
+        from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
+        from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
+
+        device = make_device("verify-vlan-group-override")
+        default_group = VLANGroup.objects.create(
+            name="Verify VLAN Group A",
+            slug="verify-vlan-group-a",
+        )
+        override_group = VLANGroup.objects.create(
+            name="Verify VLAN Group B",
+            slug="verify-vlan-group-b",
+        )
+        server_key = configured_server_key()
+        port = {
+            "port_id": 10,
+            "ifName": "Ethernet1",
+            "ifDescr": "Ethernet1",
+            "ifAlias": "",
+            "ifType": "ethernetCsmacd",
+            "ifSpeed": 1_000_000_000,
+            "ifPhysAddress": "",
+            "ifMtu": 1500,
+            "ifAdminStatus": "up",
+            "untagged_vlan": 100,
+            "tagged_vlans": [],
+        }
+        view = SingleInterfaceVerifyView()
+        ports_key = view.get_cache_key(device, "ports", server_key)
+        overrides_key = view.get_vlan_overrides_key(device, server_key)
+        cache.set(ports_key, {"ports": [port], "port_stack_relationships": {}})
+        cache.set(overrides_key, {"100": str(override_group.pk)})
+        client.force_login(make_superuser("verify-vlan-group-override"))
+
+        try:
+            response = client.post(
+                reverse("plugins:netbox_librenms_plugin:verify_interface"),
+                data=json.dumps(
+                    {
+                        "device_id": device.pk,
+                        "interface_name_field": "ifName",
+                        "port_id": 10,
+                        "server_key": server_key,
+                    }
+                ),
+                content_type="application/json",
+            )
+        finally:
+            cache.delete_many([ports_key, overrides_key])
+
+        assert response.status_code == 200, response.content
+        vlan_html = json.loads(response.content)["formatted_row"]["vlans"]
+        assert f'name="vlan_group_10_100" value="{override_group.pk}"' in vlan_html
+        assert f'value="{default_group.pk}"' not in vlan_html
 
     def test_remote_vc_target_sync_uses_its_rack_vlan_lookup(self):
         from types import SimpleNamespace

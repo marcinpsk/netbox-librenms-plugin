@@ -618,8 +618,8 @@ class LibreNMSAPIMixin:
         fallback, and that property raises KeyError/ValueError when the plugin configuration holds
         no bindable server. Every action view would then answer a 500. This resolve reports the
         missing server instead, and the caller decides what that means: a NetBox-only write (module
-        serial/move, bay template, interface delete) continues and lets its write signal invalidate
-        the source snapshot, while an action that reads or writes server-scoped data fails closed.
+        move, bay template, interface delete) continues and lets its write signal invalidate the
+        source snapshot, while an action that reads or writes server-scoped data fails closed.
 
         Args:
             data: A dict-like request payload (``request.POST`` or ``request.GET``) carrying an
@@ -768,6 +768,26 @@ class LibreNMSAPIMixin:
         # to a configured name); downstream cache/OOB scoping must use api.server_key
         # so live fetches and cache writes target the same server.
         return api.server_key
+
+    def rebind_api_for_server_or_default(self, server_key):
+        """
+        Rebind to *server_key*, degrading to the session/default server's RESOLVED key.
+
+        For ACTION paths that must still render something after a failed rebind (a stale tab or a
+        forged form carrying a key that names no configured server). Reading
+        :attr:`active_server_key` alone is not enough there: the rebind failed before binding a
+        client, so it answers the literal ``"default"`` — which in a multi-server setup is not a
+        configured key, and namespaces the cache write under a bogus server no other render reads.
+        The blank rebind goes through the same fail-closed builder, so a misconfigured default
+        degrades to ``active_server_key`` instead of raising.
+
+        Args:
+            server_key (str | None): The requested (untrusted) server key.
+
+        Returns:
+            str: A resolved server key to scope the cache read/write and the re-render to.
+        """
+        return self.rebind_api_for_server(server_key) or self.rebind_api_for_server(None) or self.active_server_key
 
     def resolve_get_render_server_key(self, request, server_key=None):
         """
@@ -1009,11 +1029,16 @@ class VlanAssignmentMixin:
     - Updating interface VLAN assignments
     """
 
-    def get_vlan_groups_for_device(self, device):
-        """Get all VLAN groups relevant to one device."""
-        return self.get_vlan_groups_for_devices([device])
+    @staticmethod
+    def _vlan_visible_queryset(model, user):
+        """Return *model*'s queryset, scoped to what *user* may view when a user is given."""
+        return model.objects.all() if user is None else model.objects.restrict(user, "view")
 
-    def get_vlan_groups_for_devices(self, devices):
+    def get_vlan_groups_for_device(self, device, user=None):
+        """Get all VLAN groups relevant to one device."""
+        return self.get_vlan_groups_for_devices([device], user=user)
+
+    def get_vlan_groups_for_devices(self, devices, user=None):
         """
         Get all VLAN groups relevant to a set of devices.
 
@@ -1024,6 +1049,11 @@ class VlanAssignmentMixin:
         - Site Group: Each device site's group and all parent site groups
         - Rack: Each device's rack
         - Global: VLAN groups with no scope
+
+        Args:
+            devices: The devices whose VLAN scopes are collected.
+            user: Restrict the result to the groups this user may view. A caller that renders
+                IPAM data into a response must pass the requesting user.
 
         Returns:
             List of VLANGroup objects, deduplicated and sorted by name
@@ -1052,14 +1082,14 @@ class VlanAssignmentMixin:
                 racks.add(rack)
 
         groups = set()
-        groups.update(self._get_vlan_groups_for_scope(Site, sites))
-        groups.update(self._get_vlan_groups_for_scope(Location, locations))
-        groups.update(self._get_vlan_groups_for_scope(Region, regions))
-        groups.update(self._get_vlan_groups_for_scope(SiteGroup, site_groups))
-        groups.update(self._get_vlan_groups_for_scope(Rack, racks))
+        groups.update(self._get_vlan_groups_for_scope(Site, sites, user=user))
+        groups.update(self._get_vlan_groups_for_scope(Location, locations, user=user))
+        groups.update(self._get_vlan_groups_for_scope(Region, regions, user=user))
+        groups.update(self._get_vlan_groups_for_scope(SiteGroup, site_groups, user=user))
+        groups.update(self._get_vlan_groups_for_scope(Rack, racks, user=user))
 
         # Global VLAN groups (no scope)
-        global_groups = VLANGroup.objects.filter(scope_type__isnull=True)
+        global_groups = self._vlan_visible_queryset(VLANGroup, user).filter(scope_type__isnull=True)
         groups.update(global_groups)
 
         # Return sorted by name for consistent display
@@ -1090,12 +1120,14 @@ class VlanAssignmentMixin:
             if group.scope_type_id is None or (group.scope_type_id, group.scope_id) in scope_keys
         ]
 
-    def _build_vlan_lookup_maps(self, vlan_groups):
+    def _build_vlan_lookup_maps(self, vlan_groups, user=None):
         """
         Build lookup dictionaries for VLAN matching.
 
         Args:
             vlan_groups (list[VLANGroup]): The VLAN groups to include.
+            user: Restrict the VLANs to the ones this user may view. A caller that renders
+                IPAM data into a response must pass the requesting user.
 
         Returns:
             dict: A dictionary with these lookup maps:
@@ -1109,9 +1141,10 @@ class VlanAssignmentMixin:
 
         # Get all VLANs from relevant groups and global VLANs
         group_pks = [g.pk for g in vlan_groups]
-        vlans = VLAN.objects.filter(group__pk__in=group_pks).select_related("group")
+        visible_vlans = self._vlan_visible_queryset(VLAN, user)
+        vlans = visible_vlans.filter(group__pk__in=group_pks).select_related("group")
         # Also get global VLANs (no group)
-        global_vlans = VLAN.objects.filter(group__isnull=True)
+        global_vlans = visible_vlans.filter(group__isnull=True)
         return self._index_vlans([*vlans, *global_vlans])
 
     @staticmethod
@@ -1175,10 +1208,10 @@ class VlanAssignmentMixin:
           precedence over auto-selection.
 
         Args:
-            port (dict): The port record to update.
-            lookup_maps (dict): The VLAN lookup maps used for group selection.
-            device (Device): The device that supplies the scope hierarchy.
-            vlan_group_overrides (dict | None): User-selected VLAN groups keyed by VID.
+            port (dict): The LibreNMS port record to update.
+            lookup_maps (dict): The VLAN lookup maps for the row's device.
+            device (Device): The device used for scope-specific group selection.
+            vlan_group_overrides (dict | None): Optional apply-to-all selections keyed by VID.
         """
         vid_to_groups = lookup_maps.get("vid_to_groups", {})
         untagged_vid = port.get("untagged_vlan")
@@ -1398,13 +1431,14 @@ class VlanAssignmentMixin:
             current = getattr(current, "parent", None)
         return ancestors
 
-    def _get_vlan_groups_for_scope(self, model_class, objects):
+    def _get_vlan_groups_for_scope(self, model_class, objects, user=None):
         """
         Get VLAN groups scoped to any of the given objects.
 
         Args:
             model_class: The Django model class (Site, Location, Region, etc.)
             objects: List of model instances to check
+            user: Restrict the result to the groups this user may view.
 
         Returns:
             QuerySet of VLANGroup objects
@@ -1421,7 +1455,7 @@ class VlanAssignmentMixin:
         if not object_ids:
             return VLANGroup.objects.none()
 
-        return VLANGroup.objects.filter(scope_type=content_type, scope_id__in=object_ids)
+        return self._vlan_visible_queryset(VLANGroup, user).filter(scope_type=content_type, scope_id__in=object_ids)
 
     def _find_vlan_in_group(self, vid, vlan_group_id, lookup_maps):
         """

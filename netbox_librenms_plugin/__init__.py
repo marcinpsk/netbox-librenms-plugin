@@ -20,6 +20,10 @@ class LibreNMSSyncConfig(PluginConfig):
         "enable_caching": True,
         "verify_ssl": True,
         "interface_name_field": DEFAULT_INTERFACE_NAME_FIELD,
+        # Cable-sync provenance (tag name/color, cable description) and serial sensor
+        # recognition (LibreNMS sensor_type -> local port-name pattern) are DB-backed, not
+        # plugin settings: the Settings → Cable Sync tab (LibreNMSSettings fields with the
+        # shipped defaults) and the SerialSensorTypePattern table under Rules & Patterns.
     }
 
     def ready(self):

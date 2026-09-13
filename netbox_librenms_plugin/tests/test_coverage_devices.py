@@ -66,11 +66,7 @@ def _real_port(**overrides):
 
 
 def _user_with_perms(tag, perm_specs):
-    """Real user granted exactly ``perm_specs`` = [(action, Model), ...] via NetBox ObjectPermissions.
-
-    Lets a test drive the view's real ``has_perm`` from a precise, real permission set (instead of a
-    mocked ``has_perm`` side-effect), so the perm→table-flag mapping is exercised end to end.
-    """
+    """Grant a real user the exact permissions needed to exercise the permission-to-table-flag mapping."""
     from core.models import ObjectType
     from django.contrib.auth import get_user_model
     from users.models import ObjectPermission
@@ -778,15 +774,10 @@ class TestSingleModuleVerifyView:
 
     @pytest.mark.django_db
     def test_success_propagates_can_change_interface_to_verify_table(self):
-        """Verify-row table keeps Update Interface available for a user with real change perms.
-
-        Device is resolved through the real restrict() lookup and every table flag is driven by the
-        view's REAL ``has_perm`` against a precise NetBox permission grant — only the module-inventory
-        pipeline / table render (a separate rendering boundary) stays stubbed.
-        """
+        """Verify that real lookup and change permissions keep Update Interface available in the verification table."""
         import json
 
-        from dcim.models import Interface, Module, ModuleBayTemplate, ModuleType
+        from dcim.models import Interface, Module, ModuleBay, ModuleBayTemplate, ModuleType
         from django.http import JsonResponse
         from django.test import RequestFactory
 
@@ -803,6 +794,7 @@ class TestSingleModuleVerifyView:
             "mod-canchange",
             [
                 ("view", type(device)),  # dcim.Device — object-perm gate + restrict
+                ("view", ModuleBay),  # the map-existing modal reads bays, so its button needs this
                 ("change", LibreNMSSettings),  # plugin write (has_write_permission)
                 ("add", Module),
                 ("change", Module),
@@ -880,6 +872,7 @@ class TestSingleModuleVerifyView:
             can_add_module_type=True,
             can_add_carrier_rule=True,
             can_add_module_bay_mapping=True,
+            can_map_existing_bay=True,
             can_add_module_type_mapping=True,
         )
 
@@ -1568,14 +1561,7 @@ class TestSaveVlanGroupOverridesView:
 
 @pytest.mark.django_db
 class TestSaveVlanGroupOverridesRealCacheBackend:
-    """Drive SaveVlanGroupOverridesView against a REAL cache backend, not a MagicMock.
-
-    The MagicMock-cache tests above synthesise a ``.ttl()`` on the cache; ``cache.ttl()``
-    is a django-redis extension that every other Django backend (e.g. the LocMemCache
-    NetBox falls back to) lacks, so those tests stay green even though the raw ``cache.ttl()``
-    call raised ``AttributeError`` mid-request. These exercise the real view against a real
-    LocMemCache so the backend-agnostic ``cache_remaining_ttl`` guard is actually tested.
-    """
+    """Verify that SaveVlanGroupOverridesView handles real cache backends with and without ttl()."""
 
     def _post(self, device, cache_backend, *, vid_group_map=None):
         import json
@@ -1656,20 +1642,6 @@ class TestDeviceCableTableView:
         view._librenms_api = MagicMock()
         return view
 
-    def test_get_table_returns_vc_cable_table_for_vc_device(self):
-        """get_table() returns VCCableTable when device has virtual_chassis."""
-        view = self._make_view()
-        obj = MagicMock()
-        obj.virtual_chassis = MagicMock()
-
-        with patch("netbox_librenms_plugin.views.object_sync.devices.VCCableTable") as mock_vc_table:
-            mock_table = MagicMock()
-            mock_vc_table.return_value = mock_table
-            result = view.get_table([], obj)
-
-        assert result is mock_table
-        mock_vc_table.assert_called_once_with([], device=obj)
-
     def test_get_table_returns_librenms_cable_table_for_non_vc_device(self):
         """get_table() returns LibreNMSCableTable when no virtual_chassis."""
         view = self._make_view()
@@ -1683,6 +1655,50 @@ class TestDeviceCableTableView:
 
         assert result is mock_table
         mock_cable_table.assert_called_once_with([], device=obj)
+
+    @pytest.mark.django_db
+    def test_get_table_returns_vc_cable_table_scoped_to_viewable_members(self):
+        """A chassis device gets the VC table, and only members the request may view are actionable."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tables.cables import VCCableTable
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
+
+        virtual_chassis, (first_member, second_member) = make_virtual_chassis_members("cable-vc-table")
+        view = DeviceCableTableView()
+        view.setup(make_request("get", user=make_user_with_perms("cable-vc-table-user", [("view", Device)])))
+
+        table = view.get_table([], first_member)
+
+        assert isinstance(table, VCCableTable)
+        # allowed_vc_member_ids reaches the table as the cached member set it filters rows against.
+        assert {member.pk for member in table._vc_members} == {first_member.pk, second_member.pk}
+        assert first_member.virtual_chassis_id == virtual_chassis.pk
+
+    @pytest.mark.django_db
+    def test_get_table_drops_a_vc_member_outside_the_view_grant(self):
+        """An unconstrained grant leaves every member viewable, so only a constrained one proves the filter."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
+
+        _vc, (first_member, hidden_member) = make_virtual_chassis_members("cable-vc-scoped")
+        user = make_user_with_perms(
+            "cable-vc-scoped-user",
+            [("view", Device)],
+            constraints={"pk": first_member.pk},
+        )
+        view = DeviceCableTableView()
+        view.setup(make_request("get", user=user))
+
+        table = view.get_table([], first_member)
+
+        assert {member.pk for member in table._vc_members} == {first_member.pk}
+        assert hidden_member.virtual_chassis_id == first_member.virtual_chassis_id
 
 
 class TestDeviceModuleTableView:
@@ -1701,6 +1717,8 @@ class TestDeviceModuleTableView:
             side_effect=lambda p: (
                 p
                 in {
+                    "dcim.view_device",
+                    "dcim.view_modulebay",
                     "dcim.add_module",
                     "dcim.change_module",
                     "dcim.change_interface",
@@ -1739,6 +1757,7 @@ class TestDeviceModuleTableView:
             can_add_module_type=True,
             can_add_carrier_rule=True,
             can_add_module_bay_mapping=True,
+            can_map_existing_bay=True,
             can_add_module_type_mapping=True,
         )
         assert result is mock_table

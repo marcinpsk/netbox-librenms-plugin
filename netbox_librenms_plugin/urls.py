@@ -12,6 +12,7 @@ from .models import (
     NormalizationRule,
     PlatformMapping,
     PortStackLagPattern,
+    SerialSensorTypePattern,
 )
 from .views import (
     AddAsOOBView,
@@ -140,11 +141,21 @@ from .views import (
     PortStackLagPatternListView,
     PortStackLagPatternView,
     PromoteToHostView,
+    SerialSensorTypePatternBulkDeleteView,
+    SerialSensorTypePatternBulkExportYAMLView,
+    SerialSensorTypePatternBulkImportView,
+    SerialSensorTypePatternChangeLogView,
+    SerialSensorTypePatternCreateView,
+    SerialSensorTypePatternDeleteView,
+    SerialSensorTypePatternEditView,
+    SerialSensorTypePatternListView,
+    SerialSensorTypePatternView,
     RemoveServerMappingView,
     ReplaceModuleView,
     SetPreferredServerView,
     SaveUserPrefView,
     SaveVlanGroupOverridesView,
+    CableRemotePickerView,
     SingleCableVerifyView,
     SingleInterfaceVerifyView,
     SingleIPAddressVerifyView,
@@ -348,6 +359,12 @@ urlpatterns = [
         "device/<int:pk>/sync-cables/",
         SyncCablesView.as_view(),
         name="sync_device_cables",
+    ),
+    # Cable remote-end picker (modal + search/ports fragments + pick POST)
+    path(
+        "device/<int:pk>/cable-remote-picker/",
+        CableRemotePickerView.as_view(),
+        name="cable_remote_picker",
     ),
     # Sync IP addresses URL
     path(
@@ -1027,6 +1044,53 @@ urlpatterns = [
         PortStackLagPatternChangeLogView.as_view(),
         name="portstacklagpattern_changelog",
         kwargs={"model": PortStackLagPattern},
+    ),
+    # SerialSensorTypePattern
+    path(
+        "serial-sensor-types/",
+        SerialSensorTypePatternListView.as_view(),
+        name="serialsensortypepattern_list",
+    ),
+    path(
+        "serial-sensor-types/<int:pk>/",
+        SerialSensorTypePatternView.as_view(),
+        name="serialsensortypepattern_detail",
+    ),
+    path(
+        "serial-sensor-types/add/",
+        SerialSensorTypePatternCreateView.as_view(),
+        name="serialsensortypepattern_add",
+    ),
+    path(
+        "serial-sensor-types/import/",
+        SerialSensorTypePatternBulkImportView.as_view(),
+        name="serialsensortypepattern_bulk_import",
+    ),
+    path(
+        "serial-sensor-types/<int:pk>/edit/",
+        SerialSensorTypePatternEditView.as_view(),
+        name="serialsensortypepattern_edit",
+    ),
+    path(
+        "serial-sensor-types/<int:pk>/delete/",
+        SerialSensorTypePatternDeleteView.as_view(),
+        name="serialsensortypepattern_delete",
+    ),
+    path(
+        "serial-sensor-types/delete/",
+        SerialSensorTypePatternBulkDeleteView.as_view(),
+        name="serialsensortypepattern_bulk_delete",
+    ),
+    path(
+        "serial-sensor-types/export-yaml/",
+        SerialSensorTypePatternBulkExportYAMLView.as_view(),
+        name="serialsensortypepattern_bulk_export_yaml",
+    ),
+    path(
+        "serial-sensor-types/<int:pk>/changelog/",
+        SerialSensorTypePatternChangeLogView.as_view(),
+        name="serialsensortypepattern_changelog",
+        kwargs={"model": SerialSensorTypePattern},
     ),
     path("api/", include("netbox_librenms_plugin.api.urls")),
 ]
