@@ -95,7 +95,8 @@ class TestLibreNMSAPIMixinWiring:
 
 
 class TestTrailingSlashResilience:
-    """Every route stays reachable when something in front of NetBox drops the trailing slash.
+    """
+    Every route stays reachable when something in front of NetBox drops the trailing slash.
 
     NetBox runs with APPEND_SLASH, so a stripped slash is answered with a 301 back to the slashed
     form. A proxy that strips it again turns that into ERR_TOO_MANY_REDIRECTS, which an XHR shows
@@ -166,7 +167,8 @@ class TestTrailingSlashResilience:
 
 
 class TestMappingBulkImportViewsAreRegistered:
-    """Every mapping bulk-import view must be in NetBox's model-view registry.
+    """
+    Every mapping bulk-import view must be in NetBox's model-view registry.
 
     An explicit urls.py entry keeps the endpoint reachable, so a missing
     @register_model_view is invisible to a URL test: only the registry drives NetBox's
@@ -196,6 +198,108 @@ class TestMappingBulkImportViewsAreRegistered:
 
         missing = [name for name, view in views if "bulk_import" not in registered_names(view.queryset.model)]
         assert not missing, f"bulk-import views missing @register_model_view: {missing}"
+
+
+class TestSourceMarkerConvention:
+    """
+    The row-source marker is written and compared through one constant, never a bare string.
+
+    Every reader gates read-only OOB rows on this value, so a typo at one site silently turns a
+    display-only row into an actionable one. constants.OOB_INVENTORY_SOURCE is the single spelling.
+    """
+
+    def _is_source_access(self, node):
+        """Return whether *node* reads or writes the ``_source`` key of a row."""
+        import ast
+
+        if isinstance(node, ast.Call):
+            func = node.func
+            return (
+                isinstance(func, ast.Attribute)
+                and func.attr == "get"
+                and bool(node.args)
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "_source"
+            )
+        return (
+            isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant) and node.slice.value == "_source"
+        )
+
+    def _bare_marker_lines(self, tree):
+        import ast
+
+        hits = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Compare):
+                # Either operand may hold the access: `row["_source"] == "serial"` and
+                # `"serial" == row["_source"]` spell the marker inline just the same.
+                operands = [node.left, *node.comparators]
+                for first, second in zip(operands, operands[1:]):
+                    if any(
+                        self._is_source_access(access)
+                        and isinstance(literal, ast.Constant)
+                        and isinstance(literal.value, str)
+                        for access, literal in ((first, second), (second, first))
+                    ):
+                        hits.append(node.lineno)
+            elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+                if isinstance(node.value.value, str) and any(self._is_source_access(t) for t in node.targets):
+                    hits.append(node.lineno)
+            elif isinstance(node, ast.Dict):
+                for key, value in zip(node.keys, node.values):
+                    if (
+                        isinstance(key, ast.Constant)
+                        and key.value == "_source"
+                        and isinstance(value, ast.Constant)
+                        and isinstance(value.value, str)
+                    ):
+                        hits.append(value.lineno)
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                # get("_source", "main") and setdefault("_source", "main") write the marker too.
+                if (
+                    node.func.attr in ("get", "setdefault")
+                    and len(node.args) == 2
+                    and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value == "_source"
+                    and isinstance(node.args[1], ast.Constant)
+                    and isinstance(node.args[1].value, str)
+                ):
+                    hits.append(node.lineno)
+        return hits
+
+    def test_the_scan_reads_both_sides_of_a_comparison(self):
+        """A reversed comparison spells the marker just as inline as the usual order."""
+        import ast
+
+        usual = self._bare_marker_lines(ast.parse('if row["_source"] == "serial":\n    pass\n'))
+        reversed_order = self._bare_marker_lines(ast.parse('if "serial" == row["_source"]:\n    pass\n'))
+        via_get = self._bare_marker_lines(ast.parse('if "serial" == row.get("_source"):\n    pass\n'))
+
+        assert usual == [1], usual
+        assert reversed_order == [1], "a reversed comparison slipped past the scan"
+        assert via_get == [1], "a reversed .get() comparison slipped past the scan"
+
+    def test_the_scan_ignores_a_comparison_against_a_constant(self):
+        """Comparing against the named constant is the point, so it must not be reported."""
+        import ast
+
+        assert self._bare_marker_lines(ast.parse('if row["_source"] == SERIAL_INVENTORY_SOURCE:\n    pass\n')) == []
+        assert self._bare_marker_lines(ast.parse('if SERIAL_INVENTORY_SOURCE == row["_source"]:\n    pass\n')) == []
+
+    def test_no_production_module_spells_the_source_marker_inline(self):
+        import ast
+        from pathlib import Path
+
+        package = Path(__file__).resolve().parent.parent
+        offenders = {}
+        for source_file in sorted(package.rglob("*.py")):
+            if "tests" in source_file.parts or "migrations" in source_file.parts:
+                continue
+            lines = self._bare_marker_lines(ast.parse(source_file.read_text()))
+            if lines:
+                offenders[str(source_file.relative_to(package))] = lines
+
+        assert offenders == {}, f"use constants.OOB_INVENTORY_SOURCE instead: {offenders}"
 
 
 class TestCacheMixinWiring:
@@ -427,6 +531,17 @@ class TestRequiredObjectPermissionsWiring:
 
         assert NetBoxObjectPermissionMixin in SingleIPAddressVerifyView.__mro__
         assert ("view", Device) in SingleIPAddressVerifyView.required_object_permissions.get("POST", [])
+
+    def test_capture_data_shape_has_required_object_permissions(self):
+        # GET-gated (not POST): the capture view reads a device's LibreNMS data, so it must carry
+        # the permission mixins and require view-Device. A dropped mixin would 500 or silently
+        # stop enforcing the gate — TestCaptureDataShapePermissionGate verifies the live has_perm.
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.views.data_shapes import CaptureDataShapeView
+
+        self._assert_has_mixins(CaptureDataShapeView)
+        assert CaptureDataShapeView.required_object_permissions.get("GET") == [("view", Device)]
 
 
 class TestViewPropertyLazyInit:
@@ -730,6 +845,40 @@ class TestSingleCableVerifyServerKey:
             assert mock_sync_device.call_args[1]["server_key"] == "fallback-server"
             cache_key_arg = mock_cache.get.call_args[0][0]
             assert "fallback-server" in cache_key_arg
+
+
+@pytest.mark.django_db
+class TestCaptureDataShapePermissionGate:
+    """The capture view's object-permission gate is enforced via the live user.has_perm, not just wiring."""
+
+    def _view_for_user(self, user):
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.views.data_shapes import CaptureDataShapeView
+
+        view = CaptureDataShapeView()
+        request = RequestFactory().get("/")
+        request.user = user
+        view.request = request
+        return view
+
+    def test_user_without_view_device_is_denied(self):
+        """A user lacking dcim.view_device fails the GET gate (real has_perm, not a mock)."""
+        from django.contrib.auth import get_user_model
+
+        user = get_user_model().objects.create(username="cap-noperm", is_active=True)
+        has_all, missing = self._view_for_user(user).check_object_permissions("GET")
+        assert has_all is False
+        assert "dcim.view_device" in missing
+
+    def test_user_with_view_device_is_permitted(self):
+        """A superuser (has dcim.view_device) passes the GET gate."""
+        from django.contrib.auth import get_user_model
+
+        user = get_user_model().objects.create(username="cap-super", is_active=True, is_superuser=True)
+        has_all, missing = self._view_for_user(user).check_object_permissions("GET")
+        assert has_all is True
+        assert missing == []
 
 
 class TestGatedViewsResolveThroughRestrictedQuerysets:
@@ -1519,7 +1668,8 @@ class TestImportMappingPermissionOrder:
 
 @pytest.mark.django_db
 class TestModuleMoveRequiresNetBoxRelocation:
-    """NetBox relocates a module's whole subtree only from 4.7.
+    """
+    NetBox relocates a module's whole subtree only from 4.7.
 
     Measured on 4.4.0 and 4.6.10: the same assignment is accepted with no error, the module row
     moves, and its interfaces, its nested module bay and the child module installed in that bay
@@ -1625,7 +1775,8 @@ class TestModuleMoveRequiresNetBoxRelocation:
 
 @pytest.mark.django_db
 class TestInstallRefusesADuplicateSerial:
-    """A serial already installed on the target device must not be installed a second time.
+    """
+    A serial already installed on the target device must not be installed a second time.
 
     The rendered row is advisory: it comes from a cache and a scripted POST never reads it. The
     refusal therefore lives on the write path, not in the table.
@@ -1650,7 +1801,8 @@ class TestInstallRefusesADuplicateSerial:
 
     @staticmethod
     def _post_install(device, module_type, empty_bay, serial, user=None):
-        """Drive a real InstallModuleView POST for a cached row carrying `serial`.
+        """
+        Drive a real InstallModuleView POST for a cached row carrying `serial`.
 
         Both the posted field and the cached row carry the serial: this branch reads it from the
         POST, and branches above take it from the selected cached inventory row.
@@ -1719,7 +1871,8 @@ class TestInstallRefusesADuplicateSerial:
         assert Module.objects.filter(device=device).count() == 2
 
     def test_an_add_only_operator_is_refused_too(self):
-        """Installing needs add_module, not change_module, so existence must be read unrestricted.
+        """
+        Installing needs add_module, not change_module, so existence must be read unrestricted.
 
         A guard that searched only modules this operator may CHANGE would come back empty here and
         let the duplicate through.
@@ -1812,7 +1965,8 @@ class TestInstallRefusesADuplicateSerial:
 
 @pytest.mark.django_db
 class TestIdentityIsNotGatedOnBayMapping:
-    """A module already installed must be reported even when bay matching fails.
+    """
+    A module already installed must be reported even when bay matching fails.
 
     Bay matching runs on operator-configured name mappings and is expected to be wrong sometimes.
     Serial is evidence about the hardware. Deriving "is this already in NetBox" from the mapping
@@ -1874,7 +2028,7 @@ class TestIdentityIsNotGatedOnBayMapping:
         return str(table.render_module_bay(record.get("module_bay", "-"), record))
 
     def test_an_unmatched_bay_reports_where_the_module_actually_is(self):
-        """ "No matching bay" alone hides the fact that NetBox already holds the part."""
+        """Report where NetBox holds a part when no bay matches."""
         prefix = "identity-render"
         inventory = [
             {
@@ -1943,7 +2097,8 @@ class TestIdentityIsNotGatedOnBayMapping:
 
 
 class TestModuleCreationIsGuarded:
-    """Only guarded code may construct a Module in the module-sync views.
+    """
+    Only guarded code may construct a Module in the module-sync views.
 
     The device-scoped duplicate check is easy to forget when a fourth creation path is added, and
     the failure is silent: a second NetBox record for one physical part. This asserts where the

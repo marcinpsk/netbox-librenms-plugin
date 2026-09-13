@@ -12,6 +12,7 @@ from django.urls import reverse
 from django.views import View
 from virtualization.models import VirtualMachine, VMInterface
 
+from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.interface_relationships import (
     build_interface_index,
     filter_interface_index,
@@ -78,7 +79,7 @@ class SyncInterfacesView(
         else:
             raise Http404(f"Invalid object type: {object_type}")
 
-    def post(self, request, object_type, object_id):
+    def post(self, request, object_type, object_id):  # noqa: C901
         """Sync selected interfaces from LibreNMS into NetBox."""
         # Set permissions dynamically based on object type
         self.required_object_permissions = {
@@ -105,7 +106,7 @@ class SyncInterfacesView(
         # stale/unknown key — the old `or self.librenms_api.server_key` fallback rebuilt
         # the lazy client, which can resolve to a different server (wrong-server sync) or
         # raise on a misconfigured default (500).
-        server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return redirect(
@@ -153,7 +154,7 @@ class SyncInterfacesView(
                 self._auto_selected_port_ids.update(added - visible_port_ids)
         host_port_id_counts = {}
         for port in ports_data:
-            if port.get("_source") == "oob":
+            if port.get("_source") == OOB_INVENTORY_SOURCE:
                 continue
             port_id = normalize_librenms_port_id(port.get("port_id"))
             if port_id is not None:
@@ -314,7 +315,8 @@ class SyncInterfacesView(
         ports_by_id = {
             port_id: port
             for port in ports_data
-            if (port_id := normalize_librenms_port_id(port.get("port_id"))) is not None and port.get("_source") != "oob"
+            if (port_id := normalize_librenms_port_id(port.get("port_id"))) is not None
+            and port.get("_source") != OOB_INVENTORY_SOURCE
         }
         candidate_port_ids = [
             ports_by_id[port_id].get("port_id", port_id)
@@ -362,7 +364,7 @@ class SyncInterfacesView(
             return cached_data.get("port_stack_relationships", {})
         return {}
 
-    def _sync_lag_and_parent_relationships(
+    def _sync_lag_and_parent_relationships(  # noqa: C901
         self,
         obj,
         ports_data,
@@ -384,6 +386,7 @@ class SyncInterfacesView(
             ports_data: The LibreNMS port dicts for the device.
             relationships (dict): The ``{lag_members, sub_interfaces}`` mapping to apply.
             server_key (str): The LibreNMS server key scoping stored-id reads.
+            excluded_columns: Fields that the current sync must not update.
 
         Returns:
             None
@@ -429,7 +432,7 @@ class SyncInterfacesView(
         valid_name_port_ids = {
             normalize_librenms_port_id(port.get("port_id"))
             for port in ports_data
-            if port.get("_source") != "oob"
+            if port.get("_source") != OOB_INVENTORY_SOURCE
             and syncable_interface_name(port, interface_name_field, relationship_writer_model) is not None
         }
         selected_edge_source_ids &= {str(port_id) for port_id in valid_name_port_ids if port_id is not None}
@@ -440,7 +443,7 @@ class SyncInterfacesView(
             # already skips them. Exclude them here too: on a page where an OOB row shares the host display
             # name, adding its port_id would let the LAG/parent pass persist links on the hidden controller
             # row instead of the host interface.
-            if port.get("_source") == "oob":
+            if port.get("_source") == OOB_INVENTORY_SOURCE:
                 continue
             pid = normalize_librenms_port_id(port.get("port_id"))
             if pid is None or pid not in unique_host_port_ids:
@@ -765,7 +768,7 @@ class SyncInterfacesView(
         logger.info("Bulk sync: set %s.%s = %s", source_iface.name, relation_field, related_iface.name)
         return True
 
-    def sync_selected_interfaces(
+    def sync_selected_interfaces(  # noqa: C901
         self,
         obj,
         ports_data,
@@ -821,7 +824,7 @@ class SyncInterfacesView(
                     # sync_interface(). They must not sync onto the host — and skipping them prevents
                     # a main/OOB interface-name collision (both "eth0") from double-processing one
                     # selection and overwriting the host interface with the OOB row's port_id/attrs.
-                    if port.get("_source") == "oob":
+                    if port.get("_source") == OOB_INVENTORY_SOURCE:
                         continue
                     port_id = normalize_librenms_port_id(port.get("port_id"))
 
@@ -840,7 +843,7 @@ class SyncInterfacesView(
         auto_selected_port_ids = getattr(self, "_auto_selected_port_ids", set())
         owners = {}
         for port in ports_data:
-            if port.get("_source") == "oob":
+            if port.get("_source") == OOB_INVENTORY_SOURCE:
                 continue
             port_id = normalize_librenms_port_id(port.get("port_id"))
             if (
@@ -856,8 +859,11 @@ class SyncInterfacesView(
 
     def _prepare_vlan_lookup_maps(self, vlan_scope_devices):
         """Build VLAN scope maps from owner rows locked for this sync transaction."""
-        vlan_groups = self.get_vlan_groups_for_devices(vlan_scope_devices)
-        lookup_maps = self._build_vlan_lookup_maps(vlan_groups)
+        # The gate checks add/change on the interface model, not IPAM, so read VLANs as the
+        # caller. A caller without the grant matches no VLAN, which the warning below names.
+        vlan_scope_user = self.vlan_scope_user()
+        vlan_groups = self.get_vlan_groups_for_devices(vlan_scope_devices, user=vlan_scope_user)
+        lookup_maps = self._build_vlan_lookup_maps(vlan_groups, user=vlan_scope_user)
         self._lookup_maps = lookup_maps
         self._lookup_maps_by_owner = {
             owner.pk: self.restrict_vlan_lookup_maps(
@@ -867,6 +873,26 @@ class SyncInterfacesView(
             for owner in vlan_scope_devices
         }
         self._vlan_owners_by_id = {owner.pk: owner for owner in vlan_scope_devices}
+        hidden = self.hidden_vlan_permissions(vlan_scope_devices, vlan_scope_user)
+        # A hidden VLAN reads as absent, so syncing would clear an existing untagged assignment and
+        # drop hidden tagged VLANs. Skip the VLAN write entirely rather than destroy what we
+        # cannot see. A constrained grant hides rows while passing the permission-name check, so
+        # the row comparison below is what catches it.
+        self._vlan_scope_incomplete = bool(hidden) or self.vlan_scope_is_incomplete(vlan_scope_devices, vlan_scope_user)
+        if hidden:
+            messages.warning(
+                self.request,
+                f"VLANs were not synced for the selected interfaces: your account is missing "
+                f"{', '.join(hidden)}. Existing VLAN assignments were left unchanged.",
+            )
+        elif self._vlan_scope_incomplete:
+            # A constrained grant passes the permission-name check, so the branch above says
+            # nothing. Without this the VLAN write is skipped silently and the user cannot tell why.
+            messages.warning(
+                self.request,
+                "VLANs were not synced for the selected interfaces: your account cannot view every "
+                "VLAN in scope for this device. Existing VLAN assignments were left unchanged.",
+            )
 
     def _lock_selected_device_targets(self, obj):
         """Lock the page Device and its current chassis scope in the shared lock order."""
@@ -1016,8 +1042,8 @@ class SyncInterfacesView(
             or changed
         )
 
-        # Sync VLANs if not excluded
-        if "vlans" not in exclude_columns:
+        # Sync VLANs if not excluded, and never when the caller cannot read the whole VLAN scope.
+        if "vlans" not in exclude_columns and not getattr(self, "_vlan_scope_incomplete", False):
             changed = self._sync_interface_vlans(interface, librenms_interface) or changed
         if changed and getattr(self, "_mutated", None) is not None:
             self._mutated = True
@@ -1135,6 +1161,7 @@ class SyncInterfacesView(
     def _sync_interface_vlans(self, interface, librenms_port):
         """
         Sync VLAN assignments from LibreNMS to NetBox interface.
+
         Sets mode, untagged_vlan, and tagged_vlans based on LibreNMS data.
 
         Args:
@@ -1221,7 +1248,7 @@ class DeleteNetBoxInterfacesView(
         else:
             raise Http404(f"Invalid object type: {object_type}")
 
-    def post(self, request, object_type, object_id):
+    def post(self, request, object_type, object_id):  # noqa: C901
         """Delete selected NetBox-only interfaces not present in LibreNMS."""
         # Set permissions dynamically based on object type
         self.required_object_permissions = {
@@ -1656,7 +1683,7 @@ class _BaseRelationshipSyncView(
         duplicate_port_ids = set()
         for port in ports:
             normalized_id = normalize_librenms_port_id(port.get("port_id"))
-            if port.get("_source") == "oob" or normalized_id is None:
+            if port.get("_source") == OOB_INVENTORY_SOURCE or normalized_id is None:
                 continue
             if normalized_id in ports_by_id:
                 duplicate_port_ids.add(normalized_id)
@@ -1679,7 +1706,7 @@ class _BaseRelationshipSyncView(
             related_name = related_port.get(interface_name_field) or ""
         return source_port, related_port, source_name, related_name, interface_name_field
 
-    def post(self, request, object_type, object_id):
+    def post(self, request, object_type, object_id):  # noqa: C901
         # Set the object-type-scoped permissions BEFORE the gate (an unsupported type raises
         # Http404 here). JSON endpoint: require_all_permissions would return the mixin's
         # HTML/redirect on denial, breaking the fetch() caller, so use the _json variant.
@@ -1688,7 +1715,7 @@ class _BaseRelationshipSyncView(
             return error
 
         obj = self._get_object(object_type, object_id)
-        server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
             return JsonResponse({"error": "Selected LibreNMS server is no longer configured."}, status=400)
         if error := self._migrated_donor_error(obj, server_key):

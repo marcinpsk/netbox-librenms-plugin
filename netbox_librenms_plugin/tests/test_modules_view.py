@@ -87,7 +87,8 @@ def _captured_table_view(view):
 
 @pytest.mark.django_db
 class TestInventoryClassIncludeRule:
-    """Admit an entPhysicalClass the built-in allowlist does not carry.
+    """
+    Admit an entPhysicalClass the built-in allowlist does not carry.
 
     A Juniper MX304 reports both Routing Engines with entPhysicalClass "other".
     INVENTORY_CLASSES has no "other", so the modules tab showed neither of them.
@@ -194,8 +195,10 @@ class TestInventoryClassIncludeRule:
         assert seeded.get().enabled is True
 
     def test_the_row_name_falls_back_to_the_description(self):
-        """Both Routing Engines report entPhysicalName "JNP304-RE-S", so the name cannot
-        tell them apart. The description carries "Routing Engine 0" and "1"."""
+        """
+        Both Routing Engines report entPhysicalName "JNP304-RE-S", so the name cannot
+        tell them apart. The description carries "Routing Engine 0" and "1".
+        """
         collected = self._collect(self._inventory(), [self._include_rule()])
         view = _make_view()
         names = [
@@ -206,8 +209,10 @@ class TestInventoryClassIncludeRule:
         assert names == ["Routing Engine 0", "Routing Engine 1"]
 
     def test_a_numeric_description_still_names_the_rule_admitted_row(self):
-        """LibreNMS sends an all-digit entPhysicalDescr as a JSON number, which the name
-        fallback stripped directly."""
+        """
+        LibreNMS sends an all-digit entPhysicalDescr as a JSON number, which the name
+        fallback stripped directly.
+        """
         inventory = self._inventory()
         inventory[1]["entPhysicalDescr"] = 20250907
         collected = self._collect(inventory, [self._include_rule()])
@@ -219,7 +224,8 @@ class TestInventoryClassIncludeRule:
         assert row["description"] == "20250907"
 
     def test_a_child_of_a_rule_admitted_parent_is_not_also_a_top_row(self):
-        """The ancestor walk recognised only built-in classes.
+        """
+        The ancestor walk recognised only built-in classes.
 
         A standard-class child of a rule-admitted parent therefore reached top level while
         _get_sub_components() also rendered it under that parent: one duplicated row, and one
@@ -263,7 +269,8 @@ class TestInventoryClassIncludeRule:
 
 @pytest.mark.django_db
 class TestSerialRulesFollowTheTargetDevice:
-    """Serial rules are manufacturer-scoped, so the device a row targets picks them.
+    """
+    Serial rules are manufacturer-scoped, so the device a row targets picks them.
 
     A virtual-chassis row can resolve to a member whose manufacturer differs from the page
     device's. Normalizing the whole snapshot up front with the page manufacturer gave those
@@ -315,7 +322,8 @@ class TestSerialRulesFollowTheTargetDevice:
         assert self._serial_for(member, page_manufacturer=page) == "BBB-12345"
 
     def test_module_type_matching_uses_the_targets_manufacturer(self):
-        """Type mappings are manufacturer-scoped too.
+        """
+        Type mappings are manufacturer-scoped too.
 
         The member vendor maps this LibreNMS model to its own type; the page device has no such
         mapping. Matching against the page manufacturer therefore resolves nothing at all, and a
@@ -354,7 +362,8 @@ class TestSerialRulesFollowTheTargetDevice:
         assert row_for(page)["module_type_id"] is None
 
     def test_a_member_rule_applies_even_though_the_preload_used_the_page_manufacturer(self):
-        """_build_context preloads for the page device, and rows resolve per target member.
+        """
+        _build_context preloads for the page device, and rows resolve per target member.
 
         apply_normalization_rules loads a manufacturer it was not preloaded for and caches it
         into the same dict, so the member's rule still applies and costs one query per vendor.
@@ -389,7 +398,8 @@ class TestSerialRulesFollowTheTargetDevice:
 
 
 class TestRowOrderIsStableAcrossAnInstall:
-    """Installing a module must not move its row.
+    """
+    Installing a module must not move its row.
 
     The rows used to be grouped by status, and installing a module flips its status to
     "Installed", which pulled the row to the top of the table under the user.
@@ -438,7 +448,8 @@ class TestRowOrderIsStableAcrossAnInstall:
 
 @pytest.mark.django_db
 class TestFpcSlotMatchesOnSlashedPositions:
-    """A Juniper module bay position is "fpc/pic", so the guard must read the FPC from it.
+    """
+    A Juniper module bay position is "fpc/pic", so the guard must read the FPC from it.
 
     Reported from live NetBox: an MX304 MIC sits in bay LCMIC0 at position "0/0", which the
     device-type library needs so the module type's "Transceiver {module}/N" template expands to
@@ -492,7 +503,8 @@ class TestFpcSlotMatchesOnSlashedPositions:
 
     @pytest.mark.parametrize("position", ["01A", "02A", "03D", "PCIe1", "swp3", "FPC1", "PSU0"])
     def test_a_digit_bearing_but_non_numeric_position_fails_closed(self, position):
-        """These are real bay positions, and none of them names an FPC.
+        """
+        These are real bay positions, and none of them names an FPC.
 
         A fix that pulled the leading digits out of "01A" would read FPC 1 and match a
         descriptor for a different slot. Only a wholly numeric component counts.
@@ -509,7 +521,8 @@ class TestFpcSlotMatchesOnSlashedPositions:
         ["0/FT0", "0/PM0", "0/RP0", "0/RP1", "0/IMD", "0/PS0/M0", "2/x1", "1/1/c1"],
     )
     def test_a_compound_position_whose_tail_is_not_numeric_fails_closed(self, position):
-        """Real shipping positions: fan trays, power modules, route processors, Nokia XIOM.
+        """
+        Real shipping positions: fan trays, power modules, route processors, Nokia XIOM.
 
         The leading digit is a chassis index, not an FPC, so reading it alone would accept a
         transceiver descriptor against a fan tray bay. Only a wholly numeric fpc/pic counts.
@@ -524,7 +537,8 @@ class TestFpcSlotMatchesOnSlashedPositions:
         assert BaseModuleTableView._fpc_slot_matches("QSFP @ 0/0/1", bay) is False
 
     def test_the_regex_mapping_resolves_through_to_the_bay(self):
-        """The whole sequence: the mapping resolves the bay name, then the guard keeps it.
+        """
+        The whole sequence: the mapping resolves the bay name, then the guard keeps it.
 
         This is the shape the bug actually broke. The mapping matched and produced the right
         bay name, and the guard then discarded it, so the lookup returned None.
@@ -4386,7 +4400,8 @@ class TestMatchedInterfaceLinking:
         assert interface_map[43] == interface_c
 
     def test_netbox_forbids_two_interfaces_sharing_a_name_on_one_device(self):
-        """Pin the constraint that makes the duplicate-name dedupe in _build_interface_indexes unreachable.
+        """
+        Pin the constraint that makes the duplicate-name dedupe in _build_interface_indexes unreachable.
 
         _build_interface_indexes only ever receives a Device, and dcim_interface_unique_device_name
         forbids two interfaces of one device sharing a name, so its duplicate_names branch cannot
@@ -5919,3 +5934,115 @@ def test_included_numeric_inventory_class_renders_on_the_sync_page(client, setti
         assert rows[0]["module_bay_id"] == device.modulebays.get(name="Slot 1").pk
     else:
         assert rows[0]["status"] == "No Bay"
+
+
+@pytest.mark.django_db
+def test_vc_inventory_ignore_rules_follow_each_attributed_member(client, settings):
+    """VC rows must use the attributed member's manufacturer rules and device serial."""
+    from dcim.models import Manufacturer, VirtualChassis
+    from django.core.cache import cache
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_superuser
+    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    configure_servers(
+        settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
+    )
+    page_manufacturer = Manufacturer.objects.create(name="VC Page Vendor", slug="vc-page-vendor")
+    member_manufacturer = Manufacturer.objects.create(name="VC Member Vendor", slug="vc-member-vendor")
+    page = make_device_with_module_bays(
+        "vc-ignore-page",
+        ["Slot 1"],
+        manufacturer=page_manufacturer,
+        serial="PAGE-SERIAL",
+    )
+    member = make_device_with_module_bays(
+        "vc-ignore-member",
+        ["Slot 1"],
+        manufacturer=member_manufacturer,
+        serial="MEMBER-SERIAL",
+    )
+    virtual_chassis = VirtualChassis.objects.create(name="vc-ignore-rules", master=page)
+    for position, device in ((1, page), (2, member)):
+        device.virtual_chassis = virtual_chassis
+        device.vc_position = position
+        device.save(update_fields=["virtual_chassis", "vc_position"])
+
+    InventoryIgnoreRule.objects.filter(match_type=InventoryIgnoreRule.MATCH_SERIAL_DEVICE).delete()
+    InventoryIgnoreRule.objects.create(
+        name="Page-only rule",
+        match_type=InventoryIgnoreRule.MATCH_ENDS_WITH,
+        pattern="Page policy item",
+        action=InventoryIgnoreRule.ACTION_SKIP,
+        require_serial_match_parent=False,
+        manufacturer=page_manufacturer,
+    )
+    InventoryIgnoreRule.objects.create(
+        name="Member-only rule",
+        match_type=InventoryIgnoreRule.MATCH_ENDS_WITH,
+        pattern="Member policy item",
+        action=InventoryIgnoreRule.ACTION_SKIP,
+        require_serial_match_parent=False,
+        manufacturer=member_manufacturer,
+    )
+    InventoryIgnoreRule.objects.create(
+        name="Member serial rule",
+        match_type=InventoryIgnoreRule.MATCH_SERIAL_DEVICE,
+        pattern="",
+        action=InventoryIgnoreRule.ACTION_SKIP,
+        require_serial_match_parent=False,
+        manufacturer=member_manufacturer,
+    )
+    inventory = [
+        {
+            "entPhysicalIndex": 91,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Member policy item",
+            "entPhysicalModelName": "MEMBER-POLICY-MODEL",
+            "entPhysicalParentRelPos": 2,
+            "entPhysicalContainedIn": 0,
+        },
+        {
+            "entPhysicalIndex": 92,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Page policy item",
+            "entPhysicalModelName": "PAGE-POLICY-MODEL",
+            "entPhysicalParentRelPos": 2,
+            "entPhysicalContainedIn": 0,
+        },
+        {
+            "entPhysicalIndex": 93,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Member serial item",
+            "entPhysicalModelName": "MEMBER-SERIAL-MODEL",
+            "entPhysicalSerialNum": member.serial,
+            "entPhysicalContainedIn": 0,
+        },
+        {
+            "entPhysicalIndex": 94,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "OOB Member policy item",
+            "entPhysicalModelName": "OOB-MODEL",
+            "entPhysicalParentRelPos": 2,
+            "entPhysicalContainedIn": 0,
+            "_source": "oob",
+        },
+    ]
+    payload = trusted_module_inventory_payload(page, inventory, librenms_id=9302)
+    cache.set(DeviceModuleTableView().get_cache_key(page, "inventory", server_key="default"), payload, 300)
+    cache.set("librenms_device_info_default_9302", (True, {"device_id": 9302, "hostname": page.name}), 300)
+    client.force_login(make_superuser("vc-ignore-rules-user"))
+
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[page.pk]),
+        {"tab": "modules", "server_key": "default"},
+    )
+
+    assert response.status_code == 200
+    rows = list(response.context["module_sync"]["table"].data)
+    assert {row["name"] for row in rows} == {"OOB Member policy item", "Page policy item"}
+    assert next(row for row in rows if row["name"] == "OOB Member policy item")["status"] == "OOB"
+    assert next(row for row in rows if row["name"] == "Page policy item")["selected_device_id"] == member.pk

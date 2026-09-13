@@ -106,7 +106,8 @@ def _seeded_model_rows():
 
 
 def _seeded_sap_rows():
-    """Yield ``(model, lookup_field, value_field, rows)`` for the seed that UPDATES existing rows.
+    """
+    Yield ``(model, lookup_field, value_field, rows)`` for the seed that UPDATES existing rows.
 
     Kept apart from :func:`_seeded_model_rows` because migration 0016 sets a second field on rows
     0013 already created, so these rows are applied with ``update()`` rather than
@@ -121,7 +122,8 @@ def _seeded_sap_rows():
 
 
 def _seeded_rule_rows():
-    """Yield ``(model, lookup, defaults)`` for every rule row the data migrations seed.
+    """
+    Yield ``(model, lookup, defaults)`` for every rule row the data migrations seed.
 
     Kept apart from :func:`_seeded_model_rows` because these rows are identified by a
     composite lookup rather than one field. The values are read from the migrations so the
@@ -144,6 +146,17 @@ def _seeded_rule_rows():
     )
 
 
+def restore_inventory_rule_scoping():
+    """Re-apply migration 0019's manufacturer scoping by running the migration's own function."""
+    import importlib
+    from types import SimpleNamespace
+
+    from django.apps import apps as global_apps
+
+    migration = importlib.import_module("netbox_librenms_plugin.migrations.0019_inventoryignorerule_manufacturer")
+    migration.scope_include_rule_to_juniper(global_apps, SimpleNamespace(connection=SimpleNamespace(alias="default")))
+
+
 def seed_migration_rows():
     """Recreate every row the plugin's data migrations seed, with its declared value."""
     for model, lookup_field, value_field, rows in _seeded_model_rows():
@@ -159,6 +172,10 @@ def seed_migration_rows():
 
     for model, lookup, defaults in _seeded_rule_rows():
         model.objects.update_or_create(**lookup, defaults=defaults)
+
+    # The declared rows carry no manufacturer, so a restored include rule would come back
+    # vendor-agnostic while a fresh migrate scopes it. Re-run the migration's own scoping.
+    restore_inventory_rule_scoping()
 
 
 _transactional_seed_restore_required = False
@@ -251,7 +268,6 @@ def _restore_migration_seeded_rows(request):
 @pytest.fixture(scope="session", autouse=True)
 def _reseed_after_transactional_flush(django_db_setup, django_db_blocker):
     """Restore data-migration seeds before and after a reused-database run."""
-
     from django.db import connection
 
     # Pure test runs do not switch the connection to an isolated test database.
@@ -577,6 +593,62 @@ def make_superuser(username="review-su"):
 
 
 # =============================================================================
+# Data-shape recording fixtures (replay real LibreNMS responses over HTTP)
+# =============================================================================
+
+
+def make_recording_api(url, *, server_key="test", token="test-token"):
+    """Build a real LibreNMSAPI for the mock server through Django's settings seam."""
+    from django.conf import settings
+    from django.test import override_settings
+
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+    servers_config = {
+        server_key: {
+            "librenms_url": url,
+            "api_token": token,
+            "cache_timeout": 0,
+            "verify_ssl": False,
+        }
+    }
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config.setdefault("netbox_librenms_plugin", {})["servers"] = servers_config
+    with override_settings(PLUGINS_CONFIG=plugin_config):
+        return LibreNMSAPI(server_key=server_key)
+
+
+@pytest.fixture
+def recording_server(monkeypatch):
+    """Yield a loader that starts mock servers with real API clients and stops them during teardown."""
+    from netbox_librenms_plugin.tests.mock_librenms_server import MockLibreNMSServer
+
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    started = []
+
+    def _load(recording, *, server_key="test"):
+        server = MockLibreNMSServer().start()
+        started.append(server)
+        server.load_recording(recording)
+        # A recording omits the instance-wide sensors route when the target device has no serial
+        # sensors. Successful capture tests still need a definitive empty response from the source
+        # server; an unregistered route is a 404 fetch failure, not proof that the device has none.
+        if "GET /api/v0/resources/sensors" not in server.routes:
+            server.register(
+                "/api/v0/resources/sensors",
+                {"status": "ok", "sensors": []},
+                method="GET",
+            )
+        return server, make_recording_api(server.url, server_key=server_key)
+
+    yield _load
+
+    for server in started:
+        server.stop()
+
+
+# =============================================================================
 # Configuration Fixtures
 # =============================================================================
 
@@ -737,7 +809,7 @@ def mock_plugins_config_multi_server_mapping():
                 },
                 "mock-dev": {
                     "display_name": "Mock",
-                    "librenms_url": "http://mock.example.com",
+                    "librenms_url": "https://mock.example.com",
                 },
             }
         }

@@ -15,6 +15,7 @@ from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views import View
 
+from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
@@ -55,9 +56,9 @@ NO_LIBRENMS_SERVER_MESSAGE = (
     "No LibreNMS server is configured. Add a server to the plugin configuration before syncing modules."
 )
 
-# OOB-controller rows are merged into the cached snapshot for display only. Every entry point that
-# can act on an inventory row rejects them here, so the marker and the reason are declared once.
-OOB_INVENTORY_SOURCE = "oob"
+# OOB-controller rows are merged into the cached snapshot for display only, and every entry point
+# that can act on an inventory row rejects them. The marker itself is shared with the readers in
+# constants.py; only the wording of the refusal belongs to this module.
 OOB_INVENTORY_READ_ONLY_REASON = "OOB controller inventory is read-only"
 
 
@@ -1077,7 +1078,9 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         # Load ignore rules so the branch respects the same filters shown in the table
         from netbox_librenms_plugin.utils import get_enabled_ignore_rules
 
-        ignore_rules = get_enabled_ignore_rules()
+        ignore_rules = get_enabled_ignore_rules(
+            getattr(getattr(target_device, "device_type", None), "manufacturer", None)
+        )
         device_serial = (getattr(target_device, "serial", None) or "").strip()
 
         # Build index map and collect the branch to install
@@ -1718,13 +1721,23 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             messages.warning(request, "None of the selected indices matched cached inventory.")
             return _modules_action_response(request, page_device, server_key)
 
-        # Load ignore rules once; they're evaluated per-row inside the install
-        # loop using the *resolved* target device serial, since VC rows may
-        # switch to a different member via device_selection_<ent_index>.
+        # Ignore rules are evaluated per-row inside the install loop against the *resolved* target
+        # device, since VC rows may switch to a different member via device_selection_<ent_index>.
+        # The rules are manufacturer-scoped and VC members can carry different device types, so
+        # resolve them per target and cache by manufacturer rather than loading the page device's
+        # set once for every row.
         from netbox_librenms_plugin.utils import get_enabled_ignore_rules
         from netbox_librenms_plugin.views.base.modules_view import _check_ignore_rules
 
-        ignore_rules = get_enabled_ignore_rules()
+        ignore_rules_by_manufacturer = {}
+
+        def _ignore_rules_for(device):
+            """Return the enabled ignore rules that apply to *device*, loading each vendor once."""
+            manufacturer = getattr(getattr(device, "device_type", None), "manufacturer", None)
+            key = getattr(manufacturer, "pk", None)
+            if key not in ignore_rules_by_manufacturer:
+                ignore_rules_by_manufacturer[key] = get_enabled_ignore_rules(manufacturer)
+            return ignore_rules_by_manufacturer[key]
 
         # Preload all ModuleBayMappings once to avoid N+1 per-item queries.
         # Manufacturer-scoping happens per-iteration since target_device may
@@ -1771,6 +1784,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     )
                     if invalid_selected_device:
                         invalid_selection_seen = True
+                    ignore_rules = _ignore_rules_for(target_device)
                     if ignore_rules:
                         target_serial = (getattr(target_device, "serial", None) or "").strip()
                         rule_action = _check_ignore_rules(

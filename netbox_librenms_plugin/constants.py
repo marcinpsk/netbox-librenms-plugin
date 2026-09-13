@@ -15,7 +15,8 @@ INTERFACE_NAME_FIELDS = frozenset({DEFAULT_INTERFACE_NAME_FIELD, "ifDescr"})
 
 
 def is_supported_interface_name_field(value):
-    """Return whether *value* names a LibreNMS port field usable as the interface name.
+    """
+    Return whether *value* names a LibreNMS port field usable as the interface name.
 
     The set membership alone raises TypeError on an unhashable value, and a preference can
     arrive from a JSON body or a cache entry. Every site tests through this one predicate so
@@ -30,6 +31,13 @@ def is_supported_interface_name_field(value):
 # — can't misclassify a normal device as an OOB controller.
 OOB_TYPE_PATTERN = re.compile(r"\b(idrac|ilo|ipmi|bmc|drac|cimc|oob)\d*\b", re.IGNORECASE)
 OOB_TYPES = ("idrac", "ilo", "ipmi", "bmc", "drac", "cimc", "oob")
+
+# Marker the interface/cable/module views stamp on rows merged in from an OOB controller. The
+# rows are display-only, so every reader gates on this one value; a bare literal at each site
+# meant a typo silently turned a read-only row into an actionable one.
+OOB_INVENTORY_SOURCE = "oob"
+MAIN_INVENTORY_SOURCE = "main"
+SERIAL_INVENTORY_SOURCE = "serial"
 
 # Shared "From OOB controller" badge markup (the bare <span>; callers add any leading space).
 # Centralised so a restyle (color/title/text) happens in one place instead of drifting across the
