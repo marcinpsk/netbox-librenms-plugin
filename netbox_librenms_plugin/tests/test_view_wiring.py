@@ -95,7 +95,8 @@ class TestLibreNMSAPIMixinWiring:
 
 
 class TestTrailingSlashResilience:
-    """Every route stays reachable when something in front of NetBox drops the trailing slash.
+    """
+    Every route stays reachable when something in front of NetBox drops the trailing slash.
 
     NetBox runs with APPEND_SLASH, so a stripped slash is answered with a 301 back to the slashed
     form. A proxy that strips it again turns that into ERR_TOO_MANY_REDIRECTS, which an XHR shows
@@ -166,7 +167,8 @@ class TestTrailingSlashResilience:
 
 
 class TestMappingBulkImportViewsAreRegistered:
-    """Every mapping bulk-import view must be in NetBox's model-view registry.
+    """
+    Every mapping bulk-import view must be in NetBox's model-view registry.
 
     An explicit urls.py entry keeps the endpoint reachable, so a missing
     @register_model_view is invisible to a URL test: only the registry drives NetBox's
@@ -199,7 +201,8 @@ class TestMappingBulkImportViewsAreRegistered:
 
 
 class TestSourceMarkerConvention:
-    """The row-source marker is written and compared through one constant, never a bare string.
+    """
+    The row-source marker is written and compared through one constant, never a bare string.
 
     Every reader gates read-only OOB rows on this value, so a typo at one site silently turns a
     display-only row into an actionable one. constants.OOB_INVENTORY_SOURCE is the single spelling.
@@ -1665,7 +1668,8 @@ class TestImportMappingPermissionOrder:
 
 @pytest.mark.django_db
 class TestModuleMoveRequiresNetBoxRelocation:
-    """NetBox relocates a module's whole subtree only from 4.7.
+    """
+    NetBox relocates a module's whole subtree only from 4.7.
 
     Measured on 4.4.0 and 4.6.10: the same assignment is accepted with no error, the module row
     moves, and its interfaces, its nested module bay and the child module installed in that bay
@@ -1771,7 +1775,8 @@ class TestModuleMoveRequiresNetBoxRelocation:
 
 @pytest.mark.django_db
 class TestInstallRefusesADuplicateSerial:
-    """A serial already installed on the target device must not be installed a second time.
+    """
+    A serial already installed on the target device must not be installed a second time.
 
     The rendered row is advisory: it comes from a cache and a scripted POST never reads it. The
     refusal therefore lives on the write path, not in the table.
@@ -1796,7 +1801,8 @@ class TestInstallRefusesADuplicateSerial:
 
     @staticmethod
     def _post_install(device, module_type, empty_bay, serial, user=None):
-        """Drive a real InstallModuleView POST for a cached row carrying `serial`.
+        """
+        Drive a real InstallModuleView POST for a cached row carrying `serial`.
 
         Both the posted field and the cached row carry the serial: this branch reads it from the
         POST, and branches above take it from the selected cached inventory row.
@@ -1865,7 +1871,8 @@ class TestInstallRefusesADuplicateSerial:
         assert Module.objects.filter(device=device).count() == 2
 
     def test_an_add_only_operator_is_refused_too(self):
-        """Installing needs add_module, not change_module, so existence must be read unrestricted.
+        """
+        Installing needs add_module, not change_module, so existence must be read unrestricted.
 
         A guard that searched only modules this operator may CHANGE would come back empty here and
         let the duplicate through.
@@ -1958,7 +1965,8 @@ class TestInstallRefusesADuplicateSerial:
 
 @pytest.mark.django_db
 class TestIdentityIsNotGatedOnBayMapping:
-    """A module already installed must be reported even when bay matching fails.
+    """
+    A module already installed must be reported even when bay matching fails.
 
     Bay matching runs on operator-configured name mappings and is expected to be wrong sometimes.
     Serial is evidence about the hardware. Deriving "is this already in NetBox" from the mapping
@@ -2020,7 +2028,7 @@ class TestIdentityIsNotGatedOnBayMapping:
         return str(table.render_module_bay(record.get("module_bay", "-"), record))
 
     def test_an_unmatched_bay_reports_where_the_module_actually_is(self):
-        """ "No matching bay" alone hides the fact that NetBox already holds the part."""
+        """Report where NetBox holds a part when no bay matches."""
         prefix = "identity-render"
         inventory = [
             {
@@ -2089,7 +2097,8 @@ class TestIdentityIsNotGatedOnBayMapping:
 
 
 class TestModuleCreationIsGuarded:
-    """Only guarded code may construct a Module in the module-sync views.
+    """
+    Only guarded code may construct a Module in the module-sync views.
 
     The device-scoped duplicate check is easy to forget when a fourth creation path is added, and
     the failure is silent: a second NetBox record for one physical part. This asserts where the

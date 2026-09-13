@@ -22,7 +22,8 @@ mock_librenms_config = test_librenms_api_helpers.mock_librenms_config
 
 
 class TestApiTokenStaysOnItsHost:
-    """A redirect off the configured LibreNMS must not carry the API token with it.
+    """
+    A redirect off the configured LibreNMS must not carry the API token with it.
 
     ``requests`` drops only ``Authorization`` when a redirect crosses hosts and forwards every
     other header, so ``X-Auth-Token`` reached whatever answered the redirect.
@@ -2752,7 +2753,8 @@ class TestResolvePortRelationships:
         assert 200 not in result["lag_members"]
 
     def test_sap_rows_stay_excluded_from_the_name_derived_sub_interface_fallback(self, mock_librenms_api):
-        """Rule 2 skips a SAP pair, but the name-derived fallback walks every port with an id,
+        """
+        Rule 2 skips a SAP pair, but the name-derived fallback walks every port with an id,
         not the filtered pairs, so a SAP child can still be recorded as a sub-interface.
         """
         ports = [

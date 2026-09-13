@@ -3896,7 +3896,8 @@ class TestInstallViewsPreserveInventoryCache:
             cache.delete(cache_key)
 
     def test_ignore_rules_follow_the_resolved_target_manufacturer(self):
-        """A row can be installed onto a VC member whose manufacturer differs from the page device.
+        """
+        A row can be installed onto a VC member whose manufacturer differs from the page device.
 
         Loading the ignore rules once from the page device omits the target's vendor rules, so a
         row the target's own rule says to skip is installed anyway.
@@ -7663,7 +7664,8 @@ def _mapping_user(name):
 
 @pytest.mark.django_db
 def test_the_map_existing_modal_chooses_the_bay_before_the_mapping_kind(client):
-    """Step one only picks a bay: nothing is preselected and no kind is offered yet.
+    """
+    Step one only picks a bay: nothing is preselected and no kind is offered yet.
 
     The kind used to be decided against the alphabetically first bay, so an unrelated bay could
     force the exact default onto a whole slot family. Deferring it removes that guess.
@@ -7691,7 +7693,8 @@ def test_the_map_existing_modal_chooses_the_bay_before_the_mapping_kind(client):
 
 @pytest.mark.django_db
 def test_the_map_existing_modal_derives_the_kind_from_the_chosen_bay(client):
-    """The reported MX304 case: RE0 derives a family pattern, so regex is the honest default.
+    """
+    The reported MX304 case: RE0 derives a family pattern, so regex is the honest default.
 
     LCMIC1 sorts first and derives nothing from "Routing Engine 0", which is exactly what used
     to force the exact default and leave the operator with a one-bay rule.

@@ -79,7 +79,7 @@ class SyncInterfacesView(
         else:
             raise Http404(f"Invalid object type: {object_type}")
 
-    def post(self, request, object_type, object_id):
+    def post(self, request, object_type, object_id):  # noqa: C901
         """Sync selected interfaces from LibreNMS into NetBox."""
         # Set permissions dynamically based on object type
         self.required_object_permissions = {
@@ -364,7 +364,7 @@ class SyncInterfacesView(
             return cached_data.get("port_stack_relationships", {})
         return {}
 
-    def _sync_lag_and_parent_relationships(
+    def _sync_lag_and_parent_relationships(  # noqa: C901
         self,
         obj,
         ports_data,
@@ -386,6 +386,7 @@ class SyncInterfacesView(
             ports_data: The LibreNMS port dicts for the device.
             relationships (dict): The ``{lag_members, sub_interfaces}`` mapping to apply.
             server_key (str): The LibreNMS server key scoping stored-id reads.
+            excluded_columns: Fields that the current sync must not update.
 
         Returns:
             None
@@ -767,7 +768,7 @@ class SyncInterfacesView(
         logger.info("Bulk sync: set %s.%s = %s", source_iface.name, relation_field, related_iface.name)
         return True
 
-    def sync_selected_interfaces(
+    def sync_selected_interfaces(  # noqa: C901
         self,
         obj,
         ports_data,
@@ -1160,6 +1161,7 @@ class SyncInterfacesView(
     def _sync_interface_vlans(self, interface, librenms_port):
         """
         Sync VLAN assignments from LibreNMS to NetBox interface.
+
         Sets mode, untagged_vlan, and tagged_vlans based on LibreNMS data.
 
         Args:
@@ -1246,7 +1248,7 @@ class DeleteNetBoxInterfacesView(
         else:
             raise Http404(f"Invalid object type: {object_type}")
 
-    def post(self, request, object_type, object_id):
+    def post(self, request, object_type, object_id):  # noqa: C901
         """Delete selected NetBox-only interfaces not present in LibreNMS."""
         # Set permissions dynamically based on object type
         self.required_object_permissions = {
@@ -1704,7 +1706,7 @@ class _BaseRelationshipSyncView(
             related_name = related_port.get(interface_name_field) or ""
         return source_port, related_port, source_name, related_name, interface_name_field
 
-    def post(self, request, object_type, object_id):
+    def post(self, request, object_type, object_id):  # noqa: C901
         # Set the object-type-scoped permissions BEFORE the gate (an unsupported type raises
         # Http404 here). JSON endpoint: require_all_permissions would return the mixin's
         # HTML/redirect on denial, breaking the fetch() caller, so use the _json variant.
