@@ -1,6 +1,7 @@
 """Real ORM, cache, and view tests for module synchronization."""
 
 import json
+import re
 
 import pytest
 from django.core.cache import cache
