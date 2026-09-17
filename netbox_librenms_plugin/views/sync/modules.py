@@ -24,7 +24,6 @@ from netbox_librenms_plugin.sync_cache import (
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
     acquire_advisory_transaction_lock,
-    coerce_positive_int as _coerce_positive_int,
     find_by_librenms_id,
     get_librenms_device_id,
     get_librenms_sync_device,
@@ -40,6 +39,9 @@ from netbox_librenms_plugin.utils import (
     normalize_serial,
     rewrite_interface_name_for_vc_member,
     set_librenms_device_id,
+)
+from netbox_librenms_plugin.utils import (
+    coerce_positive_int as _coerce_positive_int,
 )
 from netbox_librenms_plugin.views.base.modules_view import _PLACEHOLDER_VALUES
 from netbox_librenms_plugin.views.mixins import (
