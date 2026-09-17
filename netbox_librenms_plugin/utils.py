@@ -2405,7 +2405,8 @@ def get_location_parse_settings():
         from netbox_librenms_plugin.models import LibreNMSSettings
 
         settings = LibreNMSSettings.objects.order_by("pk").first()
-    except Exception:  # noqa: BLE001 — optional config read; default on any failure
+    # Optional config read: fall back to the default on any failure.
+    except Exception:
         logger.debug("Could not read LibreNMS location parse settings; using defaults", exc_info=True)
         return "", False
 
@@ -2780,7 +2781,8 @@ def render_vc_member_options(members, selected_id):
         SafeString: The concatenated ``<option>`` elements, member names escaped.
 
     """
-    return mark_safe(  # noqa: S308 — names escaped above; ids are model pks
+    # Names are escaped above and the ids are model pks, so the markup is trusted.
+    return mark_safe(
         "".join(
             f'<option value="{member.id}"{" selected" if str(member.id) == str(selected_id) else ""}>'
             f"{escape(member.name)}</option>"
@@ -2810,7 +2812,8 @@ def oob_badge_html(record, leading_space=False):
         return ""
     # Static trusted markup — mark_safe, not format_html (which requires interpolation
     # args and raises TypeError when given a bare string).
-    return mark_safe((" " if leading_space else "") + OOB_BADGE_HTML)  # noqa: S308
+    # Static trusted markup, no interpolation.
+    return mark_safe((" " if leading_space else "") + OOB_BADGE_HTML)
 
 
 def is_valid_ports_payload(payload) -> bool:
