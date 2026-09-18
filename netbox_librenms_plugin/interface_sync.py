@@ -11,13 +11,13 @@ from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.utils import (
-    coerce_interface_mtu,
     AmbiguousLibreNMSIdError,
     bounded_interface_text,
-    interface_name_rejection_reason,
+    coerce_interface_mtu,
     convert_speed_to_kbps,
     find_by_librenms_id,
     interface_name_fallback_matches_port,
+    interface_name_rejection_reason,
     normalize_librenms_port_id,
     set_librenms_device_id,
 )
@@ -72,7 +72,7 @@ def assign_interface_mac(interface, mac_address):
     return changed
 
 
-def update_interface_from_port(
+def update_interface_from_port(  # noqa: C901
     interface,
     librenms_interface,
     *,
@@ -164,7 +164,7 @@ def update_interface_from_port(
 
 
 @transaction.atomic
-def resolve_or_create_interface_from_port(
+def resolve_or_create_interface_from_port(  # noqa: C901
     owner,
     librenms_interface,
     *,

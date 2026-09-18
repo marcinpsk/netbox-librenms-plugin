@@ -7,6 +7,7 @@ from django.utils import timezone
 from django.views import View
 
 from netbox_librenms_plugin.constants import MAIN_INVENTORY_SOURCE, OOB_INVENTORY_SOURCE
+from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     coerce_librenms_id,
@@ -21,7 +22,6 @@ from netbox_librenms_plugin.utils import (
     normalize_librenms_port_id,
     normalize_serial,
 )
-from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -993,7 +993,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         transparent_indices,
         ignore_cache,
         ignore_contexts=None,
-    ):  # noqa: C901
+    ):
         """
         Collect top-level inventory items for the sync table.
 

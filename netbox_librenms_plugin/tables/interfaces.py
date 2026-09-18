@@ -25,7 +25,6 @@ from netbox_librenms_plugin.utils import (
     get_untagged_vlan_css_class,
     interface_name_fallback_matches_port,
     normalize_librenms_port_id,
-    oob_badge_html,
     render_vc_member_options,
     resolve_interface_row_device,
 )
@@ -406,13 +405,8 @@ class LibreNMSInterfaceTable(tables.Table):
 
     def render_name(self, value, record):
         """Render interface name with appropriate styling based on comparison with NetBox."""
-        rendered = self._render_field(value, record, self.interface_name_field, "name")
-        badges = oob_badge_html(record)
-        if record.get("_dedup_conflict"):
-            badges += '<span class="badge bg-warning text-dark ms-1" title="Same MAC seen on both main and OOB">Shared LOM</span>'
-        if badges:
-            return format_html("{}{}", rendered, mark_safe(badges))
-        return rendered
+        # Row markers (OOB, Shared LOM) belong to the relationship column; see render_parent.
+        return self._render_field(value, record, self.interface_name_field, "name")
 
     def _get_interface_status_display(self, enabled, record):
         """
@@ -518,6 +512,32 @@ class LibreNMSInterfaceTable(tables.Table):
 
         """
         parts = []
+
+        # Where the row came from, before what it is attached to. Both markers describe the row
+        # itself rather than a NetBox relationship, so they lead the stack and carry no sync
+        # button. The cable and module tables still badge their name column: those have no
+        # relationship column to move into.
+        if record.get("_source") == OOB_INVENTORY_SOURCE:
+            parts.append(self._render_row_marker_pill("purple", "mdi-chip", "OOB", "From OOB controller"))
+        if record.get("_dedup_conflict"):
+            parts.append(
+                self._render_row_marker_pill(
+                    "warning",
+                    "mdi-content-duplicate",
+                    "Shared LOM",
+                    "Same MAC seen on both main and OOB",
+                )
+            )
+
+        if record.get("host_name_collision"):
+            parts.append(
+                self._render_row_marker_pill(
+                    "danger",
+                    "mdi-alert-circle",
+                    "Name conflict",
+                    "The host interface of the same name owns it; the OOB port is not synced",
+                )
+            )
 
         lag_status = record.get("lag_sync_status")
         # LAG membership is device-only — VMInterface has no `lag` field and SyncInterfaceLagView
@@ -647,6 +667,35 @@ class LibreNMSInterfaceTable(tables.Table):
                 members_by_position=self._vc_members_by_position or None,
             ).pk
         return self.device.pk if self.device else ""
+
+    @staticmethod
+    def _render_row_marker_pill(color, icon, label, title):
+        """
+        Render one row-origin pill in the relationship column's badge language.
+
+        Matches the wrapper and badge classes :meth:`_render_relationship_column` emits, so the
+        markers stack with the LAG/Parent/Bridge pills instead of reading as a separate control.
+        Tabler's light (``-lt``) variants ship their own readable text colour in both themes.
+
+        Args:
+            color (str): Tabler colour name, used as ``bg-<color>-lt``.
+            icon (str): Material Design icon class.
+            label (str): The short pill text.
+            title (str): The hover description.
+
+        Returns:
+            SafeString: The pill markup.
+
+        """
+        return format_html(
+            '<div class="text-nowrap lh-sm">'
+            '<span class="badge bg-{}-lt fw-normal d-inline-flex align-items-center gap-1" title="{}">'
+            '<i class="mdi {}"></i>{}</span></div>',
+            color,
+            title,
+            icon,
+            label,
+        )
 
     def _render_relationship_column(
         self,

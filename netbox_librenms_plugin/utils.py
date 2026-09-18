@@ -1906,6 +1906,38 @@ def interface_name_rejection_reason(port, interface_name_field, model=None):
     return None
 
 
+def host_owned_interface_names(ports, interface_name_field, model=None) -> set[str]:
+    """
+    Return the interface names the host rows of a merged snapshot own.
+
+    A host and its OOB controller are two LibreNMS devices but one NetBox device, so both sides
+    write into the same ``(device, name)`` namespace. The host owns it: an OOB row carrying one
+    of these names must not create or bind that interface, or the host row can never resolve
+    its own interface again.
+
+    Derived from the rows on read rather than tagged onto the cached snapshot, so a snapshot
+    written before this existed cannot fail open, and the sync writer and the table reader
+    cannot drift apart on what "the host owns this name" means.
+
+    Args:
+        ports (list): The merged host + OOB port rows.
+        interface_name_field (str): Port field that contains the selected interface name.
+        model (type | None): Concrete interface model. Defaults to ``Interface``.
+
+    Returns:
+        set[str]: The names owned by host rows, empty when *ports* is malformed.
+
+    """
+    if not is_list_of_dicts(ports):
+        return set()
+    return {
+        name
+        for port in ports
+        if port.get("_source") != OOB_INVENTORY_SOURCE
+        and (name := syncable_interface_name(port, interface_name_field, model)) is not None
+    }
+
+
 def bounded_interface_text(field_name, value, model=None):
     """
     Return *value* clipped to the column NetBox declares for *field_name*.
@@ -2405,7 +2437,8 @@ def get_location_parse_settings():
         from netbox_librenms_plugin.models import LibreNMSSettings
 
         settings = LibreNMSSettings.objects.order_by("pk").first()
-    except Exception:  # noqa: BLE001 — optional config read; default on any failure
+    # Optional config read: fall back to the default on any failure.
+    except Exception:
         logger.debug("Could not read LibreNMS location parse settings; using defaults", exc_info=True)
         return "", False
 
@@ -2780,7 +2813,8 @@ def render_vc_member_options(members, selected_id):
         SafeString: The concatenated ``<option>`` elements, member names escaped.
 
     """
-    return mark_safe(  # noqa: S308 — names escaped above; ids are model pks
+    # Names are escaped above and the ids are model pks, so the markup is trusted.
+    return mark_safe(
         "".join(
             f'<option value="{member.id}"{" selected" if str(member.id) == str(selected_id) else ""}>'
             f"{escape(member.name)}</option>"
@@ -2810,7 +2844,8 @@ def oob_badge_html(record, leading_space=False):
         return ""
     # Static trusted markup — mark_safe, not format_html (which requires interpolation
     # args and raises TypeError when given a bare string).
-    return mark_safe((" " if leading_space else "") + OOB_BADGE_HTML)  # noqa: S308
+    # Static trusted markup, no interpolation.
+    return mark_safe((" " if leading_space else "") + OOB_BADGE_HTML)
 
 
 def is_valid_ports_payload(payload) -> bool:
