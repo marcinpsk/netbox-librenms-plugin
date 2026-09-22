@@ -23,6 +23,12 @@ LIBRENMS_PORTS_COLUMNS = (
 DEFAULT_INTERFACE_NAME_FIELD = "ifName"
 INTERFACE_NAME_FIELDS = frozenset({DEFAULT_INTERFACE_NAME_FIELD, "ifDescr"})
 
+# The typed relationships the resolver derives from a LibreNMS port_stack pair, in the order the
+# rules are applied. The resolver, the cached-snapshot reader and the diagnostics report all walk
+# this tuple, so a kind cannot be added to one and missed by another. A pair no kind claims is
+# carried untyped as "stacked_ports" instead of being dropped.
+RELATIONSHIP_KINDS = ("sub_interfaces", "bridge_members", "lag_members")
+
 
 def is_supported_interface_name_field(value):
     """
