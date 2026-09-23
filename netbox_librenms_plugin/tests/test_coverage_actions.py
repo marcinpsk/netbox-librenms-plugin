@@ -554,6 +554,31 @@ class TestBulkImportConfirmView:
         assert response.context["vc_detection_enabled"] is True
         assert response.context["devices"][0]["validation"]["_vc_detection_enabled"] is True
 
+    def test_confirm_template_displays_a_failed_chassis_read_without_stack_members(self):
+        from django.template.loader import render_to_string
+
+        html = render_to_string(
+            "netbox_librenms_plugin/htmx/bulk_import_confirm.html",
+            {
+                "devices": [
+                    {
+                        "device_id": 9901,
+                        "device_name": "failed-chassis-read",
+                        "validation": {
+                            "virtual_chassis": {
+                                "is_stack": False,
+                                "detection_failed": True,
+                                "detection_error": "Inventory read failed",
+                            }
+                        },
+                    }
+                ],
+                "server_key": "default",
+            },
+        )
+
+        assert "Unable to display virtual chassis members: Inventory read failed" in html
+
 
 @pytest.mark.django_db
 class TestBulkImportConfirmViewIntegration:

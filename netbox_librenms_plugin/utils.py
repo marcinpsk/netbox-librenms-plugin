@@ -1578,9 +1578,9 @@ def get_table_paginate_count(request: HttpRequest, table_prefix: str) -> int:
 
     """
     config = get_config()
-    # Check GET first, then POST (HTMX refresh requests send pagination via POST body)
+    # An HTMX refresh sends the new page size in POST while the URL can retain an old value.
     param_key = f"{table_prefix}per_page"
-    param_value = request.GET.get(param_key) or request.POST.get(param_key)
+    param_value = request.POST.get(param_key) if param_key in request.POST else request.GET.get(param_key)
     if param_value:
         try:
             per_page = int(param_value)

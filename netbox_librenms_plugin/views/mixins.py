@@ -1309,6 +1309,8 @@ class VlanAssignmentMixin:
             override_groups_by_id = {}
             if override_group_ids:
                 override_groups_by_id = VLANGroup.objects.in_bulk(list(override_group_ids))
+            # Scope is fixed for this port, even when several VIDs carry overrides.
+            allowed_group_ids = {candidate.pk for candidate in port.get("vlan_groups", [])}
 
             for vid in all_vids:
                 vid_str = str(vid)
@@ -1319,7 +1321,6 @@ class VlanAssignmentMixin:
                         group = override_groups_by_id.get(override_group_id)
                         # The row's in-scope groups, not only groups that already carry the VID:
                         # "apply to all" exists to put the VLAN into a group that lacks it.
-                        allowed_group_ids = {candidate.pk for candidate in port.get("vlan_groups", [])}
                         if group and group.pk in allowed_group_ids:
                             vlan_group_map[vid] = {
                                 "group_id": str(group.pk),

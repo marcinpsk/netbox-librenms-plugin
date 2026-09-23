@@ -2623,6 +2623,27 @@ class TestVlanGroupOverrideScope:
         assert port["vlan_group_map"][100]["group_id"] == ""
         assert port["vlan_group_map"][100]["group_name"] == "Global"
 
+    def test_multiple_overrides_read_the_row_scope_once(self):
+        from dcim.models import Device
+
+        _site, in_scope, _out = self._fixtures("once")
+
+        class CountingGroups(list):
+            iterations = 0
+
+            def __iter__(self):
+                self.iterations += 1
+                return super().__iter__()
+
+        groups = CountingGroups([in_scope])
+        port = {"untagged_vlan": 100, "tagged_vlans": [101, 102], "vlan_groups": groups}
+        overrides = {str(vid): str(in_scope.pk) for vid in (100, 101, 102)}
+
+        self._view()._add_vlan_group_selection(port, {"vid_to_groups": {}}, Device(), overrides)
+
+        assert {value["group_id"] for value in port["vlan_group_map"].values()} == {str(in_scope.pk)}
+        assert groups.iterations == 1
+
 
 class TestBaseInterfaceTableViewAddVlanGroupSelection:
     """Tests for BaseInterfaceTableView._add_vlan_group_selection."""
