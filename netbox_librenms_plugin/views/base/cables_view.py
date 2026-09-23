@@ -51,6 +51,26 @@ from netbox_librenms_plugin.views.mixins import (
 logger = logging.getLogger(__name__)
 
 
+def _remote_name_candidates(hostname):
+    """Return the trimmed full name and its short-name fallback."""
+    if not isinstance(hostname, str) or not (hostname := hostname.strip()):
+        return ()
+    return hostname, hostname.split(".")[0]
+
+
+def _remote_name_device_pks(names):
+    """Load names with the same case-insensitive lookup as the direct resolver."""
+    sorted_names = sorted(names)
+    device_pks = set()
+    for offset in range(0, len(sorted_names), 32):
+        chunk = sorted_names[offset : offset + 32]
+        name_q = Q(name__iexact=chunk[0])
+        for name in chunk[1:]:
+            name_q |= Q(name__iexact=name)
+        device_pks.update(Device.objects.filter(name_q).values_list("pk", flat=True))
+    return device_pks
+
+
 def _librenms_id_q(server_key: str, value, *, include_oob: bool = True) -> Q:
     """
     Return a combined Q matching JSON-field and legacy bare-int librenms_id.
@@ -383,14 +403,15 @@ class BaseCableTableView(
 
     def _load_remote_device_catalog(self, normal_links, server_key):
         """Load every device a normal row could name, indexed by name and by LibreNMS id."""
-        remote_names = {name for link in normal_links if isinstance((name := link.get("remote_device")), str) and name}
-        remote_names.update(name.split(".")[0] for name in tuple(remote_names))
+        remote_names = {
+            candidate for link in normal_links for candidate in _remote_name_candidates(link.get("remote_device"))
+        }
         remote_ids = {
             remote_id
             for link in normal_links
             if (remote_id := coerce_librenms_id(link.get("remote_device_id"))) is not None
         }
-        device_pks = set(Device.objects.filter(name__in=remote_names).values_list("pk", flat=True))
+        device_pks = _remote_name_device_pks(remote_names)
         sorted_remote_ids = sorted(remote_ids)
         # Chunked so a wide page cannot build one unbounded OR chain.
         for offset in range(0, len(sorted_remote_ids), 32):
@@ -407,7 +428,8 @@ class BaseCableTableView(
         devices_by_name = defaultdict(list)
         devices_by_librenms_id = defaultdict(list)
         for device in catalog_devices:
-            devices_by_name[device.name].append(device)
+            if device.name:
+                devices_by_name[device.name.lower()].append(device)
             device_librenms_id = get_librenms_device_id(device, server_key, auto_save=False)
             if device_librenms_id is not None:
                 devices_by_librenms_id[device_librenms_id].append(device)
@@ -424,14 +446,14 @@ class BaseCableTableView(
                 remote_device, blocked = self._first_catalog_match(
                     devices_by_librenms_id.get(remote_id, []), visible_device_ids
                 )
-            hostname = link.get("remote_device")
-            if not blocked and isinstance(hostname, str) and hostname:
+            candidates = _remote_name_candidates(link.get("remote_device"))
+            if not blocked and candidates:
                 remote_device, blocked = self._first_catalog_match(
-                    devices_by_name.get(hostname, []), visible_device_ids
+                    devices_by_name.get(candidates[0].lower(), []), visible_device_ids
                 )
                 if not blocked:
                     remote_device, _blocked = self._first_catalog_match(
-                        devices_by_name.get(hostname.split(".")[0], []), visible_device_ids
+                        devices_by_name.get(candidates[1].lower(), []), visible_device_ids
                     )
             remote_device_by_link[id(link)] = remote_device
         return remote_device_by_link
@@ -1001,24 +1023,19 @@ class BaseCableTableView(
             if result[3]:
                 return result[:3]
 
-        if not isinstance(hostname, str) or not hostname.strip():
+        candidates = _remote_name_candidates(hostname)
+        if not candidates:
             return None, False, None
-        # The grouping identity trims, so the lookups below must see the same value or a padded
-        # hostname groups with its neighbour yet still reports "Device Not Found in NetBox".
-        hostname = hostname.strip()
 
         # Fall back to name matching if no device found by ID. LibreNMS reports the neighbour
         # hostname as the device advertises it, which is commonly all lower case, while NetBox
         # holds the operator's capitalisation. Match case insensitively or the remote end only
         # ever resolves through librenms_id.
-        if not isinstance(hostname, str) or not hostname:
-            return None, False, None
         ambiguous_name = f"Multiple devices found with the same name: {hostname}."
-        exact_result = resolve_catalog_match(Device.objects.filter(name__iexact=hostname), ambiguous_name)
+        exact_result = resolve_catalog_match(Device.objects.filter(name__iexact=candidates[0]), ambiguous_name)
         if exact_result[3]:
             return exact_result[:3]
-        simple_hostname = hostname.split(".")[0]
-        simple_result = resolve_catalog_match(Device.objects.filter(name__iexact=simple_hostname), ambiguous_name)
+        simple_result = resolve_catalog_match(Device.objects.filter(name__iexact=candidates[1]), ambiguous_name)
         return simple_result[:3]
 
     def enrich_local_port(
@@ -1849,11 +1866,14 @@ class BaseCableTableView(
 
     def _build_serial_remote_context(self, links, serial_ports):
         """Bulk-load serial label targets and free ports for one table render."""
-        labels = {link.get("remote_device") for link in links if link.get("_source") == "serial"}
-        labels.discard(None)
-        labels.discard("")
-        candidate_names = labels | {label.split(".")[0] for label in labels}
-        catalog_devices = list(Device.objects.filter(name__in=candidate_names).order_by("pk"))
+        labels = {
+            label
+            for link in links
+            if link.get("_source") == "serial"
+            if isinstance((label := link.get("remote_device")), str) and label.strip()
+        }
+        candidate_names = {candidate for label in labels for candidate in _remote_name_candidates(label)}
+        catalog_devices = list(Device.objects.filter(pk__in=_remote_name_device_pks(candidate_names)).order_by("pk"))
         visible_device_ids = set(
             self._viewable_queryset(Device)
             .filter(pk__in=[device.pk for device in catalog_devices])
@@ -1861,12 +1881,14 @@ class BaseCableTableView(
         )
         devices_by_name = defaultdict(list)
         for device in catalog_devices:
-            devices_by_name[device.name].append(device)
+            if device.name:
+                devices_by_name[device.name.lower()].append(device)
 
         devices_by_label = {}
         for label in labels:
-            exact = devices_by_name[label]
-            simple = devices_by_name[label.split(".")[0]]
+            full_name, short_name = _remote_name_candidates(label)
+            exact = devices_by_name[full_name.lower()]
+            simple = devices_by_name[short_name.lower()]
             matches = exact if exact else simple
             devices_by_label[label] = matches[0] if len(matches) == 1 and matches[0].pk in visible_device_ids else None
 

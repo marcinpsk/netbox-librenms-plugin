@@ -153,6 +153,18 @@ class TestNormalLinkContextResolution:
 
         assert context["remote_device_by_link"][id(scenario.link_by_id)] == scenario.remote_by_id
 
+    def test_an_unnamed_remote_still_resolves_by_librenms_id(self):
+        from dcim.models import Device
+
+        local = make_device("ctx-unnamed-local")
+        remote = _set_librenms_id(make_device("ctx-unnamed-remote"), 9901)
+        Device.objects.filter(pk=remote.pk).update(name=None)
+        link = _link(remote_device_id=9901)
+
+        context = _view()._build_normal_link_context([link], local, SERVER_KEY)
+
+        assert context["remote_device_by_link"][id(link)].pk == remote.pk
+
     def test_a_remote_resolves_by_hostname_after_the_domain_is_dropped(self):
         scenario = _Scenario("ctx-by-name")
 
@@ -187,6 +199,42 @@ class TestNormalLinkContextResolution:
 
         assert id(scenario.serial_row) not in context["local_owner_by_link"]
         assert id(scenario.serial_row) not in context["remote_device_by_link"]
+
+
+@pytest.mark.django_db
+class TestPrefetchedRemoteDeviceNames:
+    """Both page catalogs must preserve the direct resolver's hostname rules."""
+
+    @staticmethod
+    def _resolve(source, label):
+        if source == "serial":
+            link = {"_source": "serial", "remote_device": label}
+            return _serial_view()._build_serial_remote_context([link], [])["devices_by_label"][label]
+        local = make_device("ctx-case-local")
+        link = _link(remote_device=label)
+        return _view()._build_normal_link_context([link], local, SERVER_KEY)["remote_device_by_link"][id(link)]
+
+    @pytest.mark.parametrize("source", ["lldp", "serial"])
+    @pytest.mark.parametrize("label", ["ctx-case-remote", "  ctx-case-remote.example.test  "])
+    def test_prefetched_name_matches_without_case_or_outer_whitespace(self, source, label):
+        remote = make_device("CTX-CASE-REMOTE")
+
+        assert self._resolve(source, label) == remote
+
+    @pytest.mark.parametrize("source", ["lldp", "serial"])
+    def test_case_variant_devices_are_ambiguous_in_both_catalogs(self, source):
+        from dcim.models import Device, Site
+
+        first = make_device("CTX-CASE-TWINS")
+        Device.objects.create(
+            name="ctx-case-twins",
+            site=Site.objects.create(name="Case Twin Site", slug="case-twin-site"),
+            device_type=first.device_type,
+            role=first.role,
+            status="active",
+        )
+
+        assert self._resolve(source, "ctx-case-twins") is None
 
 
 @pytest.mark.django_db
