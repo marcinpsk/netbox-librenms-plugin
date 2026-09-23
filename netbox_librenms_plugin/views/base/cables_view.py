@@ -58,15 +58,21 @@ def _remote_name_candidates(hostname):
     return hostname, hostname.split(".")[0]
 
 
-def _remote_name_device_pks(names):
-    """Load names with the same case-insensitive lookup as the direct resolver."""
+def _remote_name_queries(names):
+    """Build bounded case-insensitive name queries for the direct resolver."""
     sorted_names = sorted(names)
-    device_pks = set()
     for offset in range(0, len(sorted_names), 32):
         chunk = sorted_names[offset : offset + 32]
         name_q = Q(name__iexact=chunk[0])
         for name in chunk[1:]:
             name_q |= Q(name__iexact=name)
+        yield name_q
+
+
+def _remote_name_device_pks(names):
+    """Load names with the same case-insensitive lookup as the direct resolver."""
+    device_pks = set()
+    for name_q in _remote_name_queries(names):
         device_pks.update(Device.objects.filter(name_q).values_list("pk", flat=True))
     return device_pks
 
@@ -1873,7 +1879,10 @@ class BaseCableTableView(
             if isinstance((label := link.get("remote_device")), str) and label.strip()
         }
         candidate_names = {candidate for label in labels for candidate in _remote_name_candidates(label)}
-        catalog_devices = list(Device.objects.filter(pk__in=_remote_name_device_pks(candidate_names)).order_by("pk"))
+        catalog_by_pk = {}
+        for name_q in _remote_name_queries(candidate_names):
+            catalog_by_pk.update((device.pk, device) for device in Device.objects.filter(name_q))
+        catalog_devices = [catalog_by_pk[pk] for pk in sorted(catalog_by_pk)]
         visible_device_ids = set(
             self._viewable_queryset(Device)
             .filter(pk__in=[device.pk for device in catalog_devices])
