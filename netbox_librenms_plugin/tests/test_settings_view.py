@@ -270,6 +270,75 @@ class TestCableSyncSettingsTab:
         assert settings.cable_sync_tag == "missing-managed-tag-without-permission"
         assert not Tag.objects.filter(name="forbidden-managed-tag").exists()
 
+    def test_constrained_add_tag_grant_cannot_create_outside_its_scope(self):
+        from django.core.exceptions import PermissionDenied
+        from extras.models import Tag
+
+        from netbox_librenms_plugin.forms import CableSyncSettingsForm
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+        settings, _ = LibreNMSSettings.objects.get_or_create()
+        settings.cable_sync_tag = "missing-managed-tag"
+        settings.save(update_fields=["cable_sync_tag"])
+        Tag.objects.filter(name=settings.cable_sync_tag).delete()
+        user = make_user_with_perms(
+            "settings-scoped-tag-add",
+            [("add", Tag)],
+            constraints={"name__startswith": "team-"},
+        )
+        form = CableSyncSettingsForm(
+            data={
+                "cable_sync_tag": "outside-scope",
+                "cable_sync_tag_color": "ff5722",
+                "cable_sync_description": "Managed cable",
+            },
+            instance=settings,
+            user=user,
+        )
+        assert form.is_valid(), form.errors
+
+        with pytest.raises(PermissionDenied, match="permission to create the cable provenance tag"):
+            form.save()
+
+        settings.refresh_from_db()
+        assert settings.cable_sync_tag == "missing-managed-tag"
+        assert not Tag.objects.filter(name="outside-scope").exists()
+
+    def test_constrained_change_tag_grant_cannot_rename_outside_its_scope(self):
+        from django.core.exceptions import PermissionDenied
+        from extras.models import Tag
+
+        from netbox_librenms_plugin.forms import CableSyncSettingsForm
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+        settings, _ = LibreNMSSettings.objects.get_or_create()
+        settings.cable_sync_tag = "team-managed"
+        settings.save(update_fields=["cable_sync_tag"])
+        tag = Tag.objects.create(name="team-managed", slug="team-managed", color="00aa00")
+        user = make_user_with_perms(
+            "settings-scoped-tag-change",
+            [("change", Tag)],
+            constraints={"name__startswith": "team-"},
+        )
+        form = CableSyncSettingsForm(
+            data={
+                "cable_sync_tag": "outside-scope",
+                "cable_sync_tag_color": "ff5722",
+                "cable_sync_description": "Managed cable",
+            },
+            instance=settings,
+            user=user,
+        )
+        assert form.is_valid(), form.errors
+
+        with pytest.raises(PermissionDenied, match="permission to change the cable provenance tag"):
+            form.save()
+
+        settings.refresh_from_db()
+        tag.refresh_from_db()
+        assert settings.cable_sync_tag == "team-managed"
+        assert (tag.name, tag.color) == ("team-managed", "00aa00")
+
     def test_blank_tag_name_is_rejected_and_nothing_persists(self, client):
         """A blank provenance tag would slugify to '' and break the ownership get_or_create — the form must reject it (whitespace-only strips to '' → required-field error) and the stored settings must keep their previous value."""
         client.force_login(make_superuser())

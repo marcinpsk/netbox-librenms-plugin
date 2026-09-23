@@ -434,11 +434,13 @@ class CableSyncSettingsForm(NetBoxModelForm):
                 # Keep the insert in a savepoint so an integrity error does not poison the outer
                 # transaction before the form converts it into a field error.
                 with transaction.atomic():
-                    Tag.objects.create(name=new_tag_name, slug=slug, color=new_color)
+                    tag = Tag.objects.create(name=new_tag_name, slug=slug, color=new_color)
             except IntegrityError as exc:
                 # A concurrent insert can take either the unique name or the selected free slug.
                 # Do not adopt that row because this settings form did not create it.
                 raise forms.ValidationError({"cable_sync_tag": "A different tag already uses this name."}) from exc
+            if self.user is not None and not Tag.objects.restrict(self.user, "add").filter(pk=tag.pk).exists():
+                raise PermissionDenied("You do not have permission to create the cable provenance tag.")
         else:
             update_fields = []
             if tag.name != new_tag_name:
@@ -456,6 +458,8 @@ class CableSyncSettingsForm(NetBoxModelForm):
                     # select_for_update cannot lock a name that has no row yet, so a concurrent
                     # create can take the target name between clean_cable_sync_tag and this save.
                     raise forms.ValidationError({"cable_sync_tag": "A different tag already uses this name."}) from exc
+                if self.user is not None and not Tag.objects.restrict(self.user, "change").filter(pk=tag.pk).exists():
+                    raise PermissionDenied("You do not have permission to change the cable provenance tag.")
 
         setting_fields = ("cable_sync_tag", "cable_sync_tag_color", "cable_sync_description")
         for field_name in setting_fields:
