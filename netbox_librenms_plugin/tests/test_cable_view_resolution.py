@@ -32,6 +32,7 @@ from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, 
 SERVER_KEY = "default"
 
 
+@pytest.mark.django_db
 def test_htmx_cable_page_size_uses_the_new_post_value_over_a_stale_query_value():
     from django.test import RequestFactory
 
