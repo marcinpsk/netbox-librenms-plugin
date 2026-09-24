@@ -1752,3 +1752,15 @@ and the 1.1 and 2.1 lock schedules as tests.
 **Follow-up issues to file after implementation:** (a) correct events across savepoint and
 callback-transaction rollbacks (evidence 1.4, 2.3, 2.4, 3.1, 3.2); (b) moving the other locking
 views to the runner (#144 track).
+
+**Implementation note (increment 1, 2026-09-24): attempt purity.** Core item 7 dropped the "sets no
+view attribute" half of the lexical guard. `SyncInterfacesView`'s helpers share attempt state
+through `self`, and `_sync_attempt` resets that state at the start of each attempt: it restores the
+view attributes from before the transaction, then sets every attempt list and counter afresh. A
+lexical rule against view attributes would need the view's state moved into its own object, which
+the #144 reconciliation module will do. Purity is proven by behaviour instead, with end-to-end
+retry tests. They check exact outcome counts. They also cover a successful attribute write followed
+by a conflict in the relationship pass, and check that there is exactly one effect and each message
+appears once. The implementation review traced the shallow restore (round 1) and found no state
+carried between attempts: the owner lock re-reads `self.object`, and the maps and lists are
+rebuilt.
