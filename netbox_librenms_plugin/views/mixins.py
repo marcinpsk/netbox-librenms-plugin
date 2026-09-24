@@ -13,6 +13,7 @@ from django.utils.http import url_has_allowed_host_and_scheme
 from utilities.permissions import get_permission_for_model
 
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
+from netbox_librenms_plugin.interface_sync import write_interface_row
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSIDConflictError, LibreNMSLookupError
 from netbox_librenms_plugin.utils import coerce_librenms_id, coerce_model_pk, is_list_of_dicts
 
@@ -1684,6 +1685,10 @@ class VlanAssignmentMixin:
         """
         Update interface VLAN assignments in NetBox (mode, untagged_vlan, tagged_vlans).
 
+        The mode and the untagged VLAN are written through ``write_interface_row``, so they are
+        written to the current row, and only when no other operation changed it after the read.
+        The tagged VLANs follow on the written instance.
+
         Args:
             interface: NetBox Interface or VMInterface object
             vlan_data: Dict with 'untagged_vlan' (int or None) and 'tagged_vlans' (list of ints)
@@ -1693,11 +1698,15 @@ class VlanAssignmentMixin:
 
         Returns:
             Dict with sync results:
+                - interface: the instance that holds the row as written
                 - mode_set: str or None
                 - untagged_set: VLAN object or None
                 - tagged_set: list of VLAN objects
                 - missing_vlans: list of VIDs not found in NetBox
                 - changed: bool, True when the mode, the untagged VLAN or the tagged VLANs were written
+
+        Raises:
+            ConcurrentRowChange: Another operation changed the row after the write read it.
 
         """
         # Support both dict (per-VLAN) and string/int/None (single group) for backward compat
@@ -1710,8 +1719,6 @@ class VlanAssignmentMixin:
         untagged_vid = vlan_data.get("untagged_vlan")
         tagged_vids = vlan_data.get("tagged_vlans", [])
         missing_vlans = []
-        prior_mode = interface.mode
-        prior_untagged_vlan_id = interface.untagged_vlan_id
         prior_tagged_vlan_ids = set(interface.tagged_vlans.values_list("pk", flat=True))
 
         def _get_group_id_for_vid(vid):
@@ -1724,32 +1731,28 @@ class VlanAssignmentMixin:
         # row as "mode"); the VLAN lists only refine it. Deriving the mode from the lists alone
         # wrote "access" for a trunk that happened to carry one untagged VLAN and no tagged ones.
         if tagged_vids or vlan_data.get("mode") == "tagged":
-            interface.mode = "tagged"
+            mode = "tagged"
         elif untagged_vid:
-            interface.mode = "access"
+            mode = "access"
         else:
             # NetBox stores "no mode" as NULL, so clearing to "" would report a change every sync.
-            interface.mode = None
+            mode = None
 
-        # Set untagged VLAN
         untagged_set = None
         if untagged_vid:
-            vlan = self._find_vlan_in_group(untagged_vid, _get_group_id_for_vid(untagged_vid), lookup_maps)
-            if vlan:
-                interface.untagged_vlan = vlan
-                untagged_set = vlan
-            else:
+            untagged_set = self._find_vlan_in_group(untagged_vid, _get_group_id_for_vid(untagged_vid), lookup_maps)
+            if untagged_set is None:
                 missing_vlans.append(untagged_vid)
-                interface.untagged_vlan = None
-        else:
-            interface.untagged_vlan = None
+
+        def apply_vlans(row):
+            row.mode = mode
+            row.untagged_vlan = untagged_set
+            return False
 
         # Save mode + untagged_vlan before M2M operations.
         # tagged_vlans.set() triggers a DB refresh that wipes unsaved
         # in-memory attributes, so we must persist first.
-        fields_changed = prior_mode != interface.mode or prior_untagged_vlan_id != interface.untagged_vlan_id
-        if fields_changed:
-            interface.save()
+        interface, fields_changed = write_interface_row(interface, apply_vlans)
 
         # Set tagged VLANs (M2M - requires the instance to be saved first)
         tagged_set = []
@@ -1769,6 +1772,7 @@ class VlanAssignmentMixin:
                 interface.tagged_vlans.clear()
 
         return {
+            "interface": interface,
             "mode_set": interface.mode,
             "untagged_set": untagged_set,
             "tagged_set": tagged_set,
