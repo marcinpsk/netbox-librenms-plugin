@@ -1764,3 +1764,14 @@ retry tests. They check exact outcome counts. They also cover a successful attri
 by a conflict in the relationship pass, and check that there is exactly one effect and each message
 appears once. Implementation review round 1 found no state carried between attempts: the owner lock
 re-reads `self.object`, and the maps and lists are rebuilt.
+
+**Implementation note (increment 2, 2026-09-24): the late write.** `interface_sync.write_interface_row`
+takes the fresh read and the `snapshot()`, calls the writer's `apply(row)`, compares every concrete
+column, and saves through `transactions.save_at_version`. The writer returns
+`InterfaceWrite(interface, changed)`; the VLAN helper's result gains `interface`. The receiver reaches
+the attempt's recorder through a `ContextVar` that `_run_attempt` sets; `row_changed()` records there
+and does nothing outside the runner. A fresh read that finds no row of the expected owner raises the
+same `ConcurrentRowChange`, so the retry resolves the port again. The fixed text names the row by the
+name that the caller read, never by a name read after the permission check. The receiver pops the mark, and `save_at_version` raises `RuntimeError` when
+no receiver checked the save. The VLAN helper always reads fresh: a row that the attribute writer
+already wrote in the transaction carries the transaction's own version, so it matches.
