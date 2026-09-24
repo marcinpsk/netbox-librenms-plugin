@@ -22,6 +22,7 @@ from netbox_librenms_plugin.constants import (
     OOB_INVENTORY_SOURCE,
     SERIAL_INVENTORY_SOURCE,
 )
+from netbox_librenms_plugin.interface_rules import PORT_RECORD_KEYS, interface_rules_for_request, row_rule_block
 from netbox_librenms_plugin.librenms_api import configured_cache_timeout
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.utils import (
@@ -46,8 +47,10 @@ from netbox_librenms_plugin.utils import (
     get_migrated_to_marker,
     get_virtual_chassis_member,
     oob_badge_html,
+    PortDisclosure,
     remote_port_html,
     resolve_interface_on_device,
+    rule_block_html,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -251,6 +254,54 @@ def _remote_port_name_candidates(row):
     return [name for name in names if isinstance(name, str) and name]
 
 
+def port_record(port):
+    """Return the part of a LibreNMS port record the interface rules read (``PORT_RECORD_KEYS``)."""
+    return {key: port[key] for key in PORT_RECORD_KEYS if key in port}
+
+
+def port_owner_id(row, side):
+    """
+    Return the pk of the NetBox device that owns the row's *side* LibreNMS port, or None.
+
+    The remote owner is the resolved neighbour (or its chassis member); a manual pick never
+    changes it. None means no owner is known, and the port is decided with no platform.
+    """
+    key = "netbox_local_device_id" if side == "local" else "remote_port_owner_id"
+    return coerce_librenms_id(row.get(key))
+
+
+def cable_row_ports(row):
+    """
+    Return the LibreNMS ports a cable row names, with the records its snapshot cached for them.
+
+    A serial row names no LibreNMS port. The remote end is the port record the fetch matched,
+    and the advertised ``remote_port_id`` too when it differs.
+
+    Args:
+        row (dict): A cable row.
+
+    Returns:
+        list[tuple[str, int, dict | None]]: ``(side, port_id, record)``; side is ``local`` or ``remote``.
+
+    """
+    if row.get("_source") == SERIAL_INVENTORY_SOURCE:
+        return []
+
+    def cached(key):
+        record = row.get(key)
+        return record if isinstance(record, dict) else None
+
+    ports = []
+    if (local_id := coerce_librenms_id(row.get("local_port_id"))) is not None:
+        ports.append(("local", local_id, cached("local_port_record")))
+    remote_key = coerce_librenms_id(row.get("remote_port_key"))
+    for port_id in dict.fromkeys(
+        port_id for port_id in (remote_key, coerce_librenms_id(row.get("remote_port_id"))) if port_id is not None
+    ):
+        ports.append(("remote", port_id, cached("remote_port_record") if port_id == remote_key else None))
+    return ports
+
+
 def _drop_masked_sub_units(rows):
     """
     Drop a neighbour row for a sub-unit whose own physical port is reported beside it.
@@ -324,6 +375,9 @@ _RAW_LINK_KEYS = frozenset(
         "remote_port",
         "remote_port_aliases",
         "remote_port_key",
+        # The rule inputs of both ports, so a cable write is decided from the snapshot it came from.
+        "local_port_record",
+        "remote_port_record",
         "remote_device",
         "remote_port_id",
         "remote_device_id",
@@ -835,6 +889,16 @@ class BaseCableTableView(
         return name_map, alt_map
 
     @staticmethod
+    def _port_records_by_id(ports_data):
+        """Index a get_ports payload's rule inputs by port id; malformed rows are skipped."""
+        ports = ports_data.get("ports") if isinstance(ports_data, dict) else None
+        return {
+            port_id: port_record(port)
+            for port in (ports if isinstance(ports, list) else [])
+            if isinstance(port, dict) and (port_id := coerce_librenms_id(port.get("port_id"))) is not None
+        }
+
+    @staticmethod
     def _collect_cable_links(links, name_map, alt_map, source):
         """
         Turn LibreNMS LLDP link rows into the table's row dicts, tagged with *source*.
@@ -916,9 +980,10 @@ class BaseCableTableView(
                     matched = by_name.get(remote_port.casefold())
                 if matched is None:
                     continue
-                port_id, port_names = matched
+                port_id, port_names, record = matched
                 # Two rows that matched one port record are one link, whatever each advertised.
                 link["remote_port_key"] = port_id
+                link["remote_port_record"] = record
                 aliases = []
                 for field in sorted(INTERFACE_NAME_FIELDS):
                     name = port_names.get(field)
@@ -931,7 +996,7 @@ class BaseCableTableView(
         """
         Index one neighbour's LibreNMS port names by port id and by every name field.
 
-        Only the name fields are kept and cached, keyed by LibreNMS server and device id the way
+        Only the name fields and the rule inputs are kept and cached, keyed by LibreNMS server and device id the way
         ``get_device_info`` already caches: one switch is the neighbour of many devices, and each
         of their cable refreshes would otherwise re-read its whole port list. A failed or
         malformed read is never cached, so an outage does not persist for the whole TTL.
@@ -942,12 +1007,12 @@ class BaseCableTableView(
                 is read. A cached neighbour is still served; only new reads stop.
 
         Returns:
-            tuple[dict, dict]: ``(port_id, names)`` keyed by port id, and by each unambiguous
-                case-folded name.
+            tuple[dict, dict]: ``(port_id, names, record)`` keyed by port id, and by each
+                unambiguous case-folded name.
 
         """
         server_key = self.librenms_api.server_key
-        cache_key = f"librenms_port_names_{server_key}_{remote_device_id}"
+        cache_key = f"librenms_port_records_{server_key}_{remote_device_id}"
         records = cache.get(cache_key)
         if not isinstance(records, list):
             if time.monotonic() >= deadline:
@@ -979,7 +1044,9 @@ class BaseCableTableView(
                 if not names:
                     complete = False
                     continue
-                records.append({"port_id": coerce_librenms_id(port.get("port_id")), **names})
+                records.append(
+                    {"port_id": coerce_librenms_id(port.get("port_id")), **names, "record": port_record(port)}
+                )
             if complete:
                 # A response that lost rows is a glitch, not an inventory. Caching it would keep
                 # the far end unresolved until the entry expires, through explicit refreshes.
@@ -996,7 +1063,8 @@ class BaseCableTableView(
             if port_id is None:
                 continue
             names = {field: record[field] for field in INTERFACE_NAME_FIELDS if isinstance(record.get(field), str)}
-            by_port_id[port_id] = (port_id, names)
+            rule_inputs = record.get("record") if isinstance(record.get("record"), dict) else None
+            by_port_id[port_id] = (port_id, names, rule_inputs)
             for name in names.values():
                 folded = name.casefold()
                 # A model name repeated as the ifDescr of every port ("Ethernet adapter") names
@@ -1005,7 +1073,7 @@ class BaseCableTableView(
                 if owner_by_name.setdefault(folded, port_id) != port_id:
                     by_name.pop(folded, None)
                 else:
-                    by_name.setdefault(folded, (port_id, names))
+                    by_name.setdefault(folded, (port_id, names, rule_inputs))
         return by_port_id, by_name
 
     @staticmethod
@@ -1276,6 +1344,10 @@ class BaseCableTableView(
             )
             links = []
         links_data = self._collect_cable_links(links, local_ports_map, local_ports_alt_map, "main")
+        local_records = self._port_records_by_id(ports_data)
+        for link in links_data:
+            if (record := local_records.get(coerce_librenms_id(link.get("local_port_id")))) is not None:
+                link["local_port_record"] = record
 
         # If an OOB controller is linked, fetch its LLDP links and merge. Reuse the sync device
         # resolved at the top so host + OOB data stay scoped to the same member.
@@ -2315,6 +2387,7 @@ class BaseCableTableView(
         link.pop("remote_create_url", None)
         if (
             not self.has_write_permission()
+            or link.get("rule_block")
             or link.get("_source") == OOB_INVENTORY_SOURCE
             or link.get("manual_remote")
             or link.get("_local_end_cabled")
@@ -2694,6 +2767,7 @@ class BaseCableTableView(
             if serial_remote_context is not None
             else None,
         )
+        self._apply_cable_rule_blocks(links_data, server_key)
         return links_data
 
     def _remote_port_owner(self, link, server_key, normal_context=None):
@@ -2716,6 +2790,53 @@ class BaseCableTableView(
         if device.virtual_chassis_id is None:
             return device
         return get_virtual_chassis_member(device, link.get("remote_port"), return_device_on_failure=False)
+
+    def _apply_cable_rule_blocks(self, links, server_key):
+        """
+        Refuse, and name the rule, on a row whose write the interface rules block.
+
+        This is the cable sync gate's decision for the ports the snapshot has records for, each
+        with the platform of the device that owns it (:func:`port_owner_id`), or no platform. A
+        port without a record is decided by the sync itself, after it fetches the record. The
+        reason names a port only when ``utils.PortDisclosure`` allows it.
+
+        Args:
+            links (list[dict]): The enriched cable rows, updated in place.
+            server_key (str): The LibreNMS server whose bindings count.
+
+        Returns:
+            None
+
+        """
+        rows = [
+            (link, ports)
+            for link in links
+            if link.get("can_create_cable") or link.get("remote_create_url")
+            if (ports := [port for port in cable_row_ports(link) if port[2] is not None])
+        ]
+        if not rows:
+            return
+        owner_ids = {port_owner_id(link, side) for link, ports in rows for side, *_ in ports}
+        owners = Device.objects.in_bulk(owner_ids - {None})
+        rules = interface_rules_for_request(self.request)
+        decided = [
+            (link, [(port_id, record, owners.get(port_owner_id(link, side))) for side, port_id, record in ports])
+            for link, ports in rows
+        ]
+        disclose = PortDisclosure(self.request.user, server_key)
+        disclose.preload((port_id, owner) for _link, ports in decided for port_id, _record, owner in ports)
+        for link, ports in decided:
+            blocked = rules.first_blocked_port(
+                (
+                    (port_id, record, None if owner is None else owner.platform_id, owner)
+                    for port_id, record, owner in ports
+                ),
+                disclose,
+            )
+            if blocked is not None:
+                link["can_create_cable"] = False
+                link.pop("remote_create_url", None)
+                link["rule_block"] = row_rule_block(*blocked)
 
     def get_table(self, data, obj):
         """Return the cable table for *data*; concrete subclasses choose the table class."""
@@ -3227,6 +3348,9 @@ class SingleCableVerifyView(BaseCableTableView):
                             self._report_one_sided_cable(link_data, interface.pk, None)
 
                         self._apply_termination_change_scope([link_data])
+                        if not read_only_origin:
+                            self._set_remote_create_affordance(link_data, selected_device, server_key)
+                        self._apply_cable_rule_blocks([link_data], server_key)
                         if read_only_origin:
                             link_data["can_create_cable"] = False
                         formatted_row["can_create_cable"] = bool(link_data.get("can_create_cable"))
@@ -3267,6 +3391,8 @@ class SingleCableVerifyView(BaseCableTableView):
                                 f'<a href="{link_data["cable_url"]}">{safe_cable_status}</a>'
                             )
 
+                        if link_data.get("rule_block"):
+                            formatted_row["actions"] = rule_block_html(link_data["rule_block"])
                         if link_data.get("can_create_cable"):
                             formatted_row["actions"] = f"""
                                 <button type="submit"
