@@ -1772,6 +1772,7 @@ column, and saves through `transactions.save_at_version`. The writer returns
 the attempt's recorder through a `ContextVar` that `_run_attempt` sets; `row_changed()` records there
 and does nothing outside the runner. A fresh read that finds no row of the expected owner raises the
 same `ConcurrentRowChange`, so the retry resolves the port again. The fixed text names the row by the
-name that the caller read, never by a name read after the permission check. The receiver pops the mark, and `save_at_version` raises `RuntimeError` when
-no receiver checked the save. The VLAN helper always reads fresh: a row that the attribute writer
-already wrote in the transaction carries the transaction's own version, so it matches.
+name that the caller read, never by a name read after the permission check. The receiver pops the
+mark, and `save_at_version` raises `RuntimeError` when no receiver checked the save. The VLAN helper
+always reads fresh: a row that the attribute writer already wrote in the transaction carries the
+transaction's own version, so it matches.
