@@ -1136,3 +1136,619 @@ is deferred.
 row lock, the plan-vs-concurrent-link race, the stale full-save lost update (5.3, 5c.2), and
 plugin-wide deadlock exposure. Evidence: 1.1, 2.1-2.3, 3.1, 4.1-4.4, 5c.1, 5c.2, 6.1, 6.2, and the
 members-rule note. Candidate directions on record: late lock (r6), no-wait acquisition (r5).
+
+## 8. Follow-up: interface-row concurrency (issue #188)
+
+Status: **RATIFIED (Core r5, split scope), 2026-09-24.** See 8.9 for the scope and the next action. Target branch: `feat/interface-member-badges` (PR #180, 97/100
+changed files). The record stays in this file to save a file slot.
+
+### 8.1 Brief
+
+**Decision.**
+
+- (A) How a plugin write of an existing interface row stops overwriting a concurrent change to a
+  column the plugin does not write (lost update).
+- (B) How the type that the sync writes is checked against the row's own links as they are when the
+  row is written, not as they were when the row was read.
+- (C) How a transaction that PostgreSQL aborts for a lock conflict is retried once, and then shown
+  to the user as a "try again" result, never as a 500. This must use one boundary that a view uses
+  now and a background job uses later.
+
+**Problem as a class.**
+
+- A and B come from one gap. The sync reads the interface row in its transaction, computes the
+  change, and then saves the whole row. Plugin syncs of one owner queue behind the owner lock.
+  NetBox's own edit paths do not take that lock: the UI edit saves in `atomic` with no row lock, and
+  the API locks the row only with `If-Match`. So a NetBox edit that commits between the read and
+  the `UPDATE` is overwritten.
+- C: no plugin code handles SQLSTATE `40P01` (deadlock) or `55P03` (lock not available). NetBox
+  renders them as a 500 page. The interface sync form's htmx error path shows no message at all.
+  Section 6 round 4 shows that the plugin cannot remove deadlocks: NetBox takes interface and owner
+  locks in orders the plugin does not control.
+
+**Operator decisions in force (not open).**
+
+1. C: deadlocks are accepted as unavoidable. The goal is safe and visible: retry once, then a "try
+   again" result. A plugin-wide lock-order inventory or lock-order guard is out of scope.
+2. The retry boundary must be one that a background job can use. Issue #144 plans a JobRunner
+   adapter that runs reconciliation in "transaction groups". Build no part of #144 now, but do not
+   build a boundary that only a view can use.
+3. The LAG-members race is accepted as a known race and is out of scope. A member can join an
+   aggregate in another transaction while the sync changes the aggregate's type, because the
+   members rule reads other rows.
+4. The semantics of the #185 check are ratified (section 7) and are not open.
+5. A partial save must keep `_name` (natural ordering) and `last_updated` (`auto_now`) correct
+   (findings 6.1 and 6.2). A full save of a fresh instance meets this.
+6. No new branch. The work lands on #180.
+
+**Constraints.**
+
+- NetBox `min_version` is 4.4.0; the dev and CI container runs 4.7.0. PostgreSQL uses its default
+  isolation, READ COMMITTED. NetBox does not set `ATOMIC_REQUESTS`.
+- Do not make deadlocks more likely than today. A new row lock may be taken only where today's code
+  already waits for that row, in the same or a weaker lock mode (see 5c.1: an early lock added
+  `I -> MAC` wait edges). A plain `UPDATE` of non-key columns takes `FOR NO KEY UPDATE`.
+- A row whose values do not change takes no row lock and writes nothing (today's behaviour).
+- Fail closed. Catch only named SQLSTATEs. No broad exception swallowing.
+- A retry re-runs a whole outermost transaction. It never re-runs a savepoint inside an aborted or
+  still-open outer transaction.
+- A retried unit of work must be safe to run again. Today some views add `messages`, counters and
+  per-row result lists inside the transaction. Messages in session storage survive a rollback, so a
+  retry would duplicate them.
+- File budget: 3 free slots on #180. Tests go into files already in the diff where possible.
+- Tests need a real second database connection. `transaction=True` flushes seeded rows (a known
+  harness trap), and `tests/test_sync_interface_concurrency.py` already uses a second connection and
+  `lock_timeout`.
+
+**Observable acceptance conditions.**
+
+1. Another transaction commits a change to the interface's `lag`, `parent`, `bridge`, `vrf` or
+   `mark_connected`, or to any other column the writer does not write. The commit lands after the
+   sync read the row and before the sync writes it. The change survives both the attribute writer
+   and the VLAN helper.
+2. The type the writer stores is checked (section 7 check) against the row's own `lag`, `parent`,
+   `bridge` and cable as they are at the write. For example, a `lag` set concurrently on the row
+   keeps a planned `virtual` type from being stored.
+3. A row with no change takes no row lock and makes no write.
+4. A POST to the interface sync whose transaction PostgreSQL aborts with `40P01` or `55P03` is
+   retried once. If the retry also fails, the user gets a visible "try again" result for both the
+   htmx and the plain submit. The database is unchanged and no message is duplicated.
+5. The same `40P01` or `55P03` in any other plugin view gives the same visible result, not a 500.
+   Whether those views also retry now is open decision O2.
+6. Any other database error still propagates.
+7. `_name`, `last_updated` and the change log stay correct for every write.
+8. A job can call the same retry boundary without a request: no `request`, no `messages`.
+
+**Open decisions.**
+
+- O1. Where and how the late write takes the fresh row. Options include a lock at the write, an
+  optimistic check, or a reselect and re-plan. Also what the writer returns to its callers (the MAC
+  step and the VLAN helper run on the same instance).
+- O2. Which views retry now: only the interface sync transaction groups, or every locking view (31
+  view classes).
+- O3. Where lock conflicts become "try again": plugin middleware, a view mixin, or a helper at each
+  view. Also how the htmx client shows it.
+- O4. What a lock conflict does inside a row savepoint that a broad `except Exception` wraps. It
+  must reach the retry boundary, not become a row failure. Also which mechanical guard enforces that.
+- O5. Whether a NetBox `AbortRequest` that NetBox raised for its own `40P01` is treated as a lock
+  conflict.
+
+**Evidence** (HEAD `e84d569a05`).
+
+- Full saves of existing rows with no row lock: `interface_sync.py:199` (`update_interface_from_port`)
+  and `views/mixins.py:1711` (`_update_interface_vlan_assignment`). They are on the same in-memory
+  instance, in one transaction. An AST scan of the package (tests and migrations excluded) found no
+  other unlocked full save of an existing `Interface` or `VMInterface`. The relationship pass saves
+  with `update_fields` on rows locked by `build_interface_index(lock=True)`
+  (`interface_relationships.py:159`). Rebind and migrate lock the row first.
+- Writer callers:
+  - `SyncInterfacesView.sync_interface` -> `update_interface_attributes` (`views/sync/interfaces.py:1574`,
+    `:1735`), inside `atomic` `:224` / `:1079`, after `_lock_sync_scope` (owner locks: VM `:1164`; VC
+    `relock_scoped_row` `:1363`, then Devices `:1370`).
+  - The IP tab create-missing path: `resolve_or_create_interface_from_port` (`interface_sync.py:203`)
+    <- `views/sync/ip_addresses.py:579`, in a per-row savepoint `:1119` under owner locks
+    (`:472-496`). The row is locked only after the write (`:615-634`).
+- The instance is read by `find_interface_by_librenms_port_id` (`utils.py:3942`) or by
+  `filter().first()` / `get_or_create` (`views/sync/interfaces.py:1660-1711`), in the same
+  transaction, with no row lock.
+- The MAC step runs before the row save: `assign_interface_mac` (`interface_sync.py:56`). The VLAN
+  helper runs after the writer: `views/sync/interfaces.py:1587` -> `views/mixins.py:1748`.
+- The type check and planner: `interface_diff.planned_interface_type`, `type_change_refusal`
+  (section 7).
+- NetBox 4.7 facts:
+  - `ObjectEditView.post` runs `atomic` with no row lock (`netbox/views/generic/object_views.py:303`).
+  - The API update locks the row only with `If-Match` (`netbox/api/viewsets/__init__.py:334-338`).
+  - `CableTermination.save()` re-reads and full-saves the interface (`dcim/models/cables.py:703-722`).
+  - `update_interface_parents` / `update_interface_bridges` do `get` then a full `save()`
+    (`dcim/utils.py:208-245`).
+  - `BaseInterface.save()` clears tagged VLANs before the row save when the mode is not tagged.
+  - `_original_name` is set in `__init__` (`dcim/models/mixins.py:274`) and read in `save()` (`:288`).
+    `refresh_from_db()` does not reset it (finding 1.2).
+- NetBox's error boundary:
+  - `CoreMiddleware.process_exception` (`netbox/middleware.py:100-134`) passes `OperationalError`
+    through to `handler_500`.
+  - `PluginConfig.middleware` is appended after NetBox's own middleware, so its `process_exception`
+    runs first. It applies to every request, not only plugin URLs (`netbox/settings.py:1016`).
+  - NetBox turns its own `40P01` into `AbortRequest` in `Module._save_existing`
+    (`dcim/models/modules.py:702`) and into a `ValidationError` in `netbox/models/ltree.py:438`.
+    The plugin saves existing Modules (`views/sync/modules.py:2207`, `:3165`) and catches neither.
+  - `JobRunner.handle` does not wrap `run()` in a transaction (`netbox/jobs.py:109-137`).
+- Plugin error handling today:
+  - Nothing catches `OperationalError` or checks `pgcode`. `DatabaseError` is caught only in
+    `views/imports/actions.py:733` and `:3932-4040`.
+  - Broad `except Exception` handlers inside row savepoints turn any database error into a row
+    failure: `ip_addresses.py:1265` (with `str(exc)` in the result), `cables.py:1127`, `cables.py:277`,
+    `modules.py:700/711`, `device_fields.py:974, 1044, 1206`.
+- Client:
+  - The interface sync form (`_interface_sync_content.html:54`) puts back the off-page selections
+    and hides the spinner on `htmx:responseError` (`librenms_sync.js:1967`, `:3730`), but it shows
+    no message.
+  - An existing server pattern is `_htmx_error_response` (`views/imports/actions.py:255`): a 200
+    with `HX-Reswap: none` and a toast.
+  - An existing client pattern is `librenms_import.js:1190` (responseError -> `showErrorToast`).
+- Background jobs today: `ImportDevicesJob` writes only Device, VM and VC rows, in one `atomic` per
+  object. No interface writes run in a job.
+- Planned job consumer: issue #144 user stories 8 (cancel between safe transaction groups), 14
+  (a retry reassesses current state), 17, 18 (a changed plan assumption reports stale), 21 (a no-op
+  reports unchanged), 48 and 49 (infrastructure errors mark the job failed). Also #149 and #150.
+- Locking views: 31 view classes in 9 files take `select_for_update` or `relock_scoped_row` in POST.
+- Section 6 findings: 1.1, 2.1-2.3, 3.1, 4.1-4.4 (lock-order exposure, now accepted), 5c.1, 5c.2
+  (early lock and wait edges; stale VLAN save), 6.1, 6.2 (partial saves), and the members-rule note.
+
+### 8.2 Claude design (Opus 5.5, drafted from the brief before reading 8.3)
+
+**A and B: late lock, re-plan, full save.** One private helper in `interface_sync.py` owns the write of
+an existing interface row. Both unlocked writers use it: the attribute writer and the VLAN helper.
+
+1. The writer computes the change on the instance it has, as today. The MAC step runs in its
+   current position. No change: no lock, no write (AC3).
+2. A change: reselect the row with `select_for_update(of=("self",), no_key=True)`, filtered by
+   `pk` and the expected owner. `no_key=True` is `FOR NO KEY UPDATE`, the mode that today's `UPDATE`
+   takes. The lock is taken where today's `UPDATE` waits. No row means that the owner changed: the
+   row is refused ("changed by another operation; refresh and try again").
+3. Re-plan on the locked instance: the owned field values from the port, and the type through
+   `planned_interface_type` against the locked row's own `lag`, `parent`, `bridge` and cable columns
+   (AC2). Apply the values, including `primary_mac_address`, and run a full `save()` on the fresh
+   instance. `_name`, `last_updated` and `_original_name` are then correct (AC7).
+4. The VLAN helper leaves tagged mode: it calls `tagged_vlans.clear()` itself **before** the lock,
+   so the through-row locks come before the interface lock, as today. The `clear()` in NetBox's
+   `save()` (`device_components.py:904-914`) then finds no rows.
+5. The writer returns the fresh instance. The callers continue with it: `sync_interface`, the VLAN
+   helper, and the IP tab create-missing path. A row that this transaction created
+   (`created=True`) is private to the transaction and skips the lock.
+
+**C: one runner, one recorder, one HTTP adapter.**
+
+- `utils.run_transaction(work)`: asserts autocommit and no enclosing atomic block. It runs `work()`
+  in one outermost `atomic`, under a `connection.execute_wrapper` recorder that records every
+  statement error with SQLSTATE `40P01` or `55P03` and re-raises it. A lock conflict is either an
+  `OperationalError` with that SQLSTATE that escapes the transaction (this includes one raised at
+  COMMIT), or any exception, or even a normal return, after the recorder saw one. So a conflict
+  that a broad handler in a savepoint swallowed, or that NetBox turned into `AbortRequest` or
+  `ValidationError`, still counts (O4, O5: the SQLSTATE decides, not the exception type). On a
+  conflict the whole attempt rolls back and runs once more. A second conflict raises
+  `TransactionConflict`.
+- The first thing an attempt does is register an `on_commit` marker. A failure in a later
+  `on_commit` callback (NetBox 4.7 channel rename) after a real commit is never retried. It is
+  reported as "saved, but follow-up work failed".
+- `work` builds fresh attempt state and returns an outcome. Messages, counters and cache
+  transitions are published after the runner returns. The interface sync POST's outermost block
+  (`views/sync/interfaces.py:224`) becomes the work function. It holds the attribute pass and the
+  relationship pass, which is one group.
+- A plugin middleware (`PluginConfig.middleware`, in `views/mixins.py`) acts only for views whose
+  module is in the plugin. It maps `TransactionConflict` and a raw `40P01`/`55P03`
+  `OperationalError` to one "try again" result. For htmx: a 200 with `HX-Reswap: none` and a
+  toast, the `_htmx_error_response` shape. For a plain submit: one message and a redirect to a
+  validated same-origin page. It also runs the recorder for other plugin views. A conflict that
+  such a view swallowed as a row failure adds the "try again" message. It does not retry, because
+  part of that view's work may have committed.
+- The JS handles the new response. It shows the toast, puts back the off-page selections, stops the
+  spinner and enables the submit button.
+- A later JobRunner calls `run_transaction(lambda: apply_group(intent))` for each group.
+- O2: only the interface sync retries now. The other views get the visible result now, and they
+  get the retry when #144 moves them.
+
+**Guards.** The runner's runtime assert (outermost only). An AST test that the interface sync work
+function calls no `messages.*` and touches no view attribute. An AST test that
+`update_interface_from_port` and the VLAN helper save an existing row only through the late-write
+helper.
+
+**Files.** New to #180's diff: `views/mixins.py` and `__init__.py`, which makes 99/100.
+
+### 8.3 Codex design (`gpt-6-astra`, effort high, read-only, blind)
+
+Input: section 8.1 only. It could read sections 6 and 7 as evidence, and was told to treat r5 and
+r6 as history. It had a fresh context, and my draft was kept out of the repository. Full text: kept
+outside the repository. Summary:
+
+- **A and B: optimistic conditional write.** Read a fresh instance plus PostgreSQL `xmin` as a
+  version token, and recheck the owner (an owner change is "stale"). Plan, run the MAC step, then a
+  normal full `save(force_update=True)` whose `UPDATE` gets `AND xmin::text = %s`. It adds this
+  predicate through a per-instance override of Django's private `Model._do_update`. The whole
+  attempt runs in a savepoint. On zero rows updated: roll back, reselect, re-plan once. A second
+  mismatch is a visible "stale / try again". There is no `SELECT FOR UPDATE`, so the row lock stays
+  at today's `UPDATE` point, after the VLAN cleanup. The writer returns
+  `InterfaceWriteResult(interface, changed, planned_type)`. The VLAN helper uses the same seam.
+- **C:** `utils.run_transaction(work)` with the same contract as 8.2 (outermost only; `40P01` and
+  `55P03`; retry once; `TransactionConflict`; fresh attempt state; publish after).
+  - Swallowed conflicts: an `execute_wrapper` raises a **private `BaseException` subclass**, so no
+    `except Exception` can catch it. The runner and the middleware catch it explicitly.
+  - Commit errors, which `execute_wrapper` does not see: broad handlers around an outermost `atomic`
+    must call a shared classifier first (cables, modules, imports).
+  - O5: an `AbortRequest` counts only when its cause chain holds the SQLSTATE.
+  - A committed marker for `on_commit` failures.
+  - The middleware lives in `views/mixins.py`, and it buffers the plugin's notices during dispatch.
+  - Only the interface sync retries now.
+- **Guards:** write ownership (the two writers use the seam); no bare or `BaseException` catch in
+  production; broad handlers around transaction owners call the classifier; attempt purity.
+- **Files:** `views/mixins.py`, `__init__.py`, `views/imports/actions.py`, which makes 100/100.
+- **Its stated risks:** the private `_do_update` seam across Django versions; the coverage of the
+  `BaseException` escape; post-commit work.
+
+### 8.4 Divergence table
+
+| # | decision | 8.2 (Claude) | 8.3 (codex) | evidence | disposition | consequence |
+|---|---|---|---|---|---|---|
+| E1 | how A/B takes the fresh row | late `FOR NO KEY UPDATE` reselect, re-plan, full save; explicit tagged-VLAN pre-clear | `xmin` predicate added to the real `UPDATE` through a private `_do_update` override; savepoint; re-plan once, then stale | `device_components.py:904-914`: `save()` clears tagged VLANs before the `UPDATE`, so a plain late lock reverses T -> I when the VLAN helper leaves tagged mode (codex's objection holds); the pre-clear restores T -> I. `_do_update` is private Django API; codex names it its top risk | **8.2 with the pre-clear.** Public API only; no stale outcome or savepoint loop. The pre-clear closes codex's wait-edge objection. | test: VLAN helper leaves tagged mode while a second connection holds the through rows; statement order T then I (SQL capture) |
+| E2 | a conflict swallowed inside a savepoint | recorder: record the SQLSTATE, re-raise, and decide at the runner (or in the middleware for other views) | a private `BaseException` escapes every `except Exception` | Django's handler (`convert_exception_to_response`) catches `Exception` only, so a `BaseException` that leaks out of the adapter ends the request outside Django's handling; it also changes the row-failure semantics of every other view | **8.2.** For the retry path the outcome is the same (the group rolls back and retries). Other views keep their row semantics and add a visible message. | test differs: an IP-tab row savepoint that swallows a `40P01` -> 8.2 commits the other rows and adds the message; 8.3 rolls back the whole POST |
+| E3 | commit-time conflicts in other views | the runner sees the outermost commit; for other views, a swallowed commit error stays a row failure | a classifier call in every broad handler that wraps a transaction owner (+ `actions.py`, 100/100) | `execute_wrapper` does not wrap `commit()` | **8.2, contested.** A row failure is safe and visible; the brief's AC5 targets the 500. Round 1 to judge. | the file budget differs by one |
+| E4 | O5 `AbortRequest` | the recorder saw the SQLSTATE -> conflict | cause chain classification | `dcim/models/modules.py:702` raises `AbortRequest` from the `OperationalError`; the statement error passes the recorder first | **8.2** (subsumes it). | none |
+| E5 | post-commit failure | not in the first draft | committed marker | NetBox 4.7 `dcim/models/mixins.py:300-320`: rename cascade in `on_commit`; Django 6.1 `run_and_clear_commit_hooks` raises out of `atomic` exit (non-robust) | **8.3 adopted** (now in 8.2). | test: a failing `on_commit` after commit is not retried |
+| E6 | the owner changed under the write | the reselect filters by owner; no row -> refused | owner recheck -> stale | both | **same.** | |
+| E7 | guards | runtime assert; attempt-purity AST; two-writer seam AST | + no `BaseException` catch; + classifier on transaction-owner handlers | follows E2, E3 | **8.2.** | |
+| E8 | middleware notice buffering | the work function publishes after the runner; no buffering | the middleware buffers the plugin's notices during dispatch | only the interface sync retries | **8.2.** Buffering is only needed if a retried view adds messages inside the attempt, and the attempt-purity guard forbids that. | |
+
+Both designs agree on: `run_transaction` in `utils.py` (outermost only, `40P01`/`55P03`, retry
+once, typed failure, fresh attempt state, publish after); the interface sync POST block as the
+first group; only the interface sync retries now; a plugin-scoped middleware in `views/mixins.py`
+with the `HX-Reswap: none` toast; the writer returns the fresh instance; created rows skip the
+check; and the JobRunner calls the same runner.
+
+### r1 (merged candidate)
+
+8.2 as written, with E5 folded in. Open for round 1: E1 (the wait edges of the late lock with the
+pre-clear), E2, E3.
+
+### Round 1 (codex `gpt-6-astra` high, read-only, executed in a scratch database): r1 NOT RATIFIED
+
+Execution: Django 6.1, NetBox 4.7.0, PostgreSQL 18.4, a scratch database created and dropped by the
+reviewer. E2 held: the recorder sees swallowed statement errors, errors that NetBox translates,
+signal queries, M2M `clear()` and `on_commit` queries. The runner must reject a recorded conflict
+**inside** the outer `atomic` block, before a normal exit (executed: a swallowed `55P03` otherwise
+commits). The E5 marker holds (FIFO callbacks; the marker takes precedence over the recorder).
+`no_key=True` produces `FOR NO KEY UPDATE OF`.
+
+| # | sev | finding | my check | status |
+|---|---|---|---|---|
+| 1.1 | BLOCKER | NetBox clears tagged VLANs before **every** save of a non-tagged interface, so any lock before `save()` puts `I` before `T` for the attribute writer too; even with the pre-clear, an association inserted after the pre-clear gives `T -> I -> T` (executed: `40P01` under r1, clean under today's order) | confirmed: `device_components.py:904-914` (`clear()` whenever `mode != tagged` on an existing row) | accepted, r2-1 |
+| 1.2 | MAJOR | a commit-time conflict (deferred FK) bypasses `execute_wrapper`; a broad handler (`cables.py:1127`) swallows it as a row failure, so AC5 is unmet (executed: the recorder held 0 conflicts) | confirmed; an AST scan finds 9 broad handlers that lexically wrap an `atomic` block, in 7 files (not outermost-only; helper-owned transactions not seen) | accepted, r2-2 |
+| 1.3 | MAJOR | a fresh instance has no `_prechange_snapshot`, so the change log loses the before-state | confirmed, and pre-existing: the writer never calls `snapshot()`; only Rebind (`views/sync/interfaces.py:1958`) and the VLAN sync do | accepted, r2-3 |
+| 1.4 | MAJOR | a rolled-back attempt leaves its events in NetBox's request `events_queue` (a `ContextVar` dict mutated in place, `core/signals.py:153`); the retry can dispatch an event for a rolled-back object | confirmed: `netbox/context.py:11`, `netbox/context_managers.py:19-33` | accepted, r2-4 |
+
+### r2 (changes from r1, verbatim)
+
+- **r2-1. The lock is taken at today's `UPDATE` point, by a `pre_save` receiver, with a version
+  check.** The E1 disposition is reversed: codex's optimistic check is adopted, and the seam moves
+  from the private `_do_update` to the public `pre_save` signal.
+  - The late-write helper starts each attempt with one query. It reads a fresh instance with its
+    row version (`annotate(RawSQL("xmin::text"))`), filtered by `pk` and the expected owner. No row
+    means that the row is refused (owner changed).
+  - It plans on the fresh instance, runs the MAC step in its current position, and sets the owned
+    fields. No change: it returns, with no lock and no write (AC3).
+  - A change: it marks the instance with the expected version and calls a normal full `save()`.
+    NetBox's `BaseInterface.save()` clears tagged VLANs. Then Django sends `pre_save`, and a plugin
+    receiver runs for a marked instance only. It runs
+    `SELECT xmin::text ... WHERE id = %s FOR NO KEY UPDATE` (or `FOR UPDATE` when the save changes
+    `name`, which is in a unique constraint and so makes today's `UPDATE` take `FOR UPDATE`). It
+    compares the result with the mark. The lock is on the same row and at the same point as today's
+    `UPDATE` wait, after the clear. NetBox 4.7 has no `pre_save` receiver on `Interface`
+    (`dcim/signals.py:77` is for scope models).
+  - A version mismatch raises a private exception out of `save()`. The attempt's savepoint rolls
+    back (with its MAC and VLAN work, and its events, r2-4). The helper then re-reads, re-plans and
+    tries once more. A second mismatch refuses the row: "changed by another operation; refresh and
+    try again".
+  - `xmin` also catches NetBox's queryset `.update()` writes, which do not move `last_updated`.
+  - Once the transaction has updated the row, it holds the lock until commit, so a later writer in
+    the same transaction (the VLAN helper after the attribute writer) reads its own version and
+    always matches.
+  - No explicit pre-clear. The VLAN helper keeps its current order: scalar save, then M2M. A change
+    to tagged associations only still takes no row lock.
+  - A created row (`created=True`) skips the version check.
+- **r2-2. Commit-time conflicts become statement errors or are noted.**
+  - `run_transaction` calls `connection.check_constraints()` as the last step inside the outer
+    block. On PostgreSQL this runs `SET CONSTRAINTS ALL IMMEDIATE`, so a deferred check fails as a
+    statement that the recorder sees. Then the runner rejects a recorded conflict before exit
+    (round 1's condition).
+  - Other views: each broad handler whose `try` body holds an `atomic` block calls
+    `note_lock_conflict(exc)` first. That call records the SQLSTATE from the exception chain for the
+    middleware and does not change the handler's row semantics. The middleware then adds the one
+    "try again" message.
+  - Guard: an AST test finds every broad handler (`Exception`, `DatabaseError`, `OperationalError`,
+    bare) whose `try` body lexically contains an `atomic` block. Each must call
+    `note_lock_conflict`, and the test has negative fixtures. Limit: it does not see a transaction
+    owned by a called helper. New file: `views/imports/actions.py` (100/100).
+- **r2-3. Change-log snapshot.** The late-write helper calls `snapshot()` on the fresh instance
+  before it sets any field.
+- **r2-4. One attempt context.** `attempt_scope()` wraps an `atomic` block, saves a deep copy of
+  NetBox's `events_queue` on entry, and restores it when the block exits with an exception. The
+  runner uses it for the outermost attempt, and the late-write helper uses it for its savepoint
+  attempt. If `netbox.context.events_queue` is missing on NetBox 4.4.0, that is a finding.
+- **Files:** `views/mixins.py`, `__init__.py` and `views/imports/actions.py` are new to #180's
+  diff: 100/100.
+
+**Operator decision (2026-09-24), file budget:** if the design needs more files than #180 has free,
+the work goes to a new PR stacked on #180. Place code by module boundaries, not to save file slots.
+
+### Round 2 (codex `gpt-6-astra` high, read-only, executed in a scratch database): r2 NOT RATIFIED
+
+1.1 CLOSED (the `pre_save` lock follows NetBox's clear in all 25 mode transitions, both models).
+1.3 CLOSED (real `snapshot()` then `to_objectchange()` gives correct before and after state). 1.2
+and 1.4 NOT CLOSED. Also checked and holding:
+- Raising from the receiver rolls back the VLAN clear and the new MAC. It leaves no commit
+  callbacks, sends no `post_save`, and leaves `_original_name` unchanged. The failed instance must
+  be discarded.
+- `xmin`: a locking read after a concurrent update returns the new token. HOT updates change it.
+  Writes in one transaction share it. `VACUUM FREEZE` keeps it.
+- `check_constraints()` runs `SET CONSTRAINTS ALL IMMEDIATE`, and the recorder then sees a
+  deferred-FK `55P03`. A missing FK stays `IntegrityError`.
+- NetBox 4.4.0 has the same `events_queue` `ContextVar` dict. Its entries are plain dicts, and in
+  4.7 they are `EventContext` objects.
+
+| # | sev | finding | my check | status |
+|---|---|---|---|---|
+| 2.1 | BLOCKER | `primary_mac_address` is a `OneToOneField` (unique index), so a MAC change makes today's `UPDATE` take `FOR UPDATE`; r2 holds `FOR NO KEY UPDATE` and then upgrades, which deadlocks with a `FOR KEY SHARE` holder that updates the row (executed: today OK, r2 `40P01`) | confirmed: `dcim/models/device_components.py:864`; PostgreSQL's rule covers every column in a non-partial unique index usable by a FK | accepted, r3-1 |
+| 2.2 | MAJOR | helper-owned transactions under broad handlers (`import_utils/vm_operations.py:147` under `:332`) escape the lexical inventory, so AC5 is unmet | confirmed; the class cannot be closed by a lexical guard | operator decision, r3-4 |
+| 2.3 | BLOCKER | deep-copying `events_queue` raises `TypeError` (queued events hold the request and its stream); a shallow copy is contaminated by later in-place updates | confirmed: `extras/events.py:149` keeps the request | accepted, r3-3 |
+| 2.4 | MAJOR | restoring the queue on any exception drops the events of a committed transaction when a later `on_commit` callback fails | confirmed (executed by the reviewer) | accepted, r3-3 |
+
+**Operator decision (2026-09-24), AC5:** a view that does not use the runner must never answer a
+lock conflict with a 500. A conflict that such a view catches itself keeps that view's own failure
+report. No handler inventory and no request-wide recorder. A view gets the full behaviour when it
+moves to the runner (#144).
+
+### r3 (changes from r2, verbatim)
+
+- **r3-1. The lock mode follows the changed key columns.**
+  - `key_columns(model)` is derived once from `_meta`. It holds every column that PostgreSQL can
+    use as a FK target: `unique=True` fields (this includes `OneToOneField`), `unique_together`,
+    and `UniqueConstraint`s with plain fields and no condition or expressions.
+  - The late-write helper compares every concrete column of the fresh instance with the value it
+    will save. If any changed column is a key column, the receiver takes `FOR UPDATE`, otherwise
+    `FOR NO KEY UPDATE`. A change to `name` always counts as a key change.
+  - Drift guard: a DB test compares `key_columns()` with the unique, non-partial, non-expression
+    indexes that `pg_index` reports for the `Interface` and `VMInterface` tables.
+- **r3-2. A stale version is a conflict, retried by the runner.** The savepoint re-plan loop in
+  the helper is removed.
+  - A version mismatch in the receiver raises `ConcurrentRowChange` and records it in the
+    runner's recorder. So a broad handler that swallows it cannot hide it.
+  - The runner treats it like `40P01`/`55P03`: it rolls the whole attempt back and runs it once
+    more. A second conflict of either kind raises `TransactionConflict`.
+  - Outside the runner (the IP tab create-missing path), the exception reaches that view's row
+    handling. Its message is the fixed text "NetBox interface <name> was changed by another
+    operation. Refresh and try again."
+- **r3-3. The event queue is scoped to the runner's attempt.** The deep copy and the restore are
+  removed.
+  - The runner sets `events_queue` to a new empty dict for each attempt (a `ContextVar` token),
+    and resets it after the attempt's `atomic` exit. `on_commit` callbacks run inside that exit,
+    so their events land in the attempt dict.
+  - If the committed marker is set, the attempt's entries are appended to the request's dict. A
+    key that is already there (from an earlier committed transaction in the same request) is
+    stored under a derived key, so both events are kept. `flush_events` reads only the dict values
+    in 4.4.0 and 4.7.0.
+  - If the marker is not set (rolled back), the attempt dict is discarded. The only interface to
+    the entries is "an opaque dict value", so the code does not depend on the version.
+- **r3-4. AC5 as decided.** The middleware maps a conflict that escapes a plugin view to the "try
+  again" result: `TransactionConflict`, or an `OperationalError` with `40P01`/`55P03` anywhere in
+  the exception chain (so NetBox's `AbortRequest` raised from its own `40P01` counts, O5). There
+  is no recorder outside the runner and no `note_lock_conflict`. `check_constraints()` stays as the
+  runner's last step inside the outer block. `views/imports/actions.py` is not touched. AC5 now
+  reads: "A `40P01`/`55P03` that escapes any other plugin view gives the same visible result, not
+  a 500."
+- **r3-5. Placement (operator: new PR over the cap).** New modules: `transactions.py` (the runner,
+  the recorder, the conflict types, the attempt-scoped events, `key_columns`, the `pre_save`
+  receiver) and `middleware.py` (the HTTP adapter). The work lands on a new PR stacked on #180.
+
+### Round 3 (codex `gpt-6-astra` high, read-only, executed in a scratch database): r3 NOT RATIFIED
+
+2.1 CLOSED: `_meta` key columns equal PostgreSQL's for both models. `Interface`: `id`,
+`device_id`, `name`, `parent_id`, `channel_id`, `primary_mac_address_id`. `VMInterface`: `id`,
+`virtual_machine_id`, `name`, `primary_mac_address_id`. The 2.1 schedule completes under r3.
+2.3 CLOSED. 2.4 CLOSED for the original case. 1.2 and 2.2 MOOT (AC5 decision). 1.4 NOT CLOSED
+(see 3.1).
+
+Also checked:
+- `_name`, `last_updated` and a cleared `untagged_vlan_id` are set inside `save()`, but none of
+  them is a key column. So comparing the planned key values is enough.
+- A later-row conflict inside the runner leaves exactly one committed result after the retry.
+- The only other readers of the queue are `event_tracking` (`.values()`) and `clear_events`
+  (which replaces the dict), in both 4.4.0 and 4.7.0. The runner must merge the **current**
+  `ContextVar` value before it resets the token.
+- Without a request, NetBox's receiver enqueues nothing.
+
+| # | sev | finding | my check | status |
+|---|---|---|---|---|
+| 3.1 | MAJOR | IP create-missing path: a stale-version conflict rolls the row savepoint back but the MAC's creation event stays queued and is flushed (executed) | confirmed, and the class exists today: `_lock_target_interface` (`views/sync/ip_addresses.py:~627`) can raise after the writer created a MAC, with the same result | split: deferred |
+| 3.2 | MAJOR | NetBox's channel-rename `on_commit` callback runs its own transaction; if it rolls back, its queued events are merged because the parent's marker is set (mechanism executed; full rename path inferred) | confirmed: `dcim/models/mixins.py:304-337`; the same leak exists today without the runner | split: deferred |
+| 3.3 | MAJOR | "a conflict anywhere in the chain" hides a different escaping DB error (for example `23505` raised while handling a `55P03`); but NetBox's `ltree.py:438` raises its conflict `ValidationError` `from None`, so only `__context__` keeps it | confirmed | accepted, core item 9 |
+
+**Operator decision (2026-09-24): split.** Correct events across savepoint rollbacks and across
+rollbacks of `on_commit` callback transactions is a class that exists today, both in the plugin and
+in NetBox. It goes to a follow-up issue (evidence 1.4, 2.3, 2.4, 3.1, 3.2). The retry itself never
+leaks events, because the runner scopes them per attempt. The core below gets one counted verdict
+round.
+
+### Core (r4, split scope, for the verdict round)
+
+1. **Runner** (`transactions.py`): `run_transaction(work)`.
+   - It asserts autocommit and no enclosing atomic block.
+   - Each attempt sets a fresh `events_queue` dict, opens one outermost `atomic`, and registers
+     the committed marker first. It runs `work()` under the conflict recorder
+     (`connection.execute_wrapper`), then calls `connection.check_constraints()` as the last step
+     inside the block. A recorded conflict raises inside the block, so the attempt rolls back.
+   - A conflict is any of: `OperationalError` `40P01`/`55P03` (a statement error or at COMMIT); a
+     recorder hit (also for a swallowed or translated error); `ConcurrentRowChange` (item 3).
+   - The first conflict re-runs the attempt; a second raises `TransactionConflict`.
+   - After the attempt exits, the runner reads the current queue value. If the marker is set, it
+     merges that dict into the request queue (a colliding key gets a derived key). A later
+     callback failure is never retried: it raises `CommittedFollowUpError` from the original. If the
+     marker is not set, it discards the dict. Then it resets the token.
+   - Any other error propagates unchanged.
+2. **Attempt purity.** `work` builds fresh attempt state and returns an outcome. The caller
+   publishes messages, counters and cache transitions after the runner returns. The interface sync
+   POST's outermost block (`views/sync/interfaces.py:224`) becomes the work function, and it holds
+   the attribute pass and the relationship pass. The relationship pass's in-transaction warning
+   (`:648`) becomes part of the outcome. The existing `IntegrityError` handler stays outside the
+   runner call.
+3. **Late write** (`interface_sync.py`, a helper shared by the attribute writer and the VLAN
+   helper's scalar save).
+   - One fresh read with `xmin`, filtered by `pk` and expected owner. No row means the row is
+     refused.
+   - `snapshot()`, then the plan (the #185 check on the fresh instance), then the MAC step in its
+     current position, then the owned fields.
+   - No change: return, with no lock and no write.
+   - A change: mark the instance with the version and the lock mode, and run a full `save()`.
+     The lock mode is `FOR UPDATE` when a planned key-column value changes (`key_columns(model)`
+     from `_meta`, drift-tested against `pg_index`), otherwise `FOR NO KEY UPDATE`.
+   - The `pre_save` receiver locks the row with that mode after NetBox's tagged-VLAN clear and
+     compares `xmin`. A mismatch records the conflict and raises `ConcurrentRowChange`, with the
+     fixed text "NetBox interface <name> was changed by another operation. Refresh and try again."
+   - The writer returns the fresh instance, and the callers continue with it: `sync_interface`,
+     the VLAN helper (M2M after the scalar save, as today) and the IP tab create-missing path.
+   - A created row (`created=True`) skips the check.
+4. **HTTP adapter** (`middleware.py`, `PluginConfig.middleware`). It acts only for views whose
+   module is in the plugin. It maps a conflict that escapes to one "try again" result: for htmx, a
+   200 with `HX-Reswap: none` and a toast; for a plain submit, one message and a redirect to a
+   validated same-origin page. The JS for the sync forms shows the toast, puts back the off-page
+   selections, stops the spinner and enables the button.
+5. **Classifier** (3.3), used by the middleware:
+   - `CommittedFollowUpError`: never a conflict. When its cause is a conflict, the middleware
+     shows "Changes were saved, but follow-up work failed. Refresh and check the result."
+     Otherwise it propagates.
+   - `TransactionConflict` and `ConcurrentRowChange`: a conflict.
+   - A `DatabaseError`: its own SQLSTATE decides.
+   - NetBox `AbortRequest` or `ValidationError`: the nearest `DatabaseError` in its chain
+     (`__cause__`, else `__context__`) decides.
+   - Anything else is not a conflict.
+6. **Scope (O2, AC5 decision):** only the interface sync uses the runner now. Other plugin views
+   get "no 500" through items 4 and 5. A conflict they catch keeps their own report.
+7. **Guards:**
+   - The runner's runtime assert.
+   - An AST test: the interface sync work function calls no `messages.*` and sets no view
+     attribute.
+   - An AST test: the two writers save an existing row only through the late-write helper.
+   - The `key_columns` drift test.
+8. **Tests:** end to end through the interface sync POST (htmx and plain) with a real second
+   connection.
+   - AC1 for each unowned column and for the VLAN helper; AC2 (a concurrent `lag` blocks a planned
+     `virtual`); AC3 (captured SQL, no lock).
+   - AC4: a real `55P03` on attempt one, then clean; and on both attempts.
+   - A real `40P01` with controlled barriers.
+   - The 2.1 upgrade schedule; the 1.1 VLAN schedule; the IP-path stale row.
+   - Classifier cases (`23505` after `55P03`; `ltree` `ValidationError from None`; `AbortRequest`).
+   - A committed attempt with a failing callback is not retried and keeps its events.
+   - A rolled-back attempt's events are discarded.
+   - A mutation check for each test.
+9. **Placement:** a new PR stacked on #180 (operator decision).
+
+**Deferred to follow-up issues (filed after the core is implemented):** (a) correct events across
+savepoint and callback-transaction rollbacks (1.4, 2.3, 2.4, 3.1, 3.2); (b) moving the other locking
+views to the runner (#144).
+
+### Round 4 = core verdict round (codex `gpt-6-astra` high, read-only, executed): Core r4 NOT RATIFIED — DESIGN BLOCKED
+
+1.1, 1.3, 2.1 and 3.3 (for the item 5 classifier) are CLOSED. 1.2 and 2.2 are MOOT. 1.4, 2.3,
+2.4, 3.1 and 3.2 are DEFERRED. The split is valid: the core does not make any deferred case worse
+than today. Checked by execution:
+- `check_constraints()` placement: a blocked deferred FK is recorded as `55P03`; a missing FK
+  stays `23503`.
+- A failed first attempt leaves only the successful attempt's rows and events.
+- The merge takes the current queue value.
+- `CommittedFollowUpError` keeps the committed events and does not retry.
+- The key-lock schedule completes under r4.
+- `xmin` moves under a concurrent update.
+- `key_columns` equals `pg_index`.
+- `ValidationError from None` is still classifiable through `__context__`.
+
+| # | sev | finding | my check | status |
+|---|---|---|---|---|
+| 4.1 | BLOCKER | item 1 makes a recorder hit sufficient, so a swallowed `55P03` followed by an unrelated escaping `23505` is retried and then raised as `TransactionConflict`, which hides the `IntegrityError` from the outer handler (AC6; executed with a prototype) | confirmed: item 1 says both "a recorder hit" is a conflict and "any other error propagates unchanged", without precedence | open |
+| 4.2 | MAJOR | the attempt-purity AST guard is lexical: a helper that the work function calls can add messages or set view state (live: `_prepare_vlan_lookup_maps` warnings, `views/sync/interfaces.py:1343`, `:1351`) | confirmed | open |
+
+**Status: BLOCKED** under the agreed rule (a blocker in the core verdict round). The operator
+decides the next step.
+
+**Candidate fix (not reviewed):**
+- 4.1: one classifier, shared by the runner and the middleware (item 5). The runner retries only
+  when `work` returns normally and the recorder has a hit, or when the escaping exception itself
+  classifies as a conflict. Any other escaping exception propagates unchanged, whatever the
+  recorder holds. A mixed-error test (swallowed `55P03`, then an escaping `23505`) must show the
+  `IntegrityError` reaching the outer handler.
+- 4.2: the implementation moves the helper warnings into the attempt outcome. The guard becomes an
+  end-to-end retry test (a restricted VLAN scope plus a first-attempt conflict) that asserts each
+  message appears once, in place of a stronger AST test.
+
+**Operator decision (2026-09-24): one more verdict round**, which overrides the one-round rule
+once, on the fixed core below.
+
+### Core r5 (changes from Core r4, verbatim; all other items unchanged)
+
+- **Item 1, conflict precedence (4.1).** One classifier, `classify_conflict(exc)` (item 5), is
+  shared by the runner and the middleware. At the end of an attempt, the runner decides in this
+  order:
+  1. `work` raised: the escaping exception decides alone. If `classify_conflict(exc)` is a
+     conflict, retry (or raise `TransactionConflict` on the second attempt). Otherwise the
+     exception propagates unchanged, whatever the recorder holds.
+  2. `work` returned normally, and the recorder holds a hit (a swallowed or translated conflict),
+     or `check_constraints()` raised a conflict: raise inside the block, roll back and retry.
+  3. `work` returned normally with no hit: commit.
+  A COMMIT-time `OperationalError` is classified by the same function.
+- **Item 5.** `classify_conflict` also treats `ConcurrentRowChange` found as the escaping exception
+  as a conflict. There is no recorder lookup inside the classifier.
+- **Item 7, guards (4.2).** The lexical attempt-purity AST test stays as a cheap first check.
+  Transitive purity is proven by behaviour: an end-to-end retry test (a restricted VLAN scope, so
+  that `_prepare_vlan_lookup_maps` warns, plus a real `55P03` on the first attempt only) asserts
+  that each message appears once, and that the counters and the success banner match one attempt.
+  The implementation moves the `_prepare_vlan_lookup_maps` warnings (`views/sync/interfaces.py:1343`,
+  `:1351`) and every other message that the work path adds into the attempt outcome.
+- **Item 8, tests.** Add a mixed-error test: a swallowed `55P03` in a savepoint, then an escaping
+  `23505`. The `IntegrityError` must reach the outer handler (`views/sync/interfaces.py:250`),
+  with no retry. Mutation: make a recorder hit sufficient again, and the test goes red.
+
+### Round 5 = final verdict round (codex `gpt-6-astra` high, read-only, executed): Core r5 RATIFIED
+
+4.1 CLOSED: the reviewer re-ran the mixed-error schedule. Under r5 the same `IntegrityError`
+(`23505`) reaches the outer handler after one attempt, and the r4 rule (as a mutation) reproduces
+the defect. 4.2 CLOSED at design scope: the end-to-end test that each message appears once is an
+acceptance condition for the implementation. 1.1, 1.3, 2.1 and 3.3 stay closed. No new findings.
+Also executed:
+- A swallowed conflict still retries, and two conflicts exhaust the retry.
+- An unrelated `ValueError` propagates unchanged, and a deferred-FK `23503` propagates with no
+  retry.
+- A callback conflict after the commit gives `CommittedFollowUpError`, with no retry and the
+  committed rows and events kept.
+
+### 8.9 Ratified scope for issue #188 (2026-09-24)
+
+**Scope:** Core r4 items 1-9 as amended by Core r5. Operator decisions: deadlocks are accepted
+(retry once, then "try again"); the LAG-members race is accepted; AC5 as decided; the split; the
+work goes to a new PR stacked on #180.
+
+**First increment:** the runner (`transactions.py`), the interface sync POST as one attempt with an
+outcome that it publishes after success, and the HTTP adapter (`middleware.py` plus the sync-form
+JS). Its acceptance conditions:
+1. A real first-attempt conflict retries once. Two conflicts give a visible result for both
+   plain and htmx submits.
+2. The restricted-VLAN warnings appear once. The counters and the success banner reflect only the
+   successful attempt.
+3. A swallowed `55P03`, then an escaping `23505`, reaches the existing handler with no retry.
+4. The rows and events of a failed attempt are gone. A failed callback after a commit is never
+   retried.
+5. The runner works without a request and refuses an enclosing transaction.
+
+**Second increment:** the late write (item 3). That is the `xmin` fresh read, `snapshot()`, the
+`pre_save` lock with its mode from the key columns, and `ConcurrentRowChange`, plus AC1-AC3, AC7,
+and the 1.1 and 2.1 lock schedules as tests.
+
+**Follow-up issues to file after implementation:** (a) correct events across savepoint and
+callback-transaction rollbacks (evidence 1.4, 2.3, 2.4, 3.1, 3.2); (b) moving the other locking
+views to the runner (#144 track).
