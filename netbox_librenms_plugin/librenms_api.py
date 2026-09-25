@@ -1014,11 +1014,13 @@ class LibreNMSAPI:
         else:
             import re as _re
 
+            from netbox_librenms_plugin.utils import REGEX_COMPILE_ERRORS
+
             compiled_patterns = []
             for pattern_str in lag_patterns.values():
                 try:
                     compiled_patterns.append(_re.compile(pattern_str))
-                except (_re.error, TypeError) as exc:
+                except (*REGEX_COMPILE_ERRORS, TypeError) as exc:
                     logger.warning("Skipping invalid LAG name pattern %r: %s", pattern_str, exc)
 
         if compiled_sap_patterns is None:
@@ -1041,11 +1043,13 @@ class LibreNMSAPI:
             else:
                 import re as _re
 
+                from netbox_librenms_plugin.utils import REGEX_COMPILE_ERRORS
+
                 compiled_bridge_patterns = []
                 for pattern_str in bridge_patterns.values():
                     try:
                         compiled_bridge_patterns.append(_re.compile(pattern_str))
-                    except (_re.error, TypeError) as exc:
+                    except (*REGEX_COMPILE_ERRORS, TypeError) as exc:
                         logger.warning("Skipping invalid bridge name pattern %r: %s", pattern_str, exc)
 
         def _matches_name_patterns(name, patterns) -> bool:
