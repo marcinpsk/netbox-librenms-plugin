@@ -1815,11 +1815,15 @@ Three rules decide the scope of the interface sync. Each rule has one place in t
   change scope again during the attempt. A row that the attempt creates may be changed. The
   relationship pass keeps its row locks and its lock order: `_build_locked_relationship_indexes`
   takes a `permitted` function, and the pass gives it the selection, so its locked index build
-  reads no scope. The single-row relationship endpoints give it `_user_scope`, which reads the
-  scopes again for the locked rows, as before. A retry is a new attempt, so it reads a new
-  selection. Before, the relationship pass read the change scope again under its lock; a member
-  that the attribute write had taken out of the scope for a moment was dropped, so a final state
-  inside the scope (a new description with the LAG that the pass sets) was refused.
+  reads no scope. The pass also takes its owners from the selection: `_lock_relationship_scope`
+  locks the same rows in the same order, but it does not read the owner's view scope again. The
+  single-row relationship endpoints give the index build `_user_scope`, and their owner lock the
+  owner's view scope, so they read the scopes again for the locked rows, as before. A retry is a
+  new attempt, so it reads a new selection. Before, the relationship pass read the change scope
+  and the owner's view scope again under its lock: a member that the attribute write had taken
+  out of the scope for a moment was dropped, and an owner whose view scope follows its interfaces
+  stopped the pass with no message. A pass that cannot lock its owner now adds a warning; it never
+  ends in a silent success.
   An interface of another owner that holds the port of a row (a stale binding) is not in the
   selection, and the sync never writes it. Its change scope decides, read as before: when the user
   may change it, the row falls back to the local interface of the same name (which the selection
@@ -1829,8 +1833,11 @@ Three rules decide the scope of the interface sync. Each rule has one place in t
   in the user's change scope, and each created row also in the add scope, as NetBox's edit views
   check a saved object. The sync writes a row that it created as a change, so a created row needs
   both scopes. The check sends one query for each model and action, on the rows as the attempt
-  leaves them. It is the one scope rule for the writes: the late write's fresh read filters by pk
-  and owner only (`fresh_read_queryset=<model>.objects.all()`). The rows come from the writes
+  leaves them. Each written row that the attempt did not create must also be in the selection: a
+  channel child that NetBox renames is written by no pass, so the check refuses a child that the
+  attempt did not select, also when the child passes the final check after the rename. It is the
+  one scope rule for the writes: the late write's fresh read filters by pk and owner only
+  (`fresh_read_queryset=<model>.objects.all()`). The rows come from the writes
   themselves: `collect_interface_writes(user)` sets a `ContextVar`, and receivers of `post_save`
   and of the tagged-VLAN `m2m_changed` (both sides of the relation) record into it. A write that
   skips these signals (`QuerySet.update()`, `bulk_update()`, raw SQL) is not recorded; the sync has
@@ -1844,15 +1851,16 @@ Three rules decide the scope of the interface sync. Each rule has one place in t
   (the name that the user selected in the LibreNMS table). It describes each other row as "an
   interface you cannot view", and the refusal only counts it. A LibreNMS port name is not a NetBox
   row, so a text can show it. Guards: a behavioural test drives a row that the user may change but
-  not view through each warning path, and an AST test refuses an f-string of `SyncInterfacesView`
-  that reads a `.name`. The kept-type note is a text of the tab table, not of the sync: it names
+  not view through each warning path, and an AST test refuses a text of `SyncInterfacesView` that
+  reads a `.name` (an f-string, a `%` format, a `str.format()` call, or the name of a skipped row). The kept-type note is a text of the tab table, not of the sync: it names
   the rules and shows NetBox's refusal only to a superuser.
 - **Channel children.** NetBox 4.7 renames the channel children of a renamed interface
   (`InterfaceChannelRenameMixin`) in `transaction.on_commit()`, after the final check and after
   the commit. So when `write_interface_row` renames a row, it records the children that NetBox will
   rename, with NetBox's rule: each child with a `channel_id` whose name is `<old name>:<channel ID>`
   and whose new name fits the name column. The final check then needs each child in the change
-  scope, as the child is before the rename. The check runs when the model has the `channels` field.
+  scope, as the child is before the rename, and in the selection. The check runs when the model has
+  the `channels` field.
   Only `Interface` has it, from NetBox 4.7; `VMInterface` has no channel fields, and NetBox 4.4.0
   has no channelized interfaces. When the field exists but the model does not have NetBox's rename
   mixin, the sync fails with `RuntimeError`: it never skips the check. Residual: a change
