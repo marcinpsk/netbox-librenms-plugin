@@ -1785,6 +1785,9 @@ transaction's own version, so it matches.
   fixed text. A change after the fresh read moves `xmin`, so `save_at_version` refuses it.
   Residual, not closed: a constraint through a related row (for example `device__site__name`) can
   change without a move of the interface's `xmin`.
+  *Changed for the interface sync (2026-09-25, below):* its fresh read filters by pk and owner
+  only, and the final check of the attempt is its one scope rule for writes. The IP tab keeps the
+  change-restricted fresh read.
 - This changes the order of Core item 3 ("`snapshot()`, then the plan"). The writer copies the fresh
   instance (`copy_before_change`: no query, every field value deep-copied, because
   `set_librenms_device_id` changes the custom field data in place). Then it runs `apply(row)`, and
@@ -1825,9 +1828,15 @@ transaction's own version, so it matches.
   its permission check (`name_interface_row`): the attribute pass the checked name, the
   relationship pass the names of its locked read. A refused row with no name raises
   `RuntimeError`: a write path that names nothing is a defect.
-- The VLAN write keeps its `created` argument. A new row can be outside the change scope until the
-  final check refuses it. A fresh read of that row through the change scope finds no row, and it
-  gives a false `ConcurrentRowChange` ("try again") in place of the refusal.
+- This check is the one scope rule for the writes of the interface sync. The late write's fresh
+  read (the attribute writer and the VLAN helper) filters by pk and owner only: the caller passes
+  `fresh_read_queryset=<model>.objects.all()`. A fresh read through the change scope checked an
+  intermediate state. It refused a valid final state (for example a scope of `description="new"`
+  and `mode="tagged"`, which the row reaches only after the VLAN write), and it gave "try again"
+  (a false `ConcurrentRowChange` on both attempts) in place of the one refusal. The view's
+  pre-checks that choose the rows to process stay. The VLAN helper lost its `created` argument: a
+  new row outside the change scope no longer makes its fresh read find no row. The IP tab is not
+  on the runner, so it passes its change scope as `fresh_read_queryset`.
 - This replaced a check of each created row in a savepoint of its own, which reported a refused row
   as skipped and synced the other rows. Review found two defects in it: the relationship pass ran
   after the check, so it could set the LAG of a checked row and move the row out of the scope (the
