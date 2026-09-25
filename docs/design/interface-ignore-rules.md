@@ -1844,7 +1844,8 @@ Three rules decide the scope of the interface sync. Each rule has one place in t
   none. A row outside the scope raises `_RowsOutsideScopeError` inside the attempt: the runner rolls
   the attempt back and discards its events, and it does not retry, because the error is not a
   conflict. `post()` then adds one error, and no success message, counter or cache transition.
-- **Display.** Every text of the interface sync names a row through `_shown_name` only: the
+- **Display.** Every text of the interface sync names a row through `_shown_name` only (it calls
+  `_RowSelection.shown_name`, which the final check also calls): the
   messages, the skipped rows (also those of the relationship pass), the kept-name warning, the
   port of a name holder, and the refusal. A text names a row only when the user could view it when
   the attempt selected its rows (the name read with the view scope), or when the attempt created it
@@ -1866,6 +1867,21 @@ Three rules decide the scope of the interface sync. Each rule has one place in t
   mixin, the sync fails with `RuntimeError`: it never skips the check. Residual: a change
   constraint on the child's name is not checked against the new name, and a child that NetBox
   skips at the rename (a name collision) is still checked.
+- **Single-row relationship endpoints.** The LAG, parent and bridge endpoints
+  (`_BaseRelationshipSyncView`) follow the same three rules. Selection: the scopes that
+  `_build_locked_relationship_indexes` reads for the locked candidate rows of both ends (with
+  `_user_scope`) become a `_RowSelection` (`_relationship_selection`): the rows that the user may
+  change, and the name of each row that the user may view. Write: `collect_interface_writes`
+  records the rows of the link, and after the last write `_RowSelection.check_writes` (the check
+  that the bulk attempt calls) refuses the link when a written row is outside the change scope or
+  the selection: for example a member that its LAG takes out of a `lag__isnull` constraint, or an
+  aggregate that its promotion to `lag` takes out of a type constraint. Each attempt runs in
+  `run_transaction`, so the refusal rolls back every write and discards the events of the
+  writes; a plain `transaction.atomic()` rolls back the rows, but NetBox still sends the events of
+  the request queue. The endpoint answers with a JSON 403 and the text of `_RowsOutsideScopeError`.
+  Display: the refusal names a row through `_RowSelection.shown_name`. The other texts of the
+  endpoints (the success message, the 409 answers) name both ends without the display rule:
+  follow-up.
 - This replaced a check of each created row in a savepoint of its own, which reported a refused row
   as skipped and synced the other rows. Review found two defects in it: the relationship pass ran
   after the check, so it could set the LAG of a checked row and move the row out of the scope; and
@@ -1878,8 +1894,6 @@ Three rules decide the scope of the interface sync. Each rule has one place in t
     that address. It does not check the final change scope of an existing row that it changes,
     or the channel children of a row that it renames. Its savepoint rollback keeps the events of
     the refused row in the queue: follow-up (a), filed as #191.
-  - The single-row relationship endpoints (`_BaseRelationshipSyncView`) check the change scope
-    before their write only.
   - The attribute pass and the VLAN write rely on the final check of the attempt. A runtime guard
     that refuses a call of `sync_interface` outside an attempt is not built; many unit tests call
     it directly.
