@@ -1803,64 +1803,73 @@ transaction's own version, so it matches.
   before-state, and adds `last_updated` to `update_fields`. The child of a parent link is saved
   once, with the link and its promoted type, so it has one change record.
 
-**Implementation note (2026-09-25): the scope of every row that the sync writes.**
-- The interface sync does what NetBox's edit views do: it saves, then checks that the saved rows
-  are in the user's scope, and a violation rolls the whole transaction back. At the end of the
-  attempt (`_sync_attempt`), after the attribute pass, the VLAN write and the relationship pass,
-  each Interface or VMInterface row that the attempt created or changed must be in the user's
-  change scope, and each created row also in the add scope. The sync writes a row that it created
-  as a change, so a created row needs both scopes. The check sends one query for each model and
-  action, and it reads the rows as they are after the last write: a constraint can name a column
-  that a write sets (for example `description`, `mode` or `lag`).
-- This check is the one scope rule for the writes of the interface sync. The late write's fresh
-  read (the attribute writer and the VLAN helper) filters by pk and owner only: the caller passes
-  `fresh_read_queryset=<model>.objects.all()`. A fresh read through the change scope checked an
-  intermediate state. It refused a valid final state (for example a scope of `description="new"`
-  and `mode="tagged"`, which the row reaches only after the VLAN write), and it gave "try again"
-  (a false `ConcurrentRowChange` on both attempts) in place of the one refusal. The view's
-  pre-checks that choose the rows to process stay. The VLAN helper lost its `created` argument: a
-  new row outside the change scope no longer makes its fresh read find no row. The IP tab is not
-  on the runner, so it passes its change scope as `fresh_read_queryset`.
-- The rows come from the writes themselves. `interface_sync.collect_interface_writes(user)` sets a
-  `ContextVar` for the attempt, and two receivers record into it: `post_save` of Interface and
-  VMInterface (every `save()`, also a partial save and a save that NetBox makes), and
-  `m2m_changed` of the tagged VLANs (a change of only the tagged VLANs saves no column; both sides
-  of the relation). A write that skips these signals (`QuerySet.update()`, `bulk_update()`, raw
-  SQL) is not recorded. The sync has none; NetBox's own cable-path upkeep of channel interfaces
-  updates only cable columns this way.
-- NetBox 4.7 renames the channel children of a renamed interface (`InterfaceChannelRenameMixin`)
-  in `transaction.on_commit()`, after the collection ends and after the commit. So when
-  `write_interface_row` renames a row, it records the children that NetBox will rename, with
-  NetBox's rule: each child of a row with `channels` whose `channel_id` is set, whose name is
-  `<old name>:<channel ID>`, and whose new name fits the name column. The final check then needs
-  each such child in the user's change scope, as the child is before the rename. Only `Interface`
-  has the mixin in NetBox 4.7; `VMInterface` has no channel fields. NetBox 4.4.0 (and 4.6) has no
-  channelized interfaces, so there the check finds no child. Residual: the check reads the child
-  before the rename, so a change constraint on the child's name is not checked against the new
-  name; a child that NetBox skips at the rename (a name collision) is still checked.
-- A row outside the scope raises `_RowsOutsideScopeError` inside the attempt. The runner rolls the
-  attempt back and discards its events, and `classify_conflict` does not treat the error as a
-  conflict, so there is no second attempt. `post()` adds one error that says that nothing was
-  saved. It publishes no success message, no counter and no cache transition. A plain submit gets
-  the redirect to the tab; an htmx submit gets the tab fragment with the message.
-- The error names a refused row only when the user could view it when the sync read it. The
-  attribute pass reads the view scope of an existing row with its checked name
-  (`filter(pk=..., name=checked_name)`, so a concurrent rename cannot give a name that the user
-  may not view); a row that the sync created has the name that the user selected in the LibreNMS
-  table. The relationship pass uses the view scope of its locked read (`viewable_ids`). The
-  channel children are read with the user's view scope. Each other refused row is only counted
-  ("and 1 interface you cannot view"): not its name, and not its actions. Each write path records
-  a name or None for each row that it writes (`name_interface_row`). A refused row with no record
-  raises `RuntimeError`: a write path that records nothing is a defect.
+**Implementation note (2026-09-25): the scope model of the interface sync.**
+Three rules decide the scope of the interface sync. Each rule has one place in the code.
+
+- **Selection.** Under its owner locks and before its first write, the attempt reads which
+  existing rows it may change, and the name of each row that the user may view
+  (`SyncInterfacesView._select_rows` in `_lock_sync_scope`, a `_RowSelection`). The rows are the
+  interfaces of the locked owners: the VirtualMachine, or the Device and the chassis members that
+  the user may view. The attribute pass (its resolvers), the VLAN write, the target inference of
+  the snapshot rows and the relationship pass all use this one selection; none of them reads the
+  change scope again during the attempt. A row that the attempt creates may be changed. The
+  relationship pass keeps its row locks and its lock order: `_build_locked_relationship_indexes`
+  takes a `permitted` function, and the pass gives it the selection, so its locked index build
+  reads no scope. The single-row relationship endpoints give it `_user_scope`, which reads the
+  scopes again for the locked rows, as before. A retry is a new attempt, so it reads a new
+  selection. Before, the relationship pass read the change scope again under its lock; a member
+  that the attribute write had taken out of the scope for a moment was dropped, so a final state
+  inside the scope (a new description with the LAG that the pass sets) was refused.
+  A port owner on another device is not in the selection. The sync does not write it: it writes
+  the local interface of the same name, and it checks that row.
+- **Write.** At the end of the attempt, after the attribute pass, the VLAN write and the
+  relationship pass, each Interface or VMInterface row that the attempt created or changed must be
+  in the user's change scope, and each created row also in the add scope, as NetBox's edit views
+  check a saved object. The sync writes a row that it created as a change, so a created row needs
+  both scopes. The check sends one query for each model and action, on the rows as the attempt
+  leaves them. It is the one scope rule for the writes: the late write's fresh read filters by pk
+  and owner only (`fresh_read_queryset=<model>.objects.all()`). The rows come from the writes
+  themselves: `collect_interface_writes(user)` sets a `ContextVar`, and receivers of `post_save`
+  and of the tagged-VLAN `m2m_changed` (both sides of the relation) record into it. A write that
+  skips these signals (`QuerySet.update()`, `bulk_update()`, raw SQL) is not recorded; the sync has
+  none. A row outside the scope raises `_RowsOutsideScopeError` inside the attempt: the runner rolls
+  the attempt back and discards its events, and it does not retry, because the error is not a
+  conflict. `post()` then adds one error, and no success message, counter or cache transition.
+- **Display.** Every text of the interface sync names a row through `_shown_name` only: the
+  messages, the skipped rows (also those of the relationship pass), the kept-name warning, the
+  port of a name holder, and the refusal. A text names a row only when the user could view it when
+  the attempt selected its rows (the name read with the view scope), or when the attempt created it
+  (the name that the user selected in the LibreNMS table). It describes each other row as "an
+  interface you cannot view", and the refusal only counts it. A LibreNMS port name is not a NetBox
+  row, so a text can show it. Guards: a behavioural test drives a row that the user may change but
+  not view through each warning path, and an AST test refuses an f-string of `SyncInterfacesView`
+  that reads a `.name`. The kept-type note is a text of the tab table, not of the sync: it names
+  the rules and shows NetBox's refusal only to a superuser.
+- **Channel children.** NetBox 4.7 renames the channel children of a renamed interface
+  (`InterfaceChannelRenameMixin`) in `transaction.on_commit()`, after the final check and after
+  the commit. So when `write_interface_row` renames a row, it records the children that NetBox will
+  rename, with NetBox's rule: each child with a `channel_id` whose name is `<old name>:<channel ID>`
+  and whose new name fits the name column. The final check then needs each child in the change
+  scope, as the child is before the rename. The check runs when the model has the `channels` field.
+  Only `Interface` has it, from NetBox 4.7; `VMInterface` has no channel fields, and NetBox 4.4.0
+  has no channelized interfaces. When the field exists but the model does not have NetBox's rename
+  mixin, the sync fails with `RuntimeError`: it never skips the check. Residual: a change
+  constraint on the child's name is not checked against the new name, and a child that NetBox
+  skips at the rename (a name collision) is still checked.
 - This replaced a check of each created row in a savepoint of its own, which reported a refused row
   as skipped and synced the other rows. Review found two defects in it: the relationship pass ran
-  after the check, so it could set the LAG of a checked row and move the row out of the scope (the
-  late write checked the scope of an existing row only before its change, too); and the event of a
-  row that its savepoint rolled back stayed in the attempt's event queue, so NetBox sent it with
-  the values of the refused row.
-- The IP tab is not on the runner. It keeps its own check: after its writes, a created row must be
-  in the add and change scopes (`interface_rows_outside_scope`, the one definition of the rule),
-  and a refusal fails only that address. Its resolver runs in a savepoint, so the refused row is
-  rolled back, but its events stay in the queue. That class existed before for its change-scope
-  refusal; it is follow-up (a), filed as #191. The IP tab also renames an existing row with no
-  check of its channel children.
+  after the check, so it could set the LAG of a checked row and move the row out of the scope; and
+  the event of a row that its savepoint rolled back stayed in the attempt's event queue, so NetBox
+  sent it with the values of the refused row.
+- **Follow-up, not in this change:**
+  - The IP tab is not on the runner. It keeps its change-restricted fresh read and its own check:
+    after its writes, a created row must be in the add and change scopes
+    (`interface_rows_outside_scope`, the one definition of the rule), and a refusal fails only
+    that address. It does not check the final change scope of an existing row that it changes,
+    or the channel children of a row that it renames. Its savepoint rollback keeps the events of
+    the refused row in the queue: follow-up (a), filed as #191.
+  - The single-row relationship endpoints (`_BaseRelationshipSyncView`) check the change scope
+    before their write only.
+  - The attribute pass and the VLAN write rely on the final check of the attempt. A runtime guard
+    that refuses a call of `sync_interface` outside an attempt is not built; many unit tests call
+    it directly.

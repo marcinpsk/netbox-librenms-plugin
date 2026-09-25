@@ -12,6 +12,7 @@ from netbox_librenms_plugin.tests.conftest import (
     configured_server_key,
     make_virtual_chassis_members,
 )
+from netbox_librenms_plugin.tests.interface_sync_post_helpers import select_attempt_rows
 
 # The port keys an interface write needs, for rows whose test does not care about their values.
 _PORT_KEYS_UNSET = {"ifDescr": None, "ifType": None, "ifSpeed": None}
@@ -907,6 +908,7 @@ def test_bulk_relationship_pass_does_not_lock_unrelated_interfaces():
             view._selected_port_ids = {10}
             view._auto_selected_port_ids = set()
             view._auto_selected_target_ids = {}
+            select_attempt_rows(view, thread_device)
             view._sync_interface_relationships(
                 thread_device,
                 ports,
