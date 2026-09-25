@@ -1776,3 +1776,25 @@ name that the caller read, never by a name read after the permission check. The 
 mark, and `save_at_version` raises `RuntimeError` when no receiver checked the save. The VLAN helper
 always reads fresh: a row that the attribute writer already wrote in the transaction carries the
 transaction's own version, so it matches.
+
+**Implementation note (increment 3, 2026-09-25): change scope and change log.**
+- The fresh read uses the caller's change-restricted queryset. `write_interface_row`,
+  `update_interface_from_port` and the VLAN helper take it as a required argument. A row that left
+  the change scope before the fresh read is not found, so the writer raises `row_changed` with the
+  checked name. The retry then gives the view's own out-of-scope skip; an IP tab row fails with the
+  fixed text. A change after the fresh read moves `xmin`, so `save_at_version` refuses it.
+  Residual, not closed: a constraint through a related row (for example `device__site__name`) can
+  change without a move of the interface's `xmin`.
+- This changes the order of Core item 3 ("`snapshot()`, then the plan"). The writer copies the fresh
+  instance (`copy_before_change`: no query, every field value deep-copied, because
+  `set_librenms_device_id` changes the custom field data in place). Then it runs `apply(row)`, and
+  calls `snapshot()` on the copy only when a column changed. `keep_change_log_before_state` gives
+  the copy's `_prechange_snapshot` to the saved row. Reason: `snapshot()` reads the tags, VDCs,
+  wireless LANs and tagged VLANs of the row, and a bulk sync paid these reads for every unchanged
+  row. The before-state stays the fresh-read state: `apply` changes no data that the serializer
+  reads (the MAC step writes only the MAC's own row; the primary MAC and the custom field data
+  change only in memory). NetBox 4.4.0 and 4.7 both keep the snapshot in `_prechange_snapshot`, and
+  `to_objectchange` and the event snapshots read it there.
+- The relationship pass copies both rows of an edge the same way, gives each saved row its
+  before-state, and adds `last_updated` to `update_fields`. The child of a parent link is saved
+  once, with the link and its promoted type, so it has one change record.
