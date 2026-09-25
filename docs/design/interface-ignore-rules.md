@@ -1828,6 +1828,16 @@ transaction's own version, so it matches.
   of the relation). A write that skips these signals (`QuerySet.update()`, `bulk_update()`, raw
   SQL) is not recorded. The sync has none; NetBox's own cable-path upkeep of channel interfaces
   updates only cable columns this way.
+- NetBox 4.7 renames the channel children of a renamed interface (`InterfaceChannelRenameMixin`)
+  in `transaction.on_commit()`, after the collection ends and after the commit. So when
+  `write_interface_row` renames a row, it records the children that NetBox will rename, with
+  NetBox's rule: each child of a row with `channels` whose `channel_id` is set, whose name is
+  `<old name>:<channel ID>`, and whose new name fits the name column. The final check then needs
+  each such child in the user's change scope, as the child is before the rename. Only `Interface`
+  has the mixin in NetBox 4.7; `VMInterface` has no channel fields. NetBox 4.4.0 (and 4.6) has no
+  channelized interfaces, so there the check finds no child. Residual: the check reads the child
+  before the rename, so a change constraint on the child's name is not checked against the new
+  name; a child that NetBox skips at the rename (a name collision) is still checked.
 - A row outside the scope raises `_RowsOutsideScopeError` inside the attempt. The runner rolls the
   attempt back and discards its events, and `classify_conflict` does not treat the error as a
   conflict, so there is no second attempt. `post()` adds one error that says that nothing was
@@ -1837,11 +1847,11 @@ transaction's own version, so it matches.
   attribute pass reads the view scope of an existing row with its checked name
   (`filter(pk=..., name=checked_name)`, so a concurrent rename cannot give a name that the user
   may not view); a row that the sync created has the name that the user selected in the LibreNMS
-  table. The relationship pass uses the view scope of its locked read (`viewable_ids`). Each other
-  refused row is only counted ("and 1 interface you cannot view"): not its name, and not its
-  actions. Each write path records a name or None for each row that it writes
-  (`name_interface_row`). A refused row with no record raises `RuntimeError`: a write path that
-  records nothing is a defect.
+  table. The relationship pass uses the view scope of its locked read (`viewable_ids`). The
+  channel children are read with the user's view scope. Each other refused row is only counted
+  ("and 1 interface you cannot view"): not its name, and not its actions. Each write path records
+  a name or None for each row that it writes (`name_interface_row`). A refused row with no record
+  raises `RuntimeError`: a write path that records nothing is a defect.
 - This replaced a check of each created row in a savepoint of its own, which reported a refused row
   as skipped and synced the other rows. Review found two defects in it: the relationship pass ran
   after the check, so it could set the LAG of a checked row and move the row out of the scope (the
@@ -1852,4 +1862,5 @@ transaction's own version, so it matches.
   in the add and change scopes (`interface_rows_outside_scope`, the one definition of the rule),
   and a refusal fails only that address. Its resolver runs in a savepoint, so the refused row is
   rolled back, but its events stay in the queue. That class existed before for its change-scope
-  refusal; it is follow-up (a), filed as #191.
+  refusal; it is follow-up (a), filed as #191. The IP tab also renames an existing row with no
+  check of its channel children.
