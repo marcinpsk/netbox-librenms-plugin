@@ -1799,3 +1799,24 @@ transaction's own version, so it matches.
 - The relationship pass copies both rows of an edge the same way, gives each saved row its
   before-state, and adds `last_updated` to `update_fields`. The child of a parent link is saved
   once, with the link and its promoted type, so it has one change record.
+
+**Implementation note (2026-09-25): the scope of a row that the sync creates.**
+- The interface sync view and the IP tab use one check, `interface_sync.check_new_interface_scope`.
+  A row that the sync created must be in the user's add scope and in the user's change scope.
+  The add scope is NetBox's rule: its edit view checks the add scope of a new object after the
+  save, on the saved values. The change scope is also necessary because the sync writes the new row
+  as a change: the relationship pass and every later sync read it through the change scope.
+  Before, the interface sync view checked neither scope for a new row, and the IP tab checked only
+  the change scope, on the empty row.
+- The check reads the row after the last write of the row: the attribute write and the VLAN write.
+  A check of the empty row is wrong in both directions: a constraint on a column that the write
+  sets (for example `description` or `mode`) refuses a correct row or passes an incorrect row.
+  So the VLAN write takes `created`, and it writes a new row without the fresh read, as the
+  attribute write does. Before this change, the VLAN helper's fresh read of a new row outside the
+  change scope gave a false conflict, and the whole sync failed with "try again".
+- The interface sync view resolves and writes each row in a savepoint. A refused row is rolled
+  back with its MAC address and its change records, and it is reported as a skipped row with only
+  the name that the user selected. The IP tab resolver is atomic, so the refusal rolls it back.
+  Residual, not closed: the `object_created` event of the rolled-back row stays in the attempt's
+  event queue, and NetBox sends it after the commit with the values of the row (executed). That is
+  follow-up (a), events across savepoint rollbacks.
