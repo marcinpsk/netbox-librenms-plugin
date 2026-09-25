@@ -43,6 +43,7 @@ from netbox_librenms_plugin.utils import (
     resolve_set_primary_ip,
     same_host,
     syncable_interface_name,
+    validation_error_text_for,
 )
 from netbox_librenms_plugin.views.base.ip_addresses_view import ip_assignment_ports, ip_interface_scope
 from netbox_librenms_plugin.views.mixins import (
@@ -1475,7 +1476,7 @@ class CreateVRFFromIPRowView(SyncIPAddressesView):
                 vrf.full_clean()
                 vrf.save()
         except ValidationError as exc:
-            detail = "; ".join(exc.messages)
+            detail = validation_error_text_for(exc, VRF, request.user)
             raise _VRFCreateRefusedError(f"NetBox does not accept the LibreNMS VRF '{name}': {detail}") from exc
         except IntegrityError as exc:
             raise _VRFCreateRefusedError(
