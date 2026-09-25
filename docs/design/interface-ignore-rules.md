@@ -1820,8 +1820,10 @@ Three rules decide the scope of the interface sync. Each rule has one place in t
   selection. Before, the relationship pass read the change scope again under its lock; a member
   that the attribute write had taken out of the scope for a moment was dropped, so a final state
   inside the scope (a new description with the LAG that the pass sets) was refused.
-  A port owner on another device is not in the selection. The sync does not write it: it writes
-  the local interface of the same name, and it checks that row.
+  An interface of another owner that holds the port of a row (a stale binding) is not in the
+  selection, and the sync never writes it. Its change scope decides, read as before: when the user
+  may change it, the row falls back to the local interface of the same name (which the selection
+  checks); when not, the row is skipped. No text names the foreign interface.
 - **Write.** At the end of the attempt, after the attribute pass, the VLAN write and the
   relationship pass, each Interface or VMInterface row that the attempt created or changed must be
   in the user's change scope, and each created row also in the add scope, as NetBox's edit views
