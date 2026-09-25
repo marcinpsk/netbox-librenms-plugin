@@ -566,8 +566,9 @@ def _adopt_existing_template_interfaces(device, module, interfaces):
     adopted_names = []
     with transaction.atomic():
         for interface in adoptable:
+            interface.snapshot()
             interface.module = module
-            interface.save(update_fields=["module"])
+            interface.save(update_fields=["module", "last_updated"])
             adopted_names.append(interface.name)
 
     return {
@@ -693,8 +694,9 @@ def _normalize_module_interface_names_for_vc_member(
                 if interface.pk not in deletable_interface_ids:
                     result["skipped"] += 1
                     continue
+                conflict.snapshot()
                 conflict.module = module
-                conflict.save(update_fields=["module"])
+                conflict.save(update_fields=["module", "last_updated"])
                 result["adopted"] += 1
                 try:
                     interface.delete()
@@ -705,10 +707,11 @@ def _normalize_module_interface_names_for_vc_member(
                 result["skipped"] += 1
             continue
 
+        interface.snapshot()
         interface.name = desired_name
         try:
             interface.full_clean()
-            interface.save(update_fields=["name"])
+            interface.save(update_fields=["name", "_name", "last_updated"])
             result["renamed"] += 1
         except Exception:
             result["skipped"] += 1
@@ -821,7 +824,7 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
             "reason": f"no matching interface found for port_id {port_id}",
         }
 
-    update_fields = []
+    set_module = False
     if module_pk:
         candidate_module_id = getattr(candidate, "module_id", None)
         if candidate_module_id and candidate_module_id != module_pk:
@@ -829,9 +832,7 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
                 "status": "conflict",
                 "reason": (f"{candidate.name} already attached to module {candidate_module_id}; not reassigning"),
             }
-        if not candidate_module_id:
-            candidate.module_id = module_pk
-            update_fields.append("module")
+        set_module = not candidate_module_id
 
     current_port_id = _coerce_positive_int(get_librenms_device_id(candidate, server_key, auto_save=False))
     if current_port_id and current_port_id != port_id:
@@ -840,12 +841,19 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
             "reason": f"{candidate.name} already mapped to port_id {current_port_id}; not overwriting",
         }
 
-    if current_port_id != port_id:
+    bind_port = current_port_id != port_id
+    if set_module or bind_port:
+        candidate.snapshot()
+    update_fields = []
+    if set_module:
+        candidate.module_id = module_pk
+        update_fields.append("module")
+    if bind_port:
         set_librenms_device_id(candidate, port_id, server_key)
         update_fields.append("custom_field_data")
 
     if update_fields:
-        candidate.save(update_fields=sorted(set(update_fields)))
+        candidate.save(update_fields=[*update_fields, "last_updated"])
 
     return {"status": "bound", "interface": candidate.name, "port_id": port_id, "changed": bool(update_fields)}
 
@@ -2292,9 +2300,10 @@ class UpdateModuleSerialView(
                     return _modules_action_response(request, page_device, server_key)
                 changed = module.serial != serial
                 if changed:
+                    module.snapshot()
                     module.serial = serial
                     module.full_clean()
-                    module.save(update_fields=["serial"])
+                    module.save(update_fields=["serial", "last_updated"])
             if changed:
                 messages.success(
                     request,
@@ -2483,7 +2492,7 @@ def _apply_module_interface_type(interface, template_type, current_type, offered
         return "validation_failed", refusal
     interface.snapshot()
     interface.type = template_type
-    interface.save(update_fields=["type"])
+    interface.save(update_fields=["type", "last_updated"])
     return "updated", None
 
 
