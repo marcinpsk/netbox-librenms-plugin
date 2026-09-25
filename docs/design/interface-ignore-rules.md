@@ -1794,7 +1794,8 @@ transaction's own version, so it matches.
   row. The before-state stays the fresh-read state: `apply` changes no data that the serializer
   reads (the MAC step writes only the MAC's own row; the primary MAC and the custom field data
   change only in memory). NetBox 4.4.0 and 4.7 both keep the snapshot in `_prechange_snapshot`, and
-  `to_objectchange` and the event snapshots read it there.
+  `to_objectchange` and the event snapshots read it there. A change of only the tagged VLANs saves
+  no column, so the VLAN helper calls `snapshot()` itself before it changes the tagged VLANs.
 - The relationship pass copies both rows of an edge the same way, gives each saved row its
   before-state, and adds `last_updated` to `update_fields`. The child of a parent link is saved
   once, with the link and its promoted type, so it has one change record.
