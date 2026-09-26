@@ -648,9 +648,8 @@ class BaseCableTableView(
         candidate_names = {name for name in name_candidates if isinstance(name, str) and name}
         matches = {
             interface.pk: interface
-            for (device_id, name), named_interfaces in context["interfaces_by_name"].items()
-            if device_id == device.pk and name in candidate_names
-            for interface in named_interfaces
+            for name in candidate_names
+            for interface in context["interfaces_by_name"].get((device.pk, name), ())
         }
         if len(matches) != 1:
             return None

@@ -831,3 +831,54 @@ class TestDisplaySyncResults:
         view.display_sync_results(request, {"valid": [], "invalid": [], "duplicate": [], "missing_remote": ["if-only"]})
 
         assert message_texts(request, "error") == ["Remote device or interface not found in NetBox for: if-only"]
+
+
+class _CountedNameIndex(dict):
+    """Count catalog entries examined without changing dictionary lookup behavior."""
+
+    examined = 0
+
+    def items(self):
+        for item in super().items():
+            self.examined += 1
+            yield item
+
+    def get(self, key, default=None):
+        self.examined += 1
+        return super().get(key, default)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("port_count", [4, 64])
+def test_cable_name_resolution_work_is_bounded_by_rows(port_count, django_assert_num_queries):
+    from dcim.models import Interface
+
+    local = make_device("bounded-cable-local")
+    remote = make_device("bounded-cable-remote")
+    Interface.objects.bulk_create(
+        Interface(device=device, name=f"eth{index}", type="1000base-t")
+        for device in (local, remote)
+        for index in range(port_count)
+    )
+    links = [
+        _link(local_port=f"eth{index}", remote_device=remote.name, remote_port=f"eth{index}")
+        for index in range(port_count)
+    ]
+    view = _view()
+    context = view._build_normal_link_context(links, local, SERVER_KEY)
+    names = _CountedNameIndex(context["interfaces_by_name"])
+    context["interfaces_by_name"] = names
+    assert len(names) == 2 * port_count
+
+    with django_assert_num_queries(0):
+        for link in links:
+            view.enrich_local_port(link, local, server_key=SERVER_KEY, normal_context=context)
+            view.enrich_remote_port(link, remote, server_key=SERVER_KEY, normal_context=context)
+            assert context["interfaces_by_pk"][link["netbox_local_interface_id"]].name == link["local_port"]
+            assert context["interfaces_by_pk"][link["netbox_remote_interface_id"]].name == link["remote_port"]
+        assert (
+            view._load_link_traces(links, context, context["local_owner_by_link"], context["remote_owner_by_link"])
+            == {}
+        )
+
+    assert names.examined <= 4 * port_count
