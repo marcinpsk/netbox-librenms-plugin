@@ -1139,8 +1139,7 @@ members-rule note. Candidate directions on record: late lock (r6), no-wait acqui
 
 ## 8. Follow-up: interface-row concurrency (issue #188)
 
-Status: **RATIFIED (Core r5, split scope), 2026-09-24.** See 8.9 for the scope and the next action. Target branch: `feat/interface-member-badges` (PR #180, 97/100
-changed files). The record stays in this file to save a file slot.
+Status: **RATIFIED (Core r5, split scope), 2026-09-24.** See 8.9 for the scope and the next action. Target branch: `feat/interface-row-concurrency` (PR #190). The record stays in this file to save a file slot.
 
 ### 8.1 Brief
 
@@ -1879,9 +1878,9 @@ Three rules decide the scope of the interface sync. Each rule has one place in t
   `run_transaction`, so the refusal rolls back every write and discards the events of the
   writes; a plain `transaction.atomic()` rolls back the rows, but NetBox still sends the events of
   the request queue. The endpoint answers with a JSON 403 and the text of `_RowsOutsideScopeError`.
-  Display: the refusal names a row through `_RowSelection.shown_name`. The other texts of the
-  endpoints (the success message, the 409 answers) name both ends without the display rule:
-  follow-up.
+  Display: the refusal names a row through `_RowSelection.shown_name`. The success message
+  and the 409 answers use `_attempt_texts`, which holds the permission-filtered names from
+  `selection.shown`. These texts apply the same display rule to both ends.
 - This replaced a check of each created row in a savepoint of its own, which reported a refused row
   as skipped and synced the other rows. Review found two defects in it: the relationship pass ran
   after the check, so it could set the LAG of a checked row and move the row out of the scope; and
