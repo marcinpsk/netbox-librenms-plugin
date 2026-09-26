@@ -60,6 +60,7 @@ from netbox_librenms_plugin.import_utils import (
     visible_object_label,
 )
 from netbox_librenms_plugin.import_utils.bulk_import import ambiguous_stack_groups, stack_identity
+from netbox_librenms_plugin.interface_sync import copy_before_change, keep_change_log_before_state
 from netbox_librenms_plugin.import_validation_helpers import (
     apply_cluster_to_validation,
     apply_host_to_validation,
@@ -93,8 +94,15 @@ from netbox_librenms_plugin.utils import (
     save_user_pref,
     set_device_ip_fk,
     validate_import_context_columns,
+    validation_error_detail,
+    exception_text_for,
 )
-from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
+from netbox_librenms_plugin.views.mixins import (
+    LibreNMSAPIMixin,
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+    _htmx_error_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -250,46 +258,6 @@ def _resolve_vc_detection_enabled(request) -> bool:
             return not skip_vc
 
     return False
-
-
-def _htmx_error_response(message: str) -> HttpResponse:
-    """
-    Return an HTMX-friendly error response that surfaces ``message`` as a toast.
-
-    Uses an out-of-band swap of NetBox's ``#django-messages`` container so the
-    toast renders through the same Bootstrap pipeline NetBox uses for the
-    standard ``messages`` framework. It does not depend on ``window.bootstrap``.
-
-    Returns ``200`` (with ``HX-Reswap: none``) so the primary swap target is
-    left untouched *and* so ``django-htmx``'s DEBUG-mode handler does not
-    replace the page body with the response payload (it only does so for
-    4xx/5xx responses).
-
-    Args:
-        message (str): The error message to show in the toast.
-
-    Returns:
-        HttpResponse: The HTMX error response.
-
-    """
-    toast_html = format_html(
-        '<div id="django-messages" class="toast-container position-fixed bottom-0 end-0 p-3" hx-swap-oob="true">'
-        '<div class="toast toast-dark border-0 shadow-sm" role="alert" aria-live="assertive" '
-        'aria-atomic="true" data-bs-delay="12000">'
-        '<div class="toast-header text-bg-danger">'
-        '<i class="mdi mdi-alert-circle me-1"></i>Error'
-        '<button type="button" class="btn-close me-0 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>'
-        "</div>"
-        '<div class="toast-body">{}</div>'
-        "</div>"
-        "</div>",
-        message,
-    )
-    resp = HttpResponse(toast_html, content_type="text/html")
-    # Prevent the triggering element's hx-swap from clobbering its target with
-    # our OOB-only payload; OOB still applies regardless of HX-Reswap.
-    resp["HX-Reswap"] = "none"
-    return resp
 
 
 def _invalid_import_intent_response(request, device_id: int) -> HttpResponse | None:
@@ -654,25 +622,20 @@ def _device_type_rack_fit_error(device) -> HttpResponse | None:
     return None
 
 
-def _save_device(device, update_fields: list[str] | None = None, request=None) -> HttpResponse | None:
+@transaction.atomic
+def _save_device(device, update_fields: list[str], request=None) -> HttpResponse | None:
     """
-    Persist a Device row, returning an HttpResponse on failure or None on success.
+    Save the columns *update_fields* of a Device or VirtualMachine row, returning an HttpResponse on failure or None on success.
 
-    When ``update_fields`` is provided, the call uses ``save(update_fields=...)``
-    which issues a narrower UPDATE that only writes those columns and bypasses
-    ``full_clean()``. This is the correct mode when the caller mutates only a known
-    small set of fields and the device row may carry pre-existing inconsistencies on
-    *other* fields (e.g. a legacy ``face`` value left behind after a rack was
-    cleared); validating those untouched fields would block legitimate updates.
-
-    When ``update_fields`` is ``None`` (the default), the legacy behaviour is
-    preserved: ``full_clean()`` runs against the entire row before ``save()`` writes
-    every column.
+    The call uses ``save(update_fields=...)``, which writes only those columns and ``last_updated``
+    and bypasses ``full_clean()``. The row may carry pre-existing inconsistencies on *other* fields
+    (e.g. a legacy ``face`` value left behind after a rack was cleared), and a validation of those
+    untouched fields would block legitimate updates. The callers change the instance before the
+    call, so the change record takes its before-state from the row as stored.
 
     Args:
-        device: The NetBox Device to persist.
-        update_fields (list[str] | None): The columns to write; None runs
-            ``full_clean()`` and saves the whole row.
+        device: The NetBox Device or VirtualMachine to persist.
+        update_fields (list[str]): The columns to write.
         request: The current HTTP request; when it is an HTMX request, errors are
             returned via ``_htmx_error_response()`` so modal swap/toast flows remain
             intact, otherwise plain ``HttpResponse`` status codes are used.
@@ -687,43 +650,39 @@ def _save_device(device, update_fields: list[str] | None = None, request=None) -
             return _htmx_error_response(msg)
         return HttpResponse(escape(msg), status=status)
 
-    # ValidationError messages are field-level and safe/useful to surface; raw DB exception
-    # strings (IntegrityError/DataError/DatabaseError) can leak constraint names, column
-    # details, or backend text, so log them server-side and return a generic toast.
-    if update_fields is None:
-        try:
-            device.full_clean()
-        except ValidationError as exc:
-            error_msg = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
-            return _err(f"Validation error: {error_msg}", 400)
-        try:
-            device.save()
-        except IntegrityError:
-            logger.exception("Integrity error saving device pk=%s", getattr(device, "pk", None))
-            return _err("Could not save: a database integrity constraint was violated.", 409)
-        return None
+    stored = type(device).objects.select_for_update().filter(pk=device.pk).first()
+    if stored is None:
+        return _err("Could not save: the record may have been changed or deleted; refresh and retry.", 409)
+    before = copy_before_change(stored)
+    for name in update_fields:
+        field = device._meta.get_field(name)
+        setattr(stored, field.attname, getattr(device, field.attname))
 
     # full_clean() is intentionally skipped here (it would abort on unrelated legacy field
     # values), but a device_type/platform write still carries the platform/manufacturer
     # cross-field constraint with no DB backstop — validate just that one rule so an
     # inconsistent pairing can't be persisted silently with a success toast.
-    if update_fields and ({"device_type", "platform"} & set(update_fields)):
-        if mismatch := _platform_device_type_mismatch(device):
+    if {"device_type", "platform"} & set(update_fields):
+        if mismatch := _platform_device_type_mismatch(stored):
             return mismatch
     # A device_type write also bypasses Device.clean()'s rack-fit check; re-validate just that rule
     # so a taller device_type can't overflow the rack elevation with a success toast.
-    if update_fields and "device_type" in update_fields:
-        if rack_fit := _device_type_rack_fit_error(device):
+    if "device_type" in update_fields:
+        if rack_fit := _device_type_rack_fit_error(stored):
             return rack_fit
 
+    keep_change_log_before_state(stored, before)
     try:
-        device.save(update_fields=update_fields)
+        stored.save(update_fields=[*update_fields, "last_updated"])
     except IntegrityError:
         logger.exception("Integrity error saving device pk=%s", getattr(device, "pk", None))
         return _err("Could not save: a database integrity constraint was violated.", 409)
     except ValidationError as exc:
-        error_msg = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
-        return _err(f"Validation error: {error_msg}", 400)
+        logger.warning(
+            "Validation error saving %s pk=%s: %s", type(device).__name__, device.pk, validation_error_detail(exc)
+        )
+        user = getattr(request, "user", None)
+        return _err(f"Validation error: {exception_text_for(exc, type(device), user)}", 400)
     except DataError:
         # save(update_fields=...) skips full_clean(), so an overlong/invalid value
         # from LibreNMS (e.g. a hostname past Device.name max_length) reaches the DB
@@ -1462,11 +1421,14 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             from utilities.rqworker import get_workers_for_queue
 
             if get_workers_for_queue("default") > 0:
+                from utilities.request import copy_safe_request
+
                 from netbox_librenms_plugin.jobs import ImportDevicesJob
 
                 # Enqueue background job
                 job = ImportDevicesJob.enqueue(
                     user=request.user,
+                    request=copy_safe_request(request),
                     import_plans=serialize_import_plans(import_plans),
                     server_key=self.librenms_api.server_key,
                     sync_options=sync_options,
@@ -2411,6 +2373,7 @@ class DeviceConflictActionView(
                     )
                 # migrate_legacy_librenms_id refuses only the values is_legacy_librenms_id already
                 # rejects, and the locked value passed that gate above, so it cannot fail here.
+                locked_device.snapshot()
                 migrate_legacy_librenms_id(locked_device, server_key)
                 # Save only the field we actually mutated. Running full_clean() on the
                 # whole object would reject the migration over unrelated pre-existing
@@ -2419,7 +2382,7 @@ class DeviceConflictActionView(
                 # mapping" is to clean up the librenms_id custom field, not to gate
                 # on every other field being valid.
                 try:
-                    locked_device.save(update_fields=["custom_field_data"])
+                    locked_device.save(update_fields=["custom_field_data", "last_updated"])
                 except IntegrityError:
                     logger.exception(
                         "Failed to persist migrated LibreNMS mapping for %s pk=%s",
@@ -2890,8 +2853,7 @@ class CreatePlatformFromImportView(
                         )
         except ValidationError as exc:
             logger.exception("CreatePlatformFromImportView: validation failed while creating platform")
-            detail = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
-            return _htmx_error_response(f"Error creating platform: {detail}")
+            return _htmx_error_response(f"Error creating platform: {exception_text_for(exc, Platform, request.user)}")
         except IntegrityError:
             logger.exception("CreatePlatformFromImportView: integrity error while creating platform")
             return _htmx_error_response(

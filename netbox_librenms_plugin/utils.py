@@ -10,7 +10,7 @@ from typing import Optional
 import netaddr
 from dcim.models import Device, Interface
 from django.core import signing
-from django.core.exceptions import ObjectDoesNotExist, ValidationError
+from django.core.exceptions import FieldDoesNotExist, ObjectDoesNotExist, ValidationError
 from django.db import IntegrityError
 from django.db.models import Count, Max, Q
 from django.http import HttpRequest
@@ -1132,7 +1132,7 @@ def get_virtual_chassis_member(
         if members_by_position:
             return members_by_position.get(vc_position, fallback)
         return device.virtual_chassis.members.get(vc_position=vc_position)
-    except (re.error, ValueError, ObjectDoesNotExist):
+    except (ValueError, ObjectDoesNotExist):
         return fallback
 
 
@@ -2815,7 +2815,7 @@ def parse_librenms_location(location_string: str, pattern: str, is_regex: bool =
         else:
             compiled = re.compile(_placeholder_pattern_to_regex(pattern))
             match = compiled.match(location_string)
-    except re.error:
+    except REGEX_COMPILE_ERRORS:
         logger.warning("Invalid LibreNMS location parse pattern: %r", pattern)
         return result
 
@@ -3593,8 +3593,9 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
         if int_id <= 0:
             return None
         if auto_save:
+            obj.snapshot()
             obj.custom_field_data["librenms_id"] = int_id
-            obj.save(update_fields=["custom_field_data"])
+            obj.save(update_fields=["custom_field_data", "last_updated"])
         return int_id
     if isinstance(cf_value, dict):
         value = cf_value.get(server_key)
@@ -3607,9 +3608,10 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
                 return None
             # Normalise a string-stored id ("42" → 42) back to the DB.
             if auto_save and isinstance(inner, str):
+                obj.snapshot()
                 value["id"] = int_id
                 obj.custom_field_data["librenms_id"] = cf_value
-                obj.save(update_fields=["custom_field_data"])
+                obj.save(update_fields=["custom_field_data", "last_updated"])
             return int_id
         # Bare scalar entry ({"primary": 42} / {"primary": "42"}): coerce_librenms_id
         # rejects bools, non-positive, and non-numeric strings in one place.
@@ -3618,9 +3620,10 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
             return None
         # Normalise a string-stored id back to the DB so later queries use a plain int.
         if auto_save and isinstance(value, str):
+            obj.snapshot()
             cf_value[server_key] = int_id
             obj.custom_field_data["librenms_id"] = cf_value
-            obj.save(update_fields=["custom_field_data"])
+            obj.save(update_fields=["custom_field_data", "last_updated"])
         return int_id
     return None
 
@@ -4890,6 +4893,79 @@ def validation_error_detail(exc: ValidationError) -> str:
     return "; ".join(str(m) for m in exc.messages) if hasattr(exc, "messages") else str(exc)
 
 
+def is_active_superuser(user) -> bool:
+    """Return whether *user* is an authenticated, active superuser: the only viewer who may view every object."""
+    return bool(
+        getattr(user, "is_authenticated", False)
+        and getattr(user, "is_active", False)
+        and getattr(user, "is_superuser", False)
+    )
+
+
+def refused_model_field(model, key) -> str | None:
+    """Return the concrete *model* field that a ValidationError key names, or None for any other key."""
+    # A validator or a post_clean receiver can key an error by any text, such as an object's name.
+    try:
+        field = model._meta.get_field(key)
+    except FieldDoesNotExist:
+        return None
+    return field.name if field.concrete else None
+
+
+def hidden_refusal_text(model, fields) -> str:
+    """
+    Return the text that tells a viewer which *model* fields NetBox refuses, without NetBox's message.
+
+    Args:
+        model (type[Model]): The model that NetBox validated.
+        fields (list[str]): The concrete *model* fields that NetBox refuses (from ``refused_model_field``).
+
+    Returns:
+        str: For example "NetBox refuses the serial field (only a superuser sees the message)".
+
+    """
+    if not fields:
+        subject = f"the {model._meta.verbose_name}"
+    elif len(fields) == 1:
+        subject = f"the {fields[0]} field"
+    else:
+        subject = f"the {', '.join(fields[:-1])} and {fields[-1]} fields"
+    return f"NetBox refuses {subject} (only a superuser sees the message)"
+
+
+def exception_text_for(exc: Exception, model, user) -> str:
+    """
+    Return the text of a caught *exc* that *user* may read.
+
+    NetBox's ``clean()`` messages can name related objects, and admin ``CUSTOM_VALIDATORS`` or
+    ``post_clean`` and ``pre_save`` receivers can add any text under any key. So only a superuser
+    gets the message of a ValidationError. Every other viewer gets the concrete *model* fields
+    that the error keys name, or the model. Identity conflicts and database constraints use
+    generic text because their details can identify objects outside the viewer's scope.
+
+    Args:
+        exc (Exception): The caught error.
+        model (type[Model]): The model that NetBox validated.
+        user (User | None): The viewer.
+
+    Returns:
+        str: Safe identity or constraint text, scoped validation text, or the other exception's text.
+
+    """
+    if isinstance(exc, AmbiguousLibreNMSIdError):
+        return "Multiple records use this LibreNMS ID. Ask an administrator to correct the mappings."
+    if isinstance(exc, IntegrityError):
+        logger.warning("Database constraint rejected %s: %s", model.__name__, exc)
+        return "A database constraint rejected the change. Refresh the data and try again."
+    if not isinstance(exc, ValidationError):
+        return str(exc)
+    if is_active_superuser(user):
+        return validation_error_detail(exc)
+    keys = exc.error_dict if hasattr(exc, "error_dict") else ()
+    fields = [name for name in dict.fromkeys(refused_model_field(model, key) for key in keys) if name]
+    return hidden_refusal_text(model, fields)
+
+
 # The device-level IP foreign keys this plugin re-homes during OOB linking, merges, and the
 # Stage-2b "move to winner" actions. NetBox requires each to reference an address assigned to
 # one of THAT device's own interfaces.
@@ -4957,9 +5033,11 @@ def set_device_ip_fk(device, field, ip, *, save=True):
             raise ValueError(f"set_device_ip_fk: refusing to set primary_ip4 to non-IPv4 address {ip}")
         if field == "primary_ip6" and family != 6:
             raise ValueError(f"set_device_ip_fk: refusing to set primary_ip6 to non-IPv6 address {ip}")
+    if save:
+        device.snapshot()
     setattr(device, field, ip)
     if save:
-        device.save(update_fields=[field])
+        device.save(update_fields=[field, "last_updated"])
     return field
 
 
@@ -5550,7 +5628,7 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None, *, prel
         for rule in rules_qs:
             try:
                 val = re.sub(rule.match_pattern, rule.replacement, val)
-            except (re.error, IndexError):
+            except (*REGEX_COMPILE_ERRORS, IndexError):
                 logger.error(
                     "Invalid regex in NormalizationRule pk=%s pattern=%r — skipping", rule.pk, rule.match_pattern
                 )

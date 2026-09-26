@@ -23,6 +23,7 @@ from netbox_librenms_plugin.sync_cache import (
     schedule_request_cache_mutation,
 )
 from netbox_librenms_plugin.utils import (
+    REGEX_COMPILE_ERRORS,
     AmbiguousLibreNMSIdError,
     LibreNMSPortBindingConflict,
     claim_librenms_port_binding,
@@ -43,6 +44,7 @@ from netbox_librenms_plugin.utils import (
     normalize_serial,
     rewrite_interface_name_for_vc_member,
     set_librenms_device_id,
+    exception_text_for,
 )
 from netbox_librenms_plugin.utils import (
     coerce_positive_int as _coerce_positive_int,
@@ -256,6 +258,28 @@ def _get_cached_inventory_for_device(sync_device, server_key, get_cache_key):
         return None
 
     return inventory
+
+
+def _module_write_failure(exc, model, user):
+    """
+    Return the text of a failed module write that a page may show *user*.
+
+    Args:
+        exc (ValidationError | IntegrityError): The error of the write.
+        model (type[Model]): The model that NetBox validated.
+        user (User | None): The viewer.
+
+    Returns:
+        str: The duplicate interface name hint, else the text from ``exception_text_for``.
+
+    """
+    if isinstance(exc, IntegrityError) and "dcim_interface_unique_device_name" in str(exc):
+        return (
+            "duplicate interface name — this module type's interface template "
+            "uses the '{module}' token which resolves to the same name for all siblings. "
+            "An interface naming plugin with a rewrite rule for this module type can fix this."
+        )
+    return exception_text_for(exc, model, user)
 
 
 def _report_install_results(request, installed, skipped, failed):
@@ -566,8 +590,9 @@ def _adopt_existing_template_interfaces(device, module, interfaces):
     adopted_names = []
     with transaction.atomic():
         for interface in adoptable:
+            interface.snapshot()
             interface.module = module
-            interface.save(update_fields=["module"])
+            interface.save(update_fields=["module", "last_updated"])
             adopted_names.append(interface.name)
 
     return {
@@ -693,8 +718,9 @@ def _normalize_module_interface_names_for_vc_member(
                 if interface.pk not in deletable_interface_ids:
                     result["skipped"] += 1
                     continue
+                conflict.snapshot()
                 conflict.module = module
-                conflict.save(update_fields=["module"])
+                conflict.save(update_fields=["module", "last_updated"])
                 result["adopted"] += 1
                 try:
                     interface.delete()
@@ -705,10 +731,11 @@ def _normalize_module_interface_names_for_vc_member(
                 result["skipped"] += 1
             continue
 
+        interface.snapshot()
         interface.name = desired_name
         try:
             interface.full_clean()
-            interface.save(update_fields=["name"])
+            interface.save(update_fields=["name", "_name", "last_updated"])
             result["renamed"] += 1
         except Exception:
             result["skipped"] += 1
@@ -821,7 +848,7 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
             "reason": f"no matching interface found for port_id {port_id}",
         }
 
-    update_fields = []
+    set_module = False
     if module_pk:
         candidate_module_id = getattr(candidate, "module_id", None)
         if candidate_module_id and candidate_module_id != module_pk:
@@ -829,9 +856,7 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
                 "status": "conflict",
                 "reason": (f"{candidate.name} already attached to module {candidate_module_id}; not reassigning"),
             }
-        if not candidate_module_id:
-            candidate.module_id = module_pk
-            update_fields.append("module")
+        set_module = not candidate_module_id
 
     current_port_id = _coerce_positive_int(get_librenms_device_id(candidate, server_key, auto_save=False))
     if current_port_id and current_port_id != port_id:
@@ -840,12 +865,19 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
             "reason": f"{candidate.name} already mapped to port_id {current_port_id}; not overwriting",
         }
 
-    if current_port_id != port_id:
+    bind_port = current_port_id != port_id
+    if set_module or bind_port:
+        candidate.snapshot()
+    update_fields = []
+    if set_module:
+        candidate.module_id = module_pk
+        update_fields.append("module")
+    if bind_port:
         set_librenms_device_id(candidate, port_id, server_key)
         update_fields.append("custom_field_data")
 
     if update_fields:
-        candidate.save(update_fields=sorted(set(update_fields)))
+        candidate.save(update_fields=[*update_fields, "last_updated"])
 
     return {"status": "bound", "interface": candidate.name, "port_id": port_id, "changed": bool(update_fields)}
 
@@ -1069,7 +1101,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         except _ModuleComponentAdoptionUnavailable as exc:
             messages.error(request, f"A matching {exc.component_label} is not available for module adoption.")
         except (ValidationError, IntegrityError) as e:
-            messages.error(request, f"Failed to install module: {e}")
+            messages.error(request, f"Failed to install module: {_module_write_failure(e, Module, request.user)}")
 
         return _modules_action_response(request, page_device, server_key)
 
@@ -1255,6 +1287,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         changeable_interfaces=changeable_interfaces,
                         deletable_interfaces=deletable_interfaces,
                         holder_of=holder_of,
+                        user=request.user,
                     )
                     should_bind = _should_attempt_bind_for_result(result)
                     if result["status"] == "installed":
@@ -1274,7 +1307,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         )
                         bound_any = _record_bind_outcome(bind_result, result, skipped) or bound_any
         except (ValidationError, IntegrityError) as e:
-            messages.error(request, f"Branch install failed: {e}")
+            messages.error(request, f"Branch install failed: {_module_write_failure(e, Module, request.user)}")
             return _modules_action_response(request, page_device, server_key)
 
         _report_install_results(request, installed, skipped, failed)
@@ -1440,6 +1473,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         norm_rules_bay=None,
         norm_rules_serial=None,
         holder_of=None,
+        user=None,
     ):
         """
         Try to install a single inventory item.
@@ -1463,6 +1497,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             norm_rules_bay (dict | None): The optional module bay normalization rules.
             norm_rules_serial (dict | None): The optional serial normalization rules.
             holder_of (dict | None): Mutable module ancestry reused during a bulk install.
+            user (User | None): The viewer of a failure reason; only a superuser gets NetBox's message.
 
         Returns:
             dict: The install status and its result details.
@@ -1570,14 +1605,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 "reason": f"a matching {exc.component_label} is not available for module adoption",
             }
         except (ValidationError, IntegrityError) as e:
-            error_msg = str(e)
-            if "dcim_interface_unique_device_name" in error_msg:
-                error_msg = (
-                    "duplicate interface name — this module type's interface template "
-                    "uses the '{module}' token which resolves to the same name for all siblings. "
-                    "An interface naming plugin with a rewrite rule for this module type can fix this."
-                )
-            return {"status": "failed", "name": name, "reason": error_msg}
+            return {"status": "failed", "name": name, "reason": _module_write_failure(e, Module, user)}
 
         if holder_of is not None:
             holder_of[module.pk] = locked_bay.module_id
@@ -1868,10 +1896,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                     compiled = rm._compiled_pattern
                     if compiled is None:
                         continue
-                    try:
-                        match = compiled.fullmatch(name)
-                    except re.error:
-                        continue
+                    match = compiled.fullmatch(name)
                     if not match:
                         continue
                     try:
@@ -2192,6 +2217,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         changeable_interfaces=changeable_interfaces,
                         deletable_interfaces=deletable_interfaces,
                         holder_of=holder_of,
+                        user=request.user,
                     )
                     should_bind = _should_attempt_bind_for_result(result)
                     if result["status"] == "installed":
@@ -2211,7 +2237,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         )
                         bound_any = _record_bind_outcome(bind_result, result, skipped) or bound_any
         except (ValidationError, IntegrityError) as e:
-            messages.error(request, f"Install failed: {e}")
+            messages.error(request, f"Install failed: {_module_write_failure(e, Module, request.user)}")
             return _modules_action_response(request, page_device, server_key)
 
         if invalid_selection_seen:
@@ -2292,9 +2318,10 @@ class UpdateModuleSerialView(
                     return _modules_action_response(request, page_device, server_key)
                 changed = module.serial != serial
                 if changed:
+                    module.snapshot()
                     module.serial = serial
                     module.full_clean()
-                    module.save(update_fields=["serial"])
+                    module.save(update_fields=["serial", "last_updated"])
             if changed:
                 messages.success(
                     request,
@@ -2305,7 +2332,7 @@ class UpdateModuleSerialView(
             else:
                 messages.info(request, "The module serial already matches LibreNMS. No change was needed.")
         except (ValidationError, IntegrityError) as e:
-            messages.error(request, f"Failed to update serial: {e}")
+            messages.error(request, f"Failed to update serial: {_module_write_failure(e, Module, request.user)}")
 
         return _modules_action_response(request, page_device, server_key)
 
@@ -2483,7 +2510,7 @@ def _apply_module_interface_type(interface, template_type, current_type, offered
         return "validation_failed", refusal
     interface.snapshot()
     interface.type = template_type
-    interface.save(update_fields=["type"])
+    interface.save(update_fields=["type", "last_updated"])
     return "updated", None
 
 
@@ -3126,14 +3153,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 "Ask an administrator to resolve the conflict.",
             )
         except (ValidationError, IntegrityError) as e:
-            error_msg = str(e)
-            if "dcim_interface_unique_device_name" in error_msg:
-                error_msg = (
-                    "duplicate interface name — this module type's interface template "
-                    "uses the '{module}' token which resolves to the same name for all siblings. "
-                    "An interface naming plugin with a rewrite rule for this module type can fix this."
-                )
-            messages.error(request, f"Replace failed: {error_msg}")
+            messages.error(request, f"Replace failed: {_module_write_failure(e, Module, request.user)}")
 
         return _modules_action_response(request, page_device, server_key)
 
@@ -3265,7 +3285,7 @@ class MoveModuleView(
             if server_key:
                 _schedule_module_cache_mutation(request, page_device, server_key)
         except (ValidationError, IntegrityError) as e:
-            messages.error(request, f"Move failed: {e}")
+            messages.error(request, f"Move failed: {_module_write_failure(e, Module, request.user)}")
 
         return _modules_action_response(request, page_device, server_key)
 
@@ -3416,7 +3436,7 @@ class AddBayTemplateView(
         netbox_replacement = "".join(replacement_parts)
         try:
             compiled = re.compile(librenms_pattern)
-        except re.error:
+        except REGEX_COMPILE_ERRORS:
             return None
         if not compiled.fullmatch(librenms_name):
             return None
@@ -3467,7 +3487,7 @@ class AddBayTemplateView(
             try:
                 if re.compile(mapping.librenms_name).fullmatch(librenms_name):
                     return True
-            except re.error:
+            except REGEX_COMPILE_ERRORS:
                 continue
         return False
 
@@ -3553,7 +3573,8 @@ class AddBayTemplateView(
                     mapping.full_clean()
                     mapping.save()
             except (ValidationError, IntegrityError) as exc:
-                messages.error(request, f"Failed to add bay mapping: {exc}")
+                detail = _module_write_failure(exc, ModuleBayMapping, request.user)
+                messages.error(request, f"Failed to add bay mapping: {detail}")
             else:
                 messages.success(request, f"Added bay mapping for '{librenms_name}' to '{name}'.")
                 if server_key:
@@ -3802,6 +3823,7 @@ class AddBayTemplateView(
             if server_key:
                 _schedule_module_cache_mutation(request, device, server_key)
         except (ValidationError, IntegrityError) as e:
-            messages.error(request, f"Failed to add bay template: {e}")
+            detail = _module_write_failure(e, ModuleBayTemplate, request.user)
+            messages.error(request, f"Failed to add bay template: {detail}")
 
         return _modules_action_response(request, device, server_key)

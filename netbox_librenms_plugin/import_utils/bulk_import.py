@@ -5,6 +5,7 @@ import logging
 from dataclasses import dataclass
 from typing import List, Literal
 
+from dcim.models import Device, VirtualChassis
 from django.core.cache import cache
 
 from ..import_validation_helpers import (
@@ -21,6 +22,7 @@ from ..utils import (
     AmbiguousLibreNMSIdError,
     cached_row_matches,
     coerce_librenms_id,
+    exception_text_for,
     find_by_librenms_id,
     find_devices_by_serial,
     normalize_serial,
@@ -192,7 +194,9 @@ def detect_collisions_for_device_ids(
                 # unexpected transport/backend failure. The gate's contract is to fail closed per
                 # row, so treat an exception like a fetch miss instead of crashing the whole batch.
                 if getattr(job, "logger", None):
-                    job.logger.warning(f"Collision pre-check couldn't fetch device {device_id}: {exc}")
+                    # A job log is read later by each viewer of the job, so it keeps only hidden text.
+                    detail = exception_text_for(exc, Device, None)
+                    job.logger.warning(f"Collision pre-check couldn't fetch device {device_id}: {detail}")
                 else:
                     logger.warning("Collision pre-check couldn't fetch device %s: %s", device_id, exc)
                 unresolved_ids.append(device_id)
@@ -480,6 +484,8 @@ def bulk_import_devices_shared(  # noqa: C901
     # Extract user from job if not explicitly provided
     if user is None and job is not None:
         user = getattr(job.job, "user", None)
+    # A job's data and log are read later by each viewer of the job, so they keep only hidden text.
+    text_viewer = None if job is not None else user
 
     # change_device is needed for VC master/member updates.
     required_perms = [
@@ -636,6 +642,7 @@ def bulk_import_devices_shared(  # noqa: C901
                 manual_mappings=device_mappings if device_mappings else None,
                 libre_device=libre_device,
                 user=user,
+                text_viewer=text_viewer,
             )
 
             if result["success"]:
@@ -676,7 +683,8 @@ def bulk_import_devices_shared(  # noqa: C901
                         except Exception as vc_error:
                             # Remove from set on failure so retry is possible
                             processed_vc_domains.discard(vc_domain)
-                            warn_msg = f"Failed to create VC for device {device_id}: {vc_error}"
+                            detail = exception_text_for(vc_error, VirtualChassis, text_viewer)
+                            warn_msg = f"Failed to create VC for device {device_id}: {detail}"
                             if job and job.logger:
                                 job.logger.warning(warn_msg)
                             else:
@@ -691,12 +699,12 @@ def bulk_import_devices_shared(  # noqa: C901
                     job.logger.error(f"Failed to import device {device_id}: {result['error']}")
 
         except Exception as e:
-            error_msg = f"Unexpected error importing device {device_id}: {str(e)}"
+            detail = exception_text_for(e, Device, text_viewer)
             if job and job.logger:
-                job.logger.error(error_msg, exc_info=True)
+                job.logger.error(f"Unexpected error importing device {device_id}: {detail}", exc_info=True)
             else:
                 logger.exception(f"Unexpected error importing device {device_id}")
-            failed_list.append({"device_id": device_id, "error": str(e)})
+            failed_list.append({"device_id": device_id, "error": detail})
 
     return {
         "total": total,
@@ -981,7 +989,7 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                 recalculate_validation_status(validation, is_vm=bool(validation.get("import_as_vm")))
         except Exception as e:
             existing_id = getattr(existing, "pk", "unknown") if existing else "none"
-            logger.error(f"Failed to refresh existing device (pk={existing_id}): {e}")
+            logger.error("Failed to refresh existing device (pk=%s): %s", existing_id, e)
             return
 
     # Re-evaluate the match under current DB state. Reached when existing_device was None at
@@ -1304,7 +1312,7 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
         if message not in validation.setdefault("issues", []):
             validation["issues"].append(message)
     except Exception as e:
-        logger.error(f"Failed to check for newly imported device: {e}")
+        logger.error("Failed to check for newly imported device: %s", e)
         # Fail closed: this recheck exists to catch duplicates that appeared after the cache
         # was built, so a transient failure (e.g. a DB error mid-lookup) must not leave a
         # previously-cached "importable" row importable — that would let a duplicate import
