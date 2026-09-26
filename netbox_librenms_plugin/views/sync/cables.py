@@ -254,6 +254,8 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                 )
                 cable.save()
                 cable.tags.add(self._get_provenance_tag(create=True, sync_settings=sync_settings))
+                if not self.restricted_queryset(Cable, "add").filter(pk=cable.pk).exists():
+                    raise PermissionDenied("You may not add this cable.")
             return True
         except Exception as exc:  # pragma: no cover - protects UX
             messages.error(request, f"Failed to create cable: {str(exc)}")

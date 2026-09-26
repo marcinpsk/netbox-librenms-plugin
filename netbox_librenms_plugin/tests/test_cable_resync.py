@@ -475,3 +475,85 @@ class TestMakeSerialRowSensorIndex:
     def test_honours_explicit_index(self):
         acs, (csp,), _ = make_serial_device("idx-explicit", csp_names=["ttyS2"])
         assert _serial_row(csp, "x", acs, sensor_index_int=7)["sensor_index_int"] == 7
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "constraints, allowed", [(None, True), ({"label": "permitted"}, False), ({"tags__name": "librenms"}, True)]
+)
+def test_cable_creation_enforces_add_constraints_after_provenance(client, monkeypatch, constraints, allowed):
+    from dcim.models import Cable, ConsolePort, ConsoleServerPort, Device, Interface
+    from django.core.cache import cache
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+    from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+    monkeypatch.setattr(LibreNMSAPI, "get_device_info", lambda *_args, **_kwargs: (False, None))
+    local, (near,), _ = make_serial_device("scoped-add-local", csp_names=["ttyS9"])
+    remote, _, (far,) = make_serial_device("scoped-add-remote", cp_names=["console"])
+    row = {
+        "local_port": "ttyS9",
+        "local_port_id": f"serial:{near.pk}-s",
+        "_source": "serial",
+        "device_id": local.pk,
+        "remote_device": remote.name,
+        "netbox_local_interface_id": near.pk,
+        "netbox_remote_interface_id": far.pk,
+        "can_create_cable": True,
+        "is_configured": True,
+        "sensor_id": 9,
+        "sensor_index_int": 9,
+    }
+    user = make_user_with_perms(
+        "cable-scoped-add",
+        [
+            ("view", Device),
+            ("view", Cable),
+            ("change", Cable),
+            ("view", Interface),
+            ("view", ConsoleServerPort),
+            ("change", ConsoleServerPort),
+            ("view", ConsolePort),
+            ("change", ConsolePort),
+        ],
+    )
+    user = grant(user, "add", Cable, constraints=constraints)
+    key = SyncCablesView().get_cache_key(local, "links", SERVER_KEY)
+    cache.set(key, {"links": [row]}, timeout=300)
+    persist_test_server_mapping(local, SERVER_KEY)
+    client.force_login(user)
+    try:
+        rendered = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local.pk]),
+            {"tab": "cables", "server_key": SERVER_KEY},
+        )
+        assert rendered.status_code == 200
+        record = next(iter(rendered.context["cable_sync"]["table"].rows)).record
+        row_id = record["row_id"]
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[local.pk]),
+            {
+                "sync_one": row_id,
+                "server_key": SERVER_KEY,
+                f"expected_local_id_{row_id}": record["netbox_local_interface_id"],
+                f"expected_local_device_id_{row_id}": record["netbox_local_device_id"],
+                f"expected_remote_id_{row_id}": record["netbox_remote_interface_id"],
+                f"expected_remote_device_id_{row_id}": record["netbox_remote_device_id"],
+            },
+            HTTP_HX_REQUEST="true",
+        )
+    finally:
+        cache.delete(key)
+    assert response.status_code == 200
+    near.refresh_from_db()
+    far.refresh_from_db()
+    assert (near.cable_id is not None) is allowed
+    assert near.cable_id == far.cable_id
+    if allowed:
+        assert Cable.objects.restrict(user, "add").filter(pk=near.cable_id).exists()
+    else:
+        assert not Cable.objects.exists()
+        assert b"may not add this cable" in response.content
