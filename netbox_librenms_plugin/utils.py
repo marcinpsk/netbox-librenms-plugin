@@ -14,7 +14,7 @@ from django.db import IntegrityError
 from django.db.models import Count, Max, Q
 from django.http import HttpRequest
 from django.utils.functional import SimpleLazyObject
-from django.utils.html import escape
+from django.utils.html import escape, format_html
 from django.utils.safestring import mark_safe
 from netbox.config import get_config
 from netbox.plugins import get_plugin_config
@@ -24,6 +24,7 @@ from netbox_librenms_plugin.constants import (
     DEFAULT_INTERFACE_NAME_FIELD,
     OOB_BADGE_HTML,
     OOB_INVENTORY_SOURCE,
+    is_module_model_placeholder,
     is_supported_interface_name_field,
 )
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_host_address
@@ -1906,6 +1907,41 @@ def interface_name_rejection_reason(port, interface_name_field, model=None):
     return None
 
 
+def host_owned_interface_names(ports, interface_name_field, owner_id_for_port, model=None) -> dict[int, set[str]]:
+    """
+    Return host-owned interface names by target NetBox device.
+
+    A host and its OOB controller are two LibreNMS devices but one NetBox device, so both sides
+    can write into the same ``(device, name)`` namespace. The host owns a name only on its
+    target device. A virtual chassis member can use the same name on another member.
+
+    Derived from the rows on read rather than tagged onto the cached snapshot, so a snapshot
+    written before this existed cannot fail open, and the sync writer and the table reader
+    cannot drift apart on what "the host owns this name" means.
+
+    Args:
+        ports (list): The merged host + OOB port rows.
+        interface_name_field (str): Port field that contains the selected interface name.
+        owner_id_for_port (callable): Resolve the target NetBox device ID for a port row.
+        model (type | None): Concrete interface model. Defaults to ``Interface``.
+
+    Returns:
+        dict[int, set[str]]: Host names keyed by target device ID.
+
+    """
+    if not is_list_of_dicts(ports):
+        return {}
+    names_by_device = {}
+    for port in ports:
+        if port.get("_source") == OOB_INVENTORY_SOURCE:
+            continue
+        name = syncable_interface_name(port, interface_name_field, model)
+        owner_id = owner_id_for_port(port)
+        if name is not None and owner_id is not None:
+            names_by_device.setdefault(owner_id, set()).add(name)
+    return names_by_device
+
+
 def bounded_interface_text(field_name, value, model=None):
     """
     Return *value* clipped to the column NetBox declares for *field_name*.
@@ -2405,7 +2441,8 @@ def get_location_parse_settings():
         from netbox_librenms_plugin.models import LibreNMSSettings
 
         settings = LibreNMSSettings.objects.order_by("pk").first()
-    except Exception:  # noqa: BLE001 — optional config read; default on any failure
+    # Optional config read: fall back to the default on any failure.
+    except Exception:
         logger.debug("Could not read LibreNMS location parse settings; using defaults", exc_info=True)
         return "", False
 
@@ -2676,6 +2713,28 @@ def normalize_serial(value) -> str:
     return "" if value is None else str(value).strip()
 
 
+# "0" is deliberately absent: normalize_serial documents zero as a real-but-falsey serial.
+_STACK_SERIAL_PLACEHOLDERS = frozenset(
+    {
+        "-",
+        "n/a",
+        "na",
+        "none",
+        "not available",
+        "notavailable",
+        "null",
+        "unknown",
+        "unspecified",
+    }
+)
+
+
+def normalize_stack_serial(value) -> str:
+    """Return a serial usable as stack identity evidence, preserving numeric zero."""
+    serial = normalize_serial(value)
+    return "" if serial.casefold() in _STACK_SERIAL_PLACEHOLDERS else serial
+
+
 def find_devices_by_serial(serial: str, limit: int = 2) -> list:
     """
     Return up to *limit* Devices whose stored serial matches an already-normalized *serial*.
@@ -2780,7 +2839,8 @@ def render_vc_member_options(members, selected_id):
         SafeString: The concatenated ``<option>`` elements, member names escaped.
 
     """
-    return mark_safe(  # noqa: S308 — names escaped above; ids are model pks
+    # Names are escaped above and the ids are model pks, so the markup is trusted.
+    return mark_safe(
         "".join(
             f'<option value="{member.id}"{" selected" if str(member.id) == str(selected_id) else ""}>'
             f"{escape(member.name)}</option>"
@@ -2810,7 +2870,49 @@ def oob_badge_html(record, leading_space=False):
         return ""
     # Static trusted markup — mark_safe, not format_html (which requires interpolation
     # args and raises TypeError when given a bare string).
-    return mark_safe((" " if leading_space else "") + OOB_BADGE_HTML)  # noqa: S308
+    # Static trusted markup, no interpolation.
+    return mark_safe((" " if leading_space else "") + OOB_BADGE_HTML)
+
+
+def remote_port_html(value, record):
+    """
+    Return one cable row's remote-port cell: the port name, its link, and its badges.
+
+    Shared by the cable table column and the cable-verify formatter so an inline verify cannot
+    drop a badge the full render draws. Escaped in every branch, including the bare one: the
+    verify response is injected into the page as HTML.
+
+    Args:
+        value: The remote port name, or None when the row resolved no name.
+        record: A cable row dict.
+
+    Returns:
+        SafeString: The cell markup.
+
+    """
+    # Static trusted markup, mirrors the Serial badge idiom.
+    manual_badge = (
+        mark_safe(' <i class="mdi mdi-gesture-tap-button text-muted" title="Remote end picked manually"></i>')
+        if record.get("manual_remote")
+        else ""
+    )
+    # One adjacency reported over both CDP and LLDP renders once; name the protocol whose
+    # row was collapsed into this one so the evidence is not silently dropped.
+    also = record.get("also_reported_by")
+    protocol_badge = (
+        format_html(
+            ' <i class="mdi mdi-lan-connect text-muted" title="Also reported over {}"></i>',
+            ", ".join(str(protocol).upper() for protocol in also),
+        )
+        if also
+        else ""
+    )
+    # Normalize None to "" like the local-port and remote-device cells — an unset remote port
+    # name would otherwise render the literal "None".
+    display_value = value or ""
+    if url := record.get("remote_port_url"):
+        return format_html('<a href="{}">{}</a>{}{}', url, display_value, manual_badge, protocol_badge)
+    return format_html("{}{}{}", display_value, manual_badge, protocol_badge)
 
 
 def is_valid_ports_payload(payload) -> bool:
@@ -4815,6 +4917,61 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None, *, prel
     return value
 
 
+def _probe_module_type_name(name, module_types, *, manufacturer, norm_rules, generic_fallback):
+    """Run one candidate name through the scoped, global, normalized and generic look-ups."""
+    mfr_mappings = getattr(module_types, "mfr_mappings", None)
+    mfr_pk = getattr(manufacturer, "pk", None)
+
+    def _lookup_mfr(candidate):
+        if mfr_mappings and mfr_pk is not None and candidate:
+            return mfr_mappings.get((mfr_pk, candidate))
+        return None
+
+    def _normalized():
+        return apply_normalization_rules(name, "module_type", manufacturer=manufacturer, preloaded_rules=norm_rules)
+
+    matched = _lookup_mfr(name) or module_types.get(name)
+    normalized = None
+    if not matched:
+        normalized = _normalized()
+        if normalized != name:
+            matched = _lookup_mfr(normalized) or module_types.get(normalized)
+    if not matched and generic_fallback:
+        matched = generic_fallback.get(name)
+        if not matched:
+            if normalized is None:
+                normalized = _normalized()
+            if normalized != name:
+                matched = generic_fallback.get(normalized)
+    return matched
+
+
+def module_type_lookup_candidates(item):
+    """
+    Return the ordered names one inventory row may be matched by, placeholders removed.
+
+    The model leads. ``entPhysicalDescr`` follows because it carries the real part number when
+    the vendor reports a placeholder model, and because ``_merge_transceiver_data`` stores the
+    transceiver API's type there on a synthetic row. Every call site reads this one definition,
+    so the fallback order cannot differ between the table and the install path.
+
+    Args:
+        item (dict): One LibreNMS inventory row.
+
+    Returns:
+        list[str]: Usable lookup names, most specific first, without duplicates.
+
+    """
+    candidates = []
+    for key in ("entPhysicalModelName", "entPhysicalDescr"):
+        value = item.get(key)
+        if isinstance(value, str):
+            value = value.strip()
+        if not is_module_model_placeholder(value) and value not in candidates:
+            candidates.append(value)
+    return candidates
+
+
 def resolve_module_type(
     model_name: str,
     module_types: dict,
@@ -4822,6 +4979,7 @@ def resolve_module_type(
     *,
     norm_rules: dict | None = None,
     generic_fallback: dict | None = None,
+    fallback_names: tuple | list = (),
 ):
     """
     Resolve a LibreNMS model name to a NetBox ModuleType via direct lookup then normalization.
@@ -4846,42 +5004,37 @@ def resolve_module_type(
         manufacturer (Manufacturer | None): Optional manufacturer for scoped rules and mappings.
         norm_rules (dict | None): Preloaded normalization rules that avoid repeated database queries.
         generic_fallback (dict | None): Generic manufacturer index used when the primary lookup has no match.
+        fallback_names (tuple | list): Names to try, in order, when *model_name* is a placeholder.
+            They are ignored when it is a real model. :func:`module_type_lookup_candidates` builds
+            these from a row so every call site tries the same names in the same order.
 
     Returns:
         ModuleType | None: Matched ModuleType, or ``None`` when no lookup path matches.
 
     """
-    if not model_name:
-        return None
+    # A placeholder is absent data, not a key: matching on it would let one mapping row answer
+    # for every SFP the vendor declined to identify. The fallbacks apply only then. A real model
+    # that resolves to nothing stays unresolved, because matching it on its own description
+    # would be a guess, and a ModuleTypeMapping row is the supported way to teach that name.
+    if is_module_model_placeholder(model_name):
+        candidates = []
+        for name in fallback_names:
+            if not is_module_model_placeholder(name) and name not in candidates:
+                candidates.append(name)
+    else:
+        candidates = [model_name]
 
-    mfr_mappings = getattr(module_types, "mfr_mappings", None)
-    mfr_pk = getattr(manufacturer, "pk", None)
-
-    def _lookup_mfr(name):
-        if mfr_mappings and mfr_pk is not None and name:
-            return mfr_mappings.get((mfr_pk, name))
-        return None
-
-    matched = _lookup_mfr(model_name)
-    if not matched:
-        matched = module_types.get(model_name)
-    normalized = None
-    if not matched:
-        normalized = apply_normalization_rules(
-            model_name, "module_type", manufacturer=manufacturer, preloaded_rules=norm_rules
+    for name in candidates:
+        matched = _probe_module_type_name(
+            name,
+            module_types,
+            manufacturer=manufacturer,
+            norm_rules=norm_rules,
+            generic_fallback=generic_fallback,
         )
-        if normalized != model_name:
-            matched = _lookup_mfr(normalized) or module_types.get(normalized)
-    if not matched and generic_fallback:
-        matched = generic_fallback.get(model_name)
-        if not matched:
-            if normalized is None:
-                normalized = apply_normalization_rules(
-                    model_name, "module_type", manufacturer=manufacturer, preloaded_rules=norm_rules
-                )
-            if normalized != model_name:
-                matched = generic_fallback.get(normalized)
-    return matched
+        if matched:
+            return matched
+    return None
 
 
 def slashless_route_aliases(patterns):
@@ -4952,3 +5105,106 @@ def load_bay_mappings() -> tuple:
     exact = [m for m in all_mappings if not m.is_regex]
     regex = [m for m in all_mappings if m.is_regex]
     return exact, regex
+
+
+def select_interface_type_mapping(mappings, speed):
+    """
+    Return the InterfaceTypeMapping one LibreNMS speed resolves to.
+
+    The sync writer and the interface table must agree about which mapping applies, otherwise
+    the row reports a gap the writer does not see (or hides one it does). Both call this with
+    the rows for a single ``librenms_type``.
+
+    Args:
+        mappings: InterfaceTypeMapping rows for one LibreNMS interface type.
+        speed (int | None): The port speed in kilobits per second, if known.
+
+    Returns:
+        InterfaceTypeMapping | None: The highest speed row at or below *speed*, else the
+        speed-agnostic row for that type, else None.
+
+    """
+    wildcard = None
+    best = None
+    for mapping in mappings:
+        if mapping.librenms_speed is None:
+            if wildcard is None:
+                wildcard = mapping
+        elif speed is not None and mapping.librenms_speed <= speed:
+            if best is None or mapping.librenms_speed > best.librenms_speed:
+                best = mapping
+    return best or wildcard
+
+
+def _row_vlan_shape(port):
+    """Return one row's VLAN assignment as a hashable, comparable ``(untagged, tagged)`` pair."""
+    return port.get("untagged_vlan"), tuple(sorted(port.get("tagged_vlans") or []))
+
+
+def _copy_row_vlan_data(source, target, interface_name_field):
+    """Copy one row's VLAN assignment onto another and record where it came from."""
+    untagged, tagged = _row_vlan_shape(source)
+    target["mode"] = source.get("mode")
+    target["untagged_vlan"] = untagged
+    target["tagged_vlans"] = list(tagged)
+    target["vlan_inherited_from"] = source.get(interface_name_field) or source.get("ifName") or ""
+
+
+def apply_lag_vlan_fill(ports, lag_members, *, interface_name_field="ifName"):
+    """
+    Fill missing VLAN data between a LAG aggregate and its members, in place.
+
+    LibreNMS reports the VLANs on whichever side of the aggregation the platform exposes:
+    Juniper on the aggregate, several switch platforms on the members. Filling only the rows
+    that have none keeps the rule vendor-neutral, because it can complete a picture but never
+    correct one. A filled row carries ``vlan_inherited_from`` naming the row it copied.
+
+    Args:
+        ports: The enriched LibreNMS port rows, mutated in place.
+        lag_members (dict): ``{member_port_id: aggregate_port_id}``.
+        interface_name_field (str): The row field naming the interface ('ifName' or 'ifDescr').
+
+    Returns:
+        None
+
+    """
+    if not lag_members:
+        return
+
+    rows_by_port_id = {}
+    for port in ports:
+        port_id = normalize_librenms_port_id(port.get("port_id"))
+        if port_id is not None:
+            rows_by_port_id.setdefault(port_id, port)
+
+    # Snapshot before writing anything: both directions read the original state, so a row this
+    # call fills can never become the source of a second fill.
+    carries_own = {port_id: _row_vlan_shape(port) != (None, ()) for port_id, port in rows_by_port_id.items()}
+
+    members_by_aggregate = {}
+    for raw_member_id, raw_aggregate_id in lag_members.items():
+        member_id = normalize_librenms_port_id(raw_member_id)
+        aggregate_id = normalize_librenms_port_id(raw_aggregate_id)
+        if member_id is None or aggregate_id is None or member_id == aggregate_id:
+            continue
+        members_by_aggregate.setdefault(aggregate_id, []).append(member_id)
+
+    for aggregate_id, member_ids in members_by_aggregate.items():
+        aggregate = rows_by_port_id.get(aggregate_id)
+        if aggregate is None:
+            continue
+        member_ids = sorted(member_ids)
+        if carries_own.get(aggregate_id):
+            for member_id in member_ids:
+                member = rows_by_port_id.get(member_id)
+                if member is not None and not carries_own.get(member_id):
+                    _copy_row_vlan_data(aggregate, member, interface_name_field)
+            continue
+        member_rows = [rows_by_port_id.get(member_id) for member_id in member_ids]
+        # Rolling up the subset that happens to have data would invent an assignment for the
+        # members that have none, so every member must agree on one set.
+        if any(row is None for row in member_rows) or not all(carries_own.get(mid) for mid in member_ids):
+            continue
+        if len({_row_vlan_shape(row) for row in member_rows}) != 1:
+            continue
+        _copy_row_vlan_data(member_rows[0], aggregate, interface_name_field)
