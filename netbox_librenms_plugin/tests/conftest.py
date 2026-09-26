@@ -198,12 +198,16 @@ def _seeded_rule_rows():
         rules.SERIAL_RULE,
     )
     bridge = importlib.import_module("netbox_librenms_plugin.migrations.0019_portstacklagpattern_bridge_name_pattern")
+    # 0021 widened the bridge pattern 0019 seeded, so the restore takes that field from there.
+    # Restoring 0019's value would silently undo the later migration for every test after the
+    # first transactional one.
+    widened = importlib.import_module("netbox_librenms_plugin.migrations.0021_widen_linux_bridge_pattern")
     yield (
         PortStackLagPattern,
         {"librenms_os": bridge.BRIDGE_OS},
         {
             "lag_name_pattern": bridge.LAG_PATTERN,
-            "bridge_name_pattern": bridge.BRIDGE_PATTERN,
+            "bridge_name_pattern": widened.NEW_PATTERN,
             "description": bridge.SEEDED_DESCRIPTION,
         },
     )
@@ -413,6 +417,18 @@ def _reseed_after_transactional_flush(django_db_setup, django_db_blocker):
 # row set per test transaction, and everything is rolled back between tests.
 
 
+def typed_maps(relationships):
+    """Return only the typed relationship maps from a resolver result.
+
+    ``resolve_port_relationships`` also reports the untyped ``stacked_ports`` map and a
+    ``diagnostics`` block, so a whole-dict comparison would assert those by accident. A test that
+    cares about the untyped map asserts it by name.
+    """
+    from netbox_librenms_plugin.constants import RELATIONSHIP_KINDS
+
+    return {kind: relationships[kind] for kind in RELATIONSHIP_KINDS}
+
+
 def _shared_infra():
     """get_or_create the shared Site / Manufacturer / DeviceType / DeviceRole."""
     from dcim.models import DeviceRole, DeviceType, Manufacturer, Site
@@ -546,6 +562,31 @@ def make_interface(device, name, *, iface_type="other"):
     from dcim.models import Interface
 
     return Interface.objects.create(device=device, name=name, type=iface_type)
+
+
+def make_required_interface_custom_field(name):
+    """Create a required text custom field on Interface, so NetBox's clean() refuses an interface without it."""
+    from core.models import ObjectType
+    from dcim.models import Interface
+    from extras.models import CustomField
+
+    custom_field = CustomField.objects.create(name=name, type="text", required=True)
+    custom_field.object_types.set([ObjectType.objects.get_for_model(Interface)])
+    return custom_field
+
+
+def stamp_rule_decision(record, *, platform_id=None, rules=None):
+    """
+    Give a hand-built interface row the rule decision the interfaces tab view stamps on it.
+
+    ``rules`` is an ``InterfaceRuleMatcher``; without it the stored rules are loaded, which needs
+    the database. Pass ``InterfaceRuleMatcher(())`` for a row that no rule matches.
+    """
+    from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
+
+    matcher = InterfaceRuleMatcher.load() if rules is None else rules
+    record["rule_decision"] = matcher.check_interface_write(record, platform_id=platform_id)
+    return record
 
 
 def make_ip(address, *, assigned_object=None, status="active"):

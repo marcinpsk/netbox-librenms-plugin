@@ -27,6 +27,9 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.test_serial_cables_view import _make_view
 
+# The port keys an interface write needs, for rows whose test does not care about their values.
+_PORT_KEYS_UNSET = {"ifDescr": None, "ifType": None, "ifSpeed": None}
+
 
 def _ports_payload(*ports):
     """A LibreNMS get_ports body."""
@@ -1049,18 +1052,22 @@ class TestCheckAndCreateTheRemoteEnd:
 
     def _scenario(self, name, librenms_server, settings, *, port=None, advertised="Gi0/1", aliases=None):
         """A page device, a modelled neighbour with no matching port, and a seeded cable row."""
-        from netbox_librenms_plugin.tests.conftest import bind_librenms_server, persist_test_server_mapping
+        from netbox_librenms_plugin.tests.conftest import bind_librenms_server
 
         server_key = configured_server_key()
         bind_librenms_server(settings, librenms_server, server_key=server_key)
         local_device = make_device(f"{name}-local")
         local_interface = make_interface(local_device, "eth0")
         remote_device = make_device(f"{name}-remote")
-        persist_test_server_mapping(local_device, server_key)
+        # Fixed ids, never the device pk: a local pk of 9 made the neighbour's id 9 ambiguous.
+        map_device_to_librenms(local_device, 8, server_key=server_key)
         map_device_to_librenms(remote_device, 9, server_key=server_key)
         librenms_server.register(
             "/api/v0/ports/500",
-            {"status": "ok", "port": [port or {"port_id": 500, "ifName": "Gi0/1", "ifType": "ethernetCsmacd"}]},
+            {
+                "status": "ok",
+                "port": [port or {**_PORT_KEYS_UNSET, "port_id": 500, "ifName": "Gi0/1", "ifType": "ethernetCsmacd"}],
+            },
         )
         row = _row(
             local_port="eth0",
@@ -1109,7 +1116,13 @@ class TestCheckAndCreateTheRemoteEnd:
             "chk-b",
             librenms_server,
             settings,
-            port={"port_id": 500, "ifName": "Gi0/1", "ifType": "ethernetCsmacd", "ifSpeed": 1000000000},
+            port={
+                **_PORT_KEYS_UNSET,
+                "port_id": 500,
+                "ifName": "Gi0/1",
+                "ifType": "ethernetCsmacd",
+                "ifSpeed": 1000000000,
+            },
         )
         InterfaceTypeMapping.objects.create(
             librenms_type="ethernetCsmacd", librenms_speed=1000000, netbox_type="1000base-t"
@@ -1134,24 +1147,24 @@ class TestCheckAndCreateTheRemoteEnd:
             .content.decode()
         )
 
-        assert "no mapping" in body
+        assert "no interface rule" in body
 
-    def test_the_check_reports_missing_port_without_claiming_a_mapping_failure(self, librenms_server, settings):
+    def test_the_check_refuses_when_librenms_returns_no_port_record(self, librenms_server, settings):
+        """No record means no type the rules could decide, so the create is not offered."""
+        from dcim.models import Interface
+
         from netbox_librenms_plugin.tests.conftest import make_superuser
 
-        server_key, local_device, _, _, row_id = self._scenario("chk-no-port", librenms_server, settings)
+        server_key, local_device, _, remote_device, row_id = self._scenario("chk-no-port", librenms_server, settings)
         librenms_server.register("/api/v0/ports/500", {"status": "ok", "port": []})
+        client = _logged_in(make_superuser("remote-create-chk-no-port"))
 
-        response = _logged_in(make_superuser("remote-create-chk-no-port")).get(
-            _remote_create_url(local_device),
-            {"row_id": row_id, "server_key": server_key},
-        )
+        check = client.get(_remote_create_url(local_device), {"row_id": row_id, "server_key": server_key})
+        create = client.post(_remote_create_url(local_device), {"row_id": row_id, "server_key": server_key})
 
-        assert response.status_code == 200
-        body = response.content.decode()
-        assert "type cannot be derived" in body
-        assert "no mapping" not in body
-        assert "No InterfaceTypeMapping matches" not in body
+        assert check.status_code == create.status_code == 409
+        assert "LibreNMS returned no record for the remote port" in check.content.decode()
+        assert not Interface.objects.filter(device=remote_device).exists()
 
     def test_the_check_creates_nothing(self, librenms_server, settings):
         """Step one is read-only."""
@@ -1398,7 +1411,7 @@ class TestCheckAndCreateTheRemoteEnd:
             librenms_server,
             settings,
             advertised="0c:42:a1:00:00:01",
-            port={"port_id": 500, "ifName": "Gi0/1", "ifType": "ethernetCsmacd"},
+            port={**_PORT_KEYS_UNSET, "port_id": 500, "ifName": "Gi0/1", "ifType": "ethernetCsmacd"},
         )
 
         _logged_in(make_superuser("remote-create-mk-h")).post(
@@ -1449,7 +1462,8 @@ class TestCheckAndCreateTheRemoteEnd:
         response = _logged_in(user).post(
             _remote_create_url(local), {"row_id": row_id, "server_key": server_key}, follow=True
         )
-        assert response.status_code == 200
+        assert response.status_code == 404
+        assert response.content.decode() == "Cable row not found."
         assert list(Interface.objects.filter(device=remote).values_list("pk", flat=True)) == [existing.pk]
         assert not Cable.objects.exists()
         assert "renamed-port" not in response.content.decode()
@@ -1488,7 +1502,7 @@ class TestCheckAndCreateTheRemoteEnd:
             "mk-i",
             librenms_server,
             settings,
-            port={"port_id": 500, "ifName": "x" * 200, "ifType": "ethernetCsmacd"},
+            port={**_PORT_KEYS_UNSET, "port_id": 500, "ifName": "x" * 200, "ifType": "ethernetCsmacd"},
         )
 
         response = _logged_in(make_superuser("remote-create-mk-i")).post(
@@ -1817,19 +1831,29 @@ def test_an_unmodelled_neighbour_keeps_the_local_cable_report(client, hostname, 
 
 
 @transactional_db_with_all_apps()
-def test_remote_creation_locks_both_devices_before_inserting_an_interface(librenms_server, settings):
+@pytest.mark.parametrize("remote_chassis", [False, True])
+def test_remote_creation_locks_all_owners_before_inserting_an_interface(librenms_server, settings, remote_chassis):
     from django.db import DatabaseError, connection, connections
-    from netbox_librenms_plugin.tests.conftest import make_superuser
+    from netbox_librenms_plugin.tests.conftest import make_superuser, make_virtual_chassis
 
+    evidence_owner = make_device("create-owner-evidence") if remote_chassis else None
     server_key, local, _, remote, row_id = TestCheckAndCreateTheRemoteEnd()._scenario(
         "create-owner-lock", librenms_server, settings
     )
+    if remote_chassis:
+        make_virtual_chassis("create-owner-chassis", remote, evidence_owner)
+        row_id = _seed_cable_row(
+            local,
+            _row(remote_device=remote.name, remote_port="Gi2/0/1", remote_port_key=500),
+            server_key,
+        )
+    owners = [local, evidence_owner] if remote_chassis else [local, remote]
     client = _logged_in(make_superuser("create-owner-lock-user"))
     observed = []
 
     def inspect_owner_locks(execute, sql, params, many, context):
         if sql.startswith('INSERT INTO "dcim_interface"'):
-            for owner in (local, remote):
+            for owner in owners:
                 other = connections.create_connection("default")
                 other.set_autocommit(False)
                 try:
@@ -1840,13 +1864,13 @@ def test_remote_creation_locks_both_devices_before_inserting_an_interface(libren
                 finally:
                     other.rollback()
                     other.close()
-            assert observed == [(local.pk, "55P03"), (remote.pk, "55P03")]
+            assert observed == [(owner.pk, "55P03") for owner in owners]
         return execute(sql, params, many, context)
 
     with connection.execute_wrapper(inspect_owner_locks):
         response = client.post(_remote_create_url(local), {"row_id": row_id, "server_key": server_key})
     assert response.status_code == 302
-    assert len(observed) == 2
+    assert len(observed) == len(owners)
 
 
 @pytest.mark.django_db

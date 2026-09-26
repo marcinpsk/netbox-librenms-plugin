@@ -5,6 +5,26 @@ import importlib
 import pytest
 
 
+def test_interface_rule_migration_state_carries_the_model_help_text():
+    """Every InterfaceTypeMapping field in the final migration state has the model's help_text (NetBox's makemigrations ignores help_text, so only this test sees the drift)."""
+    from django.db.migrations.loader import MigrationLoader
+
+    from netbox_librenms_plugin.models import InterfaceTypeMapping
+
+    loader = MigrationLoader(None, ignore_no_migrations=True)
+    (leaf,) = (node for node in loader.graph.leaf_nodes() if node[0] == "netbox_librenms_plugin")
+    state_fields = (
+        loader.project_state(leaf, at_end=True).models[("netbox_librenms_plugin", "interfacetypemapping")].fields
+    )
+
+    drifted = {
+        field.name: (state_fields[field.name].help_text, field.help_text)
+        for field in InterfaceTypeMapping._meta.get_fields()
+        if field.concrete and state_fields[field.name].help_text != field.help_text
+    }
+    assert not drifted, f"migration help_text drifted from the model: {drifted}"
+
+
 def test_migration_0013_field_help_text_matches_model():
     """Migration 0013's PortStackLagPattern fields must carry the same help_text as the model (else the migration state drifts and makemigrations tracks a phantom AlterField)."""
     from netbox_librenms_plugin.models import PortStackLagPattern
@@ -64,6 +84,7 @@ def test_reverse_bridge_seed_preserves_operator_data(operator_edit):
     from netbox_librenms_plugin.models import PortStackLagPattern
 
     mod = importlib.import_module("netbox_librenms_plugin.migrations.0019_portstacklagpattern_bridge_name_pattern")
+    widened = importlib.import_module("netbox_librenms_plugin.migrations.0021_widen_linux_bridge_pattern")
     row = PortStackLagPattern.objects.get(librenms_os=mod.BRIDGE_OS)
     if operator_edit == "custom-data":
         PortStackLagPattern.objects.filter(pk=row.pk).update(custom_field_data={"operator-note": "keep"})
@@ -76,6 +97,9 @@ def test_reverse_bridge_seed_preserves_operator_data(operator_edit):
         .apps
     )
     with connection.schema_editor() as editor:
+        # 0021 widened what 0019 seeded, so a rollback reverses it first and 0019's reverse then
+        # sees its own value. Skipping that step would make this assert nothing.
+        widened.restore_bridge_pattern(historical_apps, editor)
         mod.clear_bridge_pattern(historical_apps, editor)
 
     row.refresh_from_db()
@@ -96,6 +120,7 @@ def test_reverse_bridge_seed_without_content_type():
     from netbox_librenms_plugin.models import PortStackLagPattern
 
     mod = importlib.import_module("netbox_librenms_plugin.migrations.0019_portstacklagpattern_bridge_name_pattern")
+    widened = importlib.import_module("netbox_librenms_plugin.migrations.0021_widen_linux_bridge_pattern")
     row = PortStackLagPattern.objects.get(librenms_os=mod.BRIDGE_OS)
     ContentType.objects.filter(
         app_label="netbox_librenms_plugin",
@@ -108,6 +133,7 @@ def test_reverse_bridge_seed_without_content_type():
     )
 
     with connection.schema_editor() as editor:
+        widened.restore_bridge_pattern(historical_apps, editor)
         mod.clear_bridge_pattern(historical_apps, editor)
 
     assert not PortStackLagPattern.objects.filter(pk=row.pk).exists()

@@ -8,6 +8,8 @@ Available for Devices and Virtual Machines. This tab creates or updates interfac
 
 Interface names can come from different LibreNMS fields. Type mappings control how LibreNMS interface types become NetBox interface types. The tab also handles LAG and parent relationships, NetBox-only interfaces, and Virtual Chassis member assignment.
 
+A row cannot sync when its name is already used by a NetBox interface that is bound to a different LibreNMS port. The row shows that port. If the port is another row in the table, sync that row first, then sync this row. If LibreNMS no longer reports the port (for example, after the device was rediscovered), the row shows **Rebind**. Rebind moves only the LibreNMS binding of that interface to the row's port. The interface keeps its name, IP addresses, and cables. Rebind is not offered while the OOB controller data is incomplete.
+
 ## Cables
 
 Available for Devices. This tab uses LibreNMS link data to create NetBox cable connections. Both devices and their interfaces should exist in NetBox first, so synchronize interfaces before cables.
@@ -19,6 +21,8 @@ The `librenms_id` custom field on interfaces improves matching when interface na
 Available for Devices and Virtual Machines. This tab creates IP addresses and assigns them to matching interfaces. It can also create a missing interface before assigning an address.
 
 **Set Primary IP** sets the NetBox Primary IP when the synchronized address matches the LibreNMS management address. Existing assignments or conflicting addresses require confirmation before they are changed.
+
+When LibreNMS reports the address in a VRF, the row selects the NetBox VRF with the same route distinguisher, or else the same name. If no NetBox VRF has that route distinguisher or name, the row shows **+ VRF**. It creates the VRF with the LibreNMS name and route distinguisher, after a confirmation. It does not sync the address: every row in that VRF then selects the new VRF, and you sync them as usual.
 
 ## VLANs
 

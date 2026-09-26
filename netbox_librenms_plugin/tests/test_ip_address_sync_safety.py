@@ -29,6 +29,9 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms, make_view
 
+# The port keys an interface write needs, for rows whose test does not care about their values.
+_PORT_KEYS_UNSET = {"ifDescr": None, "ifType": None, "ifSpeed": None}
+
 
 @pytest.mark.django_db
 class TestCachedInterfaceUrlFallback:
@@ -44,7 +47,8 @@ class TestCachedInterfaceUrlFallback:
     def _view():
         from netbox_librenms_plugin.views.base.ip_addresses_view import BaseIPAddressTableView
 
-        return object.__new__(BaseIPAddressTableView)
+        # The VRF dropdown is scoped to the request user, so the bare view needs a request.
+        return make_view(BaseIPAddressTableView, librenms_api=False)
 
     def test_prefetch_returns_the_by_pk_index(self):
         """The map is built either way; the bug was that the view never handed it on."""
@@ -261,6 +265,7 @@ def _serve_librenms_ip_rows(server, rows, *, device_name, management_ip="198.18.
             continue
         registered_ports.add(row["port_id"])
         port = {
+            **_PORT_KEYS_UNSET,
             "port_id": row["port_id"],
             "ifName": row["interface"],
             "ifDescr": row["interface"],
@@ -1213,6 +1218,7 @@ def test_failed_create_missing_row_does_not_leak_interface_catalog(settings):
     ]
     cached_ports = {
         "7023": {
+            **_PORT_KEYS_UNSET,
             "port_id": 7023,
             "ifName": "Ethernet23",
             "ifDescr": "Ethernet23",
@@ -1501,6 +1507,7 @@ def test_interface_sync_keeps_its_source_snapshot_and_clears_the_ip_snapshot(
             "status": "ok",
             "ports": [
                 {
+                    **_PORT_KEYS_UNSET,
                     "port_id": 7016,
                     "ifName": "Ethernet1",
                     "ifDescr": "Ethernet1",
@@ -1589,6 +1596,7 @@ def test_create_missing_interfaces_does_not_adopt_a_hidden_existing_interface(cl
             "mgmt_ip": "",
             "ports_by_id": {
                 7018: {
+                    **_PORT_KEYS_UNSET,
                     "port_id": 7018,
                     "ifName": "Ethernet1",
                     "ifDescr": "Ethernet1",
@@ -2494,6 +2502,7 @@ def test_create_missing_interfaces_is_refused_without_add_and_change_grants(clie
             "mgmt_ip": "",
             "ports_by_id": {
                 7032: {
+                    **_PORT_KEYS_UNSET,
                     "port_id": 7032,
                     "ifName": "Ethernet1",
                     "ifDescr": "Ethernet1",
