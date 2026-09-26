@@ -1823,10 +1823,8 @@ Three rules decide the scope of the interface sync. Each rule has one place in t
   out of the scope for a moment was dropped, and an owner whose view scope follows its interfaces
   stopped the pass with no message. A pass that cannot lock its owner now adds a warning; it never
   ends in a silent success.
-  An interface of another owner that holds the port of a row (a stale binding) is not in the
-  selection, and the sync never writes it. Its change scope decides, read as before: when the user
-  may change it, the row falls back to the local interface of the same name (which the selection
-  checks); when not, the row is skipped. No text names the foreign interface.
+  A port binding held by another owner refuses the attempt before any local fields change.
+  The refusal is the same for every view and change scope. No text names the foreign interface.
 - **Write.** At the end of the attempt, after the attribute pass, the VLAN write and the
   relationship pass, each Interface or VMInterface row that the attempt created or changed must be
   in the user's change scope, and each created row also in the add scope, as NetBox's edit views
