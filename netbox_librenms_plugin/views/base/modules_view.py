@@ -8,9 +8,12 @@ from django.views import View
 
 from netbox_librenms_plugin.constants import MAIN_INVENTORY_SOURCE, OOB_INVENTORY_SOURCE, is_module_model_placeholder
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
+from netbox_librenms_plugin.librenms_ids import (
+    coerce_librenms_id,
+    normalize_librenms_port_id,
+)
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
-    coerce_librenms_id,
     get_librenms_device_id,
     get_librenms_oob,
     get_librenms_sync_device,
@@ -20,7 +23,6 @@ from netbox_librenms_plugin.utils import (
     module_inventory_binding_token,
     module_inventory_row_digest,
     module_inventory_snapshot_digest,
-    normalize_librenms_port_id,
     normalize_serial,
 )
 from netbox_librenms_plugin.views.mixins import (
