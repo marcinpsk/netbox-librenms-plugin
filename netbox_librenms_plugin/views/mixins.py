@@ -1741,7 +1741,8 @@ class VlanAssignmentMixin:
 
         def apply_vlans(row):
             row.mode = mode
-            row.untagged_vlan = untagged_set
+            if not (untagged_vid and untagged_set is None):
+                row.untagged_vlan = untagged_set
             return False
 
         # Save mode + untagged_vlan before M2M operations.
