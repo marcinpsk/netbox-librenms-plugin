@@ -28,6 +28,7 @@ from netbox_librenms_plugin.sync_cache import (
     schedule_request_cache_mutation,
 )
 from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, update_existing_row
+from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
     build_migrated_context,
@@ -38,7 +39,6 @@ from netbox_librenms_plugin.utils import (
     index_ip_port_records,
     ip_row_port_record,
     normalize_ip_sync_row_id,
-    normalize_librenms_port_id,
     PortDisclosure,
     resolve_create_missing_interfaces,
     resolve_interface_row_device,
