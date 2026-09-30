@@ -1040,7 +1040,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     raise ValueError(
                         "The destination VRF changed after confirmation. Refresh the IP data and try again."
                     )
-                ip_obj.address = str(parsed)
+                ip_obj.address = netaddr.IPNetwork(str(parsed))
             else:
                 raise ValueError("IP address confirmation is invalid. Refresh the IP data and try again.")
             ip_obj.assigned_object = interface
