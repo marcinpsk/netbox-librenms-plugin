@@ -1548,6 +1548,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             "failed": [],
             "skipped": [],
             "virtual_chassis_created": 0,
+            "warnings": [],
         }
         vm_result = {"success": [], "failed": [], "skipped": []}
 
@@ -1619,6 +1620,11 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             if not is_htmx:
                 messages.success(request, _msg)
             htmx_toasts.append(("text-bg-success", "mdi-check-circle", "Success", _msg))
+        # An imported device whose follow-up work failed, such as its virtual chassis.
+        for warning in device_result["warnings"]:
+            if not is_htmx:
+                messages.warning(request, warning)
+            htmx_toasts.append(("text-bg-warning", "mdi-alert", "Warning", warning))
 
         if failed_count:
             _msg = f"Failed to import {failed_count} device{'s' if failed_count != 1 else ''}"
