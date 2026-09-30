@@ -1,6 +1,8 @@
 import logging
 from urllib.parse import quote_plus
 
+import netaddr
+
 from dcim.models import Device, Interface, VirtualChassis
 from django.contrib import messages
 from django.core import signing
@@ -983,7 +985,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             )
 
         ip_obj = IPAddress.objects.create(
-            address=str(parsed),
+            # netaddr, as NetBox loads it: NetBox 4.4's Device.clean() reads .family on this object.
+            address=netaddr.IPNetwork(str(parsed)),
             assigned_object=interface,
             status="active",
             vrf=vrf,
