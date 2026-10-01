@@ -4888,6 +4888,8 @@ def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:  #
     return summary
 
 
+# This is the formatter that caught-error-text trusts in a log call.
+# nosemgrep: caught-error-text-shadow  # noqa: ERA001
 def validation_error_detail(exc: ValidationError) -> str:
     """
     Flatten a ValidationError into a single human-readable string for a JSON error body.
@@ -4951,6 +4953,8 @@ def hidden_refusal_text(model, fields) -> str:
 DATABASE_ERROR_MESSAGE = "The database refused the operation. Refresh the data and try again."
 
 
+# This is the rule that caught-error-text trusts.
+# nosemgrep: caught-error-text-shadow  # noqa: ERA001
 def exception_text_for(exc: Exception, model, user) -> str:
     """
     Return the text of a caught *exc* that *user* may read.
