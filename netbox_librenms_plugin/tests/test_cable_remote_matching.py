@@ -2090,8 +2090,6 @@ class TestTheFarEndPortHasOneRule:
             ("views/base/cables_view.py", "_best_duplicate_row"),
             ("views/base/cables_view.py", "_set_remote_create_affordance"),
             ("views/base/cables_view.py", "cable_row_ports"),
-            ("views/sync/cables.py", "_remote_port_record"),
-            ("views/sync/cables.py", "_create_remote_interface"),
         }
     )
 
