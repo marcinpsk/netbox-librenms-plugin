@@ -15,6 +15,37 @@ from netbox_librenms_plugin.utils import (
     render_vc_member_options,
 )
 
+# Only an install keeps its visible label; carrier installs differ from each other only by that label.
+LABELLED_MODULE_ACTIONS = frozenset({"install", "install-carrier"})
+
+
+def module_action_control(tag, action, css, attrs, title, icon, label):
+    """Render one actions-column control; a secondary action is icon-only and named by aria-label."""
+    if action in LABELLED_MODULE_ACTIONS:
+        return format_html(
+            '<{} class="btn btn-sm {}" data-action="{}"{} title="{}"><i class="mdi {}" aria-hidden="true"></i> {}</{}>',
+            tag,
+            css,
+            action,
+            attrs,
+            title,
+            icon,
+            label,
+            tag,
+        )
+    return format_html(
+        '<{} class="btn btn-sm {}" data-action="{}"{} title="{}" aria-label="{}">'
+        '<i class="mdi {}" aria-hidden="true"></i></{}>',
+        tag,
+        css,
+        action,
+        attrs,
+        title,
+        label,
+        icon,
+        tag,
+    )
+
 
 class LibreNMSModuleTable(tables.Table):
     """Table for displaying LibreNMS inventory items mapped to NetBox modules."""
@@ -393,6 +424,26 @@ class LibreNMSModuleTable(tables.Table):
         else:
             possible_carrier_html = mark_safe("")
 
+        mismatch_count = record.get("interface_type_mismatch_count") or 0
+        if mismatch_count:
+            mismatch_names = record.get("interface_type_mismatch_names") or []
+            more_count = max(0, mismatch_count - len(mismatch_names))
+            names_text = ", ".join(mismatch_names)
+            if more_count:
+                names_text = f"{names_text}, +{more_count} more" if names_text else f"+{more_count} more"
+            noun = "interface type differs" if mismatch_count == 1 else "interface types differ"
+            pronoun = "its" if mismatch_count == 1 else "their"
+            title = f"{mismatch_count} {noun} from {pronoun} module template"
+            if names_text:
+                title = f"{title}: {names_text}"
+            interface_type_html = format_html(
+                ' <span class="badge bg-warning text-dark" title="{}">'
+                '<i class="mdi mdi-swap-vertical"></i> Interface Type</span>',
+                title,
+            )
+        else:
+            interface_type_html = mark_safe("")
+
         if value == "Integrated":
             parent_name = record.get("integrated_in_name") or "parent module"
             tooltip = (
@@ -442,7 +493,7 @@ class LibreNMSModuleTable(tables.Table):
                 fallback_url=url,
                 label="Fix Model",
             )
-            return status_html + fix_html + possible_carrier_html
+            return status_html + fix_html + possible_carrier_html + interface_type_html
 
         # "Fix Device Type" badge when the device type is missing bay templates for this component.
         if record.get("device_type_incomplete"):
@@ -460,9 +511,9 @@ class LibreNMSModuleTable(tables.Table):
                 fallback_url=url,
                 label="Fix Device Type",
             )
-            return status_html + fix_html + possible_carrier_html
+            return status_html + fix_html + possible_carrier_html + interface_type_html
 
-        return status_html + possible_carrier_html
+        return status_html + possible_carrier_html + interface_type_html
 
     def _render_fix_bay_template_badge(
         self, *, title, target_kind, target_pk, target_label, suggestion, fallback_url, label
@@ -590,10 +641,7 @@ class LibreNMSModuleTable(tables.Table):
                     '<input type="hidden" name="ent_index" value="{}">'
                     '<input type="hidden" name="module_bay_id" value="{}">'
                     '<input type="hidden" name="module_type_id" value="{}">'
-                    '<input type="hidden" name="inventory_binding" value="{}">'
-                    '<button type="submit" class="btn btn-sm btn-success" title="Install module in bay">'
-                    '<i class="mdi mdi-download"></i> Install'
-                    "</button></form>",
+                    '<input type="hidden" name="inventory_binding" value="{}">{}</form>',
                     url,
                     url,
                     self.csrf_token,
@@ -603,6 +651,15 @@ class LibreNMSModuleTable(tables.Table):
                     record.get("module_bay_id", ""),
                     record.get("module_type_id", ""),
                     inventory_binding,
+                    module_action_control(
+                        "button",
+                        "install",
+                        "btn-success",
+                        mark_safe(' type="submit"'),
+                        "Install module in bay",
+                        "mdi-download",
+                        "Install",
+                    ),
                 )
             )
 
@@ -634,11 +691,7 @@ class LibreNMSModuleTable(tables.Table):
                     '<input type="hidden" name="server_key" value="{}">'
                     '<input type="hidden" name="selected_device_id" value="{}">'
                     '<input type="hidden" name="parent_index" value="{}">'
-                    '<input type="hidden" name="inventory_binding" value="{}">'
-                    '<button type="submit" class="btn btn-sm btn-primary ms-1"'
-                    ' title="Install this module and all installable children">'
-                    '<i class="mdi mdi-file-tree"></i> Install Branch'
-                    "</button></form>",
+                    '<input type="hidden" name="inventory_binding" value="{}">{}</form>',
                     url,
                     url,
                     self.csrf_token,
@@ -646,6 +699,15 @@ class LibreNMSModuleTable(tables.Table):
                     record.get("selected_device_id") or self.device.pk,
                     record.get("ent_physical_index", ""),
                     inventory_binding,
+                    module_action_control(
+                        "button",
+                        "install-branch",
+                        "btn-primary",
+                        mark_safe(' type="submit"'),
+                        "Install this module and all installable children",
+                        "mdi-file-tree",
+                        "Install Branch",
+                    ),
                 )
             )
 
@@ -679,11 +741,7 @@ class LibreNMSModuleTable(tables.Table):
                     '<input type="hidden" name="selected_device_id" value="{}">'
                     '<input type="hidden" name="module_id" value="{}">'
                     '<input type="hidden" name="ent_index" value="{}">'
-                    '<input type="hidden" name="inventory_binding" value="{}">'
-                    '<button type="submit" class="btn btn-sm btn-warning ms-1"'
-                    ' title="Update serial in NetBox to match LibreNMS">'
-                    '<i class="mdi mdi-sync"></i> Update Serial'
-                    "</button></form>",
+                    '<input type="hidden" name="inventory_binding" value="{}">{}</form>',
                     url,
                     url,
                     self.csrf_token,
@@ -692,6 +750,15 @@ class LibreNMSModuleTable(tables.Table):
                     record["installed_module_id"],
                     record.get("ent_physical_index") or "",
                     inventory_binding,
+                    module_action_control(
+                        "button",
+                        "update-serial",
+                        "btn-warning",
+                        mark_safe(' type="submit"'),
+                        "Update serial in NetBox to match LibreNMS",
+                        "mdi-sync",
+                        "Update Serial",
+                    ),
                 )
             )
 
@@ -723,11 +790,7 @@ class LibreNMSModuleTable(tables.Table):
                     '<input type="hidden" name="selected_device_id" value="{}">'
                     '<input type="hidden" name="module_id" value="{}">'
                     '<input type="hidden" name="ent_index" value="{}">'
-                    '<input type="hidden" name="inventory_binding" value="{}">'
-                    '<button type="submit" class="btn btn-sm btn-outline-warning ms-1"'
-                    ' title="Associate matching NetBox interface with installed module">'
-                    '<i class="mdi mdi-link-variant"></i> Update Interface'
-                    "</button></form>",
+                    '<input type="hidden" name="inventory_binding" value="{}">{}</form>',
                     url,
                     url,
                     self.csrf_token,
@@ -736,6 +799,48 @@ class LibreNMSModuleTable(tables.Table):
                     record["installed_module_id"],
                     record.get("ent_physical_index", ""),
                     inventory_binding,
+                    module_action_control(
+                        "button",
+                        "update-interface",
+                        "btn-outline-warning",
+                        mark_safe(' type="submit"'),
+                        "Associate matching NetBox interface with installed module",
+                        "mdi-link-variant",
+                        "Update Interface",
+                    ),
+                )
+            )
+
+        if (
+            getattr(self, "can_change_interface", False)
+            and record.get("interface_type_mismatch_count")
+            and record.get("installed_module_id")
+        ):
+            preview_url = reverse(
+                "plugins:netbox_librenms_plugin:module_interface_type_preview",
+                kwargs={"pk": self.device.pk},
+            )
+            preview_params = urlencode(
+                {
+                    "module_id": record["installed_module_id"],
+                    "server_key": self.server_key or "",
+                    "selected_device_id": record.get("selected_device_id") or self.device.pk,
+                }
+            )
+            buttons.append(
+                module_action_control(
+                    "button",
+                    "review-interface-types",
+                    "btn-outline-warning",
+                    format_html(
+                        ' type="button" hx-get="{}?{}" hx-target="#htmx-modal-content"'
+                        ' hx-swap="innerHTML" hx-sync="#htmx-modal-content:replace" hx-disabled-elt="this"',
+                        preview_url,
+                        preview_params,
+                    ),
+                    "Review interface type differences",
+                    "mdi-swap-vertical",
+                    "Review Interface Types",
                 )
             )
 
@@ -761,17 +866,20 @@ class LibreNMSModuleTable(tables.Table):
                 }
             )
             buttons.append(
-                format_html(
+                module_action_control(
+                    "button",
+                    "replace",
+                    "btn-danger",
                     # hx-get: the preview carries hx- forms, so it must arrive through an HTMX swap to bind.
-                    '<button type="button" class="btn btn-sm btn-danger ms-1"'
-                    ' hx-get="{}?{}"'
-                    ' hx-target="#htmx-modal-content" hx-swap="innerHTML"'
-                    ' hx-sync="#htmx-modal-content:replace" hx-disabled-elt="this"'
-                    ' title="Replace module — opens comparison dialog">'
-                    '<i class="mdi mdi-swap-horizontal"></i> Replace'
-                    "</button>",
-                    preview_url,
-                    preview_params,
+                    format_html(
+                        ' type="button" hx-get="{}?{}" hx-target="#htmx-modal-content" hx-swap="innerHTML"'
+                        ' hx-sync="#htmx-modal-content:replace" hx-disabled-elt="this"',
+                        preview_url,
+                        preview_params,
+                    ),
+                    "Replace module — opens comparison dialog",
+                    "mdi-swap-horizontal",
+                    "Replace",
                 )
             )
 
@@ -794,19 +902,22 @@ class LibreNMSModuleTable(tables.Table):
                     '<input type="hidden" name="server_key" value="{}">'
                     '<input type="hidden" name="selected_device_id" value="{}">'
                     '<input type="hidden" name="conflict_module_id" value="{}">'
-                    '<input type="hidden" name="target_bay_id" value="{}">'
-                    '<button type="submit" class="btn btn-sm btn-info ms-1"'
-                    ' title="Move module from {} / {} to this bay">'
-                    '<i class="mdi mdi-arrow-right"></i> Move'
-                    "</button></form>",
+                    '<input type="hidden" name="target_bay_id" value="{}">{}</form>',
                     move_url,
                     self.csrf_token,
                     self.server_key,
                     record.get("selected_device_id") or self.device.pk,
                     conflict_module.pk,
                     record["module_bay_id"],
-                    conflict_module.device.name,
-                    conflict_module.module_bay.name,
+                    module_action_control(
+                        "button",
+                        "move",
+                        "btn-info",
+                        mark_safe(' type="submit"'),
+                        f"Move module from {conflict_module.device.name} / {conflict_module.module_bay.name} to this bay",
+                        "mdi-arrow-right",
+                        "Move",
+                    ),
                 )
             )
 
@@ -829,11 +940,7 @@ class LibreNMSModuleTable(tables.Table):
                         '<input type="hidden" name="selected_device_id" value="{}">'
                         '<input type="hidden" name="module_bay_id" value="{}">'
                         '<input type="hidden" name="module_type_id" value="{}">'
-                        '<input type="hidden" name="serial" value="">'
-                        '<button type="submit" class="btn btn-sm btn-success ms-1"'
-                        " title=\"Install carrier {} into empty bay '{}'\">"
-                        '<i class="mdi mdi-puzzle-plus-outline"></i> Install {} into &#39;{}&#39;'
-                        "</button></form>",
+                        '<input type="hidden" name="serial" value="">{}</form>',
                         install_url,
                         install_url,
                         self.csrf_token,
@@ -841,10 +948,15 @@ class LibreNMSModuleTable(tables.Table):
                         record.get("selected_device_id") or self.device.pk,
                         opt["bay_id"],
                         opt["module_type_id"],
-                        opt["module_type_name"],
-                        opt["bay_name"],
-                        opt["module_type_name"],
-                        opt["bay_name"],
+                        module_action_control(
+                            "button",
+                            "install-carrier",
+                            "btn-success",
+                            mark_safe(' type="submit"'),
+                            f"Install carrier {opt['module_type_name']} into empty bay '{opt['bay_name']}'",
+                            "mdi-puzzle-plus-outline",
+                            f"Install {opt['module_type_name']} into '{opt['bay_name']}'",
+                        ),
                     )
                 )
 
@@ -878,16 +990,17 @@ class LibreNMSModuleTable(tables.Table):
                 params["return_url"] = return_url
             qs = urlencode(params)
             buttons.append(
-                format_html(
-                    '<a href="{}?{}" class="btn btn-sm btn-outline-info ms-1"'
-                    ' title="Open the Carrier Auto-Install Rule create form pre-filled'
+                module_action_control(
+                    "a",
+                    "add-carrier-rule",
+                    "btn-outline-info",
+                    format_html(' href="{}?{}"', base_url, qs),
+                    "Open the Carrier Auto-Install Rule create form pre-filled"
                     " with this device's manufacturer, the orphan child class/name"
                     " and the device's empty bay names so you only need to pick the"
-                    ' carrier ModuleType">'
-                    '<i class="mdi mdi-puzzle-plus-outline"></i> Add Carrier Rule'
-                    "</a>",
-                    base_url,
-                    qs,
+                    " carrier ModuleType",
+                    "mdi-puzzle-plus-outline",
+                    "Add Carrier Rule",
                 )
             )
 
@@ -919,15 +1032,15 @@ class LibreNMSModuleTable(tables.Table):
                 params["return_url"] = return_url
             qs = urlencode(params)
             buttons.append(
-                format_html(
-                    '<a href="{}?{}" class="btn btn-sm btn-outline-primary ms-1"'
-                    ' title="Open the ModuleBayMapping create form pre-filled with a suggested regex'
-                    " mapping that covers this slot family"
-                    '">'
-                    '<i class="mdi mdi-plus-box-outline"></i> Add Mapping'
-                    "</a>",
-                    base_url,
-                    qs,
+                module_action_control(
+                    "a",
+                    "add-bay-mapping",
+                    "btn-outline-primary",
+                    format_html(' href="{}?{}"', base_url, qs),
+                    "Open the ModuleBayMapping create form pre-filled with a suggested regex"
+                    " mapping that covers this slot family",
+                    "mdi-plus-box-outline",
+                    "Add Bay Mapping",
                 )
             )
 
@@ -954,14 +1067,19 @@ class LibreNMSModuleTable(tables.Table):
                 }
             )
             buttons.append(
-                format_html(
-                    '<button type="button" class="btn btn-sm btn-outline-primary ms-1"'
-                    ' hx-get="{}?{}" hx-target="#htmx-modal-content" hx-swap="innerHTML"'
-                    ' hx-sync="#htmx-modal-content:replace" hx-disabled-elt="this"'
-                    ' title="Choose an existing bay and review the proposed mapping">'
-                    '<i class="mdi mdi-link-variant"></i> Map Existing Bay</button>',
-                    mapping_url,
-                    mapping_params,
+                module_action_control(
+                    "button",
+                    "map-existing-bay",
+                    "btn-outline-primary",
+                    format_html(
+                        ' type="button" hx-get="{}?{}" hx-target="#htmx-modal-content" hx-swap="innerHTML"'
+                        ' hx-sync="#htmx-modal-content:replace" hx-disabled-elt="this"',
+                        mapping_url,
+                        mapping_params,
+                    ),
+                    "Choose an existing bay and review the proposed mapping",
+                    "mdi-link-variant",
+                    "Map Existing Bay",
                 )
             )
 
@@ -987,15 +1105,15 @@ class LibreNMSModuleTable(tables.Table):
                 params["return_url"] = return_url
             qs = urlencode(params)
             buttons.append(
-                format_html(
-                    '<a href="{}?{}" class="btn btn-sm btn-outline-primary ms-1"'
-                    ' title="Open the ModuleTypeMapping create form pre-filled with the LibreNMS'
-                    " model name; select or create the matching NetBox ModuleType to complete the mapping"
-                    '">'
-                    '<i class="mdi mdi-plus-box-outline"></i> Add Mapping'
-                    "</a>",
-                    base_url,
-                    qs,
+                module_action_control(
+                    "a",
+                    "add-type-mapping",
+                    "btn-outline-primary",
+                    format_html(' href="{}?{}"', base_url, qs),
+                    "Open the ModuleTypeMapping create form pre-filled with the LibreNMS"
+                    " model name; select or create the matching NetBox ModuleType to complete the mapping",
+                    "mdi-plus-box-outline",
+                    "Add Type Mapping",
                 )
             )
 
@@ -1018,15 +1136,16 @@ class LibreNMSModuleTable(tables.Table):
                 params["return_url"] = return_url
             qs = urlencode(params)
             buttons.append(
-                format_html(
-                    '<a href="{}?{}" class="btn btn-sm btn-outline-success ms-1"'
-                    ' title="Open the NetBox ModuleType create form pre-filled with the LibreNMS'
+                module_action_control(
+                    "a",
+                    "add-module-type",
+                    "btn-outline-success",
+                    format_html(' href="{}?{}"', base_url, qs),
+                    "Open the NetBox ModuleType create form pre-filled with the LibreNMS"
                     " model, part number, manufacturer and description so the missing type can be"
-                    ' created in one step">'
-                    '<i class="mdi mdi-plus-circle-outline"></i> Add Module Type'
-                    "</a>",
-                    base_url,
-                    qs,
+                    " created in one step",
+                    "mdi-plus-circle-outline",
+                    "Add Module Type",
                 )
             )
 
@@ -1049,21 +1168,27 @@ class LibreNMSModuleTable(tables.Table):
                     kwargs={"pk": self.device.pk},
                 )
                 buttons.append(
-                    format_html(
-                        '<button type="button" class="btn btn-sm btn-outline-secondary ms-1 vc-report-btn"'
-                        ' data-report-url="{}" data-module-id="{}" data-selected-device-id="{}"'
-                        ' title="Report VC naming-convention issue — opens a copyable diagnostic'
-                        " for a GitHub issue"
-                        '">'
-                        '<i class="mdi mdi-bug-outline"></i> Report VC issue'
-                        "</button>",
-                        report_url,
-                        record["installed_module_id"],
-                        record.get("selected_device_id") or self.device.pk,
+                    module_action_control(
+                        "button",
+                        "report-vc-issue",
+                        "btn-outline-secondary vc-report-btn",
+                        format_html(
+                            ' type="button" data-report-url="{}" data-module-id="{}" data-selected-device-id="{}"',
+                            report_url,
+                            record["installed_module_id"],
+                            record.get("selected_device_id") or self.device.pk,
+                        ),
+                        "Report VC naming-convention issue — opens a copyable diagnostic for a GitHub issue",
+                        "mdi-bug-outline",
+                        "Report VC issue",
                     )
                 )
 
-        return mark_safe("".join(buttons)) if buttons else ""
+        if not buttons:
+            return ""
+        return format_html(
+            '<span class="d-inline-flex flex-wrap align-items-center gap-1">{}</span>', mark_safe("".join(buttons))
+        )
 
     def format_module_data(self, record):
         """Format a module row for verify endpoint partial updates."""
