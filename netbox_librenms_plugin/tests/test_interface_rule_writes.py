@@ -1080,7 +1080,7 @@ _TYPE_WRITERS = {
     ): "OOB management interface creation uses the neutral other type",
     ("views/sync/cables.py", "_create_remote_interface"): "remote creation uses the type from its checked proposal",
     ("views/sync/modules.py", "get"): "unsaved interface used only to display the template type label",
-    ("interface_sync.py", "update_interface_from_port"): "the writer; the value comes from planned_interface_type",
+    ("interface_sync.py", "apply_port"): "the writer; the value comes from planned_interface_type",
     ("interface_diff.py", "type_change_refusal"): "the unsaved copy that NetBox validates",
     ("views/sync/modules.py", "_apply_module_interface_type"): "module apply, after type_change_refusal",
     ("views/sync/interfaces.py", "_promote_lag_aggregate"): "the ratified LAG promotion and its restore",
@@ -1205,7 +1205,7 @@ def test_only_the_planned_writers_assign_an_interface_type():
             sites.setdefault((relative, function), set()).add(value)
 
     assert set(sites) == set(_TYPE_WRITERS), sites
-    assert sites[("interface_sync.py", "update_interface_from_port")] == {"planned_type.value"}
+    assert sites[("interface_sync.py", "apply_port")] == {"planned_type.value"}
 
 
 # Modules allowed to read InterfaceTypeMapping rows: the matcher, and the rule management surfaces.

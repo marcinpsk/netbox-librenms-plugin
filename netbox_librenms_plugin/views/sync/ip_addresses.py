@@ -25,6 +25,7 @@ from netbox_librenms_plugin.sync_cache import (
     render_sync_cache_miss,
     schedule_request_cache_mutation,
 )
+from netbox_librenms_plugin.transactions import classify_conflict, run_transaction
 from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
     build_migrated_context,
@@ -44,6 +45,7 @@ from netbox_librenms_plugin.utils import (
     resolve_set_primary_ip,
     same_host,
     syncable_interface_name,
+    exception_text_for,
 )
 from netbox_librenms_plugin.views.base.ip_addresses_view import ip_assignment_ports, ip_interface_scope
 from netbox_librenms_plugin.views.mixins import (
@@ -161,6 +163,11 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             return None
         return cached_data
 
+    @staticmethod
+    def _owner_action(request):
+        """Return the action the sync needs on the owner: ``change`` when it sets the Primary IP, else ``view``."""
+        return "change" if resolve_set_primary_ip(request) else "view"
+
     def get_object(self, object_type, pk, action="view"):
         """Return the Device or VirtualMachine instance for the given type and pk (object-scoped)."""
         if object_type == "device":
@@ -195,7 +202,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
     def redirect_to_ip_tab(self, request, obj):
         """Reload the full sync page for HTMX requests, or redirect a normal request."""
         url = self.get_ip_tab_url(obj)
-        if request.headers.get("HX-Request") == "true":
+        if request.htmx:
             return HttpResponse("", headers={"HX-Redirect": url})
         return redirect(url)
 
@@ -206,8 +213,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         if error := self.require_all_permissions("POST"):
             return error
 
-        owner_action = "change" if resolve_set_primary_ip(request) else "view"
-        obj = self.get_object(object_type, pk, owner_action)
+        obj = self.get_object(object_type, pk, self._owner_action(request))
 
         # Rebind the cached API client to the POSTed server so live lookups (e.g. the
         # management-IP fetch for Set-Primary-IP) hit the same LibreNMS instance the cached
@@ -304,7 +310,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 "create_missing_interfaces": resolve_create_missing_interfaces(request),
                 "cancel_url": self.get_ip_tab_url(obj),
             }
-            if request.headers.get("HX-Request") != "true":
+            if not request.htmx:
                 conflict_context["full_page"] = True
                 response = render(
                     request,
@@ -405,7 +411,10 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             return ip.strip() or None
         except LibreNMSIDConflictError:
             raise
-        except Exception:  # pragma: no cover - defensive
+        except Exception as exc:
+            if classify_conflict(exc):
+                raise
+            logger.warning("Management IP lookup failed for %s: %s", obj, exc, exc_info=True)
             return None
 
     @staticmethod
@@ -583,6 +592,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             rules=interface_rules_for_request(self.request),
             server_key=server_key,
             interface_name_field=interface_name_field,
+            addable_queryset=self.restricted_queryset(interface_model, "add"),
             changeable_queryset=self.restricted_queryset(interface_model, "change"),
             viewable_queryset=self.restricted_queryset(interface_model, "view"),
         )
@@ -1001,19 +1011,21 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         interface_name_field=None,
         bound_ports_by_id=None,
     ):
-        """Sync selected IP rows in one transaction with per-row savepoints."""
-        with transaction.atomic():
-            return self._process_ip_sync(
+        """Sync selected IP rows in one transaction with per-row savepoints; a lock conflict retries the batch once."""
+        return run_transaction(
+            lambda: self._process_ip_sync(
                 request,
                 selected_ips,
                 cached_ips,
-                obj,
+                # Each attempt reads the owner again: a rolled-back attempt leaves its writes on the instance.
+                self.get_object(object_type, obj.pk, self._owner_action(request)),
                 object_type,
                 force_intents=force_intents,
                 cached_ports_by_id=cached_ports_by_id,
                 interface_name_field=interface_name_field,
                 bound_ports_by_id=bound_ports_by_id,
             )
+        )
 
     def _process_ip_sync(  # noqa: C901
         self,
@@ -1047,10 +1059,11 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 interfaces in scope; evidence for the interface rules only.
 
         Returns:
-            dict: The per-outcome row lists, errors, conflicts, and batch mutation state.
+            dict: The per-outcome row lists, errors, conflicts, warnings, and batch mutation state.
 
         """
         results = {
+            "warnings": [],
             "created": [],
             "updated": [],
             "unchanged": [],
@@ -1069,9 +1082,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         set_primary = resolve_set_primary_ip(request)
         mgmt_ip = self.get_management_ip(obj) if set_primary else None
         if mgmt_ip and sum(self._same_host(str(row_id).partition("@")[0], mgmt_ip) for row_id in selected_ips) > 1:
-            messages.warning(
-                request,
-                "Primary IP not set: multiple selected source rows match the management IP. Select one row to set it.",
+            results["warnings"].append(
+                "Primary IP not set: multiple selected source rows match the management IP. Select one row to set it."
             )
             mgmt_ip = None
 
@@ -1265,6 +1277,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             row_mutations.add(row_id)
 
             except Exception as exc:
+                if classify_conflict(exc):
+                    raise
                 if interface_maps_before_row is not None:
                     (
                         interfaces_by_librenms_id_before,
@@ -1286,14 +1300,15 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         )
                 # The row's savepoint rolled back, so drop only this row's keys.
                 row_mutations.clear()
+                detail = exception_text_for(exc, IPAddress, request.user)
                 if isinstance(exc, PortSyncBlocked):
                     # The interface rules refused the create: an expected outcome, not an error.
                     logger.info("IP sync skipped %s: %s", row_id, exc)
-                    results["skipped_by_rule"].append(f"{display_address} ({exc})")
+                    results["skipped_by_rule"].append(f"{display_address} ({detail})")
                 else:
                     logger.warning("IP sync failed for %s: %s", row_id, exc, exc_info=True)
                     results["failed"].append(display_address)
-                    results["errors"][display_address] = str(exc) or exc.__class__.__name__
+                    results["errors"][display_address] = detail or type(exc).__name__
             finally:
                 # `finally`, not `else`: the conflict and no-interface paths leave the row with
                 # `continue`, which skips an `else` clause but keeps their committed writes.
@@ -1304,6 +1319,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
     def display_sync_results(self, request, results):
         """Display flash messages summarizing the IP sync results."""
+        for warning in results["warnings"]:
+            messages.warning(request, warning)
         if results["created"]:
             messages.success(request, f"Created IP addresses: {', '.join(results['created'])}")
         if results["updated"]:
@@ -1476,7 +1493,7 @@ class CreateVRFFromIPRowView(SyncIPAddressesView):
                 vrf.full_clean()
                 vrf.save()
         except ValidationError as exc:
-            detail = "; ".join(exc.messages)
+            detail = exception_text_for(exc, VRF, request.user)
             raise _VRFCreateRefusedError(f"NetBox does not accept the LibreNMS VRF '{name}': {detail}") from exc
         except IntegrityError as exc:
             raise _VRFCreateRefusedError(
