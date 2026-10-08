@@ -1206,9 +1206,18 @@ function initializePrimaryIpToggle() {
     };
     selectManagementRow();
     toggle.addEventListener('change', () => {
+        const table = document.getElementById('librenms-ipaddress-table');
+        if (table && !toggle.checked) {
+            // The management row can be selected on another page, where no checkbox can clear it.
+            const selection = readStoredSelection(table);
+            Object.keys(selection).forEach((key) => {
+                if (selection[key] && selection[key].mgmt) delete selection[key];
+            });
+            writeStoredSelection(table, selection);
+        }
         selectManagementRow();
         // Store the change too, or the next swap restores the row from the old selection.
-        commitSelectionChange(document.getElementById('librenms-ipaddress-table'));
+        commitSelectionChange(table);
     });
 }
 
@@ -1727,7 +1736,7 @@ function _selectionSnapshot(table) {
  * row restored after paging keeps the same standing it had before.
  *
  * @param {HTMLElement} table - The table element.
- * @returns {Object<string, {inputs: Object<string, string>, auto: string}>} Selected rows by key.
+ * @returns {Object<string, {inputs: Object<string, string>, auto: string, mgmt: boolean}>} Selected rows by key.
  */
 function readStoredSelection(table) {
     try {
@@ -1848,6 +1857,7 @@ function persistTableSelection(table) {
                     : checkbox.dataset[MEMBER_MARKER]
                       ? 'member'
                       : '',
+                mgmt: row.dataset.mgmtIp === 'true',
             };
         } else {
             // Only the visible page can retract a row: an absent checkbox means "another page",
