@@ -93,7 +93,13 @@
         "SN-a1b2c3",
         "SN-d4e5f6",
         "SN-789abc"
-      ]
+      ],
+      "member_positions": [
+        1,
+        2,
+        3
+      ],
+      "master_position": 1
     }
   }
 }
