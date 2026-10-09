@@ -181,7 +181,7 @@
       ],
       "count": 4
     },
-    "GET /api/v0/inventory/5?entPhysicalClass=chassis&entPhysicalContainedIn=1": {
+    "GET /api/v0/inventory/5?entPhysicalContainedIn=1": {
       "status": "ok",
       "inventory": [],
       "count": 0

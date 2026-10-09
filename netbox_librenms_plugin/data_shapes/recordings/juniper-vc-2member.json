@@ -41,7 +41,7 @@
         }
       ]
     },
-    "GET /api/v0/inventory/1001?entPhysicalClass=chassis&entPhysicalContainedIn=10": {
+    "GET /api/v0/inventory/1001?entPhysicalContainedIn=10": {
       "status": "ok",
       "inventory": [
         {
