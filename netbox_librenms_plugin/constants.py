@@ -60,25 +60,11 @@ INTERFACE_SYNC_FIELD_PAIRS = (
 INTERFACE_SYNC_EXTRA_FIELDS = ("enabled", "mac_address", "librenms_id", "vlans")
 
 
-# Model strings LibreNMS reports when it has no model to report. They are absent data, never a
-# lookup key: a vendor that answers "unspecified" for every SFP in the box would otherwise
-# collapse them all onto one ModuleTypeMapping row, which the schema allows only one of.
-MODULE_MODEL_PLACEHOLDERS = frozenset({"", "-", "builtin", "default", "n/a", "na", "none", "unknown", "unspecified"})
-
-
-# Model name values that mark a generic or empty container, which is no real hardware.
-GENERIC_CONTAINER_MODELS = frozenset({"", "builtin", "default", "n/a"})
-
-
-def is_module_model_placeholder(value):
-    """Return whether *value* is a LibreNMS model string that names no hardware."""
-    return not isinstance(value, str) or value.strip().lower() in MODULE_MODEL_PLACEHOLDERS
-
-
-# Serial strings that name no hardware, so they are no stack identity evidence. "0" is absent on
-# purpose: zero is a real-but-falsey serial. The anonymizer keeps these values as they are.
-STACK_SERIAL_PLACEHOLDERS = frozenset(
+# Values LibreNMS reports in a model, serial or type field when it has no data: no lookup key, no
+# identity evidence, and kept as they are by the anonymizer. "0" is a real-but-falsey serial.
+LIBRENMS_PLACEHOLDER_VALUES = frozenset(
     {
+        "",
         "-",
         "builtin",
         "default",
@@ -94,9 +80,14 @@ STACK_SERIAL_PLACEHOLDERS = frozenset(
 )
 
 
-def is_stack_serial_placeholder(serial: str) -> bool:
-    """Return whether a trimmed serial string is a placeholder that names no hardware."""
-    return serial.casefold() in STACK_SERIAL_PLACEHOLDERS
+def is_librenms_placeholder(value) -> bool:
+    """Return whether *value* is a LibreNMS model, serial or type value that holds no data."""
+    return not isinstance(value, str) or value.strip().casefold() in LIBRENMS_PLACEHOLDER_VALUES
+
+
+# Model values that hide a row as a generic container. Narrower than LIBRENMS_PLACEHOLDER_VALUES on
+# purpose: an "unspecified" SFP is still hardware, and its description can resolve its type.
+GENERIC_CONTAINER_MODELS = frozenset({"", "builtin", "default", "n/a"})
 
 
 # Junos Virtual Chassis ENTITY descriptions: the root names the Virtual Chassis, each member is an

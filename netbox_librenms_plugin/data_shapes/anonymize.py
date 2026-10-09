@@ -34,7 +34,7 @@ from netbox_librenms_plugin.constants import (
     JUNOS_FPC_MEMBER_DESCR_RE,
     JUNOS_VC_ROOT_DESCR_MARKER,
     LIBRENMS_GLOBAL_ROUTING_INSTANCE,
-    is_stack_serial_placeholder,
+    is_librenms_placeholder,
 )
 from netbox_librenms_plugin.data_shapes.ports import (
     ANON_INTERFACE_NAME_PREFIX,
@@ -663,7 +663,7 @@ def _anon_value(key, value, rules):  # noqa: C901
             return value
         serial = str(value).strip()
         # A placeholder is no identity; hashing it would make it look like a real serial.
-        return f"SN-{_hash(serial, salt)}" if serial and not is_stack_serial_placeholder(serial) else value
+        return f"SN-{_hash(serial, salt)}" if serial and not is_librenms_placeholder(serial) else value
     if not isinstance(value, str) or not value or value == "-":
         # Pseudonym/scrub rules below operate on real string values; leave empties/sentinels
         # and non-strings (ints, bools, null) untouched so logic-bearing numerics survive.
