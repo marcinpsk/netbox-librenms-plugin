@@ -46,7 +46,8 @@ test-useful while losing identifying detail:
 - **Pseudonymized deterministically:** serials, hostnames, the device `hardware` chassis SKU,
   and the `os` become `SN-…` / `device-…` / `MODEL-…` / `os-…` tokens. The mapping is stable,
   so cross-references (a device serial that equals a stack member's serial, which identifies
-  the master) still match. `ifName` gets *pattern-aware* anonymization: structured interface names (slots,
+  the master) still match. A placeholder serial such as `BUILTIN`, `-` or `N/A` stays as it is,
+  because it names no hardware and VC detection ignores it. `ifName` gets *pattern-aware* anonymization: structured interface names (slots,
   sub-units, channels) keep their shape while custom/free-form names become `iface-…` tokens.
 - **Scrubbed:** IPs → documentation ranges, MACs → a synthetic `02:00:00` block, lat/lng →
   null, location → `Lab`, free-text (`ifAlias`, `sysContact`, `sysDescr`, …) → empty.
