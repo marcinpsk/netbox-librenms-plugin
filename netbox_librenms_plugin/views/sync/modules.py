@@ -23,7 +23,7 @@ from netbox_librenms_plugin.sync_cache import (
     apply_request_cache_transition,
     schedule_request_cache_mutation,
 )
-from netbox_librenms_plugin.transactions import classify_conflict
+from netbox_librenms_plugin.transactions import classify_conflict, update_existing_row
 from netbox_librenms_plugin.utils import (
     REGEX_COMPILE_ERRORS,
     AmbiguousLibreNMSIdError,
@@ -3245,6 +3245,21 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         return _modules_action_response(request, page_device, server_key)
 
 
+def _parse_move_ids(post):
+    """Return (module, target bay, optional occupant) IDs from a move form, or None when a required one is invalid."""
+    try:
+        conflict_module_id = int(post.get("conflict_module_id"))
+        target_bay_id = int(post.get("target_bay_id"))
+    except (TypeError, ValueError):
+        return None
+    raw_module_id = post.get("module_id")
+    try:
+        module_id = int(raw_module_id) if raw_module_id else None
+    except (TypeError, ValueError):
+        module_id = None
+    return conflict_module_id, target_bay_id, module_id
+
+
 class MoveModuleView(
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
@@ -3293,25 +3308,35 @@ class MoveModuleView(
             messages.error(request, MODULE_MOVE_REQUIRES_NETBOX_MESSAGE)
             return _modules_action_response(request, page_device, server_key)
 
-        try:
-            conflict_module_id = int(request.POST.get("conflict_module_id"))
-            target_bay_id = int(request.POST.get("target_bay_id"))
-        except (TypeError, ValueError):
+        if (move_ids := _parse_move_ids(request.POST)) is None:
             messages.error(request, "Missing or invalid conflict_module_id/target_bay_id.")
             return _modules_action_response(request, page_device, server_key)
-
-        # Optional: current occupant of target bay
-        raw_module_id = request.POST.get("module_id")
-        try:
-            module_id = int(raw_module_id) if raw_module_id else None
-        except (TypeError, ValueError):
-            module_id = None
+        conflict_module_id, target_bay_id, module_id = move_ids
 
         self.restrict_object_or_404(ModuleBay, pk=target_bay_id, device=target_device)
 
+        occupant_removed_msg = from_device = from_bay = None
+
+        def move(module):
+            nonlocal occupant_removed_msg, from_device, from_bay
+            # Remove whatever is currently in the target bay (if provided and different).
+            # Scoped by "delete": the device and bay filters prove where the row sits, not that
+            # the grant covers it, and the gate asked has_perm without an instance.
+            if module_id and module_id != module.pk:
+                occupant = (
+                    self.restricted_queryset(Module, "delete")
+                    .select_for_update(of=("self",))
+                    .filter(pk=module_id, device=target_device, module_bay=target_bay)
+                    .first()
+                )
+                if occupant:
+                    occupant_removed_msg = f"Removed {occupant.module_type.model} from {target_bay.name}."
+                    occupant.delete()
+            from_device, from_bay = module.device.name, module.module_bay.name
+            module.module_bay = target_bay
+            module.device = target_device
+
         try:
-            occupant_removed_msg = None
-            source_device = None
             with transaction.atomic():
                 # Lock target bay to prevent concurrent modifications
                 target_bay = (
@@ -3324,43 +3349,19 @@ class MoveModuleView(
                     messages.error(request, "Module bay no longer exists.")
                     return _modules_action_response(request, page_device, server_key)
 
-                # Re-fetch with row lock to prevent concurrent modifications. Scoped like the
-                # primary lookup: this module's device and bay are reassigned below, and its pk
-                # comes straight from the POST, so an unscoped read would move a module the
-                # user's grant does not cover.
-                conflict_module = (
-                    self.restricted_queryset(Module, "change")
-                    .select_for_update(of=("self",))
-                    .filter(pk=conflict_module_id)
-                    .select_related("module_type", "module_bay", "device")
-                    .first()
-                )
-                if not conflict_module:
+                # Scoped like the primary lookup: this module's device and bay are reassigned, and
+                # its pk comes straight from the POST, so an unscoped read would move a module the
+                # user's grant does not cover. The module is locked before the occupant.
+                try:
+                    conflict_module = update_existing_row(
+                        self.restricted_queryset(Module, "change")
+                        .filter(pk=conflict_module_id)
+                        .select_related("module_type", "module_bay", "device"),
+                        move,
+                    )
+                except Module.DoesNotExist:
                     messages.error(request, "Module no longer exists.")
                     return _modules_action_response(request, page_device, server_key)
-
-                # Remove whatever is currently in the target bay (if provided and different).
-                # Scoped by "delete": the device and bay filters prove where the row sits, not that
-                # the grant covers it, and the gate asked has_perm without an instance.
-                if module_id:
-                    occupant = (
-                        self.restricted_queryset(Module, "delete")
-                        .select_for_update(of=("self",))
-                        .filter(pk=module_id, device=target_device, module_bay=target_bay)
-                        .first()
-                    )
-                    if occupant and occupant.pk != conflict_module.pk:
-                        occupant_removed_msg = f"Removed {occupant.module_type.model} from {target_bay.name}."
-                        occupant.delete()
-
-                # Move the conflict module to the target bay
-                from_bay = conflict_module.module_bay.name
-                source_device = conflict_module.device
-                from_device = source_device.name
-                conflict_module.module_bay = target_bay
-                conflict_module.device = target_device
-                conflict_module.full_clean()
-                conflict_module.save()
 
             if occupant_removed_msg:
                 messages.info(request, occupant_removed_msg)
