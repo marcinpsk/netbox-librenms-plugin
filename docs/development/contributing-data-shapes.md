@@ -46,7 +46,8 @@ test-useful while losing identifying detail:
 - **Pseudonymized deterministically:** serials, hostnames, the device `hardware` chassis SKU,
   and the `os` become `SN-…` / `device-…` / `MODEL-…` / `os-…` tokens. The mapping is stable,
   so cross-references (a device serial that equals a stack member's serial, which identifies
-  the master) still match. `ifName` gets *pattern-aware* anonymization: structured interface names (slots,
+  the master) still match. A placeholder serial such as `BUILTIN`, `-` or `N/A` stays as it is,
+  because it names no hardware and VC detection ignores it. `ifName` gets *pattern-aware* anonymization: structured interface names (slots,
   sub-units, channels) keep their shape while custom/free-form names become `iface-…` tokens.
 - **Scrubbed:** IPs → documentation ranges, MACs → a synthetic `02:00:00` block, lat/lng →
   null, location → `Lab`, free-text (`ifAlias`, `sysContact`, `sysDescr`, …) → empty.
@@ -60,7 +61,9 @@ Schema version 1 treats `entPhysicalName` and `entPhysicalDescr` as private disp
 replaces the text with a deterministic `entity-...` token. It preserves only a bounded terminal
 slash locator, such as `1/1` or `2/x1`, when the module hierarchy reader needs that locator. This
 keeps synthetic transceivers nested without publishing the surrounding label. Public catalog
-values stay in the separate `entPhysicalModelName` field.
+values stay in the separate `entPhysicalModelName` field. An `entPhysicalDescr` also keeps the
+Junos Virtual Chassis markers that VC detection reads: `Virtual Chassis` on the root, and a
+leading `FPC` or `FPC <n>` on member rows (for example `FPC 1 entity-...`).
 
 Schema version 1 does not capture operator-specific inventory-ignore rules or module-bay mappings.
 It therefore does not promise to replay arbitrary name-based rules. A future schema that declares

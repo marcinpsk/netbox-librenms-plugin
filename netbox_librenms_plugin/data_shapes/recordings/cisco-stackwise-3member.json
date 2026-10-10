@@ -41,7 +41,7 @@
         }
       ]
     },
-    "GET /api/v0/inventory/1000?entPhysicalClass=chassis&entPhysicalContainedIn=1": {
+    "GET /api/v0/inventory/1000?entPhysicalContainedIn=1": {
       "status": "ok",
       "inventory": [
         {
@@ -93,7 +93,13 @@
         "SN-a1b2c3",
         "SN-d4e5f6",
         "SN-789abc"
-      ]
+      ],
+      "member_positions": [
+        1,
+        2,
+        3
+      ],
+      "master_position": 1
     }
   }
 }

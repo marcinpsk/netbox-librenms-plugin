@@ -63,9 +63,7 @@ def test_logic_bearing_fields_preserved():
     assert root["entPhysicalClass"] == "stack"
     assert root["entPhysicalIndex"] == 1
 
-    members = anon["responses"]["GET /api/v0/inventory/1000?entPhysicalClass=chassis&entPhysicalContainedIn=1"][
-        "inventory"
-    ]
+    members = anon["responses"]["GET /api/v0/inventory/1000?entPhysicalContainedIn=1"]["inventory"]
     # Positions and indices (drive VC member ordering) are untouched.
     assert [m["entPhysicalParentRelPos"] for m in members] == [1, 2, 3]
     assert [m["entPhysicalIndex"] for m in members] == [100, 200, 300]
@@ -78,7 +76,7 @@ def test_serials_pseudonymized_and_deterministic():
     a1 = anonymize_recording(rec)
     a2 = anonymize_recording(rec)
 
-    key = "GET /api/v0/inventory/1000?entPhysicalClass=chassis&entPhysicalContainedIn=1"
+    key = "GET /api/v0/inventory/1000?entPhysicalContainedIn=1"
     serials1 = [m["entPhysicalSerialNum"] for m in a1["responses"][key]["inventory"]]
     serials2 = [m["entPhysicalSerialNum"] for m in a2["responses"][key]["inventory"]]
 
@@ -93,7 +91,7 @@ def test_cross_reference_serial_preserved():
     rec = load_recording("cisco-stackwise-3member")
     # Sanity: the fixture's device serial equals member #100's serial.
     dev_serial = rec["responses"]["GET /api/v0/devices/1000"]["devices"][0]["serial"]
-    key = "GET /api/v0/inventory/1000?entPhysicalClass=chassis&entPhysicalContainedIn=1"
+    key = "GET /api/v0/inventory/1000?entPhysicalContainedIn=1"
     member_serial = rec["responses"][key]["inventory"][0]["entPhysicalSerialNum"]
     assert dev_serial == member_serial == "SN-a1b2c3"
 
@@ -136,7 +134,7 @@ def test_expected_member_serials_follow_anonymized_inventory():
 
     anon = anonymize_recording(rec)
 
-    key = "GET /api/v0/inventory/1001?entPhysicalClass=chassis&entPhysicalContainedIn=10"
+    key = "GET /api/v0/inventory/1001?entPhysicalContainedIn=10"
     inventory_serials = [row["entPhysicalSerialNum"] for row in anon["responses"][key]["inventory"]]
     expected_serials = anon["expected"]["virtual_chassis"]["member_serials"]
     assert expected_serials == inventory_serials
@@ -180,9 +178,7 @@ def test_inventory_model_name_preserved_as_module_match_key():
     rec = load_recording("cisco-stackwise-3member")
     anon = anonymize_recording(rec)
 
-    members = anon["responses"]["GET /api/v0/inventory/1000?entPhysicalClass=chassis&entPhysicalContainedIn=1"][
-        "inventory"
-    ]
+    members = anon["responses"]["GET /api/v0/inventory/1000?entPhysicalContainedIn=1"]["inventory"]
     model_names = [m.get("entPhysicalModelName") for m in members if m.get("entPhysicalModelName")]
     # The real chassis SKUs survive so a recording can match a provisioned NetBox ModuleType.
     assert "WS-C3750X-48P" in model_names
@@ -754,6 +750,38 @@ def test_entphysical_name_and_descr_are_pseudonymized():
     assert item["entPhysicalName"] != item["entPhysicalDescr"]
 
 
+def test_entity_descr_keeps_only_the_junos_virtual_chassis_markers():
+    """VC detection reads these description markers, so they survive while the rest is replaced."""
+    import re
+
+    key = "GET /api/v0/inventory/1/all"
+    rec = _ports()
+    rec["responses"][key] = {
+        "status": "ok",
+        "inventory": [
+            {"entPhysicalIndex": 1, "entPhysicalDescr": "Juniper Virtual Chassis Switch"},
+            {"entPhysicalIndex": 4, "entPhysicalDescr": "FPC 1 Power Supply 0", "entPhysicalName": "FPC 1 PSU"},
+            {"entPhysicalIndex": 121, "entPhysicalDescr": "FPC: EX4400-24X @ 1/*/*", "entPhysicalName": "EX4400-24X-S"},
+            {"entPhysicalIndex": 271, "entPhysicalDescr": "Routing Engine 1"},
+        ],
+    }
+
+    first = anonymize_recording(rec)
+    second = anonymize_recording(first)
+
+    rows = first["responses"][key]["inventory"]
+    token = "entity-[0-9a-f]{6}"
+    assert re.fullmatch(f"{token} Virtual Chassis", rows[0]["entPhysicalDescr"])
+    assert re.fullmatch(f"FPC 1 {token}", rows[1]["entPhysicalDescr"])
+    assert re.fullmatch(f"FPC {token}", rows[2]["entPhysicalDescr"])
+    assert re.fullmatch(token, rows[3]["entPhysicalDescr"])
+    # The markers are read from the description only; names stay fully replaced.
+    assert all(re.fullmatch(token, row["entPhysicalName"]) for row in rows if "entPhysicalName" in row)
+    assert not any(word in str(rows) for word in ("Juniper", "EX4400", "Power Supply", "Routing"))
+    assert second["responses"][key]["inventory"] == rows
+    assert find_pii(first) == []
+
+
 def test_entity_text_preserves_only_supported_terminal_locators():
     """Entity text keeps hierarchy locators but not hostname-like slash labels."""
     rec = _ports()
@@ -903,7 +931,7 @@ def test_find_pii_flags_nonempty_value_under_secret_looking_key():
 def test_salt_changes_pseudonyms():
     """Different salts produce different pseudonyms for the same input."""
     rec = load_recording("cisco-stackwise-3member")
-    key = "GET /api/v0/inventory/1000?entPhysicalClass=chassis&entPhysicalContainedIn=1"
+    key = "GET /api/v0/inventory/1000?entPhysicalContainedIn=1"
     s_a = anonymize_recording(rec, salt="alpha")["responses"][key]["inventory"][0]["entPhysicalSerialNum"]
     s_b = anonymize_recording(rec, salt="beta")["responses"][key]["inventory"][0]["entPhysicalSerialNum"]
     assert s_a != s_b

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from netbox_librenms_plugin.tests.conftest import junos_vc_inventory, make_junos_vc_members
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -2779,6 +2780,17 @@ class TestBuildRowSerialMismatch:
         assert "row_class" not in row
         assert not row.get("can_update_serial")
 
+    @pytest.mark.parametrize("placeholder", ["BUILTIN", "none", "null", "unspecified", "Not Available"])
+    def test_a_placeholder_librenms_serial_is_no_serial_mismatch(self, placeholder):
+        """A serial that names no hardware must not offer to overwrite the blank NetBox serial."""
+        view = self._view()
+        _installed, module_bays, module_types = self._make_installed_rows("")
+
+        row = view._build_row(self._make_item(serial=placeholder), {}, module_bays, module_types)
+
+        assert row["status"] == "Installed"
+        assert not row.get("can_update_serial")
+
 
 @pytest.mark.django_db
 class TestDetectSerialConflicts:
@@ -2803,6 +2815,18 @@ class TestDetectSerialConflicts:
             view._detect_serial_conflicts(table_data)
         assert "serial_conflict_module" not in table_data[0]
         assert "serial_conflict_module" not in table_data[1]
+
+    @pytest.mark.parametrize("placeholder", ["BUILTIN", "none", "Not Available"])
+    def test_a_placeholder_serial_names_no_installed_module(self, placeholder):
+        """A NetBox module stored with a placeholder serial is not the part another row reports."""
+        view = self._view()
+        self._make_module(f"placeholder-{len(placeholder)}", placeholder)
+        row = {"can_install": True, "serial": placeholder, "status": "Matched"}
+
+        view._detect_serial_conflicts([row])
+
+        assert "serial_conflict_module" not in row
+        assert row["can_install"] is True
 
     def test_a_row_with_no_action_flags_is_still_checked(self):
         """Identity must not depend on bay matching having succeeded — that was the defect."""
@@ -2997,6 +3021,20 @@ class TestCheckIgnoreRules:
         item = {"entPhysicalName": "Optics0/0/0/0-IDPROM", "entPhysicalSerialNum": "XYZ999"}
         parent = {"entPhysicalName": "Optics0/0/0/0", "entPhysicalSerialNum": "ABC123"}
         assert self._check(item, parent, [self._rule()]) is None
+
+    @pytest.mark.parametrize("placeholder", ["BUILTIN", "none", "Not Available"])
+    def test_a_shared_placeholder_serial_is_no_parent_match(self, placeholder):
+        """Two rows that both report no serial are not one part, so the serial check fails."""
+        item = {"entPhysicalName": "Optics0/0/0/0-IDPROM", "entPhysicalSerialNum": placeholder}
+        parent = {"entPhysicalName": "Optics0/0/0/0", "entPhysicalSerialNum": placeholder}
+        assert self._check(item, parent, [self._rule()]) is None
+
+    @pytest.mark.parametrize("placeholder", ["BUILTIN", "none", "Not Available"])
+    def test_a_placeholder_device_serial_matches_no_row(self, placeholder):
+        """A device without a real serial must not claim a row that also reports none."""
+        rule = self._rule(match_type="serial_matches_device", pattern="", action="transparent")
+        item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": placeholder}
+        assert self._check(item, None, [rule], device_serial=placeholder) is None
 
     def test_match_with_no_parent_not_skipped(self):
         """Name matches, require_serial=True, but no parent → conservative: NOT skipped."""
@@ -4884,7 +4922,7 @@ class TestFindIntegratingAncestor:
     def test_returns_none_for_placeholder_serial(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        for placeholder in ("", "N/A", "Unknown", "-"):
+        for placeholder in ("", "N/A", "Unknown", "-", "BUILTIN", "none", "Not Available"):
             xiom = {
                 "entPhysicalIndex": 100,
                 "entPhysicalClass": "xioModule",
@@ -4900,6 +4938,27 @@ class TestFindIntegratingAncestor:
                 "entPhysicalContainedIn": 100,
             }
             assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda])) is None, placeholder
+
+    @pytest.mark.parametrize("placeholder", ["BUILTIN", "unspecified", "none", "null"])
+    def test_returns_none_for_placeholder_model(self, placeholder):
+        """A shared serial with a model that names nothing is no proof of one card."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        xiom = {
+            "entPhysicalIndex": 100,
+            "entPhysicalClass": "xioModule",
+            "entPhysicalSerialNum": "S",
+            "entPhysicalModelName": placeholder,
+            "entPhysicalContainedIn": 0,
+        }
+        mda = {
+            "entPhysicalIndex": 200,
+            "entPhysicalClass": "mdaModule",
+            "entPhysicalSerialNum": "S",
+            "entPhysicalModelName": placeholder,
+            "entPhysicalContainedIn": 100,
+        }
+        assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda])) is None
 
     def test_skips_chassis_ancestor(self):
         """A chassis ancestor sharing serial (the device serial!) must NEVER be matched."""
@@ -5868,60 +5927,6 @@ class TestInterfacePortIdActiveServerScope:
 
 
 @pytest.mark.django_db
-class TestInferVcMemberSerialNormalization:
-    """VC-member inference keys on serials that LibreNMS may deliver as JSON numbers (real Devices, real VirtualChassis)."""
-
-    def _vc_members(self, serials):
-        from dcim.models import VirtualChassis
-
-        from netbox_librenms_plugin.tests.conftest import make_device
-
-        vc = VirtualChassis.objects.create(name=f"vc-infer-{'-'.join(serials)}")
-        members = []
-        for pos, serial in enumerate(serials, start=1):
-            dev = make_device(f"vc-infer-member-{serial}", serial=serial)
-            dev.virtual_chassis = vc
-            dev.vc_position = pos
-            dev.save()
-            members.append(dev)
-        return members
-
-    def test_numeric_item_serial_matches_the_member_stored_as_text(self):
-        """An all-digit ENTITY serial arriving as an int must still resolve to its VC member instead of raising."""
-        view = _make_view()
-        master, member2 = self._vc_members(["100001", "100002"])
-
-        item = {"entPhysicalIndex": 1, "entPhysicalSerialNum": 100002, "entPhysicalContainedIn": 0}
-        target, source = view._infer_vc_member_for_item(master, item, {}, [master, member2])
-
-        assert target.pk == member2.pk
-        assert source == "serial"
-
-    def test_zero_item_serial_is_not_dropped_as_falsey(self):
-        """A serial of JSON number 0 is real; dropping it silently attributes the item to the wrong VC member."""
-        view = _make_view()
-        master, member2 = self._vc_members(["0", "100003"])
-
-        item = {"entPhysicalIndex": 2, "entPhysicalSerialNum": 0, "entPhysicalContainedIn": 0}
-        target, source = view._infer_vc_member_for_item(member2, item, {}, [master, member2])
-
-        assert target.pk == master.pk
-        assert source == "serial"
-
-    @pytest.mark.parametrize("field", ["entPhysicalName", "entPhysicalDescr"])
-    def test_numeric_name_hints_do_not_crash(self, field):
-        """Numeric ENTITY hint fields are normalized before prefix matching."""
-        view = _make_view()
-        master, member2 = self._vc_members(["100004", "100005"])
-        item = {"entPhysicalIndex": 3, field: 2, "entPhysicalContainedIn": 0}
-
-        target, source = view._infer_vc_member_for_item(master, item, {}, [master, member2])
-
-        assert target.pk == master.pk
-        assert source == "default"
-
-
-@pytest.mark.django_db
 @pytest.mark.parametrize("inventory_name", ["Slot 1", "Unmatched Card"])
 @pytest.mark.parametrize("description", ["", 123])
 def test_included_numeric_inventory_class_renders_on_the_sync_page(client, settings, inventory_name, description):
@@ -6374,82 +6379,79 @@ def test_vc_default_hardware_parent_keeps_child_on_page_device(client, settings,
 
 
 @pytest.mark.django_db
-def test_vc_descendant_local_position_does_not_override_parent_member():
-    """A hardware-local child position must inherit its parent's VC member."""
-    page, member, _member_manufacturer = _make_mixed_manufacturer_chassis("descendant-position")
-    inventory = [
-        {
-            "entPhysicalIndex": 120,
-            "entPhysicalClass": "module",
-            "entPhysicalName": "1/FPC0",
-            "entPhysicalContainedIn": 0,
-        },
-        {
-            "entPhysicalIndex": 121,
-            "entPhysicalClass": "fan",
-            "entPhysicalName": "Fan 2",
-            "entPhysicalParentRelPos": 2,
-            "entPhysicalContainedIn": 120,
-        },
-    ]
-    from netbox_librenms_plugin.views.base.modules_view import _inventory_item_key
+def test_junos_vc_rows_on_the_page_belong_to_the_member_they_name(client, settings):
+    """Junos rows under the one VC root belong to the member their FPC names, not to the root's master."""
+    from django.core.cache import cache
+    from django.urls import reverse
 
-    view = _make_view()
-    index_map = {item["entPhysicalIndex"]: item for item in inventory}
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
-    _default, contexts = view._build_inventory_ignore_contexts(
-        page,
-        inventory,
-        index_map,
-        [page, member],
-        lambda _manufacturer: [],
+    configure_servers(
+        settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
+    )
+    master, member = make_junos_vc_members("junos-modules")
+    payload = trusted_module_inventory_payload(master, junos_vc_inventory(), librenms_id=9355)
+    cache.set(DeviceModuleTableView().get_cache_key(master, "inventory", server_key="default"), payload, 300)
+    cache.set("librenms_device_info_default_9355", (True, {"device_id": 9355, "hostname": master.name}), 300)
+    client.force_login(make_superuser("junos-modules-user"))
+
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[master.pk]),
+        {"tab": "modules", "server_key": "default"},
     )
 
-    assert contexts[_inventory_item_key(inventory[0])]["selected_device"].pk == page.pk
-    assert contexts[_inventory_item_key(inventory[1])]["selected_device"].pk == page.pk
+    assert response.status_code == 200
+    owners = {
+        row["ent_physical_index"]: row["selected_device_id"] for row in response.context["module_sync"]["table"].data
+    }
+    assert owners[2] == master.pk
+    assert owners[4] == member.pk
+    # The FPC 1 container carries the member serial, so it is transparent and its PIC is a row.
+    assert owners[1210] == member.pk
 
 
 @pytest.mark.django_db
-def test_vc_chassis_can_resolve_below_an_unattributed_stack_root():
-    """A generic stack root must not suppress a chassis member position."""
-    page, member, _member_manufacturer = _make_mixed_manufacturer_chassis("stack-root-position")
+def test_a_decorated_junos_fpc_serial_is_serial_evidence_on_the_page(client, settings):
+    """Juniper reports "S/N 12350"; after the serial rules it names its member even where the position disagrees."""
+    from django.core.cache import cache
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    configure_servers(
+        settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
+    )
+    NormalizationRule.objects.get_or_create(
+        scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+    )
+    master, member = make_junos_vc_members("junos-decorated")
+    # NetBox numbers the members the other way round, so only the serial can name FPC 1's member.
+    master.serial, member.serial = "12350", "12345"
+    for device in (master, member):
+        device.save(update_fields=["serial"])
     inventory = [
-        {
-            "entPhysicalIndex": 130,
-            "entPhysicalClass": "stack",
-            "entPhysicalName": "Switch stack",
-            "entPhysicalContainedIn": 0,
-        },
-        {
-            "entPhysicalIndex": 131,
-            "entPhysicalClass": "chassis",
-            "entPhysicalName": "Chassis 2",
-            "entPhysicalParentRelPos": 2,
-            "entPhysicalContainedIn": 130,
-        },
-        {
-            "entPhysicalIndex": 132,
-            "entPhysicalClass": "module",
-            "entPhysicalName": "2/FPC0",
-            "entPhysicalContainedIn": 131,
-        },
+        {**row, "entPhysicalSerialNum": f"S/N {row['entPhysicalSerialNum']}"} if row["entPhysicalSerialNum"] else row
+        for row in junos_vc_inventory()
     ]
-    from netbox_librenms_plugin.views.base.modules_view import _inventory_item_key
+    payload = trusted_module_inventory_payload(master, inventory, librenms_id=9356)
+    cache.set(DeviceModuleTableView().get_cache_key(master, "inventory", server_key="default"), payload, 300)
+    cache.set("librenms_device_info_default_9356", (True, {"device_id": 9356, "hostname": master.name}), 300)
+    client.force_login(make_superuser("junos-decorated-user"))
 
-    view = _make_view()
-    index_map = {item["entPhysicalIndex"]: item for item in inventory}
-
-    _default, contexts = view._build_inventory_ignore_contexts(
-        page,
-        inventory,
-        index_map,
-        [page, member],
-        lambda _manufacturer: [],
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[master.pk]),
+        {"tab": "modules", "server_key": "default"},
     )
 
-    assert contexts[_inventory_item_key(inventory[0])]["resolution_source"] == "default"
-    assert contexts[_inventory_item_key(inventory[1])]["selected_device"].pk == member.pk
-    assert contexts[_inventory_item_key(inventory[2])]["selected_device"].pk == member.pk
+    assert response.status_code == 200
+    rows = {row["ent_physical_index"]: row for row in response.context["module_sync"]["table"].data}
+    assert rows[1210]["selected_device_id"] == master.pk
+    assert rows[1210]["member_resolution_source"] == "ancestor-serial"
 
 
 @pytest.mark.django_db

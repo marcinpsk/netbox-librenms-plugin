@@ -10,7 +10,12 @@ from netbox.views import generic
 
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.import_utils import _determine_device_name
-from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
+from netbox_librenms_plugin.import_utils.virtual_chassis import (
+    _generate_vc_member_name,
+    chassis_serial_key,
+    extract_vc_members,
+    members_by_serial_key,
+)
 from netbox_librenms_plugin.server_mappings import get_librenms_sync_device, mapped_device_servers, read_mapping
 from netbox_librenms_plugin.server_selection import (
     ServerSelectionState,
@@ -29,7 +34,6 @@ from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_user_pref,
     match_librenms_hardware_to_device_type,
-    normalize_inventory_serial,
     resolve_naming_preferences,
     save_user_pref,
 )
@@ -790,13 +794,16 @@ class BaseLibreNMSSyncView(
         """
         Fetch inventory serials for Virtual Chassis members.
 
+        The members come from :func:`extract_vc_members`, the same definition that import
+        detection uses, so a Junos VC lists its FPC members and not the root chassis.
+
         Args:
             obj: NetBox device object (VC member)
 
         Returns:
             list: [
                 {
-                    'description': 'Chassis component description',
+                    'description': 'Member component description',
                     'serial': 'serial number',
                     'model': 'model name',
                     'assigned_member': Device object or None (if serial matches existing assignment)
@@ -808,41 +815,27 @@ class BaseLibreNMSSyncView(
         if not success:
             return []
 
-        # Filter for chassis components
-        chassis_components = [item for item in inventory if item.get("entPhysicalClass") == "chassis"]
-
         # Get all VC members
         vc_members = obj.virtual_chassis.members.all()
 
         # The ENTITY-MIB serial carries the vendor's decoration ("S/N BCFB9793" on Juniper) while
-        # the stored member serial does not, so compare and display the normalized value.
-        master = obj.virtual_chassis.master or obj
-        manufacturer = getattr(getattr(master, "device_type", None), "manufacturer", None)
-        # One lazy cache for the whole loop: apply_normalization_rules fills it on the first
-        # component that needs normalizing and reuses it for the rest, so a stack costs one read
-        # instead of one per component and an inventory with no serials costs none.
-        serial_rules: dict = {}
+        # the stored member serial does not, so compare and display the serial key.
+        serial_key = chassis_serial_key(obj)
+        # A serial key that two members share assigns neither.
+        members_by_key = members_by_serial_key(vc_members, serial_key)
 
         result = []
-        for component in chassis_components:
-            serial = normalize_inventory_serial(
-                component.get("entPhysicalSerialNum"), manufacturer=manufacturer, preloaded_rules=serial_rules
-            )
-            if not serial or serial == "-":
+        for component in extract_vc_members(inventory):
+            serial = serial_key(component["serial"])
+            if not serial:
                 continue
-
-            # Check if this serial is already assigned to a VC member
-            assigned_member = None
-            for member in vc_members:
-                if member.serial and member.serial.strip() == serial.strip():
-                    assigned_member = member
-                    break
+            assigned_member = members_by_key.get(serial)
 
             result.append(
                 {
-                    "description": component.get("entPhysicalDescr", "-"),
+                    "description": component["description"] or "-",
                     "serial": serial,
-                    "model": component.get("entPhysicalModelName", "-"),
+                    "model": component["model"] or "-",
                     "assigned_member": assigned_member,
                 }
             )
