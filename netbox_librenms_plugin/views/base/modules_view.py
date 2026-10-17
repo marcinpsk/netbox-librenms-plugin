@@ -1022,14 +1022,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         The page table is not built again: the verify grant carries what it showed for the row.
         """
-        from netbox_librenms_plugin.models import InventoryRuleFilterError
+        from netbox_librenms_plugin.models import RuleConfigurationError
 
         scoped_server, sync_device, inventory, empty = self._read_render_inventory(request, page_device, server_key)
         if empty is not None:
             return empty
         try:
             policy = load_inventory_policy(page_device.pk)
-        except InventoryRuleFilterError as exc:
+        except RuleConfigurationError as exc:
             logger.error("Module table for %s not built: %s", page_device, exc)
             return {
                 "table": None,
@@ -1082,21 +1082,25 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # (reached via the row builders) uses the same key without threading it through
         # every intermediate signature.
         self._active_server_key = server_key or self.librenms_api.server_key
-        from netbox_librenms_plugin.models import InventoryRuleFilterError
+        from netbox_librenms_plugin.models import RuleConfigurationError
 
+        try:
+            return self._build_table_context(request, obj, inventory_data, sync_device, policy=policy, pin_to=pin_to)
+        except RuleConfigurationError as exc:
+            # Rows that a broken rule would admit or place are unknown, so the tab shows no partial table.
+            logger.error("Module table for %s not built: %s", obj, exc)
+            return {
+                "table": None,
+                "object": obj,
+                "cache_expiry": None,
+                "server_key": self._active_server_key,
+                "inventory_rule_error": exc,
+            }
+
+    def _build_table_context(self, request, obj, inventory_data, sync_device, *, policy, pin_to):
+        """Build the module table context of ``_build_context``; raise RuleConfigurationError for a broken rule."""
         if policy is None:
-            try:
-                policy = load_inventory_policy(obj.pk)
-            except InventoryRuleFilterError as exc:
-                # Rows that a broken rule would admit are unknown, so the tab shows no partial table.
-                logger.error("Module table for %s not built: %s", obj, exc)
-                return {
-                    "table": None,
-                    "object": obj,
-                    "cache_expiry": None,
-                    "server_key": self._active_server_key,
-                    "inventory_rule_error": exc,
-                }
+            policy = load_inventory_policy(obj.pk)
         # The collector reads devices from the policy load, so the fingerprint covers what it read.
         self._inventory_policy = policy
         owner = policy.page_device if pin_to is None else policy.member(pin_to.pk)
@@ -3088,16 +3092,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             candidates = [m for m in scoped_mappings if m.librenms_class == ""]
 
         for mapping in candidates:
-            compiled = mapping._compiled_pattern
-            if compiled is None:
-                continue
-            match = compiled.fullmatch(name)
+            match = mapping._compiled_pattern.fullmatch(name)
             if not match:
                 continue
-            try:
-                resolved_bay = match.expand(mapping.netbox_bay_name)
-            except (re.error, IndexError):
-                continue
+            resolved_bay = match.expand(mapping.netbox_bay_name)
             if resolved_bay in module_bays:
                 maps = module_bays.maps if hasattr(module_bays, "maps") else [module_bays]
                 for scope_map in maps:
