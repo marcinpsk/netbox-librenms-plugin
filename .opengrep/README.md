@@ -66,6 +66,7 @@ unchecked until that review.
 | `conflict-raised-without-record` | error | A raise of a `TransactionConflict` or `ConcurrentRowChange` class that does not go through `recorded_conflict(...)`. |
 | `no-lock-on-exists` | error | A `select_for_update()` chain that ends in `exists()` or `count()`. |
 | `posted-module-target-needs-resolver` | error | A read of the posted `selected_device_id` from `request.GET` or `request.POST` outside `_resolve_destination(...)` or a module grant's `require(device_id=...)`. |
+| `regex-error-must-raise` | error | A handler that catches `re.error` or `REGEX_COMPILE_ERRORS` and does not raise. A stored rule regex compiles through `models.compile_rule_regex`, which raises `RuleConfigurationError`. |
 
 ## Scope
 
@@ -234,6 +235,11 @@ later statement ends with `exists()` or `count()`.
 
 `posted-module-target-needs-resolver` excludes tests. It reads the key by its literal name. It does
 not see the key in a variable, or a read through another name than `GET` or `POST`.
+
+`regex-error-must-raise` reads the class list of the handler. It does not see a regex error caught
+by `except Exception`, or a module alias other than `_re`. A handler that raises only inside a
+nested branch is reported, because its other branch swallows the error. A pattern that is not
+stored rule data, such as a form value or a derived pattern, carries a suppression with its reason.
 
 ## `--taint-intrafile` is required
 
