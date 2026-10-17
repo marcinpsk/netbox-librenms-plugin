@@ -65,6 +65,7 @@ unchecked until that review.
 | `no-scroll-wrapper-on-sync-table` | error | A `table-responsive` wrapper directly around `inc/table.html`. It clips a member dropdown that opens inside the table. A wrapper with another class, or one written with `{% if %}` in its class, is outside this check. |
 | `conflict-raised-without-record` | error | A raise of a `TransactionConflict` or `ConcurrentRowChange` class that does not go through `recorded_conflict(...)`. |
 | `no-lock-on-exists` | error | A `select_for_update()` chain that ends in `exists()` or `count()`. |
+| `posted-module-target-needs-resolver` | error | A read of the posted `selected_device_id` from `request.GET` or `request.POST` outside `_resolve_destination(...)` or a module grant's `require(device_id=...)`. |
 
 ## Scope
 
@@ -230,6 +231,9 @@ subclass, add its name to the rule and a fixture line.
 
 `no-lock-on-exists` checks one method chain. It does not see a locked queryset in a variable that a
 later statement ends with `exists()` or `count()`.
+
+`posted-module-target-needs-resolver` excludes tests. It reads the key by its literal name. It does
+not see the key in a variable, or a read through another name than `GET` or `POST`.
 
 ## `--taint-intrafile` is required
 
