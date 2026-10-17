@@ -95,3 +95,8 @@
     flex-wrap: wrap;
     align-items: center;
 }
+
+/* A long value breaks so the information sync table fits a phone-width card; the field names keep their words. */
+.librenms-info-sync-table td + td {
+    overflow-wrap: anywhere;
+}

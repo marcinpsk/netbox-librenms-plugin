@@ -10,7 +10,7 @@ from typing import NamedTuple, Optional
 import django_tables2 as tables
 import psycopg
 from dcim.models import Device, Interface
-from django.core.exceptions import FieldDoesNotExist, ObjectDoesNotExist, ValidationError
+from django.core.exceptions import NON_FIELD_ERRORS, FieldDoesNotExist, ObjectDoesNotExist, ValidationError
 from django.core.paginator import EmptyPage, PageNotAnInteger
 from django.db import DatabaseError, IntegrityError
 from django.db.models import Count, Max
@@ -2717,6 +2717,9 @@ def parse_librenms_location(location_string: str, pattern: str, is_regex: bool =
     Returns:
         dict: Mapping of each supported token to its parsed value (or None).
 
+    Raises:
+        re.error: When ``pattern`` does not compile (OverflowError for a too-large repeat count).
+
     """
     result = {name: None for name in LOCATION_PARSE_TOKENS}
     if not location_string or not pattern:
@@ -2725,16 +2728,10 @@ def parse_librenms_location(location_string: str, pattern: str, is_regex: bool =
     if len(location_string) > LOCATION_PARSE_MAX_INPUT_LEN:
         location_string = location_string[:LOCATION_PARSE_MAX_INPUT_LEN]
 
-    try:
-        if is_regex:
-            compiled = re.compile(pattern)
-            match = compiled.search(location_string)
-        else:
-            compiled = re.compile(_placeholder_pattern_to_regex(pattern))
-            match = compiled.match(location_string)
-    except REGEX_COMPILE_ERRORS:
-        logger.warning("Invalid LibreNMS location parse pattern: %r", pattern)
-        return result
+    if is_regex:
+        match = re.compile(pattern).search(location_string)
+    else:
+        match = re.compile(_placeholder_pattern_to_regex(pattern)).match(location_string)
 
     if not match:
         return result
@@ -2783,6 +2780,9 @@ def parse_location_for_import(location_string: str) -> dict:
     Returns:
         dict: Mapping of each supported token to its parsed value (or None).
 
+    Raises:
+        RuleConfigurationError: When the stored parse pattern does not compile.
+
     """
     location_string = _normalise_location_value(location_string)
     pattern, is_regex = get_location_parse_settings()
@@ -2795,7 +2795,12 @@ def parse_location_for_import(location_string: str) -> dict:
             "rack": None,
             "tenant": None,
         }
-    parsed = parse_librenms_location(location_string, pattern, is_regex)
+    try:
+        parsed = parse_librenms_location(location_string, pattern, is_regex)
+    except REGEX_COMPILE_ERRORS as exc:
+        from netbox_librenms_plugin.models import LibreNMSSettings, RuleConfigurationError
+
+        raise RuleConfigurationError(LibreNMSSettings.objects.order_by("pk").first(), "location_parse_pattern") from exc
     # A global parse pattern is best-effort: if this particular location does
     # not match the pattern (no site token resolved), fall back to whole-string
     # matching so locations that don't fit the pattern still resolve a site.
@@ -2804,67 +2809,6 @@ def parse_location_for_import(location_string: str) -> dict:
         if not parsed.get("location"):
             parsed["location"] = whole
     return parsed
-
-
-def find_matching_platform(librenms_os: str) -> dict:
-    """
-    Find matching NetBox platform for a LibreNMS OS.
-
-    Tries exact case-insensitive name match first, then falls back to
-    PlatformMapping for when the platform name differs from the LibreNMS OS string.
-
-    Args:
-        librenms_os (str): OS string from LibreNMS (e.g., 'ios', 'linux', 'junos')
-
-    Returns:
-        dict: Dictionary containing:
-            - found (bool): Whether a match was found
-            - platform (Platform|None): The matched Platform object
-            - match_type (str|None): 'mapping', 'exact', 'ambiguous', or None.
-              'ambiguous' means multiple PlatformMapping entries matched, or
-              multiple Platform objects share the same name, and a single
-              Platform could not be determined.
-
-    """
-    from dcim.models import Platform
-
-    if not librenms_os or librenms_os == "-":
-        return {"found": False, "platform": None, "match_type": None}
-
-    # Try case-insensitive exact name match first.  We defer the "ambiguous"
-    # short-circuit so that an explicit PlatformMapping can still disambiguate
-    # the LibreNMS OS in exactly the case where multiple Platform rows share
-    # the name and the user added a mapping to break the tie.
-    platform_ambiguous = False
-    try:
-        platform = Platform.objects.get(name__iexact=librenms_os)
-        return {"found": True, "platform": platform, "match_type": "exact"}
-    except Platform.DoesNotExist:
-        pass
-    except Platform.MultipleObjectsReturned:
-        platform_ambiguous = True
-
-    # Fall back to PlatformMapping for when the platform name differs from the LibreNMS OS string
-    try:
-        from netbox_librenms_plugin.models import PlatformMapping as _PlatformMapping
-
-        _has_platform_mapping = True
-    except ImportError:
-        _has_platform_mapping = False
-
-    if _has_platform_mapping:
-        try:
-            mapping = _PlatformMapping.objects.get(librenms_os__iexact=librenms_os)
-            return {"found": True, "platform": mapping.netbox_platform, "match_type": "mapping"}
-        except _PlatformMapping.DoesNotExist:
-            pass
-        except _PlatformMapping.MultipleObjectsReturned:
-            return {"found": False, "platform": None, "match_type": "ambiguous", "ambiguity_source": "mapping"}
-
-    if platform_ambiguous:
-        return {"found": False, "platform": None, "match_type": "ambiguous", "ambiguity_source": "platform"}
-
-    return {"found": False, "platform": None, "match_type": None}
 
 
 def get_vlan_sync_css_class(exists_in_netbox: bool, name_matches: bool = True) -> str:
@@ -3613,7 +3557,8 @@ def load_module_type_bay_types():
 
 
 def module_type_bay_type_ids(module_type, preloaded=None):
-    """Return the module bay types *module_type* installs into; an empty set fits any bay.
+    """
+    Return the module bay types *module_type* installs into; an empty set fits any bay.
 
     *preloaded* is the result of ``load_module_type_bay_types``; without it, this reads one query.
     """
@@ -3796,6 +3741,37 @@ def exception_text_for(exc: Exception, model, user) -> str:
     keys = exc.error_dict if hasattr(exc, "error_dict") else ()
     fields = [name for name in dict.fromkeys(refused_model_field(model, key) for key in keys) if name]
     return hidden_refusal_text(model, fields)
+
+
+# This is the failure text that caught-error-text trusts.
+# nosemgrep: caught-error-text-shadow  # noqa: ERA001
+def write_failure_message(exc, action, written_field, model, user):
+    """
+    Describe a failed single-field write to *user*, and say when the failure is on another field.
+
+    Args:
+        exc (Exception): The caught error of the write.
+        action (str): The write, for example "update serial to 'X'".
+        written_field (str): The field that the write changed.
+        model (type[Model]): The model that NetBox validated.
+        user (User | None): The viewer.
+
+    Returns:
+        str: The failure text; its detail comes from ``exception_text_for``.
+
+    """
+    detail = exception_text_for(exc, model, user)
+    # full_clean() validates the whole object, so the failure can sit on a field this write never
+    # touched. Whether the write caused the failure is not knowable from the error keys alone:
+    # a custom validator can add any key, so the wording states what failed, never when it broke.
+    # The keys only choose the wording; the text comes from exception_text_for.
+    # nosemgrep: caught-error-text  # noqa: ERA001
+    keys = exc.error_dict if hasattr(exc, "error_dict") else ()
+    # nosemgrep: caught-error-text  # noqa: ERA001
+    elsewhere = [key for key in keys if key not in (written_field, NON_FIELD_ERRORS)]
+    if elsewhere and len(elsewhere) == len(keys):
+        return f"Cannot {action}: another field fails validation. {detail.rstrip('.')}. Resolve that, then retry."
+    return f"Failed to {action}: {detail}"
 
 
 # The device-level IP foreign keys this plugin re-homes during OOB linking, merges, and the
@@ -4282,6 +4258,9 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None, *, prel
     Returns:
         The normalized string after all matching rules have been applied.
 
+    Raises:
+        RuleConfigurationError: When a rule in the chain stores a pattern or replacement that does not work.
+
     """
     from netbox_librenms_plugin.models import NormalizationRule
 
@@ -4290,12 +4269,7 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None, *, prel
 
     def _apply_rules(val, rules_qs):
         for rule in rules_qs:
-            try:
-                val = re.sub(rule.match_pattern, rule.replacement, val)
-            except (*REGEX_COMPILE_ERRORS, IndexError):
-                logger.error(
-                    "Invalid regex in NormalizationRule pk=%s pattern=%r — skipping", rule.pk, rule.match_pattern
-                )
+            val = rule.apply(val)
         return val
 
     if preloaded_rules is not None:

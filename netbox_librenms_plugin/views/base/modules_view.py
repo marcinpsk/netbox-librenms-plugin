@@ -1018,42 +1018,36 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
     def get_verify_context_data(self, request, page_device, member, server_key=None):
         """
-        Return the page table and the table pinned to *member*, built from one snapshot and one policy load.
+        Return the context of the table pinned to *member*; its table is None when no table could be built.
 
-        Returns:
-            tuple: ``(page context, pinned context)``; the pinned context is None when no table could be built.
-
+        The page table is not built again: the verify grant carries what it showed for the row.
         """
-        from netbox_librenms_plugin.models import InventoryRuleFilterError
+        from netbox_librenms_plugin.models import RuleConfigurationError
 
         scoped_server, sync_device, inventory, empty = self._read_render_inventory(request, page_device, server_key)
         if empty is not None:
-            return empty, None
+            return empty
         try:
             policy = load_inventory_policy(page_device.pk)
-        except InventoryRuleFilterError as exc:
+        except RuleConfigurationError as exc:
             logger.error("Module table for %s not built: %s", page_device, exc)
             return {
                 "table": None,
                 "object": page_device,
                 "server_key": scoped_server,
                 "inventory_rule_error": exc,
-            }, None
+            }
         if policy.member(member.pk) is None:
-            return {"table": None, "object": page_device, "server_key": scoped_server}, None
-        contexts = [
-            self._build_context(
-                request,
-                page_device,
-                inventory,
-                server_key=scoped_server,
-                sync_device=sync_device,
-                policy=policy,
-                pin_to=pin_to,
-            )
-            for pin_to in (None, member)
-        ]
-        return contexts[0], contexts[1]
+            return {"table": None, "object": page_device, "server_key": scoped_server}
+        return self._build_context(
+            request,
+            page_device,
+            inventory,
+            server_key=scoped_server,
+            sync_device=sync_device,
+            policy=policy,
+            pin_to=member,
+        )
 
     def _build_context(
         self,
@@ -1088,21 +1082,25 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # (reached via the row builders) uses the same key without threading it through
         # every intermediate signature.
         self._active_server_key = server_key or self.librenms_api.server_key
-        from netbox_librenms_plugin.models import InventoryRuleFilterError
+        from netbox_librenms_plugin.models import RuleConfigurationError
 
+        try:
+            return self._build_table_context(request, obj, inventory_data, sync_device, policy=policy, pin_to=pin_to)
+        except RuleConfigurationError as exc:
+            # Rows that a broken rule would admit or place are unknown, so the tab shows no partial table.
+            logger.error("Module table for %s not built: %s", obj, exc)
+            return {
+                "table": None,
+                "object": obj,
+                "cache_expiry": None,
+                "server_key": self._active_server_key,
+                "inventory_rule_error": exc,
+            }
+
+    def _build_table_context(self, request, obj, inventory_data, sync_device, *, policy, pin_to):
+        """Build the module table context of ``_build_context``; raise RuleConfigurationError for a broken rule."""
         if policy is None:
-            try:
-                policy = load_inventory_policy(obj.pk)
-            except InventoryRuleFilterError as exc:
-                # Rows that a broken rule would admit are unknown, so the tab shows no partial table.
-                logger.error("Module table for %s not built: %s", obj, exc)
-                return {
-                    "table": None,
-                    "object": obj,
-                    "cache_expiry": None,
-                    "server_key": self._active_server_key,
-                    "inventory_rule_error": exc,
-                }
+            policy = load_inventory_policy(obj.pk)
         # The collector reads devices from the policy load, so the fingerprint covers what it read.
         self._inventory_policy = policy
         owner = policy.page_device if pin_to is None else policy.member(pin_to.pk)
@@ -1186,6 +1184,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # Bulk-detect serial conflicts for rows that can be replaced/installed
         self._detect_serial_conflicts(table_data, index_map, obj=owner)
         self._mark_grant_rows(table_data, grants_enabled=not index_ambiguous)
+        if pin_to is None:
+            self._mark_verify_rows(table_data)
 
         table = self.get_table(table_data, obj)
         table.server_key = self._active_server_key
@@ -1258,6 +1258,21 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 branch = row["branch_rows"] = []
             if branch is not None and row["selectable"]:
                 branch.append([index, row["selected_device_id"]])
+
+    @staticmethod
+    def _mark_verify_rows(table_data):
+        """Give each row of the page table the indices of itself and of the rows below it, in table order."""
+        open_rows = []
+        for row in table_data:
+            depth = row.get("depth", 0)
+            while open_rows and open_rows[-1].get("depth", 0) >= depth:
+                open_rows.pop()
+            open_rows.append(row)
+            row["verify_rows"] = []
+            index = coerce_positive_int(row.get("ent_physical_index"))
+            if index is not None:
+                for owner in open_rows:
+                    owner["verify_rows"].append(index)
 
     def _selection_manifest(self, table, table_data):
         """Return the signed list of every rendered row a selected install may name, or None without grants."""
@@ -3078,15 +3093,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         for mapping in candidates:
             compiled = mapping._compiled_pattern
+            # An exact mapping has no pattern.
             if compiled is None:
                 continue
             match = compiled.fullmatch(name)
             if not match:
                 continue
-            try:
-                resolved_bay = match.expand(mapping.netbox_bay_name)
-            except (re.error, IndexError):
-                continue
+            resolved_bay = match.expand(mapping.netbox_bay_name)
             if resolved_bay in module_bays:
                 maps = module_bays.maps if hasattr(module_bays, "maps") else [module_bays]
                 for scope_map in maps:

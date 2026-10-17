@@ -44,7 +44,7 @@ unchecked until that review.
 | --- | --- | --- |
 | `import-disclosure` | error | A `warnings`/`issues` message that names a NetBox object no `restrict()` call filtered. |
 | `import-disclosure-sanitizer-shadow` | error | A local definition that impersonates a permission API trusted by `import-disclosure`. |
-| `caught-error-text` | error | A read of a caught error that can be a ValidationError, a database error or an `AbortRequest`, other than through `exception_text_for`, the module logger or a `raise`. |
+| `caught-error-text` | error | A read of a caught error that can be a ValidationError, a database error or an `AbortRequest`, other than through `exception_text_for` or `write_failure_message`, the module logger or a `raise`. |
 | `caught-error-text-shadow` | error | A binding of a name that `caught-error-text` trusts, a logging change, a risky error class under another name, or `except*`. |
 | `no-requests-outside-http-client` | error | Selected imported requests HTTP calls outside the package HTTP client and tests. |
 | `ipaddress-address-needs-netaddr` | error | An ipam `IPAddress` gets an address that is not a `netaddr.IPNetwork(...)` call, or a `**` expansion. |
@@ -65,6 +65,8 @@ unchecked until that review.
 | `no-scroll-wrapper-on-sync-table` | error | A `table-responsive` wrapper directly around `inc/table.html`. It clips a member dropdown that opens inside the table. A wrapper with another class, or one written with `{% if %}` in its class, is outside this check. |
 | `conflict-raised-without-record` | error | A raise of a `TransactionConflict` or `ConcurrentRowChange` class that does not go through `recorded_conflict(...)`. |
 | `no-lock-on-exists` | error | A `select_for_update()` chain that ends in `exists()` or `count()`. |
+| `posted-module-target-needs-resolver` | error | A read of the posted `selected_device_id` from `request.GET` or `request.POST` outside `_resolve_destination(...)` or a module grant's `require(device_id=...)`. |
+| `regex-error-must-raise` | error | A handler that catches `re.error` or `REGEX_COMPILE_ERRORS` and does not raise. A stored rule regex compiles through `models.compile_rule_regex`, which raises `RuleConfigurationError`. |
 
 ## Scope
 
@@ -157,7 +159,7 @@ also counts. A chained error (`__cause__`, `__context__`, a group's `exceptions`
 returns the current exception (`sys.exc_info()`, `traceback.format_exc()`, `locals()` and others)
 are sources in any function. Each argument or receiver of a call, and each store, return, yield,
 loop or assert message, is a finding. The exceptions are the log methods of the module `logger`, a `raise`,
-and the trusted calls: `exception_text_for`, `classify_conflict`, `database_error_sqlstate`,
+and the trusted calls: `exception_text_for`, `write_failure_message`, `classify_conflict`, `database_error_sqlstate`,
 `isinstance`, `hasattr`, `type`, `validation_error_detail`, and a `TypeRefusal` that the reviewed
 factory `_first_refusal` builds. A trusted call hides the arguments that it gets. A call of a
 helper is a finding at the call, and intrafile analysis also reports the reads inside a helper of
@@ -230,6 +232,14 @@ subclass, add its name to the rule and a fixture line.
 
 `no-lock-on-exists` checks one method chain. It does not see a locked queryset in a variable that a
 later statement ends with `exists()` or `count()`.
+
+`posted-module-target-needs-resolver` excludes tests. It reads the key by its literal name. It does
+not see the key in a variable, or a read through another name than `GET` or `POST`.
+
+`regex-error-must-raise` reads the class list of the handler. It does not see a regex error caught
+by `except Exception`, or a module alias other than `_re`. A handler that raises only inside a
+nested branch is reported, because its other branch swallows the error. A pattern that is not
+stored rule data, such as a form value or a derived pattern, carries a suppression with its reason.
 
 ## `--taint-intrafile` is required
 

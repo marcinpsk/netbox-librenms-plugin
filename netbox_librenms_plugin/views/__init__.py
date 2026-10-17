@@ -16,11 +16,8 @@ from .imports import (
     BulkImportConfirmView,
     BulkImportDevicesView,
     CreatePlatformFromImportView,
-    DeviceClusterUpdateView,
     DeviceConflictActionView,
     DeviceImportPlanUpdateView,
-    DeviceRackUpdateView,
-    DeviceRoleUpdateView,
     DeviceValidationDetailsView,
     DeviceVCDetailsView,
     LibreNMSImportView,
@@ -159,12 +156,14 @@ from .sync.device_fields import (
     AssignVCSerialView,
     ConvertLegacyLibreNMSIdView,
     CreateAndAssignPlatformView,
+    CreateAndAssignVMPlatformView,
     RemoveServerMappingView,
     SetPreferredServerView,
     UpdateDeviceNameView,
     UpdateDevicePlatformView,
     UpdateDeviceSerialView,
     UpdateDeviceTypeView,
+    UpdateVMPlatformView,
 )
 from .sync.devices import AddDeviceToLibreNMSView, UpdateDeviceLocationView
 from .sync.interfaces import (
