@@ -13,6 +13,7 @@ import json
 import pytest
 
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.view_test_helpers import module_tab_forms
 
 
 SERVER_KEY = "default"
@@ -80,15 +81,29 @@ def _refresh_modules(client, device):
     )
 
 
-def _verify_module(client, body):
-    """POST a JSON body to the single-module verify endpoint."""
+def _verify_module(client, refreshed, page, body):
+    """POST the verify request that the member select of the asked row on the refreshed tab sends."""
     from django.urls import reverse
 
+    (select,) = [
+        attrs
+        for attrs in module_tab_forms(refreshed.content.decode()).selects
+        if attrs.get("data-module") == str(body["ent_physical_index"])
+    ]
     return client.post(
         reverse("plugins:netbox_librenms_plugin:verify_module"),
-        data=json.dumps(body),
+        data=json.dumps({"page_device_id": page.pk, "verify_binding": select["data-verify-binding"], **body}),
         content_type="application/json",
     )
+
+
+def _in_a_chassis(device):
+    """Enroll *device* in a two-member Virtual Chassis, so its Modules table renders a member select per row."""
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_virtual_chassis
+
+    make_virtual_chassis(f"{device.name}-vc", device, make_device_with_module_bays(f"{device.name}-member", []))
+    device.refresh_from_db()
+    return device
 
 
 @pytest.mark.django_db
@@ -106,10 +121,13 @@ class TestSingleModuleVerifyRow:
         _register_inventory(librenms_server, INVENTORY)
         client.force_login(make_superuser("module-verify-row-user"))
 
-        assert _refresh_modules(client, device).status_code == 200
+        refreshed = _refresh_modules(client, _in_a_chassis(device))
+        assert refreshed.status_code == 200
 
         response = _verify_module(
             client,
+            refreshed,
+            device,
             {"device_id": device.pk, "ent_physical_index": 1, "server_key": SERVER_KEY},
         )
 
@@ -141,10 +159,13 @@ class TestSingleModuleVerifyRow:
         _register_inventory(librenms_server, INVENTORY)
         client.force_login(make_superuser("module-verify-depth-user"))
 
-        assert _refresh_modules(client, device).status_code == 200
+        refreshed = _refresh_modules(client, _in_a_chassis(device))
+        assert refreshed.status_code == 200
 
         response = _verify_module(
             client,
+            refreshed,
+            device,
             {"device_id": device.pk, "ent_physical_index": 1, "depth": 5, "server_key": SERVER_KEY},
         )
 
@@ -189,10 +210,13 @@ class TestSingleModuleVerifyRow:
         _register_inventory(librenms_server, inventory)
         client.force_login(make_superuser("module-verify-carrier-user"))
 
-        assert _refresh_modules(client, device).status_code == 200
+        refreshed = _refresh_modules(client, _in_a_chassis(device))
+        assert refreshed.status_code == 200
 
         response = _verify_module(
             client,
+            refreshed,
+            device,
             {"device_id": device.pk, "ent_physical_index": 3, "server_key": SERVER_KEY},
         )
 
@@ -221,10 +245,13 @@ class TestSingleModuleVerifyRow:
         _register_inventory(librenms_server, inventory)
         client.force_login(make_superuser("module-verify-vc-user"))
 
-        assert _refresh_modules(client, first).status_code == 200
+        refreshed = _refresh_modules(client, first)
+        assert refreshed.status_code == 200
 
         response = _verify_module(
             client,
+            refreshed,
+            first,
             {"device_id": selected.pk, "ent_physical_index": 1, "server_key": SERVER_KEY},
         )
 

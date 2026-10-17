@@ -70,6 +70,7 @@ def test_relationship_diagnostics_modal_opens_without_bootstrap(page):
 # Interface selection: the requirement cascade and cross-page state
 # ===========================================================================
 SELECTION_PAGE_URL = "https://plugin.example.com/device/1/sync"
+MODULE_VERIFY_ROUTE = "**/plugins/librenms_plugin/verify-module/"
 
 # Verbatim relationship shape of a live Junos MX304 (LibreNMS device 20): et-0/0/6.0 is a unit of
 # et-0/0/6, et-0/0/6 is a member of ae2, and ae2.0 is a unit of ae2.
@@ -137,6 +138,7 @@ def _selection_page_html(
     blocked_attr = escape(json.dumps(list(blocked_port_ids)))
     return f"""<!doctype html><html><body>
         <input type="checkbox" id="autoSelectLagMembers" {checked}>
+        <input type="hidden" name="csrfmiddlewaretoken" value="selection-csrf-token">
         <form id="sync-form" method="post" action="{SELECTION_PAGE_URL}/submit" data-blocked-port-ids="{blocked_attr}">
           <input type="hidden" name="server_key" value="production">
           <table id="{escape(table_id)}"{snapshot_attr}>
@@ -609,6 +611,44 @@ class TestAMovedCableMemberIsNotRestored:
 
         assert ("select", "cable-10") in pairs
         assert ("device_selection_cable-10", "2") in pairs
+
+
+class TestTheCableVerifyAnswerSetsTheCheckbox:
+    """After a member change, the cable row's checkbox follows can_create_cable of the verify answer."""
+
+    @pytest.mark.parametrize("can_create", [True, False], ids=["writable", "not-writable"])
+    def test_the_checkbox_follows_the_answer(self, page, can_create):
+        _load_cable_member_page(page, ["cable-10"])
+        formatted_row = {
+            "local_port": "Ethernet1",
+            "remote_port": "",
+            "remote_device": "",
+            "cable_status": "No Cable",
+            "actions": "",
+            "can_create_cable": can_create,
+        }
+        page.route(
+            f"{CABLE_VERIFY_URL}**",
+            lambda route: route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"status": "success", "formatted_row": formatted_row}),
+            ),
+        )
+        with page.expect_response(f"{CABLE_VERIFY_URL}**"):
+            page.evaluate(
+                """() => {
+                    const select = document.getElementById('device_selection_cable-10');
+                    select.value = '2';
+                    handleCableChange(select, '2');
+                }"""
+            )
+
+        checkbox = page.locator("#cb-cable-10")
+        if can_create:
+            expect(checkbox).to_be_enabled()
+        else:
+            expect(checkbox).to_be_disabled()
 
 
 class TestADetachedVerifyChangesNothing:
@@ -1197,8 +1237,9 @@ class TestCrossPageSelection:
         submitted = dict(_selection_form_pairs(request_info.value.post_data))
         assert {name: submitted.get(name) for name in expected_fields} == expected_fields
 
-    def test_a_companion_input_is_restored_when_its_row_returns(self, page):
-        # The module table restores a stored member; the member-verified tables clear it instead.
+    def test_a_restored_module_member_is_verified_again(self, page):
+        # The module table verifies a restored member again; the member-verified tables clear it instead.
+        page.route(MODULE_VERIFY_ROUTE, lambda route: None)
         rows = [dict(JUNOS_ROWS[0], companion=True), JUNOS_ROWS[2]]
         table = "librenms-module-table"
         _load_selection_page(page, rows, url=f"{SELECTION_PAGE_URL}?page=1", table_id=table)
@@ -1206,8 +1247,10 @@ class TestCrossPageSelection:
         page.check("#cb-4303")
 
         _load_selection_page(page, [JUNOS_ROWS[1]], url=f"{SELECTION_PAGE_URL}?page=2", table_id=table)
-        _load_selection_page(page, rows, url=f"{SELECTION_PAGE_URL}?page=1", table_id=table)
+        with page.expect_request(MODULE_VERIFY_ROUTE) as verify:
+            _load_selection_page(page, rows, url=f"{SELECTION_PAGE_URL}?page=1", table_id=table)
 
+        assert json.loads(verify.value.post_data)["device_id"] == "9"
         assert "4303" in _checked_values(page)
         assert page.locator('[name="device_selection_4303"]').input_value() == "9"
 
@@ -1223,6 +1266,8 @@ class TestCrossPageSelection:
             },
         )
         table = "librenms-module-table"
+        # The restored member is verified again; the request stays open so the row keeps what the restore set.
+        page.route(MODULE_VERIFY_ROUTE, lambda route: None)
         _load_selection_page(page, [old_row, JUNOS_ROWS[2]], url=f"{SELECTION_PAGE_URL}?page=1", table_id=table)
         page.select_option('[name="device_selection_4303"]', "9")
         page.check("#cb-4303")
@@ -1241,8 +1286,9 @@ class TestCrossPageSelection:
 
         assert "4303" in _checked_values(page)
         assert page.locator('[name="device_selection_4303"]').input_value() == "9"
+        row = page.locator('tr[data-port-id="4303"]')
         for name, expected in new_row["hidden_fields"].items():
-            assert page.locator(f'[name="{name}"]').input_value() == expected
+            assert row.locator(f'[name="{name}"]').input_value() == expected
 
 
 def test_vlan_row_submit_keeps_another_page_selection_and_group(page):
@@ -1632,10 +1678,12 @@ def test_a_standalone_confirmation_leaves_no_backdrop_or_scroll_lock(page):
 )
 def test_bulk_submit_still_consumes_off_page_selection_for_other_row_action_tabs(page, table_id):
     """Bulk actions still submit and clear off-page rows for every other row-action tab."""
+    bulk_url = "https://plugin.example.com/bulk"
+    page.route(bulk_url, lambda route: route.fulfill(body="", content_type="text/html"))
     page.set_content(
         f"""
         <input name="server_key" value="production">
-        <form id="sync-form" method="post" action="/bulk">
+        <form id="sync-form" method="post" action="{bulk_url}">
           <table id="{table_id}"><tbody><tr>
             <td><input type="checkbox" name="select" value="201"></td>
           </tr></tbody></table>
@@ -1644,20 +1692,20 @@ def test_bulk_submit_still_consumes_off_page_selection_for_other_row_action_tabs
         """
     )
     _add_page_scripts(page)
-    page.evaluate(
+    storage_key = page.evaluate(
         """() => {
             const table = document.querySelector('table');
             writeStoredSelection(table, {'101': {inputs: {}, auto: ''}});
-            document.getElementById('sync-form').addEventListener('submit', event => event.preventDefault());
+            return _selectionStorageKey(table);
         }"""
     )
 
-    page.click("#bulk-submit")
+    # A listener that cancels the submit would stand in for htmx, so the native submit really navigates.
+    with page.expect_request(bulk_url) as submitted:
+        page.click("#bulk-submit")
 
-    posted = page.locator("#sync-form").evaluate("form => Array.from(new FormData(form).entries())")
-    stored = page.evaluate("readStoredSelection(document.querySelector('table'))")
-    assert ["select", "101"] in posted
-    assert stored == {}
+    assert ("select", "101") in _selection_form_pairs(submitted.value.post_data)
+    assert page.evaluate("key => window.sessionStorage.getItem(key)", storage_key) is None
 
 
 HTMX_SYNC_URL = "https://plugin.example.com/htmx-sync"
@@ -1844,7 +1892,7 @@ def test_a_retry_after_a_failed_module_install_still_carries_the_off_page_select
           </form>
           <table id="librenms-module-table"><tbody><tr>
             <td><input type="checkbox" name="select" value="201" checked>
-                <select id="device_selection_201"><option value="7" selected>m7</option></select></td>
+                <select id="device_selection_201" name="device_selection_201"><option value="7" selected>m7</option></select></td>
           </tr></tbody></table>
         </div>
         """

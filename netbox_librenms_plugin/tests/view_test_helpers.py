@@ -113,19 +113,114 @@ def queued_request(user):
     return copy_safe_request(request)
 
 
-def module_row_binding(target_device, action, row, *, action_target=None, server_key="default"):
-    """Sign the cached module row that a rendered action form would submit."""
-    from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
+def render_module_tab(device, *, user=None, server_key="default"):
+    """Render the Modules tab fragment from its cached snapshot, as a module action re-renders it; return the HTML."""
+    from django.urls import reverse
 
-    ent_index = row.get("entPhysicalIndex")
-    return module_inventory_binding_token(
-        target_device.pk,
-        server_key,
-        action,
-        action_target or {},
-        ent_index,
-        module_inventory_row_digest(row),
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    request = make_request(
+        "get",
+        {"tab": "modules", "server_key": server_key},
+        user=user,
+        path=reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": device.pk}),
     )
+    view = DeviceModuleTableView()
+    view.setup(request, pk=device.pk)
+    view.cache_only = True
+    context = view.get_context_data(request, device, server_key=server_key)
+    return view.render_sync_partial(request, device, context["server_key"], {"module_sync": context}).content.decode()
+
+
+class _ModuleTabParser:
+    """Collect the forms, the hx-get controls and the member selects of a rendered Modules tab."""
+
+    def __init__(self, html):
+        from html.parser import HTMLParser
+
+        self.forms, self.links, self.selects = [], [], []
+        self.manifest = None
+        self.table_attrs = {}
+        parser = HTMLParser(convert_charrefs=True)
+        current = []
+
+        def start(tag, attrs):
+            attrs = dict(attrs)
+            if tag == "form":
+                current.append({"action": attrs.get("action", ""), "fields": {}})
+                self.forms.append(current[-1])
+            elif tag == "table" and attrs.get("id") == "librenms-module-table":
+                self.table_attrs = attrs
+            elif tag == "input" and attrs.get("name"):
+                if current:
+                    current[-1]["fields"][attrs["name"]] = attrs.get("value", "")
+                if attrs.get("type") == "hidden" and attrs["name"].startswith("selection_grant_"):
+                    self.links.append({"selection_grant": attrs["name"], "value": attrs.get("value", "")})
+            elif tag == "select" and attrs.get("data-module") is not None:
+                self.selects.append(attrs)
+            if attrs.get("hx-get"):
+                self.links.append({"hx-get": attrs["hx-get"], "action": attrs.get("data-action", "")})
+
+        def end(tag):
+            if tag == "form" and current:
+                current.pop()
+
+        parser.handle_starttag = start
+        parser.handle_startendtag = start
+        parser.handle_endtag = end
+        parser.feed(html)
+
+
+def module_tab_forms(html):
+    """Return the parsed forms, hx-get controls, member selects and table attributes of a rendered Modules tab."""
+    return _ModuleTabParser(html)
+
+
+def rendered_module_form(html, path_part, ent_index=None):
+    """Return ``(action URL, fields)`` of the one rendered form whose URL holds *path_part* for *ent_index*."""
+    matches = [
+        form
+        for form in module_tab_forms(html).forms
+        if path_part in form["action"]
+        and (
+            ent_index is None or str(ent_index) in (form["fields"].get("ent_index"), form["fields"].get("parent_index"))
+        )
+    ]
+    assert len(matches) == 1, f"expected one {path_part} form for {ent_index}, found {len(matches)}"
+    return matches[0]["action"], dict(matches[0]["fields"])
+
+
+def rendered_preview_url(html, ent_index):
+    """Return the mismatch preview URL the rendered Replace button of row *ent_index* opens."""
+    from urllib.parse import parse_qs, urlsplit
+
+    for link in module_tab_forms(html).links:
+        url = link.get("hx-get", "")
+        if "module-mismatch-preview" in url and parse_qs(urlsplit(url).query).get("ent_index") == [str(ent_index)]:
+            return url
+    raise AssertionError(f"row {ent_index} renders no Replace button")
+
+
+def rendered_preview_query(device, ent_index, *, user=None, server_key="default"):
+    """Return the query that the rendered Replace button of row *ent_index* opens the mismatch preview with."""
+    from urllib.parse import parse_qsl, urlsplit
+
+    url = rendered_preview_url(render_module_tab(device, user=user, server_key=server_key), ent_index)
+    return dict(parse_qsl(urlsplit(url).query))
+
+
+def rendered_modal_form(device, ent_index, path_part, *, user=None, server_key="default"):
+    """Return ``(action URL, fields)`` of a form in the modal that the rendered Replace button of row *ent_index* opens."""
+    from types import SimpleNamespace
+
+    from netbox_librenms_plugin.views.sync.modules import ModuleMismatchPreviewView
+
+    query = rendered_preview_query(device, ent_index, user=user, server_key=server_key)
+    request = make_request("get", query, user=user)
+    view = make_view(ModuleMismatchPreviewView, request, librenms_api=SimpleNamespace(server_key=server_key))
+    response = get(view, request, pk=device.pk)
+    assert response.status_code == 200, response.content
+    return rendered_module_form(response.content.decode(), path_part, ent_index)
 
 
 def _message_level(name):
