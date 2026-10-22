@@ -588,6 +588,7 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
     conflict_raise = 'raise MappingChanged("changed")\n'
     titled_icon = '<i class="mdi mdi-alert" title="Missing"></i>'
     server_key_lookup = "document.querySelector('[name=server_key]');\n"
+    tab_url = 'url = f"{path}?tab=vlans"\n'
     sources = {
         # Flagged: a direct HTTP call outside the client.
         "netbox_librenms_plugin/worker.py": http_call,
@@ -618,6 +619,11 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
         # Flagged: a page script looks up the server key in the whole document. Clean: vendored code.
         "netbox_librenms_plugin/static/netbox_librenms_plugin/js/page.js": server_key_lookup,
         "netbox_librenms_plugin/static/netbox_librenms_plugin/js/vendor/lib.js": server_key_lookup,
+        # Flagged: a hand-built tab query. Clean: the query module, the Modules tab redirect and tests.
+        "netbox_librenms_plugin/views/sync/vlans_redirect.py": tab_url,
+        "netbox_librenms_plugin/sync_query.py": tab_url,
+        "netbox_librenms_plugin/views/sync/modules.py": tab_url,
+        "netbox_librenms_plugin/tests/test_tab_url.py": tab_url,
     }
     for name, source in sources.items():
         staged = tmp_path / name
@@ -638,4 +644,5 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
         ("netbox_librenms_plugin/static/netbox_librenms_plugin/js/seed.js", "titled-icon-needs-accessible-name"),
         ("netbox_librenms_plugin/claims.py", "conflict-raised-without-record"),
         ("netbox_librenms_plugin/static/netbox_librenms_plugin/js/page.js", "sync-script-reads-page-server-key"),
+        ("netbox_librenms_plugin/views/sync/vlans_redirect.py", "sync-tab-url-through-sync-query"),
     }, found
