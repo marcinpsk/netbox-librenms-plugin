@@ -62,25 +62,109 @@
         inset-inline-end: 0;
     }
 
+    /* A lead row above the toolbar takes the refresh controls, so the toolbar keeps its full width. */
     .sync-tab-refresh-toolbar:has(~ [id$="-sync-content"] .sync-tab-primary-toolbar):not(
-        :has(~ [id$="-sync-content"] > .alert)
+        :has(~ [id$="-sync-content"] > :is(.alert, .sync-tab-lead-row))
     ) ~ [id$="-sync-content"] .sync-tab-primary-toolbar {
         min-height: 1.875rem;
-        padding-inline-end: 21rem;
+        padding-inline-end: 24rem;
     }
 
-    /* A filter form is the first row of its tab, so the refresh controls sit beside its first rows. */
+    /* A lead row is as tall as the refresh controls beside it. */
     .sync-tab-refresh-toolbar:has(~ [id$="-sync-content"] .sync-tab-primary-toolbar):not(
         :has(~ [id$="-sync-content"] > .alert)
-    ) ~ [id$="-sync-content"] .sync-filter-form > :not(.collapse) {
-        margin-inline-end: 21rem;
+    ) ~ [id$="-sync-content"] > .sync-tab-lead-row {
+        display: flex;
+        align-items: center;
+        min-height: 1.875rem;
     }
+
+    /* A filter error is the first row of its tab, so the refresh controls sit beside it. */
+    .sync-tab-refresh-toolbar:has(~ [id$="-sync-content"] .sync-tab-primary-toolbar):not(
+        :has(~ [id$="-sync-content"] > .alert)
+    ) ~ [id$="-sync-content"] .sync-filter-form > .alert {
+        margin-inline-end: 24rem;
+    }
+}
+
+/* The search line fills the toolbar room right of the sync actions; the search shrinks before the line wraps. */
+.sync-filter-controls {
+    flex: 1 1 0;
+    justify-content: flex-end;
+}
+
+.sync-filter-search {
+    flex: 0 1 14rem;
+    width: 0;
+    min-width: 8rem;
+}
+
+/* The column filters: small text, and each field about as wide as the values of its column. */
+.sync-filter-panel {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 0.375rem 0.5rem;
+}
+
+.sync-filter-field {
+    flex: 0 0 8rem;
+}
+
+/* A label stays on one line, and a narrow field grows to its label. */
+.sync-filter-panel .form-label {
+    margin-bottom: 0.125rem;
+    font-size: 0.75rem;
+    white-space: nowrap;
+}
+
+.sync-filter-panel .form-control,
+.sync-filter-panel .btn {
+    min-height: 0;
+    padding-block: 0.125rem;
+    font-size: 0.75rem;
+}
+
+:is(
+    [data-filter-field="interfaces_filter_mtu"],
+    [data-filter-field="interfaces_filter_enabled"],
+    [data-filter-field="ipaddresses_filter_prefix"],
+    [data-filter-field="vlans_filter_vlan_id"],
+    [data-filter-field="vlans_filter_type"]
+) {
+    flex-basis: 4.5rem;
+}
+
+:is(
+    [data-filter-field="interfaces_filter_speed"],
+    [data-filter-field="interfaces_filter_librenms_id"],
+    [data-filter-field="vlans_filter_state"]
+) {
+    flex-basis: 6rem;
+}
+
+:is(
+    [data-filter-field="interfaces_filter_type"],
+    [data-filter-field="interfaces_filter_description"],
+    [data-filter-field="cables_filter_remote_device"],
+    [data-filter-field="vlans_filter_name"],
+    [data-filter-field="vlans_filter_group"]
+) {
+    flex-basis: 11rem;
 }
 
 @media (max-width: 575.98px) {
     .interface-sync-options-menu,
     .ip-sync-options-menu {
         min-width: min(23rem, calc(100vw - 2rem));
+    }
+
+    .sync-filter-controls {
+        flex-wrap: wrap;
+    }
+
+    .sync-filter-search {
+        flex-grow: 1;
     }
 }
 

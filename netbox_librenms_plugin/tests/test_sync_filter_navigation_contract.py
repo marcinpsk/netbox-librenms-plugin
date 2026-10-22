@@ -6,6 +6,7 @@ non-ASCII text), finds every link, form, ``formaction`` and ``hx-*`` URL in one 
 checks each one. A URL the test does not know fails, so a new hop must be classified here.
 """
 
+import json
 import re
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, urlsplit
@@ -69,7 +70,7 @@ KEEP_ALL_BUT_PAGE = tuple(key for key in KEEP_ALL if key != "interfaces_page")
 
 
 class _Hops(HTMLParser):
-    """Collect every URL attribute inside the element with *root_id*, and the fields of each GET form."""
+    """Collect every URL attribute inside the element with *root_id*, and the fields of each GET form, also those it owns through the form attribute."""
 
     def __init__(self, root_id):
         super().__init__(convert_charrefs=True)
@@ -78,6 +79,7 @@ class _Hops(HTMLParser):
         self.urls = []
         self.get_forms = []
         self._get_form = None
+        self._get_forms_by_id = {}
 
     def handle_starttag(self, tag, attrs):
         attributes = dict(attrs)
@@ -87,15 +89,19 @@ class _Hops(HTMLParser):
         if tag not in VOID_TAGS:
             self.depth += 1
         if tag == "form" and (attributes.get("method") or "get").lower() == "get":
-            self._get_form = {"attrs": attributes, "fields": []}
+            # htmx sends the form's hx-vals with its fields.
+            self._get_form = {
+                "attrs": attributes,
+                "fields": list(json.loads(attributes.get("hx-vals") or "{}").items()),
+            }
             self.get_forms.append(self._get_form)
-        if self._get_form is not None and tag in ("input", "select") and attributes.get("name"):
-            self._get_form["fields"].append((attributes["name"], attributes.get("value") or ""))
+            self._get_forms_by_id[attributes.get("id")] = self._get_form
+        owner = self._get_forms_by_id.get(attributes["form"]) if "form" in attributes else self._get_form
+        if owner is not None and tag in ("input", "select") and attributes.get("name"):
+            owner["fields"].append((attributes["name"], attributes.get("value") or ""))
         for name in URL_ATTRIBUTES:
             if name in attributes:
-                self.urls.append(
-                    {"tag": tag, "attrs": attributes, "url": attributes[name], "in_get_form": bool(self._get_form)}
-                )
+                self.urls.append({"tag": tag, "attrs": attributes, "url": attributes[name]})
 
     def handle_endtag(self, tag):
         if not self.depth:
@@ -130,7 +136,17 @@ def _routes(owner, object_type):
         "rebind": plugin_url("rebind_interface_port", **object_kwargs),
         "refresh": plugin_url(f"{'device' if object_type == 'device' else 'vm'}_interface_sync", pk=owner.pk),
         "fragment": plugin_url("sync_cache_fragment", object_type=object_type, pk=owner.pk, tab="interfaces"),
+        "netbox_only": plugin_url("netbox_only_interfaces", object_type=object_type, pk=owner.pk),
     }
+
+
+def _is_filter_form(hop):
+    # The filter form sends its own fields to the page path (librenms_sync.js); _check_filter_form checks them.
+    return hop["tag"] == "form" and "sync-filter-form" in (hop["attrs"].get("class") or "")
+
+
+def _is_clear_link(hop):
+    return "sync-filter-clear" in (hop["attrs"].get("class") or "")
 
 
 def _classify(hop, page_path, routes):
@@ -146,7 +162,9 @@ def _classify(hop, page_path, routes):
     if "/sync-interface-" in path or path.startswith("/dcim/interfaces/"):
         # A relationship sync answers JSON and repaints one button; an object link leaves the page.
         return "follow-up"
-    if on_page and hop["in_get_form"]:
+    if _is_filter_form(hop):
+        return "filter form"
+    if on_page and _is_clear_link(hop):
         # Clear filters: this tab's filters and page go, every other state stays.
         assert not any(key in query for key in (*INTERFACE_FILTERS, "interfaces_page")), url
         _assert_keeps(query, ("cables_q", "interfaces_per_page", "interfaces_sort", "interfaces_show_ignored"), url)
@@ -161,6 +179,10 @@ def _classify(hop, page_path, routes):
         assert query["tab"] == ["interfaces"], url
         _assert_keeps(query, (*PAGE_FILTERS, "interfaces_show_ignored"), url)
         return "page link"
+    if path == routes["netbox_only"]:
+        # The NetBox-only dialog loads its rows for the same page query.
+        _assert_keeps(query, KEEP_ALL, url)
+        return "netbox-only loader"
     if path in (routes["refresh"], routes["sync"], routes["rebind"]):
         # A refresh, sync or Rebind comes back to the same filters and page, clamped to the last page.
         _assert_keeps(query, KEEP_ALL, url)
@@ -333,7 +355,9 @@ def _classify_tab_hop(hop, page_path, tab, owner, page_query):
         return "picker loader"
     if OBJECT_LINK.match(path):
         return "object link"
-    if on_page and hop["in_get_form"]:
+    if _is_filter_form(hop):
+        return "filter form"
+    if on_page and _is_clear_link(hop):
         # Clear filters: this tab's filters and page go, every other state stays.
         assert not any(key in query for key in (*own_filters, f"{prefix}page")), url
         _assert_keeps(query, (*OTHER_TAB_FILTER, f"{prefix}per_page", f"{prefix}sort"), url, page_query)
@@ -527,13 +551,13 @@ def _four_tab_owner(client, settings, librenms_server):
 
 
 def _signatures(client, owner, field):
-    """Return the selection signature of each tab table that the full sync page renders, by table ID."""
+    """Return the selection scope of each tab table that the full sync page renders, by table ID."""
     response = client.get(
         reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[owner.pk]),
         {"server_key": SERVER_KEY, "interface_name_field": field},
     )
     assert response.status_code == 200
-    return dict(re.findall(r'<table[^>]*id="([^"]+)"[^>]*data-filter-signature="([^"]*)"', response.content.decode()))
+    return dict(re.findall(r'<table[^>]*id="([^"]+)"[^>]*data-selection-scope="([^"]*)"', response.content.decode()))
 
 
 @pytest.mark.django_db
@@ -560,7 +584,9 @@ TAB_TABLES = {
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("tab", sorted(TAB_TABLES))
-def test_an_invalid_filter_shows_its_errors_when_the_tab_has_no_snapshot(client, settings, librenms_server, tab):
+def test_a_tab_with_no_snapshot_hides_its_filter_also_when_the_url_holds_an_invalid_one(
+    client, settings, librenms_server, tab
+):
     owner = _four_tab_owner(client, settings, librenms_server)
     table_id, data_type = TAB_TABLES[tab]
     cache.delete(object.__new__(SyncCablesView).get_cache_key(owner, data_type, SERVER_KEY))
@@ -573,11 +599,9 @@ def test_an_invalid_filter_shows_its_errors_when_the_tab_has_no_snapshot(client,
     assert (full.status_code, swapped.status_code) == (400, 200)
     for response in (full, swapped):
         html = response.content.decode()
-        assert f'id="{tab}_filter-errors"' in html
-        assert re.search(rf'id="id_{tab}_sync_state"[^>]*aria-invalid="true"', html, re.S)
-        # The form keeps its Clear link, which drops the invalid filter.
-        clear = [hop["url"] for hop in _hops(html, tab).urls if hop["in_get_form"] and hop["tag"] == "a"]
-        assert clear and f"{tab}_sync_state" not in _query(clear[0])
+        # An empty tab shows no filter, as it shows no sync buttons; a refresh brings the filtered table back.
+        assert f'id="{tab}_filter-errors"' not in html
+        assert f'id="id_{tab}_q"' not in html
         # The target tab shows no table; every sibling tab renders its table.
         tables = set(re.findall(r'<table[^>]*id="(librenms-[a-z]+-table)"', html))
         assert tables == {table for table, _ in TAB_TABLES.values()} - {table_id}

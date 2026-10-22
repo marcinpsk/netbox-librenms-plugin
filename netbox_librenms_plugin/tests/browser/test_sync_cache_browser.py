@@ -2852,6 +2852,11 @@ def test_verified_missing_snapshot_restores_pane_controls_but_not_modal_controls
     assert "could not be verified" in page.locator("#interface-sync-content").inner_text()
 
 
+def _refresh_position(markup):
+    """Return where a tab template renders its Refresh button: in place, or through its own include."""
+    return markup.index("-refresh-action") if "-refresh-action" in markup else markup.index("Refresh ")
+
+
 @pytest.mark.parametrize(
     ("template", "content_id"),
     [
@@ -2865,7 +2870,7 @@ def test_verified_missing_snapshot_restores_pane_controls_but_not_modal_controls
 def test_the_tab_templates_keep_the_refresh_button_outside_the_cached_content(template, content_id):
     """The pane refresh button the fail-closed test injects must mirror the real templates."""
     markup = (TEMPLATE_DIR / template).read_text()
-    refresh = markup.index("Refresh ")
+    refresh = _refresh_position(markup)
     content = markup.index(f'id="{content_id}"')
     assert refresh < content, f"{template}: the refresh button moved inside #{content_id}"
 
@@ -2886,7 +2891,7 @@ def test_tab_toolbars_put_the_shared_countdown_before_refresh(template, heading,
 
     assert f"<h2>{heading}</h2>" not in markup
     countdown = markup.index(f'cache_container_id="{countdown_id}"')
-    refresh = markup.index("Refresh ")
+    refresh = _refresh_position(markup)
     assert countdown < refresh
 
 
@@ -3005,6 +3010,78 @@ def test_tab_toolbars_share_a_row_only_when_the_viewport_has_room(page):
     warning_refresh_rect = page.locator("#warning-refresh-actions").bounding_box()
     warning_rect = page.locator("#sync-warning").bounding_box()
     assert warning_refresh_rect["y"] + warning_refresh_rect["height"] + 16 <= warning_rect["y"]
+
+
+def _search_line_shell(shell_id, width, actions_width, lead_row):
+    lead = '<div class="sync-tab-lead-row" style="height: 21px;"></div>' if lead_row else ""
+    return f"""
+        <div class="sync-shell" id="{shell_id}" style="width: {width}px;">
+          <div class="sync-tab-refresh-toolbar"><div class="btn-list" style="width: 358px;"></div></div>
+          <div id="{shell_id}-sync-content">
+            {lead}
+            <form><div class="sync-tab-primary-toolbar d-flex flex-wrap align-items-center gap-2">
+              <div class="actions" style="width: {actions_width}px; height: 31px;"></div>
+              <div class="sync-filter-controls d-flex align-items-center gap-2">
+                <input type="search" class="sync-filter-search">
+                <select style="width: 143px;"></select>
+                <button type="button" style="width: 80px;">Filters</button>
+              </div>
+            </div></form>
+          </div>
+        </div>"""
+
+
+def test_the_search_line_shares_the_sync_row_and_clears_the_refresh_controls(page):
+    """The search line sits right of the sync actions, beside the refresh controls or under them, and wraps last."""
+    page.set_viewport_size({"width": 1500, "height": 800})
+    page.set_content(
+        f"""
+        <style>
+          * {{ box-sizing: border-box; }}
+          body {{ margin: 0; }}
+          .d-flex {{ display: flex; }} .flex-wrap {{ flex-wrap: wrap; }} .gap-2 {{ gap: .5rem; }}
+          .align-items-center {{ align-items: center; }}
+          .sync-tab-refresh-toolbar {{ display: flex; justify-content: flex-end; }}
+          .btn-list {{ display: flex; height: 30px; }}
+        </style>
+        {_search_line_shell("first", 1165, 400, lead_row=False)}
+        {_search_line_shell("lead", 1165, 440, lead_row=True)}
+        {_search_line_shell("tight", 1100, 440, lead_row=False)}
+        """
+    )
+    page.add_style_tag(path=str(STYLE_PATH))
+
+    def boxes(shell_id):
+        return page.evaluate(
+            """shellId => {
+                const shell = document.getElementById(shellId);
+                const box = (selector) => {
+                    const rect = shell.querySelector(selector).getBoundingClientRect().toJSON();
+                    return { ...rect, middle: rect.top + rect.height / 2 };
+                };
+                return {
+                    shell: shell.getBoundingClientRect().toJSON(), refresh: box('.btn-list'), actions: box('.actions'),
+                    search: box('.sync-filter-search'), filters: box('button'),
+                };
+            }""",
+            shell_id,
+        )
+
+    # The toolbar is the first row: the search line shares it and ends before the refresh controls.
+    first = boxes("first")
+    assert first["search"]["middle"] == pytest.approx(first["actions"]["middle"], abs=1)
+    assert first["refresh"]["top"] == pytest.approx(first["actions"]["top"], abs=1)
+    assert first["filters"]["right"] <= first["refresh"]["left"], first
+
+    # A lead row takes the refresh controls, so the search line reaches the right edge.
+    lead = boxes("lead")
+    assert lead["search"]["middle"] == pytest.approx(lead["actions"]["middle"], abs=1)
+    assert lead["refresh"]["bottom"] <= lead["search"]["top"], lead
+    assert lead["filters"]["right"] == pytest.approx(lead["shell"]["right"], abs=1)
+
+    # With no room for the narrowest search, the search line wraps below the sync actions.
+    tight = boxes("tight")
+    assert tight["search"]["top"] >= tight["actions"]["bottom"], tight
 
 
 def test_vlan_group_verification_ignores_a_late_response_for_an_old_selection(page):
@@ -5178,3 +5255,44 @@ def test_vlan_modal_warning_icons_are_named_by_their_titles(page):
         icon = icons.nth(index)
         assert icon.get_attribute("role") == "img"
         assert icon.get_attribute("aria-label") == icon.get_attribute("title")
+
+
+NETBOX_ONLY_URL = "https://plugin.example.com/netbox-only-interfaces/?server_key=primary"
+
+
+def _netbox_only_rows():
+    from django.conf import settings
+    from django.template import Context, Engine
+
+    if not settings.configured:
+        settings.configure(USE_I18N=False, USE_TZ=True)
+    engine = Engine(dirs=[str(TEMPLATE_DIR.parent)])
+    interfaces = [{"id": pk, "name": f"eth{pk}", "type": "Other", "enabled": True, "url": f"/i/{pk}/"} for pk in (1, 2)]
+    return engine.get_template("netbox_librenms_plugin/inc/_netbox_only_interfaces.html").render(
+        Context({"interface_sync": {"netbox_only_interfaces": interfaces}, "migrated_to_marker": None})
+    )
+
+
+def test_the_netbox_only_dialog_loads_its_rows_when_it_opens(page):
+    requests = []
+    page.route(
+        NETBOX_ONLY_URL,
+        lambda route: (requests.append(route.request.url), route.fulfill(body=_netbox_only_rows()))[-1],
+    )
+    page.set_content(
+        f"""<div id="netboxOnlyInterfacesModal" style="display: none">
+              <div id="netbox-only-interfaces-rows" hx-get="{NETBOX_ONLY_URL}" hx-trigger="intersect once"
+                   hx-swap="innerHTML">Loading interfaces</div>
+            </div>"""
+    )
+    _add_page_scripts(page)
+    page.wait_for_timeout(300)
+    # A closed dialog loads nothing: a filter render can leave thousands of rows out.
+    assert requests == []
+
+    page.locator("#netboxOnlyInterfacesModal").evaluate("dialog => { dialog.style.display = 'block'; }")
+
+    expect(page.locator(".netbox-interface-checkbox")).to_have_count(2)
+    page.check("#select-all-netbox-interfaces")
+    expect(page.locator(".netbox-interface-checkbox:checked")).to_have_count(2)
+    assert requests == [NETBOX_ONLY_URL]

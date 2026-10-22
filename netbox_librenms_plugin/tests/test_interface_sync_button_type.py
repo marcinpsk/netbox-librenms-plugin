@@ -16,11 +16,13 @@ from django.template.loader import get_template, render_to_string
 from django.test import RequestFactory
 
 TEMPLATE = "netbox_librenms_plugin/_interface_sync.html"
+# The Refresh buttons live in their own include, which the tab and a filter response both render.
+BUTTONS_TEMPLATE = "netbox_librenms_plugin/inc/_refresh_interfaces.html"
 
 
 def test_every_button_declares_type():
     """Every <button> in the template declares an explicit type (no implicit submit)."""
-    src = pathlib.Path(get_template(TEMPLATE).origin.name).read_text()
+    src = pathlib.Path(get_template(BUTTONS_TEMPLATE).origin.name).read_text()
     buttons = re.findall(r"<button\b[^>]*>", src, re.DOTALL)
     assert buttons, "expected at least one <button> in the template"
     untyped = [b for b in buttons if not re.search(r'\btype\s*=\s*"[^"]+"', b)]

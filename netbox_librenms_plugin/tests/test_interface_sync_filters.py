@@ -224,7 +224,7 @@ class TestMatching:
         assert list(_rows(html)) == [5117]
         # The browser keys the selection on this text, so a selection never carries to another server.
         assert re.search(
-            r'<table[^>]*id="librenms-interface-table"[^>]*data-filter-signature="[^"]*server_key=default', html
+            r'<table[^>]*id="librenms-interface-table"[^>]*data-selection-scope="[^"]*server_key=default', html
         )
         assert re.search(r"Showing 1-1 of 1\s*\(filtered from 120\)", html)
 
@@ -435,12 +435,12 @@ class TestInvalidFilters:
             },
         )
 
-        # The page URL holds invalid filters of two other tabs, so the full page answers 400 and those
-        # tabs show their errors. The Interfaces tab filters its own rows as usual.
+        # The page URL holds invalid filters of two other tabs, so the full page answers 400. Those tabs
+        # have no snapshot, so they show no filter. The Interfaces tab filters its own rows as usual.
         assert response.status_code == 400
         html = response.content.decode()
         assert 'id="interfaces_filter-errors"' not in html
-        assert 'id="cables_filter-errors"' in html and 'id="ipaddresses_filter-errors"' in html
+        assert 'id="cables_filter-errors"' not in html and 'id="ipaddresses_filter-errors"' not in html
         assert list(_rows(html)) == [1002]
 
     def test_invalid_filter_does_not_refuse_the_sync_action(self, client, settings):

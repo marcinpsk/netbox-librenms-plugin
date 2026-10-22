@@ -1,0 +1,8 @@
+{% comment %}
+The parts of the sync page outside a filtered tab that carry the page query: the tab links and the tab's
+Refresh button. SyncTabFilterView appends them to the tab content, and htmx puts each one in place by id.
+{% endcomment %}
+<ul id="librenmsSync" hx-swap-oob="innerHTML">
+{% include "netbox_librenms_plugin/inc/_sync_tab_nav.html" %}
+</ul>
+<span id="{{ tab }}-refresh-action" hx-swap-oob="innerHTML">{% with refresh_template="netbox_librenms_plugin/inc/_refresh_"|add:tab|add:".html" %}{% include refresh_template %}{% endwith %}</span>
