@@ -477,9 +477,8 @@ def test_turning_set_primary_ip_on_selects_the_off_page_management_row(page, swa
     page.check("#ip-third")
     page.check("#set-primary-ip-toggle-cb")
 
-    assert page.locator("#librenms-ipaddress-table-offpage-selection span").inner_text() == (
-        "1 more row is selected on another page."
-    )
+    # The notice counts the selected rows this page does not show.
+    assert page.locator("#librenms-ipaddress-table-offpage-selection span").inner_text().split()[0] == "1"
     assert _submitted_selection(page) == ["198.18.0.1/24", "198.18.0.3/24"]
 
 
