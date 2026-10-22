@@ -943,6 +943,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             request.GET,
             ip_data,
             lambda rows: IPAddressTable(rows, mgmt_row_ids=mgmt_row_ids),
+            # The interface column follows the name field, so a new name field starts an empty selection.
+            interface_name_field=interface_name_field,
         )
         table.configure(request)
 
