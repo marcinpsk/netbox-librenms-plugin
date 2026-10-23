@@ -4,7 +4,7 @@ The IP tab does not assign an address to an existing interface whose LibreNMS po
 Only an Ignore rule blocks an assignment: the type is not written, so an ambiguous port is
 allowed. Without the full port record the assignment is refused when an Ignore rule could apply to
 the owner's platform, and goes ahead when none could. The tests drive real requests against real
-NetBox objects and real rules; the management-IP lookup reads a loopback LibreNMS.
+NetBox objects and real rules, over a source snapshot seeded the way a refresh stores it.
 """
 
 import re
@@ -12,15 +12,16 @@ from html import unescape
 
 import pytest
 from django.contrib.messages import get_messages
-from django.core.cache import cache
 from django.urls import reverse
 from ipam.models import IPAddress
 
+from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.server_mappings import read_mapping
-from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncTab, sync_snapshot_key
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot
 from netbox_librenms_plugin.tests.test_interface_rule_writes import _platform, _port
 
 SERVER_KEY = "default"
@@ -42,33 +43,22 @@ def _bound(device, name, port_id):
     return interface
 
 
-def _row(address, port_id, name):
-    return {
-        "ip_address": address,
-        "prefix_length": 24,
-        "ip_with_mask": f"{address}/24",
-        "port_id": port_id,
-        "interface_name": name,
-    }
+def _row(address, port_id):
+    return ip_address_row(address, port_id)
 
 
-def _seed(device, rows, ports_by_id, bound_ports_by_id=None):
-    cache.set(
-        sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].source.data_type, SERVER_KEY),
-        {
-            "ip_addresses": rows,
-            "mgmt_ip": "",
-            "ports_by_id": ports_by_id,
-            "bound_ports_by_id": bound_ports_by_id or {},
-            "interface_name_field": "ifName",
-        },
-        timeout=300,
-    )
+def _row_id(row):
+    return f"{row['ip_address']}/{row['prefix_length']}"
+
+
+def _seed(device, rows, ports, management_ip=""):
+    """Store an IP snapshot of LibreNMS rows and ports, as a refresh leaves it."""
+    seed_ip_snapshot(device, rows, ports, device={"device_id": DEVICE_ID, "ip": management_ip})
 
 
 def _sync(client, device, rows, **extra):
-    data = {"server_key": SERVER_KEY, "select": [row["ip_with_mask"] for row in rows], **extra}
-    data.update({f"vrf_{row['ip_with_mask']}": "" for row in rows})
+    data = {"server_key": SERVER_KEY, "select": [_row_id(row) for row in rows], **extra}
+    data.update({f"vrf_{_row_id(row)}": "" for row in rows})
     return client.post(
         reverse(
             "plugins:netbox_librenms_plugin:sync_device_ip_addresses", kwargs={"object_type": "device", "pk": device.pk}
@@ -116,8 +106,8 @@ def ignored_vlan(client, live_librenms):
 class TestAnIgnoredPortGetsNoAddress:
     def test_a_new_address_is_not_created_on_the_ignored_interface(self, client, ignored_vlan):
         device, vlan, eth, rule = ignored_vlan
-        rows = [_row("198.18.60.10", 7100, "Vlan10"), _row("198.18.60.11", 7101, "eth0")]
-        _seed(device, rows, {7100: _port(7100, "Vlan10", if_type="propVirtual"), 7101: _port(7101, "eth0")})
+        rows = [_row("198.18.60.10", 7100), _row("198.18.60.11", 7101)]
+        _seed(device, rows, [_port(7100, "Vlan10", if_type="propVirtual"), _port(7101, "eth0")])
 
         cell = _status_cell(client, device, "198.18.60.10/24")
         response = _sync(client, device, rows)
@@ -134,8 +124,8 @@ class TestAnIgnoredPortGetsNoAddress:
 
     def test_a_confirmed_reassignment_is_refused(self, client, ignored_vlan):
         device, vlan, eth, rule = ignored_vlan
-        rows = [_row("198.18.61.10", 7100, "Vlan10")]
-        _seed(device, rows, {7100: _port(7100, "Vlan10", if_type="propVirtual")})
+        rows = [_row("198.18.61.10", 7100)]
+        _seed(device, rows, [_port(7100, "Vlan10", if_type="propVirtual")])
         existing = IPAddress.objects.create(address="198.18.61.10/24", assigned_object=eth, status="active")
         # The confirmation is signed while no rule applies; the rule then exists when it is used.
         InterfaceTypeMapping.objects.filter(pk=rule.pk).update(platform=None, name_pattern="^no-such-port$")
@@ -150,15 +140,11 @@ class TestAnIgnoredPortGetsNoAddress:
             response, "198.18.61.10/24", f"LibreNMS port 7100 (Vlan10): ignored by interface rule {rule.pk}"
         )
 
-    def test_the_primary_ip_is_not_set_from_the_ignored_interface(self, client, ignored_vlan, live_librenms):
+    def test_the_primary_ip_is_not_set_from_the_ignored_interface(self, client, ignored_vlan):
         device, vlan, _eth, rule = ignored_vlan
-        rows = [_row("198.18.62.10", 7100, "Vlan10")]
-        _seed(device, rows, {7100: _port(7100, "Vlan10", if_type="propVirtual")})
+        rows = [_row("198.18.62.10", 7100)]
+        _seed(device, rows, [_port(7100, "Vlan10", if_type="propVirtual")], management_ip="198.18.62.10")
         address = IPAddress.objects.create(address="198.18.62.10/24", assigned_object=vlan, status="active")
-        live_librenms.server.register(
-            f"/api/v0/devices/{DEVICE_ID}",
-            {"status": "ok", "devices": [{"device_id": DEVICE_ID, "ip": "198.18.62.10"}]},
-        )
 
         response = _sync(client, device, rows, **{"set-primary-ip-toggle": "true"})
 
@@ -183,21 +169,17 @@ def renamed_source(client, live_librenms):
     device = _device("ip-assign-bound", platform)
     eth = _bound(device, "eth0", 7100)
     other = make_interface(device, "eth9", iface_type="virtual")
-    rows = [_row("198.18.70.10", 7101, "eth0")]
-    _seed(
-        device,
-        rows,
-        {7101: _port(7101, "eth0")},
-        bound_ports_by_id={7100: _port(7100, "Vlan10", if_type="propVirtual")},
-    )
+    rows = [_row("198.18.70.10", 7101)]
+    ports = [_port(7101, "eth0"), _port(7100, "Vlan10", if_type="propVirtual")]
+    _seed(device, rows, ports)
     client.force_login(make_superuser("ip-assign-bound-user"))
-    return device, eth, other, rows, rule
+    return device, eth, other, rows, ports, rule
 
 
 @pytest.mark.django_db
 class TestANameMatchBoundToAnotherPortIsNotTheTarget:
     def test_a_new_address_is_refused_and_the_row_says_why(self, client, renamed_source):
-        device, _eth, _other, rows, _rule = renamed_source
+        device, _eth, _other, rows, _ports, _rule = renamed_source
 
         cell = _status_cell(client, device, "198.18.70.10/24")
         response = _sync(client, device, rows)
@@ -207,7 +189,7 @@ class TestANameMatchBoundToAnotherPortIsNotTheTarget:
         assert "Skipped (no matching NetBox interface): 198.18.70.10/24" in " ".join(_messages(response))
 
     def test_an_existing_address_is_not_moved(self, client, renamed_source):
-        device, _eth, other, rows, _rule = renamed_source
+        device, _eth, other, rows, _ports, _rule = renamed_source
         existing = IPAddress.objects.create(address="198.18.70.10/24", assigned_object=other, status="active")
 
         response = _sync(client, device, rows)
@@ -216,13 +198,10 @@ class TestANameMatchBoundToAnotherPortIsNotTheTarget:
         assert existing.assigned_object == other
         assert "Skipped (no matching NetBox interface): 198.18.70.10/24" in " ".join(_messages(response))
 
-    def test_the_primary_ip_is_not_set(self, client, renamed_source, live_librenms):
-        device, eth, _other, rows, _rule = renamed_source
+    def test_the_primary_ip_is_not_set(self, client, renamed_source):
+        device, eth, _other, rows, ports, _rule = renamed_source
         IPAddress.objects.create(address="198.18.70.10/24", assigned_object=eth, status="active")
-        live_librenms.server.register(
-            f"/api/v0/devices/{DEVICE_ID}",
-            {"status": "ok", "devices": [{"device_id": DEVICE_ID, "ip": "198.18.70.10"}]},
-        )
+        _seed(device, rows, ports, management_ip="198.18.70.10")
 
         response = _sync(client, device, rows, **{"set-primary-ip-toggle": "true"})
 
@@ -248,6 +227,8 @@ def test_a_refresh_keeps_the_record_of_the_port_bound_to_the_target_interface(cl
     The one IP row is on 7101. NetBox eth0 has its name but is bound to 7100, so the row has no
     target until the interfaces are synced. The record of 7100 is evidence only: it is not an IP row.
     """
+    from netbox_librenms_plugin.views.base.ip_addresses_view import assess_ip_snapshot
+
     InterfaceTypeMapping.objects.create(action=IGNORE, name_pattern="^Vlan")
     device = make_device("ip-assign-refresh", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
     eth0 = _bound(device, "eth0", 7100)
@@ -264,13 +245,14 @@ def test_a_refresh_keeps_the_record_of_the_port_bound_to_the_target_interface(cl
         {"server_key": SERVER_KEY, "interface_name_field": "ifName"},
         HTTP_HX_REQUEST="true",
     )
-    snapshot = cache.get(sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].source.data_type, SERVER_KEY))
-    response = _sync(client, device, [_row("198.18.80.10", 7101, "eth0")])
+    snapshot = source_cache.read(device, Resource.IP_ADDRESSES, SERVER_KEY)
+    assessment = assess_ip_snapshot(refreshed.wsgi_request, device, snapshot, SERVER_KEY)
+    response = _sync(client, device, [_row("198.18.80.10", 7101)])
 
     assert refreshed.status_code == 200
-    assert [row["port_id"] for row in snapshot["ip_addresses"]] == [7101]
-    assert {str(key) for key in snapshot["ports_by_id"]} == {"7101"}
-    assert snapshot["bound_ports_by_id"]["7100"]["ifName"] == "eth9"
+    assert [row["port_id"] for row in snapshot.value(Resource.IP_ADDRESSES, "addresses")] == [7101]
+    assert set(assessment.ports_by_id) == {"7101"}
+    assert assessment.bound_ports_by_id["7100"]["ifName"] == "eth9"
     assert not IPAddress.objects.filter(address="198.18.80.10/24").exists()
     assert read_mapping(eth0).own_id(SERVER_KEY) == 7100
     assert "Skipped (no matching NetBox interface): 198.18.80.10/24" in " ".join(_messages(response))
@@ -288,13 +270,8 @@ def test_the_table_does_not_resolve_an_interface_the_caller_cannot_view(live_lib
     InterfaceTypeMapping.objects.create(action=IGNORE, name_pattern="^secret")
     device = _device("ip-assign-hidden", None)
     hidden = _bound(device, "eth0", 7100)
-    rows = [_row("198.18.81.10", 7101, "eth0")]
-    _seed(
-        device,
-        rows,
-        {7101: _port(7101, "eth0")},
-        bound_ports_by_id={7100: _port(7100, "secret-uplink")},
-    )
+    rows = [_row("198.18.81.10", 7101)]
+    _seed(device, rows, [_port(7101, "eth0"), _port(7100, "secret-uplink")])
     user = make_user_with_perms("ip-assign-hidden-user", [("view", Device), ("view", IPAddress), ("view", VRF)])
     user = grant(user, "view", Interface, constraints={"pk": hidden.pk + 100000})
     client = Client()
@@ -330,8 +307,8 @@ def test_a_sibling_member_the_caller_cannot_view_is_never_resolved(live_librenms
     member_b = make_device("ip-assign-member-b")
     make_virtual_chassis("ip-assign-vc", member_a, member_b)
     hidden = _bound(member_b, "eth0", 7100)
-    rows = [_row("198.18.82.10", 7101, "eth0")]
-    _seed(member_a, rows, {7101: _port(7101, "eth0")}, bound_ports_by_id={7100: _port(7100, "secret-uplink")})
+    rows = [_row("198.18.82.10", 7101)]
+    _seed(member_a, rows, [_port(7101, "eth0"), _port(7100, "secret-uplink")])
     user = make_user_with_perms(
         "ip-assign-sibling-user",
         [("view", Interface), ("view", IPAddress), ("add", IPAddress), ("change", IPAddress), ("view", VRF)],
@@ -385,8 +362,8 @@ def test_a_source_port_bound_on_a_hidden_member_is_not_named(live_librenms):
     make_virtual_chassis("ip-assign-owner-vc", member_a, member_b)
     target = make_interface(member_a, "eth0", iface_type="virtual")
     hidden = _bound(member_b, "eth0", 7101)
-    rows = [_row("198.18.83.10", 7101, "eth0")]
-    _seed(member_a, rows, {7101: _port(7101, "eth0", descr="secret-src")})
+    rows = [_row("198.18.83.10", 7101)]
+    _seed(member_a, rows, [_port(7101, "eth0", descr="secret-src")])
     user = make_user_with_perms(
         "ip-assign-owner-user",
         [("view", Interface), ("view", IPAddress), ("add", IPAddress), ("change", IPAddress), ("view", VRF)],
@@ -419,12 +396,12 @@ def _ip_render_queries(client, tag, count, first_port, *, blocked=True):
     from django.test.utils import CaptureQueriesContext
 
     device = make_device(tag, librenms_cf={SERVER_KEY: {"id": first_port}})
-    rows, ports = [], {}
+    rows, ports = [], []
     for index in range(count):
         port_id = first_port + index
         _bound(device, f"Vlan{index}", port_id)
-        rows.append(_row(f"10.{first_port % 250}.{index}.10", port_id, f"Vlan{index}"))
-        ports[port_id] = _port(port_id, f"Vlan{index}", if_type="propVirtual")
+        rows.append(_row(f"10.{first_port % 250}.{index}.10", port_id))
+        ports.append(_port(port_id, f"Vlan{index}", if_type="propVirtual"))
     _seed(device, rows, ports)
     url = reverse(
         "plugins:netbox_librenms_plugin:sync_cache_fragment",
@@ -471,8 +448,8 @@ def test_an_ambiguous_port_still_gets_its_address(client, live_librenms):
         )
     device = _device("ip-assign-tie", platform)
     vlan = _bound(device, "Vlan20", 7200)
-    rows = [_row("198.18.63.10", 7200, "Vlan20")]
-    _seed(device, rows, {7200: _port(7200, "Vlan20", if_type="propVirtual")})
+    rows = [_row("198.18.63.10", 7200)]
+    _seed(device, rows, [_port(7200, "Vlan20", if_type="propVirtual")])
     client.force_login(make_superuser("ip-assign-tie-user"))
 
     _sync(client, device, rows)
@@ -487,9 +464,9 @@ def test_a_missing_port_record_refuses_only_when_an_ignore_rule_could_apply(clie
     InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform if may_ignore else other, name_pattern="^Vlan")
     device = _device("ip-assign-missing", platform)
     eth = _bound(device, "eth5", 7300)
-    rows = [_row("198.18.64.10", 7300, "eth5")]
+    rows = [_row("198.18.64.10", 7300)]
     # The port snapshot has no record for the row's port: nothing proves the port is not ignored.
-    _seed(device, rows, {7300: None})
+    _seed(device, rows, [])
     client.force_login(make_superuser("ip-assign-missing-user"))
 
     cell = _status_cell(client, device, "198.18.64.10/24")

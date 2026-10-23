@@ -3,7 +3,12 @@
 from netbox_librenms_plugin.acquisition import responses
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.acquisition.snapshot import Outcome
-from netbox_librenms_plugin.data_shapes.ports import port_has_vrf
+from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
+
+
+def port_vrf_id(port):
+    """Return the LibreNMS VRF id a port row names, or None; LibreNMS reports 0 for no VRF."""
+    return coerce_librenms_id(port.get("ifVrf"))
 
 
 def _vlans(fetch, librenms_id):
@@ -20,7 +25,7 @@ def _ip_addresses(fetch, librenms_id):
     ports = parts["ports"]
     if not ports.obtained:
         parts["vrfs"] = fetch.skip(vrfs, Outcome.NOT_REQUESTED, "The ports were not obtained.")
-    elif any(port_has_vrf(port) for port in ports.value):
+    elif any(port_vrf_id(port) is not None for port in ports.value):
         parts["vrfs"] = fetch(vrfs)
     else:
         parts["vrfs"] = fetch.skip(vrfs, Outcome.NOT_APPLICABLE, "No port names a VRF.")

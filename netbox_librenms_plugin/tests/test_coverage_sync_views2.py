@@ -20,7 +20,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
-from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
+from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot, seed_source_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 from netbox_librenms_plugin.utils import get_librenms_cable_tag
 from netbox_librenms_plugin.views.sync.cables import SyncCablesView
@@ -68,21 +68,10 @@ def _vlan_url(device):
     )
 
 
-def _ip_snapshot(row, interface):
-    port_id = row["port_id"]
-    return {
-        "ip_addresses": [row],
-        "mgmt_ip": "",
-        "ports_by_id": {
-            port_id: {
-                "port_id": port_id,
-                "ifName": interface.name,
-                "ifDescr": interface.name,
-                "ifType": "ethernetCsmacd",
-            }
-        },
-        "interface_name_field": "ifName",
-    }
+def _seed_ip(obj, address, port_id, interface):
+    """Store an IP snapshot whose one row LibreNMS reports on port *port_id*, named like *interface*."""
+    port = {"port_id": port_id, "ifName": interface.name, "ifDescr": interface.name, "ifType": "ethernetCsmacd"}
+    seed_ip_snapshot(obj, [ip_address_row(address, port_id)], [port], server_key=SERVER_KEY)
 
 
 @pytest.mark.django_db
@@ -277,14 +266,7 @@ class TestIPAddressWriteFailures:
     def test_empty_selection_does_not_create_an_address(self, client, live_librenms):
         device = make_device("ip-no-selection", librenms_cf={SERVER_KEY: {"id": 122}})
         interface = make_interface(device, "Ethernet1")
-        row = {
-            "ip_address": "198.18.122.10",
-            "prefix_length": 24,
-            "ip_with_mask": "198.18.122.10/24",
-            "port_id": 8321,
-            "interface_name": interface.name,
-        }
-        _seed(SyncIPAddressesView(), device, "ip_addresses", _ip_snapshot(row, interface))
+        _seed_ip(device, "198.18.122.10", 8321, interface)
         _login(client, "ip-no-selection-user")
 
         response = client.post(_ip_url(device), {"server_key": SERVER_KEY})
@@ -300,14 +282,7 @@ class TestIPAddressWriteFailures:
         _set_id(intended, 8331)
         row_id = "198.18.123.10/24"
         address = IPAddress.objects.create(address=row_id, assigned_object=current, status="active")
-        row = {
-            "ip_address": "198.18.123.10",
-            "prefix_length": 24,
-            "ip_with_mask": row_id,
-            "port_id": 8331,
-            "interface_name": intended.name,
-        }
-        _seed(SyncIPAddressesView(), device, "ip_addresses", _ip_snapshot(row, intended))
+        _seed_ip(device, "198.18.123.10", 8331, intended)
         _login(client, "ip-conflict-user")
 
         response = client.post(
@@ -327,14 +302,7 @@ class TestIPAddressWriteFailures:
         _set_id(interface, 8341)
         vrf = VRF.objects.create(name="Application VRF", rd="64512:124")
         row_id = "198.18.124.10/24"
-        row = {
-            "ip_address": "198.18.124.10",
-            "prefix_length": 24,
-            "ip_with_mask": row_id,
-            "port_id": 8341,
-            "interface_name": interface.name,
-        }
-        _seed(SyncIPAddressesView(), device, "ip_addresses", _ip_snapshot(row, interface))
+        _seed_ip(device, "198.18.124.10", 8341, interface)
         _login(client, "ip-vrf-user")
 
         response = client.post(
@@ -352,14 +320,7 @@ class TestIPAddressWriteFailures:
         interface = VMInterface.objects.create(virtual_machine=vm, name="eth0")
         _set_id(interface, 8351)
         row_id = "198.18.125.10/24"
-        row = {
-            "ip_address": "198.18.125.10",
-            "prefix_length": 24,
-            "ip_with_mask": row_id,
-            "port_id": 8351,
-            "interface_name": interface.name,
-        }
-        _seed(SyncIPAddressesView(), vm, "ip_addresses", _ip_snapshot(row, interface))
+        _seed_ip(vm, "198.18.125.10", 8351, interface)
         _login(client, "ip-vm-user")
 
         response = client.post(

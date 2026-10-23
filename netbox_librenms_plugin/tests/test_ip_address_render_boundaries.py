@@ -10,6 +10,8 @@ import json
 
 import pytest
 
+from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_interface,
@@ -18,6 +20,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view
 
 
@@ -45,18 +48,20 @@ def _set_librenms_id(obj, value):
     seed_mapping(obj, SERVER_KEY, own=value)
 
 
-def _ip_view(live_librenms, request=None):
-    """Bind a real device IP table view to the loopback LibreNMS client."""
+def _ip_view(request):
+    """Bind a real device IP table view to *request*; the render needs no LibreNMS client."""
     from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
 
-    return make_view(DeviceIPAddressTableView, request, librenms_api=live_librenms.api)
+    return make_view(DeviceIPAddressTableView, request, librenms_api=False)
 
 
-def _cache_key(obj):
-    """Return the IP snapshot key production writes for *obj*."""
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
+def _stored_rows(device):
+    """Assess the stored IP snapshot of *device* as a superuser and return its rows."""
+    from netbox_librenms_plugin.views.base.ip_addresses_view import assess_ip_snapshot
 
-    return DeviceIPAddressTableView().get_cache_key(obj, "ip_addresses", SERVER_KEY)
+    snapshot = source_cache.read(device, Resource.IP_ADDRESSES, SERVER_KEY)
+    assert snapshot is not None
+    return assess_ip_snapshot(make_request("get"), device, snapshot, SERVER_KEY).rows
 
 
 def _refresh_url(device):
@@ -66,109 +71,61 @@ def _refresh_url(device):
     return reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk])
 
 
-def _serve_ip_rows(live_librenms, device_id, rows):
-    """Register the LibreNMS device IP list."""
-    live_librenms.server.register(f"/api/v0/devices/{device_id}/ip", {"status": "ok", "addresses": rows})
-
-
-def _serve_port(live_librenms, port_id, **fields):
-    """Register one LibreNMS port record."""
-    live_librenms.server.register(
-        f"/api/v0/ports/{port_id}",
-        {"status": "ok", "port": [{"port_id": port_id, **fields}]},
-    )
-
-
-def _serve_device_info(live_librenms, device_id, payload):
-    """Register the LibreNMS device record the management-IP lookup reads."""
-    live_librenms.server.register(
+def _serve(live_librenms, device_id, rows, ports=(), device_record=None):
+    """Register the LibreNMS device IP list, its port list and its device record."""
+    server = live_librenms.server
+    server.register(f"/api/v0/devices/{device_id}/ip", {"status": "ok", "addresses": rows})
+    server.register(f"/api/v0/devices/{device_id}/ports", {"status": "ok", "ports": list(ports)})
+    server.register(
         f"/api/v0/devices/{device_id}",
-        {"status": "ok", "devices": [{"device_id": device_id, **payload}]},
+        {"status": "ok", "devices": [{"device_id": device_id, **(device_record or {"ip": ""})}]},
     )
 
 
 @pytest.mark.django_db
-class TestEnrichmentSkipsMalformedRows:
-    """Enrichment tolerates rows LibreNMS returns that carry no usable port reference."""
+class TestManagementIPResolution:
+    """The management IP comes from the device record the snapshot holds."""
 
-    def test_rows_without_a_usable_port_reference_are_dropped(self, live_librenms):
-        """A null row and a row without port_id are skipped instead of raising."""
-        device = make_device("ip-enrich-malformed", librenms_cf={SERVER_KEY: {"id": 4301}})
-        interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
-        _set_librenms_id(interface, 9301)
-        _serve_ip_rows(
-            live_librenms,
-            4301,
-            [
-                None,
-                {"ip_address": "198.18.49.5", "prefix_length": 24},
-                {"ip_address": "198.18.49.10", "prefix_length": 24, "port_id": 9301},
-            ],
-        )
-        _serve_port(live_librenms, 9301, ifName=interface.name, ifDescr=interface.name)
-        view = _ip_view(live_librenms)
-
-        success, raw = view.get_ip_addresses(device)
-        enriched = view.enrich_ip_data(raw, device, "ifName", server_key=SERVER_KEY)
-
-        assert success is True
-        assert len(raw) == 3
-        assert [row["ip_with_mask"] for row in enriched] == ["198.18.49.10/24"]
-
-
-@pytest.mark.django_db
-class TestManagementIPResolutionOnRender:
-    """The render pipeline resolves the management IP without paying for a hopeless lookup."""
-
-    def test_object_without_a_librenms_id_is_never_looked_up(self, live_librenms):
-        """A cached snapshot missing mgmt_ip on an unmapped object requests no device record."""
-        from django.core.cache import cache
-
-        device = make_device("ip-render-no-id")
-        interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
-        cache.set(
-            _cache_key(device),
-            {
-                "ip_addresses": [
-                    {
-                        "ip_address": "198.18.51.10",
-                        "prefix_length": 24,
-                        "ip_with_mask": "198.18.51.10/24",
-                        "port_id": 9302,
-                        "interface_name": interface.name,
-                    }
-                ],
-                "ports_by_id": {9302: {"port_id": 9302, "ifName": interface.name}},
-                "interface_name_field": "ifName",
-            },
-            timeout=300,
+    def test_a_render_flags_the_management_row_from_the_snapshot_without_a_request(self, live_librenms):
+        """The render reads the stored device record; it never asks LibreNMS for the management IP."""
+        device = make_device("ip-render-mgmt-snapshot", librenms_cf={SERVER_KEY: {"id": 4300}})
+        seed_ip_snapshot(
+            device,
+            [ip_address_row("198.18.51.10", 9302), ip_address_row("198.18.51.11", 9302)],
+            [{"port_id": 9302, "ifName": "Ethernet1", "ifDescr": "Ethernet1"}],
+            device={"device_id": 4300, "ip": " 198.18.51.11 "},
         )
         request = make_request("get", path="/plugins/librenms/sync/")
-        view = _ip_view(live_librenms, request)
 
-        context = view._prepare_context(request, device, "ifName", fetch_fresh=False, server_key=SERVER_KEY)
+        context = _ip_view(request)._prepare_context(request, device, SERVER_KEY)
 
-        assert context is not None
+        assert [row.get("is_mgmt_ip") for row in context["table"].data] == [None, True]
         assert live_librenms.server.requests == []
 
-    def test_failed_device_read_caches_an_empty_management_ip(self, client, live_librenms):
-        """A LibreNMS fault while reading the device record caches a blank management IP."""
-        from django.core.cache import cache
+    def test_a_device_record_without_a_string_ip_flags_no_row(self, client, live_librenms):
+        """A refresh whose device record carries no string IP stores a snapshot with an empty management IP."""
+        from netbox_librenms_plugin.views.base.ip_addresses_view import assess_ip_snapshot
 
-        device = make_device("ip-render-mgmt-fails", librenms_cf={SERVER_KEY: {"id": 4302}})
+        device = make_device("ip-render-mgmt-missing", librenms_cf={SERVER_KEY: {"id": 4302}})
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
         _set_librenms_id(interface, 9303)
-        _serve_ip_rows(live_librenms, 4302, [{"ip_address": "198.18.51.20", "prefix_length": 24, "port_id": 9303}])
-        _serve_port(live_librenms, 9303, ifName=interface.name, ifDescr=interface.name)
-        live_librenms.server.register("/api/v0/devices/4302", {"status": "error"}, status=500)
-        _login(client, "ip-render-mgmt-fails-user")
+        _serve(
+            live_librenms,
+            4302,
+            [{"ip_address": "198.18.51.20", "prefix_length": 24, "port_id": 9303}],
+            [{"port_id": 9303, "ifName": interface.name, "ifDescr": interface.name}],
+            device_record={"ip": None},
+        )
+        _login(client, "ip-render-mgmt-missing-user")
 
         response = client.post(_refresh_url(device), {"server_key": SERVER_KEY, "interface_name_field": "ifName"})
 
         assert response.status_code == 200
-        cached = cache.get(_cache_key(device))
-        assert cached["mgmt_ip"] == ""
-        assert [row.get("is_mgmt_ip") for row in cached["ip_addresses"]] == [None]
+        assert _messages(response, "success") == ["IP address data refreshed successfully."]
+        snapshot = source_cache.read(device, Resource.IP_ADDRESSES, SERVER_KEY)
+        assessment = assess_ip_snapshot(make_request("get"), device, snapshot, SERVER_KEY)
+        assert assessment.mgmt_ip == ""
+        assert [row.get("is_mgmt_ip") for row in assessment.rows] == [None]
 
 
 @pytest.mark.django_db
@@ -177,79 +134,79 @@ class TestExistingAddressEnrichment:
 
     def test_unassigned_existing_address_stays_an_update_row(self, client, live_librenms):
         """An existing but unassigned address is reported as an update, not a match."""
-        from django.core.cache import cache
-
         device = make_device("ip-render-unassigned", librenms_cf={SERVER_KEY: {"id": 4303}})
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
         _set_librenms_id(interface, 9304)
         address = make_ip("198.18.51.30/24")
-        _serve_ip_rows(live_librenms, 4303, [{"ip_address": "198.18.51.30", "prefix_length": 24, "port_id": 9304}])
-        _serve_port(live_librenms, 9304, ifName=interface.name, ifDescr=interface.name)
-        _serve_device_info(live_librenms, 4303, {"ip": "198.18.51.99"})
+        _serve(
+            live_librenms,
+            4303,
+            [{"ip_address": "198.18.51.30", "prefix_length": 24, "port_id": 9304}],
+            [{"port_id": 9304, "ifName": interface.name, "ifDescr": interface.name}],
+            device_record={"ip": "198.18.51.99"},
+        )
         _login(client, "ip-render-unassigned-user")
 
         response = client.post(_refresh_url(device), {"server_key": SERVER_KEY, "interface_name_field": "ifName"})
 
         assert response.status_code == 200
-        row = cache.get(_cache_key(device))["ip_addresses"][0]
+        (row,) = _stored_rows(device)
         assert row["netbox_ip_id"] == address.pk
         assert row["status"] == "update"
         assert row["interface_url"] == interface.get_absolute_url()
 
 
 @pytest.mark.django_db
-class TestPrepareContextDefaults:
-    """``_prepare_context`` resolves its own interface name field when none is supplied."""
+class TestPrepareContextNameField:
+    """``_prepare_context`` reads the interface name field from the request."""
 
-    def test_absent_interface_name_field_is_resolved_from_the_request(self, live_librenms):
-        """With no field passed in, the request's interface_name_field decides the rendered name."""
-        from django.core.cache import cache
-
+    def test_the_request_interface_name_field_decides_the_rendered_name(self):
+        """The request's interface_name_field picks the port column the rendered row is named by."""
         device = make_device("ip-render-name-field", librenms_cf={SERVER_KEY: {"id": 4304}})
         make_interface(device, "Ethernet1", iface_type="1000base-t")
-        cache.set(
-            _cache_key(device),
-            {
-                "ip_addresses": [
-                    {
-                        "ip_address": "198.18.51.40",
-                        "prefix_length": 24,
-                        "ip_with_mask": "198.18.51.40/24",
-                        "port_id": 9305,
-                    }
-                ],
-                "mgmt_ip": "",
-                "ports_by_id": {9305: {"port_id": 9305, "ifName": "Gi0/1", "ifDescr": "uplink-to-core"}},
-                "interface_name_field": "ifName",
-            },
-            timeout=300,
+        seed_ip_snapshot(
+            device,
+            [ip_address_row("198.18.51.40", 9305)],
+            [{"port_id": 9305, "ifName": "Gi0/1", "ifDescr": "uplink-to-core"}],
         )
         request = make_request("get", path="/plugins/librenms/sync/?interface_name_field=ifDescr")
-        view = _ip_view(live_librenms, request)
 
-        context = view._prepare_context(request, device, None, fetch_fresh=False, server_key=SERVER_KEY)
+        context = _ip_view(request)._prepare_context(request, device, SERVER_KEY)
 
         assert [row["interface_name"] for row in context["table"].data] == ["uplink-to-core"]
 
 
 @pytest.mark.django_db
 class TestFreshFetchValidation:
-    """A refresh fails closed on a payload the render pipeline cannot key by port."""
+    """A refresh fails closed on an IP row the render pipeline cannot key by port or parse."""
 
-    def test_unhashable_port_id_fails_the_refresh_closed(self, client, live_librenms):
-        """A row whose port_id is not a plain int or string purges the snapshot and reports failure."""
-        from django.core.cache import cache
-
+    @pytest.mark.parametrize(
+        "bad_row",
+        [
+            None,
+            {"ip_address": "198.18.51.50", "prefix_length": 24},
+            {"ip_address": "198.18.51.50", "prefix_length": 24, "port_id": {}},
+        ],
+        ids=["null-row", "no-port-id", "unhashable-port-id"],
+    )
+    def test_an_unusable_row_fails_the_refresh_and_drops_the_older_snapshot(self, client, live_librenms, bad_row):
+        """One unusable row fails the whole refresh: no row is dropped silently and no older snapshot stays."""
         device = make_device("ip-render-bad-port", librenms_cf={SERVER_KEY: {"id": 4305}})
-        cache.set(_cache_key(device), {"ip_addresses": [], "mgmt_ip": "", "ports_by_id": {}}, timeout=300)
-        _serve_ip_rows(live_librenms, 4305, [{"ip_address": "198.18.51.50", "prefix_length": 24, "port_id": {}}])
+        seed_ip_snapshot(device, [ip_address_row("198.18.51.51", 9306)], [{"port_id": 9306, "ifName": "eth0"}])
+        _serve(
+            live_librenms,
+            4305,
+            [bad_row, {"ip_address": "198.18.51.51", "prefix_length": 24, "port_id": 9306}],
+            [{"port_id": 9306, "ifName": "eth0", "ifDescr": "eth0"}],
+        )
         _login(client, "ip-render-bad-port-user")
 
         response = client.post(_refresh_url(device), {"server_key": SERVER_KEY, "interface_name_field": "ifName"})
 
         assert response.status_code == 200
-        assert cache.get(_cache_key(device)) is None
-        assert any("Failed to fetch IP addresses" in text for text in _messages(response, "error"))
+        assert source_cache.read(device, Resource.IP_ADDRESSES, SERVER_KEY) is None
+        (error,) = _messages(response, "error")
+        assert error.startswith("Failed to fetch IP addresses from LibreNMS: devices/4305/ip was not obtained")
 
 
 @pytest.mark.django_db
