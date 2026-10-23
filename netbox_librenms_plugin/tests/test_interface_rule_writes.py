@@ -994,13 +994,15 @@ class TestTheCableFarEndCreate:
             configured_server_key,
             map_device_to_librenms,
         )
-        from netbox_librenms_plugin.tests.test_cable_remote_matching import _row, _seed_cable_row
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_cables_snapshot
+        from netbox_librenms_plugin.views.base.cables_view import read_cable_assessment
 
         server_key = configured_server_key()
         bind_librenms_server(settings, librenms_server, server_key=server_key)
         platform = _platform(f"{name}-remote")
+        rule = None
         if ignored:
-            InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform, name_pattern="^Gi")
+            rule = InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform, name_pattern="^Gi")
         local_device = make_device(f"{name}-local")
         local_interface = make_interface(local_device, "eth0")
         remote_device = make_device(f"{name}-remote")
@@ -1011,29 +1013,71 @@ class TestTheCableFarEndCreate:
         map_device_to_librenms(remote_device, 9, server_key=server_key)
         port = {**_port(500, "Gi0/1"), "device_id": 9, "deleted": 0}
         librenms_server.register("/api/v0/ports/500", {"status": "ok", "port": [port]})
-        row_id = _seed_cable_row(
-            local_device, _row(local_port="eth0", remote_device=remote_device.name, remote_port_key=500), server_key
+        seed_cables_snapshot(
+            local_device,
+            [
+                {
+                    "id": 1,
+                    "protocol": "lldp",
+                    "local_port_id": 100,
+                    "remote_hostname": remote_device.name,
+                    "remote_device_id": 9,
+                    "remote_port": "Gi0/1",
+                    "remote_port_id": 500,
+                }
+            ],
+            [_port(100, "eth0")],
+            neighbour_ports={9: [port]},
+            server_key=server_key,
         )
+        (row,) = read_cable_assessment(local_device, server_key)["links"]
         url = reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[local_device.pk])
-        return url, {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key}, remote_device
+        data = {"expected_local_id": local_interface.pk, "row_id": row["row_id"], "server_key": server_key}
+        return url, data, local_device, remote_device, rule
 
     @pytest.mark.parametrize("ignored", [True, False], ids=["remote-ignored", "control"])
     def test_an_ignored_remote_port_is_not_offered_or_created(self, client, librenms_server, settings, ignored):
-        url, data, remote_device = self._scenario(
+        from dcim.models import Cable
+
+        from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher, RuleDecisionKind
+
+        url, data, local_device, remote_device, rule = self._scenario(
             f"rule-cable-{int(ignored)}", librenms_server, settings, ignored=ignored
         )
         client.force_login(make_superuser("rule-cable-user"))
+        rendered = client.get(
+            reverse(
+                "plugins:netbox_librenms_plugin:sync_cache_fragment",
+                kwargs={"object_type": "device", "pk": local_device.pk, "tab": "cables"},
+            ),
+            {"server_key": data["server_key"]},
+        )
+        assert rendered.status_code == 200
+        (bound_row,) = list(rendered.context["cable_sync"]["table"].rows)
+        record = bound_row.record
 
         offer = client.get(url, data)
-        client.post(url, data)
+        created = client.post(url, data)
 
         if ignored:
             assert offer.status_code == 409
-            assert "The remote port is not created: ignored by interface rule" in offer.content.decode()
+            assert created.status_code == 409
+            decision = InterfaceRuleMatcher.load().check_interface_write(
+                record["remote_port_record"], platform_id=remote_device.platform_id
+            )
+            assert decision.kind is RuleDecisionKind.IGNORE
+            assert [matched.pk for matched in decision.rules] == [rule.pk]
+            assert record["rule_block"]["kind"] == decision.kind.value
+            assert not record.get("remote_create_url")
+            assert not record["can_create_cable"]
+            assert not Cable.objects.exists()
             assert not Interface.objects.filter(device=remote_device).exists()
         else:
             assert offer.status_code == 200
-            assert Interface.objects.filter(device=remote_device, name="Gi0/1").exists()
+            assert created.status_code == 302
+            assert record.get("remote_create_url")
+            remote_interface = Interface.objects.get(device=remote_device, name="Gi0/1")
+            assert remote_interface.cable_id is not None
 
 
 @pytest.mark.django_db

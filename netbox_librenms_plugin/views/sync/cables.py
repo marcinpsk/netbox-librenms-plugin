@@ -46,6 +46,7 @@ from netbox_librenms_plugin.server_mappings import (
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
+    apply_cable_manual_picks,
     apply_request_cache_transition,
     render_sync_cache_miss,
     schedule_request_cache_mutation,
@@ -61,23 +62,21 @@ from netbox_librenms_plugin.transactions import (
     saved_in_scope,
 )
 from netbox_librenms_plugin.utils import (
-    apply_cable_manual_picks,
     cable_path_reaches,
     classify_cable_action,
     get_cable_sync_settings,
     get_librenms_cable_tag,
     get_interface_name_field,
-    is_list_of_dicts,
     PortDisclosure,
     exception_text_for,
     render_cable_trace,
 )
+from netbox_librenms_plugin.assessment.cables import port_record, remote_port_ref
 from netbox_librenms_plugin.views.base.cables_view import (
     CABLE_MODAL_QUERY_KEYS,
     cable_row_ports,
     port_owner_id,
-    port_record,
-    remote_port_ref,
+    read_cable_assessment,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -226,7 +225,6 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         """
         self._cable_row_identity_error = False
         self._cable_source_permission_error = False
-        self._incomplete_sources = set()
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
         cache_obj = get_librenms_sync_device(obj, server_key=server_key) or obj
         if not self.restricted_queryset(Device, "view").filter(pk=cache_obj.pk).exists():
@@ -234,21 +232,21 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             return None
         self._cache_device = cache_obj
         cache_key = self.get_cache_key(cache_obj, "links", server_key)
-        cached_data = cache.get(cache_key)
-        if not isinstance(cached_data, dict) or not is_list_of_dicts(cached_data.get("links")):
+        assessed = read_cable_assessment(obj, server_key, get_interface_name_field(request, obj))
+        if assessed is None:
             return None
+        self._cable_row_identity_error = assessed.get("identity_error", False)
+        if assessed["blockers"]:
+            from netbox_librenms_plugin.source_cache import blocker_notice
+
+            messages.warning(request, blocker_notice(assessed["blockers"]))
         links, _applied = apply_cable_manual_picks(
             cache,
             cache_key,
-            cached_data,
+            assessed["snapshot_id"],
             request.user.pk,
-            cached_data["links"],
+            assessed["links"],
         )
-        if cached_data["links"] and not links:
-            self._cable_row_identity_error = True
-        incomplete = cached_data.get("incomplete_sources")
-        if isinstance(incomplete, list):
-            self._incomplete_sources = {source.lower() for source in incomplete if isinstance(source, str)}
         from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
 
         view = DeviceCableTableView()
@@ -1028,12 +1026,6 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         # sync (interfaces.py) and module sync (modules.py).
         if link_data.get("_source") == OOB_INVENTORY_SOURCE:
             return None, {"status": "skipped", "interface": display_name}
-        # A source named in incomplete_sources contributed no fresh rows to this snapshot, so a
-        # row still carrying it was carried over from an earlier refresh (see the permission-skip
-        # carry-over in cables_view). LibreNMS may have moved that sensor since, so the row is
-        # unverified: show it, but never create or replace a cable from it.
-        if (link_data.get("_source") or "host").lower() in getattr(self, "_incomplete_sources", set()):
-            return None, {"status": "unverified", "interface": display_name}
         # A multi-termination (breakout) cable on either end stops the enrichment before it
         # resolves the remote IDs, so the expected-endpoint check would report the row as
         # "stale". Name the real reason instead; classify_cable_action still catches a cable
@@ -1263,7 +1255,6 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             "conflict": [],
             "denied": [],
             "stale": [],
-            "unverified": [],
             "unsupported": [],
             "patch_path": [],
             "blocked_by_rule": [],
@@ -1456,12 +1447,6 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             "stale",
             "error",
             "The cable state or target changed after confirmation. Refresh and review the current cable for: {items}",
-        ),
-        (
-            "unverified",
-            "error",
-            "These links come from a LibreNMS source the last refresh could not read, so they "
-            "may be out of date. Refresh Cables before syncing: {items}.",
         ),
         (
             "unsupported",

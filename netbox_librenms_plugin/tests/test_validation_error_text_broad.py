@@ -10,9 +10,10 @@ message.
 from uuid import uuid4
 
 import pytest
+
+from netbox_librenms_plugin.tests.cable_source_helpers import seed_cable_rows
 from django.contrib.auth import get_user_model
 from django.contrib.messages import get_messages
-from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.db.models.signals import pre_save
 from django.urls import reverse
@@ -153,7 +154,6 @@ def test_the_cable_create(client, superuser):
     from extras.models import Tag
 
     from netbox_librenms_plugin.tests.test_cable_overwrite import SERVER_KEY, _rendered_sync_data
-    from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
     tag = f"vetext-cable-{int(superuser)}"
     acs, (csp,), _ = make_serial_device(f"{tag}-acs", csp_names=["ttyS5"])
@@ -172,7 +172,7 @@ def test_the_cable_create(client, superuser):
         "sensor_id": 1,
         "sensor_index_int": 5,
     }
-    cache.set(object.__new__(SyncCablesView).get_cache_key(acs, "links", SERVER_KEY), {"links": [link]}, timeout=300)
+    seed_cable_rows(acs, [link], SERVER_KEY)
     client.force_login(make_superuser(f"{tag}-renderer"))
     post_data = _rendered_sync_data(client, acs, link["local_port_id"])
     if superuser:

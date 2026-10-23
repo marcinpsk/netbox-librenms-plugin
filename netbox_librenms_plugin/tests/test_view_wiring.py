@@ -12,6 +12,8 @@ from unittest.mock import patch
 
 import pytest
 
+from netbox_librenms_plugin.tests.cable_source_helpers import seed_cable_rows
+
 from netbox_librenms_plugin.tests.conftest import configured_server_key
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, stored_mapping_for_test
 from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
@@ -849,7 +851,7 @@ class TestSingleCableVerifyServerKey:
             api_server_key="production",
         )
         key = view.get_cache_key(device, "links", "production")
-        cache.set(key, {"links": [{"local_port": "eth0", "local_port_id": 42, "remote_device": ""}]})
+        seed_cable_rows(device, [{"local_port": "eth0", "local_port_id": 42, "remote_device": ""}], "production")
         try:
             row = json.loads(view.post(request).content)["formatted_row"]
         finally:
@@ -872,7 +874,7 @@ class TestSingleCableVerifyServerKey:
             device, {"device_id": device.pk, "row_id": "42"}, api_server_key="fallback-server"
         )
         key = view.get_cache_key(device, "links", "fallback-server")
-        cache.set(key, {"links": [{"local_port": "eth0", "local_port_id": 42, "remote_device": ""}]})
+        seed_cable_rows(device, [{"local_port": "eth0", "local_port_id": 42, "remote_device": ""}], "fallback-server")
         try:
             row = json.loads(view.post(request).content)["formatted_row"]
         finally:

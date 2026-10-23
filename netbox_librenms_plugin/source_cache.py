@@ -2,10 +2,11 @@
 
 from dataclasses import dataclass, field
 
+from dcim.models import ConsoleServerPort, Device
 from django.core.cache import cache
 
 from netbox_librenms_plugin.acquisition.coordinator import SubjectNotMapped, acquire, oob_link, resource_owner
-from netbox_librenms_plugin.acquisition.registry import RESOURCE_SPECS
+from netbox_librenms_plugin.acquisition.registry import RESOURCE_SPECS, Resource
 from netbox_librenms_plugin.acquisition.resources import OOB_ACQUIRERS, blocked_scopes, is_ready
 from netbox_librenms_plugin.acquisition.snapshot import ObjectRef, SourceSnapshot
 from netbox_librenms_plugin.librenms_api import configured_cache_timeout
@@ -32,16 +33,25 @@ def snapshot_key(subject, resource, server_key):
     return _key(resource_owner(subject, resource, server_key), resource, server_key)
 
 
-def refresh(subject, resource, server_key):
+def refresh(subject, resource, server_key, *, request=None):
     """
     Acquire the resource's snapshot and store it; a refresh that stores nothing leaves no older snapshot.
 
     The caller runs discovery first, so the subject's mapping exists when one could be found.
 
     """
+    options = {}
+    if resource is Resource.CABLES:
+        owner = resource_owner(subject, resource, server_key)
+        options["include_serial"] = bool(
+            request is not None
+            and isinstance(owner, Device)
+            and request.user.has_perm("dcim.view_consoleserverport")
+            and ConsoleServerPort.objects.restrict(request.user, "view").filter(device=owner).exists()
+        )
     delete(subject, resource, server_key)
     try:
-        snapshot = acquire(subject, server_key=server_key, resources=[resource])
+        snapshot = acquire(subject, server_key=server_key, resources=[resource], **options)
     except SubjectNotMapped:
         # Discovery can keep an id in the cache only, when the mapping custom field is missing.
         return Refresh(None, "Device not found in LibreNMS.")

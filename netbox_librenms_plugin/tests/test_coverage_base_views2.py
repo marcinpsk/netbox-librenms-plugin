@@ -9,6 +9,8 @@ only against NetBox state.
 import json
 
 import pytest
+
+from netbox_librenms_plugin.tests.cable_source_helpers import seed_cable_rows
 from django.core.cache import cache
 from django.http import Http404
 
@@ -58,8 +60,7 @@ def _post_cable(device, links, *, row_id, **extra):
     view = SingleCableVerifyView()
     server_key = view._render_server_key()
     assert server_key is not None
-    cache_key = view.get_cache_key(device, "links", server_key)
-    cache.set(cache_key, {"links": links}, timeout=300)
+    seed_cable_rows(device, links, server_key)
     payload = {"device_id": device.pk, "row_id": row_id, "server_key": server_key, **extra}
     return view_post(view, _request(payload))
 
@@ -298,7 +299,7 @@ class TestCableVerifyEndpoint:
         assert response.status_code == 200
         assert _json(response)["formatted_row"]["cable_status"] == "Missing Ports"
 
-    def test_malformed_snapshot_is_purged_and_returns_the_empty_row(self):
+    def test_an_unsupported_source_snapshot_returns_an_empty_row_without_deletion(self):
         from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
 
         device = make_device("cable-malformed")
@@ -306,7 +307,7 @@ class TestCableVerifyEndpoint:
         server_key = view._render_server_key()
         assert server_key is not None
         key = view.get_cache_key(device, "links", server_key)
-        cache.set(key, {"links": ["not-a-row"]}, timeout=300)
+        cache.set(key, {"schema": -1}, timeout=300)
 
         response = view_post(
             view,
@@ -315,7 +316,7 @@ class TestCableVerifyEndpoint:
 
         assert response.status_code == 200
         assert _json(response)["formatted_row"]["cable_status"] == "Missing Ports"
-        assert cache.get(key) is None
+        assert cache.get(key) == {"schema": -1}
 
     def test_origin_must_match_the_selected_device(self):
         selected = make_device("cable-selected")
@@ -337,6 +338,7 @@ class TestCableVerifyEndpoint:
             "_source": "serial",
             "local_port": "ttyS0",
             "local_port_id": "serial:7",
+            "sensor_id": 7,
             "remote_device": "console-server",
         }
 

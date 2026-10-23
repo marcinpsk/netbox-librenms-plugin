@@ -17,6 +17,7 @@ force.
 import pytest
 from django.core.exceptions import PermissionDenied
 
+from netbox_librenms_plugin.tests.cable_source_helpers import seed_cable_rows
 from netbox_librenms_plugin.tests.conftest import (
     cable_together,
     configured_server_key,
@@ -61,6 +62,9 @@ def _serial_link(csp, cp):
         "local_port": csp.name,
         "local_port_id": row_id,
         "row_id": row_id,
+        "sensor_id": csp.pk,
+        "remote_device": cp.device.name,
+        "device_id": csp.device_id,
         "_source": "serial",
         "netbox_local_interface_id": csp.pk,
         "netbox_remote_interface_id": cp.pk,
@@ -138,12 +142,10 @@ class TestNameFallbackRespectsThePortBinding:
     def test_the_sync_attaches_only_an_interface_that_may_be_the_port(
         self, binding_server, attached, librenms_server, settings
     ):
-        from django.core.cache import cache
         from django.test import Client
         from django.urls import reverse
 
         from netbox_librenms_plugin.tests.conftest import bind_librenms_server
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
         local_device = make_device(f"fallback-local-{attached}")
@@ -160,8 +162,7 @@ class TestNameFallbackRespectsThePortBinding:
             "remote_port": remote.name,
             "remote_port_id": 202,
         }
-        cache_key = object.__new__(SyncCablesView).get_cache_key(local_device, "links", SERVER_KEY)
-        cache.set(cache_key, {"links": [row], "snapshot_token": f"fallback-{attached}"}, timeout=300)
+        seed_cable_rows(local_device, [row], SERVER_KEY)
         client = Client()
         client.force_login(make_superuser(f"fallback-user-{attached}"))
         persist_test_server_mapping(local_device, SERVER_KEY)
@@ -193,7 +194,6 @@ class TestNameFallbackRespectsThePortBinding:
         """eth0 resolves by name for port 6, then a concurrent write binds it to port 7 before the lock."""
         from dcim.models import Interface
         from django.contrib.messages import get_messages
-        from django.core.cache import cache
         from django.test import Client
         from django.urls import reverse
 
@@ -214,8 +214,7 @@ class TestNameFallbackRespectsThePortBinding:
             "remote_port": remote.name,
             "remote_port_id": 202,
         }
-        cache_key = object.__new__(SyncCablesView).get_cache_key(local_device, "links", SERVER_KEY)
-        cache.set(cache_key, {"links": [row], "snapshot_token": "fallback-rebound"}, timeout=300)
+        seed_cable_rows(local_device, [row], SERVER_KEY)
         client = Client()
         client.force_login(make_superuser("fallback-user-rebound"))
         persist_test_server_mapping(local_device, SERVER_KEY)
@@ -658,13 +657,10 @@ class TestSerialCableOverwriteBehaviour:
         """The real request classifies a model-signal failure and leaves the cable unchanged."""
         from django.contrib.auth import get_user_model
         from django.contrib.messages import get_messages
-        from django.core.cache import cache
         from django.db.models.signals import m2m_changed
         from django.test import Client
         from django.urls import reverse
         from extras.models import TaggedItem
-
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         local_device = make_device(f"signal-local-{error_type.__name__}")
         local = make_interface(local_device, "Ethernet1")
@@ -679,11 +675,7 @@ class TestSerialCableOverwriteBehaviour:
             "remote_port": remote.name,
             "remote_port_id": 202,
         }
-        cache.set(
-            object.__new__(SyncCablesView).get_cache_key(local_device, "links", SERVER_KEY),
-            {"links": [row], "snapshot_token": f"signal-{error_type.__name__}"},
-            timeout=300,
-        )
+        seed_cable_rows(local_device, [row], SERVER_KEY)
         user = get_user_model().objects.create_superuser(
             f"signal-user-{error_type.__name__}",
             password="pw",
@@ -826,11 +818,8 @@ class TestCableOverwriteHtmxModal:
 
     def _seed(self, name):
         from django.contrib.auth import get_user_model
-        from django.core.cache import cache
         from django.test import Client
         from django.urls import reverse
-
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         acs, csps, _ = make_serial_device(f"acs-{name}", csp_names=["ttyS5"])
         _old_router, _, (cp_a,) = make_serial_device(f"router-old-{name}", cp_names=["console-A"])
@@ -855,8 +844,7 @@ class TestCableOverwriteHtmxModal:
             "sensor_id": 1,
             "sensor_index_int": 5,
         }
-        key_view = object.__new__(SyncCablesView)
-        cache.set(key_view.get_cache_key(acs, "links", SERVER_KEY), {"links": [link]}, timeout=300)
+        seed_cable_rows(acs, [link], SERVER_KEY)
 
         user = get_user_model().objects.create_superuser(f"modal-admin-{name}", f"{name}@example.com", "pw")
         client = Client()
@@ -941,7 +929,7 @@ class TestCableOverwriteHtmxModal:
         from django.urls import reverse
         from dcim.models import Cable, CableTermination
 
-        from netbox_librenms_plugin.utils import cable_manual_pick_cache_key
+        from netbox_librenms_plugin.sync_cache import cable_manual_pick_cache_key
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         acs, csps, _ = make_serial_device(
@@ -960,16 +948,11 @@ class TestCableOverwriteHtmxModal:
         old.save()
         seed_mapping(acs, SERVER_KEY, own=13)
         row = make_serial_row(csps[0], target_device.name, acs)
-        snapshot = {"links": [row], "snapshot_token": "multi-termination"}
         cache_key = object.__new__(SyncCablesView).get_cache_key(acs, "links", SERVER_KEY)
-        cache.set(
-            cache_key,
-            snapshot,
-            timeout=300,
-        )
+        snapshot = seed_cable_rows(acs, [row], SERVER_KEY)
         user = get_user_model().objects.create_superuser("multi-termination-admin", "", "pw")
         cache.set(
-            cable_manual_pick_cache_key(cache_key, snapshot["snapshot_token"], user.pk, row["local_port_id"]),
+            cable_manual_pick_cache_key(cache_key, snapshot.snapshot_id, user.pk, row["local_port_id"]),
             {"manual_remote_id": target_port.pk},
             timeout=300,
         )
@@ -1228,11 +1211,8 @@ class TestOverwritePreservesMidPathSegments:
     def test_modal_marks_deleted_segment_and_keeps_the_rest(self):
         """Verify the warning modal marks only the endpoint segment for deletion and the remaining path as staying."""
         from django.contrib.auth import get_user_model
-        from django.core.cache import cache
         from django.test import Client
         from django.urls import reverse
-
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         acs, csp, c1, c2 = self._panel_path("midmodal")
         _t, _, (target_cp,) = make_serial_device("midmodal-target", cp_names=["console"])
@@ -1243,8 +1223,7 @@ class TestOverwritePreservesMidPathSegments:
         link["device_id"] = acs.id
         link["remote_device"] = target_cp.device.name
         link["is_configured"] = True
-        key_view = object.__new__(SyncCablesView)
-        cache.set(key_view.get_cache_key(acs, "links", SERVER_KEY), {"links": [link]}, timeout=300)
+        seed_cable_rows(acs, [link], SERVER_KEY)
 
         user = get_user_model().objects.create_superuser("midmodal-admin", "midmodal@example.com", "pw")
         client = Client()
@@ -1517,13 +1496,9 @@ class TestCableSyncLeastPrivilegeByRowType:
 
     @staticmethod
     def _cache_and_url(device, link):
-        from django.core.cache import cache
         from django.urls import reverse
 
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
-
-        view = object.__new__(SyncCablesView)
-        cache.set(view.get_cache_key(device, "links", SERVER_KEY), {"links": [link]}, timeout=300)
+        seed_cable_rows(device, [link], SERVER_KEY)
         return reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[device.pk])
 
     def test_interface_only_user_does_not_need_console_port_permissions(self):

@@ -14,12 +14,11 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 import pytest
 from dcim.models import Cable, ConsolePort, ConsoleServerPort, Device, FrontPort, Interface, RearPort
-from django.core.cache import cache
 from django.urls import reverse
 
 from netbox_librenms_plugin.models import InterfaceTypeMapping, LibreNMSSettings
-from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.constants import MATCHING, MISMATCHED, NOT_IN_NETBOX
+from netbox_librenms_plugin.tests.cable_source_helpers import seed_cable_rows
 from netbox_librenms_plugin.tests.conftest import (
     cable_together,
     librenms_cable_tag,
@@ -40,8 +39,7 @@ from netbox_librenms_plugin.tests.test_interface_sync_filters import (
 )
 from netbox_librenms_plugin.tests.test_interface_rule_writes import _port as _rule_port
 from netbox_librenms_plugin.tests.view_test_helpers import grant
-from netbox_librenms_plugin.views.base.cables_view import port_record
-from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+from netbox_librenms_plugin.assessment.cables import port_record
 
 ROW = re.compile(r'<tr[^>]*data-interface="([^"]+)"[^>]*>.*?</tr>', re.S)
 TABLE = re.compile(r'<table[^>]*id="librenms-cable-table(?:-vc)?".*?</table>', re.S)
@@ -55,11 +53,8 @@ FIELD_COLUMNS = {
 
 
 def _seed(owner, links):
-    """Store *links* as the cable snapshot of *owner*, under the device that a refresh caches it for."""
-    cache_owner = get_librenms_sync_device(owner, server_key=SERVER_KEY) or owner
-    cache_key = object.__new__(SyncCablesView).get_cache_key(cache_owner, "links", SERVER_KEY)
-    payload = {"links": links, "snapshot_token": f"filters-{cache_owner.pk}", "incomplete_sources": []}
-    cache.set(cache_key, payload, timeout=300)
+    """Store source endpoint facts for the resource owner of the page."""
+    return seed_cable_rows(owner, links, SERVER_KEY)
 
 
 def _link(port_id, local, remote_device, remote_port):
@@ -457,9 +452,21 @@ class TestWholeSnapshotData:
         for name in ("con1", "con2"):
             ConsolePort.objects.create(device=console, name=name)
         links = [make_serial_row(csp, console.name, device, sensor_index_int=n) for n, csp in enumerate(csps, 1)]
-        _seed(device, links)
-        cache_key = object.__new__(SyncCablesView).get_cache_key(device, "links", SERVER_KEY)
-        cache.set(cache_key, {**cache.get(cache_key), "incomplete_sources": ["OOB"]}, timeout=300)
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import Failed, seed_cables_snapshot
+        from netbox_librenms_plugin.acquisition.registry import Resource
+
+        snapshot = _seed(device, links)
+        seed_mapping(device, SERVER_KEY, oob=99001)
+        seed_cables_snapshot(
+            device,
+            [],
+            [],
+            sensors=snapshot.value(Resource.CABLES, "sensors"),
+            oob_links=Failed(),
+            oob_ports=[],
+            server_key=SERVER_KEY,
+        )
 
         def remote_ports(html):
             return {row_id: _cell_texts(row)["remote_port"] for row_id, row in _rows(html).items()}
@@ -472,7 +479,7 @@ class TestWholeSnapshotData:
         assert remote_ports(unfiltered)[f"serial:{csps[1].pk}"] == "con2"
         # The incomplete-source warning describes the snapshot, so the filter keeps it.
         for html in (unfiltered, filtered):
-            assert "These LibreNMS sources failed: OOB" in html
+            assert "devices/99001/links" in html
 
 
 def _sync_page_url(device):
