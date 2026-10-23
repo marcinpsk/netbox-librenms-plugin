@@ -496,4 +496,4 @@ def test_only_the_steps_outside_the_transaction_add_messages():
     }
 
     # post() adds messages before run_transaction() and after it returns; the other two run before it.
-    assert adders == {"post", "get_selected_port_ids", "get_cached_ports_data"}
+    assert adders == {"post", "get_selected_port_ids", "read_assessment"}

@@ -325,11 +325,11 @@ class SyncInterfacesView(
             return self._tab_response(request, object_type, interface_name_field, server_key)
         visible_port_ids = selected_port_ids
 
-        ports_data = self.get_cached_ports_data(request, obj, server_key)
-        if ports_data is None:
+        assessment = self.read_assessment(request, obj, server_key)
+        if assessment is None:
             return self._tab_response(request, object_type, interface_name_field, server_key)
-
-        relationships = self._get_cached_relationships(obj, server_key)
+        ports_data = assessment["ports"]
+        relationships = assessment["port_stack_relationships"]
         # The related-row walk runs under the owner locks (_lock_sync_scope), with the writer's state.
         self._related_walk = (
             normalize_relationship_maps(relationships) if request.POST.get("auto_select_lag_members") else None
@@ -570,19 +570,19 @@ class SyncInterfacesView(
             return None
         return visible
 
-    def get_cached_ports_data(self, request, obj, server_key=None):
-        """Return the port rows of the stored interfaces snapshot, or None after a warning when none is stored."""
-        if server_key is None:
-            server_key = self.librenms_api.server_key
-        # Keep the assessment, so the relationships and the snapshot state come from the same rows.
-        self._cached_ports_payload = read_interface_assessment(obj, server_key, get_interface_name_field(request, obj))
-        if self._cached_ports_payload is None:
+    def read_assessment(self, request, obj, server_key):
+        """
+        Return the stored interfaces snapshot, assessed for the request, or None after a warning when none is stored.
+
+        The view keeps the assessment, so the rows, the relationships and the snapshot state come from one read.
+        """
+        self._assessment = read_interface_assessment(obj, server_key, get_interface_name_field(request, obj))
+        if self._assessment is None:
             messages.warning(
                 request,
                 "No cached data found. Please refresh the data before syncing.",
             )
-            return None
-        return self._cached_ports_payload["ports"]
+        return self._assessment
 
     def _infer_snapshot_target_ids(
         self,
@@ -711,13 +711,6 @@ class SyncInterfacesView(
                 self._skipped_conflicts.append(f"related row {name} not synced: {reason}")
             self._selected_port_ids.update(frontier)
             self._auto_selected_port_ids.update(frontier)
-
-    def _get_cached_relationships(self, obj, server_key):
-        """Return the port relationships of the stored interfaces snapshot, or an empty dict without one."""
-        assessment = getattr(self, "_cached_ports_payload", None)
-        if assessment is None:
-            assessment = read_interface_assessment(obj, server_key, get_interface_name_field(self.request, obj))
-        return assessment["port_stack_relationships"] if assessment is not None else {}
 
     def _sync_interface_relationships(
         self,
@@ -1430,7 +1423,7 @@ class SyncInterfacesView(
             rejected,
             target_device_ids=target_device_ids,
             reserved_name_port_ids_by_device=reserved_name_port_ids,
-            snapshot_complete=not (getattr(self, "_cached_ports_payload", None) or {}).get("oob_incomplete"),
+            snapshot_complete=not self._assessment["oob_incomplete"],
             model=writer_model,
         )
         return _SnapshotNameDecisions(target_device_ids, names, rejected, owners)
@@ -2062,9 +2055,10 @@ class RebindInterfacePortView(SyncInterfacesView):
         self._post_server_key = server_key
         self._selected_port_ids = {port_id}
         self._auto_selected_port_ids = set()
-        ports_data = self.get_cached_ports_data(request, obj, server_key)
-        if ports_data is None:
+        assessment = self.read_assessment(request, obj, server_key)
+        if assessment is None:
             return self._tab_response(request, object_type, interface_name_field, server_key)
+        ports_data = assessment["ports"]
         try:
             with transaction.atomic():
                 interface = self._rebind(obj, ports_data, port_id, expected_port_id, interface_name_field, server_key)
