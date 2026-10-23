@@ -16,10 +16,12 @@ from netbox_librenms_plugin.utils import apply_lag_vlan_fill, normalize_relation
 
 def parse_port_vlan_data(port_data: dict, interface_name_field: str = "ifName") -> dict:
     """
-    Transform LibreNMS port VLAN data into normalized structure.
+    Return the VLAN fields of a LibreNMS port row, in the shape the interface readers use.
+
+    The ports contract (``acquisition.responses.ports``) admits only rows whose VLAN fields name VLAN ids.
 
     Args:
-        port_data: Raw port dict from LibreNMS API
+        port_data: A port row that the ports contract obtained.
         interface_name_field: Field to use for interface name ('ifName' or 'ifDescr')
 
     Returns:
@@ -33,54 +35,33 @@ def parse_port_vlan_data(port_data: dict, interface_name_field: str = "ifName") 
             - tagged_vlans: list[int]
 
     """
-    port_id = port_data.get("port_id")
     if_name = port_data.get("ifName", "")
-    if_descr = port_data.get("ifDescr", "")
-    interface_name = port_data.get(interface_name_field, "") or if_name
     if_vlan = port_data.get("ifVlan", "")
-    if_trunk = port_data.get("ifTrunk")
-
-    # Determine 802.1Q mode
+    # LibreNMS sets ifVlan for a port with a mode; only ifTrunk tells a trunk from an access port.
     if not if_vlan:
         mode = None
-    elif if_trunk == "dot1Q":
+    elif port_data.get("ifTrunk") == "dot1Q":
         mode = "tagged"
     else:
         mode = "access"
 
-    # Parse VLAN assignments from vlans array if present
-    vlans_data = port_data.get("vlans", [])
     untagged_vlan = None
     tagged_vlans = []
-
-    if isinstance(vlans_data, list) and vlans_data:
-        # Parse from detailed vlans array
-        for vlan_entry in vlans_data:
-            if not isinstance(vlan_entry, dict):
-                continue
-            vlan_id = vlan_entry.get("vlan")
-            if vlan_id is None:
-                continue
-            try:
-                vlan_id = int(vlan_id)
-            except (ValueError, TypeError):
-                continue
-            if vlan_entry.get("untagged") == 1:
-                untagged_vlan = vlan_id
-            else:
-                tagged_vlans.append(vlan_id)
-    elif if_vlan:
-        # Fallback to ifVlan field for basic port info
-        try:
-            untagged_vlan = int(if_vlan)
-        except (ValueError, TypeError):
-            pass
+    vlans = port_data.get("vlans") or []
+    for vlan in vlans:
+        if vlan.get("untagged") == 1:
+            untagged_vlan = int(vlan["vlan"])
+        else:
+            tagged_vlans.append(int(vlan["vlan"]))
+    # An older LibreNMS reports no vlans list, only the port's ifVlan.
+    if not vlans and if_vlan:
+        untagged_vlan = int(if_vlan)
 
     return {
-        "port_id": port_id,
-        "interface_name": interface_name,
+        "port_id": port_data.get("port_id"),
+        "interface_name": port_data.get(interface_name_field, "") or if_name,
         "ifName": if_name,
-        "ifDescr": if_descr,
+        "ifDescr": port_data.get("ifDescr", ""),
         "mode": mode,
         "untagged_vlan": untagged_vlan,
         "tagged_vlans": sorted(tagged_vlans),
