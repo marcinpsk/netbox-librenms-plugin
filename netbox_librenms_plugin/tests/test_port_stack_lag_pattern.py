@@ -3,6 +3,8 @@
 import pytest
 from django.core.exceptions import ValidationError
 
+from netbox_librenms_plugin.interface_relationships import resolve_port_relationships
+
 
 @pytest.mark.django_db
 class TestPortStackLagPattern:
@@ -455,7 +457,7 @@ class TestLagPatternSharedLoad:
     def _no_pattern_query(ctx):
         return not any("portstacklagpattern" in q["sql"].lower() for q in ctx.captured_queries)
 
-    def test_resolver_reuses_supplied_compiled_patterns_without_db(self, mock_librenms_api):
+    def test_resolver_reuses_supplied_compiled_patterns_without_db(self):
         """resolve_port_relationships(compiled_lag_patterns=...) resolves without re-loading patterns."""
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
@@ -468,15 +470,13 @@ class TestLagPatternSharedLoad:
         port_stack = [{"high_port_id": 11, "low_port_id": 12}]
 
         with CaptureQueriesContext(connection) as ctx:
-            result = mock_librenms_api.resolve_port_relationships(
-                ports, port_stack, device_os="sharedos", compiled_lag_patterns=compiled
-            )
+            result = resolve_port_relationships(ports, port_stack, device_os="sharedos", compiled_lag_patterns=compiled)
 
         # Po1 aggregate matched via the supplied pattern (behavior preserved) and no pattern query.
         assert result["lag_members"] == {11: 12}
         assert self._no_pattern_query(ctx)
 
-    def test_resolver_reads_the_stored_sap_rule_from_device_os_alone(self, mock_librenms_api):
+    def test_resolver_reads_the_stored_sap_rule_from_device_os_alone(self):
         """Given only device_os, the resolver applies that OS's stored SAP rule from the database."""
         # The other SAP tests inject a compiled pattern, so none of them prove the stored rule is
         # ever read. This one passes no pattern overrides at all.
@@ -498,14 +498,14 @@ class TestLagPatternSharedLoad:
             {"high_port_id": 200, "low_port_id": 102},
         ]
 
-        result = mock_librenms_api.resolve_port_relationships(ports, port_stack, device_os="storedos")
+        result = resolve_port_relationships(ports, port_stack, device_os="storedos")
 
         assert result["lag_members"] == {101: 102}
         # An ipForward port is never a LAG member, so only the skip count proves the rule was read.
         assert result["diagnostics"]["pairs_skipped_sap"] == 1, "the stored SAP rule was not read"
         assert 200 not in result["sub_interfaces"]
 
-    def test_string_zero_high_id_sentinel_is_skipped(self, mock_librenms_api):
+    def test_string_zero_high_id_sentinel_is_skipped(self):
         """A string "0" port ID (the ifStack 'no port' sentinel) is skipped, not looked up."""
         compiled = self._seed_and_compile()
         # A port whose id is 0 exists in by_id (keyed "0"); the sentinel entry references it as the
@@ -516,9 +516,7 @@ class TestLagPatternSharedLoad:
         ]
         port_stack = [{"high_port_id": "0", "low_port_id": 12}]
 
-        result = mock_librenms_api.resolve_port_relationships(
-            ports, port_stack, device_os="sharedos", compiled_lag_patterns=compiled
-        )
+        result = resolve_port_relationships(ports, port_stack, device_os="sharedos", compiled_lag_patterns=compiled)
 
         # The sentinel entry created no relationship at all (nothing references the phantom port 0).
         assert result["lag_members"] == {}
