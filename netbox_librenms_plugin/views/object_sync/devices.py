@@ -30,7 +30,6 @@ from netbox_librenms_plugin.tables.interfaces import (
 from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable, VCModuleTable
 from netbox_librenms_plugin.utils import (
     build_migrated_context,
-    cache_remaining_ttl,
     coerce_model_pk,
     get_interface_name_field,
     get_interface_port_identity_sets,
@@ -823,7 +822,7 @@ class SaveVlanGroupOverridesView(
         # Use the remaining TTL of the ports cache so both expire together. .ttl() is a
         # django-redis extension; degrade to None on a backend without it (e.g. LocMemCache)
         # so a non-Redis deployment gets a graceful "refresh first" 400 instead of a 500.
-        ports_ttl = cache_remaining_ttl(cache, self.get_cache_key(sync_device, "ports", server_key))
+        ports_ttl = cache.ttl(self.get_cache_key(sync_device, "ports", server_key))
         if ports_ttl is None or ports_ttl <= 0:
             return JsonResponse(
                 {"status": "error", "message": "No cached port data; refresh interfaces first"},

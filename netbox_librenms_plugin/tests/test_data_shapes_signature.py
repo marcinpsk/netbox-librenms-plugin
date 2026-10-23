@@ -862,7 +862,6 @@ else:
         server.load_recording(recording)
         settings.PLUGINS_CONFIG["netbox_librenms_plugin"] = {
             "servers": {"bounded-regex": {"librenms_url": server.url, "api_token": "token", "verify_ssl": False}},
-            "enable_caching": False,
         }
         api = LibreNMSAPI(server_key="bounded-regex")
         expected = {"lag_members": {1: 2} if map_name == "lag_patterns" and not name.endswith("!") else {}}
