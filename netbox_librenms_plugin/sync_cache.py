@@ -20,7 +20,6 @@ from netbox_librenms_plugin.librenms_api import configured_cache_timeout, stored
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.server_mappings import mapped_device_servers, read_mapping
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
-from netbox_librenms_plugin.utils import cache_remaining_ttl
 
 logger = logging.getLogger(__name__)
 
@@ -523,7 +522,7 @@ class SyncCacheConsistency:
 
     def _remaining_state_timeout(self, state_key, record, server_key):
         """Return a state record's remaining lifetime without extending it."""
-        remaining_timeout = cache_remaining_ttl(cache, state_key)
+        remaining_timeout = cache.ttl(state_key)
         if isinstance(remaining_timeout, int):
             return remaining_timeout
         created_at = parse_datetime(record.get("timestamp") or "")
@@ -631,30 +630,12 @@ class SyncCacheConsistency:
                 )
 
     def _delete_pattern(self, pattern):
-        delete_pattern = getattr(cache, "delete_pattern", None)
-        if not callable(delete_pattern):
-            return 0
-        try:
-            return int(delete_pattern(pattern) or 0)
-        except (AttributeError, NotImplementedError):
-            return 0
+        return int(cache.delete_pattern(pattern) or 0)
 
     @staticmethod
     def _pattern_has_values(pattern):
         """Return whether a snapshot-bound wildcard key currently exists."""
-        iter_keys = getattr(cache, "iter_keys", None)
-        if callable(iter_keys):
-            try:
-                return next(iter_keys(pattern), None) is not None
-            except (AttributeError, NotImplementedError):
-                return False
-        keys = getattr(cache, "keys", None)
-        if callable(keys):
-            try:
-                return bool(keys(pattern))
-            except (AttributeError, NotImplementedError):
-                return False
-        return False
+        return next(cache.iter_keys(pattern), None) is not None
 
     def _tab_has_values(self, tab, server_key):
         """Return whether a tab has a snapshot or snapshot-bound temporary state."""

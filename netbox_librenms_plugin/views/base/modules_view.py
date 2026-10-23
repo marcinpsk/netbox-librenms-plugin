@@ -45,7 +45,6 @@ from netbox_librenms_plugin.sync_cache import (
     request_actor_id,
 )
 from netbox_librenms_plugin.utils import (
-    cache_remaining_ttl,
     coerce_positive_int,
     get_module_adoptable_interface_names,
     get_module_template_interface_specs,
@@ -1343,9 +1342,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # Reuse the device the caller (post / get_context_data) already resolved to avoid a second
         # _get_sync_device() VC-members query per request; falls back to resolving here.
         sync_device = sync_device or self._get_sync_device(obj, server_key=self._active_server_key)
-        cache_ttl = cache_remaining_ttl(
-            cache, self.get_cache_key(sync_device, "inventory", server_key=self._active_server_key)
-        )
+        cache_ttl = cache.ttl(self.get_cache_key(sync_device, "inventory", server_key=self._active_server_key))
         cache_expiry = (
             timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl is not None and cache_ttl > 0 else None
         )
