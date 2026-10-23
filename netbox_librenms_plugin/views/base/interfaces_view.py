@@ -757,9 +757,9 @@ class BaseInterfaceTableView(
         # Read overrides under the same VC-scoped key SaveVlanGroupOverridesView writes
         # (the sync device, not the viewed member) — otherwise an "apply to all" made on a VC
         # member is lost on the next render/member switch. cache_device mirrors that writer.
-        vlan_group_overrides = (
-            cache.get(self.get_vlan_overrides_key(cache_device, server_key)) or {} if server_key is not None else {}
-        )
+        vlan_group_overrides = {}
+        if server_key is not None:
+            vlan_group_overrides = cache.get(self.get_vlan_overrides_key(cache_device, server_key)) or {}
 
         # isinstance(dict) guard (mirroring the IP/VLAN/Cables/Modules render paths and the
         # interfaces SYNC path): a truthy-but-malformed cache entry — a legacy/older-shape snapshot
