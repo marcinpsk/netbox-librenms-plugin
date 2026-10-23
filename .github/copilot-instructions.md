@@ -26,7 +26,8 @@
 - Devices/VMs map to LibreNMS via the `librenms_id` custom field, then cached if absent. Always call `LibreNMSAPI.get_librenms_id` instead of touching the field directly.
 - Matching is intentionally **exact-only** for site, platform, device type, and role. See `utils.py` (`find_matching_site`, `match_librenms_hardware_to_device_type`, `find_matching_platform`). Do not add fuzzy matching.
 - Sync pipelines acquire LibreNMS data through `acquisition/` (no request, no writes), store the snapshot through `source_cache.py`, assess it against NetBox for the current user, build comparison tables (`tables/`), and render HTMX fragments (`templates/netbox_librenms_plugin/htmx/`). The interfaces, cables, IP and VLAN tabs work this way (`assessment/` holds their derivation); the modules tab still fetches and caches through `CacheMixin`. Follow the acquisition flow for new resources.
-- Virtual chassis support uses `get_virtual_chassis_member()` for port-to-member mapping and `get_librenms_sync_device()` for VC priority-based device selection.
+- Source refresh requires the request. Cable reads check serial visibility for the current actor. Cable actions use stored port evidence and require a refresh when that evidence is absent.
+- Cable rows use stable port bindings to select a Virtual Chassis member, then `get_virtual_chassis_member()` when no binding exists. `get_librenms_sync_device()` selects the resource owner by VC priority.
 
 ## Developer Workflow
 - Prefer the devcontainer commands (`netbox-run`, `netbox-run-bg`, `netbox-reload`, `netbox-logs`) described in `.devcontainer/README.md`. They manage NetBox + plugin reloading.
