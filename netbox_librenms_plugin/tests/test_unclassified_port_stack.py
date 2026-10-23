@@ -15,6 +15,7 @@ does not poll.
 
 import pytest
 
+from netbox_librenms_plugin.interface_relationships import resolve_port_relationships
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
@@ -61,8 +62,8 @@ class TestAPairNoRuleClaims:
     """The resolver carries it instead of dropping it."""
 
     @staticmethod
-    def _resolve(api, bridge_pattern=OLD_BRIDGE_PATTERN):
-        return api.resolve_port_relationships(
+    def _resolve(bridge_pattern=OLD_BRIDGE_PATTERN):
+        return resolve_port_relationships(
             EVE_NG_PORTS,
             EVE_NG_STACK,
             lag_patterns={"linux": r"^bond\d+$"},
@@ -71,9 +72,9 @@ class TestAPairNoRuleClaims:
             interface_name_field="ifName",
         )
 
-    def test_it_is_reported_on_both_ports(self, mock_librenms_api):
+    def test_it_is_reported_on_both_ports(self):
         """Neither side claims to be the composite, so each names the other."""
-        relationships = self._resolve(mock_librenms_api)
+        relationships = self._resolve()
 
         assert relationships["bridge_members"] == {}, "the shipped pattern rejects pnet0 and nat0"
         assert relationships["stacked_ports"] == {
@@ -83,16 +84,16 @@ class TestAPairNoRuleClaims:
             8013: [8012],
         }
 
-    def test_a_classified_pair_is_not_also_stacked(self, mock_librenms_api):
+    def test_a_classified_pair_is_not_also_stacked(self):
         """A pair a rule claims leaves the untyped map, so the row cannot show both."""
-        relationships = self._resolve(mock_librenms_api, r"^(pnet|nat)\d+$")
+        relationships = self._resolve(r"^(pnet|nat)\d+$")
 
         assert relationships["bridge_members"] == {7998: 8002, 8012: 8013}
         assert relationships["stacked_ports"] == {}
 
-    def test_a_pair_whose_ends_are_not_polled_is_not_stacked(self, mock_librenms_api):
+    def test_a_pair_whose_ends_are_not_polled_is_not_stacked(self):
         """A row naming ports LibreNMS does not poll names nothing this device can show."""
-        relationships = self._resolve(mock_librenms_api)
+        relationships = self._resolve()
 
         assert 115 not in relationships["stacked_ports"]
         assert 139 not in relationships["stacked_ports"]
@@ -102,8 +103,8 @@ class TestTheDiagnosticsCounters:
     """Why the Relationships column is empty, per device."""
 
     @staticmethod
-    def _diagnostics(api, ports=EVE_NG_PORTS, stack=EVE_NG_STACK, **kwargs):
-        return api.resolve_port_relationships(
+    def _diagnostics(ports=EVE_NG_PORTS, stack=EVE_NG_STACK, **kwargs):
+        return resolve_port_relationships(
             ports,
             stack,
             lag_patterns={"linux": r"^bond\d+$"},
@@ -113,9 +114,9 @@ class TestTheDiagnosticsCounters:
             **kwargs,
         )["diagnostics"]
 
-    def test_it_separates_a_dropped_row_from_a_row_that_was_never_reported(self, mock_librenms_api):
+    def test_it_separates_a_dropped_row_from_a_row_that_was_never_reported(self):
         """Three rows reported, one unusable, two classified by nothing."""
-        diagnostics = self._diagnostics(mock_librenms_api)
+        diagnostics = self._diagnostics()
 
         assert diagnostics["pairs_seen"] == 3
         assert diagnostics["pairs_unresolved_end"] == 1
@@ -128,12 +129,12 @@ class TestTheDiagnosticsCounters:
             "lag_members": 0,
         }
 
-    def test_no_reported_rows_reads_differently_from_rejected_rows(self, mock_librenms_api):
+    def test_no_reported_rows_reads_differently_from_rejected_rows(self):
         """The two cases that both used to render an empty column now say different things."""
         from netbox_librenms_plugin.interface_relationships import relationship_diagnostics_report
 
         def _report(stack):
-            relationships = mock_librenms_api.resolve_port_relationships(
+            relationships = resolve_port_relationships(
                 EVE_NG_PORTS,
                 stack,
                 lag_patterns={"linux": r"^bond\d+$"},
@@ -151,9 +152,9 @@ class TestTheDiagnosticsCounters:
         assert "no rule says what kind" in rejected["verdict"]
         assert rejected["unclassified_pairs"] == [("eth0", "pnet0"), ("natmac", "nat0")]
 
-    def test_it_names_the_patterns_that_were_applied(self, mock_librenms_api):
+    def test_it_names_the_patterns_that_were_applied(self):
         """The report shows the regexes in effect, which are what an operator has to change."""
-        diagnostics = self._diagnostics(mock_librenms_api)
+        diagnostics = self._diagnostics()
 
         assert diagnostics["patterns"]["bridge"] == [OLD_BRIDGE_PATTERN]
         assert diagnostics["patterns"]["lag"] == [r"^bond\d+$"]
@@ -165,10 +166,10 @@ class TestTheDiagnosticsCounters:
             [{"unknown": 1}, {"high_port_id": 999, "low_port_id": 8002}],
         ],
     )
-    def test_rejected_malformed_rows_do_not_get_a_single_cause_verdict(self, mock_librenms_api, stack):
+    def test_rejected_malformed_rows_do_not_get_a_single_cause_verdict(self, stack):
         from netbox_librenms_plugin.interface_relationships import relationship_diagnostics_report
 
-        relationships = mock_librenms_api.resolve_port_relationships(
+        relationships = resolve_port_relationships(
             EVE_NG_PORTS,
             stack,
             lag_patterns={"linux": r"^bond\d+$"},
@@ -182,11 +183,11 @@ class TestTheDiagnosticsCounters:
         assert "none could be used" in report["verdict"]
 
 
-def test_conflicted_lag_claims_survive_an_empty_name_field_fallback(mock_librenms_api):
+def test_conflicted_lag_claims_survive_an_empty_name_field_fallback():
     ports = [_port(1, "eth0"), _port(2, "bond0"), _port(3, "bond1")]
     for port in ports:
         port["ifDescr"] = "shared description"
-    relationships = mock_librenms_api.resolve_port_relationships(
+    relationships = resolve_port_relationships(
         ports,
         [
             {"high_port_id": 1, "low_port_id": 2},
@@ -219,9 +220,9 @@ class TestTheSeededLinuxPattern:
         assert row is not None, "migration 0019 seeds a linux rule"
         return row.bridge_name_pattern
 
-    def test_it_types_the_bridges_the_old_one_rejected(self, mock_librenms_api):
+    def test_it_types_the_bridges_the_old_one_rejected(self):
         """Resolved through the seeded row, not a pattern the test supplies."""
-        relationships = mock_librenms_api.resolve_port_relationships(
+        relationships = resolve_port_relationships(
             EVE_NG_PORTS,
             EVE_NG_STACK,
             device_os="linux",

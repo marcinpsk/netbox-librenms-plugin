@@ -2,6 +2,7 @@
 
 import pytest
 
+from netbox_librenms_plugin.interface_relationships import resolve_port_relationships
 from netbox_librenms_plugin.tests.conftest import (
     _PORT_KEYS_UNSET,
     configure_default_librenms_server,
@@ -26,9 +27,9 @@ LINUX_PORTS = [
 ]
 
 
-def test_bridge_members_are_independent_from_parent_relationships(mock_librenms_api):
+def test_bridge_members_are_independent_from_parent_relationships():
     """Keep a sub-interface parent when the same interface also joins a bridge."""
-    relationships = mock_librenms_api.resolve_port_relationships(
+    relationships = resolve_port_relationships(
         LINUX_PORTS,
         [
             {"high_port_id": 102, "low_port_id": 101},
@@ -48,9 +49,9 @@ def test_bridge_members_are_independent_from_parent_relationships(mock_librenms_
     assert relationships["stacked_ports"] == {}, "every pair here is classified"
 
 
-def test_bridge_pair_is_not_reclassified_as_lag_by_name_field_fallback(mock_librenms_api):
+def test_bridge_pair_is_not_reclassified_as_lag_by_name_field_fallback():
     """Keep one relationship kind when bridge names differ between canonical fields."""
-    relationships = mock_librenms_api.resolve_port_relationships(
+    relationships = resolve_port_relationships(
         [
             {
                 "port_id": 100,
@@ -79,9 +80,9 @@ def test_bridge_pair_is_not_reclassified_as_lag_by_name_field_fallback(mock_libr
     assert relationships["stacked_ports"] == {}, "every pair here is classified"
 
 
-def test_name_field_fallback_does_not_reclassify_a_sub_interface_pair_as_bridge(mock_librenms_api):
+def test_name_field_fallback_does_not_reclassify_a_sub_interface_pair_as_bridge():
     """Assign one relationship type to a port-stack pair across name-field fallback."""
-    relationships = mock_librenms_api.resolve_port_relationships(
+    relationships = resolve_port_relationships(
         [
             {
                 "port_id": 100,
