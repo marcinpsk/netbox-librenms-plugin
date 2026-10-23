@@ -82,3 +82,34 @@ def stored_source_value(subject, resource, part, server_key="default"):
     """Return the value of one part of the stored snapshot, or None when no snapshot is stored."""
     snapshot = source_cache.read(subject, resource, server_key)
     return snapshot.value(resource, part) if snapshot is not None else None
+
+
+def ip_address_row(address, port_id, prefix_length=24):
+    """Return one LibreNMS ``/devices/{id}/ip`` row as the endpoint serves it."""
+    return {"ip_address": address, "prefix_length": prefix_length, "port_id": port_id}
+
+
+def seed_ip_snapshot(subject, addresses, ports=(), *, device=None, vrfs=None, server_key="default"):
+    """
+    Store an IP address snapshot of *addresses* and *ports*, with *device* as the device record.
+
+    A port that names a VRF needs *vrfs*, as acquisition reads them only then; without such a port
+    the VRF part is not applicable.
+    """
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.acquisition.resources import port_vrf_id
+
+    ports = list(ports)
+    if vrfs is None:
+        if any(port_vrf_id(port) is not None for port in ports):
+            raise TypeError("seed_ip_snapshot() needs vrfs when a port names a VRF.")
+        vrfs = NotApplicable()
+    return seed_source_snapshot(
+        subject,
+        Resource.IP_ADDRESSES,
+        server_key,
+        addresses=list(addresses),
+        ports=ports,
+        device={} if device is None else device,
+        vrfs=vrfs,
+    )
