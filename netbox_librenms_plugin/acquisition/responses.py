@@ -5,6 +5,7 @@ from typing import Callable
 
 from netbox_librenms_plugin.acquisition.snapshot import Outcome, SourceRequest
 from netbox_librenms_plugin.constants import LIBRENMS_NO_IPS_MESSAGE, LIBRENMS_NO_VRFS_MESSAGE, LIBRENMS_PORTS_COLUMNS
+from netbox_librenms_plugin.ip_addressing import parse_librenms_ip_entry
 from netbox_librenms_plugin.utils import is_list_of_dicts
 
 HTTP_NOT_FOUND = 404
@@ -86,12 +87,32 @@ def ports(device_id, *, with_vlans):
     return Endpoint(SourceRequest(f"devices/{device_id}/ports", params, key_params=False), _rows_contract("ports"))
 
 
+def _is_usable_ip_row(row):
+    """Return whether an IP row names its port by a plain id and holds an address that parses."""
+    port_id = row.get("port_id")
+    if isinstance(port_id, bool) or not isinstance(port_id, (int, str)):
+        return False
+    try:
+        parse_librenms_ip_entry(row)
+    except ValueError:
+        return False
+    return True
+
+
 def ip_addresses(device_id):
     """Return the IP address endpoint; LibreNMS answers a device with no address with a 404."""
-    return Endpoint(
-        SourceRequest(f"devices/{device_id}/ip"),
-        _rows_contract("addresses", empty_404_message=LIBRENMS_NO_IPS_MESSAGE),
-    )
+    contract = _rows_contract("addresses", empty_404_message=LIBRENMS_NO_IPS_MESSAGE)
+
+    def decode(status, body):
+        decoded = contract(status, body)
+        # One unusable row makes the answer malformed, so a reader never drops a row silently.
+        if decoded.outcome is Outcome.OBTAINED and not all(_is_usable_ip_row(row) for row in decoded.value):
+            return Decoded(
+                Outcome.FAILED, reason="LibreNMS returned an IP address row without a usable port or address."
+            )
+        return decoded
+
+    return Endpoint(SourceRequest(f"devices/{device_id}/ip"), decode)
 
 
 def vrfs(device_id):
