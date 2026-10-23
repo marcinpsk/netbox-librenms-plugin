@@ -11,10 +11,12 @@ from collections import Counter
 
 import pytest
 
+from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.tests.conftest import (
     configure_default_librenms_server,
     make_device,
 )
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import (
     grant,
     make_request,
@@ -260,7 +262,9 @@ class TestVlanTabIpamScoping:
         device = make_device("vlan-tab-ipam-scope")
         group, _vlan = _site_group_with_vlan(device, "vlan-tab")
         view, request = self._view(_reader("vlan-tab-no-ipam"))
-        cache.set(view.get_cache_key(device, "vlans", server_key), [{"vlan_vlan": 100, "vlan_name": "vlan-tab-vlan"}])
+        seed_source_snapshot(
+            device, Resource.VLANS, server_key, vlans=[{"vlan_vlan": 100, "vlan_name": "vlan-tab-vlan"}]
+        )
 
         try:
             context = view.get_vlan_context(request, device, server_key)
@@ -282,9 +286,8 @@ class TestVlanTabIpamScoping:
         device = make_device("vlan-tab-ipam-allowed")
         group, vlan = _site_group_with_vlan(device, "vlan-tab-allowed")
         view, request = self._view(_reader("vlan-tab-ipam", ipam=True))
-        cache.set(
-            view.get_cache_key(device, "vlans", server_key),
-            [{"vlan_vlan": 100, "vlan_name": "vlan-tab-allowed-vlan"}],
+        seed_source_snapshot(
+            device, Resource.VLANS, server_key, vlans=[{"vlan_vlan": 100, "vlan_name": "vlan-tab-allowed-vlan"}]
         )
 
         try:
@@ -317,9 +320,8 @@ class TestVlanTabIpamScoping:
         user = grant(user, "view", VLANGroup, constraints={"pk": group.pk})
         user = grant(user, "view", VLAN, constraints={"pk": vlan.pk})
         view, request = self._view(user)
-        cache.set(
-            view.get_cache_key(device, "vlans", server_key),
-            [{"vlan_vlan": 100, "vlan_name": "vlan-tab-constrained-vlan"}],
+        seed_source_snapshot(
+            device, Resource.VLANS, server_key, vlans=[{"vlan_vlan": 100, "vlan_name": "vlan-tab-constrained-vlan"}]
         )
 
         try:
