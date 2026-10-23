@@ -18,7 +18,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_virtual_chassis_members,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_interfaces_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
 from netbox_librenms_plugin.views.object_sync.devices import (
@@ -361,6 +361,25 @@ class TestSaveVLANGroupOverridesEndpoint:
 
         assert response.status_code == 400
         assert response.json()["message"] == "No cached port data; refresh interfaces first"
+        assert cache.get(overrides_key) is None
+
+    def test_a_snapshot_whose_binding_no_longer_holds_takes_no_overrides(self, client, live_librenms):
+        device = make_device("save-vlan-overrides-rebound", librenms_cf={SERVER_KEY: {"id": 153}})
+        view = SaveVlanGroupOverridesView()
+        overrides_key = view.get_vlan_overrides_key(device, SERVER_KEY)
+        seed_interfaces_snapshot(device, [_port()], server_key=SERVER_KEY)
+        # The write signals run on commit, which this test never reaches, so only the binding refuses the snapshot.
+        seed_stored_mapping(device, {SERVER_KEY: {"id": 153, "oob": {"id": 154, "type": "idrac"}}}, save=True)
+        assert cache.ttl(source_cache.snapshot_key(device, Resource.INTERFACES, SERVER_KEY)) > 0
+        _login(client, "save-vlan-overrides-rebound-user")
+
+        response = _json_post(
+            client,
+            "save_vlan_group_overrides",
+            {"device_id": device.pk, "server_key": SERVER_KEY, "vid_group_map": {"3207": "19"}},
+        )
+
+        assert response.status_code == 400
         assert cache.get(overrides_key) is None
 
     def test_a_user_without_plugin_view_is_denied_before_the_view_runs(self, client, live_librenms):

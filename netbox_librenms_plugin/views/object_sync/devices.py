@@ -820,8 +820,9 @@ class SaveVlanGroupOverridesView(
         if sync_device is None:
             sync_device = device
 
-        # Use the remaining TTL of the interfaces snapshot so both expire together; no snapshot answers "refresh first".
-        ports_ttl = source_cache.remaining_ttl(sync_device, Resource.INTERFACES, server_key)
+        # The overrides belong to the snapshot that every reader accepts, and they expire with it.
+        readable = source_cache.read(sync_device, Resource.INTERFACES, server_key) is not None
+        ports_ttl = source_cache.remaining_ttl(sync_device, Resource.INTERFACES, server_key) if readable else None
         if ports_ttl is None:
             return JsonResponse(
                 {"status": "error", "message": "No cached port data; refresh interfaces first"},
