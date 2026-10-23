@@ -29,6 +29,8 @@ This document provides an overview of the NetBox LibreNMS Plugin's codebase orga
   - `interface_sync.py` — Shared interface creation and update logic
   - `interface_relationships.py` — Parent, child, and LAG relationship resolution
   - `ip_addressing.py` — Shared IP address handling
+  - `acquisition/` — Source acquisition: the snapshot types, one contract per LibreNMS endpoint, the resource registry and the coordinator (`acquire`). It needs no request and writes nothing
+  - `source_cache.py` — The web transport of source snapshots: refresh, store and read
   - `sync_cache.py` and `cache_signals.py` — Sync-tab cache coordination and invalidation
   - `jobs.py` — Background import jobs
   - `signals.py` — Public extension signals
