@@ -19,7 +19,7 @@ from netbox_librenms_plugin.acquisition.snapshot import (
     ResponseRecord,
     SourceSnapshot,
 )
-from netbox_librenms_plugin.librenms_api import build_librenms_api, stored_librenms_id
+from netbox_librenms_plugin.librenms_api import EXTENDED_API_TIMEOUT, build_librenms_api, stored_librenms_id
 from netbox_librenms_plugin.server_mappings import MappingRole, read_mapping, require_server_key
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
@@ -42,11 +42,14 @@ class _Fetch:
     def __init__(self, api):
         self._api = api
         self.responses = {}
+        self.neighbour_deadline = None
 
     def __call__(self, endpoint):
         key = endpoint.request.key
-        if key not in self.responses:
-            status, body = self._api.get_response(endpoint.request.path, dict(endpoint.request.params))
+        if key not in self.responses or self.responses[key].received_at is None:
+            # A budget omission is still available to a resource that requires this request.
+            options = {"timeout": EXTENDED_API_TIMEOUT} if endpoint.extended_timeout else {}
+            status, body = self._api.get_response(endpoint.request.path, dict(endpoint.request.params), **options)
             decoded = endpoint.decode(status, body)
             self.responses[key] = ResponseRecord(
                 request=endpoint.request,
@@ -67,14 +70,19 @@ class _Fetch:
 
 
 class _Refused:
-    """Record each request of a mapping as failed without making it, because the mapping names no device."""
+    """Record requests not made because a mapping has no usable device."""
 
-    def __init__(self, fetch, reason):
+    def __init__(self, fetch, reason, outcome=Outcome.FAILED):
         self._fetch = fetch
         self._reason = reason
+        self._outcome = outcome
 
     def __call__(self, endpoint):
-        return self._fetch.skip(endpoint, Outcome.FAILED, self._reason)
+        return self._fetch.skip(endpoint, self._outcome, self._reason)
+
+    def skip(self, endpoint, outcome, reason):
+        """Keep the mapping's refusal for a request its resource would otherwise skip."""
+        return self(endpoint)
 
 
 def oob_link(mapping, server_key):
@@ -120,20 +128,25 @@ def oob_source(fetch, resource, mapping, server_key):
     )
 
 
-def _resource_source(fetch, resource, owner, server_key):
+def _resource_source(fetch, resource, owner, server_key, *, include_serial=False):
     """Acquire one resource from the owner's own mapping and, when it links one, its OOB controller."""
     mapping = read_mapping(owner)
     librenms_id = stored_librenms_id(owner, server_key)
-    if librenms_id is None:
+    oob_only = resource is Resource.CABLES and librenms_id is None and mapping.has_oob(server_key)
+    if librenms_id is None and not oob_only:
         raise SubjectNotMapped(owner, server_key)
-    parts = ACQUIRERS[resource](fetch, librenms_id)
+    host_fetch = _Refused(fetch, "The owner has only an OOB mapping.", Outcome.NOT_APPLICABLE) if oob_only else fetch
+    options = {"include_serial": include_serial} if resource is Resource.CABLES else {}
+    # An absent host and an invalid OOB mapping must keep separate skipped responses.
+    host_request_id = "unmapped" if oob_only else librenms_id
+    parts = ACQUIRERS[resource](host_fetch, host_request_id, **options)
     return ResourceSource(
         resource=resource,
         owner=ObjectRef.of(owner),
         host=MappingSource(
             role=MappingRole.OWN,
             librenms_id=librenms_id,
-            state=MappingState.RESOLVED,
+            state=MappingState.INVALID if oob_only else MappingState.RESOLVED,
             parts=_part_keys(parts),
         ),
         oob=oob_source(fetch, resource, mapping, server_key),
@@ -186,7 +199,7 @@ def plan_acquisition(subject, *, server_key, resources):
     )
 
 
-def acquire(plan):
+def acquire(plan, *, include_serial=False):
     """
     Acquire the planned owners' current stored or cached identities from one configured server.
 
@@ -203,7 +216,7 @@ def acquire(plan):
         owner = type(planned_owner).objects.filter(pk=planned_owner.pk).first()
         if owner is None:
             raise SubjectNotMapped(planned_owner, plan.server_key)
-        sources[resource] = _resource_source(fetch, resource, owner, plan.server_key)
+        sources[resource] = _resource_source(fetch, resource, owner, plan.server_key, include_serial=include_serial)
     return SourceSnapshot(
         snapshot_id=uuid4().hex,
         server_key=plan.server_key,
