@@ -10,6 +10,7 @@ import pytest
 
 from netbox_librenms_plugin.data_shapes.capture import capture_device_recording
 from netbox_librenms_plugin.data_shapes.signature import compute_shape_signature
+from netbox_librenms_plugin.interface_relationships import resolve_port_relationships
 from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 from netbox_librenms_plugin.tests.recordings import load_recording
 
@@ -483,7 +484,7 @@ def test_capture_roundtrip_preserves_port_relationships(recording_server):
     ok_stack, port_stack = api2.get_port_stack(_SINGLE_RECORDING_ID)
     assert ok_ports and ok_stack
 
-    relationships = api2.resolve_port_relationships(ports_data["ports"], port_stack, lag_patterns={})
+    relationships = resolve_port_relationships(ports_data["ports"], port_stack, lag_patterns={})
     lag = {str(k): str(v) for k, v in relationships["lag_members"].items()}
     sub = {str(k): str(v) for k, v in relationships["sub_interfaces"].items()}
     assert lag == {str(k): str(v) for k, v in seed["expected"]["lag_members"].items()}
