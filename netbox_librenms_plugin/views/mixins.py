@@ -1056,12 +1056,6 @@ class CacheMixin(SyncSubjectClaimMixin):
 
         return sync_snapshot_key(obj, data_type, server_key)
 
-    def get_last_fetched_key(self, obj, data_type, server_key):
-        """Get the cache key for the last fetched time of the object."""
-        from netbox_librenms_plugin.sync_cache import sync_last_fetched_key
-
-        return sync_last_fetched_key(obj, data_type, server_key)
-
     def get_vlan_overrides_key(self, obj, server_key):
         """
         Get the cache key for user VLAN group override selections.
