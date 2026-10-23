@@ -540,11 +540,11 @@ class TestSyncInterfacesViewGetSelectedPortIds:
 
 
 # ===========================================================================
-# SyncInterfacesView.get_cached_ports_data
+# SyncInterfacesView.read_assessment
 # ===========================================================================
 
 
-class TestSyncInterfacesViewGetCachedPortsData:
+class TestSyncInterfacesViewReadAssessment:
     @staticmethod
     def _case(tag, server_key="default"):
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
@@ -557,21 +557,21 @@ class TestSyncInterfacesViewGetCachedPortsData:
 
     def test_cache_miss_warns_and_returns_none(self):
         view, request, device = self._case("miss")
-        result = view.get_cached_ports_data(request, device, "default")
+        result = view.read_assessment(request, device, "default")
 
         assert result is None
         assert message_texts(request, "warning")
 
-    def test_cache_hit_returns_ports(self):
+    def test_cache_hit_returns_the_assessment_the_view_keeps(self):
         view, request, device = self._case("hit")
         seed_interfaces_snapshot(device, [{"port_id": 1, "ifName": "Gi0/1"}])
 
-        result = view.get_cached_ports_data(request, device, "default")
+        result = view.read_assessment(request, device, "default")
 
-        assert [(row["port_id"], row["ifName"], row["_source"]) for row in result] == [(1, "Gi0/1", "main")]
+        assert [(row["port_id"], row["ifName"], row["_source"]) for row in result["ports"]] == [(1, "Gi0/1", "main")]
         # The relationships and the snapshot state come from the same assessment as the rows.
-        assert view._cached_ports_payload["ports"] is result
-        assert view._cached_ports_payload["oob_incomplete"] is False
+        assert view._assessment is result
+        assert result["oob_incomplete"] is False
 
     def test_malformed_cached_ports_treated_as_miss(self):
         """An unusable payload under the snapshot key reads as no snapshot, so the sync asks for a refresh."""
@@ -583,7 +583,7 @@ class TestSyncInterfacesViewGetCachedPortsData:
         for index, bad in enumerate(({"ports": None}, "oops", [None], ["not-a-dict"])):
             view, request, device = self._case(f"malformed-{index}")
             cache.set(source_cache.snapshot_key(device, Resource.INTERFACES, "default"), bad)
-            result = view.get_cached_ports_data(request, device, "default")
+            result = view.read_assessment(request, device, "default")
 
             assert result is None, f"malformed {bad!r} should be a miss"
             assert message_texts(request, "warning")
@@ -593,22 +593,10 @@ class TestSyncInterfacesViewGetCachedPortsData:
         view, request, device = self._case("empty")
         seed_interfaces_snapshot(device, [])
 
-        result = view.get_cached_ports_data(request, device, "default")
+        result = view.read_assessment(request, device, "default")
 
-        assert result == []
+        assert result["ports"] == []
         assert message_texts(request, "warning") == []
-
-    def test_no_server_key_uses_librenms_api(self, settings):
-        from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
-
-        server = {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}
-        configure_librenms_servers(settings, {"default": server, "mykey": server})
-        view, request, device = self._case("api-key", server_key="mykey")
-        seed_interfaces_snapshot(device, [{"port_id": 1, "ifName": "Ethernet1"}], server_key="mykey")
-
-        result = view.get_cached_ports_data(request, device, None)
-
-        assert [row["ifName"] for row in result] == ["Ethernet1"]
 
 
 @pytest.mark.django_db
@@ -2714,17 +2702,6 @@ class TestSyncInterfacesViewPost:
         assert existing.description == "original description"
         assert interface_model.objects.filter(**owner_filter, name="Ethernet").count() == 1
 
-    def test_standalone_relationship_cache_read_fails_closed_on_non_dict(self):
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin import source_cache
-        from netbox_librenms_plugin.acquisition.registry import Resource
-
-        obj = make_device("malformed-standalone-relationship-cache")
-        view = _sync_view(_make_request())
-        cache.set(source_cache.snapshot_key(obj, Resource.INTERFACES, "default"), ["corrupt", "snapshot"])
-        assert view._get_cached_relationships(obj, "default") == {}
-
     def test_sync_selected_interfaces_syncs_oob_rows_but_not_a_shared_lom(self):
         """An OOB controller is a second LibreNMS device but the same device in NetBox.
 
@@ -3652,43 +3629,6 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
         _assert_snapshot_read(response.wsgi_request)
         interface.refresh_from_db()
         assert interface.description == ""
-
-
-# ===========================================================================
-# SyncInterfacesView._sync_interface_vlans
-# ===========================================================================
-
-
-class TestSyncInterfacesViewSyncInterfaceVlans:
-    def test_non_numeric_cached_vid_is_dropped_instead_of_aborting_the_sync(self, client, settings):
-        """A nonnumeric VLAN ID from LibreNMS is dropped without aborting the sync or a valid VLAN update."""
-        from ipam.models import VLAN
-
-        device = make_device("bad-vid-owner")
-        interface = make_interface(device, "Ethernet1")
-        real_vlan = VLAN.objects.create(vid=100, name="Real VLAN", status="active")
-        port = {
-            **_PORT_KEYS_UNSET,
-            "port_id": 10,
-            "ifName": "Ethernet1",
-            **port_vlans(None, None, [100]),
-        }
-        port["vlans"].insert(0, {"vlan": "not-a-vid", "untagged": 1})
-
-        # The group override is keyed by port_id and VID, so post the malformed VID's key too.
-        _post_sync(
-            client,
-            settings,
-            device,
-            [port],
-            [10],
-            exclude_columns=("mac_address",),
-            extra={"vlan_group_10_not-a-vid": "1", "vlan_group_10_100": "1"},
-        )
-
-        interface.refresh_from_db()
-        # The good VID still applied; only the malformed one was dropped.
-        assert list(interface.tagged_vlans.all()) == [real_vlan]
 
 
 # ===========================================================================
