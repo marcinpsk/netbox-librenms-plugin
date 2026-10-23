@@ -688,7 +688,7 @@ class TestIPAddressHTTPAndORM:
         ],
         ids=["not-an-envelope", "old-enriched-payload"],
     )
-    def test_a_payload_of_another_shape_reads_as_no_snapshot_and_is_deleted(self, live_librenms, payload):
+    def test_a_payload_of_another_shape_reads_as_no_snapshot(self, live_librenms, payload):
         from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
 
         device, _interface = self._device()
@@ -698,7 +698,8 @@ class TestIPAddressHTTPAndORM:
         cache.set(key, payload, timeout=300)
 
         assert view._prepare_context(request, device, "default") is None
-        assert cache.get(key) is None
+        # A read never deletes: a concurrent refresh can store a new snapshot under the same key.
+        assert cache.get(key) == payload
 
 
 class TestBaseClassContracts:

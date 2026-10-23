@@ -59,8 +59,9 @@ class _Fetch:
         return self.responses[endpoint.request.key]
 
 
-def _owner(subject, spec, server_key):
-    if spec.owner_policy is OwnerPolicy.SUBJECT:
+def resource_owner(subject, resource, server_key):
+    """Return the object a resource is acquired for: the subject, or its Virtual Chassis sync owner."""
+    if RESOURCE_SPECS[resource].owner_policy is OwnerPolicy.SUBJECT:
         return subject
     return get_librenms_sync_device(subject, server_key=server_key) or subject
 
@@ -86,6 +87,7 @@ def acquire(subject, *, server_key, resources):
 
     """
     require_server_key(server_key)
+    resources = tuple(resources)
     api = build_librenms_api(server_key)
     if api is None or api.server_key != server_key:
         raise ValueError(f"LibreNMS server {server_key!r} is not configured.")
@@ -99,7 +101,7 @@ def acquire(subject, *, server_key, resources):
     fetch = _Fetch(api)
     sources = {}
     for resource in resources:
-        owner = _owner(subject, RESOURCE_SPECS[resource], server_key)
+        owner = resource_owner(subject, resource, server_key)
         librenms_id = read_mapping(owner).own_id(server_key)
         if librenms_id is None:
             raise SubjectNotMapped(owner, server_key)
