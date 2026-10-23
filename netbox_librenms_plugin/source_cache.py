@@ -48,7 +48,12 @@ def refresh(subject, resource, server_key):
     blocked = blocked_scopes(snapshot, resource)
     if store(subject, resource, snapshot):
         return Refresh(snapshot, blocked=blocked)
-    return Refresh(snapshot, next(iter(blocked.values()))[0].message, blocked)
+    return Refresh(snapshot, blocker_notice(blocker for blockers in blocked.values() for blocker in blockers), blocked)
+
+
+def blocker_notice(blockers):
+    """Return one notice that names each failed source once."""
+    return "; ".join(dict.fromkeys(blocker.message for blocker in blockers))
 
 
 def store(subject, resource, snapshot):
