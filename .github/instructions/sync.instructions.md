@@ -31,7 +31,7 @@ The interfaces, cables, IP and VLAN tabs follow: **acquire → store → assess 
   LibreNMS responses with no request or user, reads the mapping and writes nothing. It returns a
   `SourceSnapshot`: each response with its outcome. `snapshot.value(resource, part)` raises
   `IncompleteSource` for a part that was not obtained; never read a failed part as an empty list.
-- **Store:** `source_cache.refresh()` runs after discovery and stores the snapshot under the
+- **Store:** `source_cache.refresh(request, subject, resource, server_key)` runs after discovery and stores the snapshot under the
   `CacheMixin` key; `source_cache.read()` is the one reader for the tab, the verify views and the sync.
 - **Assess:** derive the rows at read time, for the current user. The snapshot holds source facts only.
   The snapshot's `finished_at` is the tab's "last updated" time.
@@ -41,11 +41,13 @@ The interfaces, cables, IP and VLAN tabs follow: **acquire → store → assess 
 
 - **Cables:** host and OOB rows each need their own links and ports. A failed neighbour ports request
   blocks only that neighbour's rows. The 15 second neighbour budget records omitted requests as failed.
-  `source_cache.refresh(..., request=request)` checks ConsoleServerPort visibility before it enables
-  serial acquisition. Serial rows need obtained sensors and a valid projection. A refresh never carries
-  old serial rows forward. Names, aliases, port records and row IDs are assessed on each read.
+  `source_cache.refresh()` checks ConsoleServerPort visibility before it enables serial acquisition.
+  Each read checks the actor's visibility again. Serial rows need obtained sensors and a valid
+  projection. Unrequested sensors do not produce a warning. A refresh never carries old serial rows
+  forward. Names, aliases, port records and row IDs are assessed on each read.
   The tab, verify, sync, picker and far-end creation read through `source_cache.read()`.
-  Manual picks bind to `snapshot_id`. An expired picker asks for a refresh.
+  Sync and far-end creation use the stored port evidence. Missing evidence requires a refresh.
+  Manual picks bind to `snapshot_id` and use the owner's snapshot key. An expired picker asks for a refresh.
 
 The modules tab still follows **fetch → cache → compare → render**:
 
