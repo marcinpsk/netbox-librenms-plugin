@@ -8,8 +8,6 @@ snapshot already carries, so the count is complete even when no member is on the
 table render and the single-row verify read the same definition.
 """
 
-import json
-
 import pytest
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, stamp_rule_decision
@@ -30,7 +28,6 @@ def _port(port_id, name, if_type="ethernetCsmacd"):
         "ifMtu": 1500,
         "ifAdminStatus": "up",
         "ifPhysAddress": "",
-        "_source": "host",
     }
 
 
@@ -51,8 +48,17 @@ RELATIONSHIPS = {
 }
 
 
+def _seed_snapshot(device):
+    """Store the raw LibreNMS facts from which the assessment derives :data:`RELATIONSHIPS`."""
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import interface_rows, port_pair, seed_interfaces_snapshot
+
+    seed_interfaces_snapshot(device, PORTS, [port_pair(11, 10), port_pair(12, 10)], server_key=SERVER_KEY)
+    relationships = interface_rows(device)["port_stack_relationships"]
+    assert {key: relationships[key] for key in RELATIONSHIPS} == RELATIONSHIPS
+
+
 def _cached_data(relationships=None, ports=None):
-    """Return the cached LibreNMS snapshot shape the table and the verify view both read."""
+    """Return the assessed rows and relationships, in the shape the relationship enrichment reads."""
     return {
         "ports": [dict(port) for port in (ports if ports is not None else PORTS)],
         "port_stack_relationships": relationships if relationships is not None else RELATIONSHIPS,
@@ -102,7 +108,6 @@ def _render_tab(device, rows, *, per_page=None, table_class=None):
             "virtual_chassis_members": [],
             "cache_expiry": None,
             "oob_incomplete": False,
-            "relationship_data_incomplete": False,
         },
         "interface_name_field": "ifName",
         "migrated_to_marker": False,
@@ -299,16 +304,14 @@ class TestTheRealTabRendersIt:
     The whole interfaces tab, through the real view.
 
     Every other render case in this file enriches the rows itself, so it would stay green if the
-    view stopped enriching at all. This one seeds only the cache and asks the device's sync page
+    view stopped enriching at all. This one seeds only the snapshot and asks the device's sync page
     for the interfaces tab, so it fails if any link in the production chain drops the badge.
     """
 
     def test_the_interfaces_tab_badges_the_aggregate(self):
-        from django.core.cache import cache
         from django.test import Client
 
         from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
-        from netbox_librenms_plugin.views.mixins import CacheMixin
 
         device = make_device("member-badge-e2e")
         interface = make_interface(device, "ae0", iface_type="lag")
@@ -316,7 +319,7 @@ class TestTheRealTabRendersIt:
         interface.save()
         seed_mapping(device, SERVER_KEY, own=4242, save=False)
         device.save()
-        cache.set(CacheMixin().get_cache_key(device, "ports", SERVER_KEY), _cached_data(), 300)
+        _seed_snapshot(device)
 
         client = Client()
         client.force_login(make_superuser("member-badge-e2e-user"))
@@ -332,42 +335,33 @@ class TestTheRealTabRendersIt:
 class TestTheVerifyPathAgrees:
     """A single-row verify re-renders the same cell, so it must re-derive the same badge."""
 
-    def test_an_inline_verify_keeps_the_member_badge(self):
-        from django.core.cache import cache
+    def test_an_inline_verify_keeps_the_member_badge(self, client, settings):
+        from django.urls import reverse
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser
-        from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
+        from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server
+        from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
 
+        configure_default_librenms_server(settings)
         device = make_device("member-badge-verify")
         interface = make_interface(device, "ae0")
         seed_mapping(interface, SERVER_KEY, own=10, save=False)
         interface.save()
+        _seed_snapshot(device)
+        client.force_login(make_superuser("member-badge-verify-user"))
 
-        view = SingleInterfaceVerifyView()
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = SERVER_KEY
-        view._librenms_api = api
-        cache.set(view.get_cache_key(device, "ports", SERVER_KEY), _cached_data())
-
-        request = make_request(
-            "post",
-            json.dumps(
-                {
-                    "device_id": device.pk,
-                    "interface_name": "ae0",
-                    "interface_name_field": "ifName",
-                    "port_id": 10,
-                }
-            ),
-            user=make_superuser("member-badge-verify-user"),
-            path="/verify/",
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:verify_interface"),
+            {
+                "device_id": device.pk,
+                "interface_name": "ae0",
+                "interface_name_field": "ifName",
+                "port_id": 10,
+                "server_key": SERVER_KEY,
+            },
             content_type="application/json",
         )
-        view.setup(request)
-        response = view.post(request)
 
         assert response.status_code == 200
-        parent_cell = json.loads(response.content)["formatted_row"]["parent"]
+        parent_cell = response.json()["formatted_row"]["parent"]
         assert "</i>2 members</span>" in parent_cell
         assert "</i>1 sub-interface</span>" in parent_cell

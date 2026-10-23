@@ -17,16 +17,14 @@ import pytest
 from dcim.models import Interface, Platform
 from django.contrib.messages import get_messages
 from django.core.exceptions import ValidationError
-from django.core.cache import cache
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from extras.validators import CustomValidator
 from ipam.models import IPAddress
 
-from netbox_librenms_plugin.models import InterfaceTypeMapping
+from netbox_librenms_plugin.models import InterfaceTypeMapping, PortStackLagPattern
 from netbox_librenms_plugin.server_mappings import read_mapping
-from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.tests.conftest import (
     configure_default_librenms_server,
     make_device,
@@ -35,7 +33,12 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis_members,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
-from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot
+from netbox_librenms_plugin.tests.source_snapshot_helpers import (
+    ip_address_row,
+    port_pair,
+    seed_interfaces_snapshot,
+    seed_ip_snapshot,
+)
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
@@ -43,6 +46,7 @@ SERVER_KEY = "default"
 IGNORE = InterfaceTypeMapping.ACTION_IGNORE
 RULE_TABLE = "netbox_librenms_plugin_interfacetypemapping"
 PACKAGE = Path(__file__).resolve().parents[1]
+PO_LAG_OS = "rule-writes-po-lag"
 
 
 def _port(port_id, name, *, if_type="ethernetCsmacd", descr=None, speed=10_000_000_000):
@@ -77,10 +81,14 @@ def _bound(device, name, port_id, iface_type="other"):
     return interface
 
 
-def _seed(owner, ports, relationships=None):
-    cache_owner = get_librenms_sync_device(owner, server_key=SERVER_KEY) or owner
-    payload = {"ports": ports, "port_stack_relationships": relationships or {}}
-    cache.set(SyncInterfacesView().get_cache_key(cache_owner, "ports", SERVER_KEY), payload, timeout=300)
+def _seed(owner, ports, port_stack=(), *, os=None):
+    seed_interfaces_snapshot(owner, ports, port_stack, device=None if os is None else {"os": os}, server_key=SERVER_KEY)
+
+
+def _po_lag_os():
+    """Return a LibreNMS OS whose stored LAG name rule makes a ``PoN`` port an aggregate of any ifType."""
+    PortStackLagPattern.objects.get_or_create(librenms_os=PO_LAG_OS, lag_name_pattern=r"^Po\d+$")
+    return PO_LAG_OS
 
 
 def _sync(client, owner, *, select=(), sync_one=None, extra=None, htmx=False):
@@ -204,13 +212,14 @@ class TestAnIgnoredPortIsNeverWritten:
     def test_an_incomplete_port_record_asks_for_a_refresh(self, superuser_client):
         device = _device("rule-write-incomplete", _platform("rule-write-incomplete"))
         port = _port(100, "eth0")
-        del port["ifDescr"]
+        # The assessment fills a missing ifName or ifDescr with "", so only another key stays missing.
+        del port["ifSpeed"]
         _seed(device, [port])
 
         response = _sync(superuser_client, device, select=[100])
 
         assert not Interface.objects.filter(device=device).exists()
-        assert any("record has no ifDescr; refresh the data" in text for text in _messages(response))
+        assert any("record has no ifSpeed; refresh the data" in text for text in _messages(response))
 
 
 @pytest.mark.django_db
@@ -342,7 +351,7 @@ class TestAChassisRowNeedsItsOwner:
                 _port(20, "Po1", if_type="ieee8023adLag"),
                 _port(30, "Po1.100", if_type="l2vlan"),
             ],
-            {"lag_members": {10: 20}, "sub_interfaces": {30: 20}, "bridge_members": {}},
+            [port_pair(10, 20), port_pair(30, 20)],
         )
         # A forged member for the auto-added parent: the writer never reads it for that row.
         forged = [str(second.pk)] if posted_parent_member == "other-member" else [str(first.pk), str(second.pk)]
@@ -371,8 +380,9 @@ class TestAChassisRowNeedsItsOwner:
         first.save()
         _seed(
             first,
-            [_port(21, "Ethernet2.100", if_type="l2vlan"), _port(22, "Vlan100", if_type="propVirtual")],
-            {"lag_members": {}, "sub_interfaces": {21: 22}, "bridge_members": {}},
+            # An ipForward child is a sub-interface of its pair partner, whatever the names say.
+            [_port(21, "Ethernet2.100", if_type="ipForward"), _port(22, "Vlan100", if_type="propVirtual")],
+            [port_pair(21, 22)],
         )
 
         response = _sync(
@@ -417,7 +427,7 @@ def _lag_scenario(tag, ignored_pattern):
     _seed(
         device,
         [_port(10, "Gi0/1"), _port(20, "Po1", if_type="ieee8023adLag")],
-        {"lag_members": {10: 20}, "sub_interfaces": {}, "bridge_members": {}},
+        [port_pair(10, 20)],
     )
     return device, member, aggregate, other_lag
 
@@ -475,7 +485,7 @@ class TestRelationshipEdges:
                 _port(20, "Po1", if_type="ieee8023adLag"),
                 _port(30, "Po1.100", if_type="l2vlan"),
             ],
-            {"lag_members": {10: 20, 11: 20}, "sub_interfaces": {30: 20}, "bridge_members": {}},
+            [port_pair(10, 20), port_pair(11, 20), port_pair(30, 20)],
         )
 
         _sync(superuser_client, device, select=[30], extra={"auto_select_lag_members": "1"})
@@ -504,14 +514,12 @@ def _promotion_scenario(tag, *, relation, rule_type):
         source = _bound(device, "Gi0/1", 10, iface_type="1000base-t")
         target = _bound(device, "Po1", 20, iface_type="other")
         ports = [_port(10, "Gi0/1"), _port(20, "Po1", if_type="ieee8023adLag")]
-        relationships = {"lag_members": {10: 20}, "sub_interfaces": {}, "bridge_members": {}}
     else:
         rule = InterfaceTypeMapping.objects.create(platform=platform, name_pattern=r"\.10$", netbox_type=rule_type)
         source = _bound(device, "Gi0/1.10", 10, iface_type="other")
         target = _bound(device, "Gi0/1", 20, iface_type="1000base-t")
         ports = [_port(10, "Gi0/1.10", if_type="l2vlan"), _port(20, "Gi0/1")]
-        relationships = {"lag_members": {}, "sub_interfaces": {10: 20}, "bridge_members": {}}
-    _seed(device, ports, relationships)
+    _seed(device, ports, [port_pair(10, 20)])
     return device, rule, source, target
 
 
@@ -631,17 +639,20 @@ def _kept_link_scenario(tag, link, rule):
     if link == "aggregate":
         partner.lag = planned
         partner.save()
-        relationships = {"lag_members": {20: 10}, "sub_interfaces": {}, "bridge_members": {}}
     elif link == "lag-member":
         planned.lag = partner
         planned.save()
-        relationships = {"lag_members": {10: 20}, "sub_interfaces": {}, "bridge_members": {}}
     else:
         planned.parent = partner
         planned.save()
-        relationships = {"lag_members": {}, "sub_interfaces": {10: 20}, "bridge_members": {}}
     created = _planning_rule(tag, platform, planned_name, rule, rule_type)
-    _seed(device, [_port(10, planned_name, if_type=f"{tag}Type"), _port(20, partner_name)], relationships)
+    # Neither Po1 is typed ieee8023adLag, so the stored name rule of the OS makes it the aggregate.
+    _seed(
+        device,
+        [_port(10, planned_name, if_type=f"{tag}Type"), _port(20, partner_name)],
+        [port_pair(10, 20)],
+        os=_po_lag_os(),
+    )
     return device, planned, partner, created
 
 
@@ -857,10 +868,8 @@ class TestAKeptNoteShowsNetBoxsMessageOnlyToASuperuser:
 
 
 @pytest.mark.django_db
-def test_the_walk_decides_with_the_platform_read_under_the_lock():
+def test_the_walk_decides_with_the_platform_read_under_the_lock(settings):
     """A platform change after the request read the device, and before the lock, must not split the walk and the writer."""
-    from types import SimpleNamespace
-
     from dcim.models import Device
 
     from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
@@ -868,19 +877,12 @@ def test_the_walk_decides_with_the_platform_read_under_the_lock():
     platform_p, platform_q = _platform("rule-walk-lock-p"), _platform("rule-walk-lock-q")
     InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform_q, name_pattern="^Po1$")
     device = _device("rule-walk-lock", platform_p)
+    configure_default_librenms_server(settings)
     view = _PlatformMovesAfterTheRead(moved_to=platform_q)
-    view._librenms_api = SimpleNamespace(server_key=SERVER_KEY)
-    cache.set(
-        view.get_cache_key(device, "ports", SERVER_KEY),
-        {
-            "ports": [
-                _port(10, "Gi0/1"),
-                _port(20, "Po1", if_type="ieee8023adLag"),
-                _port(30, "Po1.100", if_type="l2vlan"),
-            ],
-            "port_stack_relationships": {"lag_members": {10: 20}, "sub_interfaces": {30: 20}, "bridge_members": {}},
-        },
-        timeout=300,
+    _seed(
+        device,
+        [_port(10, "Gi0/1"), _port(20, "Po1", if_type="ieee8023adLag"), _port(30, "Po1.100", if_type="l2vlan")],
+        [port_pair(10, 20), port_pair(30, 20)],
     )
     request = make_request("post", {"server_key": SERVER_KEY, "select": ["30"], "auto_select_lag_members": "1"})
     request.GET = request.GET.copy()
@@ -896,10 +898,8 @@ def test_the_walk_decides_with_the_platform_read_under_the_lock():
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("object_type", ["device", "virtualmachine"])
-def test_the_swapped_tab_renders_the_platform_the_writer_read(object_type):
+def test_the_swapped_tab_renders_the_platform_the_writer_read(settings, object_type):
     """The htmx response is rendered from the object as the sync locked it, not as the request first read it."""
-    from types import SimpleNamespace
-
     from netbox_librenms_plugin.tests.conftest import make_vm
     from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
 
@@ -912,13 +912,9 @@ def test_the_swapped_tab_renders_the_platform_the_writer_read(object_type):
         owner.platform = platform_p
         seed_stored_mapping(owner, {SERVER_KEY: {"id": 71}})
         owner.save()
+    configure_default_librenms_server(settings)
     view = _PlatformMovesAfterTheRead(moved_to=platform_q)
-    view._librenms_api = SimpleNamespace(server_key=SERVER_KEY)
-    cache.set(
-        view.get_cache_key(owner, "ports", SERVER_KEY),
-        {"ports": [_port(40, "eth0"), _port(41, "Vlan10", if_type="propVirtual")], "port_stack_relationships": {}},
-        timeout=300,
-    )
+    _seed(owner, [_port(40, "eth0"), _port(41, "Vlan10", if_type="propVirtual")])
     request = make_request("post", {"server_key": SERVER_KEY, "select": ["40"]}, HTTP_HX_REQUEST="true")
     request.GET = request.GET.copy()
     request.GET["interface_name_field"] = "ifName"
@@ -1054,7 +1050,9 @@ def test_a_sync_post_and_the_tab_it_renders_read_the_rules_once(superuser_client
 
     assert response.status_code == 200
     assert "Showing 1-10 of 10" in response.content.decode()
-    assert sum(RULE_TABLE in query["sql"] for query in queries.captured_queries) == 1
+    # The rows cache key counts the rule table with an aggregate; that query reads no rule.
+    rule_reads = [q for q in queries.captured_queries if RULE_TABLE in q["sql"] and "rows_cache_count" not in q["sql"]]
+    assert len(rule_reads) == 1
     assert Interface.objects.filter(device=device).count() == 2
 
 

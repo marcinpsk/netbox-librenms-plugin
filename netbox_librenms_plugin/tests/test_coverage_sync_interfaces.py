@@ -23,9 +23,16 @@ from netbox_librenms_plugin.tests.conftest import (
     make_interface,
     make_virtual_chassis_members,
     make_vm,
+    map_device_to_librenms,
 )
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, seed_ports
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
+from netbox_librenms_plugin.tests.source_snapshot_helpers import (
+    interface_rows,
+    port_pair,
+    port_vlans,
+    seed_interfaces_snapshot,
+)
 from netbox_librenms_plugin.tests.view_test_helpers import (
     grant,
     make_request,
@@ -58,8 +65,8 @@ def _make_request(post_data=None, get_data=None, user=None):
 
 
 def _vlan_row(port_id, interface):
-    """Return a cached row for *interface* that reports no VLANs."""
-    return {**_PORT_KEYS_UNSET, "port_id": port_id, "ifName": interface.name, "untagged_vlan": None, "tagged_vlans": []}
+    """Return a LibreNMS port row for *interface* that reports no VLANs."""
+    return {**_PORT_KEYS_UNSET, "port_id": port_id, "ifName": interface.name, **port_vlans()}
 
 
 def test_an_unreadable_vlan_scope_skips_the_vlan_write_instead_of_clearing_it(client, settings):
@@ -123,7 +130,7 @@ def test_a_constrained_vlan_grant_also_skips_the_vlan_write(client, settings):
 
 
 def _sync_view(request=None):
-    """The real SyncInterfacesView; only the LibreNMS client is stubbed."""
+    """The real SyncInterfacesView with the configured LibreNMS client."""
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
     view = make_view(SyncInterfacesView, request)
@@ -131,51 +138,71 @@ def _sync_view(request=None):
     return view
 
 
-def _post_sync(client, settings, owner, ports, port_ids, *, user=None, relationships=None, **post_kwargs):
+def _post_sync(client, settings, owner, ports, port_ids, *, user=None, port_stack=(), oob_ports=None, **post_kwargs):
     """Seed *ports* for *owner* and post its interface sync through the real URL, as *user* or a superuser."""
     from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
 
     configure_default_librenms_server(settings)
     client.force_login(user or make_superuser(f"{owner.name}-user"))
-    seed_ports(owner, ports, **(relationships or {}))
+    seed_ports(owner, ports, port_stack, oob_ports=oob_ports)
     return post_interface_sync(client, owner, port_ids, htmx=False, **post_kwargs)
 
 
-def _post_raw_snapshot(client, settings, owner, ports, relationships, port_ids):
-    """Cache *ports* with *relationships* stored as given, as a corrupt cache entry holds them, and post the sync."""
-    from django.core.cache import cache
-
-    from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
-    from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-    configure_default_librenms_server(settings)
-    client.force_login(make_superuser(f"{owner.name}-user"))
-    payload = {"ports": ports, "port_stack_relationships": relationships}
-    cache.set(SyncInterfacesView().get_cache_key(owner, "ports", "default"), payload, timeout=300)
-    return post_interface_sync(client, owner, port_ids, htmx=False)
+NO_SNAPSHOT_WARNING = "No cached data found. Please refresh the data before syncing."
 
 
-def _cache_relationship(view, obj, relation_field, source_id, related_id, source_name="", related_name=""):
-    """Seed the real VC-scoped cache snapshot required by an inline relationship POST."""
-    from django.core.cache import cache
+def _assert_snapshot_read(request):
+    """Assert the sync read a stored snapshot, so a refused write is not a missing seed."""
+    assert NO_SNAPSHOT_WARNING not in message_texts(request, "warning")
 
-    from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
-    cache_obj = get_librenms_sync_device(obj, server_key="default") or obj
-    cache_key = view.get_cache_key(cache_obj, "ports", "default")
-    relationships = {"lag_members": {}, "sub_interfaces": {}}
-    relationships[relation_field][source_id] = related_id
-    ports = [{**_PORT_KEYS_UNSET, "port_id": source_id, "ifName": source_name or f"port-{source_id}"}]
-    if related_id != source_id:
-        ports.append({**_PORT_KEYS_UNSET, "port_id": related_id, "ifName": related_name or f"port-{related_id}"})
-    cache.set(
-        cache_key,
+# The LibreNMS ID of the OOB controller that a test links on the owner, so a seed can carry OOB rows.
+OOB_ID = 9900
+
+
+def _link_oob(device):
+    """Link an OOB controller on the device's mapping and return the device."""
+    return map_device_to_librenms(device, server_key="default", oob={"id": OOB_ID, "type": "idrac"})
+
+
+def _relationship_ports(relation_field, source_id, related_id, source_name="", related_name=""):
+    """Return the raw ports and the port_stack pair from which the assessment derives one LAG or parent edge."""
+    # A LAG member pairs with a LAG aggregate; an L3 port pairs with its parent as a sub-interface.
+    source_type, related_type = {
+        "lag_members": ("ethernetCsmacd", "ieee8023adLag"),
+        "sub_interfaces": ("ipForward", "ethernetCsmacd"),
+    }[relation_field]
+    ports = [
+        {**_PORT_KEYS_UNSET, "port_id": source_id, "ifName": source_name or f"port-{source_id}", "ifType": source_type},
         {
-            "ports": ports,
-            "port_stack_relationships": relationships,
+            **_PORT_KEYS_UNSET,
+            "port_id": related_id,
+            "ifName": related_name or f"port-{related_id}",
+            "ifType": related_type,
         },
-    )
-    return cache_key
+    ]
+    return ports, [port_pair(source_id, related_id)]
+
+
+def _seed_relationship(obj, relation_field, source_id, related_id, source_name="", related_name=""):
+    """Seed the interfaces snapshot of *obj* with the raw facts of one LAG or parent edge."""
+    ports, port_stack = _relationship_ports(relation_field, source_id, related_id, source_name, related_name)
+    return seed_interfaces_snapshot(obj, ports, port_stack)
+
+
+def _render(request, obj, interface_name_field="ifName"):
+    """Render the interface table of *obj* from its stored snapshot; return the context and the table rows."""
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+
+    view = make_view(DeviceInterfaceTableView, request)
+    context = view.get_context_data(request, obj, interface_name_field, "default")
+    return context, [row.record for row in context["table"].rows]
+
+
+def _row(rows, port_id):
+    """Return the one row of *rows* with *port_id*."""
+    (row,) = [row for row in rows if row["port_id"] == port_id]
+    return row
 
 
 # ===========================================================================
@@ -216,8 +243,6 @@ class TestSyncInterfaceParentViewPermissions:
     """Exercise the object-type-specific parent endpoint with real rows and grants."""
 
     def test_vm_post_links_real_vminterfaces(self):
-        from types import SimpleNamespace
-
         from virtualization.models import VirtualMachine, VMInterface
 
         from netbox_librenms_plugin.tests.conftest import make_vm
@@ -238,9 +263,8 @@ class TestSyncInterfaceParentViewPermissions:
             {"port_id": "10", "parent_port_id": "11", "parent_name": "Ethernet1"},
             user=user,
         )
-        view = SyncInterfaceParentView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        _cache_relationship(view, vm, "sub_interfaces", 10, 11, child.name, parent.name)
+        view = make_view(SyncInterfaceParentView)
+        _seed_relationship(vm, "sub_interfaces", 10, 11, child.name, parent.name)
 
         response = _post(view, request, object_type="virtualmachine", object_id=vm.pk)
 
@@ -523,71 +547,68 @@ class TestSyncInterfacesViewGetSelectedPortIds:
 class TestSyncInterfacesViewGetCachedPortsData:
     @staticmethod
     def _case(tag, server_key="default"):
-        from types import SimpleNamespace
-
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device(f"cached-ports-{tag}")
         request = _make_request()
-        view = make_view(SyncInterfacesView, request)
-        view._librenms_api = SimpleNamespace(server_key=server_key)
+        view = make_view(SyncInterfacesView, request, librenms_api=LibreNMSAPI(server_key=server_key))
         return view, request, device
 
     def test_cache_miss_warns_and_returns_none(self):
-        from django.core.cache import cache
-
         view, request, device = self._case("miss")
-        cache.delete(view.get_cache_key(device, "ports", "default"))
         result = view.get_cached_ports_data(request, device, "default")
 
         assert result is None
         assert message_texts(request, "warning")
 
     def test_cache_hit_returns_ports(self):
-        from django.core.cache import cache
-
         view, request, device = self._case("hit")
-        ports = [{"ifName": "Gi0/1"}]
-        cache.set(view.get_cache_key(device, "ports", "default"), {"ports": ports})
+        seed_interfaces_snapshot(device, [{"port_id": 1, "ifName": "Gi0/1"}])
 
         result = view.get_cached_ports_data(request, device, "default")
 
-        assert result == ports
+        assert [(row["port_id"], row["ifName"], row["_source"]) for row in result] == [(1, "Gi0/1", "main")]
+        # The relationships and the snapshot state come from the same assessment as the rows.
+        assert view._cached_ports_payload["ports"] is result
+        assert view._cached_ports_payload["oob_incomplete"] is False
 
     def test_malformed_cached_ports_treated_as_miss(self):
-        """A stale/malformed cache entry (ports not a list of dicts, e.g."""
+        """An unusable payload under the snapshot key reads as no snapshot, so the sync asks for a refresh."""
         from django.core.cache import cache
 
-        for index, bad in enumerate(({"ports": None}, {"ports": "oops"}, {"ports": [None]}, ["not-a-dict"])):
+        from netbox_librenms_plugin import source_cache
+        from netbox_librenms_plugin.acquisition.registry import Resource
+
+        for index, bad in enumerate(({"ports": None}, "oops", [None], ["not-a-dict"])):
             view, request, device = self._case(f"malformed-{index}")
-            cache.set(view.get_cache_key(device, "ports", "default"), bad)
+            cache.set(source_cache.snapshot_key(device, Resource.INTERFACES, "default"), bad)
             result = view.get_cached_ports_data(request, device, "default")
 
             assert result is None, f"malformed {bad!r} should be a miss"
             assert message_texts(request, "warning")
 
-    def test_dict_without_ports_key_is_noop_not_miss(self):
-        """A cached dict that simply lacks a 'ports' key is a harmless empty no-op (historical behavior), not a 'refresh first' abort — only PRESENT-but-malformed ports fail closed."""
-        from django.core.cache import cache
+    def test_an_empty_snapshot_is_a_noop_not_a_miss(self):
+        """A device with no ports is a harmless empty no-op, not a 'refresh first' abort."""
+        view, request, device = self._case("empty")
+        seed_interfaces_snapshot(device, [])
 
-        for index, empty in enumerate(({}, {"librenms_id": 5}, {"ports": []})):
-            view, request, device = self._case(f"empty-{index}")
-            cache.set(view.get_cache_key(device, "ports", "default"), empty)
-            result = view.get_cached_ports_data(request, device, "default")
+        result = view.get_cached_ports_data(request, device, "default")
 
-            assert result == [], f"{empty!r} should be an empty no-op, not a miss"
-            assert message_texts(request, "warning") == []
+        assert result == []
+        assert message_texts(request, "warning") == []
 
-    def test_no_server_key_uses_librenms_api(self):
-        from django.core.cache import cache
+    def test_no_server_key_uses_librenms_api(self, settings):
+        from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
 
+        server = {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}
+        configure_librenms_servers(settings, {"default": server, "mykey": server})
         view, request, device = self._case("api-key", server_key="mykey")
-        expected_key = view.get_cache_key(device, "ports", "mykey")
-        cache.set(expected_key, {"ports": [{"ifName": "Ethernet1"}]})
+        seed_interfaces_snapshot(device, [{"port_id": 1, "ifName": "Ethernet1"}], server_key="mykey")
 
         result = view.get_cached_ports_data(request, device, None)
 
-        assert result == [{"ifName": "Ethernet1"}]
+        assert [row["ifName"] for row in result] == ["Ethernet1"]
 
 
 @pytest.mark.django_db
@@ -612,54 +633,25 @@ class TestInterfaceContextOOBRows:
         return device
 
     def test_unbound_interface_named_by_oob_row_remains_netbox_only(self):
-        from django.core.cache import cache
-        from django.utils import timezone
-
         view = self._make_view()
-        obj = self._host_with_idrac()
-        cached = {"ports": [{"ifName": "idrac0", "_source": "oob", "port_id": 999}]}
-        req = _make_request()
+        obj = _link_oob(self._host_with_idrac())
+        seed_interfaces_snapshot(obj, [], oob_ports=[{"ifName": "idrac0", "port_id": 999}])
 
-        cache_key = view.get_cache_key(obj, "ports", "default")
-        last_fetched_key = view.get_last_fetched_key(obj, "ports", "default")
-        cache.set(cache_key, cached)
-        cache.set(last_fetched_key, timezone.now())
-        try:
-            ctx = view.get_context_data(req, obj, "ifName", "default")
-        finally:
-            cache.delete(cache_key)
-            cache.delete(last_fetched_key)
+        ctx = view.get_context_data(_make_request(), obj, "ifName", "default")
 
         names = {i["name"] for i in ctx["netbox_only_interfaces"]}
         assert "idrac0" in names
 
     def test_unbound_interface_named_by_derived_oob_row_remains_netbox_only(self):
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
-
-        device = make_device("oob-derived-name-adoption")
+        device = _link_oob(make_device("oob-derived-name-adoption"))
         make_interface(device, "eth0-oob")
-        snapshot = {
-            "ports": [
-                {"port_id": 9301, "ifName": "eth0", "ifType": "ethernetCsmacd"},
-                {"port_id": 9302, "ifName": "eth0", "ifType": "ethernetCsmacd", "_source": "oob"},
-            ]
-        }
-        request = _make_request()
-        view = DeviceInterfaceTableView()
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        view._librenms_api = api
-        view.request = request
-
-        context = view.get_context_data(
-            request,
+        seed_interfaces_snapshot(
             device,
-            "ifName",
-            "default",
-            fresh_data=snapshot,
-            sync_device=device,
+            [{"port_id": 9301, "ifName": "eth0", "ifType": "ethernetCsmacd"}],
+            oob_ports=[{"port_id": 9302, "ifName": "eth0", "ifType": "ethernetCsmacd"}],
         )
+
+        context, _rows = _render(_make_request(), device)
 
         netbox_only_names = {interface["name"] for interface in context["netbox_only_interfaces"]}
         assert "eth0-oob" in netbox_only_names
@@ -670,30 +662,26 @@ class TestInterfaceContextOOBRows:
         The name field is switchable while the cached snapshot is not, so the flag is derived per
         render. This walks the whole path: snapshot -> get_context_data -> rendered column.
         """
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
-
-        device = make_device("oob-collision-context")
-        snapshot = {
-            "ports": [
+        device = _link_oob(make_device("oob-collision-context"))
+        seed_interfaces_snapshot(
+            device,
+            [
                 {"port_id": 9401, "ifName": "eth0", "ifType": "ethernetCsmacd"},
-                {"port_id": 9402, "ifName": "eth0", "ifType": "ethernetCsmacd", "_source": "oob"},
-                {"port_id": 9403, "ifName": "bmc0", "ifType": "ethernetCsmacd", "_source": "oob"},
                 {"port_id": 9404, "ifName": "eth1", "ifType": "ethernetCsmacd"},
                 {"port_id": 9405, "ifName": "eth1-oob", "ifType": "ethernetCsmacd"},
-                {"port_id": 9406, "ifName": "eth1", "ifType": "ethernetCsmacd", "_source": "oob"},
-            ]
-        }
-        request = _make_request()
-        view = DeviceInterfaceTableView()
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        view._librenms_api = api
-        view.request = request
+            ],
+            oob_ports=[
+                {"port_id": 9402, "ifName": "eth0", "ifType": "ethernetCsmacd"},
+                {"port_id": 9403, "ifName": "bmc0", "ifType": "ethernetCsmacd"},
+                {"port_id": 9406, "ifName": "eth1", "ifType": "ethernetCsmacd"},
+            ],
+        )
 
-        context = view.get_context_data(request, device, "ifName", "default", fresh_data=snapshot, sync_device=device)
+        context, rows = _render(_make_request(), device)
 
-        host_row, collided_oob_row, free_oob_row, _, _, contested_oob_row = snapshot["ports"]
+        host_row, collided_oob_row, free_oob_row, contested_oob_row = (
+            _row(rows, port_id) for port_id in (9401, 9402, 9403, 9406)
+        )
         assert host_row["synced_name"] == "eth0"
         assert host_row["synced_name_is_derived"] is False
         assert collided_oob_row["synced_name"] == "eth0-oob"
@@ -714,9 +702,6 @@ class TestInterfaceContextOOBRows:
     def test_host_name_on_another_chassis_member_does_not_mark_oob_collision(self):
         from dcim.models import VirtualChassis
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
-
         master = make_device("oob-collision-scope-master")
         member = make_device("oob-collision-scope-member")
         chassis = VirtualChassis.objects.create(name="oob-collision-scope", master=master)
@@ -727,137 +712,75 @@ class TestInterfaceContextOOBRows:
         host_interface = make_interface(member, "eth0")
         seed_mapping(host_interface, own=9401, save=False)
         host_interface.save()
-        snapshot = {
-            "ports": [
-                {"port_id": 9401, "ifName": "eth0", "ifType": "ethernetCsmacd"},
-                {"port_id": 9402, "ifName": "eth0", "ifType": "ethernetCsmacd", "_source": "oob"},
-            ]
-        }
-        request = _make_request()
-        view = DeviceInterfaceTableView()
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        view._librenms_api = api
-        view.request = request
+        _link_oob(master)
+        seed_interfaces_snapshot(
+            master,
+            [{"port_id": 9401, "ifName": "eth0", "ifType": "ethernetCsmacd"}],
+            oob_ports=[{"port_id": 9402, "ifName": "eth0", "ifType": "ethernetCsmacd"}],
+        )
 
-        view.get_context_data(request, master, "ifName", "default", fresh_data=snapshot, sync_device=master)
+        _context, rows = _render(_make_request(), master)
 
-        assert snapshot["ports"][1]["synced_name"] == "eth0"
-        assert snapshot["ports"][1]["synced_name_is_derived"] is False
-        assert snapshot["ports"][1]["synced_name_contested"] is False
-        assert snapshot["ports"][1]["selected_object_id"] == master.pk
+        oob_row = _row(rows, 9402)
+        assert oob_row["synced_name"] == "eth0"
+        assert oob_row["synced_name_is_derived"] is False
+        assert oob_row["synced_name_contested"] is False
+        assert oob_row["selected_object_id"] == master.pk
 
     def test_switching_the_name_field_re_evaluates_the_collision(self):
         """ifName and ifDescr are different namespaces, so a collision under one is not one under the other."""
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+        device = _link_oob(make_device("oob-collision-field-switch"))
+        seed_interfaces_snapshot(
+            device,
+            [{"port_id": 9501, "ifName": "eth0", "ifDescr": "host-uplink", "ifType": "ethernetCsmacd"}],
+            oob_ports=[{"port_id": 9502, "ifName": "eth0", "ifDescr": "bmc-nic", "ifType": "ethernetCsmacd"}],
+        )
 
-        device = make_device("oob-collision-field-switch")
-        snapshot = {
-            "ports": [
-                {"port_id": 9501, "ifName": "eth0", "ifDescr": "host-uplink", "ifType": "ethernetCsmacd"},
-                {
-                    "port_id": 9502,
-                    "ifName": "eth0",
-                    "ifDescr": "bmc-nic",
-                    "ifType": "ethernetCsmacd",
-                    "_source": "oob",
-                },
-            ]
-        }
-        request = _make_request()
-        view = DeviceInterfaceTableView()
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        view._librenms_api = api
-        view.request = request
+        _context, rows = _render(_make_request(), device, "ifName")
+        assert _row(rows, 9502)["synced_name"] == "eth0-oob"
+        assert _row(rows, 9502)["synced_name_is_derived"] is True
 
-        view.get_context_data(request, device, "ifName", "default", fresh_data=snapshot, sync_device=device)
-        assert snapshot["ports"][1]["synced_name"] == "eth0-oob"
-        assert snapshot["ports"][1]["synced_name_is_derived"] is True
-
-        view.get_context_data(request, device, "ifDescr", "default", fresh_data=snapshot, sync_device=device)
-        assert snapshot["ports"][1]["synced_name"] == "bmc-nic"
-        assert snapshot["ports"][1]["synced_name_is_derived"] is False
+        _context, rows = _render(_make_request(), device, "ifDescr")
+        assert _row(rows, 9502)["synced_name"] == "bmc-nic"
+        assert _row(rows, 9502)["synced_name_is_derived"] is False
 
     def test_rejected_derived_name_shows_why_the_row_cannot_sync(self):
         from dcim.models import Interface
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
-
-        device = make_device("oob-rejected-derived-name")
+        device = _link_oob(make_device("oob-rejected-derived-name"))
         limit = Interface._meta.get_field("name").max_length
         name = "x" * limit
-        snapshot = {
-            "ports": [
-                {"port_id": 9601, "ifName": name, "ifType": "ethernetCsmacd"},
-                {"port_id": 9602, "ifName": name, "ifType": "ethernetCsmacd", "_source": "oob"},
-            ]
-        }
-        request = _make_request()
-        view = DeviceInterfaceTableView()
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        view._librenms_api = api
-        view.request = request
-
-        context = view.get_context_data(
-            request,
+        seed_interfaces_snapshot(
             device,
-            "ifName",
-            "default",
-            fresh_data=snapshot,
-            sync_device=device,
+            [{"port_id": 9601, "ifName": name, "ifType": "ethernetCsmacd"}],
+            oob_ports=[{"port_id": 9602, "ifName": name, "ifType": "ethernetCsmacd"}],
         )
 
-        oob_row = snapshot["ports"][1]
-        rendered = str(context["table"].render_parent(None, oob_row))
+        context, rows = _render(_make_request(), device)
+
+        rendered = str(context["table"].render_parent(None, _row(rows, 9602)))
         assert f"derived interface name is longer than the {limit} characters NetBox stores" in rendered
         assert "not synced" in rendered
 
     def test_shared_lom_does_not_promise_a_derived_sync_name(self):
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
-
-        device = make_device("oob-shared-lom-derived-pill")
-        snapshot = {
-            "ports": [
-                {"port_id": 9701, "ifName": "eth0", "ifType": "ethernetCsmacd"},
-                {
-                    "port_id": 9702,
-                    "ifName": "eth0",
-                    "ifType": "ethernetCsmacd",
-                    "_source": "oob",
-                    "_dedup_conflict": True,
-                },
-            ]
-        }
-        request = _make_request()
-        view = DeviceInterfaceTableView()
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        view._librenms_api = api
-        view.request = request
-
-        context = view.get_context_data(
-            request,
+        device = _link_oob(make_device("oob-shared-lom-derived-pill"))
+        # One MAC that the host and the OOB controller both report is a shared LOM port.
+        mac = "aa:bb:cc:00:97:01"
+        seed_interfaces_snapshot(
             device,
-            "ifName",
-            "default",
-            fresh_data=snapshot,
-            sync_device=device,
+            [{"port_id": 9701, "ifName": "eth0", "ifType": "ethernetCsmacd", "ifPhysAddress": mac}],
+            oob_ports=[{"port_id": 9702, "ifName": "eth0", "ifType": "ethernetCsmacd", "ifPhysAddress": mac}],
         )
 
-        shared_lom = snapshot["ports"][1]
+        context, rows = _render(_make_request(), device)
+
+        shared_lom = _row(rows, 9702)
+        assert shared_lom["_dedup_conflict"] is True
         rendered = str(context["table"].render_parent(None, shared_lom))
         assert "Shared LOM" in rendered
         assert "Will sync as" not in rendered
 
     def test_name_fallback_does_not_match_an_interface_bound_to_another_port(self):
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
-
         device = make_device("table-conflicting-port-id")
         wrong_interface = make_interface(device, "Ethernet1")
         aggregate = make_interface(device, "Port-Channel1", iface_type="lag")
@@ -865,80 +788,44 @@ class TestInterfaceContextOOBRows:
         seed_mapping(aggregate, own=40, save=False)
         wrong_interface.save()
         aggregate.save()
-        snapshot = {
-            "ports": [
+        seed_interfaces_snapshot(
+            device,
+            [
                 {"port_id": 20, "ifName": "Ethernet1", "ifType": "ethernetCsmacd"},
                 {"port_id": 40, "ifName": "Port-Channel1", "ifType": "ieee8023adLag"},
             ],
-            "port_stack_relationships": {
-                "lag_members": {20: 40},
-                "sub_interfaces": {},
-            },
-        }
-        request = _make_request()
-        view = DeviceInterfaceTableView()
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        view._librenms_api = api
-        view.request = request
-
-        context = view.get_context_data(
-            request,
-            device,
-            "ifName",
-            "default",
-            fresh_data=snapshot,
-            sync_device=device,
+            [port_pair(20, 40)],
         )
 
-        row = snapshot["ports"][0]
+        context, rows = _render(_make_request(), device)
+
+        row = _row(rows, 20)
         assert row["exists_in_netbox"] is False
         assert row["netbox_interface"] is None
         assert "lag-sync-btn" not in str(context["table"].render_parent(None, row))
 
     def test_relationship_button_is_hidden_when_related_interface_does_not_exist(self):
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
-
         device = make_device("table-missing-related-interface")
         source = make_interface(device, "Ethernet1")
         seed_mapping(source, own=10, save=False)
         source.save()
-        snapshot = {
-            "ports": [
+        seed_interfaces_snapshot(
+            device,
+            [
                 {"port_id": 10, "ifName": "Ethernet1", "ifType": "ethernetCsmacd"},
                 {"port_id": 20, "ifName": "Port-Channel1", "ifType": "ieee8023adLag"},
             ],
-            "port_stack_relationships": {
-                "lag_members": {10: 20},
-                "sub_interfaces": {},
-            },
-        }
-        request = _make_request()
-        view = DeviceInterfaceTableView()
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        view._librenms_api = api
-        view.request = request
-
-        context = view.get_context_data(
-            request,
-            device,
-            "ifName",
-            "default",
-            fresh_data=snapshot,
-            sync_device=device,
+            [port_pair(10, 20)],
         )
 
-        row = snapshot["ports"][0]
+        context, rows = _render(_make_request(), device)
+
+        row = _row(rows, 10)
         assert row["lag_sync_status"] == "missing_nb"
         assert "lag-sync-btn" not in str(context["table"].render_parent(None, row))
 
     def test_a_related_interface_with_a_malformed_binding_is_not_a_name_match(self):
         """A malformed binding is never unbound, so a same-name LAG cannot stand for the LibreNMS LAG port."""
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
-
         device = make_device("table-malformed-related-binding")
         lag = make_interface(device, "Port-Channel1", iface_type="lag")
         seed_stored_mapping(lag, {"default": {"id": "junk"}}, save=True)
@@ -946,31 +833,20 @@ class TestInterfaceContextOOBRows:
         seed_mapping(source, own=10, save=False)
         source.lag = lag
         source.save()
-        snapshot = {
-            "ports": [
+        seed_interfaces_snapshot(
+            device,
+            [
                 {"port_id": 10, "ifName": "Ethernet1", "ifType": "ethernetCsmacd"},
                 {"port_id": 20, "ifName": "Port-Channel1", "ifType": "ieee8023adLag"},
             ],
-            "port_stack_relationships": {"lag_members": {10: 20}, "sub_interfaces": {}},
-        }
-        request = _make_request()
-        view = DeviceInterfaceTableView()
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        view._librenms_api = api
-        view.request = request
+            [port_pair(10, 20)],
+        )
 
-        view.get_context_data(request, device, "ifName", "default", fresh_data=snapshot, sync_device=device)
+        _context, rows = _render(_make_request(), device)
 
-        assert snapshot["ports"][0]["lag_sync_status"] == "mismatch"
+        assert _row(rows, 10)["lag_sync_status"] == "mismatch"
 
     def test_relationship_button_resolves_an_unbound_same_name_source(self):
-        from types import SimpleNamespace
-
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
         device = make_device("table-unbound-relationship-source")
@@ -978,57 +854,29 @@ class TestInterfaceContextOOBRows:
         parent = make_interface(device, "Ethernet1")
         seed_mapping(parent, own=20, save=False)
         parent.save()
-        snapshot = {
-            "ports": [
+        # The child's name is the parent's name plus ".100", so the assessment derives the edge.
+        seed_interfaces_snapshot(
+            device,
+            [
                 {**_PORT_KEYS_UNSET, "port_id": 11, "ifName": "Ethernet1.100", "ifType": "l2vlan"},
                 {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": "Ethernet1", "ifType": "ethernetCsmacd"},
             ],
-            "port_stack_relationships": {
-                "lag_members": {},
-                "sub_interfaces": {11: 20},
-            },
-        }
-        render_request = _make_request()
-        table_view = DeviceInterfaceTableView()
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        table_view._librenms_api = api
-        table_view.request = render_request
-        cache_key = table_view.get_cache_key(device, "ports", "default")
-        cache.set(cache_key, snapshot)
-        try:
-            context = table_view.get_context_data(
-                render_request,
-                device,
-                "ifName",
-                "default",
-                fresh_data=snapshot,
-                sync_device=device,
-            )
+        )
 
-            row = snapshot["ports"][0]
-            rendered = str(context["table"].render_parent(None, row))
-            assert "parent-sync-btn" in rendered
-            request = _make_request(
-                {
-                    "port_id": "11",
-                    "source_name": "Ethernet1.100",
-                    "interface_name_field": "ifName",
-                    "parent_port_id": "20",
-                    "parent_name": "Ethernet1",
-                }
-            )
-            relationship_view = SyncInterfaceParentView()
-            relationship_view._librenms_api = SimpleNamespace(server_key="default")
+        context, rows = _render(_make_request(), device)
 
-            response = _post(
-                relationship_view,
-                request,
-                object_type="device",
-                object_id=device.pk,
-            )
-        finally:
-            cache.delete(cache_key)
+        rendered = str(context["table"].render_parent(None, _row(rows, 11)))
+        assert "parent-sync-btn" in rendered
+        request = _make_request(
+            {
+                "port_id": "11",
+                "source_name": "Ethernet1.100",
+                "interface_name_field": "ifName",
+                "parent_port_id": "20",
+                "parent_name": "Ethernet1",
+            }
+        )
+        response = _post(make_view(SyncInterfaceParentView), request, object_type="device", object_id=device.pk)
 
         assert response.status_code == 200, response.content
         child.refresh_from_db()
@@ -1036,12 +884,6 @@ class TestInterfaceContextOOBRows:
 
     def test_unrelated_duplicate_cached_id_does_not_break_inline_parent_sync(self):
         """Duplicate cached IDs outside the current edge must not make its button fail."""
-        from types import SimpleNamespace
-
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
         device = make_device("inline-unrelated-duplicate-id")
@@ -1050,63 +892,31 @@ class TestInterfaceContextOOBRows:
         for interface, port_id in ((child, 10), (parent, 20)):
             seed_mapping(interface, own=port_id, save=False)
             interface.save()
-        snapshot = {
-            "ports": [
+        seed_interfaces_snapshot(
+            device,
+            [
                 {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": child.name, "ifType": "l2vlan"},
                 {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": parent.name, "ifType": "ethernetCsmacd"},
                 {**_PORT_KEYS_UNSET, "port_id": 30, "ifName": "unrelated-a", "ifType": "ethernetCsmacd"},
                 {**_PORT_KEYS_UNSET, "port_id": "030", "ifName": "unrelated-b", "ifType": "ethernetCsmacd"},
             ],
-            "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {10: 20}},
-        }
-        render_request = _make_request()
-        table_view = DeviceInterfaceTableView()
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        table_view._librenms_api = api
-        table_view.request = render_request
-        cache_key = table_view.get_cache_key(device, "ports", "default")
-        cache.set(cache_key, snapshot)
-        try:
-            context = table_view.get_context_data(
-                render_request,
-                device,
-                "ifName",
-                "default",
-                fresh_data=snapshot,
-                sync_device=device,
-            )
-            source_row = snapshot["ports"][0]
-            assert "parent-sync-btn" in str(context["table"].render_parent(None, source_row))
+        )
 
-            relationship_view = SyncInterfaceParentView()
-            relationship_view._librenms_api = SimpleNamespace(server_key="default")
-            response = _post(
-                relationship_view,
-                _make_request(
-                    {
-                        "port_id": "10",
-                        "interface_name_field": "ifName",
-                        "parent_port_id": "20",
-                    }
-                ),
-                object_type="device",
-                object_id=device.pk,
-            )
-        finally:
-            cache.delete(cache_key)
+        context, rows = _render(_make_request(), device)
+        assert "parent-sync-btn" in str(context["table"].render_parent(None, _row(rows, 10)))
+
+        response = _post(
+            make_view(SyncInterfaceParentView),
+            _make_request({"port_id": "10", "interface_name_field": "ifName", "parent_port_id": "20"}),
+            object_type="device",
+            object_id=device.pk,
+        )
 
         assert response.status_code == 200, response.content
         child.refresh_from_db()
         assert child.parent_id == parent.pk
 
     def test_duplicate_display_name_does_not_make_unbound_source_actionable(self):
-        from types import SimpleNamespace
-
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
         device = make_device("table-ambiguous-unbound-source")
@@ -1117,63 +927,40 @@ class TestInterfaceContextOOBRows:
         seed_mapping(second_parent, own=21, save=False)
         first_parent.save()
         second_parent.save()
-        snapshot = {
-            "ports": [
-                {"port_id": 10, "ifName": "Gi0/1", "ifDescr": "Ethernet", "ifType": "l2vlan"},
-                {"port_id": 11, "ifName": "Gi0/2", "ifDescr": "Ethernet", "ifType": "l2vlan"},
+        # Each L3 child pairs with its own parent, and both children report the ifDescr "Ethernet".
+        seed_interfaces_snapshot(
+            device,
+            [
+                {"port_id": 10, "ifName": "Gi0/1", "ifDescr": "Ethernet", "ifType": "ipForward"},
+                {"port_id": 11, "ifName": "Gi0/2", "ifDescr": "Ethernet", "ifType": "ipForward"},
                 {"port_id": 20, "ifName": "Parent1", "ifDescr": "Parent1", "ifType": "ethernetCsmacd"},
                 {"port_id": 21, "ifName": "Parent2", "ifDescr": "Parent2", "ifType": "ethernetCsmacd"},
             ],
-            "port_stack_relationships": {
-                "lag_members": {},
-                "sub_interfaces": {10: 20, 11: 21},
-            },
-        }
-        render_request = _make_request()
-        table_view = DeviceInterfaceTableView()
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        table_view._librenms_api = api
-        table_view.request = render_request
-        cache_key = table_view.get_cache_key(device, "ports", "default")
-        cache.set(cache_key, snapshot)
-        try:
-            context = table_view.get_context_data(
-                render_request,
-                device,
-                "ifDescr",
-                "default",
-                fresh_data=snapshot,
-                sync_device=device,
-            )
-            for row in snapshot["ports"][:2]:
-                assert row["netbox_interface"] is None
-                assert "parent-sync-btn" not in str(context["table"].render_parent(None, row))
+            [port_pair(10, 20), port_pair(11, 21)],
+        )
 
-            request = _make_request(
-                {
-                    "port_id": "10",
-                    "source_name": "Ethernet",
-                    "interface_name_field": "ifDescr",
-                    "parent_port_id": "20",
-                    "parent_name": "Parent1",
-                }
-            )
-            relationship_view = SyncInterfaceParentView()
-            relationship_view._librenms_api = SimpleNamespace(server_key="default")
-            response = _post(relationship_view, request, object_type="device", object_id=device.pk)
-        finally:
-            cache.delete(cache_key)
+        context, rows = _render(_make_request(), device, "ifDescr")
+        for port_id in (10, 11):
+            row = _row(rows, port_id)
+            assert row["netbox_interface"] is None
+            assert "parent-sync-btn" not in str(context["table"].render_parent(None, row))
+
+        request = _make_request(
+            {
+                "port_id": "10",
+                "source_name": "Ethernet",
+                "interface_name_field": "ifDescr",
+                "parent_port_id": "20",
+                "parent_name": "Parent1",
+            }
+        )
+        response = _post(make_view(SyncInterfaceParentView), request, object_type="device", object_id=device.pk)
 
         assert response.status_code == 404
         source.refresh_from_db()
         assert source.parent_id is None
 
     def test_inline_relationship_rejects_an_edge_replaced_in_the_current_cache(self):
-        from types import SimpleNamespace
-
-        from django.core.cache import cache
-
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
         device = make_device("stale-inline-parent")
@@ -1183,18 +970,17 @@ class TestInterfaceContextOOBRows:
         for interface, port_id in ((child, 10), (old_parent, 20), (current_parent, 30)):
             seed_mapping(interface, own=port_id, save=False)
             interface.save()
-        snapshot = {
-            "ports": [
-                {"port_id": 10, "ifName": child.name, "ifType": "l2vlan"},
+        # The L3 child's port_stack pair names Ethernet2, which wins over the parent its name implies.
+        seed_interfaces_snapshot(
+            device,
+            [
+                {"port_id": 10, "ifName": child.name, "ifType": "ipForward"},
                 {"port_id": 20, "ifName": old_parent.name, "ifType": "ethernetCsmacd"},
                 {"port_id": 30, "ifName": current_parent.name, "ifType": "ethernetCsmacd"},
             ],
-            "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {10: 30}},
-        }
-        view = SyncInterfaceParentView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(device, "ports", "default")
-        cache.set(cache_key, snapshot)
+            [port_pair(10, 30)],
+        )
+        assert interface_rows(device)["port_stack_relationships"]["sub_interfaces"] == {10: 30}
         request = _make_request(
             {
                 "port_id": "10",
@@ -1205,20 +991,13 @@ class TestInterfaceContextOOBRows:
             }
         )
 
-        try:
-            response = _post(view, request, object_type="device", object_id=device.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(make_view(SyncInterfaceParentView), request, object_type="device", object_id=device.pk)
 
         assert response.status_code == 409
         child.refresh_from_db()
         assert child.parent_id is None
 
     def test_inline_relationship_rejects_conflicting_canonical_cache_edges(self):
-        from types import SimpleNamespace
-
-        from django.core.cache import cache
-
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
         device = make_device("conflicting-canonical-inline-edge")
@@ -1228,45 +1007,26 @@ class TestInterfaceContextOOBRows:
         for interface, port_id in ((child, 10), (first_parent, 20), (second_parent, 30)):
             seed_mapping(interface, own=port_id, save=False)
             interface.save()
-        snapshot = {
-            "ports": [
-                {"port_id": 10, "ifName": child.name},
-                {"port_id": 20, "ifName": first_parent.name},
-                {"port_id": 30, "ifName": second_parent.name},
+        # Two pairs give the one canonical child two parents, so the edge conflicts.
+        seed_interfaces_snapshot(
+            device,
+            [
+                {"port_id": 10, "ifName": child.name, "ifType": "ipForward"},
+                {"port_id": 20, "ifName": first_parent.name, "ifType": "ethernetCsmacd"},
+                {"port_id": 30, "ifName": second_parent.name, "ifType": "ethernetCsmacd"},
             ],
-            "port_stack_relationships": {
-                "lag_members": {},
-                "sub_interfaces": {"10": 20, "010": 30},
-            },
-        }
-        view = SyncInterfaceParentView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(device, "ports", "default")
-        cache.set(cache_key, snapshot)
-        request = _make_request(
-            {
-                "port_id": "10",
-                "interface_name_field": "ifName",
-                "parent_port_id": "20",
-            }
+            [port_pair("10", 20), port_pair("010", 30)],
         )
+        assert interface_rows(device)["port_stack_relationships"]["sub_interfaces"] == {}
+        request = _make_request({"port_id": "10", "interface_name_field": "ifName", "parent_port_id": "20"})
 
-        try:
-            response = _post(view, request, object_type="device", object_id=device.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(make_view(SyncInterfaceParentView), request, object_type="device", object_id=device.pk)
 
         assert response.status_code == 409
         child.refresh_from_db()
         assert child.parent_id is None
 
     def test_duplicate_unbound_related_name_in_vc_has_no_inline_action(self):
-        from types import SimpleNamespace
-
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
         _virtual_chassis, (member1, member2) = make_virtual_chassis_members("ambiguous-related-vc")
@@ -1275,45 +1035,20 @@ class TestInterfaceContextOOBRows:
         second_aggregate = make_interface(member2, "Port-Channel1")
         seed_mapping(source, own=10, save=False)
         source.save()
-        snapshot = {
-            "ports": [
+        seed_interfaces_snapshot(
+            member1,
+            [
                 {"port_id": 10, "ifName": source.name, "ifType": "ethernetCsmacd"},
                 {"port_id": 20, "ifName": "Port-Channel1", "ifType": "ieee8023adLag"},
             ],
-            "port_stack_relationships": {"lag_members": {10: 20}, "sub_interfaces": {}},
-        }
-        render_request = _make_request()
-        table_view = DeviceInterfaceTableView()
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        table_view._librenms_api = api
-        table_view.request = render_request
-        cache_key = table_view.get_cache_key(member1, "ports", "default")
-        cache.set(cache_key, snapshot)
-        try:
-            context = table_view.get_context_data(
-                render_request,
-                member1,
-                "ifName",
-                "default",
-                fresh_data=snapshot,
-                sync_device=member1,
-            )
-            source_row = snapshot["ports"][0]
-            assert "lag-sync-btn" not in str(context["table"].render_parent(None, source_row))
+            [port_pair(10, 20)],
+        )
 
-            request = _make_request(
-                {
-                    "port_id": "10",
-                    "interface_name_field": "ifName",
-                    "lag_port_id": "20",
-                }
-            )
-            relationship_view = SyncInterfaceLagView()
-            relationship_view._librenms_api = SimpleNamespace(server_key="default")
-            response = _post(relationship_view, request, object_type="device", object_id=member1.pk)
-        finally:
-            cache.delete(cache_key)
+        context, rows = _render(_make_request(), member1)
+        assert "lag-sync-btn" not in str(context["table"].render_parent(None, _row(rows, 10)))
+
+        request = _make_request({"port_id": "10", "interface_name_field": "ifName", "lag_port_id": "20"})
+        response = _post(make_view(SyncInterfaceLagView), request, object_type="device", object_id=member1.pk)
 
         assert response.status_code == 404
         source.refresh_from_db()
@@ -1324,12 +1059,6 @@ class TestInterfaceContextOOBRows:
         assert second_aggregate.type != "lag"
 
     def test_duplicate_related_port_id_in_vc_has_no_inline_action(self):
-        from types import SimpleNamespace
-
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
         _virtual_chassis, (member1, member2) = make_virtual_chassis_members("duplicate-related-id-vc")
@@ -1339,57 +1068,26 @@ class TestInterfaceContextOOBRows:
         for interface, port_id in ((source, 10), (first_aggregate, 20), (second_aggregate, 20)):
             seed_mapping(interface, own=port_id, save=False)
             interface.save()
-        snapshot = {
-            "ports": [
+        seed_interfaces_snapshot(
+            member1,
+            [
                 {"port_id": 10, "ifName": source.name, "ifType": "ethernetCsmacd"},
                 {"port_id": 20, "ifName": first_aggregate.name, "ifType": "ieee8023adLag"},
             ],
-            "port_stack_relationships": {"lag_members": {10: 20}, "sub_interfaces": {}},
-        }
-        render_request = _make_request()
-        table_view = DeviceInterfaceTableView()
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        table_view._librenms_api = api
-        table_view.request = render_request
-        cache_key = table_view.get_cache_key(member1, "ports", "default")
-        cache.set(cache_key, snapshot)
-        try:
-            context = table_view.get_context_data(
-                render_request,
-                member1,
-                "ifName",
-                "default",
-                fresh_data=snapshot,
-                sync_device=member1,
-            )
-            source_row = snapshot["ports"][0]
-            assert "lag-sync-btn" not in str(context["table"].render_parent(None, source_row))
+            [port_pair(10, 20)],
+        )
 
-            request = _make_request(
-                {
-                    "port_id": "10",
-                    "interface_name_field": "ifName",
-                    "lag_port_id": "20",
-                }
-            )
-            relationship_view = SyncInterfaceLagView()
-            relationship_view._librenms_api = SimpleNamespace(server_key="default")
-            response = _post(relationship_view, request, object_type="device", object_id=member1.pk)
-        finally:
-            cache.delete(cache_key)
+        context, rows = _render(_make_request(), member1)
+        assert "lag-sync-btn" not in str(context["table"].render_parent(None, _row(rows, 10)))
+
+        request = _make_request({"port_id": "10", "interface_name_field": "ifName", "lag_port_id": "20"})
+        response = _post(make_view(SyncInterfaceLagView), request, object_type="device", object_id=member1.pk)
 
         assert response.status_code == 404
         source.refresh_from_db()
         assert source.lag_id is None
 
     def test_duplicate_cached_related_port_id_has_no_inline_action(self):
-        from types import SimpleNamespace
-
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
         device = make_device("duplicate-cached-related-id")
@@ -1399,40 +1097,20 @@ class TestInterfaceContextOOBRows:
         seed_mapping(parent, own=20, save=False)
         source.save()
         parent.save()
-        snapshot = {
-            "ports": [
+        seed_interfaces_snapshot(
+            device,
+            [
                 {"port_id": 10, "ifName": source.name, "ifType": "l2vlan"},
                 {"port_id": 20, "ifName": parent.name, "ifType": "ethernetCsmacd"},
                 {"port_id": "020", "ifName": "duplicate-parent", "ifType": "ethernetCsmacd"},
             ],
-            "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {10: 20}},
-        }
-        render_request = _make_request()
-        table_view = DeviceInterfaceTableView()
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        table_view._librenms_api = api
-        table_view.request = render_request
-        cache_key = table_view.get_cache_key(device, "ports", "default")
-        cache.set(cache_key, snapshot)
-        try:
-            context = table_view.get_context_data(
-                render_request,
-                device,
-                "ifName",
-                "default",
-                fresh_data=snapshot,
-                sync_device=device,
-            )
-            source_row = snapshot["ports"][0]
-            assert "parent-sync-btn" not in str(context["table"].render_parent(None, source_row))
+        )
 
-            request = _make_request({"port_id": "10", "interface_name_field": "ifName", "parent_port_id": "20"})
-            relationship_view = SyncInterfaceParentView()
-            relationship_view._librenms_api = SimpleNamespace(server_key="default")
-            response = _post(relationship_view, request, object_type="device", object_id=device.pk)
-        finally:
-            cache.delete(cache_key)
+        context, rows = _render(_make_request(), device)
+        assert "parent-sync-btn" not in str(context["table"].render_parent(None, _row(rows, 10)))
+
+        request = _make_request({"port_id": "10", "interface_name_field": "ifName", "parent_port_id": "20"})
+        response = _post(make_view(SyncInterfaceParentView), request, object_type="device", object_id=device.pk)
 
         assert response.status_code == 409
         source.refresh_from_db()
@@ -1441,14 +1119,8 @@ class TestInterfaceContextOOBRows:
     def test_duplicate_cached_source_port_id_is_disabled_and_verify_rejects_it(self):
         import json
 
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
-        from netbox_librenms_plugin.views.object_sync.devices import (
-            DeviceInterfaceTableView,
-            SingleInterfaceVerifyView,
-        )
+        from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
 
         device = make_device("duplicate-cached-source-id")
         source = make_interface(device, "Ethernet1.100", iface_type="virtual")
@@ -1457,126 +1129,81 @@ class TestInterfaceContextOOBRows:
         seed_mapping(parent, own=20, save=False)
         source.save()
         parent.save()
-        snapshot = {
-            "ports": [
+        seed_interfaces_snapshot(
+            device,
+            [
                 {"port_id": 10, "ifName": source.name, "ifType": "l2vlan"},
                 {"port_id": "010", "ifName": "duplicate-source", "ifType": "l2vlan"},
                 {"port_id": 20, "ifName": parent.name, "ifType": "ethernetCsmacd"},
             ],
-            "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {10: 20}},
-        }
+        )
         user = make_superuser("duplicate-cached-source-id")
-        render_request = _make_request(user=user)
-        table_view = DeviceInterfaceTableView()
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        table_view._librenms_api = api
-        table_view.request = render_request
-        cache_key = table_view.get_cache_key(device, "ports", "default")
-        cache.set(cache_key, snapshot)
-        try:
-            table_view.get_context_data(
-                render_request,
-                device,
-                "ifName",
-                "default",
-                fresh_data=snapshot,
-                sync_device=device,
-            )
-            assert all(row["sync_target_resolvable"] is False for row in snapshot["ports"][:2])
 
-            verify_request = make_request(
-                "post",
-                json.dumps(
-                    {
-                        "device_id": device.pk,
-                        "interface_name": "duplicate-source",
-                        "interface_name_field": "ifName",
-                        "port_id": 10,
-                    }
-                ),
-                user=user,
-                path="/verify/",
-                content_type="application/json",
-            )
-            verify_view = SingleInterfaceVerifyView()
-            verify_view._librenms_api = api
-            response = verify_view.post(verify_request)
-        finally:
-            cache.delete(cache_key)
+        _context, rows = _render(_make_request(user=user), device)
+
+        duplicates = [row for row in rows if row["ifName"] in (source.name, "duplicate-source")]
+        assert len(duplicates) == 2
+        assert all(row["sync_target_resolvable"] is False for row in duplicates)
+
+        verify_request = make_request(
+            "post",
+            json.dumps(
+                {
+                    "device_id": device.pk,
+                    "interface_name": "duplicate-source",
+                    "interface_name_field": "ifName",
+                    "port_id": 10,
+                }
+            ),
+            user=user,
+            path="/verify/",
+            content_type="application/json",
+        )
+        response = make_view(SingleInterfaceVerifyView, verify_request).post(verify_request)
 
         assert response.status_code == 404
 
     def test_missing_port_id_disables_member_selection_and_verify_rejects_it(self):
         import json
 
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
-        from netbox_librenms_plugin.views.object_sync.devices import (
-            DeviceInterfaceTableView,
-            SingleInterfaceVerifyView,
-        )
+        from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
 
         _virtual_chassis, (page_device, _member) = make_virtual_chassis_members("missing-row-port-id")
-        snapshot = {
-            "ports": [
+        seed_interfaces_snapshot(
+            page_device,
+            [
                 {"port_id": None, "ifName": "Gi0/1", "ifDescr": "Ethernet", "ifType": "ethernetCsmacd"},
                 {"port_id": None, "ifName": "Gi0/2", "ifDescr": "Ethernet", "ifType": "ethernetCsmacd"},
             ],
-            "port_stack_relationships": {},
-        }
+        )
         user = make_superuser("missing-row-port-id")
-        render_request = _make_request(user=user)
-        table_view = DeviceInterfaceTableView()
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        table_view._librenms_api = api
-        table_view.request = render_request
-        cache_key = table_view.get_cache_key(page_device, "ports", "default")
-        cache.set(cache_key, snapshot)
-        try:
-            context = table_view.get_context_data(
-                render_request,
-                page_device,
-                "ifDescr",
-                "default",
-                fresh_data=snapshot,
-                sync_device=page_device,
-            )
-            assert snapshot["ports"][1]["sync_target_resolvable"] is False
-            assert "disabled" in str(context["table"].render_device_selection(None, snapshot["ports"][1]))
 
-            verify_request = make_request(
-                "post",
-                json.dumps(
-                    {
-                        "device_id": page_device.pk,
-                        "interface_name": "Ethernet",
-                        "interface_name_field": "ifDescr",
-                        "port_id": None,
-                    }
-                ),
-                user=user,
-                path="/verify/",
-                content_type="application/json",
-            )
-            verify_view = SingleInterfaceVerifyView()
-            verify_view._librenms_api = api
-            response = verify_view.post(verify_request)
-        finally:
-            cache.delete(cache_key)
+        context, rows = _render(_make_request(user=user), page_device, "ifDescr")
+
+        (second_row,) = [row for row in rows if row["ifName"] == "Gi0/2"]
+        assert second_row["sync_target_resolvable"] is False
+        assert "disabled" in str(context["table"].render_device_selection(None, second_row))
+
+        verify_request = make_request(
+            "post",
+            json.dumps(
+                {
+                    "device_id": page_device.pk,
+                    "interface_name": "Ethernet",
+                    "interface_name_field": "ifDescr",
+                    "port_id": None,
+                }
+            ),
+            user=user,
+            path="/verify/",
+            content_type="application/json",
+        )
+        response = make_view(SingleInterfaceVerifyView, verify_request).post(verify_request)
 
         assert response.status_code == 404
 
     def test_duplicate_source_port_id_has_no_inline_action(self):
-        from types import SimpleNamespace
-
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
         device = make_device("duplicate-source-id")
@@ -1586,45 +1213,20 @@ class TestInterfaceContextOOBRows:
         for interface, port_id in ((source, 10), (duplicate_source, 10), (aggregate, 20)):
             seed_mapping(interface, own=port_id, save=False)
             interface.save()
-        snapshot = {
-            "ports": [
+        seed_interfaces_snapshot(
+            device,
+            [
                 {"port_id": 10, "ifName": source.name, "ifType": "ethernetCsmacd"},
                 {"port_id": 20, "ifName": aggregate.name, "ifType": "ieee8023adLag"},
             ],
-            "port_stack_relationships": {"lag_members": {10: 20}, "sub_interfaces": {}},
-        }
-        render_request = _make_request()
-        table_view = DeviceInterfaceTableView()
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        table_view._librenms_api = api
-        table_view.request = render_request
-        cache_key = table_view.get_cache_key(device, "ports", "default")
-        cache.set(cache_key, snapshot)
-        try:
-            context = table_view.get_context_data(
-                render_request,
-                device,
-                "ifName",
-                "default",
-                fresh_data=snapshot,
-                sync_device=device,
-            )
-            source_row = snapshot["ports"][0]
-            assert "lag-sync-btn" not in str(context["table"].render_parent(None, source_row))
+            [port_pair(10, 20)],
+        )
 
-            request = _make_request(
-                {
-                    "port_id": "10",
-                    "interface_name_field": "ifName",
-                    "lag_port_id": "20",
-                }
-            )
-            relationship_view = SyncInterfaceLagView()
-            relationship_view._librenms_api = SimpleNamespace(server_key="default")
-            response = _post(relationship_view, request, object_type="device", object_id=device.pk)
-        finally:
-            cache.delete(cache_key)
+        context, rows = _render(_make_request(), device)
+        assert "lag-sync-btn" not in str(context["table"].render_parent(None, _row(rows, 10)))
+
+        request = _make_request({"port_id": "10", "interface_name_field": "ifName", "lag_port_id": "20"})
+        response = _post(make_view(SyncInterfaceLagView), request, object_type="device", object_id=device.pk)
 
         assert response.status_code == 404
         source.refresh_from_db()
@@ -1633,13 +1235,8 @@ class TestInterfaceContextOOBRows:
         assert duplicate_source.lag_id is None
 
     def test_hidden_related_interface_has_no_inline_action(self):
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface
-        from django.core.cache import cache
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
         device = make_device("hidden-related-interface-action")
@@ -1651,61 +1248,33 @@ class TestInterfaceContextOOBRows:
         parent.save()
         user = make_user_with_perms("hidden-related-interface-action", [("view", Device)])
         user = grant(user, "change", Interface, constraints={"id": child.pk})
-        snapshot = {
-            "ports": [
+        seed_interfaces_snapshot(
+            device,
+            [
                 {"port_id": 10, "ifName": child.name, "ifType": "l2vlan"},
                 {"port_id": 20, "ifName": parent.name, "ifType": "ethernetCsmacd"},
             ],
-            "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {10: 20}},
-        }
-        render_request = _make_request(user=user)
-        table_view = DeviceInterfaceTableView()
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        table_view._librenms_api = api
-        table_view.request = render_request
-        cache_key = table_view.get_cache_key(device, "ports", "default")
-        cache.set(cache_key, snapshot)
-        try:
-            context = table_view.get_context_data(
-                render_request,
-                device,
-                "ifName",
-                "default",
-                fresh_data=snapshot,
-                sync_device=device,
-            )
-            child_row = snapshot["ports"][0]
-            assert "parent-sync-btn" not in str(context["table"].render_parent(None, child_row))
+        )
 
-            request = _make_request(
-                {
-                    "port_id": "10",
-                    "interface_name_field": "ifName",
-                    "parent_port_id": "20",
-                },
-                user=user,
-            )
-            relationship_view = SyncInterfaceParentView()
-            relationship_view._librenms_api = SimpleNamespace(server_key="default")
-            response = _post(relationship_view, request, object_type="device", object_id=device.pk)
-        finally:
-            cache.delete(cache_key)
+        context, rows = _render(_make_request(user=user), device)
+        assert "parent-sync-btn" not in str(context["table"].render_parent(None, _row(rows, 10)))
+
+        request = _make_request(
+            {"port_id": "10", "interface_name_field": "ifName", "parent_port_id": "20"},
+            user=user,
+        )
+        response = _post(make_view(SyncInterfaceParentView), request, object_type="device", object_id=device.pk)
 
         assert response.status_code == 404
         child.refresh_from_db()
         assert child.parent_id is None
 
     def test_hidden_virtual_chassis_owner_has_no_inline_action_or_target_option(self):
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface, Rack
         from django.contrib.contenttypes.models import ContentType
-        from django.core.cache import cache
+        from django.http import Http404
         from ipam.models import VLAN, VLANGroup
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
         _virtual_chassis, (page_device, hidden_member) = make_virtual_chassis_members("hidden-row-owner-vc")
@@ -1733,169 +1302,65 @@ class TestInterfaceContextOOBRows:
         user = grant(user, "view", Device, constraints={"id": page_device.pk})
         user = grant(user, "change", Interface, constraints={"id": source.pk})
         user = grant(user, "view", Interface, constraints={"id": parent.pk})
-        snapshot = {
-            "ports": [
-                {
-                    "port_id": 10,
-                    "ifName": source.name,
-                    "ifType": "l2vlan",
-                    "untagged_vlan": None,
-                    "tagged_vlans": [100],
-                },
+        # The L3 source pairs with Ethernet1, a parent its name does not imply.
+        seed_interfaces_snapshot(
+            page_device,
+            [
+                {"port_id": 10, "ifName": source.name, "ifType": "ipForward", **port_vlans(None, None, [100])},
                 {"port_id": 20, "ifName": parent.name, "ifType": "ethernetCsmacd"},
             ],
-            "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {10: 20}},
-        }
-        render_request = _make_request(user=user)
-        table_view = DeviceInterfaceTableView()
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        table_view._librenms_api = api
-        table_view.request = render_request
-        cache_key = table_view.get_cache_key(page_device, "ports", "default")
-        cache.set(cache_key, snapshot)
-        try:
-            context = table_view.get_context_data(
-                render_request,
-                page_device,
-                "ifName",
-                "default",
-                fresh_data=snapshot,
-                sync_device=page_device,
-            )
-            source_row = snapshot["ports"][0]
-            table = context["table"]
-            assert source_row["sync_target_resolvable"] is False
-            assert [member.pk for member in table._vc_members] == [page_device.pk]
-            # Match the option value, not the bare pk: a substring check also hits the pk inside
-            # an unrelated interface name (e.g. "Ethernet2.100"), so it passes or fails on which
-            # pks the run happens to allocate.
-            assert f'value="{hidden_member.pk}"' not in str(table.render_device_selection(None, source_row))
-            assert "parent-sync-btn" not in str(table.render_parent(None, source_row))
-            vlan_html = str(table.render_vlans(None, source_row))
-            assert hidden_group.name not in vlan_html
-            assert "vlan-group-hidden" not in vlan_html
-            assert "vlan-edit-btn" not in vlan_html
-            assert "data-vlan-groups" not in vlan_html
+            [port_pair(10, 20)],
+        )
 
-            request = _make_request(
-                {"port_id": "10", "interface_name_field": "ifName", "parent_port_id": "20"},
-                user=user,
-            )
-            relationship_view = SyncInterfaceParentView()
-            relationship_view._librenms_api = SimpleNamespace(server_key="default")
-            from django.http import Http404
+        context, rows = _render(_make_request(user=user), page_device)
 
-            with pytest.raises(Http404):
-                _post(
-                    relationship_view,
-                    request,
-                    object_type="device",
-                    object_id=hidden_member.pk,
-                )
-        finally:
-            cache.delete(cache_key)
+        source_row = _row(rows, 10)
+        table = context["table"]
+        assert source_row["sync_target_resolvable"] is False
+        assert [member.pk for member in table._vc_members] == [page_device.pk]
+        # Match the option value, not the bare pk: a substring check also hits the pk inside
+        # an unrelated interface name (e.g. "Ethernet2.100"), so it passes or fails on which
+        # pks the run happens to allocate.
+        assert f'value="{hidden_member.pk}"' not in str(table.render_device_selection(None, source_row))
+        assert "parent-sync-btn" not in str(table.render_parent(None, source_row))
+        vlan_html = str(table.render_vlans(None, source_row))
+        assert hidden_group.name not in vlan_html
+        assert "vlan-group-hidden" not in vlan_html
+        assert "vlan-edit-btn" not in vlan_html
+        assert "data-vlan-groups" not in vlan_html
+
+        request = _make_request(
+            {"port_id": "10", "interface_name_field": "ifName", "parent_port_id": "20"},
+            user=user,
+        )
+        with pytest.raises(Http404):
+            _post(make_view(SyncInterfaceParentView), request, object_type="device", object_id=hidden_member.pk)
 
         source.refresh_from_db()
         assert source.parent_id is None
 
-    def test_fresh_data_renders_without_reading_cache(self):
-        """Fresh data renders the partial OOB snapshot after the failed fetch deletes its cache entry."""
-        from django.core.cache import cache
-
-        view = self._make_view()
-        obj = self._host_with_idrac()
-        fresh = {"ports": [{"ifName": "idrac0", "_source": "oob", "port_id": 999}]}
-        req = _make_request()
-        cache_key = view.get_cache_key(obj, "ports", "default")
-        cache.set(cache_key, {"ports": [{"ifName": "cached", "port_id": 123}]})
-
-        try:
-            ctx = view.get_context_data(req, obj, "ifName", "default", fresh_data=fresh)
-        finally:
-            cache.delete(cache_key)
-
-        rows = list(ctx["table"].data)
-        assert any(row.get("port_id") == 999 for row in rows)
-        assert all(row.get("port_id") != 123 for row in rows)
-        assert "idrac0" in {i["name"] for i in ctx["netbox_only_interfaces"]}
-
-    def test_malformed_port_stack_relationships_does_not_crash(self):
-        """A cached snapshot whose port_stack_relationships is None / a non-dict (corruption, partial write, format migration) must fail soft, not AttributeError on the .get('lag_members') calls."""
-        from django.core.cache import cache
-        from django.utils import timezone
-
-        view = self._make_view()
-        obj = self._host_with_idrac()
-        req = _make_request()
-
-        cache_key = view.get_cache_key(obj, "ports", "default")
-        last_fetched_key = view.get_last_fetched_key(obj, "ports", "default")
-        try:
-            for bad in (None, ["not", "a", "dict"], "garbage"):
-                cached = {
-                    "ports": [{"ifName": "idrac0", "port_id": 999, "_source": "host"}],
-                    "port_stack_relationships": bad,
-                }
-                cache.set(cache_key, cached)
-                cache.set(last_fetched_key, timezone.now())
-                assert cache.get(cache_key) == cached
-                ctx = view.get_context_data(req, obj, "ifName", "default")  # must not raise
-                assert ctx["table"] is not None
-        finally:
-            cache.delete(cache_key)
-            cache.delete(last_fetched_key)
-
-    def test_malformed_nested_relationship_maps_do_not_crash(self):
-        """port_stack_relationships is a dict but its lag_members / sub_interfaces are None / non-dict (the present-but-None key defeats the .get(..., {}) default) — iterating .items() must fail soft, not AttributeError."""
-        from django.core.cache import cache
-        from django.utils import timezone
-
-        view = self._make_view()
-        obj = self._host_with_idrac()
-        req = _make_request()
-
-        cache_key = view.get_cache_key(obj, "ports", "default")
-        last_fetched_key = view.get_last_fetched_key(obj, "ports", "default")
-        try:
-            for bad in (None, ["not", "a", "dict"], "garbage", 42):
-                cached = {
-                    "ports": [{"ifName": "idrac0", "port_id": 999, "_source": "host"}],
-                    "port_stack_relationships": {"lag_members": bad, "sub_interfaces": bad},
-                }
-                cache.set(cache_key, cached)
-                cache.set(last_fetched_key, timezone.now())
-                assert cache.get(cache_key) == cached
-                ctx = view.get_context_data(req, obj, "ifName", "default")  # must not raise
-                assert ctx["table"] is not None
-        finally:
-            cache.delete(cache_key)
-            cache.delete(last_fetched_key)
-
     def test_malformed_cached_port_snapshot_fails_closed(self):
-        """A stale/corrupt cached ports snapshot (non-dict, or ports not a list of dicts) must be dropped and re-rendered empty, not 500 the sync tab — and the bad entry purged so a later render re-fetches."""
+        """An unusable payload under the snapshot key renders the tab empty instead of a 500."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin import source_cache
+        from netbox_librenms_plugin.acquisition.registry import Resource
+
         view = self._make_view()
         obj = self._host_with_idrac()
         req = _make_request()
 
-        from django.core.cache import cache
-
-        cache_key = view.get_cache_key(obj, "ports", "default")
-        for bad in ("garbage-string", {"ports": "not-a-list"}, {"ports": [42]}):
+        cache_key = source_cache.snapshot_key(obj, Resource.INTERFACES, "default")
+        for bad in ("garbage-string", {"ports": "not-a-list"}, {"ports": [42]}, ["not", "a", "dict"]):
             cache.set(cache_key, bad)
             ctx = view.get_context_data(req, obj, "ifName", "default")
-            assert "table" in ctx
-            assert cache.get(cache_key) is None
+            assert ctx["table"] is None
+            assert ctx["last_fetched"] is None
 
 
 class TestInterfaceContextVirtualChassisOwner:
     def test_logical_row_uses_stable_id_owner_for_render_and_sync(self):
         from dcim.models import Device, Interface
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         _virtual_chassis, (page_device, other_member) = make_virtual_chassis_members("logical-row-owner")
         correct = make_interface(page_device, "Vlan2", iface_type="virtual")
@@ -1905,7 +1370,6 @@ class TestInterfaceContextVirtualChassisOwner:
         seed_mapping(correct, own=10, save=False)
         correct.save()
         wrong.save()
-
         port = {
             "port_id": 10,
             "ifName": "Vlan2",
@@ -1916,26 +1380,11 @@ class TestInterfaceContextVirtualChassisOwner:
             "ifPhysAddress": None,
             "ifMtu": 1500,
             "ifAdminStatus": "up",
-            "untagged_vlan": None,
-            "tagged_vlans": [],
         }
-        snapshot = {"ports": [port], "port_stack_relationships": {}}
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        request = _make_request()
-        table_view = object.__new__(DeviceInterfaceTableView)
-        table_view._librenms_api = api
-        table_view.request = request
+        seed_interfaces_snapshot(page_device, [port])
 
-        context = table_view.get_context_data(
-            request,
-            page_device,
-            "ifName",
-            "default",
-            fresh_data=snapshot,
-            sync_device=page_device,
-        )
-        rendered_row = list(context["table"].data)[0]
+        context, rows = _render(_make_request(), page_device)
+        rendered_row = _row(rows, 10)
         assert rendered_row["netbox_interface"].pk == correct.pk
         selected_member_id = context["table"]._resolve_row_member_id(rendered_row)
         assert selected_member_id == page_device.pk
@@ -1952,14 +1401,7 @@ class TestInterfaceContextVirtualChassisOwner:
             },
             user=user,
         )
-        sync_view = SyncInterfacesView()
-        sync_view._librenms_api = api
-        cache_key = sync_view.get_cache_key(page_device, "ports", "default")
-        cache.set(cache_key, snapshot)
-        try:
-            response = _post(sync_view, post_request, object_type="device", object_id=page_device.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(_sync_view(), post_request, object_type="device", object_id=page_device.pk)
 
         assert response.status_code == 302
         correct.refresh_from_db()
@@ -1968,9 +1410,6 @@ class TestInterfaceContextVirtualChassisOwner:
         assert wrong.description == "original other"
 
     def test_non_string_interface_type_does_not_crash_row_owner_resolution(self):
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
-
         _virtual_chassis, (page_device, _other_member) = make_virtual_chassis_members("invalid-row-type")
         port = {
             "port_id": 10,
@@ -1982,26 +1421,12 @@ class TestInterfaceContextVirtualChassisOwner:
             "ifPhysAddress": None,
             "ifMtu": 1500,
             "ifAdminStatus": "up",
-            "untagged_vlan": None,
-            "tagged_vlans": [],
         }
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        request = _make_request()
-        view = object.__new__(DeviceInterfaceTableView)
-        view._librenms_api = api
-        view.request = request
+        seed_interfaces_snapshot(page_device, [port])
 
-        context = view.get_context_data(
-            request,
-            page_device,
-            "ifName",
-            "default",
-            fresh_data={"ports": [port], "port_stack_relationships": {}},
-            sync_device=page_device,
-        )
+        _context, rows = _render(_make_request(), page_device)
 
-        rendered_row = list(context["table"].data)[0]
+        rendered_row = _row(rows, 10)
         assert rendered_row["netbox_interface"] is None
         assert rendered_row["selected_object_id"] == page_device.pk
 
@@ -2011,7 +1436,6 @@ class TestInterfaceContextVirtualChassisOwner:
         from django.core.cache import cache
         from ipam.models import VLAN, VLANGroup
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         _virtual_chassis, (member1, member2) = make_virtual_chassis_members("row-vlan-owner")
@@ -2039,48 +1463,34 @@ class TestInterfaceContextVirtualChassisOwner:
         interface = make_interface(member2, "Ethernet2")
         seed_mapping(interface, own=10, save=False)
         interface.save()
-        port = {
-            "port_id": 10,
-            "ifName": "Ethernet2",
-            "ifType": "ethernetCsmacd",
-            "ifAdminStatus": "up",
-            "untagged_vlan": 100,
-            "tagged_vlans": [],
-        }
-        request = _make_request()
-        view = DeviceInterfaceTableView()
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        view._librenms_api = api
-        view.request = request
+        seed_interfaces_snapshot(
+            member1,
+            [
+                {
+                    "port_id": 10,
+                    "ifName": "Ethernet2",
+                    "ifType": "ethernetCsmacd",
+                    "ifAdminStatus": "up",
+                    **port_vlans(None, 100),
+                }
+            ],
+        )
 
-        overrides_key = view.get_vlan_overrides_key(member1, "default")
+        overrides_key = make_view(DeviceInterfaceTableView).get_vlan_overrides_key(member1, "default")
         cache.set(overrides_key, {"100": str(group1.pk)})
         try:
-            view.get_context_data(
-                request,
-                member1,
-                "ifName",
-                "default",
-                fresh_data={"ports": [port], "port_stack_relationships": {}},
-                sync_device=member1,
-            )
+            _context, rows = _render(_make_request(), member1)
         finally:
             cache.delete(overrides_key)
 
+        port = _row(rows, 10)
         assert port["selected_object_id"] == member2.pk
         assert port["vlan_group_map"][100]["group_id"] == str(group2.pk)
 
         VLAN.objects.filter(group=group2).delete()
         group2.delete()
-        view.get_context_data(
-            request,
-            member1,
-            "ifName",
-            "default",
-            fresh_data={"ports": [port], "port_stack_relationships": {}},
-            sync_device=member1,
-        )
+        _context, rows = _render(_make_request(), member1)
+        port = _row(rows, 10)
         assert port["vlan_group_map"][100]["group_id"] == ""
         assert port["missing_vlans"] == [100]
 
@@ -2116,13 +1526,10 @@ class TestInterfaceContextVirtualChassisOwner:
             "ifPhysAddress": "",
             "ifMtu": 1500,
             "ifAdminStatus": "up",
-            "untagged_vlan": 100,
-            "tagged_vlans": [],
+            **port_vlans(None, 100),
         }
-        view = SingleInterfaceVerifyView()
-        ports_key = view.get_cache_key(device, "ports", server_key)
-        overrides_key = view.get_vlan_overrides_key(device, server_key)
-        cache.set(ports_key, {"ports": [port], "port_stack_relationships": {}})
+        seed_interfaces_snapshot(device, [port], server_key=server_key)
+        overrides_key = SingleInterfaceVerifyView().get_vlan_overrides_key(device, server_key)
         cache.set(overrides_key, {"100": str(override_group.pk)})
         client.force_login(make_superuser("verify-vlan-group-override"))
 
@@ -2140,7 +1547,7 @@ class TestInterfaceContextVirtualChassisOwner:
                 content_type="application/json",
             )
         finally:
-            cache.delete_many([ports_key, overrides_key])
+            cache.delete(overrides_key)
 
         assert response.status_code == 200, response.content
         vlan_html = json.loads(response.content)["formatted_row"]["vlans"]
@@ -2148,16 +1555,9 @@ class TestInterfaceContextVirtualChassisOwner:
         assert f'value="{default_group.pk}"' not in vlan_html
 
     def test_remote_vc_target_sync_uses_its_rack_vlan_lookup(self):
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface, Rack
         from django.contrib.contenttypes.models import ContentType
-        from django.core.cache import cache
         from ipam.models import VLAN, VLANGroup
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         _virtual_chassis, (member1, member2) = make_virtual_chassis_members("sync-vlan-owner")
         rack1 = Rack.objects.create(name="Sync VLAN Rack 1", site=member1.site, status="active")
@@ -2185,35 +1585,25 @@ class TestInterfaceContextVirtualChassisOwner:
         interface = make_interface(member2, "Ethernet2")
         seed_mapping(interface, own=10, save=False)
         interface.save()
-        snapshot = {
-            "ports": [
-                {
-                    **_PORT_KEYS_UNSET,
-                    "port_id": "0010",
-                    "ifName": "Ethernet2",
-                    "ifType": "ethernetCsmacd",
-                    "ifAdminStatus": "up",
-                    "untagged_vlan": 100,
-                    "tagged_vlans": [],
-                }
-            ],
-            "port_stack_relationships": {},
-        }
-        render_request = _make_request()
-        table_view = DeviceInterfaceTableView()
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        table_view._librenms_api = api
-        table_view.request = render_request
-        context = table_view.get_context_data(
-            render_request,
-            member1,
-            "ifName",
-            "default",
-            fresh_data=snapshot,
-            sync_device=member1,
-        )
-        row = snapshot["ports"][0]
+
+        def seed(**vlans):
+            seed_interfaces_snapshot(
+                member1,
+                [
+                    {
+                        **_PORT_KEYS_UNSET,
+                        "port_id": "0010",
+                        "ifName": "Ethernet2",
+                        "ifType": "ethernetCsmacd",
+                        "ifAdminStatus": "up",
+                        **vlans,
+                    }
+                ],
+            )
+
+        seed(**port_vlans(None, 100))
+        context, rows = _render(_make_request(), member1)
+        (row,) = rows
         assert row["port_id"] == 10
         assert 'name="device_selection_10"' in str(context["table"].render_device_selection(None, row))
         assert 'name="vlan_group_10_100"' in str(context["table"].render_vlans(None, row))
@@ -2232,15 +1622,8 @@ class TestInterfaceContextVirtualChassisOwner:
             },
             user=user,
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(member1, "ports", "default")
-        cache.set(cache_key, snapshot)
 
-        try:
-            response = _post(view, request, object_type="device", object_id=member1.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(_sync_view(), request, object_type="device", object_id=member1.pk)
 
         assert response.status_code == 302
         interface.refresh_from_db()
@@ -2259,19 +1642,14 @@ class TestInterfaceContextVirtualChassisOwner:
             },
             user=user,
         )
-        stale_view = SyncInterfacesView()
-        stale_view._librenms_api = SimpleNamespace(server_key="default")
-        cache.set(cache_key, snapshot)
-        try:
-            stale_response = _post(stale_view, stale_request, object_type="device", object_id=member1.pk)
-        finally:
-            cache.delete(cache_key)
+        seed(**port_vlans(None, 100))
+
+        stale_response = _post(_sync_view(), stale_request, object_type="device", object_id=member1.pk)
 
         assert stale_response.status_code == 302
         interface.refresh_from_db()
         assert interface.untagged_vlan_id == expected_vlan.pk
 
-        snapshot["ports"][0]["untagged_vlan"] = None
         clear_request = _make_request(
             post_data={
                 "select": ["10"],
@@ -2280,13 +1658,10 @@ class TestInterfaceContextVirtualChassisOwner:
             },
             user=user,
         )
-        clear_view = SyncInterfacesView()
-        clear_view._librenms_api = SimpleNamespace(server_key="default")
-        cache.set(cache_key, snapshot)
-        try:
-            clear_response = _post(clear_view, clear_request, object_type="device", object_id=member1.pk)
-        finally:
-            cache.delete(cache_key)
+        # LibreNMS now reports no VLAN on the port.
+        seed(**port_vlans())
+
+        clear_response = _post(_sync_view(), clear_request, object_type="device", object_id=member1.pk)
 
         assert clear_response.status_code == 302
         interface.refresh_from_db()
@@ -2302,9 +1677,6 @@ class TestInterfaceContextVirtualChassisOwner:
 class TestSyncInterfacesViewPost:
     def test_integrity_error_at_the_outer_commit_is_reported_not_a_500(self, monkeypatch):
         """A deferred foreign-key IntegrityError at the outer atomic commit redirects instead of returning a 500."""
-        from types import SimpleNamespace
-
-        from django.core.cache import cache
         from django.db import IntegrityError
 
         from netbox_librenms_plugin.tests.view_test_helpers import make_superuser, message_texts
@@ -2321,26 +1693,19 @@ class TestSyncInterfacesViewPost:
             "ifPhysAddress": "",
             "ifMtu": 1500,
             "ifAdminStatus": "up",
-            "untagged_vlan": None,
-            "tagged_vlans": [],
         }
         request = _make_request(
             post_data={"select": ["10"], "exclude_columns": ["mac_address", "description", "mtu", "speed", "type"]},
             user=make_superuser("outer-commit-integrity"),
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(device, "ports", "default")
-        cache.set(cache_key, {"ports": [port], "port_stack_relationships": {}})
+        view = _sync_view()
+        seed_ports(device, [port])
 
         def raise_integrity_error(*args, **kwargs):
             raise IntegrityError("deferred FK violated at COMMIT")
 
         monkeypatch.setattr(SyncInterfacesView, "_sync_interface_relationships", raise_integrity_error)
-        try:
-            response = _post(view, request, object_type="device", object_id=device.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(view, request, object_type="device", object_id=device.pk)
 
         assert response.status_code == 302
         assert any("rolled back by a concurrent change" in text for text in message_texts(request, "error"))
@@ -2348,12 +1713,7 @@ class TestSyncInterfacesViewPost:
     @pytest.mark.parametrize("source", ["host", "oob"])
     def test_vlan_maps_cover_only_selected_row_owners(self, source):
         """One selected row must not build VLAN scope maps for unrelated chassis members."""
-        from types import SimpleNamespace
-
-        from django.core.cache import cache
-
         from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         _virtual_chassis, (page_device, target_device, _unrelated_member) = make_virtual_chassis_members(
             "selected-vlan-owner-scope",
@@ -2369,9 +1729,6 @@ class TestSyncInterfacesViewPost:
             "ifPhysAddress": "",
             "ifMtu": 1500,
             "ifAdminStatus": "up",
-            "untagged_vlan": None,
-            "tagged_vlans": [],
-            "_source": source,
         }
         request = _make_request(
             post_data={
@@ -2381,15 +1738,14 @@ class TestSyncInterfacesViewPost:
             },
             user=make_superuser("selected-vlan-owner-scope"),
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(page_device, "ports", "default")
-        cache.set(cache_key, {"ports": [port], "port_stack_relationships": {}})
+        view = _sync_view()
+        if source == "oob":
+            _link_oob(page_device)
+            seed_ports(page_device, [], oob_ports=[port])
+        else:
+            seed_ports(page_device, [port])
 
-        try:
-            response = _post(view, request, object_type="device", object_id=page_device.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(view, request, object_type="device", object_id=page_device.pk)
 
         assert response.status_code == 302
         assert set(view._lookup_maps_by_owner) == {target_device.pk}
@@ -2470,12 +1826,7 @@ class TestSyncInterfacesViewPost:
 
     def test_excluding_type_does_not_promote_or_link_a_non_lag_aggregate(self):
         """The relationship pass must honor the form's explicit Type exclusion."""
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("bulk-exclude-lag-type")
         member = make_interface(device, "Ethernet1")
@@ -2494,34 +1845,18 @@ class TestSyncInterfacesViewPost:
             },
             user=user,
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(device, "ports", "default")
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {
-                        "port_id": 10,
-                        "ifName": member.name,
-                        "ifType": "ethernetCsmacd",
-                        "ifAdminStatus": "up",
-                    },
-                    {
-                        "port_id": 20,
-                        "ifName": aggregate.name,
-                        "ifType": "ieee8023adLag",
-                        "ifAdminStatus": "up",
-                    },
-                ],
-                "port_stack_relationships": {"lag_members": {10: 20}, "sub_interfaces": {}},
-            },
+        view = _sync_view()
+        seed_ports(
+            device,
+            [
+                {"port_id": 10, "ifName": member.name, "ifType": "ethernetCsmacd", "ifAdminStatus": "up"},
+                {"port_id": 20, "ifName": aggregate.name, "ifType": "ieee8023adLag", "ifAdminStatus": "up"},
+            ],
+            [port_pair(10, 20)],
         )
+        assert interface_rows(device)["port_stack_relationships"]["lag_members"] == {10: 20}
 
-        try:
-            response = _post(view, request, object_type="device", object_id=device.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(view, request, object_type="device", object_id=device.pk)
 
         assert response.status_code == 302
         member.refresh_from_db()
@@ -2531,12 +1866,7 @@ class TestSyncInterfacesViewPost:
 
     def test_bulk_relink_repairs_an_aggregate_edited_back_to_a_non_lag_type(self):
         """An already-linked member must still repair a stale aggregate type."""
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("bulk-lag-type-repair")
         member = make_interface(device, "Ethernet1")
@@ -2560,36 +1890,29 @@ class TestSyncInterfacesViewPost:
             },
             user=user,
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(device, "ports", "default")
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {
-                        **_PORT_KEYS_UNSET,
-                        "port_id": 10,
-                        "ifName": member.name,
-                        "ifType": "ethernetCsmacd",
-                        "ifAdminStatus": "up",
-                    },
-                    {
-                        **_PORT_KEYS_UNSET,
-                        "port_id": 20,
-                        "ifName": aggregate.name,
-                        "ifType": "ieee8023adLag",
-                        "ifAdminStatus": "up",
-                    },
-                ],
-                "port_stack_relationships": {"lag_members": {10: 20}, "sub_interfaces": {}},
-            },
+        view = _sync_view()
+        seed_ports(
+            device,
+            [
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 10,
+                    "ifName": member.name,
+                    "ifType": "ethernetCsmacd",
+                    "ifAdminStatus": "up",
+                },
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 20,
+                    "ifName": aggregate.name,
+                    "ifType": "ieee8023adLag",
+                    "ifAdminStatus": "up",
+                },
+            ],
+            [port_pair(10, 20)],
         )
 
-        try:
-            response = _post(view, request, object_type="device", object_id=device.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(view, request, object_type="device", object_id=device.pk)
 
         assert response.status_code == 302
         member.refresh_from_db()
@@ -2598,12 +1921,7 @@ class TestSyncInterfacesViewPost:
         assert aggregate.type == "lag"
 
     def test_bulk_parent_link_resolves_a_unique_unbound_related_name(self):
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("bulk-unbound-related-parent")
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
@@ -2621,39 +1939,22 @@ class TestSyncInterfacesViewPost:
             },
             user=user,
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(device, "ports", "default")
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {
-                        **_PORT_KEYS_UNSET,
-                        "port_id": 11,
-                        "ifName": child.name,
-                        "ifType": "l2vlan",
-                        "ifAdminStatus": "up",
-                    },
-                    {
-                        **_PORT_KEYS_UNSET,
-                        "port_id": 10,
-                        "ifName": parent.name,
-                        "ifType": "ethernetCsmacd",
-                        "ifAdminStatus": "up",
-                    },
-                ],
-                "port_stack_relationships": {
-                    "lag_members": {},
-                    "sub_interfaces": {11: 10},
+        view = _sync_view()
+        seed_ports(
+            device,
+            [
+                {**_PORT_KEYS_UNSET, "port_id": 11, "ifName": child.name, "ifType": "l2vlan", "ifAdminStatus": "up"},
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 10,
+                    "ifName": parent.name,
+                    "ifType": "ethernetCsmacd",
+                    "ifAdminStatus": "up",
                 },
-            },
+            ],
         )
 
-        try:
-            response = _post(view, request, object_type="device", object_id=device.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(view, request, object_type="device", object_id=device.pk)
 
         assert response.status_code == 302
         child.refresh_from_db()
@@ -2662,13 +1963,8 @@ class TestSyncInterfacesViewPost:
         assert stored_mapping_for_test(parent) is None
 
     def test_cross_page_parent_keeps_unsubmitted_vlan_group(self):
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface
-        from django.core.cache import cache
         from ipam.models import VLAN, VLANGroup
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("cross-page-parent-vlan")
         wrong_group = VLANGroup.objects.create(name="Parent fallback", slug="parent-fallback")
@@ -2697,43 +1993,29 @@ class TestSyncInterfacesViewPost:
             },
             user=user,
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(device, "ports", "default")
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {
-                        **_PORT_KEYS_UNSET,
-                        "port_id": 10,
-                        "ifName": "Ethernet1",
-                        "ifType": "ethernetCsmacd",
-                        "ifAdminStatus": "up",
-                        "untagged_vlan": 100,
-                        "tagged_vlans": [],
-                    },
-                    {
-                        **_PORT_KEYS_UNSET,
-                        "port_id": 11,
-                        "ifName": "Ethernet1.100",
-                        "ifType": "l2vlan",
-                        "ifAdminStatus": "up",
-                        "untagged_vlan": None,
-                        "tagged_vlans": [],
-                    },
-                ],
-                "port_stack_relationships": {
-                    "lag_members": {},
-                    "sub_interfaces": {11: 10},
+        view = _sync_view()
+        seed_ports(
+            device,
+            [
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 10,
+                    "ifName": "Ethernet1",
+                    "ifType": "ethernetCsmacd",
+                    "ifAdminStatus": "up",
+                    **port_vlans(None, 100),
                 },
-            },
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 11,
+                    "ifName": "Ethernet1.100",
+                    "ifType": "l2vlan",
+                    "ifAdminStatus": "up",
+                },
+            ],
         )
 
-        try:
-            response = _post(view, request, object_type="device", object_id=device.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(view, request, object_type="device", object_id=device.pk)
 
         assert response.status_code == 302
         parent.refresh_from_db()
@@ -2743,10 +2025,7 @@ class TestSyncInterfacesViewPost:
         assert child.parent_id == parent.pk
 
     def test_selected_lag_includes_member_from_another_page(self):
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface
-        from django.core.cache import cache
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
 
@@ -2783,39 +2062,29 @@ class TestSyncInterfacesViewPost:
                 self.target_lookup_queries = len(captured)
                 return super()._sync_interface_relationships(obj, *args, **kwargs)
 
-        view = QueryCheckedSyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(page_device, "ports", "default")
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {
-                        **_PORT_KEYS_UNSET,
-                        "port_id": 10,
-                        "ifName": "Ethernet2",
-                        "ifType": "ethernetCsmacd",
-                        "ifAdminStatus": "up",
-                    },
-                    {
-                        **_PORT_KEYS_UNSET,
-                        "port_id": 100,
-                        "ifName": "Port-Channel1",
-                        "ifType": "ieee8023adLag",
-                        "ifAdminStatus": "up",
-                    },
-                ],
-                "port_stack_relationships": {
-                    "lag_members": {10: 100},
-                    "sub_interfaces": {},
+        view = make_view(QueryCheckedSyncInterfacesView)
+        seed_ports(
+            page_device,
+            [
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 10,
+                    "ifName": "Ethernet2",
+                    "ifType": "ethernetCsmacd",
+                    "ifAdminStatus": "up",
                 },
-            },
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 100,
+                    "ifName": "Port-Channel1",
+                    "ifType": "ieee8023adLag",
+                    "ifAdminStatus": "up",
+                },
+            ],
+            [port_pair(10, 100)],
         )
 
-        try:
-            response = _post(view, request, object_type="device", object_id=page_device.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(view, request, object_type="device", object_id=page_device.pk)
 
         assert response.status_code == 302
         aggregate.refresh_from_db()
@@ -2827,12 +2096,7 @@ class TestSyncInterfacesViewPost:
 
     @pytest.mark.parametrize("physical_ifname", ["ge-2/0/0", "2/1/1"])
     def test_off_page_physical_member_uses_ifname_owner_in_ifdescr_mode(self, physical_ifname):
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         _virtual_chassis, (page_device, member_device) = make_virtual_chassis_members("ifdescr-cross-page-member")
         aggregate = make_interface(member_device, "Bundle", iface_type="lag")
@@ -2852,41 +2116,31 @@ class TestSyncInterfacesViewPost:
             get_data={"interface_name_field": "ifDescr"},
             user=user,
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(page_device, "ports", "default")
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {
-                        **_PORT_KEYS_UNSET,
-                        "port_id": 10,
-                        "ifName": physical_ifname,
-                        "ifDescr": "uplink",
-                        "ifType": "ethernetCsmacd",
-                        "ifAdminStatus": "up",
-                    },
-                    {
-                        **_PORT_KEYS_UNSET,
-                        "port_id": 100,
-                        "ifName": "Port-Channel1",
-                        "ifDescr": aggregate.name,
-                        "ifType": "ieee8023adLag",
-                        "ifAdminStatus": "up",
-                    },
-                ],
-                "port_stack_relationships": {
-                    "lag_members": {10: 100},
-                    "sub_interfaces": {},
+        view = _sync_view()
+        seed_ports(
+            page_device,
+            [
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 10,
+                    "ifName": physical_ifname,
+                    "ifDescr": "uplink",
+                    "ifType": "ethernetCsmacd",
+                    "ifAdminStatus": "up",
                 },
-            },
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 100,
+                    "ifName": "Port-Channel1",
+                    "ifDescr": aggregate.name,
+                    "ifType": "ieee8023adLag",
+                    "ifAdminStatus": "up",
+                },
+            ],
+            [port_pair(10, 100)],
         )
 
-        try:
-            response = _post(view, request, object_type="device", object_id=page_device.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(view, request, object_type="device", object_id=page_device.pk)
 
         assert response.status_code == 302
         created_member = Interface.objects.get(device=member_device, name="uplink")
@@ -2894,12 +2148,7 @@ class TestSyncInterfacesViewPost:
         assert not Interface.objects.filter(device=page_device, name="uplink").exists()
 
     def test_same_page_lag_link_can_span_virtual_chassis_members(self):
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         _virtual_chassis, (page_device, other_member) = make_virtual_chassis_members("cross-member-lag")
         aggregate = make_interface(page_device, "Port-Channel1", iface_type="lag")
@@ -2922,39 +2171,29 @@ class TestSyncInterfacesViewPost:
             },
             user=user,
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(page_device, "ports", "default")
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {
-                        **_PORT_KEYS_UNSET,
-                        "port_id": 10,
-                        "ifName": "Ethernet2",
-                        "ifType": "ethernetCsmacd",
-                        "ifAdminStatus": "up",
-                    },
-                    {
-                        **_PORT_KEYS_UNSET,
-                        "port_id": 100,
-                        "ifName": "Port-Channel1",
-                        "ifType": "ieee8023adLag",
-                        "ifAdminStatus": "up",
-                    },
-                ],
-                "port_stack_relationships": {
-                    "lag_members": {10: 100},
-                    "sub_interfaces": {},
+        view = _sync_view()
+        seed_ports(
+            page_device,
+            [
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 10,
+                    "ifName": "Ethernet2",
+                    "ifType": "ethernetCsmacd",
+                    "ifAdminStatus": "up",
                 },
-            },
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 100,
+                    "ifName": "Port-Channel1",
+                    "ifType": "ieee8023adLag",
+                    "ifAdminStatus": "up",
+                },
+            ],
+            [port_pair(10, 100)],
         )
 
-        try:
-            response = _post(view, request, object_type="device", object_id=page_device.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(view, request, object_type="device", object_id=page_device.pk)
 
         assert response.status_code == 302
         aggregate.refresh_from_db()
@@ -2964,12 +2203,7 @@ class TestSyncInterfacesViewPost:
         assert member.device_id == other_member.pk
 
     def test_same_page_parent_link_can_span_virtual_chassis_members(self):
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         _virtual_chassis, (page_device, other_member) = make_virtual_chassis_members("cross-member-parent")
         parent = make_interface(page_device, "Ethernet1")
@@ -2992,39 +2226,28 @@ class TestSyncInterfacesViewPost:
             },
             user=user,
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(page_device, "ports", "default")
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {
-                        **_PORT_KEYS_UNSET,
-                        "port_id": 10,
-                        "ifName": "Ethernet2",
-                        "ifType": "ethernetCsmacd",
-                        "ifAdminStatus": "up",
-                    },
-                    {
-                        **_PORT_KEYS_UNSET,
-                        "port_id": 11,
-                        "ifName": "Ethernet2.100",
-                        "ifType": "l2vlan",
-                        "ifAdminStatus": "up",
-                    },
-                ],
-                "port_stack_relationships": {
-                    "lag_members": {},
-                    "sub_interfaces": {11: 10},
+        view = _sync_view()
+        seed_ports(
+            page_device,
+            [
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 10,
+                    "ifName": "Ethernet2",
+                    "ifType": "ethernetCsmacd",
+                    "ifAdminStatus": "up",
                 },
-            },
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 11,
+                    "ifName": "Ethernet2.100",
+                    "ifType": "l2vlan",
+                    "ifAdminStatus": "up",
+                },
+            ],
         )
 
-        try:
-            response = _post(view, request, object_type="device", object_id=page_device.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(view, request, object_type="device", object_id=page_device.pk)
 
         assert response.status_code == 302
         parent.refresh_from_db()
@@ -3034,12 +2257,7 @@ class TestSyncInterfacesViewPost:
         assert child.device_id == other_member.pk
 
     def test_invalid_selected_parent_target_does_not_fall_back_to_another_member(self):
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         _virtual_chassis, (page_device, other_member) = make_virtual_chassis_members("invalid-parent-target")
         outside_device = make_device("invalid-parent-target-outside")
@@ -3062,37 +2280,17 @@ class TestSyncInterfacesViewPost:
             },
             user=user,
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(page_device, "ports", "default")
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {
-                        "port_id": 10,
-                        "ifName": "Ethernet1",
-                        "ifType": "ethernetCsmacd",
-                        "ifAdminStatus": "up",
-                    },
-                    {
-                        "port_id": 11,
-                        "ifName": "Ethernet1.100",
-                        "ifType": "l2vlan",
-                        "ifAdminStatus": "up",
-                    },
-                ],
-                "port_stack_relationships": {
-                    "lag_members": {},
-                    "sub_interfaces": {11: 10},
-                },
-            },
+        view = _sync_view()
+        seed_ports(
+            page_device,
+            [
+                {"port_id": 10, "ifName": "Ethernet1", "ifType": "ethernetCsmacd", "ifAdminStatus": "up"},
+                {"port_id": 11, "ifName": "Ethernet1.100", "ifType": "l2vlan", "ifAdminStatus": "up"},
+            ],
         )
+        assert interface_rows(page_device)["port_stack_relationships"]["sub_interfaces"] == {11: 10}
 
-        try:
-            response = _post(view, request, object_type="device", object_id=page_device.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(view, request, object_type="device", object_id=page_device.pk)
 
         assert response.status_code == 302
         child.refresh_from_db()
@@ -3101,12 +2299,7 @@ class TestSyncInterfacesViewPost:
         assert existing_parent.device_id == other_member.pk
 
     def test_auto_selected_view_only_parent_keeps_its_existing_member_owner(self):
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         _virtual_chassis, (page_device, other_member) = make_virtual_chassis_members("view-only-parent-owner")
         child = make_interface(page_device, "Ethernet1.100", iface_type="virtual")
@@ -3130,39 +2323,28 @@ class TestSyncInterfacesViewPost:
             },
             user=user,
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(page_device, "ports", "default")
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {
-                        **_PORT_KEYS_UNSET,
-                        "port_id": 10,
-                        "ifName": "Ethernet1",
-                        "ifType": "l3ipvlan",
-                        "ifAdminStatus": "up",
-                    },
-                    {
-                        **_PORT_KEYS_UNSET,
-                        "port_id": 11,
-                        "ifName": "Ethernet1.100",
-                        "ifType": "l2vlan",
-                        "ifAdminStatus": "up",
-                    },
-                ],
-                "port_stack_relationships": {
-                    "lag_members": {},
-                    "sub_interfaces": {11: 10},
+        view = _sync_view()
+        seed_ports(
+            page_device,
+            [
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 10,
+                    "ifName": "Ethernet1",
+                    "ifType": "l3ipvlan",
+                    "ifAdminStatus": "up",
                 },
-            },
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 11,
+                    "ifName": "Ethernet1.100",
+                    "ifType": "l2vlan",
+                    "ifAdminStatus": "up",
+                },
+            ],
         )
 
-        try:
-            response = _post(view, request, object_type="device", object_id=page_device.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(view, request, object_type="device", object_id=page_device.pk)
 
         assert response.status_code == 302
         child.refresh_from_db()
@@ -3171,12 +2353,7 @@ class TestSyncInterfacesViewPost:
         assert parent.device_id == other_member.pk
 
     def test_auto_selected_unbound_logical_parent_without_owner_signal_is_skipped(self):
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         _virtual_chassis, (page_device, child_member) = make_virtual_chassis_members("unbound-logical-parent-owner")
         child = make_interface(child_member, "Ethernet2.100", iface_type="virtual")
@@ -3195,37 +2372,19 @@ class TestSyncInterfacesViewPost:
             },
             user=user,
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(page_device, "ports", "default")
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {
-                        "port_id": 10,
-                        "ifName": "Vlan100",
-                        "ifType": "l3ipvlan",
-                        "ifAdminStatus": "up",
-                    },
-                    {
-                        "port_id": 11,
-                        "ifName": child.name,
-                        "ifType": "l2vlan",
-                        "ifAdminStatus": "up",
-                    },
-                ],
-                "port_stack_relationships": {
-                    "lag_members": {},
-                    "sub_interfaces": {11: 10},
-                },
-            },
+        view = _sync_view()
+        # The L3 child pairs with Vlan100, a parent its name does not imply.
+        seed_ports(
+            page_device,
+            [
+                {"port_id": 10, "ifName": "Vlan100", "ifType": "l3ipvlan", "ifAdminStatus": "up"},
+                {"port_id": 11, "ifName": child.name, "ifType": "ipForward", "ifAdminStatus": "up"},
+            ],
+            [port_pair(11, 10)],
         )
+        assert interface_rows(page_device)["port_stack_relationships"]["sub_interfaces"] == {11: 10}
 
-        try:
-            response = _post(view, request, object_type="device", object_id=page_device.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(view, request, object_type="device", object_id=page_device.pk)
 
         assert response.status_code == 302
         child.refresh_from_db()
@@ -3235,13 +2394,9 @@ class TestSyncInterfacesViewPost:
         ).exists()
 
     def test_off_page_parent_selection_expands_to_all_ancestors(self):
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface
-        from django.core.cache import cache
 
         from netbox_librenms_plugin.models import InterfaceTypeMapping
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("nested-off-page-parent")
         InterfaceTypeMapping.objects.create(librenms_type="nestedVirtual", netbox_type="virtual")
@@ -3258,46 +2413,36 @@ class TestSyncInterfacesViewPost:
             },
             user=user,
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(device, "ports", "default")
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {
-                        **_PORT_KEYS_UNSET,
-                        "port_id": 10,
-                        "ifName": "Ethernet1",
-                        "ifType": "nestedPhysical",
-                        "ifAdminStatus": "up",
-                    },
-                    {
-                        **_PORT_KEYS_UNSET,
-                        "port_id": 11,
-                        "ifName": "Ethernet1.100",
-                        "ifType": "nestedVirtual",
-                        "ifAdminStatus": "up",
-                    },
-                    {
-                        **_PORT_KEYS_UNSET,
-                        "port_id": 12,
-                        "ifName": "Ethernet1.100.200",
-                        "ifType": "nestedVirtual",
-                        "ifAdminStatus": "up",
-                    },
-                ],
-                "port_stack_relationships": {
-                    "lag_members": {},
-                    "sub_interfaces": {12: 11, 11: 10},
+        view = _sync_view()
+        # Each name is its parent's name plus a ".N" suffix, so the assessment derives both edges.
+        seed_ports(
+            device,
+            [
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 10,
+                    "ifName": "Ethernet1",
+                    "ifType": "nestedPhysical",
+                    "ifAdminStatus": "up",
                 },
-            },
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 11,
+                    "ifName": "Ethernet1.100",
+                    "ifType": "nestedVirtual",
+                    "ifAdminStatus": "up",
+                },
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 12,
+                    "ifName": "Ethernet1.100.200",
+                    "ifType": "nestedVirtual",
+                    "ifAdminStatus": "up",
+                },
+            ],
         )
 
-        try:
-            response = _post(view, request, object_type="device", object_id=device.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(view, request, object_type="device", object_id=device.pk)
 
         assert response.status_code == 302
         grandparent = Interface.objects.get(device=device, name="Ethernet1")
@@ -3307,12 +2452,7 @@ class TestSyncInterfacesViewPost:
         assert child.parent_id == parent.pk
 
     def test_selected_row_with_blank_active_name_is_skipped(self):
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("blank-selected-interface-name")
         child = make_interface(device, "Ethernet2", iface_type="virtual")
@@ -3333,89 +2473,27 @@ class TestSyncInterfacesViewPost:
             get_data={"interface_name_field": "ifDescr"},
             user=user,
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(device, "ports", "default")
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {
-                        "port_id": 11,
-                        "ifName": "Ethernet2",
-                        "ifDescr": None,
-                        "ifAdminStatus": "up",
-                    },
-                    {
-                        "port_id": 10,
-                        "ifName": "Ethernet1",
-                        "ifDescr": "Ethernet1",
-                        "ifAdminStatus": "up",
-                    },
-                ],
-                "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {11: 10}},
-            },
+        view = _sync_view()
+        # The L3 child pairs with Ethernet1, but it reports no ifDescr.
+        seed_ports(
+            device,
+            [
+                {"port_id": 11, "ifName": "Ethernet2", "ifDescr": None, "ifType": "ipForward", "ifAdminStatus": "up"},
+                {"port_id": 10, "ifName": "Ethernet1", "ifDescr": "Ethernet1", "ifAdminStatus": "up"},
+            ],
+            [port_pair(11, 10)],
         )
-        try:
-            response = _post(view, request, object_type="device", object_id=device.pk)
-        finally:
-            cache.delete(cache_key)
+        assert interface_rows(device, "ifDescr")["port_stack_relationships"]["sub_interfaces"] == {11: 10}
+
+        response = _post(view, request, object_type="device", object_id=device.pk)
 
         assert response.status_code == 302
         child.refresh_from_db()
         assert child.parent_id is None
         assert message_texts(request, "warning") == ["1 interface(s) skipped: (unnamed) (interface name is blank)."]
 
-    def test_invalid_relationship_value_does_not_crash_auto_selection(self):
-        from types import SimpleNamespace
-
-        from dcim.models import Device, Interface
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        device = make_device("invalid-relationship-value")
-        user = make_user_with_perms(
-            "invalid-relationship-value",
-            [("view", Device), ("add", Interface), ("change", Interface)],
-        )
-        request = _make_request(
-            post_data={
-                "select": ["100"],
-                "auto_select_lag_members": "1",
-                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-            },
-            user=user,
-        )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(device, "ports", "default")
-        cache.set(
-            cache_key,
-            {
-                "ports": [{**_PORT_KEYS_UNSET, "port_id": 100, "ifName": "Port-Channel1", "ifAdminStatus": "up"}],
-                "port_stack_relationships": {
-                    "lag_members": {10: []},
-                    "sub_interfaces": {},
-                },
-            },
-        )
-
-        try:
-            response = _post(view, request, object_type="device", object_id=device.pk)
-        finally:
-            cache.delete(cache_key)
-
-        assert response.status_code == 302
-        assert Interface.objects.filter(device=device, name="Port-Channel1").exists()
-
     def test_duplicate_display_name_sync_uses_selected_port_id_and_target(self):
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         _virtual_chassis, (member1, member2) = make_virtual_chassis_members("stable-selection")
         selected_interface = make_interface(member1, "Ethernet")
@@ -3441,38 +2519,30 @@ class TestSyncInterfacesViewPost:
             get_data={"interface_name_field": "ifDescr"},
             user=user,
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(member1, "ports", "default")
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {
-                        **_PORT_KEYS_UNSET,
-                        "port_id": 10,
-                        "ifName": "Ethernet1",
-                        "ifDescr": "Ethernet",
-                        "ifAlias": "new selected",
-                        "ifAdminStatus": "up",
-                    },
-                    {
-                        **_PORT_KEYS_UNSET,
-                        "port_id": 11,
-                        "ifName": "Ethernet2",
-                        "ifDescr": "Ethernet",
-                        "ifAlias": "must not be applied",
-                        "ifAdminStatus": "up",
-                    },
-                ],
-                "port_stack_relationships": {},
-            },
+        view = _sync_view()
+        seed_ports(
+            member1,
+            [
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 10,
+                    "ifName": "Ethernet1",
+                    "ifDescr": "Ethernet",
+                    "ifAlias": "new selected",
+                    "ifAdminStatus": "up",
+                },
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 11,
+                    "ifName": "Ethernet2",
+                    "ifDescr": "Ethernet",
+                    "ifAlias": "must not be applied",
+                    "ifAdminStatus": "up",
+                },
+            ],
         )
 
-        try:
-            response = _post(view, request, object_type="device", object_id=member1.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(view, request, object_type="device", object_id=member1.pk)
 
         assert response.status_code == 302
         selected_interface.refresh_from_db()
@@ -3481,12 +2551,7 @@ class TestSyncInterfacesViewPost:
         assert untouched_interface.description == "old untouched"
 
     def test_same_device_duplicate_display_name_does_not_rebind_existing_port(self):
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("same-device-stable-selection")
         existing = make_interface(device, "Ethernet")
@@ -3506,50 +2571,38 @@ class TestSyncInterfacesViewPost:
             get_data={"interface_name_field": "ifDescr"},
             user=user,
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(device, "ports", "default")
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {
-                        "port_id": 10,
-                        "ifName": "Ethernet1",
-                        "ifDescr": "Ethernet",
-                        "ifAlias": "original port",
-                        "ifAdminStatus": "up",
-                    },
-                    {
-                        "port_id": 11,
-                        "ifName": "Ethernet2",
-                        "ifDescr": "Ethernet",
-                        "ifAlias": "must not be applied",
-                        "ifAdminStatus": "up",
-                    },
-                ],
-                "port_stack_relationships": {},
-            },
+        view = _sync_view()
+        seed_ports(
+            device,
+            [
+                {
+                    "port_id": 10,
+                    "ifName": "Ethernet1",
+                    "ifDescr": "Ethernet",
+                    "ifAlias": "original port",
+                    "ifAdminStatus": "up",
+                },
+                {
+                    "port_id": 11,
+                    "ifName": "Ethernet2",
+                    "ifDescr": "Ethernet",
+                    "ifAlias": "must not be applied",
+                    "ifAdminStatus": "up",
+                },
+            ],
         )
 
-        try:
-            response = _post(view, request, object_type="device", object_id=device.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(view, request, object_type="device", object_id=device.pk)
 
         assert response.status_code == 302
+        _assert_snapshot_read(request)
         existing.refresh_from_db()
         assert read_mapping(existing).own_id("default") == 10
         assert existing.description == "original port"
         assert Interface.objects.filter(device=device, name="Ethernet").count() == 1
 
     def test_same_vm_duplicate_display_name_does_not_rebind_existing_port(self):
-        from types import SimpleNamespace
-
-        from django.core.cache import cache
         from virtualization.models import VirtualMachine, VMInterface
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         vm = make_vm("same-vm-stable-selection")
         existing = VMInterface.objects.create(virtual_machine=vm, name="Ethernet", description="original port")
@@ -3568,38 +2621,31 @@ class TestSyncInterfacesViewPost:
             get_data={"interface_name_field": "ifDescr"},
             user=user,
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(vm, "ports", "default")
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {
-                        "port_id": 10,
-                        "ifName": "Ethernet1",
-                        "ifDescr": "Ethernet",
-                        "ifAlias": "original port",
-                        "ifAdminStatus": "up",
-                    },
-                    {
-                        "port_id": 11,
-                        "ifName": "Ethernet2",
-                        "ifDescr": "Ethernet",
-                        "ifAlias": "must not be applied",
-                        "ifAdminStatus": "up",
-                    },
-                ],
-                "port_stack_relationships": {},
-            },
+        view = _sync_view()
+        seed_ports(
+            vm,
+            [
+                {
+                    "port_id": 10,
+                    "ifName": "Ethernet1",
+                    "ifDescr": "Ethernet",
+                    "ifAlias": "original port",
+                    "ifAdminStatus": "up",
+                },
+                {
+                    "port_id": 11,
+                    "ifName": "Ethernet2",
+                    "ifDescr": "Ethernet",
+                    "ifAlias": "must not be applied",
+                    "ifAdminStatus": "up",
+                },
+            ],
         )
 
-        try:
-            response = _post(view, request, object_type="virtualmachine", object_id=vm.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(view, request, object_type="virtualmachine", object_id=vm.pk)
 
         assert response.status_code == 302
+        _assert_snapshot_read(request)
         existing.refresh_from_db()
         assert read_mapping(existing).own_id("default") == 10
         assert existing.description == "original port"
@@ -3616,13 +2662,8 @@ class TestSyncInterfacesViewPost:
         ],
     )
     def test_corrupt_same_name_binding_is_not_claimed_by_selected_port(self, object_type, stored_entry):
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface
-        from django.core.cache import cache
         from virtualization.models import VirtualMachine, VMInterface
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         if object_type == "device":
             obj = make_device("corrupt-name-fallback-device")
@@ -3649,31 +2690,24 @@ class TestSyncInterfacesViewPost:
             get_data={"interface_name_field": "ifDescr"},
             user=user,
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(obj, "ports", "default")
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {
-                        "port_id": 11,
-                        "ifName": "Ethernet1",
-                        "ifDescr": "Ethernet",
-                        "ifAlias": "must not be applied",
-                        "ifAdminStatus": "up",
-                    }
-                ],
-                "port_stack_relationships": {},
-            },
+        view = _sync_view()
+        seed_ports(
+            obj,
+            [
+                {
+                    "port_id": 11,
+                    "ifName": "Ethernet1",
+                    "ifDescr": "Ethernet",
+                    "ifAlias": "must not be applied",
+                    "ifAdminStatus": "up",
+                }
+            ],
         )
 
-        try:
-            response = _post(view, request, object_type=object_type, object_id=obj.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(view, request, object_type=object_type, object_id=obj.pk)
 
         assert response.status_code == 302
+        _assert_snapshot_read(request)
         existing.refresh_from_db()
         assert stored_mapping_for_test(existing) == {"default": stored_entry}
         assert read_mapping(existing).own_id("default") is None
@@ -3681,21 +2715,15 @@ class TestSyncInterfacesViewPost:
         assert interface_model.objects.filter(**owner_filter, name="Ethernet").count() == 1
 
     def test_standalone_relationship_cache_read_fails_closed_on_non_dict(self):
-        from types import SimpleNamespace
-
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+        from netbox_librenms_plugin import source_cache
+        from netbox_librenms_plugin.acquisition.registry import Resource
 
         obj = make_device("malformed-standalone-relationship-cache")
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(obj, "ports", "default")
-        cache.set(cache_key, ["corrupt", "snapshot"])
-        try:
-            assert view._get_cached_relationships(obj, "default") == {}
-        finally:
-            cache.delete(cache_key)
+        view = _sync_view(_make_request())
+        cache.set(source_cache.snapshot_key(obj, Resource.INTERFACES, "default"), ["corrupt", "snapshot"])
+        assert view._get_cached_relationships(obj, "default") == {}
 
     def test_sync_selected_interfaces_syncs_oob_rows_but_not_a_shared_lom(self):
         """An OOB controller is a second LibreNMS device but the same device in NetBox.
@@ -3704,12 +2732,8 @@ class TestSyncInterfacesViewPost:
         physical port is reported on both sides: syncing both rows would model it twice, so that
         row is skipped and the skip is reported.
         """
-        from types import SimpleNamespace
 
         from dcim.models import Device, Interface
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("oob-row-not-syncable")
         user = make_user_with_perms(
@@ -3723,28 +2747,11 @@ class TestSyncInterfacesViewPost:
             },
             user=user,
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(device, "ports", "default")
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {
-                        **_PORT_KEYS_UNSET,
-                        "ifName": "eth0",
-                        "port_id": 99,
-                        "ifAdminStatus": "up",
-                        "_source": "oob",
-                    }
-                ]
-            },
-        )
+        view = _sync_view()
+        _link_oob(device)
+        seed_ports(device, [], oob_ports=[{**_PORT_KEYS_UNSET, "ifName": "eth0", "port_id": 99, "ifAdminStatus": "up"}])
 
-        try:
-            response = _post(view, request, object_type="device", object_id=device.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(view, request, object_type="device", object_id=device.pk)
 
         assert response.status_code == 302
         assert Interface.objects.filter(device=device, name="eth0").exists(), (
@@ -3753,12 +2760,7 @@ class TestSyncInterfacesViewPost:
 
     @pytest.mark.parametrize("selected_ports", [["9402"], ["9401", "9402"]])
     def test_oob_sync_can_use_a_name_owned_by_another_chassis_member(self, selected_ports):
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface, VirtualChassis
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         master = make_device("oob-sync-scope-master")
         member = make_device("oob-sync-scope-member")
@@ -3781,29 +2783,15 @@ class TestSyncInterfacesViewPost:
             },
             user=user,
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(master, "ports", "default")
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {**_PORT_KEYS_UNSET, "ifName": "eth0", "port_id": 9401, "ifType": "ethernetCsmacd"},
-                    {
-                        **_PORT_KEYS_UNSET,
-                        "ifName": "eth0",
-                        "port_id": 9402,
-                        "ifType": "ethernetCsmacd",
-                        "_source": "oob",
-                    },
-                ]
-            },
+        view = _sync_view()
+        _link_oob(master)
+        seed_ports(
+            master,
+            [{**_PORT_KEYS_UNSET, "ifName": "eth0", "port_id": 9401, "ifType": "ethernetCsmacd"}],
+            oob_ports=[{**_PORT_KEYS_UNSET, "ifName": "eth0", "port_id": 9402, "ifType": "ethernetCsmacd"}],
         )
 
-        try:
-            response = _post(view, request, object_type="device", object_id=master.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(view, request, object_type="device", object_id=master.pk)
 
         assert response.status_code == 302
         master_interface = Interface.objects.get(device=master, name="eth0")
@@ -3816,24 +2804,21 @@ class TestSyncInterfacesViewPost:
         ["host_both", "host_unselected", "alone", "explicit_page", "bound_page", "bound_member", "hidden_member"],
     )
     def test_oob_writes_and_collisions_use_the_displayed_chassis_owner(self, case):
-        from copy import deepcopy
         from dcim.models import Device, Interface
-        from django.core.cache import cache
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.tests.view_test_helpers import grant
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         _chassis, (page, member) = make_virtual_chassis_members("oob-displayed-owner")
+        _link_oob(page)
         user = make_user_with_perms(
             "oob-displayed-owner", [("view", Interface), ("add", Interface), ("change", Interface)]
         )
         user = grant(user, "view", Device, constraints={"pk": page.pk} if case == "hidden_member" else None)
         name = "Gi1/0/1" if case == "bound_member" else "Gi2/0/1"
-        rows = [{**_PORT_KEYS_UNSET, "ifName": name, "port_id": 9412, "ifType": "ethernetCsmacd", "_source": "oob"}]
+        oob_rows = [{**_PORT_KEYS_UNSET, "ifName": name, "port_id": 9412, "ifType": "ethernetCsmacd"}]
+        host_rows = []
         if case in ("host_both", "host_unselected", "explicit_page"):
-            rows.insert(0, {**_PORT_KEYS_UNSET, "ifName": name, "port_id": 9411, "ifType": "ethernetCsmacd"})
+            host_rows.append({**_PORT_KEYS_UNSET, "ifName": name, "port_id": 9411, "ifType": "ethernetCsmacd"})
         bound = None
         if case in ("bound_page", "bound_member"):
             bound = make_interface(page if case == "bound_page" else member, "old-port-name")
@@ -3846,26 +2831,14 @@ class TestSyncInterfacesViewPost:
         if case == "explicit_page":
             post_data["device_selection_9412"] = str(page.pk)
         request = _make_request(post_data=post_data, user=user)
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        display = DeviceInterfaceTableView()
-        display._librenms_api = api
-        display.request = request
-        snapshot = {"ports": deepcopy(rows)}
-        context = display.get_context_data(request, page, "ifName", "default", fresh_data=snapshot, sync_device=page)
+        seed_ports(page, host_rows, oob_ports=oob_rows)
+
+        context, rows = _render(request, page)
         assert context["table"] is not None
         if case != "hidden_member":
-            oob_row = next(row for row in snapshot["ports"] if row["port_id"] == 9412)
-            assert oob_row["selected_object_id"] == (page.pk if case == "bound_page" else member.pk)
+            assert _row(rows, 9412)["selected_object_id"] == (page.pk if case == "bound_page" else member.pk)
 
-        view = SyncInterfacesView()
-        view._librenms_api = api
-        key = view.get_cache_key(page, "ports", "default")
-        cache.set(key, {"ports": rows})
-        try:
-            response = _post(view, request, object_type="device", object_id=page.pk)
-        finally:
-            cache.delete(key)
+        response = _post(_sync_view(), request, object_type="device", object_id=page.pk)
         assert response.status_code == 302
         if case == "hidden_member":
             assert not Interface.objects.filter(device__in=[page, member]).exists()
@@ -3926,12 +2899,7 @@ class TestSyncInterfacesViewPost:
     @pytest.mark.parametrize("selected_port_id", ["98", "99"])
     def test_a_shared_lom_row_is_reported_only_when_selected(self, selected_port_id):
         """One physical port reported on both sides must not become two NetBox interfaces."""
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("oob-shared-lom")
         user = make_user_with_perms(
@@ -3945,36 +2913,19 @@ class TestSyncInterfacesViewPost:
             },
             user=user,
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(device, "ports", "default")
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {
-                        **_PORT_KEYS_UNSET,
-                        "ifName": "lom0",
-                        "port_id": 99,
-                        "ifAdminStatus": "up",
-                        "_source": "host",
-                    },
-                    {
-                        **_PORT_KEYS_UNSET,
-                        "ifName": "lom0",
-                        "port_id": 98,
-                        "ifAdminStatus": "up",
-                        "_source": "oob",
-                        "_dedup_conflict": True,
-                    },
-                ]
-            },
+        view = _sync_view()
+        _link_oob(device)
+        # The host and the OOB controller report one MAC: a shared LOM port.
+        mac = "aa:bb:cc:00:00:99"
+        seed_ports(
+            device,
+            [{**_PORT_KEYS_UNSET, "ifName": "lom0", "port_id": 99, "ifAdminStatus": "up", "ifPhysAddress": mac}],
+            oob_ports=[
+                {**_PORT_KEYS_UNSET, "ifName": "lom0", "port_id": 98, "ifAdminStatus": "up", "ifPhysAddress": mac}
+            ],
         )
 
-        try:
-            response = _post(view, request, object_type="device", object_id=device.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(view, request, object_type="device", object_id=device.pk)
 
         assert response.status_code == 302
         assert Interface.objects.filter(device=device, name="lom0").exists() is (selected_port_id == "99")
@@ -3986,12 +2937,7 @@ class TestSyncInterfacesViewPost:
 
     @pytest.mark.parametrize("viewable", [True, False])
     def test_oob_port_does_not_adopt_an_unbound_host_interface_by_name(self, viewable):
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("oob-name-collision")
         host_interface = make_interface(device, "lom0")
@@ -4007,34 +2953,29 @@ class TestSyncInterfacesViewPost:
             post_data={"select": ["98"], "exclude_columns": ["vlans", "mac_address"]},
             user=user,
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(device, "ports", "default")
+        view = _sync_view()
+        _link_oob(device)
         # The host row is absent from LibreNMS, but its unbound NetBox interface remains.
         # This reaches the existing-interface guard after the snapshot collision check.
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {
-                        **_PORT_KEYS_UNSET,
-                        "ifName": "lom0",
-                        "port_id": 98,
-                        "ifAdminStatus": "up",
-                        "ifAlias": "controller interface",
-                        "_source": "oob",
-                    },
-                ]
-            },
+        seed_ports(
+            device,
+            [],
+            oob_ports=[
+                {
+                    **_PORT_KEYS_UNSET,
+                    "ifName": "lom0",
+                    "port_id": 98,
+                    "ifAdminStatus": "up",
+                    "ifAlias": "controller interface",
+                },
+            ],
         )
 
-        try:
-            response = _post(view, request, object_type="device", object_id=device.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(view, request, object_type="device", object_id=device.pk)
 
         host_interface.refresh_from_db()
         assert response.status_code == 302
+        _assert_snapshot_read(request)
         assert host_interface.description == "host interface"
         assert read_mapping(host_interface).own_id("default") is None
         assert Interface.objects.filter(device=device, name="lom0").count() == 1
@@ -4049,12 +2990,8 @@ class TestSyncInterfacesViewPost:
         create the name and bind it to the OOB port_id, after which the host row could never
         resolve its own interface again.
         """
-        from types import SimpleNamespace
 
         from dcim.models import Device, Interface
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("oob-name-collision-host")
         user = make_user_with_perms(
@@ -4070,23 +3007,15 @@ class TestSyncInterfacesViewPost:
             },
             user=user,
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(device, "ports", "default")
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {**_PORT_KEYS_UNSET, "ifName": "eth0", "port_id": 8501, "ifAdminStatus": "up"},
-                    {**_PORT_KEYS_UNSET, "ifName": "eth0", "port_id": 8502, "ifAdminStatus": "up", "_source": "oob"},
-                ]
-            },
+        view = _sync_view()
+        _link_oob(device)
+        seed_ports(
+            device,
+            [{**_PORT_KEYS_UNSET, "ifName": "eth0", "port_id": 8501, "ifAdminStatus": "up"}],
+            oob_ports=[{**_PORT_KEYS_UNSET, "ifName": "eth0", "port_id": 8502, "ifAdminStatus": "up"}],
         )
 
-        try:
-            response = _post(view, request, object_type="device", object_id=device.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(view, request, object_type="device", object_id=device.pk)
 
         assert response.status_code == 302
         derived = Interface.objects.get(device=device, name="eth0-oob")
@@ -4095,12 +3024,7 @@ class TestSyncInterfacesViewPost:
 
     def test_a_host_oob_name_collision_syncs_under_the_derived_name(self):
         """A host-owned bare name derives an OOB name instead of reporting a skip."""
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("oob-collision-reported")
         user = make_user_with_perms(
@@ -4114,23 +3038,15 @@ class TestSyncInterfacesViewPost:
             },
             user=user,
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(device, "ports", "default")
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {**_PORT_KEYS_UNSET, "ifName": "mgmt0", "port_id": 8601, "ifAdminStatus": "up"},
-                    {**_PORT_KEYS_UNSET, "ifName": "mgmt0", "port_id": 8602, "ifAdminStatus": "up", "_source": "oob"},
-                ]
-            },
+        view = _sync_view()
+        _link_oob(device)
+        seed_ports(
+            device,
+            [{**_PORT_KEYS_UNSET, "ifName": "mgmt0", "port_id": 8601, "ifAdminStatus": "up"}],
+            oob_ports=[{**_PORT_KEYS_UNSET, "ifName": "mgmt0", "port_id": 8602, "ifAdminStatus": "up"}],
         )
 
-        try:
-            _post(view, request, object_type="device", object_id=device.pk)
-        finally:
-            cache.delete(cache_key)
+        _post(view, request, object_type="device", object_id=device.pk)
 
         interface = Interface.objects.get(device=device, name="mgmt0-oob")
         assert read_mapping(interface).own_id("default") == 8602
@@ -4138,22 +3054,13 @@ class TestSyncInterfacesViewPost:
 
     def test_the_host_row_can_still_sync_its_own_name_after_an_oob_collision(self):
         """Host precedence is only real if the host row still gets its name afterwards."""
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface
-        from django.core.cache import cache
 
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        device = make_device("oob-collision-host-wins")
+        device = _link_oob(make_device("oob-collision-host-wins"))
         user = make_user_with_perms(
             "oob-collision-host-wins",
             [("view", Device), ("add", Interface), ("change", Interface)],
         )
-        ports = [
-            {**_PORT_KEYS_UNSET, "ifName": "eth1", "port_id": 8701, "ifAdminStatus": "up"},
-            {**_PORT_KEYS_UNSET, "ifName": "eth1", "port_id": 8702, "ifAdminStatus": "up", "_source": "oob"},
-        ]
 
         def _sync(selected):
             request = _make_request(
@@ -4163,14 +3070,12 @@ class TestSyncInterfacesViewPost:
                 },
                 user=user,
             )
-            view = SyncInterfacesView()
-            view._librenms_api = SimpleNamespace(server_key="default")
-            cache_key = view.get_cache_key(device, "ports", "default")
-            cache.set(cache_key, {"ports": ports})
-            try:
-                _post(view, request, object_type="device", object_id=device.pk)
-            finally:
-                cache.delete(cache_key)
+            seed_ports(
+                device,
+                [{**_PORT_KEYS_UNSET, "ifName": "eth1", "port_id": 8701, "ifAdminStatus": "up"}],
+                oob_ports=[{**_PORT_KEYS_UNSET, "ifName": "eth1", "port_id": 8702, "ifAdminStatus": "up"}],
+            )
+            _post(_sync_view(), request, object_type="device", object_id=device.pk)
 
         # The OOB row goes first, so ordering cannot be what saves the host.
         _sync(["8702"])
@@ -4188,12 +3093,8 @@ class TestSyncInterfacesViewPost:
         The shared-LOM skip used to run before the selection check, so an untouched OOB row
         raised a warning and inflated the skipped count on a sync of unrelated host ports.
         """
-        from types import SimpleNamespace
 
         from dcim.models import Device, Interface
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("oob-unselected-lom")
         user = make_user_with_perms(
@@ -4207,30 +3108,23 @@ class TestSyncInterfacesViewPost:
             },
             user=user,
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(device, "ports", "default")
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {**_PORT_KEYS_UNSET, "ifName": "swp1", "port_id": 8801, "ifAdminStatus": "up"},
-                    {
-                        **_PORT_KEYS_UNSET,
-                        "ifName": "lom1",
-                        "port_id": 8802,
-                        "ifAdminStatus": "up",
-                        "_source": "oob",
-                        "_dedup_conflict": True,
-                    },
-                ]
-            },
+        view = _sync_view()
+        _link_oob(device)
+        # An unselected host port and the OOB controller report one MAC: a shared LOM port.
+        mac = "aa:bb:cc:00:88:02"
+        seed_ports(
+            device,
+            [
+                {**_PORT_KEYS_UNSET, "ifName": "swp1", "port_id": 8801, "ifAdminStatus": "up"},
+                {**_PORT_KEYS_UNSET, "ifName": "eno1", "port_id": 8803, "ifAdminStatus": "up", "ifPhysAddress": mac},
+            ],
+            oob_ports=[
+                {**_PORT_KEYS_UNSET, "ifName": "lom1", "port_id": 8802, "ifAdminStatus": "up", "ifPhysAddress": mac}
+            ],
         )
+        assert _row(interface_rows(device)["ports"], 8802)["_dedup_conflict"] is True
 
-        try:
-            _post(view, request, object_type="device", object_id=device.pk)
-        finally:
-            cache.delete(cache_key)
+        _post(view, request, object_type="device", object_id=device.pk)
 
         assert Interface.objects.filter(device=device, name="swp1").exists()
         assert not any("lom1" in text for text in message_texts(request, "warning")), (
@@ -4241,12 +3135,7 @@ class TestSyncInterfacesViewPost:
     @pytest.mark.parametrize("bound_elsewhere", [True, False])
     def test_an_existing_bound_name_derives_oob_without_a_host_snapshot(self, viewable, bound_elsewhere):
         """A different bound port keeps the bare name unavailable to the OOB row."""
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("oob-collision-host-gone")
         host_interface = make_interface(device, "eno1")
@@ -4272,23 +3161,16 @@ class TestSyncInterfacesViewPost:
             },
             user=user,
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(device, "ports", "default")
+        view = _sync_view()
+        _link_oob(device)
         # Only the OOB row remains; the host port is gone from LibreNMS.
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {**_PORT_KEYS_UNSET, "ifName": "eno1", "port_id": 8902, "ifAdminStatus": "up", "_source": "oob"}
-                ]
-            },
+        seed_ports(
+            device,
+            [],
+            oob_ports=[{**_PORT_KEYS_UNSET, "ifName": "eno1", "port_id": 8902, "ifAdminStatus": "up"}],
         )
 
-        try:
-            _post(view, request, object_type="device", object_id=device.pk)
-        finally:
-            cache.delete(cache_key)
+        _post(view, request, object_type="device", object_id=device.pk)
 
         host_interface.refresh_from_db()
         assert read_mapping(host_interface).own_id("default") == 8901, "the host interface keeps its own port binding"
@@ -4306,12 +3188,7 @@ class TestSyncInterfacesViewPost:
             assert warnings == []
 
     def test_duplicate_normalized_selected_port_id_is_rejected_before_writes(self):
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("duplicate-normalized-selected-id")
         user = make_user_with_perms(
@@ -4325,24 +3202,16 @@ class TestSyncInterfacesViewPost:
             },
             user=user,
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(device, "ports", "default")
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {"port_id": 10, "ifName": "eth0", "ifAdminStatus": "up"},
-                    {"port_id": "010", "ifName": "eth1", "ifAdminStatus": "up"},
-                ],
-                "port_stack_relationships": {},
-            },
+        view = _sync_view()
+        seed_ports(
+            device,
+            [
+                {"port_id": 10, "ifName": "eth0", "ifAdminStatus": "up"},
+                {"port_id": "010", "ifName": "eth1", "ifAdminStatus": "up"},
+            ],
         )
 
-        try:
-            response = _post(view, request, object_type="device", object_id=device.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(view, request, object_type="device", object_id=device.pk)
 
         assert response.status_code == 302
         assert not Interface.objects.filter(device=device).exists()
@@ -4352,12 +3221,7 @@ class TestSyncInterfacesViewPost:
         ]
 
     def test_duplicate_normalized_related_port_id_is_not_linked(self):
-        from types import SimpleNamespace
-
         from dcim.models import Device
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("duplicate-normalized-related-id")
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
@@ -4377,40 +3241,26 @@ class TestSyncInterfacesViewPost:
             },
             user=user,
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(device, "ports", "default")
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {"port_id": 10, "ifName": child.name, "ifAdminStatus": "up"},
-                    {"port_id": 20, "ifName": parent.name, "ifAdminStatus": "up"},
-                    {"port_id": "020", "ifName": "duplicate-parent", "ifAdminStatus": "up"},
-                ],
-                "port_stack_relationships": {
-                    "lag_members": {},
-                    "sub_interfaces": {10: 20},
-                },
-            },
+        view = _sync_view()
+        # The parent's port ID is duplicated, so the assessment derives no edge from it.
+        seed_ports(
+            device,
+            [
+                {"port_id": 10, "ifName": child.name, "ifAdminStatus": "up"},
+                {"port_id": 20, "ifName": parent.name, "ifAdminStatus": "up"},
+                {"port_id": "020", "ifName": "duplicate-parent", "ifAdminStatus": "up"},
+            ],
         )
 
-        try:
-            response = _post(view, request, object_type="device", object_id=device.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(view, request, object_type="device", object_id=device.pk)
 
         assert response.status_code == 302
+        _assert_snapshot_read(request)
         child.refresh_from_db()
         assert child.parent_id is None
 
     def test_padded_cached_port_id_updates_its_existing_stable_match(self):
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("padded-stable-port-id")
         interface = make_interface(device, "oldname")
@@ -4426,28 +3276,13 @@ class TestSyncInterfacesViewPost:
             },
             user=user,
         )
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        cache_key = view.get_cache_key(device, "ports", "default")
-        cache.set(
-            cache_key,
-            {
-                "ports": [
-                    {
-                        **_PORT_KEYS_UNSET,
-                        "port_id": "0010",
-                        "ifName": "newname",
-                        "ifAdminStatus": "up",
-                    }
-                ],
-                "port_stack_relationships": {},
-            },
+        view = _sync_view()
+        seed_ports(
+            device,
+            [{**_PORT_KEYS_UNSET, "port_id": "0010", "ifName": "newname", "ifAdminStatus": "up"}],
         )
 
-        try:
-            response = _post(view, request, object_type="device", object_id=device.pk)
-        finally:
-            cache.delete(cache_key)
+        response = _post(view, request, object_type="device", object_id=device.pk)
 
         assert response.status_code == 302
         interface.refresh_from_db()
@@ -4498,9 +3333,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         """
         from dcim.models import Interface
 
-        from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
-
-        dev = make_device("oob-sync-host")
+        dev = _link_oob(make_device("oob-sync-host"))
         oob_port = {
             **_PORT_KEYS_UNSET,
             "ifName": "iDRAC-NIC",
@@ -4510,10 +3343,9 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
             "ifMtu": 1500,
             "port_id": 9301,
             "ifAdminStatus": "up",
-            "_source": OOB_INVENTORY_SOURCE,
         }
 
-        _post_sync(client, settings, dev, [oob_port], [9301])
+        _post_sync(client, settings, dev, [], [9301], oob_ports=[oob_port])
 
         iface = Interface.objects.get(device=dev, name="iDRAC-NIC")
         assert iface.description == "BMC dedicated"
@@ -4815,8 +3647,9 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
             "ifAdminStatus": "up",
         }
 
-        _post_sync(client, settings, interface.device, [librenms_port], [1])
+        response = _post_sync(client, settings, interface.device, [librenms_port], [1])
 
+        _assert_snapshot_read(response.wsgi_request)
         interface.refresh_from_db()
         assert interface.description == ""
 
@@ -4828,7 +3661,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
 
 class TestSyncInterfacesViewSyncInterfaceVlans:
     def test_non_numeric_cached_vid_is_dropped_instead_of_aborting_the_sync(self, client, settings):
-        """A nonnumeric cached VLAN ID is dropped without aborting the sync or a valid VLAN update."""
+        """A nonnumeric VLAN ID from LibreNMS is dropped without aborting the sync or a valid VLAN update."""
         from ipam.models import VLAN
 
         device = make_device("bad-vid-owner")
@@ -4838,9 +3671,9 @@ class TestSyncInterfacesViewSyncInterfaceVlans:
             **_PORT_KEYS_UNSET,
             "port_id": 10,
             "ifName": "Ethernet1",
-            "untagged_vlan": "not-a-vid",
-            "tagged_vlans": [100],
+            **port_vlans(None, None, [100]),
         }
+        port["vlans"].insert(0, {"vlan": "not-a-vid", "untagged": 1})
 
         # The group override is keyed by port_id and VID, so post the malformed VID's key too.
         _post_sync(
@@ -4905,18 +3738,19 @@ class TestSyncLagAndParentRelationships:
         vm = make_vm("relgate-vm")
         parent = self._vm_iface(vm, "eth0", 10)
         child = self._vm_iface(vm, "eth0.100", 11)
+        # The child's name is the parent's name plus ".100", so the assessment derives the edge.
         ports_data = [
             {**_PORT_KEYS_UNSET, "ifName": "eth0", "ifDescr": "eth0", "port_id": 10},
             {**_PORT_KEYS_UNSET, "ifName": "eth0.100", "ifDescr": "eth0.100", "port_id": 11},
         ]
-        relationships = {"sub_interfaces": {11: 10}}
 
         if name_limit is None:
-            _post_sync(client, settings, vm, ports_data, [11], relationships=relationships)
+            response = _post_sync(client, settings, vm, ports_data, [11])
         else:
             with patch.object(VMInterface._meta.get_field("name"), "max_length", name_limit):
-                _post_sync(client, settings, vm, ports_data, [11], relationships=relationships)
+                response = _post_sync(client, settings, vm, ports_data, [11])
 
+        _assert_snapshot_read(response.wsgi_request)
         child.refresh_from_db()
         return child, parent
 
@@ -4942,12 +3776,17 @@ class TestSyncLagAndParentRelationships:
         ports_data = [
             {**_PORT_KEYS_UNSET, "ifDescr": "Ethernet", "ifName": "Gi0/1", "port_id": 10},
             {**_PORT_KEYS_UNSET, "ifDescr": "Ethernet", "ifName": "Gi0/2", "port_id": 11},
-            {**_PORT_KEYS_UNSET, "ifDescr": "Po1", "ifName": "Po1", "port_id": 100},
+            {**_PORT_KEYS_UNSET, "ifDescr": "Po1", "ifName": "Po1", "port_id": 100, "ifType": "ieee8023adLag"},
         ]
-        relationships = {"lag_members": {10: 100, 11: 100}}
 
         _post_sync(
-            client, settings, device, ports_data, [10], relationships=relationships, interface_name_field="ifDescr"
+            client,
+            settings,
+            device,
+            ports_data,
+            [10],
+            port_stack=[port_pair(10, 100), port_pair(11, 100)],
+            interface_name_field="ifDescr",
         )
 
         m1.refresh_from_db()
@@ -4981,10 +3820,15 @@ class TestSyncLagAndParentRelationships:
         ports_data = [
             {**_PORT_KEYS_UNSET, "ifName": f"Ethernet{port_id}", "port_id": port_id} for port_id in source_ids
         ] + [
-            {**_PORT_KEYS_UNSET, "ifName": f"Port-Channel{port_id}", "port_id": 10_000 + port_id}
+            {
+                **_PORT_KEYS_UNSET,
+                "ifName": f"Port-Channel{port_id}",
+                "port_id": 10_000 + port_id,
+                "ifType": "ieee8023adLag",
+            }
             for port_id in source_ids
         ]
-        relationships = {"lag_members": {port_id: 10_000 + port_id for port_id in source_ids}}
+        port_stack = [port_pair(port_id, 10_000 + port_id) for port_id in source_ids]
         parameter_counts = []
         locked_interface_ids = set()
         real_pass = SyncInterfacesView._sync_interface_relationships
@@ -5007,7 +3851,7 @@ class TestSyncLagAndParentRelationships:
                 return real_pass(self, *args, **kwargs)
 
         monkeypatch.setattr(SyncInterfacesView, "_sync_interface_relationships", observed_pass)
-        _post_sync(client, settings, device, ports_data, source_ids, relationships=relationships)
+        _post_sync(client, settings, device, ports_data, source_ids, port_stack=port_stack)
 
         assert parameter_counts, "the attempt did not run the relationship pass"
         assert max(parameter_counts) < 2_000
@@ -5022,11 +3866,10 @@ class TestSyncLagAndParentRelationships:
 
         ports_data = [
             {**_PORT_KEYS_UNSET, "ifName": "Gi0/2", "port_id": 11},
-            {**_PORT_KEYS_UNSET, "ifName": "Po1", "port_id": 100},
+            {**_PORT_KEYS_UNSET, "ifName": "Po1", "port_id": 100, "ifType": "ieee8023adLag"},
         ]
-        relationships = {"lag_members": {11: 100}}
 
-        _post_sync(client, settings, device, ports_data, ["11"], relationships=relationships)
+        _post_sync(client, settings, device, ports_data, ["11"], port_stack=[port_pair(11, 100)])
 
         member.refresh_from_db()
         assert member.lag_id == agg.pk
@@ -5038,11 +3881,10 @@ class TestSyncLagAndParentRelationships:
         agg = self._iface(device, "Po2", 101, itype="lag")
         ports_data = [
             {**_PORT_KEYS_UNSET, "ifName": "Gi0/3", "port_id": "0012"},
-            {**_PORT_KEYS_UNSET, "ifName": "Po2", "port_id": 101},
+            {**_PORT_KEYS_UNSET, "ifName": "Po2", "port_id": 101, "ifType": "ieee8023adLag"},
         ]
-        relationships = {"lag_members": {12: 101}}
 
-        _post_sync(client, settings, device, ports_data, ["12"], relationships=relationships)
+        _post_sync(client, settings, device, ports_data, ["12"], port_stack=[port_pair(12, 101)])
 
         member.refresh_from_db()
         assert member.lag_id == agg.pk
@@ -5061,11 +3903,10 @@ class TestSyncLagAndParentRelationships:
         user = grant(user, "change", Interface, constraints={"name": "allowed"})
         ports_data = [
             {**_PORT_KEYS_UNSET, "ifName": "Gi0/4", "port_id": 21},
-            {**_PORT_KEYS_UNSET, "ifName": "Po3", "port_id": 102},
+            {**_PORT_KEYS_UNSET, "ifName": "Po3", "port_id": 102, "ifType": "ieee8023adLag"},
         ]
-        relationships = {"lag_members": {21: 102}}
 
-        response = _post_sync(client, settings, device, ports_data, ["21"], user=user, relationships=relationships)
+        response = _post_sync(client, settings, device, ports_data, ["21"], user=user, port_stack=[port_pair(21, 102)])
 
         hidden_member.refresh_from_db()
         hidden_agg.refresh_from_db()
@@ -5073,34 +3914,7 @@ class TestSyncLagAndParentRelationships:
         assert hidden_agg.type == "1000base-t"
         # The pass left the rows out, so the final write check found nothing to refuse.
         assert message_texts(response.wsgi_request, "error") == []
-
-    def test_non_dict_relationships_fails_soft_not_attributeerror(self, client, settings):
-        """A truthy non-dict relationship cache value fails soft instead of raising AttributeError."""
-        device = self._make_device()
-        member = self._iface(device, "Gi0/2", 11)
-        ports_data = [{**_PORT_KEYS_UNSET, "ifName": "Gi0/2", "port_id": 11}]
-
-        # Must NOT raise AttributeError on the non-dict relationships of a corrupt cache entry.
-        response = _post_raw_snapshot(client, settings, device, ports_data, ["garbage"], [11])
-
-        member.refresh_from_db()
-        assert member.lag_id is None  # nothing persisted from the corrupt map
-        assert message_texts(response.wsgi_request, "success") == ["Selected interfaces synced successfully."]
-
-    def test_invalid_lag_link_rejected_by_full_clean_is_skipped(self, client, settings):
-        """A relationship that fails Interface.full_clean() (a self-LAG from stale/crafted port_stack data) must be skipped, not persisted."""
-        device = self._make_device()
-        member = self._iface(device, "Gi0/2", 11)
-
-        ports_data = [{"ifName": "Gi0/2", "port_id": 11}]
-        # Self-LAG: the member's aggregate resolves back to itself (port_id 11 → 11), which
-        # Interface.full_clean() rejects.
-        relationships = {"lag_members": {11: 11}}
-
-        _post_sync(client, settings, device, ports_data, ["11"], relationships=relationships)
-
-        member.refresh_from_db()
-        assert member.lag_id is None  # invalid self-LAG was not persisted
+        _assert_snapshot_read(response.wsgi_request)
 
     def test_agg_type_restored_when_a_sharing_member_fails_validation(self, client, settings):
         """A member whose LAG link fails full_clean must not leave the shared agg_iface.type='lag' dirty: a later valid member sharing that aggregate must still persist it as a LAG in the DB."""
@@ -5114,11 +3928,12 @@ class TestSyncLagAndParentRelationships:
         ports_data = [
             {**_PORT_KEYS_UNSET, "ifName": "virt0", "port_id": 10},
             {**_PORT_KEYS_UNSET, "ifName": "Gi0/2", "port_id": 11},
-            {**_PORT_KEYS_UNSET, "ifName": "Po1", "port_id": 100},
+            {**_PORT_KEYS_UNSET, "ifName": "Po1", "port_id": 100, "ifType": "ieee8023adLag"},
         ]
-        relationships = {"lag_members": {10: 100, 11: 100}}
 
-        _post_sync(client, settings, device, ports_data, ["10", "11"], relationships=relationships)
+        _post_sync(
+            client, settings, device, ports_data, ["10", "11"], port_stack=[port_pair(10, 100), port_pair(11, 100)]
+        )
 
         member1.refresh_from_db()
         member2.refresh_from_db()
@@ -5282,7 +4097,7 @@ class TestSyncLagAndParentRelationships:
 
     def test_oob_row_excluded_from_relationship_sync(self, client, settings):
         """An OOB-controller row sharing a selected host display name must not contribute its port_id, or the LAG pass would link the hidden controller interface instead of the host."""
-        device = self._make_device()
+        device = _link_oob(self._make_device())
         self._iface(device, "Gi0/1", 10)  # real host member sharing the name
         self._iface(device, "Po1", 100, itype="lag")  # the LAG aggregate (port_id 100)
         # The OOB controller's interface, which the OOB row's port_id would resolve to.
@@ -5290,16 +4105,17 @@ class TestSyncLagAndParentRelationships:
 
         ports_data = [
             {**_PORT_KEYS_UNSET, "ifName": "Gi0/1", "port_id": 10},
-            {**_PORT_KEYS_UNSET, "ifName": "Po1", "port_id": 100},
-            # OOB controller row merged for display; shares the selected host name "Gi0/1".
-            {**_PORT_KEYS_UNSET, "ifName": "Gi0/1", "port_id": 999, "_source": "oob"},
+            {**_PORT_KEYS_UNSET, "ifName": "Po1", "port_id": 100, "ifType": "ieee8023adLag"},
         ]
-        # Crafted/colliding port_stack data maps the OOB row's port_id to the aggregate.
-        relationships = {"lag_members": {"999": 100}}
+        # The OOB row shares the selected host name "Gi0/1", and the host reports Gi0/1 as a LAG member.
+        oob_ports = [{**_PORT_KEYS_UNSET, "ifName": "Gi0/1", "port_id": 999}]
 
-        _post_sync(client, settings, device, ports_data, [999], relationships=relationships)
+        response = _post_sync(
+            client, settings, device, ports_data, [999], port_stack=[port_pair(10, 100)], oob_ports=oob_ports
+        )
 
         oob_iface.refresh_from_db()
+        _assert_snapshot_read(response.wsgi_request)
         assert oob_iface.lag_id is None  # OOB row skipped → no link persisted on the controller iface
 
 
@@ -5506,19 +4322,6 @@ class TestResolveInterfaceByPortIdExpectedOwner:
 class TestBulkRelationshipRobustness:
     """Real-DB coverage for the bulk LAG/parent relationship pass robustness fixes."""
 
-    def test_non_dict_relationship_maps_do_not_crash(self, client, settings):
-        """A corrupt list-shaped lag_members/sub_interfaces in the cached relationships must be coerced to {} (fail-soft), not crash the bulk sync POST."""
-        from netbox_librenms_plugin.tests.conftest import make_device
-
-        device = make_device("rel-shape")
-        ports_data = [{**_PORT_KEYS_UNSET, "ifName": "Gi0/1", "port_id": 1}]
-        # Without the guard the relationship-map reader raises AttributeError ('list' object has no attribute 'items').
-        corrupt = {"lag_members": [1, 2], "sub_interfaces": ["x"]}
-
-        response = _post_raw_snapshot(client, settings, device, ports_data, corrupt, [1])
-
-        assert message_texts(response.wsgi_request, "success") == ["Selected interfaces synced successfully."]
-
     def test_relationship_candidates_cost_one_regex_per_path_and_match_exactly(self, db):
         """A full batch of port IDs builds one regex per JSON path, and each ID finds only its own row."""
         from dcim.models import Interface
@@ -5666,13 +4469,9 @@ class TestSyncInterfaceLagViewRealDB:
     """End-to-end (real DB) coverage for SyncInterfaceLagView.post."""
 
     def _make_view(self):
-        from types import SimpleNamespace
-
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
-        view = SyncInterfaceLagView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        return view
+        return make_view(SyncInterfaceLagView)
 
     @staticmethod
     def _iface(device, name, port_id, itype="1000base-t"):
@@ -5691,7 +4490,7 @@ class TestSyncInterfaceLagViewRealDB:
         agg = self._iface(device, "Po1", 20)
 
         view = self._make_view()
-        _cache_relationship(view, device, "lag_members", 10, 20, member.name, agg.name)
+        _seed_relationship(device, "lag_members", 10, 20, member.name, agg.name)
         req = _make_request({"port_id": "10", "lag_port_id": "20"})
         resp = _post(view, req, object_type="device", object_id=device.pk)
 
@@ -5702,31 +4501,29 @@ class TestSyncInterfaceLagViewRealDB:
         assert member.lag_id == agg.pk
         assert agg.type == "lag"
 
-    def test_self_lag_rejected_by_real_full_clean(self):
+    def test_virtual_member_lag_rejected_by_real_full_clean(self):
         import json
 
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        device = make_device("lag-host-self")
-        iface = self._iface(device, "Po1", 30)
+        device = make_device("lag-host-virtual-member")
+        member = self._iface(device, "virt0", 30, itype="virtual")
+        aggregate = self._iface(device, "Po1", 31, itype="lag")
 
         view = self._make_view()
-        _cache_relationship(view, device, "lag_members", 30, 30, iface.name, iface.name)
-        # port_id == lag_port_id resolves member == aggregate (same real interface); NetBox's
-        # real Interface.clean() must reject the self-LAG with a 409 and persist nothing.
-        req = _make_request({"port_id": "30", "lag_port_id": "30"})
+        _seed_relationship(device, "lag_members", 30, 31, member.name, aggregate.name)
+        # NetBox's real Interface.clean() rejects a virtual LAG member with a 409, and nothing persists.
+        req = _make_request({"port_id": "30", "lag_port_id": "31"})
         resp = _post(view, req, object_type="device", object_id=device.pk)
 
         assert resp.status_code == 409
         body = json.loads(resp.content)
         assert "NetBox rejected the LAG relationship" in body["error"]
-        iface.refresh_from_db()
-        assert iface.lag_id is None
+        member.refresh_from_db()
+        assert member.lag_id is None
 
     def test_cross_member_aggregate_is_linked_within_virtual_chassis(self):
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
         member1 = make_device("vc-lag-m1")
         member2 = make_device("vc-lag-m2")
@@ -5734,11 +4531,8 @@ class TestSyncInterfaceLagViewRealDB:
         local = self._iface(member1, "Gi0/1", 40)
         aggregate = self._iface(member2, "Po1", 50)
 
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        view = SyncInterfaceLagView()
-        view._librenms_api = api
-        _cache_relationship(view, member1, "lag_members", 40, 50, local.name, aggregate.name)
+        view = self._make_view()
+        _seed_relationship(member1, "lag_members", 40, 50, local.name, aggregate.name)
         req = _make_request({"port_id": "40", "lag_port_id": "50"})
         resp = _post(view, req, object_type="device", object_id=member1.pk)
 
@@ -5752,8 +4546,6 @@ class TestSyncInterfaceLagViewRealDB:
 @pytest.mark.django_db
 class TestSyncInterfaceParentViewRealPermissions:
     def test_migrated_donor_rejects_direct_parent_sync(self):
-        from types import SimpleNamespace
-
         from netbox_librenms_plugin.server_mappings import mark_migrated
         from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
@@ -5770,19 +4562,18 @@ class TestSyncInterfaceParentViewRealPermissions:
         donor.save()
 
         request = _make_request({"port_id": "10", "parent_port_id": "11"})
-        view = SyncInterfaceParentView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        _cache_relationship(view, donor, "sub_interfaces", 10, 11, child.name, parent.name)
+        view = make_view(SyncInterfaceParentView)
+        _seed_relationship(donor, "sub_interfaces", 10, 11, child.name, parent.name)
+        assert interface_rows(donor)["port_stack_relationships"]["sub_interfaces"] == {10: 11}
 
         response = _post(view, request, object_type="device", object_id=donor.pk)
 
         assert response.status_code == 409
+        assert b"migrated" in response.content.lower()
         child.refresh_from_db()
         assert child.parent_id is None
 
     def test_viewable_parent_does_not_require_change_permission(self):
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface
 
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
@@ -5808,9 +4599,8 @@ class TestSyncInterfaceParentViewRealPermissions:
             },
             user=user,
         )
-        view = SyncInterfaceParentView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        _cache_relationship(view, device, "sub_interfaces", 10, 11, child.name, parent.name)
+        view = make_view(SyncInterfaceParentView)
+        _seed_relationship(device, "sub_interfaces", 10, 11, child.name, parent.name)
 
         response = _post(view, request, object_type="device", object_id=device.pk)
 
@@ -5818,33 +4608,43 @@ class TestSyncInterfaceParentViewRealPermissions:
         child.refresh_from_db()
         assert child.parent_id == parent.pk
 
-    def test_self_parent_is_rejected_without_leaking_validation_detail(self):
+    def test_rejected_parent_does_not_leak_validation_detail(self, monkeypatch):
         import json
-        from types import SimpleNamespace
+
+        from dcim.models import Interface
+        from django.core.exceptions import ValidationError
 
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
-        device = make_device("parent-self-link")
-        interface = make_interface(device, "Ethernet1")
-        seed_mapping(interface, own=12, save=False)
-        interface.save()
-        request = _make_request({"port_id": "12", "parent_port_id": "12", "parent_name": "Ethernet1"})
-        view = SyncInterfaceParentView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        _cache_relationship(view, device, "sub_interfaces", 12, 12, interface.name, interface.name)
+        device = make_device("parent-rejected-link")
+        child = make_interface(device, "Ethernet1.100", iface_type="virtual")
+        parent = make_interface(device, "Ethernet1")
+        for interface, port_id in ((child, 12), (parent, 13)):
+            seed_mapping(interface, own=port_id, save=False)
+            interface.save()
+        request = _make_request({"port_id": "12", "parent_port_id": "13", "parent_name": "Ethernet1"})
+        view = make_view(SyncInterfaceParentView)
+        _seed_relationship(device, "sub_interfaces", 12, 13, child.name, parent.name)
+        original_clean = Interface.clean
+
+        def rejecting_clean(interface):
+            # NetBox validation refuses the edge; its wording must not reach the response.
+            if interface.pk == child.pk and interface.parent_id == parent.pk:
+                raise ValidationError({"parent": "secret validation detail"})
+            return original_clean(interface)
+
+        monkeypatch.setattr(Interface, "clean", rejecting_clean)
 
         response = _post(view, request, object_type="device", object_id=device.pk)
 
         assert response.status_code == 409
         body = json.loads(response.content)
         assert "NetBox rejected the parent relationship" in body["error"]
-        assert "cannot be its own" not in body["error"]
-        interface.refresh_from_db()
-        assert interface.parent_id is None
+        assert "secret validation detail" not in body["error"]
+        child.refresh_from_db()
+        assert child.parent_id is None
 
     def test_name_fallback_rejects_interface_bound_to_a_different_port(self):
-        from types import SimpleNamespace
-
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
         device = make_device("parent-conflicting-id")
@@ -5855,9 +4655,8 @@ class TestSyncInterfaceParentViewRealPermissions:
         child.save()
         wrong_parent.save()
         request = _make_request({"port_id": "10", "parent_port_id": "20", "parent_name": "Ethernet1"})
-        view = SyncInterfaceParentView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        _cache_relationship(view, device, "sub_interfaces", 10, 20, child.name, wrong_parent.name)
+        view = make_view(SyncInterfaceParentView)
+        _seed_relationship(device, "sub_interfaces", 10, 20, child.name, wrong_parent.name)
 
         response = _post(view, request, object_type="device", object_id=device.pk)
 
@@ -5866,8 +4665,6 @@ class TestSyncInterfaceParentViewRealPermissions:
         assert child.parent_id is None
 
     def test_unknown_server_key_fails_closed_before_relationship_lookup(self):
-        from types import SimpleNamespace
-
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
         device = make_device("parent-stale-server")
@@ -5885,8 +4682,7 @@ class TestSyncInterfaceParentViewRealPermissions:
                 "server_key": "retired",
             }
         )
-        view = SyncInterfaceParentView()
-        view._librenms_api = SimpleNamespace(server_key="default")
+        view = make_view(SyncInterfaceParentView)
 
         response = _post(view, request, object_type="device", object_id=device.pk)
 
@@ -5966,17 +4762,14 @@ class TestRelationshipSyncObjectScope:
 
     def _drive(self, user, device, port_id, lag_port_id):
         """POST the LAG link as *user*, with the real permission gate and real restrict() running."""
-        from types import SimpleNamespace
-
         from django.test import RequestFactory
 
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
         request = RequestFactory().post("/lag/", {"port_id": str(port_id), "lag_port_id": str(lag_port_id)})
         request.user = user
-        view = SyncInterfaceLagView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        _cache_relationship(view, device, "lag_members", port_id, lag_port_id)
+        view = make_view(SyncInterfaceLagView)
+        _seed_relationship(device, "lag_members", port_id, lag_port_id)
         return _post(view, request, object_type="device", object_id=device.pk)
 
     def test_lag_sync_refuses_an_out_of_scope_interface(self):
@@ -6022,8 +4815,6 @@ class TestRelationshipSyncObjectScope:
 
     def test_parent_sync_rechecks_device_scope_after_owner_change(self):
         """A device that leaves the user's view scope before locking must not be changed."""
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface, Site
 
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
@@ -6057,9 +4848,8 @@ class TestRelationshipSyncObjectScope:
             {"port_id": "720", "parent_port_id": "721"},
             user=user,
         )
-        view = MoveOwnerAfterReadView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        _cache_relationship(view, device, "sub_interfaces", 720, 721, child.name, parent.name)
+        view = make_view(MoveOwnerAfterReadView)
+        _seed_relationship(device, "sub_interfaces", 720, 721, child.name, parent.name)
         assert (
             SyncInterfaceParentView._get_current_edge(
                 view,
@@ -6081,8 +4871,6 @@ class TestRelationshipSyncObjectScope:
 
     def test_parent_sync_rechecks_interface_scope_after_row_lock(self, monkeypatch):
         """A source that leaves its change grant before locking must not be changed."""
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface
 
         from netbox_librenms_plugin.views.sync import interfaces as sync_interfaces
@@ -6105,9 +4893,8 @@ class TestRelationshipSyncObjectScope:
             {"port_id": "722", "parent_port_id": "723"},
             user=user,
         )
-        view = sync_interfaces.SyncInterfaceParentView()
-        view._librenms_api = SimpleNamespace(server_key="default")
-        _cache_relationship(view, device, "sub_interfaces", 722, 723, child.name, parent.name)
+        view = make_view(sync_interfaces.SyncInterfaceParentView)
+        _seed_relationship(device, "sub_interfaces", 722, 723, child.name, parent.name)
         real_build_index = sync_interfaces.build_interface_index
         permission_revoked = False
 
@@ -6129,14 +4916,9 @@ class TestRelationshipSyncObjectScope:
 
     @pytest.mark.parametrize("hidden_stored_id", [20, "020"])
     def test_hidden_duplicate_stable_id_blocks_inline_and_bulk_parent_links(self, hidden_stored_id):
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface
-        from django.core.cache import cache
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView, SyncInterfacesView
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
         device = make_device("hidden-duplicate-parent-id")
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
@@ -6152,58 +4934,33 @@ class TestRelationshipSyncObjectScope:
         )
         user = grant(user, "change", Interface, constraints={"pk": child.pk})
         user = grant(user, "view", Interface, constraints={"pk": visible_parent.pk})
-        snapshot = {
-            "ports": [
+        seed_interfaces_snapshot(
+            device,
+            [
                 {"port_id": 10, "ifName": child.name, "ifType": "l2vlan", "ifAdminStatus": "up"},
-                {
-                    "port_id": 20,
-                    "ifName": visible_parent.name,
-                    "ifType": "ethernetCsmacd",
-                    "ifAdminStatus": "up",
-                },
+                {"port_id": 20, "ifName": visible_parent.name, "ifType": "ethernetCsmacd", "ifAdminStatus": "up"},
             ],
-            "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {10: 20}},
-        }
-        render_request = _make_request(user=user)
-        table_view = DeviceInterfaceTableView()
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        table_view._librenms_api = api
-        table_view.request = render_request
-        cache_key = table_view.get_cache_key(device, "ports", "default")
-        cache.set(cache_key, snapshot)
+        )
 
-        try:
-            context = table_view.get_context_data(
-                render_request,
-                device,
-                "ifName",
-                "default",
-                fresh_data=snapshot,
-                sync_device=device,
-            )
-            assert "parent-sync-btn" not in str(context["table"].render_parent(None, snapshot["ports"][0]))
+        context, rows = _render(_make_request(user=user), device)
+        assert "parent-sync-btn" not in str(context["table"].render_parent(None, _row(rows, 10)))
 
-            inline_request = _make_request(
-                {"port_id": "10", "parent_port_id": "20", "interface_name_field": "ifName"},
-                user=user,
-            )
-            inline_view = SyncInterfaceParentView()
-            inline_view._librenms_api = SimpleNamespace(server_key="default")
-            inline_response = _post(inline_view, inline_request, object_type="device", object_id=device.pk)
+        inline_request = _make_request(
+            {"port_id": "10", "parent_port_id": "20", "interface_name_field": "ifName"},
+            user=user,
+        )
+        inline_response = _post(
+            make_view(SyncInterfaceParentView), inline_request, object_type="device", object_id=device.pk
+        )
 
-            bulk_request = _make_request(
-                post_data={
-                    "select": ["10"],
-                    "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-                },
-                user=user,
-            )
-            bulk_view = SyncInterfacesView()
-            bulk_view._librenms_api = SimpleNamespace(server_key="default")
-            bulk_response = _post(bulk_view, bulk_request, object_type="device", object_id=device.pk)
-        finally:
-            cache.delete(cache_key)
+        bulk_request = _make_request(
+            post_data={
+                "select": ["10"],
+                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
+            },
+            user=user,
+        )
+        bulk_response = _post(_sync_view(), bulk_request, object_type="device", object_id=device.pk)
 
         assert inline_response.status_code == 404
         assert bulk_response.status_code == 302
@@ -6211,14 +4968,9 @@ class TestRelationshipSyncObjectScope:
         assert child.parent_id is None
 
     def test_hidden_duplicate_unbound_name_blocks_inline_and_bulk_parent_links(self):
-        from types import SimpleNamespace
-
         from dcim.models import Device, Interface
-        from django.core.cache import cache
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView, SyncInterfacesView
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
         _vc, (member1, member2) = make_virtual_chassis_members("hidden-duplicate-parent-name")
         child = make_interface(member1, "Ethernet1.100", iface_type="virtual")
@@ -6232,58 +4984,33 @@ class TestRelationshipSyncObjectScope:
         )
         user = grant(user, "change", Interface, constraints={"pk": child.pk})
         user = grant(user, "view", Interface, constraints={"pk": visible_parent.pk})
-        snapshot = {
-            "ports": [
+        seed_interfaces_snapshot(
+            member1,
+            [
                 {"port_id": 10, "ifName": child.name, "ifType": "l2vlan", "ifAdminStatus": "up"},
-                {
-                    "port_id": 20,
-                    "ifName": visible_parent.name,
-                    "ifType": "ethernetCsmacd",
-                    "ifAdminStatus": "up",
-                },
+                {"port_id": 20, "ifName": visible_parent.name, "ifType": "ethernetCsmacd", "ifAdminStatus": "up"},
             ],
-            "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {10: 20}},
-        }
-        render_request = _make_request(user=user)
-        table_view = DeviceInterfaceTableView()
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        table_view._librenms_api = api
-        table_view.request = render_request
-        cache_key = table_view.get_cache_key(member1, "ports", "default")
-        cache.set(cache_key, snapshot)
+        )
 
-        try:
-            context = table_view.get_context_data(
-                render_request,
-                member1,
-                "ifName",
-                "default",
-                fresh_data=snapshot,
-                sync_device=member1,
-            )
-            assert "parent-sync-btn" not in str(context["table"].render_parent(None, snapshot["ports"][0]))
+        context, rows = _render(_make_request(user=user), member1)
+        assert "parent-sync-btn" not in str(context["table"].render_parent(None, _row(rows, 10)))
 
-            inline_request = _make_request(
-                {"port_id": "10", "parent_port_id": "20", "interface_name_field": "ifName"},
-                user=user,
-            )
-            inline_view = SyncInterfaceParentView()
-            inline_view._librenms_api = SimpleNamespace(server_key="default")
-            inline_response = _post(inline_view, inline_request, object_type="device", object_id=member1.pk)
+        inline_request = _make_request(
+            {"port_id": "10", "parent_port_id": "20", "interface_name_field": "ifName"},
+            user=user,
+        )
+        inline_response = _post(
+            make_view(SyncInterfaceParentView), inline_request, object_type="device", object_id=member1.pk
+        )
 
-            bulk_request = _make_request(
-                post_data={
-                    "select": ["10"],
-                    "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-                },
-                user=user,
-            )
-            bulk_view = SyncInterfacesView()
-            bulk_view._librenms_api = SimpleNamespace(server_key="default")
-            bulk_response = _post(bulk_view, bulk_request, object_type="device", object_id=member1.pk)
-        finally:
-            cache.delete(cache_key)
+        bulk_request = _make_request(
+            post_data={
+                "select": ["10"],
+                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
+            },
+            user=user,
+        )
+        bulk_response = _post(_sync_view(), bulk_request, object_type="device", object_id=member1.pk)
 
         assert inline_response.status_code == 404
         assert bulk_response.status_code == 302
@@ -6293,10 +5020,7 @@ class TestRelationshipSyncObjectScope:
 
 def test_relinking_repairs_an_aggregate_edited_back_to_a_non_lag_type(settings):
     """A retry must repair a stale aggregate type instead of reporting success."""
-    from types import SimpleNamespace
-
     from dcim.models import Interface
-    from django.core.cache import cache
 
     from netbox_librenms_plugin.tests.conftest import make_superuser
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
@@ -6314,28 +5038,13 @@ def test_relinking_repairs_an_aggregate_edited_back_to_a_non_lag_type(settings):
     # so an aggregate that already has members can still be edited to a non-LAG type.
     Interface.objects.filter(pk=aggregate.pk).update(type="1000base-t")
 
-    view = SyncInterfaceLagView()
-    view._librenms_api = SimpleNamespace(server_key=server_key)
-    cache_key = view.get_cache_key(device, "ports", server_key)
-    cache.set(
-        cache_key,
-        {
-            "ports": [
-                {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": member.name},
-                {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": aggregate.name},
-            ],
-            "port_stack_relationships": {"lag_members": {10: 20}, "sub_interfaces": {}},
-        },
-    )
+    _seed_relationship(device, "lag_members", 10, 20, member.name, aggregate.name)
     request = make_request(
         "post",
         {"port_id": "10", "lag_port_id": "20", "server_key": server_key},
         user=make_superuser("lag-type-repair-user"),
     )
-    try:
-        response = _post(view, request, object_type="device", object_id=device.pk)
-    finally:
-        cache.delete(cache_key)
+    response = _post(make_view(SyncInterfaceLagView), request, object_type="device", object_id=device.pk)
 
     assert response.status_code == 200, response.content
     member.refresh_from_db()
@@ -6347,14 +5056,14 @@ def test_relinking_repairs_an_aggregate_edited_back_to_a_non_lag_type(settings):
 @pytest.mark.parametrize("endpoint", ["inline", "bulk"])
 @pytest.mark.parametrize("same_oob_name, bound_parent", [(True, False), (True, True), (False, False)])
 def test_relationship_name_fallback_checks_host_and_oob_rows(client, settings, endpoint, same_oob_name, bound_parent):
-    from django.core.cache import cache
     from django.urls import reverse
 
-    from netbox_librenms_plugin.tests.conftest import make_superuser, map_device_to_librenms
-    from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
+    from netbox_librenms_plugin.tests.conftest import make_superuser
 
     configure_default_librenms_server(settings)
-    device = map_device_to_librenms(make_device("cross-source-parent"), 1, server_key="default")
+    device = map_device_to_librenms(
+        make_device("cross-source-parent"), 1, server_key="default", oob={"id": OOB_ID, "type": "idrac"}
+    )
     child = make_interface(device, "Ethernet1.100", iface_type="virtual")
     parent = make_interface(device, "Ethernet1")
     seed_mapping(child, own=10, save=False)
@@ -6362,32 +5071,25 @@ def test_relationship_name_fallback_checks_host_and_oob_rows(client, settings, e
     if bound_parent:
         seed_mapping(parent, own=20, save=False)
         parent.save()
-    view = SyncInterfaceParentView()
-    key = _cache_relationship(view, device, "sub_interfaces", 10, 20, child.name, parent.name)
-    snapshot = cache.get(key)
-    snapshot["ports"].append(
-        {"port_id": 30, "ifName": parent.name if same_oob_name else "Management", "_source": "oob"}
-    )
-    for port in snapshot["ports"]:
-        port.update(ifDescr=port["ifName"], ifType="ethernetCsmacd", ifSpeed=1_000_000_000)
-    cache.set(key, snapshot)
+    ports, port_stack = _relationship_ports("sub_interfaces", 10, 20, child.name, parent.name)
+    oob_port = {"port_id": 30, "ifName": parent.name if same_oob_name else "Management"}
+    for port in [*ports, oob_port]:
+        port.update(ifDescr=port["ifName"], ifSpeed=1_000_000_000)
+    seed_interfaces_snapshot(device, ports, port_stack, oob_ports=[{**oob_port, "ifType": "ethernetCsmacd"}])
     client.force_login(make_superuser("cross-source-parent-user"))
-    try:
-        action = "sync_interface_parent" if endpoint == "inline" else "sync_selected_interfaces"
-        data = (
-            {"port_id": "10", "parent_port_id": "20", "interface_name_field": "ifName"}
-            if endpoint == "inline"
-            else {"select": ["10"], "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"]}
-        )
-        response = client.post(
-            reverse(
-                f"plugins:netbox_librenms_plugin:{action}", kwargs={"object_type": "device", "object_id": device.pk}
-            ),
-            {**data, "server_key": "default"},
-        )
-    finally:
-        cache.delete(key)
+    action = "sync_interface_parent" if endpoint == "inline" else "sync_selected_interfaces"
+    data = (
+        {"port_id": "10", "parent_port_id": "20", "interface_name_field": "ifName"}
+        if endpoint == "inline"
+        else {"select": ["10"], "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"]}
+    )
+    response = client.post(
+        reverse(f"plugins:netbox_librenms_plugin:{action}", kwargs={"object_type": "device", "object_id": device.pk}),
+        {**data, "server_key": "default"},
+    )
     allowed = bound_parent or not same_oob_name
     assert response.status_code == (302 if endpoint == "bulk" else 200 if allowed else 404)
+    if endpoint == "bulk":
+        _assert_snapshot_read(response.wsgi_request)
     child.refresh_from_db()
     assert child.parent_id == (parent.pk if allowed else None)

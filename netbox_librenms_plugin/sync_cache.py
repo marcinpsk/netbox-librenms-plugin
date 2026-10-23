@@ -217,7 +217,7 @@ _CABLE_PICK_TABS = frozenset({SyncTab.CABLES})
 
 
 # The resources whose snapshot source_cache stores; the other tabs still store their own payload.
-_ACQUIRED_RESOURCES = frozenset({Resource.IP_ADDRESSES, Resource.VLANS})
+_ACQUIRED_RESOURCES = frozenset({Resource.INTERFACES, Resource.IP_ADDRESSES, Resource.VLANS})
 
 
 def _shares_vc_owner(tab):
