@@ -98,14 +98,15 @@ def _vlan_scopes(snapshot):
 def _interface_scopes(snapshot):
     resource = Resource.INTERFACES
     host = _blockers(snapshot, resource, ("ports", "port_stack"))
-    if not host and snapshot.record(resource, "port_stack").value:
+    port_stack = snapshot.record(resource, "port_stack")
+    if port_stack.obtained and port_stack.value:
         # The OS scopes the name rules that classify the pairs.
         device = snapshot.record(resource, "device")
         if not device.obtained:
-            host = (Blocker.of(device),)
+            host += (Blocker.of(device),)
         elif not device_os(device.value):
             path = device.request.path
-            host = (Blocker(path, f"{path} names no device OS, which the port_stack pairs need"),)
+            host += (Blocker(path, f"{path} names no device OS, which the port_stack pairs need"),)
     scopes = {"host": host}
     if snapshot.resources[resource].oob is not None:
         # The OOB rows are compared with the host rows, so they need the host scope too.

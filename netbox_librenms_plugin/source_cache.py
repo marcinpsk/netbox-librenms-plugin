@@ -85,7 +85,12 @@ def refresh(request, plan):
         return Refresh(snapshot, blocked=blocked)
     if is_ready(snapshot, resource):
         return Refresh(None, IDENTITY_CHANGED, blocked)
-    return Refresh(snapshot, next(iter(blocked.values()))[0].message, blocked)
+    return Refresh(snapshot, blocker_notice(blocker for blockers in blocked.values() for blocker in blockers), blocked)
+
+
+def blocker_notice(blockers):
+    """Return one notice that names each failed source once."""
+    return "; ".join(dict.fromkeys(blocker.message for blocker in blockers))
 
 
 def store(subject, resource, snapshot):
