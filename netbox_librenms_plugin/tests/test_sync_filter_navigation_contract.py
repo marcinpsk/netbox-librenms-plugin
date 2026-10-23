@@ -12,6 +12,8 @@ from html.parser import HTMLParser
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+
+from netbox_librenms_plugin.tests.cable_source_helpers import seed_cable_rows
 from django.contrib.auth.models import AnonymousUser
 from django.core.cache import cache
 from django.template.loader import render_to_string
@@ -447,11 +449,7 @@ def _cable_owner(kind, client, settings, server):
         }
     )
     sync_device = get_librenms_sync_device(owner, server_key=SERVER_KEY) or owner
-    cache.set(
-        object.__new__(SyncCablesView).get_cache_key(sync_device, "links", SERVER_KEY),
-        {"links": links, "snapshot_token": "contract-cables", "incomplete_sources": []},
-        timeout=300,
-    )
+    seed_cable_rows(sync_device, links, SERVER_KEY)
     return serve_sync_page(client, settings, server, owner)
 
 
@@ -527,22 +525,18 @@ def _four_tab_owner(client, settings, librenms_server):
         SERVER_KEY,
         vlans=[{"vlan_vlan": 100, "vlan_name": "v100", "vlan_type": "ethernet", "vlan_state": 1}],
     )
-    cache.set(
-        object.__new__(SyncCablesView).get_cache_key(owner, "links", SERVER_KEY),
-        {
-            "links": [
-                {
-                    "_source": "main",
-                    "local_port_id": 9601,
-                    "local_port": "eth0",
-                    "remote_device": "peer",
-                    "remote_port": "xe-1",
-                }
-            ],
-            "snapshot_token": "signature",
-            "incomplete_sources": [],
-        },
-        timeout=300,
+    seed_cable_rows(
+        owner,
+        [
+            {
+                "_source": "main",
+                "local_port_id": 9601,
+                "local_port": "eth0",
+                "remote_device": "peer",
+                "remote_port": "xe-1",
+            }
+        ],
+        SERVER_KEY,
     )
     _refresh(
         client,

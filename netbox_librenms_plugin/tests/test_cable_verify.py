@@ -8,13 +8,14 @@ Device/Interface/Cable objects, a real links cache entry and a real object-scope
 end. Tests select servers through the real plugin configuration.
 
 Covers:
-- Stale derived fields (ids/URLs from a previous enrichment) in the cached link are stripped and
-  recomputed from current NetBox state.
+- Endpoints and cable state are resolved from current NetBox state after source acquisition.
 - LibreNMS-sourced labels (local_port, remote_device) are HTML-escaped to prevent XSS.
 """
 
 import json
 from copy import deepcopy
+
+from netbox_librenms_plugin.tests.cable_source_helpers import seed_cable_rows
 
 import pytest
 from django.conf import settings
@@ -33,7 +34,7 @@ def _server_settings(*server_keys, broken_default=False):
         key: {
             "librenms_url": f"https://{key}.example.com",
             "api_token": "test-token",
-            "cache_timeout": 0,
+            "cache_timeout": 300,
             "verify_ssl": False,
         }
         for key in server_keys
@@ -88,7 +89,7 @@ def _cable_view_and_request(tag, body):
 def _post_with_links(view, request, device, links):
     """Warm the real links cache for *device*, run post() (with 'default' configured), clean up, return JSON."""
     key = view.get_cache_key(device, "links", SERVER_KEY)
-    real_cache.set(key, {"links": links})
+    seed_cable_rows(device, links, SERVER_KEY)
     try:
         with _server_settings(SERVER_KEY):
             response = view.post(request)
@@ -99,7 +100,7 @@ def _post_with_links(view, request, device, links):
 
 @pytest.fixture(autouse=True)
 def _clear_cache_around_each_test():
-    """Clear the real cache before and after each test so cache.set() link/port payloads (keyed by device PK, NOT rolled back with the test DB) can't feed a reused PK stale data."""
+    """Keep source snapshots isolated when database rollback reuses object primary keys."""
     from django.core.cache import cache
     from netbox_librenms_plugin.tests.conftest import clear_test_cache
 
@@ -109,86 +110,61 @@ def _clear_cache_around_each_test():
 
 
 @pytest.mark.django_db
-class TestStaleFieldStripping:
-    """Cached derived fields (URLs/ids from a previous enrichment) must be recomputed from live state."""
+class TestVerifyUsesCurrentNetBoxState:
+    """Verify resolves endpoints and cable state from the database after source acquisition."""
 
-    def test_stale_remote_fields_recomputed_from_live_netbox(self):
-        """A stale remote_device_url/id in cache is dropped; the row links the REAL remote device + cable."""
+    def test_a_cable_created_after_acquisition_is_recognized(self):
         from dcim.models import Cable
+        from django.urls import reverse
 
-        local, lifaces = _cable_device("stale-local", [("eth0", 100)])
-        remote, rifaces = _cable_device("switch-remote", [("eth1", 200)])
+        local, lifaces = _cable_device("current-local", [("eth0", 100)])
+        remote, rifaces = _cable_device("current-remote", [("eth1", 200)])
+        seed_cable_rows(
+            local,
+            [
+                {
+                    "local_port": "eth0",
+                    "local_port_id": 100,
+                    "remote_port": "eth1",
+                    "remote_port_id": 200,
+                    "remote_device": remote.name,
+                }
+            ],
+            SERVER_KEY,
+        )
         cable = Cable(a_terminations=[lifaces["eth0"]], b_terminations=[rifaces["eth1"]])
         cable.save()
-
         view, request = _cable_view_and_request(
-            "stale", {"device_id": local.pk, "row_id": "100", "server_key": SERVER_KEY}
-        )
-        content = _post_with_links(
-            view,
-            request,
-            local,
-            [
-                {
-                    "local_port": "eth0",
-                    "local_port_id": 100,
-                    "remote_port": "eth1",
-                    "remote_port_id": 200,
-                    "remote_device": "switch-remote",
-                    "remote_device_id": None,
-                    # Stale derived fields from a previous enrichment (a different remote object then):
-                    "netbox_remote_device_id": 999,
-                    "remote_device_url": "/dcim/devices/999/",
-                    "netbox_remote_interface_id": 888,
-                    "remote_port_url": "/dcim/interfaces/888/",
-                    "cable_status": "No Cable",
-                    "can_create_cable": True,
-                }
-            ],
+            "current-cable", {"device_id": local.pk, "row_id": "100", "server_key": SERVER_KEY}
         )
 
-        row = content["formatted_row"]
-        # Remote side recomputed to the REAL device, not the stale 999.
-        assert f"/dcim/devices/{remote.pk}/" in row["remote_device"]
-        assert "/dcim/devices/999/" not in row["remote_device"]
-        # The real cable is found, so the stale "No Cable" is replaced.
-        assert "Cable Found" in row["cable_status"]
+        with _server_settings(SERVER_KEY):
+            row = json.loads(view.post(request).content)["formatted_row"]
 
-    def test_stale_local_and_status_fields_recomputed(self):
-        """Stale local interface id / cable_status in cache are stripped; the row uses live values."""
-        local, lifaces = _cable_device("stale2-local", [("eth0", 100)])
+        assert reverse("dcim:device", args=[remote.pk]) in row["remote_device"]
+        assert reverse("dcim:cable", args=[cable.pk]) in row["cable_status"]
+        assert row["expected_local_id"] == lifaces["eth0"].pk
+        assert row["expected_remote_id"] == rifaces["eth1"].pk
 
+    def test_a_replacement_local_interface_is_resolved_from_current_state(self):
+        from dcim.models import Interface
+        from django.urls import reverse
+
+        local, lifaces = _cable_device("current-local-replaced", [("eth0", 100)])
+        old_id = lifaces["eth0"].pk
+        seed_cable_rows(local, [{"local_port": "eth0", "local_port_id": 100}], SERVER_KEY)
+        lifaces["eth0"].delete()
+        replacement = Interface.objects.create(device=local, name="eth0", type="1000base-t")
         view, request = _cable_view_and_request(
-            "stale2", {"device_id": local.pk, "row_id": "100", "server_key": SERVER_KEY}
-        )
-        content = _post_with_links(
-            view,
-            request,
-            local,
-            [
-                {
-                    "local_port": "eth0",
-                    "local_port_id": 100,
-                    "remote_port": "eth1",
-                    "remote_port_id": 200,
-                    "remote_device": "",  # no remote side → no remote enrichment / cable check
-                    "remote_device_id": None,
-                    # Stale derived fields that must not survive the strip-to-raw-keys step:
-                    "netbox_local_interface_id": 999,
-                    "local_port_url": "/stale/",
-                    "cable_status": "stale-status",
-                    "can_create_cable": True,
-                }
-            ],
+            "current-local-replaced", {"device_id": local.pk, "row_id": "100", "server_key": SERVER_KEY}
         )
 
-        row = content["formatted_row"]
-        # Local port link recomputed to the REAL interface, not the stale id/url.
-        assert f"/dcim/interfaces/{lifaces['eth0'].pk}/" in row["local_port"]
-        assert "/stale/" not in row["local_port"]
-        # cable_status was stripped (not a raw key) → falls back to the default, never the stale value.
-        assert "stale-status" not in row["cable_status"]
-        assert row["cable_status"] == "Missing Ports"
+        with _server_settings(SERVER_KEY):
+            row = json.loads(view.post(request).content)["formatted_row"]
+
+        assert reverse("dcim:interface", args=[replacement.pk]) in row["local_port"]
+        assert reverse("dcim:interface", args=[old_id]) not in row["local_port"]
+        assert row["expected_local_id"] == replacement.pk
 
 
 @pytest.mark.django_db
@@ -285,7 +261,7 @@ class TestServerKeyGuard:
         device, _ = _cable_device("guard-valid", [("eth0", 100)])
         view, request = _cable_view_with_api("valid", {"device_id": device.pk, "row_id": "100", "server_key": "prod"})
         key = view.get_cache_key(device, "links", "prod")
-        real_cache.set(key, {"links": [{"local_port": "eth0", "local_port_id": 100, "remote_device": ""}]})
+        seed_cable_rows(device, [{"local_port": "eth0", "local_port_id": 100, "remote_device": ""}], "prod")
         try:
             with _server_settings("prod"):
                 row = json.loads(view.post(request).content)["formatted_row"]
@@ -403,7 +379,6 @@ class TestVerifyDualNameFallback:
     """Issue #88 (verify parity): SingleCableVerifyView.post must resolve a row whose NetBox interface is named from the LibreNMS field the user is NOT currently displaying — using the same dual-name (local_port / local_port_alt) fallback as enrich_local_port."""
 
     def test_verify_resolves_interface_by_alternate_name(self):
-        from django.core.cache import cache
 
         from dcim.models import Interface
         from netbox_librenms_plugin.tests.conftest import make_device
@@ -426,7 +401,7 @@ class TestVerifyDualNameFallback:
             "remote_port_id": None,
             "remote_device_id": None,
         }
-        cache.set(view.get_cache_key(device, "links", "default"), {"links": [link]}, 300)
+        seed_cable_rows(device, [link], "default")
 
         request = _make_request({"device_id": device.pk, "row_id": "555", "server_key": "default"})
         response = view.post(request)
@@ -438,7 +413,6 @@ class TestVerifyDualNameFallback:
 
     def test_verify_unresolved_none_local_port_does_not_render_literal_none(self):
         """A row whose local_port is None and resolves to no interface must render "" (or a badge), not the literal "None"."""
-        from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.conftest import make_device
 
@@ -456,7 +430,7 @@ class TestVerifyDualNameFallback:
             "remote_device_id": None,
             "_source": "oob",
         }
-        cache.set(view.get_cache_key(device, "links", "default"), {"links": [link]}, 300)
+        seed_cable_rows(device, [link], "default")
 
         request = _make_request({"device_id": device.pk, "row_id": "7777", "server_key": "default"})
         response = view.post(request)
@@ -469,8 +443,8 @@ class TestVerifyDualNameFallback:
         # the empty row (or stops processing the OOB row) fails here.
         assert "formatted_row" in payload
         assert "local_port" in payload["formatted_row"]
-        assert payload["formatted_row"]["cable_status"] == "Missing Interface"
-        assert "From OOB controller" in payload["formatted_row"]["local_port"]
+        assert payload["formatted_row"]["can_create_cable"] is False
+        assert "OOB" in payload["formatted_row"]["local_port"]
         # render_local_port in the table was fixed to normalize None→""; the verify path must match.
         assert payload["formatted_row"]["local_port"] != "None"
         assert "None" not in payload["formatted_row"]["local_port"]
@@ -549,7 +523,6 @@ class TestOOBRowsNeverActionable:
     def test_verify_response_offers_sync_only_for_non_oob_rows(self, source, expect_sync):
         """Verify POST offers Sync Cable for a host row but not for an OOB row."""
         # Both rows resolve to cable-free interfaces on both ends; only _source differs.
-        from django.core.cache import cache
 
         from dcim.models import Interface
         from netbox_librenms_plugin.tests.conftest import make_device
@@ -569,17 +542,17 @@ class TestOOBRowsNeverActionable:
             "remote_device_id": None,
             "_source": source,
         }
-        cache.set(view.get_cache_key(local_dev, "links", "default"), {"links": [link]}, 300)
+        seed_cable_rows(local_dev, [link], "default")
 
         request = _make_request({"device_id": local_dev.pk, "row_id": "700", "server_key": "default"})
         payload = json.loads(view.post(request).content)
         actions = payload["formatted_row"]["actions"]
 
-        assert ("Sync Cable" in actions) is expect_sync
+        assert payload["formatted_row"]["can_create_cable"] is expect_sync
+        assert bool(actions) is expect_sync
 
     def test_oob_row_never_links_a_host_interface(self):
         """Verify an OOB row never resolves its local end against a host interface with a shared name or LibreNMS ID."""
-        from django.core.cache import cache
 
         from dcim.models import Interface
         from netbox_librenms_plugin.tests.conftest import make_device
@@ -589,7 +562,7 @@ class TestOOBRowsNeverActionable:
 
         view = _make_view()
         link = {"local_port": "eth0", "local_port_id": 700, "remote_device": "", "_source": "oob"}
-        cache.set(view.get_cache_key(local_dev, "links", "default"), {"links": [link]}, 300)
+        seed_cable_rows(local_dev, [link], "default")
 
         request = _make_request({"device_id": local_dev.pk, "row_id": "700", "server_key": "default"})
         row = json.loads(view.post(request).content)["formatted_row"]
@@ -604,11 +577,10 @@ class TestSingleCableVerifyServerKeyRouting:
     """post() must resolve the links cache under the POSTed server_key, else the api's bound key."""
 
     def _seed(self, view, device, server_key):
-        from django.core.cache import cache
 
         # A minimal host link keyed under *server_key*; local port matches the interface by name.
         link = {"local_port": "eth0", "local_port_id": 700, "remote_device": "", "_source": "main"}
-        cache.set(view.get_cache_key(device, "links", server_key), {"links": [link]}, 300)
+        seed_cable_rows(device, [link], server_key)
 
     def test_post_server_key_selects_that_servers_cache(self):
         from dcim.models import Interface

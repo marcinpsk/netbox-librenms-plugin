@@ -18,6 +18,7 @@ All tests run against real Device / ConsoleServerPort / ConsolePort / Interface 
 import pytest
 from django.core.cache.backends.locmem import LocMemCache
 
+from netbox_librenms_plugin.tests.cable_source_helpers import cable_rows, seed_cable_rows
 from netbox_librenms_plugin.tests.conftest import (
     cable_together,
     configured_server_key,
@@ -38,13 +39,27 @@ SERVER_KEY = configured_server_key()
 
 def test_picker_viewability_uses_the_shared_serial_source_constant():
     """The picker must follow the inventory-source constant used by every producer."""
-    import inspect
+    import ast
+    from pathlib import Path
 
-    from netbox_librenms_plugin.views.base.cables_view import CableRemotePickerView
+    from netbox_librenms_plugin.views.base import cables_view
 
-    source = inspect.getsource(CableRemotePickerView._row_is_viewable)
-    assert "source != SERIAL_INVENTORY_SOURCE" in source
-    assert 'source != "serial"' not in source
+    module = ast.parse(Path(cables_view.__file__).read_text())
+    picker = next(
+        node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "CableRemotePickerView"
+    )
+    reader = next(node for node in picker.body if isinstance(node, ast.FunctionDef) and node.name == "_row_is_viewable")
+    comparisons = [node for node in ast.walk(reader) if isinstance(node, ast.Compare)]
+    assert any(
+        isinstance(comparator, ast.Name) and comparator.id == "SERIAL_INVENTORY_SOURCE"
+        for comparison in comparisons
+        for comparator in comparison.comparators
+    )
+    assert not any(
+        isinstance(comparator, ast.Constant) and comparator.value == "serial"
+        for comparison in comparisons
+        for comparator in comparison.comparators
+    )
 
 
 @pytest.fixture
@@ -60,7 +75,7 @@ def picker_librenms(configure_librenms, monkeypatch):
             SERVER_KEY: {
                 "librenms_url": server.url,
                 "api_token": "test-token",
-                "cache_timeout": 0,
+                "cache_timeout": 300,
                 "verify_ssl": False,
             }
         }
@@ -79,31 +94,6 @@ class CountingLocMemCache(LocMemCache):
     def get(self, key, default=None, version=None):
         type(self).get_count += 1
         return super().get(key, default=default, version=version)
-
-
-def _register_serial_refetch(server, link):
-    """Register real HTTP responses that rebuild one serial row."""
-    server.register(
-        "/api/v0/devices/13/links",
-        {"status": "error", "message": "Device does not have any links"},
-        status=404,
-    )
-    server.register("/api/v0/devices/13/ports", {"status": "ok", "ports": []})
-    server.register(
-        "/api/v0/resources/sensors",
-        {
-            "status": "ok",
-            "sensors": [
-                {
-                    "sensor_id": link["sensor_id"],
-                    "device_id": 13,
-                    "sensor_type": "acsSerialPortTable",
-                    "sensor_index": "acsSerialPortTableStatus.8",
-                    "sensor_descr": f"{link['remote_device']} Status",
-                }
-            ],
-        },
-    )
 
 
 def _rendered_sync_data(client, device, row_ids, server_key=SERVER_KEY, submit_name="select"):
@@ -255,15 +245,15 @@ def test_manual_pick_overlay_reads_the_real_cache_in_one_batch():
     """A large cable snapshot must not issue one cache read for each row."""
     from django.core.cache import cache
 
-    from netbox_librenms_plugin.utils import apply_cable_manual_picks, cable_manual_pick_cache_key
+    from netbox_librenms_plugin.sync_cache import apply_cable_manual_picks, cable_manual_pick_cache_key
 
     rows = [{"local_port_id": str(port_id), "row_id": str(port_id)} for port_id in range(1, 501)]
     snapshot_key = "librenms_plugin:test:manual-pick-batch"
-    snapshot_token = "manual-pick-batch-token"
+    snapshot_id = "manual-pick-batch-token"
     user_id = 123
     picked_row = rows[-1]
     cache.set(
-        cable_manual_pick_cache_key(snapshot_key, snapshot_token, user_id, picked_row["row_id"]),
+        cable_manual_pick_cache_key(snapshot_key, snapshot_id, user_id, picked_row["row_id"]),
         {"manual_remote_id": 456},
         timeout=300,
     )
@@ -286,7 +276,7 @@ def test_manual_pick_overlay_reads_the_real_cache_in_one_batch():
     overlaid, applied = apply_cable_manual_picks(
         counted_cache,
         snapshot_key,
-        {"links": rows, "snapshot_token": snapshot_token},
+        snapshot_id,
         user_id,
         rows,
     )
@@ -348,16 +338,12 @@ class TestRemotePickerEndpoint:
         return client
 
     def _seed_serial(self, name, label="name-that-matches-nothing"):
-        from django.core.cache import cache
         from django.urls import reverse
-
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         acs, (csp,), _ = make_serial_device(f"acs-{name}", csp_names=["ttyS5"])
         link = _serial_row(csp, label, acs)
         link["local_port_id"] = f"serial:{csp.pk}-s"
-        key_view = object.__new__(SyncCablesView)
-        cache.set(key_view.get_cache_key(acs, "links", SERVER_KEY), {"links": [link]}, timeout=300)
+        seed_cable_rows(acs, [link], SERVER_KEY)
         url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[acs.pk])
         return acs, csp, link, url
 
@@ -377,10 +363,7 @@ class TestRemotePickerEndpoint:
 
     def test_virtual_interfaces_are_not_listed_or_accepted(self):
         """The normal picker must expose only Interfaces that can terminate a Cable."""
-        from django.core.cache import cache
         from django.urls import reverse
-
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("physical-interfaces")
         local_device = make_device("picker-physical-local")
@@ -395,8 +378,7 @@ class TestRemotePickerEndpoint:
             "remote_device": "unknown",
             "remote_port": "unknown",
         }
-        cache_key = object.__new__(SyncCablesView).get_cache_key(local_device, "links", SERVER_KEY)
-        cache.set(cache_key, {"links": [row], "snapshot_token": "physical-interfaces"}, timeout=300)
+        seed_cable_rows(local_device, [row], SERVER_KEY)
         url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[local_device.pk])
 
         ports = client.get(
@@ -448,22 +430,16 @@ class TestRemotePickerEndpoint:
 
     def test_unconfigured_serial_label_does_not_auto_create_a_cable(self):
         """A default sensor label is not evidence for a remote Device match."""
-        from django.core.cache import cache
         from django.urls import reverse
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("unconfigured-label")
         local, (csp,), _ = make_serial_device("picker-unconfigured-local", csp_names=["ttyS49"])
         remote, _, (cp,) = make_serial_device("ttyS49", cp_names=["console"])
         row = _serial_row(csp, csp.name, local, is_configured=False)
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        cache.set(
-            object.__new__(SyncCablesView).get_cache_key(local, "links", server_key),
-            {"links": [row]},
-            timeout=300,
-        )
+        seed_cable_rows(local, [row], server_key)
         persist_test_server_mapping(local, server_key)
 
         rendered = _render_cable_sync_page(client, local, server_key)
@@ -493,10 +469,7 @@ class TestRemotePickerEndpoint:
 
     def test_removed_server_cache_cannot_drive_picker_or_cable_sync(self):
         """Action endpoints must reject a cached snapshot for an unconfigured server key."""
-        from django.core.cache import cache
         from django.urls import reverse
-
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("removed-server")
         local, (csp,), _ = make_serial_device("picker-removed-server-local", csp_names=["ttyS1"])
@@ -504,8 +477,7 @@ class TestRemotePickerEndpoint:
         row = _serial_row(csp, remote.name, local)
         row["local_port_id"] = "serial:removed-server"
         stale_key = "removed-server"
-        cache_key = object.__new__(SyncCablesView).get_cache_key(local, "links", stale_key)
-        cache.set(cache_key, {"links": [row], "snapshot_token": "removed-server-snapshot"}, timeout=300)
+        seed_cable_rows(local, [row], stale_key)
 
         picker_response = client.post(
             reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[local.pk]),
@@ -551,13 +523,11 @@ class TestRemotePickerEndpoint:
         """The exact local termination owner must suppress actions before the writer rejects it."""
         import json
 
-        from django.core.cache import cache
         from django.urls import reverse
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.server_mappings import mark_migrated
         from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("migrated-selected-member")
         page = make_device("picker-migrated-selected-page")
@@ -578,11 +548,7 @@ class TestRemotePickerEndpoint:
             "remote_port_id": 20,
             "_source": "main",
         }
-        cache.set(
-            object.__new__(SyncCablesView).get_cache_key(page, "links", server_key),
-            {"links": [row]},
-            timeout=300,
-        )
+        seed_cable_rows(page, [row], server_key)
         apply_mapping_change(selected, mark_migrated(selected, winner.pk, server_key))
         selected.save()
 
@@ -633,13 +599,11 @@ class TestRemotePickerEndpoint:
 
     def test_migrated_donor_cache_cannot_drive_cable_sync(self):
         """A direct POST must not mutate a Device after it entered migrated mode."""
-        from django.core.cache import cache
         from django.urls import reverse
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.server_mappings import mark_migrated
         from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("migrated-donor")
         donor, (csp,), _ = make_serial_device("picker-migrated-donor", csp_names=["ttyS1"])
@@ -648,8 +612,7 @@ class TestRemotePickerEndpoint:
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
         row = _serial_row(csp, remote.name, donor)
         row["local_port_id"] = "serial:migrated-donor"
-        cache_key = object.__new__(SyncCablesView).get_cache_key(donor, "links", server_key)
-        cache.set(cache_key, {"links": [row]}, timeout=300)
+        seed_cable_rows(donor, [row], server_key)
         persist_test_server_mapping(donor, server_key)
         rendered = _render_cable_sync_page(client, donor, server_key)
         record = next(iter(rendered.context["cable_sync"]["table"].rows)).record
@@ -679,13 +642,11 @@ class TestRemotePickerEndpoint:
         """A member repaint must retain the migrated page's read-only contract."""
         import json
 
-        from django.core.cache import cache
         from django.urls import reverse
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.server_mappings import mark_migrated
         from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("migrated-vc-origin")
         donor = make_device("picker-migrated-vc-donor")
@@ -706,8 +667,7 @@ class TestRemotePickerEndpoint:
             "remote_port_id": 20,
             "_source": "main",
         }
-        cache_key = object.__new__(SyncCablesView).get_cache_key(donor, "links", server_key)
-        cache.set(cache_key, {"links": [row]}, timeout=300)
+        seed_cable_rows(donor, [row], server_key)
         apply_mapping_change(donor, mark_migrated(donor, winner.pk, server_key))
         donor.save()
 
@@ -716,9 +676,7 @@ class TestRemotePickerEndpoint:
             {"tab": "cables", "server_key": server_key},
         )
         assert rendered.status_code == 200
-        rendered_record = next(iter(rendered.context["cable_sync"]["table"].rows)).record
-        assert rendered_record["can_create_cable"] is False
-        assert rendered_record.get("picker_url") is None
+        assert rendered.context["cable_sync"]["table"] is None
 
         verified = client.post(
             reverse("plugins:netbox_librenms_plugin:verify_cable"),
@@ -761,13 +719,11 @@ class TestRemotePickerEndpoint:
         """The force modal must retain the page owner that authorized the first POST."""
         import re
 
-        from django.core.cache import cache
         from django.urls import reverse
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.server_mappings import mark_migrated
         from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("force-origin")
         origin = make_device("picker-force-origin")
@@ -792,11 +748,7 @@ class TestRemotePickerEndpoint:
             "remote_port_id": 20,
             "_source": "main",
         }
-        cache.set(
-            object.__new__(SyncCablesView).get_cache_key(origin, "links", server_key),
-            {"links": [row]},
-            timeout=300,
-        )
+        seed_cable_rows(origin, [row], server_key)
         sync_url = reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[member.pk])
 
         conflict = client.post(
@@ -846,14 +798,12 @@ class TestRemotePickerEndpoint:
         """The chassis cache owner is part of the migrated read-only boundary."""
         import json
 
-        from django.core.cache import cache
         from django.urls import reverse
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.tests.conftest import make_ip
         from netbox_librenms_plugin.server_mappings import mark_migrated
         from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("migrated-cache-owner")
         origin = make_device("picker-cache-origin")
@@ -882,11 +832,7 @@ class TestRemotePickerEndpoint:
             "remote_port_id": 20,
             "_source": "main",
         }
-        cache.set(
-            object.__new__(SyncCablesView).get_cache_key(cache_owner, "links", server_key),
-            {"links": [row]},
-            timeout=300,
-        )
+        seed_cable_rows(cache_owner, [row], server_key)
         apply_mapping_change(cache_owner, mark_migrated(cache_owner, winner.pk, server_key))
         cache_owner.save()
 
@@ -1173,7 +1119,7 @@ class TestRemotePickerEndpoint:
     def test_post_stores_manual_pick_outside_the_shared_snapshot(self):
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import cable_manual_pick_cache_key, cable_snapshot_token
+        from netbox_librenms_plugin.sync_cache import cable_manual_pick_cache_key
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("post")
@@ -1194,13 +1140,13 @@ class TestRemotePickerEndpoint:
         key_view = object.__new__(SyncCablesView)
         snapshot_key = key_view.get_cache_key(acs, "links", SERVER_KEY)
         cached = cache.get(snapshot_key)
-        row = next(r for r in cached["links"] if r["local_port_id"] == link["local_port_id"])
+        row = next(r for r in cable_rows(acs, SERVER_KEY)["links"] if r["local_port_id"] == link["local_port_id"])
         assert "manual_remote_id" not in row
         user_id = client.session["_auth_user_id"]
         pick = cache.get(
             cable_manual_pick_cache_key(
                 snapshot_key,
-                cable_snapshot_token(cached),
+                cached["snapshot_id"],
                 user_id,
                 link["local_port_id"],
             )
@@ -1214,11 +1160,9 @@ class TestRemotePickerEndpoint:
 
     def test_duplicate_local_port_rows_keep_independent_picker_and_sync_state(self):
         """Two LibreNMS links on one local port must remain separate actionable rows."""
-        from django.core.cache import cache
         from django.urls import reverse
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("duplicate-link-rows")
         local_device = make_device("picker-duplicate-link-local")
@@ -1251,8 +1195,7 @@ class TestRemotePickerEndpoint:
             },
         ]
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        cache_key = object.__new__(SyncCablesView).get_cache_key(local_device, "links", server_key)
-        cache.set(cache_key, {"links": rows, "snapshot_token": "duplicate-link-snapshot"}, timeout=300)
+        seed_cable_rows(local_device, rows, server_key)
 
         rendered = _render_cable_sync_page(client, local_device, server_key)
 
@@ -1289,10 +1232,7 @@ class TestRemotePickerEndpoint:
 
     def test_manual_pick_reserves_remote_before_an_earlier_auto_row(self):
         """Auto matching must not consume an endpoint reserved by a later manual row."""
-        from django.core.cache import cache
         from django.urls import reverse
-
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("manual-reservation-order")
         local, (auto_csp, manual_csp), _ = make_serial_device(
@@ -1305,12 +1245,7 @@ class TestRemotePickerEndpoint:
         )
         auto_row = _serial_row(auto_csp, remote.name, local, sensor_index_int=1)
         manual_row = _serial_row(manual_csp, "no-label-match", local, sensor_index_int=2)
-        cache_key = object.__new__(SyncCablesView).get_cache_key(local, "links", SERVER_KEY)
-        cache.set(
-            cache_key,
-            {"links": [auto_row, manual_row], "snapshot_token": "manual-reservation-snapshot"},
-            timeout=300,
-        )
+        seed_cable_rows(local, [auto_row, manual_row], SERVER_KEY)
         picker_url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[local.pk])
         picked = client.post(
             picker_url,
@@ -1345,11 +1280,9 @@ class TestRemotePickerEndpoint:
         """A row identity must not authorize a different auto-selected ConsolePort."""
         import re
 
-        from django.core.cache import cache
         from django.urls import reverse
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("stale-auto-target")
         local, (csp,), _ = make_serial_device("picker-stale-auto-local", csp_names=["ttyS1"])
@@ -1364,26 +1297,25 @@ class TestRemotePickerEndpoint:
         row = _serial_row(csp, remote.name, local)
         row["local_port_id"] = "serial:stale-auto-target"
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        cache_key = object.__new__(SyncCablesView).get_cache_key(local, "links", server_key)
-        cache.set(cache_key, {"links": [row], "snapshot_token": "stale-auto-target"}, timeout=300)
+        seed_cable_rows(local, [row], server_key)
 
         rendered = _render_cable_sync_page(client, local, server_key)
         assert rendered.status_code == 200
         record = next(iter(rendered.context["cable_sync"]["table"].rows)).record
         table_html = rendered.context["cable_sync"]["table"].as_html(rendered.wsgi_request)
-        expected_name = "expected_remote_id_serial:stale-auto-target"
+        expected_name = f"expected_remote_id_{row['local_port_id']}"
         assert re.search(rf'name="{re.escape(expected_name)}"\s+value="{first_cp.pk}"', table_html)
 
         cable_together(blocker_csp, first_cp)
         synced = client.post(
             reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[local.pk]),
             {
-                "sync_one": "serial:stale-auto-target",
+                "sync_one": row["local_port_id"],
                 "server_key": server_key,
-                "expected_local_id_serial:stale-auto-target": record["netbox_local_interface_id"],
-                "expected_local_device_id_serial:stale-auto-target": record["netbox_local_device_id"],
+                f"expected_local_id_{row['local_port_id']}": record["netbox_local_interface_id"],
+                f"expected_local_device_id_{row['local_port_id']}": record["netbox_local_device_id"],
                 expected_name: record["netbox_remote_interface_id"],
-                "expected_remote_device_id_serial:stale-auto-target": record["netbox_remote_device_id"],
+                f"expected_remote_device_id_{row['local_port_id']}": record["netbox_remote_device_id"],
             },
         )
 
@@ -1397,11 +1329,9 @@ class TestRemotePickerEndpoint:
 
     def test_pick_on_a_deleted_local_port_does_not_reserve_the_remote(self):
         """A dead picked row must not block a valid auto row from using its free port."""
-        from django.core.cache import cache
         from django.urls import reverse
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("deleted-manual-source")
         local, (auto_csp, deleted_csp), _ = make_serial_device(
@@ -1415,12 +1345,7 @@ class TestRemotePickerEndpoint:
         auto_row = _serial_row(auto_csp, remote.name, local, sensor_index_int=1)
         deleted_row = _serial_row(deleted_csp, "no-label-match", local, sensor_index_int=2)
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        cache_key = object.__new__(SyncCablesView).get_cache_key(local, "links", server_key)
-        cache.set(
-            cache_key,
-            {"links": [auto_row, deleted_row], "snapshot_token": "deleted-source-snapshot"},
-            timeout=300,
-        )
+        seed_cable_rows(local, [auto_row, deleted_row], server_key)
         picker_url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[local.pk])
         picked = client.post(
             picker_url,
@@ -1461,11 +1386,9 @@ class TestRemotePickerEndpoint:
 
     def test_deleted_manual_serial_target_does_not_fall_back_to_the_label(self):
         """A stale explicit pick must not cable the row to an automatic target."""
-        from django.core.cache import cache
         from django.urls import reverse
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("deleted-manual-serial-target")
         local, (csp,), _ = make_serial_device(
@@ -1482,8 +1405,7 @@ class TestRemotePickerEndpoint:
         )
         row = _serial_row(csp, automatic.name, local)
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        cache_key = object.__new__(SyncCablesView).get_cache_key(local, "links", server_key)
-        cache.set(cache_key, {"links": [row], "snapshot_token": "deleted-manual-serial"}, timeout=300)
+        seed_cable_rows(local, [row], server_key)
 
         picked = client.post(
             reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[local.pk]),
@@ -1513,11 +1435,9 @@ class TestRemotePickerEndpoint:
 
     def test_deleted_manual_interface_target_does_not_fall_back_to_the_label(self):
         """A stale explicit Interface pick must not cable the row to an automatic target."""
-        from django.core.cache import cache
         from django.urls import reverse
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("deleted-manual-interface-target")
         local_device = make_device("picker-deleted-manual-interface-local")
@@ -1535,8 +1455,7 @@ class TestRemotePickerEndpoint:
             "_source": "main",
         }
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        cache_key = object.__new__(SyncCablesView).get_cache_key(local_device, "links", server_key)
-        cache.set(cache_key, {"links": [row], "snapshot_token": "deleted-manual-interface"}, timeout=300)
+        seed_cable_rows(local_device, [row], server_key)
 
         picked_response = client.post(
             reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[local_device.pk]),
@@ -1566,11 +1485,9 @@ class TestRemotePickerEndpoint:
 
     def test_picking_an_occupied_remote_reports_a_conflict_before_sync(self):
         """The picker partial must classify both terminations, not only the local CSP."""
-        from django.core.cache import cache
         from django.urls import reverse
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("occupied-remote")
         local, (local_csp,), _ = make_serial_device("picker-occupied-local", csp_names=["ttyS1"])
@@ -1579,8 +1496,7 @@ class TestRemotePickerEndpoint:
         existing_cable = cable_together(other_csp, occupied_cp)
         row = _serial_row(local_csp, "no-label-match", local)
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        cache_key = object.__new__(SyncCablesView).get_cache_key(local, "links", server_key)
-        cache.set(cache_key, {"links": [row], "snapshot_token": "occupied-remote"}, timeout=300)
+        seed_cable_rows(local, [row], server_key)
 
         picked = client.post(
             reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[local.pk]),
@@ -1603,11 +1519,9 @@ class TestRemotePickerEndpoint:
         """A verify repaint must use the same user-scoped pick as the later write."""
         import json
 
-        from django.core.cache import cache
         from django.urls import reverse
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("verify-manual-pick")
         local_device = make_device("picker-verify-manual-local")
@@ -1625,8 +1539,7 @@ class TestRemotePickerEndpoint:
             "_source": "main",
         }
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        cache_key = object.__new__(SyncCablesView).get_cache_key(local_device, "links", server_key)
-        cache.set(cache_key, {"links": [row], "snapshot_token": "verify-manual-pick"}, timeout=300)
+        seed_cable_rows(local_device, [row], server_key)
 
         picked_response = client.post(
             reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[local_device.pk]),
@@ -1686,11 +1599,9 @@ class TestRemotePickerEndpoint:
 
     def test_remote_virtual_chassis_member_renders_and_syncs_by_exact_owner(self):
         """A remote physical port must bind to its actual VC member through the full flow."""
-        from django.core.cache import cache
         from django.urls import reverse
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("remote-vc-owner")
         local_device = make_device("picker-remote-vc-local")
@@ -1708,11 +1619,7 @@ class TestRemotePickerEndpoint:
             "remote_port_id": 20,
         }
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        cache.set(
-            object.__new__(SyncCablesView).get_cache_key(local_device, "links", server_key),
-            {"links": [row], "snapshot_token": "remote-vc-owner"},
-            timeout=300,
-        )
+        seed_cable_rows(local_device, [row], server_key)
 
         rendered = _render_cable_sync_page(client, local_device, server_key)
 
@@ -1744,11 +1651,9 @@ class TestRemotePickerEndpoint:
         """A selected VC member must not inherit the default member's patch-path state."""
         import json
 
-        from django.core.cache import cache
         from django.urls import reverse
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("vc-selected-topology")
         first = make_device("picker-vc-topology-first")
@@ -1771,8 +1676,7 @@ class TestRemotePickerEndpoint:
             "_source": "main",
         }
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        cache_key = object.__new__(SyncCablesView).get_cache_key(first, "links", server_key)
-        cache.set(cache_key, {"links": [row], "snapshot_token": "vc-selected-topology"}, timeout=300)
+        seed_cable_rows(first, [row], server_key)
 
         verified = client.post(
             reverse("plugins:netbox_librenms_plugin:verify_cable"),
@@ -1810,11 +1714,9 @@ class TestRemotePickerEndpoint:
         import json
         import re
 
-        from django.core.cache import cache
         from django.urls import reverse
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("vc-verified-local")
         first = make_device("picker-vc-verified-first")
@@ -1835,11 +1737,7 @@ class TestRemotePickerEndpoint:
             "remote_port": remote.name,
             "remote_port_id": 20,
         }
-        cache.set(
-            object.__new__(SyncCablesView).get_cache_key(first, "links", server_key),
-            {"links": [row], "snapshot_token": "vc-verified-local"},
-            timeout=300,
-        )
+        seed_cable_rows(first, [row], server_key)
         initial_render = _render_cable_sync_page(client, first, server_key)
         initial_record = next(iter(initial_render.context["cable_sync"]["table"].rows)).record
         assert initial_record["netbox_local_interface_id"] == first_local.pk
@@ -1932,9 +1830,6 @@ class TestRemotePickerEndpoint:
 
     def test_post_rejects_port_of_wrong_type(self):
         """Picking an Interface for a serial row is rejected and the cache is untouched."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("wrongtype")
         acs, _csp, link, url = self._seed_serial("wrongtype")
@@ -1951,9 +1846,7 @@ class TestRemotePickerEndpoint:
         )
 
         assert resp.status_code == 400
-        key_view = object.__new__(SyncCablesView)
-        cached = cache.get(key_view.get_cache_key(acs, "links", SERVER_KEY))
-        row = next(r for r in cached["links"] if r["local_port_id"] == link["local_port_id"])
+        row = next(r for r in cable_rows(acs, SERVER_KEY)["links"] if r["local_port_id"] == link["local_port_id"])
         assert "manual_remote_id" not in row
 
     def test_pick_then_sync_creates_cable_to_picked_port(self):
@@ -1962,9 +1855,8 @@ class TestRemotePickerEndpoint:
         from django.core.cache import cache
         from django.urls import reverse
 
-        from netbox_librenms_plugin.utils import (
+        from netbox_librenms_plugin.sync_cache import (
             apply_cable_manual_picks,
-            cable_snapshot_token,
         )
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
@@ -1989,9 +1881,9 @@ class TestRemotePickerEndpoint:
         overlaid, applied = apply_cable_manual_picks(
             cache,
             snapshot_key,
-            {"links": cached["links"], "snapshot_token": cable_snapshot_token(cached)},
+            cached["snapshot_id"],
             client.session["_auth_user_id"],
-            cached["links"],
+            cable_rows(acs, SERVER_KEY)["links"],
         )
         assert applied is True
         # The overlay only carries the pick; enrichment resolves it to the NetBox termination.
@@ -2014,10 +1906,7 @@ class TestRemotePickerEndpoint:
 
     def test_batch_rejects_two_manual_rows_targeting_one_remote_port(self):
         from dcim.models import Cable
-        from django.core.cache import cache
         from django.urls import reverse
-
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("duplicate-remote")
         acs, (csp_a, csp_b), _unused = make_serial_device(
@@ -2028,8 +1917,7 @@ class TestRemotePickerEndpoint:
             _serial_row(csp_a, "no-label-a", acs, sensor_index_int=1),
             _serial_row(csp_b, "no-label-b", acs, sensor_index_int=2),
         ]
-        key_view = object.__new__(SyncCablesView)
-        cache.set(key_view.get_cache_key(acs, "links", SERVER_KEY), {"links": links}, timeout=300)
+        seed_cable_rows(acs, links, SERVER_KEY)
         picker_url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[acs.pk])
         _remote, _, (remote_port,) = make_serial_device(
             "picker-duplicate-remote-target",
@@ -2065,11 +1953,9 @@ class TestRemotePickerEndpoint:
 
     def test_batch_rejects_an_endpoint_reused_across_local_and_remote_roles(self):
         from dcim.models import Cable
-        from django.core.cache import cache
         from django.urls import reverse
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         device = make_device("cable-cross-role")
         first = make_interface(device, "Ethernet1")
@@ -2097,8 +1983,7 @@ class TestRemotePickerEndpoint:
                 "netbox_remote_device_id": device.pk,
             },
         ]
-        cache_key = object.__new__(SyncCablesView).get_cache_key(device, "links", SERVER_KEY)
-        cache.set(cache_key, {"links": rows}, timeout=300)
+        seed_cable_rows(device, rows, SERVER_KEY)
         client = self._client("cross-role")
         post_data = _rendered_sync_data(
             client,
@@ -2119,10 +2004,7 @@ class TestRemotePickerEndpoint:
     def test_batch_rejects_two_rows_overridden_onto_one_vc_member_interface(self):
         """Verify alternate-name member overrides that resolve two rows to one interface reject the whole batch."""
         from dcim.models import Cable
-        from django.core.cache import cache
         from django.urls import reverse
-
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("vc-collapse")
         page = make_device("cable-vc-collapse-page")
@@ -2154,11 +2036,7 @@ class TestRemotePickerEndpoint:
                 "remote_port": second_remote.name,
             },
         ]
-        cache.set(
-            object.__new__(SyncCablesView).get_cache_key(page, "links", SERVER_KEY),
-            {"links": rows, "snapshot_token": "vc-collapse"},
-            timeout=300,
-        )
+        seed_cable_rows(page, rows, SERVER_KEY)
 
         post_data = {
             "server_key": SERVER_KEY,
@@ -2323,36 +2201,30 @@ class TestManualRepointOfExistingCable:
         new_cp.refresh_from_db()
         assert csp.cable_id == new_cp.cable_id  # re-pointed to the pick
 
-    def test_pick_post_refetches_when_cache_expired(self, picker_librenms):
-        """A pick that lands after the snapshot expired re-fetches from LibreNMS instead of erroring."""
+    def test_pick_post_requires_a_refresh_when_the_snapshot_expires(self, picker_librenms):
+        """An expired approval snapshot must not acquire different source data."""
         from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.conftest import clear_test_cache
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client_e2e("expiry-post")
-        acs, csp, _old, link, picker_url = self._seed_cabled("expiry-post")
-        _t, _, (new_cp,) = make_serial_device("expiry-post-target", cp_names=["console"])
-        seed_mapping(acs, SERVER_KEY, own=13)
+        acs, csp, old, link, picker_url = self._seed_cabled("expiry-post")
+        _target, _, (new_cp,) = make_serial_device("expiry-post-target", cp_names=["console"])
+        clear_test_cache(cache)
 
-        clear_test_cache(cache)  # the snapshot expired between render and pick
-
-        _register_serial_refetch(picker_librenms, link)
-        resp = client.post(
+        response = client.post(
             picker_url,
-            data={"row_id": link["local_port_id"], "server_key": SERVER_KEY, "remote_interface_id": new_cp.pk},
+            {"row_id": link["local_port_id"], "server_key": SERVER_KEY, "remote_interface_id": new_cp.pk},
             HTTP_HX_REQUEST="true",
         )
 
-        refetched = cache.get(object.__new__(SyncCablesView).get_cache_key(acs, "links", SERVER_KEY))
-        assert refetched is not None, picker_librenms.requests
-        assert resp.status_code == 200, resp.content.decode()
-        assert new_cp.name in resp.content.decode()
-        key_view = object.__new__(SyncCablesView)
-        for configured_key in SyncCablesView().librenms_api.get_available_servers():
-            cached = cache.get(key_view.get_cache_key(acs, "links", configured_key))
-            if cached:
-                assert all("manual_remote_id" not in row for row in cached["links"])
+        assert response.status_code == 409
+        assert picker_librenms.requests == []
+        assert cache.get(SyncCablesView().get_cache_key(acs, "links", SERVER_KEY)) is None
+        csp.refresh_from_db()
+        assert csp.cable_id == old.pk
+        assert new_cp.cable_id is None
 
     def test_pick_with_unconfigured_server_key_is_rejected(self):
         """A stale server key must not reuse or refresh a removed server snapshot."""
@@ -2368,8 +2240,8 @@ class TestManualRepointOfExistingCable:
 
         assert resp.status_code == 400
 
-    def test_pick_modal_get_refetches_when_cache_expired(self, picker_librenms):
-        """Opening the picker after the snapshot expired re-fetches instead of a dead-end warning."""
+    def test_pick_modal_get_requires_a_refresh_when_the_snapshot_expires(self, picker_librenms):
+        """Opening a stale picker cannot acquire a new approval snapshot."""
         from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.conftest import clear_test_cache
@@ -2377,19 +2249,13 @@ class TestManualRepointOfExistingCable:
 
         client = self._client_e2e("expiry-get")
         acs, _csp, _old, link, picker_url = self._seed_cabled("expiry-get")
-        seed_mapping(acs, SERVER_KEY, own=13)
-
         clear_test_cache(cache)
 
-        _register_serial_refetch(picker_librenms, link)
-        resp = client.get(picker_url, {"row_id": link["local_port_id"], "server_key": SERVER_KEY})
+        response = client.get(picker_url, {"row_id": link["local_port_id"], "server_key": SERVER_KEY})
 
-        refetched = cache.get(object.__new__(SyncCablesView).get_cache_key(acs, "links", SERVER_KEY))
-        assert refetched is not None, picker_librenms.requests
-        assert resp.status_code == 200
-        content = resp.content.decode()
-        assert 'name="q"' in content, content  # the real picker, not the cache-expired warning
-        assert "Cache has expired" not in content
+        assert response.status_code == 409
+        assert picker_librenms.requests == []
+        assert cache.get(SyncCablesView().get_cache_key(acs, "links", SERVER_KEY)) is None
 
     def test_pick_modal_get_rejects_an_unconfigured_server_key(self):
         """The picker modal must fail closed when its server was removed."""
@@ -2411,10 +2277,7 @@ class TestManualRepointOfExistingCable:
 
     def _seed_cabled(self, name):
         """Seed a cache row for a CSP already cabled (tagged) to its label device."""
-        from django.core.cache import cache
         from django.urls import reverse
-
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         acs, (csp,), _ = make_serial_device(f"acs-{name}", csp_names=["ttyS8"])
         _r, _, (cp,) = make_serial_device(f"router-{name}", cp_names=["console"])
@@ -2422,8 +2285,7 @@ class TestManualRepointOfExistingCable:
         old.tags.add(_librenms_tag())
 
         link = _serial_row(csp, f"router-{name}", acs, sensor_index_int=8)
-        key_view = object.__new__(SyncCablesView)
-        cache.set(key_view.get_cache_key(acs, "links", SERVER_KEY), {"links": [link]}, timeout=300)
+        seed_cable_rows(acs, [link], SERVER_KEY)
         picker_url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[acs.pk])
         return acs, csp, old, link, picker_url
 
@@ -2477,16 +2339,12 @@ class TestRemotePickerObjectScope:
     @staticmethod
     def _seed(name, label="name-that-matches-nothing"):
         """Cache a serial row for a real ACS device and return it with the picker URL."""
-        from django.core.cache import cache
         from django.urls import reverse
-
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         acs, (csp,), _ = make_serial_device(f"acs-{name}", csp_names=["ttyS5"])
         link = _serial_row(csp, label, acs)
         link["local_port_id"] = f"serial:{csp.pk}-s"
-        key_view = object.__new__(SyncCablesView)
-        cache.set(key_view.get_cache_key(acs, "links", SERVER_KEY), {"links": [link]}, timeout=300)
+        seed_cable_rows(acs, [link], SERVER_KEY)
         url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[acs.pk])
         return acs, link, url
 
@@ -2535,12 +2393,10 @@ class TestRemotePickerObjectScope:
     def test_picker_rejects_a_normal_row_when_the_local_interface_is_hidden(self):
         """A raw cached LLDP row must not bypass current Interface view scope."""
         from dcim.models import Device, Interface
-        from django.core.cache import cache
         from django.test import Client
         from django.urls import reverse
 
         from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         local_device = make_device("picker-hidden-interface-local")
         local_interface = make_interface(local_device, "Ethernet1")
@@ -2554,11 +2410,7 @@ class TestRemotePickerObjectScope:
             "remote_device": "restricted-neighbor-label",
             "remote_port": remote_interface.name,
         }
-        cache.set(
-            object.__new__(SyncCablesView).get_cache_key(local_device, "links", SERVER_KEY),
-            {"links": [row], "snapshot_token": "hidden-interface-picker"},
-            timeout=300,
-        )
+        seed_cable_rows(local_device, [row], SERVER_KEY)
         user = make_user_with_perms(
             "picker-hidden-interface-user",
             [("view", Device)],
@@ -2584,19 +2436,13 @@ class TestRemotePickerObjectScope:
         assert "restricted-neighbor-label" not in modal.content.decode()
 
     def test_plugin_view_only_user_does_not_receive_a_picker_action(self):
-        from django.core.cache import cache
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         remote, _, _ = make_serial_device("picker-view-only-target", cp_names=["console"])
         acs, link, _url = self._seed("view-only-picker", label=remote.name)
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        cache.set(
-            object.__new__(SyncCablesView).get_cache_key(acs, "links", server_key),
-            {"links": [link]},
-            timeout=300,
-        )
+        seed_cable_rows(acs, [link], server_key)
         client = self._scoped_client(
             "view-only-picker",
             [acs.name, remote.name],
@@ -2616,21 +2462,18 @@ class TestRemotePickerObjectScope:
         from dcim.models import Cable, ConsolePort, ConsoleServerPort, Device
         from django.apps import apps
         from django.contrib.auth import get_user_model
-        from django.core.cache import cache
         from django.test import Client
         from django.urls import reverse
         from users.models import ObjectPermission
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         local, (csp,), _ = make_serial_device("picker-view-only-local", csp_names=["ttyS1"])
         remote, _, (cp,) = make_serial_device("picker-view-only-remote", cp_names=["console"])
         row = _serial_row(csp, remote.name, local)
         row["local_port_id"] = "serial:view-only"
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        cache_key = object.__new__(SyncCablesView).get_cache_key(local, "links", server_key)
-        cache.set(cache_key, {"links": [row]}, timeout=300)
+        seed_cable_rows(local, [row], server_key)
 
         user = get_user_model().objects.create_user("picker-view-only-user")
         grants = [
@@ -2677,12 +2520,10 @@ class TestRemotePickerObjectScope:
     def test_serial_auto_pick_skips_a_view_only_console_port(self):
         """Allocation must prefer a later actionable port over an earlier view-only port."""
         from dcim.models import Cable, ConsolePort, ConsoleServerPort, Device
-        from django.core.cache import cache
         from django.test import Client
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         local, (csp,), _ = make_serial_device("picker-actionable-local", csp_names=["ttyS1"])
         remote, _, (view_only, actionable) = make_serial_device(
@@ -2692,11 +2533,7 @@ class TestRemotePickerObjectScope:
         row = _serial_row(csp, remote.name, local)
         row["local_port_id"] = "serial:actionable-port"
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        cache.set(
-            object.__new__(SyncCablesView).get_cache_key(local, "links", server_key),
-            {"links": [row]},
-            timeout=300,
-        )
+        seed_cable_rows(local, [row], server_key)
         user = make_user_with_perms(
             "picker-actionable-user",
             [
@@ -2724,13 +2561,11 @@ class TestRemotePickerObjectScope:
     def test_manual_pick_on_an_unchangeable_source_does_not_reserve_the_port(self):
         """A dead manual row must not starve an actionable auto-matched sibling row."""
         from dcim.models import Cable, ConsolePort, ConsoleServerPort, Device
-        from django.core.cache import cache
         from django.test import Client
         from django.urls import reverse
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         local, (actionable_csp, view_only_csp), _ = make_serial_device(
             "picker-dead-reservation-local",
@@ -2742,12 +2577,7 @@ class TestRemotePickerObjectScope:
         manual_row = _serial_row(view_only_csp, remote.name, local, sensor_index_int=2)
         manual_row["local_port_id"] = "serial:manual-view-only"
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        cache_key = object.__new__(SyncCablesView).get_cache_key(local, "links", server_key)
-        cache.set(
-            cache_key,
-            {"links": [auto_row, manual_row], "snapshot_token": "dead-reservation"},
-            timeout=300,
-        )
+        seed_cable_rows(local, [auto_row, manual_row], server_key)
         user = make_user_with_perms(
             "picker-dead-reservation-user",
             [
@@ -2789,25 +2619,19 @@ class TestRemotePickerObjectScope:
         from dcim.models import Cable, ConsolePort, ConsoleServerPort, Device
         from django.apps import apps
         from django.contrib.auth import get_user_model
-        from django.core.cache import cache
         from django.test import Client
         from django.urls import reverse
         from extras.models import Tag
         from users.models import ObjectPermission
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         local, (csp,), _ = make_serial_device("picker-no-tag-add-local", csp_names=["ttyS1"])
         remote, _, (cp,) = make_serial_device("picker-no-tag-add-remote", cp_names=["console"])
         row = _serial_row(csp, remote.name, local)
         row["local_port_id"] = "serial:no-tag-add"
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        cache.set(
-            object.__new__(SyncCablesView).get_cache_key(local, "links", server_key),
-            {"links": [row]},
-            timeout=300,
-        )
+        seed_cable_rows(local, [row], server_key)
         Tag.objects.filter(name="librenms").delete()
         user = get_user_model().objects.create_user("picker-no-tag-add-user")
         grants = [
@@ -2846,13 +2670,11 @@ class TestRemotePickerObjectScope:
         from dcim.models import Cable, Device, Interface
         from django.apps import apps
         from django.contrib.auth import get_user_model
-        from django.core.cache import cache
         from django.test import Client
         from django.urls import reverse
         from users.models import ObjectPermission
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         first = make_device("picker-verify-scope-first")
         second = make_device("picker-verify-scope-second")
@@ -2871,8 +2693,7 @@ class TestRemotePickerObjectScope:
             "_source": "main",
         }
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        cache_key = object.__new__(SyncCablesView).get_cache_key(first, "links", server_key)
-        cache.set(cache_key, {"links": [row], "snapshot_token": "verify-member-scope"}, timeout=300)
+        seed_cable_rows(first, [row], server_key)
 
         user = get_user_model().objects.create_user("picker-verify-scope-user")
         grants = [
@@ -2961,9 +2782,6 @@ class TestRemotePickerObjectScope:
         assert cp.name not in resp.content.decode()
 
     def test_post_refuses_a_port_on_a_device_outside_the_grant(self):
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         acs, link, url = self._seed("scope-post")
         _hidden, _, (cp,) = make_serial_device("picker-scope-post-hidden", cp_names=["console"])
@@ -2985,9 +2803,7 @@ class TestRemotePickerObjectScope:
         )
 
         assert resp.status_code == 400
-        key_view = object.__new__(SyncCablesView)
-        cached = cache.get(key_view.get_cache_key(acs, "links", SERVER_KEY))
-        row = next(r for r in cached["links"] if r["local_port_id"] == link["local_port_id"])
+        row = next(r for r in cable_rows(acs, SERVER_KEY)["links"] if r["local_port_id"] == link["local_port_id"])
         assert "manual_remote_id" not in row  # nothing bound
 
     def test_ports_fragment_requires_console_port_view_permission(self):
@@ -3045,7 +2861,7 @@ class TestRemotePickerObjectScope:
     def test_post_requires_console_port_view_permission(self):
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import cable_manual_pick_cache_key, cable_snapshot_token
+        from netbox_librenms_plugin.sync_cache import cable_manual_pick_cache_key
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         acs, link, url = self._seed("scope-port-post")
@@ -3072,7 +2888,7 @@ class TestRemotePickerObjectScope:
         cached = cache.get(snapshot_key)
         pick_key = cable_manual_pick_cache_key(
             snapshot_key,
-            cable_snapshot_token(cached),
+            cached["snapshot_id"],
             client.session["_auth_user_id"],
             link["local_port_id"],
         )
@@ -3082,9 +2898,6 @@ class TestRemotePickerObjectScope:
 
     def test_in_scope_pick_still_works(self):
         """The device the grant DOES cover still picks — the scoping must not over-block."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         acs, link, url = self._seed("scope-ok")
         remote, _, (cp,) = make_serial_device("picker-scope-ok-target", cp_names=["console"])
@@ -3106,9 +2919,7 @@ class TestRemotePickerObjectScope:
         )
 
         assert resp.status_code == 200
-        key_view = object.__new__(SyncCablesView)
-        cached = cache.get(key_view.get_cache_key(acs, "links", SERVER_KEY))
-        row = next(r for r in cached["links"] if r["local_port_id"] == link["local_port_id"])
+        row = next(r for r in cable_rows(acs, SERVER_KEY)["links"] if r["local_port_id"] == link["local_port_id"])
         assert "manual_remote_id" not in row
 
     def test_picker_declares_the_device_view_gate(self):
@@ -3132,13 +2943,11 @@ class TestNormalCableLinkObjectScope:
         from dcim.models import Device, Interface
         from django.apps import apps
         from django.contrib.auth import get_user_model
-        from django.core.cache import cache
         from django.test import Client
         from django.urls import reverse
         from users.models import ObjectPermission
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         visible = make_device("normal-scope-visible")
         hidden = make_device("normal-scope-hidden")
@@ -3155,11 +2964,7 @@ class TestNormalCableLinkObjectScope:
             "remote_port_id": 20,
         }
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        cache.set(
-            object.__new__(SyncCablesView).get_cache_key(visible, "links", server_key),
-            {"links": [row], "snapshot_token": "normal-hidden-owner"},
-            timeout=300,
-        )
+        seed_cable_rows(visible, [row], server_key)
 
         user = get_user_model().objects.create_user("normal-scope-user")
         plugin_model = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
@@ -3200,13 +3005,11 @@ class TestNormalCableLinkObjectScope:
         from dcim.models import Device, Interface
         from django.apps import apps
         from django.contrib.auth import get_user_model
-        from django.core.cache import cache
         from django.test import Client
         from django.urls import reverse
         from users.models import ObjectPermission
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         local_device = make_device("normal-verify-scope-local")
         local = make_interface(local_device, "Ethernet1")
@@ -3223,11 +3026,7 @@ class TestNormalCableLinkObjectScope:
             "remote_port_id": 20,
         }
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        cache.set(
-            object.__new__(SyncCablesView).get_cache_key(local_device, "links", server_key),
-            {"links": [row], "snapshot_token": "normal-verify-hidden-owner"},
-            timeout=300,
-        )
+        seed_cable_rows(local_device, [row], server_key)
 
         user = get_user_model().objects.create_user("normal-verify-scope-user")
         plugin_model = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
@@ -3277,14 +3076,12 @@ class TestNormalCableLinkObjectScope:
         from dcim.models import Cable, Device, Interface
         from django.apps import apps
         from django.contrib.auth import get_user_model
-        from django.core.cache import cache
         from django.test import Client
         from django.urls import reverse
         from users.models import ObjectPermission
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.utils import get_librenms_cable_tag
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         first = make_device("normal-writer-scope-first")
         selected = make_device("normal-writer-scope-selected")
@@ -3307,11 +3104,7 @@ class TestNormalCableLinkObjectScope:
             "remote_port": remote.name,
             "remote_port_id": 20,
         }
-        cache.set(
-            object.__new__(SyncCablesView).get_cache_key(first, "links", server_key),
-            {"links": [row], "snapshot_token": "normal-writer-scope"},
-            timeout=300,
-        )
+        seed_cable_rows(first, [row], server_key)
         get_librenms_cable_tag()
 
         user = get_user_model().objects.create_user("normal-writer-scope-user")
@@ -3373,13 +3166,11 @@ class TestNormalCableLinkObjectScope:
     def test_duplicate_local_stable_ids_are_not_rendered_or_synced(self):
         """A corrupt duplicate binding must not choose one local Interface by query order."""
         from django.contrib.auth import get_user_model
-        from django.core.cache import cache
         from django.test import Client
         from django.urls import reverse
         from dcim.models import Cable
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         local_device = make_device("normal-duplicate-id-local")
         first = make_interface(local_device, "Ethernet1")
@@ -3400,11 +3191,7 @@ class TestNormalCableLinkObjectScope:
             "remote_port": remote.name,
             "remote_port_id": 20,
         }
-        cache.set(
-            object.__new__(SyncCablesView).get_cache_key(local_device, "links", server_key),
-            {"links": [row], "snapshot_token": "normal-duplicate-id"},
-            timeout=300,
-        )
+        seed_cable_rows(local_device, [row], server_key)
         user = get_user_model().objects.create_superuser("normal-duplicate-id-user", "", "pw")
         client = Client()
         client.force_login(user)
@@ -3441,11 +3228,9 @@ class TestCablePathReadScope:
         from dcim.models import Cable, Device, FrontPort, Interface, RearPort
         from django.apps import apps
         from django.contrib.auth import get_user_model
-        from django.core.cache import cache
         from users.models import ObjectPermission
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         local_device = make_device("path-scope-local")
         local = make_interface(local_device, "Ethernet1")
@@ -3480,22 +3265,19 @@ class TestCablePathReadScope:
         assert middle.pk not in [first.pk, last.pk]
 
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        cache_key = object.__new__(SyncCablesView).get_cache_key(local_device, "links", server_key)
-        cache.set(
-            cache_key,
-            {
-                "links": [
-                    {
-                        "local_port": local.name,
-                        "local_port_id": 10,
-                        "remote_device": remote_device.name,
-                        "remote_port": remote.name,
-                        "remote_port_id": 20,
-                        "_source": "main",
-                    }
-                ]
-            },
-            timeout=300,
+        seed_cable_rows(
+            local_device,
+            [
+                {
+                    "local_port": local.name,
+                    "local_port_id": 10,
+                    "remote_device": remote_device.name,
+                    "remote_port": remote.name,
+                    "remote_port_id": 20,
+                    "_source": "main",
+                }
+            ],
+            server_key,
         )
         client.force_login(user)
 

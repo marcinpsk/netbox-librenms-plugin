@@ -1,9 +1,6 @@
 import logging
-import re
-import time
 from collections import defaultdict
 from urllib.parse import quote_plus
-from uuid import uuid4
 
 from dcim.constants import VIRTUAL_IFACE_TYPES
 from dcim.models import Cable, ConsolePort, ConsoleServerPort, Device, Interface
@@ -27,7 +24,6 @@ from netbox_librenms_plugin.breakout_cables import (
     is_channel,
 )
 from netbox_librenms_plugin.constants import (
-    INTERFACE_NAME_FIELDS,
     MATCHING,
     MISMATCHED,
     NOT_IN_NETBOX,
@@ -35,7 +31,7 @@ from netbox_librenms_plugin.constants import (
     SERIAL_INVENTORY_SOURCE,
     UNCLASSIFIED,
 )
-from netbox_librenms_plugin.interface_rules import PORT_RECORD_KEYS, interface_rules_for_request, row_rule_block
+from netbox_librenms_plugin.interface_rules import interface_rules_for_request, row_rule_block
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
@@ -47,19 +43,21 @@ from netbox_librenms_plugin.server_mappings import (
     resolve_device_port,
 )
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
-from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
+from netbox_librenms_plugin.sync_cache import (
+    SyncCacheConsistency,
+    SyncTab,
+    request_actor_id,
+    apply_cable_manual_picks,
+    cable_manual_pick_cache_key,
+)
 from netbox_librenms_plugin.sync_filters import filter_sync_table, parse_table_filters
 from netbox_librenms_plugin.sync_query import SyncQuery
 from netbox_librenms_plugin.tables.cables import SYNC_CABLE_LABEL
 from netbox_librenms_plugin.utils import (
-    apply_cable_manual_picks,
-    assign_cable_row_ids,
     cable_far_terminations,
     cable_has_librenms_tag,
     cable_is_point_to_point,
-    cable_manual_pick_cache_key,
     cable_path_reaches,
-    cable_snapshot_token,
     get_interface_name_field,
     get_librenms_cable_tag,
     get_virtual_chassis_member,
@@ -77,7 +75,28 @@ from netbox_librenms_plugin.views.mixins import (
     server_unavailable_json,
 )
 
+from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin.acquisition.registry import Resource
+from netbox_librenms_plugin.assessment.cables import (
+    assess,
+    remote_port_ref,
+    _dedupe_protocol_duplicates,
+    _also_reported_by,
+)
+
 logger = logging.getLogger(__name__)
+
+
+def read_cable_assessment(subject, server_key, interface_name_field="ifName"):
+    """Read the bound source snapshot and assess its cable rows for the current name option."""
+    snapshot = source_cache.read(subject, Resource.CABLES, server_key)
+    if snapshot is None:
+        return None
+    return {
+        **assess(snapshot, subject=subject, interface_name_field=interface_name_field),
+        "snapshot_id": snapshot.snapshot_id,
+        "last_fetched": snapshot.finished_at,
+    }
 
 
 def _remote_name_candidates(hostname):
@@ -125,122 +144,10 @@ def _remote_name_devices(names):
     return [by_pk[pk] for pk in sorted(by_pk)]
 
 
-_SUB_UNIT_RE = re.compile(r"^(?P<physical>.+)\.\d+$")
-
-# LLDP is the standard and names ports the way the device does; CDP is the fallback. Used to
-# pick a survivor when one adjacency is reported over both and neither row resolved.
-_PROTOCOL_PREFERENCE = ("lldp", "cdp")
-
-# Wall-clock budget for the neighbour port-name reads one cable refresh may spend. A switch with
-# fifty neighbours would otherwise serialize fifty requests, each able to reach the API timeout.
-REMOTE_ALIAS_FETCH_BUDGET_SECONDS = 15.0
-
-
-def _neighbour_group_key(row):
-    """
-    Identify the adjacency a row describes: one local port plus one remote device.
-
-    Two rows sharing this key describe the same neighbour relationship, whether they differ by
-    sub-unit (see :func:`_drop_masked_sub_units`) or by discovery protocol (see
-    :meth:`BaseCableTableView._dedupe_protocol_duplicates`). Defined once so the two filters
-    cannot drift apart on what "the same neighbour" means.
-
-    Args:
-        row (dict): A collected cable row.
-
-    Returns:
-        tuple | None: The adjacency identity, or None when the row names no remote device.
-
-    """
-    local_port_id = coerce_librenms_id(row.get("local_port_id"))
-    if local_port_id is None:
-        return None
-    remote_device = coerce_librenms_id(row.get("remote_device_id"))
-    hostname = row.get("remote_device")
-    if remote_device is not None:
-        remote_identity = ("id", remote_device)
-    elif isinstance(hostname, str) and hostname.strip():
-        # The hostname lookup in get_device_by_id_or_name is name__iexact, so fold case here too.
-        remote_identity = ("hostname", hostname.strip().casefold())
-    else:
-        return None
-    return local_port_id, remote_identity
-
-
-def _remote_endpoint_identity(row):
-    """
-    Identify the far end a row names, or None when nothing proves which port it is.
-
-    The LibreNMS port the row names (:func:`remote_port_ref`) is the strongest evidence and
-    outranks the NetBox interface: two protocols naming one port can resolve differently,
-    because each resolves through its own advertised name. The table lookup reads the same
-    port, so two rows grouped here resolve to one interface.
-
-    Args:
-        row (dict): An enriched cable row.
-
-    Returns:
-        tuple | None: The endpoint identity, or None when the row proves no particular port.
-
-    """
-    port_key = remote_port_ref(row)
-    if port_key is not None:
-        return ("port", port_key)
-    if interface_id := row.get("netbox_remote_interface_id"):
-        return ("interface", interface_id)
-    return None
-
-
-def _endpoint_group_key(row):
-    """
-    Identify the reported link *row* describes, or None when nothing proves which one it is.
-
-    Two rows carrying this key report one link over two discovery protocols. A serial row's
-    ``local_port_id`` is not a LibreNMS port id, so it groups with nothing; OOB rows keep their
-    own namespace, because their local ports live on the controller.
-
-    Args:
-        row (dict): A cable row.
-
-    Returns:
-        tuple | None: The group identity, or None when the row proves no particular link.
-
-    """
-    neighbour = _neighbour_group_key(row)
-    endpoint = _remote_endpoint_identity(row)
-    if neighbour is None or endpoint is None:
-        return None
-    return (row.get("_source"), neighbour, endpoint)
-
-
-def remote_port_ref(link):
-    """
-    Identify the far-end LibreNMS port of *link*: the matched port record, else the advertised ID.
-
-    ``remote_port_key`` is the only ID proven to be on the neighbour now: it comes from the
-    neighbour's current port list. An advertised ID that list does not hold is stale or names
-    another device's port, so it is used only when no record matched.
-
-    Args:
-        link (dict): A cable row.
-
-    Returns:
-        int | None: The far-end LibreNMS port ID, or None when the row names none.
-
-    """
-    port_key = coerce_librenms_id(link.get("remote_port_key"))
-    return port_key if port_key is not None else coerce_librenms_id(link.get("remote_port_id"))
-
-
 def _remote_port_name_candidates(row):
     """Every LibreNMS name the far end of *row* is known by: advertised first, then the aliases."""
     names = [row.get("remote_port"), *(row.get("remote_port_aliases") or [])]
     return [name for name in names if isinstance(name, str) and name]
-
-
-def port_record(port):
-    """Return the part of a LibreNMS port record the interface rules read (``PORT_RECORD_KEYS``)."""
-    return {key: port[key] for key in PORT_RECORD_KEYS if key in port}
 
 
 def port_owner_id(row, side):
@@ -284,69 +191,6 @@ def cable_row_ports(row):
     return ports
 
 
-def _drop_masked_sub_units(rows):
-    """
-    Drop a neighbour row for a sub-unit whose own physical port is reported beside it.
-
-    A router advertises LLDP from the physical port and from each sub-unit configured on
-    it, so one local port can report the same neighbour several times. A cable terminates
-    on the physical port only, so every sub-unit row renders as a mismatch.
-
-    Masking is deliberately narrow: a sub-unit is dropped only when the SAME local port
-    reports its exact parent name on the SAME remote device. A sub-unit reported on its
-    own is kept, because it is then the only evidence of that neighbour.
-    """
-    physical_by_group = {}
-    for row in rows:
-        remote_port = row["remote_port"]
-        key = _neighbour_group_key(row)
-        if key is not None and isinstance(remote_port, str) and not _SUB_UNIT_RE.match(remote_port):
-            physical_by_group.setdefault(key, set()).add(remote_port)
-
-    kept = []
-    for row in rows:
-        remote_port = row["remote_port"]
-        match = _SUB_UNIT_RE.match(remote_port) if isinstance(remote_port, str) else None
-        if match and match.group("physical") in physical_by_group.get(_neighbour_group_key(row), ()):
-            continue
-        kept.append(row)
-    return kept
-
-
-def _extract_cached_links(cached, cache_key=None):
-    """
-    Return the validated link list from a cached "links" entry, or None when malformed.
-
-    A stale/corrupt but truthy cache value — a non-dict, a non-list ``links``, or any non-dict
-    link row — would crash the cached GET render or the verify path on ``.get()`` / ``.items()``
-    / iteration. Treat those as a cache miss: when ``cache_key`` is given, purge the bad entry so
-    the next read doesn't keep serving garbage.
-
-    Args:
-        cached: The raw value read from the links cache key.
-        cache_key: Optional cache key to delete when the entry is malformed.
-
-    Returns:
-        list | None: The list of (dict) link rows, or None if the entry is malformed.
-
-    """
-    if not isinstance(cached, dict) or not isinstance(cached.get("links"), list):
-        if cache_key is not None:
-            cache.delete(cache_key)
-        return None
-    links = cached["links"]
-    if any(not isinstance(link, dict) for link in links):
-        if cache_key is not None:
-            cache.delete(cache_key)
-        return None
-    return links
-
-
-# The raw (un-enriched) link fields a cached/replayed link is stripped down to before
-# re-enrichment — derived fields (netbox_*_id, *_url, cable_status, …) are dropped so stale
-# IDs/URLs can't cause DoesNotExist after the underlying NetBox objects are deleted. Defined
-# once so the strip in _prepare_context and in SingleCableVerifyView stay in lock-step.
-# The query keys that only the remote picker and the remote create modal read: every other key is the page query.
 CABLE_MODAL_QUERY_KEYS = ("row_id", "expected_local_id", "action", "source", "q", "device_id")
 
 
@@ -367,39 +211,6 @@ def _set_cable_state(link, status, comparison):
     """
     link["cable_status"] = status
     link["cable_comparison"] = comparison
-
-
-_RAW_LINK_KEYS = frozenset(
-    {
-        "local_port",
-        "local_port_alt",
-        "local_port_id",
-        "row_id",
-        "link_id",
-        "protocol",
-        "remote_port",
-        "remote_port_aliases",
-        "remote_port_key",
-        # The rule inputs of both ports, so a cable write is decided from the snapshot it came from.
-        "local_port_record",
-        "remote_port_record",
-        "remote_device",
-        "remote_port_id",
-        "remote_device_id",
-        "_source",
-        # Serial-specific source fields (not derived; must survive the cache strip so the
-        # read-only Avocent serial rows on the Cables tab re-render after a cached replay).
-        "sensor_id",
-        "sensor_index_int",
-        "is_configured",
-        # device_id must also survive the strip for serial rows: enrich_links_data re-sets it to
-        # obj.id for host/OOB rows, but the serial branch `continue`s before that (a serial row must
-        # keep its CSP-owning sync device_id, not obj.id). Dropping it here would leave a cached
-        # serial row with no device_id, and the Cables-tab render reads record["device_id"]
-        # (tables/cables.py) — a KeyError that 500s the whole tab on any cached replay.
-        "device_id",
-    }
-)
 
 
 class BaseCableTableView(
@@ -850,567 +661,6 @@ class BaseCableTableView(
             return str(obj.primary_ip.address.ip)
         return None
 
-    def get_ports_data(self, librenms_id):
-        """Fetch the host ports that name the cable rows; an owner with no host id (OOB only) has none."""
-        if librenms_id is None:
-            return {"ports": []}
-        success, data = self.librenms_api.get_ports(librenms_id, with_vlans=False)
-        return data if success else {"ports": []}
-
-    @staticmethod
-    def _build_cable_port_name_maps(ports_data, interface_name_field, alt_name_field):
-        """
-        Build ``{port_id: name}`` and ``{port_id: alt_name}`` maps from a get_ports payload.
-
-        Shared by the host and OOB cable branches so they name local ports identically. A
-        malformed payload (non-dict, non-list ports, non-dict rows) yields empty maps rather
-        than crashing.
-
-        Args:
-            ports_data (dict): A get_ports payload.
-            interface_name_field (str): The field that supplies each displayed port name.
-            alt_name_field (str): The field that supplies alternate port names.
-
-        Returns:
-            tuple[dict, dict]: Maps from port IDs to displayed names and alternate names.
-
-        """
-        name_map = {}
-        alt_map = {}
-        ports = ports_data.get("ports") if isinstance(ports_data, dict) else None
-        for port in ports if isinstance(ports, list) else []:
-            # A malformed LibreNMS/cache payload can carry non-dict rows (strings/nulls);
-            # dereferencing .get() on those would 500 the refresh, so skip them.
-            if not isinstance(port, dict):
-                continue
-            raw_port_id = port.get("port_id")
-            if raw_port_id is None:
-                continue
-            port_id = str(raw_port_id)
-            port_name = port.get(interface_name_field)
-            if port_name is None:
-                continue
-            name_map[port_id] = port_name
-            # Only record an alternate that differs from the displayed name (issue #88).
-            alt_name = port.get(alt_name_field)
-            if alt_name and alt_name != port_name:
-                alt_map[port_id] = alt_name
-        return name_map, alt_map
-
-    @staticmethod
-    def _port_records_by_id(ports_data):
-        """Index a get_ports payload's rule inputs by port id; malformed rows are skipped."""
-        ports = ports_data.get("ports") if isinstance(ports_data, dict) else None
-        return {
-            port_id: port_record(port)
-            for port in (ports if isinstance(ports, list) else [])
-            if isinstance(port, dict) and (port_id := coerce_librenms_id(port.get("port_id"))) is not None
-        }
-
-    @staticmethod
-    def _collect_cable_links(links, name_map, alt_map, source):
-        """
-        Turn LibreNMS LLDP link rows into the table's row dicts, tagged with *source*.
-
-        Shared by the host (``source='main'``) and OOB (``source='oob'``) branches. Non-dict
-        rows are skipped; an unmapped local_port_id falls back to the LibreNMS-reported name.
-
-        Args:
-            links (list): LibreNMS LLDP link rows.
-            name_map (dict): A map from local port IDs to displayed names.
-            alt_map (dict): A map from local port IDs to alternate names.
-            source (str): The source tag for each table row.
-
-        Returns:
-            list[dict]: Table rows tagged with the source.
-
-        """
-        rows = []
-        for link in links:
-            if not isinstance(link, dict):
-                continue
-            port_id = link.get("local_port_id")
-            key = str(port_id)
-            local_port_name = name_map.get(key)
-            if local_port_name is None:
-                # Fall back to the LibreNMS-reported local_port name so name-based resolution
-                # still works when the ports map misses or the ports fetch failed.
-                local_port_name = link.get("local_port")
-            rows.append(
-                {
-                    "local_port": local_port_name,
-                    "local_port_alt": alt_map.get(key),
-                    "local_port_id": port_id,
-                    "link_id": link.get("id"),
-                    "protocol": link.get("protocol"),
-                    "remote_port": link.get("remote_port"),
-                    "remote_device": link.get("remote_hostname"),
-                    "remote_port_id": link.get("remote_port_id"),
-                    "remote_device_id": link.get("remote_device_id"),
-                    "_source": source,
-                }
-            )
-        return _drop_masked_sub_units(rows)
-
-    def _attach_remote_port_aliases(self, links_data):
-        """
-        Carry the other LibreNMS names of each remote port onto its row.
-
-        The local end resolves against the displayed port name and its ifName/ifDescr counterpart
-        (issue #88); the remote end only ever had the neighbour-advertised string, so a remote
-        interface named in NetBox from the other field read as "Remote Interface Not Found in
-        Netbox". An action that creates the far end on top of that would then duplicate an
-        interface that is already there.
-
-        One ``/devices/<remote>/ports`` read serves every row pointing at that neighbour, so a
-        LAG to one switch costs one request, not one per member. A neighbour LibreNMS does not
-        monitor (``remote_device_id`` 0) is never fetched: it has no port record to read.
-
-        Args:
-            links_data (list[dict]): The collected cable rows, updated in place.
-
-        Returns:
-            None
-
-        """
-        rows_by_device = defaultdict(list)
-        for link in links_data:
-            remote_device_id = coerce_librenms_id(link.get("remote_device_id"))
-            if remote_device_id is not None:
-                rows_by_device[remote_device_id].append(link)
-
-        deadline = time.monotonic() + REMOTE_ALIAS_FETCH_BUDGET_SECONDS
-        for remote_device_id, rows in rows_by_device.items():
-            by_port_id, by_name = self._remote_port_name_index(remote_device_id, deadline)
-            for link in rows:
-                remote_port = link.get("remote_port")
-                matched = by_port_id.get(coerce_librenms_id(link.get("remote_port_id")))
-                if matched is None and isinstance(remote_port, str) and remote_port:
-                    matched = by_name.get(remote_port.casefold())
-                if matched is None:
-                    continue
-                port_id, port_names, record = matched
-                # Two rows that matched one port record are one link, whatever each advertised.
-                link["remote_port_key"] = port_id
-                link["remote_port_record"] = record
-                aliases = []
-                for field in sorted(INTERFACE_NAME_FIELDS):
-                    name = port_names.get(field)
-                    if isinstance(name, str) and name and name != remote_port and name not in aliases:
-                        aliases.append(name)
-                if aliases:
-                    link["remote_port_aliases"] = aliases
-
-    def _remote_port_name_index(self, remote_device_id, deadline):
-        """
-        Index one neighbour's LibreNMS port names by port id and by every name field.
-
-        Every explicit refresh reads the neighbour's current ports. The caller groups rows by
-        neighbour, so one refresh reads each neighbour once. A later refresh must see renamed
-        or re-created ports rather than reuse an earlier port list.
-
-        Args:
-            remote_device_id (int): The neighbour's LibreNMS device id.
-            deadline (float): The ``time.monotonic()`` reading after which no further neighbour
-                is read. Rows for unread neighbours keep their advertised names.
-
-        Returns:
-            tuple[dict, dict]: ``(port_id, names, record)`` keyed by port id, and by each
-                unambiguous case-folded name.
-
-        """
-        if time.monotonic() >= deadline:
-            # One slow or timing-out neighbour must not hold the whole refresh. The rows for
-            # the neighbours not read keep the advertised name only, which is what they had
-            # before aliases existed.
-            logger.warning(
-                "Remote port name lookup budget spent; leaving LibreNMS device %s unread on this refresh.",
-                remote_device_id,
-            )
-            return {}, {}
-        # VLAN associations say nothing about naming and make the payload much larger.
-        success, data = self.librenms_api.get_ports(remote_device_id, with_vlans=False)
-        ports = data.get("ports") if success and isinstance(data, dict) else None
-        if not isinstance(ports, list):
-            return {}, {}
-        records = []
-        for port in ports:
-            # A malformed LibreNMS payload can carry non-dict rows; skip them rather than 500.
-            if not isinstance(port, dict) or coerce_librenms_id(port.get("port_id")) is None:
-                continue
-            names = {
-                field: port[field]
-                for field in INTERFACE_NAME_FIELDS
-                if isinstance(port.get(field), str) and port[field]
-            }
-            if not names:
-                continue
-            records.append({"port_id": coerce_librenms_id(port.get("port_id")), **names, "record": port_record(port)})
-
-        by_port_id = {}
-        by_name = {}
-        owner_by_name = {}
-        for record in records:
-            # A poisoned cache entry must not crash the tab.
-            if not isinstance(record, dict):
-                continue
-            port_id = coerce_librenms_id(record.get("port_id"))
-            if port_id is None:
-                continue
-            names = {field: record[field] for field in INTERFACE_NAME_FIELDS if isinstance(record.get(field), str)}
-            rule_inputs = record.get("record") if isinstance(record.get("record"), dict) else None
-            by_port_id[port_id] = (port_id, names, rule_inputs)
-            for name in names.values():
-                folded = name.casefold()
-                # A model name repeated as the ifDescr of every port ("Ethernet adapter") names
-                # no particular port. Binding the row to the first one would resolve a NetBox
-                # interface uniquely and offer to cable the wrong port.
-                if owner_by_name.setdefault(folded, port_id) != port_id:
-                    by_name.pop(folded, None)
-                else:
-                    by_name.setdefault(folded, (port_id, names, rule_inputs))
-        return by_port_id, by_name
-
-    @staticmethod
-    def _dedupe_protocol_duplicates(links_data):
-        """
-        Collapse one adjacency that LibreNMS reported over more than one discovery protocol.
-
-        A neighbour discovered over both CDP and LLDP comes back as two link rows, so one
-        physical link renders twice and offers two Sync Cable buttons. The two protocols do not
-        report the same strings (CDP gives ``GigabitEthernet0/1`` where LLDP may give ``Gi0/1``,
-        a MAC or an ifIndex), so rows are never collapsed on the advertised name.
-
-        Two rows collapse only on AFFIRMATIVE proof that they name one endpoint
-        (:func:`_remote_endpoint_identity`): the same LibreNMS port, else the same NetBox
-        interface. A row that proves neither is always kept, because "reported on the same local
-        port, towards the same neighbour" is not evidence of the same port: a breakout or a hub
-        reaches several ports of one switch, and one extra CDP row must not cost an independent
-        LLDP report of another port. A row whose remote interface the request may not see proves
-        nothing either, so it keeps its own row rather than folding into a visible one.
-
-        Within one endpoint the survivor is the row that resolved, then the row with a usable
-        ``remote_port_id``, then LLDP over CDP. The protocols it absorbed are recorded on it as
-        ``also_reported_by`` so no evidence disappears silently, and they are recorded per
-        endpoint, never across the whole neighbour.
-
-        Runs at enrichment time, after resolution: the cached snapshot keeps both raw rows.
-
-        Args:
-            links_data (list[dict]): The enriched cable rows.
-
-        Returns:
-            list[dict]: The rows to render, in their original order.
-
-        """
-        dropped = set()
-        for positions in BaseCableTableView._endpoint_groups(links_data).values():
-            if len(positions) < 2:
-                continue
-            survivor = BaseCableTableView._best_duplicate_row(links_data, positions)
-            if absorbed := BaseCableTableView._absorbed_protocols(links_data, positions, survivor):
-                links_data[survivor]["also_reported_by"] = absorbed
-            dropped.update(position for position in positions if position != survivor)
-        return [link for position, link in enumerate(links_data) if position not in dropped]
-
-    @staticmethod
-    def _endpoint_groups(links_data):
-        """Group row positions by the link they report (:func:`_endpoint_group_key`)."""
-        endpoints = defaultdict(list)
-        for position, link in enumerate(links_data):
-            if (key := _endpoint_group_key(link)) is not None:
-                endpoints[key].append(position)
-        return endpoints
-
-    @staticmethod
-    def _absorbed_protocols(links_data, positions, keeper):
-        """Name the protocols the *keeper* row speaks for: its group's, minus its own."""
-        # Only a string is a protocol, on the keeper side too: LibreNMS ``protocol`` is copied
-        # unvalidated, and an unhashable one would 500 the table and the verify alike.
-        keeper_protocol = links_data[keeper].get("protocol")
-        return sorted(
-            {
-                protocol
-                for position in positions
-                if position != keeper and isinstance(protocol := links_data[position].get("protocol"), str)
-            }
-            - ({keeper_protocol} if isinstance(keeper_protocol, str) else set())
-        )
-
-    @staticmethod
-    def _also_reported_by(links_data, row_id):
-        """
-        Derive one row's ``also_reported_by`` without de-duplicating the whole set.
-
-        The single-row verify path enriches one row, so it never runs
-        :meth:`_dedupe_protocol_duplicates` and the badge would disappear the moment the user
-        re-verified the row. It reads the same grouping, so the two cannot drift. A row that
-        proves its endpoint only through a resolved NetBox interface groups with nothing here,
-        because verify resolves no row but its own.
-
-        Args:
-            links_data (list[dict]): The raw snapshot rows, with row ids assigned.
-            row_id (str): The row being verified.
-
-        Returns:
-            list[str]: The protocols the row speaks for, or ``[]``.
-
-        """
-        position = next((index for index, link in enumerate(links_data) if link.get("row_id") == row_id), None)
-        if position is None:
-            return []
-        key = _endpoint_group_key(links_data[position])
-        if key is None:
-            return []
-        positions = BaseCableTableView._endpoint_groups(links_data).get(key, [])
-        return BaseCableTableView._absorbed_protocols(links_data, positions, position)
-
-    @staticmethod
-    def _best_duplicate_row(links_data, positions):
-        """Pick the row to keep for one endpoint: resolved, then a usable port id, then LLDP."""
-
-        def rank(position):
-            link = links_data[position]
-            protocol = link.get("protocol")
-            return (
-                not link.get("netbox_remote_interface_id"),
-                coerce_librenms_id(link.get("remote_port_id")) is None,
-                _PROTOCOL_PREFERENCE.index(protocol) if protocol in _PROTOCOL_PREFERENCE else len(_PROTOCOL_PREFERENCE),
-                position,
-            )
-
-        return min(positions, key=rank)
-
-    @staticmethod
-    def _classify_links_fetch_error(success, data):
-        """Extract a human-readable error string from a failed/garbled get_device_links response."""
-        if not success:
-            # A failed fetch may carry the detail under "error" OR "message"; capture either,
-            # else post() loses the real reason and can cache an empty "successful" refresh.
-            return (data.get("error") or data.get("message") or str(data)) if isinstance(data, dict) else str(data)
-        if isinstance(data, dict):
-            return data.get("message") or data.get("error") or "Unexpected response from LibreNMS"
-        return "Unexpected response from LibreNMS (expected an object)."
-
-    def _merge_oob_cable_links(self, links_data, lookup_device, server_key, interface_name_field, alt_name_field):
-        """
-        Append the linked OOB controller's LLDP links (``_source='oob'``) to *links_data*.
-
-        Returns True when an OOB controller is linked, so the caller's empty-refresh
-        classification can tell an OOB-only mapping from a truly unmapped device. Sets
-        ``self._oob_links_fetch_failed`` on a failed/malformed OOB fetch so post() can warn
-        rather than silently dropping OOB rows.
-
-        Args:
-            links_data (list): The table rows to extend with OOB links.
-            lookup_device (Device): The device that can have a linked OOB controller.
-            server_key (str): The LibreNMS server key for the OOB lookup.
-            interface_name_field (str): The field that supplies each displayed port name.
-            alt_name_field (str): The field that supplies alternate port names.
-
-        Returns:
-            bool: True when an OOB controller is linked, otherwise False.
-
-        """
-        lookup_mapping = read_mapping(lookup_device)
-        if not lookup_mapping.has_oob(server_key):
-            # No OOB controller linked — a genuinely unmapped/host-only device.
-            return False
-        # A non-numeric/bool/zero/negative stored id fails closed (skip the fetch) rather than
-        # building a GET /devices/<garbage>/... that 404s and silently drops OOB rows.
-        oob_id = lookup_mapping.oob_id(server_key)
-        if not oob_id:
-            # An OOB controller IS linked, but its stored id is corrupt. Mirror interfaces_view's
-            # fail-closed pattern: flag + warn and return True (OOB linked) so post() surfaces the
-            # dropped OOB rows instead of showing a "successful" banner over silently-missing rows.
-            self._oob_links_fetch_failed = True
-            logger.warning(
-                "OOB controller linked for device %s but its stored id is invalid; skipping OOB links",
-                self.librenms_id,
-            )
-            return True
-        oob_success, oob_data = self.librenms_api.get_device_links(oob_id)
-        # Mirror the main-device branch: a 200 {"status": "error", ...} body is also a failure.
-        oob_ok = (
-            oob_success and isinstance(oob_data, dict) and oob_data.get("status") != "error" and "error" not in oob_data
-        )
-        if not oob_ok:
-            self._oob_links_fetch_failed = True
-            logger.warning(
-                "OOB links fetch failed for device %s (OOB id %s): %s",
-                self.librenms_id,
-                oob_id,
-                oob_data.get("message") if isinstance(oob_data, dict) else oob_data,
-            )
-            return True
-        oob_ports_success, oob_ports_data = self.librenms_api.get_ports(oob_id, with_vlans=False)
-        oob_map, oob_alt_map = self._build_cable_port_name_maps(
-            oob_ports_data if oob_ports_success else {}, interface_name_field, alt_name_field
-        )
-        oob_links = oob_data.get("links")
-        if not isinstance(oob_links, list):
-            # Malformed "links" (null/object): flag the failure and keep the host links already
-            # collected rather than crashing on iteration.
-            self._oob_links_fetch_failed = True
-            logger.warning(
-                "OOB links fetch returned a malformed payload for device %s (OOB id %s): %s",
-                self.librenms_id,
-                oob_id,
-                oob_data,
-            )
-            return True
-        links_data.extend(self._collect_cable_links(oob_links, oob_map, oob_alt_map, OOB_INVENTORY_SOURCE))
-        return True
-
-    def get_links_data(self, obj, server_key=None, sync_device=None):
-        """Fetch links data from LibreNMS for the device and add local port names."""
-        # Scope DB lookups (sync device / OOB) and the ports cache to the POST-resolved
-        # server when provided (fallback: session server). The LibreNMS fetch itself
-        # still goes through self.librenms_api (the session-active server), by design.
-        server_key = server_key or self.librenms_api.server_key
-        # Reset per-call so a prior request's OOB failure doesn't leak into this one.
-        self._oob_links_fetch_failed = False
-        # Same for a serial-sensor fetch failure: flag it so post() can warn rather than
-        # silently dropping serial rows under a success banner (parity with OOB).
-        self._serial_links_fetch_failed = False
-        self._serial_source_skipped = False
-        # Distinguish a real LibreNMS fetch failure (auth/network/server) from a device
-        # that simply has no links, so the caller can surface the actual error instead of
-        # always saying "No links found". Reset per-call to avoid leaking a prior error.
-        self._links_fetch_error = None
-        # Resolve the VC sync device once and use it for the main LibreNMS id + ports too —
-        # not just the OOB branch below. On VC-member pages the active librenms_id/mapping can
-        # live on the priority member, so reading it from the viewed `obj` would fetch one
-        # member's cables and cache them under another member's key (mismatched verify/sync).
-        # Reuse the device the caller (_prepare_context) already resolved to avoid a second
-        # get_librenms_sync_device() VC-members query per request; falls back to resolving here.
-        lookup_device = sync_device or self._viewable_sync_device(obj, server_key)
-        if lookup_device is None:
-            return None
-        # coerce_librenms_id fails closed on a bool/zero/negative/garbage value (a poisoned
-        # id-cache can return True/0 verbatim — get_librenms_id only coerces the custom-field
-        # and discovery paths), so a falsy non-None id resolves to None here instead of being
-        # passed to get_device_links()/get_ports() as device id 1 (int(True)) — fetching a
-        # stranger's links. Mirrors the GET/interfaces-POST contract.
-        self.librenms_id, lookup_error = self.resolve_librenms_id(lookup_device)
-        self._librenms_id_unresolved = lookup_error is not None
-        if lookup_error is not None:
-            self._links_fetch_error = lookup_error.message
-        if self.librenms_id is None:
-            # OOB-only / unmapped device: skip the host LLDP call. get_device_links(None) would
-            # GET /devices/None/links and always 404 for no benefit. Synthesize the same not-ok
-            # result the reconciliation below already handles — an OOB-only mapping still falls
-            # through to render its rows; a device with neither host id nor OOB still resolves to
-            # "No links found".
-            success, data = False, "Device has no LibreNMS host mapping."
-        else:
-            success, data = self.librenms_api.get_device_links(self.librenms_id)
-        # A failed/garbled host LLDP call (including an OOB-only device whose host
-        # librenms_id is None) must not abort the whole fetch: fall through (don't return
-        # None) so the OOB merge below still runs and OOB-only devices render their rows.
-        # get_device_links returns the raw JSON body, so a 200 can still carry an
-        # application-level error ({"status": "error", ...}) or a non-object payload
-        # (list/null/scalar) — treat all of those as not-ok.
-        lldp_ok = success and isinstance(data, dict) and "error" not in data and data.get("status") != "error"
-        if not lldp_ok:
-            # Capture the real fetch failure so that when there's ultimately nothing to show,
-            # post() can surface the actual LibreNMS error instead of a generic "No links found".
-            self._links_fetch_error = self._links_fetch_error or self._classify_links_fetch_error(success, data)
-
-        interface_name_field = get_interface_name_field(getattr(self, "request", None), obj)
-        # The alternate LibreNMS name field: when the user displays ifName, a NetBox
-        # interface may still be named from ifDescr (and vice versa). Carrying the alternate
-        # name lets enrich_local_port fall back to either field (issue #88).
-        alt_name_field = "ifDescr" if interface_name_field == "ifName" else "ifName"
-        ports_data = self.get_ports_data(self.librenms_id)
-        local_ports_map, local_ports_alt_map = self._build_cable_port_name_maps(
-            ports_data, interface_name_field, alt_name_field
-        )
-
-        # Only consume links when the LLDP fetch was OK. A dict-shaped body can still carry a
-        # malformed "links" (null/object); treat that as no links (and record the error)
-        # rather than crashing or returning early — the OOB merge below must still run.
-        links = data.get("links") if lldp_ok else []
-        if not isinstance(links, list):
-            self._links_fetch_error = (
-                self._links_fetch_error or "Unexpected response from LibreNMS (links must be a list)."
-            )
-            links = []
-        links_data = self._collect_cable_links(links, local_ports_map, local_ports_alt_map, "main")
-        local_records = self._port_records_by_id(ports_data)
-        for link in links_data:
-            if (record := local_records.get(coerce_librenms_id(link.get("local_port_id")))) is not None:
-                link["local_port_record"] = record
-
-        # If an OOB controller is linked, fetch its LLDP links and merge. Reuse the sync device
-        # resolved at the top so host + OOB data stay scoped to the same member.
-        oob_linked = self._merge_oob_cable_links(
-            links_data, lookup_device, server_key, interface_name_field, alt_name_field
-        )
-
-        # Both name fields of each remote port, so the far end resolves as widely as the near one.
-        self._attach_remote_port_aliases(links_data)
-
-        # Append serial rows only when this request can view at least one ConsoleServerPort on the
-        # sync device. The sensor endpoint is instance-wide, so a plain Device grant must not
-        # authorize that expensive inventory request. Store the complete raw sensor response when
-        # the request is allowed to fetch it; request-local enrichment filters individual CSP rows.
-        viewable_serial_port_names = (
-            set(self._viewable_queryset(ConsoleServerPort).filter(device=lookup_device).values_list("name", flat=True))
-            if isinstance(lookup_device, Device)
-            else set()
-        )
-        if isinstance(lookup_device, Device) and not viewable_serial_port_names:
-            self._serial_source_skipped = ConsoleServerPort.objects.filter(device=lookup_device).exists()
-        if self.librenms_id is not None and viewable_serial_port_names:
-            from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
-
-            serial_success, serial_sensors = self.librenms_api.get_serial_port_sensors(self.librenms_id)
-            if not serial_success:
-                # Don't silently drop serial rows on a fetch failure — flag it so post() can warn
-                # the user (this method has no request to message on). Mirrors the OOB branch.
-                self._serial_links_fetch_failed = True
-                logger.warning(
-                    "Serial port sensor fetch failed for device %s: %s",
-                    self.librenms_id,
-                    serial_sensors,
-                )
-            elif serial_sensors and isinstance(serial_sensors, list):
-                # get_serial_port_sensors() guarantees a list on success, but guard the call site
-                # with isinstance(list) like every other LibreNMS payload handled in this method
-                # (host links, OOB ports, OOB links): a malformed non-list success payload is then
-                # skipped rather than iterated — a non-iterable would otherwise crash mapping.
-                links_data.extend(map_sensors_to_serial_links(serial_sensors, device_id=lookup_device.id))
-
-        # Distinguish a *successful* zero-row refresh ([] — flows through to the success path in
-        # _prepare_context(), where an OOB-fetch warning can still be surfaced) from a genuine
-        # fetch failure (None — mislabeled "No links found" otherwise). A refresh is a failure
-        # only when nothing was collected AND a fetch error was recorded (host LLDP failure or a
-        # malformed payload). An empty-but-valid host result, or OOB-failure with a host success,
-        # records no host error and must return [] so the warning isn't dropped. Any collected
-        # rows (host / OOB / serial) always come back.
-        #
-        # Exception: an OOB-only mapping has no host librenms_id, so the host get_device_links()
-        # call always records _links_fetch_error even though no host fetch was meaningfully
-        # attempted. If the OOB controller validly returns no links, that's a *successful* empty
-        # refresh — return [] so _prepare_context() overwrites the cache with the empty snapshot
-        # (otherwise stale OOB rows linger after a genuine empty refresh). But this exemption
-        # only holds when the OOB fetch itself SUCCEEDED: a failed/malformed OOB fetch
-        # (_oob_links_fetch_failed) on an OOB-only mapping collects zero rows too, and treating
-        # that as a successful empty refresh would overwrite the cache with [] and drop the
-        # very rows we couldn't re-fetch. So fall back to None (failure) in that case.
-        host_mapping_absent_but_oob_scoped = (
-            self.librenms_id is None and lookup_error is None and oob_linked and not self._oob_links_fetch_failed
-        )
-        if (
-            not links_data
-            and self._links_fetch_error
-            and not host_mapping_absent_but_oob_scoped
-            and not self._serial_source_skipped
-        ):
-            return None
-        return links_data
-
     def get_device_by_id_or_name(self, remote_device_id, hostname, server_key=None, queryset=None):
         """Try to find device in NetBox first by librenms_id custom field, then by name."""
         if server_key is None:
@@ -1495,11 +745,7 @@ class BaseCableTableView(
             return None
         if local_port := link.get("local_port"):
             # Serial rows map to ConsoleServerPort, not Interface. Resolve the CSP on the
-            # LibreNMS sync device, not the viewed obj/selected_device: get_links_data builds
-            # serial rows from get_librenms_sync_device(obj), so on a VC-member page the CSP
-            # lives on the priority member — querying obj would drop the row to "Console Server
-            # Port Not Found" and lose its Sync Cable action. sync_device may be passed in by the
-            # caller (resolved once for the whole links loop) to avoid re-resolving it per row.
+            # Serial rows belong to the sync owner on a Virtual Chassis page.
             if link.get("_source") == SERIAL_INVENTORY_SOURCE:
                 if server_key is None:
                     server_key = self.librenms_api.server_key
@@ -2783,7 +2029,7 @@ class BaseCableTableView(
                 ]
         # After resolution, so one adjacency reported over two protocols collapses on what the
         # rows resolved to rather than on the two protocols' differing name strings.
-        links_data[:] = self._dedupe_protocol_duplicates(links_data)
+        links_data[:] = _dedupe_protocol_duplicates(links_data)
         self._apply_termination_change_scope(
             links_data,
             preloaded_changeable_ids={
@@ -2875,152 +2121,58 @@ class BaseCableTableView(
         raise NotImplementedError
 
     def _prepare_context(self, request, obj, fetch_fresh=False, server_key=None):
-        """Prepare the context data for cable sync views."""
-        # Scoped to the POST-resolved server when provided; else the degrading resolver.
+        """Assess the bound source snapshot, then compare its rows with visible NetBox objects."""
         server_key = server_key or self._render_server_key()
         if server_key is None:
-            # No usable server means no scoped snapshot to read.
             return None
-        # For VC devices, cache under the sync device's key so SingleCableVerifyView reads the same entry.
-        cache_device = self._viewable_sync_device(obj, server_key)
-        if cache_device is None:
+        owner = self._viewable_sync_device(obj, server_key)
+        if owner is None:
             return None
-        cache_key = self.get_cache_key(cache_device, "links", server_key)
-
+        interface_name_field = get_interface_name_field(request, obj)
+        result = None
         if fetch_fresh:
-            snapshot = self._refresh_cable_snapshot(obj, cache_device, cache_key, server_key)
-        else:
-            snapshot = self._read_cached_cable_snapshot(cache_key)
-        if snapshot is None:
-            return None
-        if snapshot.get("refresh_incomplete"):
-            return {
-                "table": None,
-                "object": obj,
-                "cache_expiry": None,
-                "server_key": server_key,
-                "refresh_incomplete": True,
+            self._cable_refresh_error = None
+            librenms_id, lookup_error = self.resolve_librenms_id(owner)
+            if lookup_error is not None or (librenms_id is None and not read_mapping(owner).has_oob(server_key)):
+                source_cache.delete(obj, Resource.CABLES, server_key)
+                self._cable_refresh_error = (
+                    self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS."
+                )
+                return None
+            result = source_cache.refresh(obj, Resource.CABLES, server_key, request=request)
+            self._cable_refresh_error = result.error
+            if result.error is not None:
+                return None
+        assessed = read_cable_assessment(obj, server_key, interface_name_field)
+        if assessed is None and result is not None:
+            # Show the acquired rows when the cache write failed; writers still require a stored snapshot.
+            assessed = {
+                **assess(result.snapshot, subject=obj, interface_name_field=interface_name_field),
+                "snapshot_id": result.snapshot.snapshot_id,
+                "last_fetched": result.snapshot.finished_at,
             }
-
-        raw_links = self._store_raw_cable_links(snapshot, cache_key, fetch_fresh)
-        if raw_links is None:
+        if assessed is None:
             return None
-
-        user_id = getattr(getattr(request, "user", None), "pk", None)
-        if user_id is not None:
+        cache_key = source_cache.snapshot_key(obj, Resource.CABLES, server_key)
+        raw_links = assessed["links"]
+        if request.user.pk is not None:
             raw_links, _has_manual_picks = apply_cable_manual_picks(
-                cache,
-                cache_key,
-                {"links": raw_links, "snapshot_token": snapshot["snapshot_token"]},
-                user_id,
-                raw_links,
+                cache, cache_key, assessed["snapshot_id"], request.user.pk, raw_links
             )
-
-        # Enrich a request-local copy against current permission-scoped NetBox state.
-        links_data = self.enrich_links_data(
-            raw_links,
-            obj,
-            server_key=server_key,
-            sync_device=cache_device,
-        )
+        links_data = self.enrich_links_data(raw_links, obj, server_key=server_key, sync_device=owner)
         if isinstance(obj, Device):
-            self._disable_actions_for_migrated_owners(links_data, obj, cache_device, server_key)
-
-        cache_expiry = self._cable_cache_expiry(cache_key)
+            self._disable_actions_for_migrated_owners(links_data, obj, owner, server_key)
         table, filters, filtered_from = self._build_cable_table(request, links_data, obj, server_key)
         return {
-            "table": table,
+            "table": None if assessed.get("identity_error") else table,
             "filters": filters,
-            # The row count before the filter, shown only while a filter narrows the table.
             "filtered_from": filtered_from,
             "object": obj,
-            "cache_expiry": cache_expiry,
+            "cache_expiry": self._cable_cache_expiry(cache_key),
             "server_key": server_key,
-            "incomplete_sources": snapshot["incomplete_sources"],
+            "last_fetched": assessed["last_fetched"],
+            "blockers": assessed["blockers"],
         }
-
-    def _refresh_cable_snapshot(self, obj, cache_device, cache_key, server_key):
-        """
-        Fetch a live snapshot of the device's cable rows.
-
-        Returns None when the fetch truly failed, ``{"refresh_incomplete": True}`` when the
-        device's LibreNMS identity could not be resolved, else the snapshot with the list of
-        sources that came back incomplete.
-        """
-        cached_before_refresh = cache.get(cache_key)
-        links_data = self.get_links_data(obj, server_key=server_key, sync_device=cache_device)
-        # Only a true fetch failure returns None. An empty list ([]) is a valid result
-        # (device has no host links) and must flow through: get_links_data() may have
-        # collected zero host links yet still set _oob_links_fetch_failed, and post()
-        # surfaces that OOB warning only on the success path — `if not links_data`
-        # would discard it and mislabel it "No links found".
-        if links_data is None:
-            cache.delete(cache_key)
-            return None
-        if getattr(self, "_librenms_id_unresolved", False):
-            cache.delete(cache_key)
-            return {"refresh_incomplete": True}
-
-        incomplete_sources = []
-        if getattr(self, "_links_fetch_error", None) and getattr(self, "librenms_id", None) is not None:
-            incomplete_sources.append("host")
-        if getattr(self, "_oob_links_fetch_failed", False):
-            incomplete_sources.append("OOB")
-        if getattr(self, "_serial_links_fetch_failed", False):
-            incomplete_sources.append("serial")
-        if getattr(self, "_serial_source_skipped", False):
-            prior_links = _extract_cached_links(cached_before_refresh) if cached_before_refresh else None
-            links_data.extend(link for link in prior_links or [] if link.get("_source") == SERIAL_INVENTORY_SOURCE)
-            incomplete_sources.append("serial")
-        return {
-            "links": links_data,
-            "snapshot_token": uuid4().hex,
-            "incomplete_sources": incomplete_sources,
-        }
-
-    @staticmethod
-    def _read_cached_cable_snapshot(cache_key):
-        """Return the cached snapshot, or None when it is absent or unusable."""
-        cached_links_data = cache.get(cache_key)
-        if not cached_links_data:
-            return None
-        # Fail closed on a malformed/corrupt cache entry (non-dict, non-list "links", or a
-        # non-dict link row) instead of crashing the cached render on .items().
-        links_data = _extract_cached_links(cached_links_data, cache_key)
-        if links_data is None:
-            return None
-        cached_incomplete = cached_links_data.get("incomplete_sources", [])
-        return {
-            "links": links_data,
-            "snapshot_token": cable_snapshot_token(cached_links_data),
-            "incomplete_sources": (
-                [source for source in cached_incomplete if isinstance(source, str)]
-                if isinstance(cached_incomplete, list)
-                else []
-            ),
-        }
-
-    def _store_raw_cable_links(self, snapshot, cache_key, fetch_fresh):
-        """Strip the snapshot to shared source fields, and write it back on a refresh."""
-        # The shared snapshot stores only permission-independent LibreNMS source fields. NetBox
-        # IDs, URLs, cable state, and user picks are derived per request by the caller.
-        raw_links = assign_cable_row_ids(
-            [{k: v for k, v in link.items() if k in _RAW_LINK_KEYS} for link in snapshot["links"]]
-        )
-        if raw_links is None:
-            cache.delete(cache_key)
-            return None
-        if fetch_fresh:
-            cache.set(
-                cache_key,
-                {
-                    "links": raw_links,
-                    "snapshot_token": snapshot["snapshot_token"],
-                    "incomplete_sources": snapshot["incomplete_sources"],
-                },
-                timeout=self.librenms_api.cache_timeout,
-            )
-        return raw_links
 
     def _disable_actions_for_migrated_owners(self, links_data, obj, cache_device, server_key):
         """Strip every sync affordance from rows owned by a device already merged into another."""
@@ -3128,82 +2280,18 @@ class BaseCableTableView(
             )
         context = self._prepare_context(request, obj, fetch_fresh=True, server_key=server_key)
 
-        if context is None:
-            # Surface the real fetch failure (auth/network/server) when there was one;
-            # only fall back to the empty-result message when the device genuinely has no links.
-            if getattr(self, "_links_fetch_error", None):
-                messages.error(request, f"Failed to fetch links from LibreNMS: {self._links_fetch_error}")
-            else:
-                messages.error(request, "No links found in LibreNMS")
-            SyncCacheConsistency(obj).mark_refresh_failure(
-                SyncTab.CABLES,
-                server_key,
-                actor_id=request_actor_id(request),
-            )
-            return self.render_sync_partial(
-                request,
-                obj,
-                server_key,
-                {"cable_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key}},
-            )
-
-        if context.get("refresh_incomplete"):
-            messages.warning(
-                request,
-                "Cable refresh was incomplete. No cable rows were loaded. Refresh Cables to try again.",
-            )
-            SyncCacheConsistency(obj).mark_refresh_failure(
-                SyncTab.CABLES,
-                server_key,
-                actor_id=request_actor_id(request),
-            )
-            return self.render_sync_partial(request, obj, server_key, {"cable_sync": context})
-
-        # Decide the outcome before announcing it. cache.set() does not confirm that the
-        # snapshot exists, and an eviction can remove it before this check.
         coordinator = SyncCacheConsistency(obj)
-        snapshot_cached = coordinator.mark_refresh_outcome(
-            SyncTab.CABLES,
-            server_key,
-            actor_id=request_actor_id(request),
-        )
-        if snapshot_cached:
-            messages.success(request, "Cable data refreshed successfully.")
+        if context is None:
+            messages.error(request, getattr(self, "_cable_refresh_error", None) or "No cable source was obtained.")
+            coordinator.mark_refresh_failure(SyncTab.CABLES, server_key, actor_id=request_actor_id(request))
+            context = {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key}
         else:
-            messages.error(
-                request,
-                "Cable data could not be cached. The rows shown come from this refresh only "
-                "and will not survive a reload. Refresh again before syncing; see server logs for details.",
-            )
-        # A host LLDP failure no longer aborts the refresh (OOB/serial rows can still surface it
-        # as "successful"), so warn when the host fetch failed but we had a host id to query —
-        # otherwise host-side cables are silently omitted under a success banner. Skip for an
-        # OOB-only device (librenms_id is None), where a host fetch failure is expected.
-        if getattr(self, "_links_fetch_error", None) and (
-            getattr(self, "librenms_id", None) is not None or getattr(self, "_librenms_id_unresolved", False)
-        ):
-            logger.warning(
-                "Host links fetch failed for device %s: %s",
-                self.librenms_id,
-                self._links_fetch_error,
-            )
-            messages.warning(
-                request,
-                "Cables refreshed, but host links fetch failed; showing available cable rows only. "
-                "See server logs for details.",
-            )
-        if getattr(self, "_oob_links_fetch_failed", False):
-            messages.warning(
-                request,
-                "Cables refreshed, but OOB controller links fetch failed; "
-                "showing host cables only. See server logs for details.",
-            )
-        if getattr(self, "_serial_links_fetch_failed", False):
-            messages.warning(
-                request,
-                "Cables refreshed, but serial port sensor fetch failed; "
-                "serial console rows may be missing. See server logs for details.",
-            )
+            if context["blockers"]:
+                messages.warning(request, source_cache.blocker_notice(context["blockers"]))
+            if coordinator.mark_refresh_outcome(SyncTab.CABLES, server_key, actor_id=request_actor_id(request)):
+                messages.success(request, "Cable data refreshed successfully.")
+            else:
+                messages.error(request, "Cable data could not be cached. Refresh again before syncing.")
         return self.render_sync_partial(request, obj, server_key, {"cable_sync": context})
 
 
@@ -3287,18 +2375,15 @@ class SingleCableVerifyView(BaseCableTableView):
             )
 
             links_cache_key = self.get_cache_key(primary_device, "links", server_key)
-            cached_links = cache.get(links_cache_key)
-
-            # Same fail-closed guard as the cached GET render: a malformed entry (non-dict, non-list
-            # "links", or a non-dict link row) is purged and treated as no cache, so the verify path
-            # returns the empty formatted_row instead of crashing on .get()/.items().
-            valid_links = _extract_cached_links(cached_links, links_cache_key) if cached_links else None
-            valid_links = assign_cable_row_ids(valid_links) if valid_links is not None else None
+            assessed = read_cable_assessment(
+                primary_device, server_key, get_interface_name_field(request, origin_device)
+            )
+            valid_links = assessed["links"] if assessed is not None else None
             if valid_links and request.user.pk is not None:
                 valid_links, _has_manual_picks = apply_cable_manual_picks(
                     cache,
                     links_cache_key,
-                    cached_links,
+                    assessed["snapshot_id"],
                     request.user.pk,
                     valid_links,
                 )
@@ -3309,10 +2394,9 @@ class SingleCableVerifyView(BaseCableTableView):
                 )
                 if link_data:
                     manual_remote_id = link_data.get("manual_remote_id")
-                    also_reported_by = self._also_reported_by(valid_links, row_id)
-                    # Strip derived fields from cached data to avoid stale
-                    # IDs/URLs when NetBox objects are deleted after caching.
-                    link_data = {k: v for k, v in link_data.items() if k in _RAW_LINK_KEYS}
+                    also_reported_by = _also_reported_by(valid_links, row_id)
+                    # Keep the assessment local to this verify request.
+                    link_data = dict(link_data)
                     if manual_remote_id is not None:
                         link_data["manual_remote_id"] = manual_remote_id
                     if also_reported_by:
@@ -3513,28 +2597,12 @@ class CableRemotePickerView(BaseCableTableView):
         return queryset
 
     def _cache_state(self, obj, server_key):
-        """Return ``(cache_key, cached_payload)`` for *obj*'s links snapshot (sync-device scoped)."""
-        cache_obj = self._viewable_sync_device(obj, server_key)
-        if cache_obj is None:
-            return self.get_cache_key(obj, "links", server_key), None
-        cache_key = self.get_cache_key(cache_obj, "links", server_key)
-        return cache_key, cache.get(cache_key)
-
-    @staticmethod
-    def _snapshot_rows(cached, cache_key=None):
-        """Return normalized rows, or None when the snapshot is absent or malformed."""
-        links = _extract_cached_links(cached, cache_key)
-        return assign_cable_row_ids(links) if links is not None else None
-
-    def _find_row(self, cached, row_id, cache_key=None):
-        """Return the cached links row matching *row_id*, or None."""
-        rows = self._snapshot_rows(cached, cache_key)
-        if rows is None:
-            return None
-        return next(
-            (row for row in rows if row.get("row_id") == row_id),
-            None,
-        )
+        """Return the cache key and assessed rows of the current bound snapshot."""
+        owner = self._viewable_sync_device(obj, server_key)
+        cache_key = source_cache.snapshot_key(obj, Resource.CABLES, server_key)
+        if owner is None:
+            return cache_key, None
+        return cache_key, read_cable_assessment(obj, server_key, get_interface_name_field(self.request, obj))
 
     def _row_is_viewable(self, request, row, obj, server_key):
         """Return whether the picker requester may view a cached row's local endpoint."""
@@ -3563,37 +2631,6 @@ class CableRemotePickerView(BaseCableTableView):
             return False
         viewable_ports = self._viewable_ports(request, ConsoleServerPort)
         return bool(viewable_ports is not None and viewable_ports.filter(device_id=owner_id, name=local_name).exists())
-
-    def _refetch_snapshot(self, request, obj, server_key):
-        """
-        Rebuild the links snapshot fresh from LibreNMS after a cache expiry.
-
-        A pick typically lands moments after a render, but the snapshot TTL (or a dev-server
-        cache flush) can lapse in between — erroring out just to make the user click "Refresh
-        Cables" first is needless friction, so do exactly what that button does and retry.
-
-        Returns:
-            tuple: The refreshed ``(cache_key, cached_payload, resolved_key)`` — payload None when
-                the LibreNMS fetch itself failed. ``resolved_key`` is the key the snapshot was
-                actually cached under; it differs from the passed ``server_key`` when a stale/forged
-                key fell back to the active client key, so the caller reuses it for the rest of the
-                render and the POST round-trip. Without that, the stale query-string key round-trips
-                back on POST, misses ``_cache_state`` again, and triggers a SECOND live LibreNMS
-                fetch that this first refetch already made unnecessary.
-
-        """
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
-
-        view = DeviceCableTableView()
-        view.setup(request, pk=obj.pk)
-        # A key that names no configured server (stale tab / forged form) must not be reused: it
-        # would cache the fresh snapshot under a bogus namespace, invisible to every real render.
-        # Degrade to the session/default server's RESOLVED key, exactly like SyncCablesView.
-        resolved_key = view.rebind_api_for_server_or_default(server_key)
-        # Caches the fresh snapshot on success (same write "Refresh Cables" performs).
-        view._prepare_context(request, obj, fetch_fresh=True, server_key=resolved_key)
-        cache_key, cached = self._cache_state(obj, resolved_key)
-        return cache_key, cached, resolved_key
 
     def get(self, request, pk):
         """Serve the picker modal or one of its search/ports HTMX fragments."""
@@ -3657,17 +2694,10 @@ class CableRemotePickerView(BaseCableTableView):
         # Only the modal render needs the row: the fragments above carry `source` in their URLs
         # and run per keystroke, so they never read the snapshot.
         cache_key, cached = self._cache_state(obj, server_key)
-        rows = self._snapshot_rows(cached, cache_key)
+        rows = cached["links"] if cached is not None else None
         row = next((candidate for candidate in rows or [] if candidate.get("row_id") == row_id), None)
-        # On a missing/malformed snapshot, rebuild it instead of dead-ending on an expired-cache
-        # warning. A valid snapshot with an unknown row ID is authoritative and must not let a
-        # forged ID trigger fresh LibreNMS requests.
         if rows is None:
-            # Reuse the key the refetch actually cached under (it falls back to the active client
-            # key on a stale/forged query-string key) for the rendered URLs and the modal's hidden
-            # server_key input, so a stale key doesn't round-trip on POST and force a second fetch.
-            cache_key, cached, server_key = self._refetch_snapshot(request, obj, server_key)
-            row = self._find_row(cached, row_id, cache_key)
+            return HttpResponse("Cable data expired. Refresh Cables before selecting a remote port.", status=409)
 
         if row is None or not self._row_is_viewable(request, row, obj, server_key):
             return HttpResponse("Cable row not found.", status=404)
@@ -3721,14 +2751,11 @@ class CableRemotePickerView(BaseCableTableView):
             return HttpResponse("Selected LibreNMS server is no longer configured.", status=400)
         row_id = request.POST.get("row_id", "")
         cache_key, cached = self._cache_state(obj, server_key)
-        rows = self._snapshot_rows(cached, cache_key)
+        rows = cached["links"] if cached is not None else None
         row = next((candidate for candidate in rows or [] if candidate.get("row_id") == row_id), None)
         if rows is None:
-            # Snapshot expired between render and pick: rebuild it fresh (what "Refresh
-            # Cables" does) and retry before giving up. The row identity is snapshot-stable, so
-            # the row reappears unless LibreNMS itself dropped it.
-            cache_key, cached, server_key = self._refetch_snapshot(request, obj, server_key)
-            row = self._find_row(cached, row_id, cache_key)
+            return HttpResponse("Cable data expired. Refresh Cables before selecting a remote port.", status=409)
+
         if row is None or not self._row_is_viewable(request, row, obj, server_key):
             return HttpResponse("Cable row not found.", status=404)
 
@@ -3757,7 +2784,7 @@ class CableRemotePickerView(BaseCableTableView):
         remaining_ttl = cache.ttl(cache_key)
         pick_key = cable_manual_pick_cache_key(
             cache_key,
-            cable_snapshot_token(cached),
+            cached["snapshot_id"],
             request.user.pk,
             row["row_id"],
         )
@@ -3773,8 +2800,7 @@ class CableRemotePickerView(BaseCableTableView):
 
         view = DeviceCableTableView()
         view.setup(request, pk=obj.pk)
-        # The row was resolved from this exact snapshot scope. A stale key reaches
-        # _refetch_snapshot above, which replaces it with the resolved active key.
+        # Re-render from the same server and snapshot scope.
         resolved_key = server_key
         context = view._prepare_context(request, obj, fetch_fresh=False, server_key=resolved_key)
         if context is None:

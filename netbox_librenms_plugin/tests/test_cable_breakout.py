@@ -5,10 +5,10 @@ import json
 import pytest
 from dcim.models import Cable, Interface
 from django.contrib.messages import get_messages
-from django.core.cache import cache
 from django.test import Client
 from django.urls import reverse
 
+from netbox_librenms_plugin.tests.cable_source_helpers import seed_cable_rows
 from netbox_librenms_plugin.tests.conftest import (
     bind_librenms_server,
     configured_server_key,
@@ -66,11 +66,9 @@ class _Breakout:
         }
 
     def seed(self, *rows, device=None):
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         device = device or self.device
-        cache_key = object.__new__(SyncCablesView).get_cache_key(device, "links", SERVER_KEY)
-        cache.set(cache_key, {"links": list(rows), "snapshot_token": f"breakout-{device.pk}"}, timeout=300)
+        seed_cable_rows(device, list(rows), SERVER_KEY)
 
     def records(self, device=None):
         """Return the table records by row id, from a real page render."""
@@ -161,7 +159,7 @@ class TestBreakoutCableWrites:
     def test_channel_two_writes_nothing_while_channel_one_has_no_cable_also_when_channel_one_is_ignored(self):
         from netbox_librenms_plugin.models import InterfaceTypeMapping
         from netbox_librenms_plugin.tests.test_interface_rule_writes import _port
-        from netbox_librenms_plugin.views.base.cables_view import port_record
+        from netbox_librenms_plugin.assessment.cables import port_record
 
         setup = _Breakout("lower-ignored")
         InterfaceTypeMapping.objects.create(action=InterfaceTypeMapping.ACTION_IGNORE, name_pattern=r"^et-0/0/1:0$")
@@ -464,7 +462,7 @@ def test_a_channel_with_an_empty_connector_offers_to_create_its_far_end(librenms
 def _records_row(channel_id, setup, record):
     """Return the port records and the matched remote key that let the rule gate decide a row offline."""
     from netbox_librenms_plugin.tests.test_interface_rule_writes import _port
-    from netbox_librenms_plugin.views.base.cables_view import port_record
+    from netbox_librenms_plugin.assessment.cables import port_record
 
     return {
         **record,
@@ -816,13 +814,8 @@ class TestASingleProfileCableIsPointToPoint:
     """A single-* profile has one connector on each side, so the plain path treats it as an unprofiled cable."""
 
     def _client(self, device, row):
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
-        cache.set(
-            object.__new__(SyncCablesView).get_cache_key(device, "links", SERVER_KEY),
-            {"links": [row], "snapshot_token": f"single-{device.pk}"},
-            timeout=300,
-        )
+        seed_cable_rows(device, [row], SERVER_KEY)
         client = Client()
         client.force_login(make_superuser())
         return client
