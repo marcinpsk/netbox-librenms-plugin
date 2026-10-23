@@ -57,6 +57,7 @@ from ..mixins import (
     VlanAssignmentMixin,
     extract_cached_ports,
     parse_request_json,
+    server_unavailable_json,
 )
 
 
@@ -173,6 +174,13 @@ class SingleInterfaceVerifyView(
             )
         return origin_device, None
 
+    @staticmethod
+    def _sync_device(selected_device, server_key):
+        """Return the device whose cache keys the sync view stored: the VC sync device for a member."""
+        if selected_device.virtual_chassis:
+            return get_librenms_sync_device(selected_device, server_key=server_key)
+        return selected_device
+
     def post(self, request):
         """Verify interface data against cached LibreNMS ports for a device."""
         # Bind the request so require_object_permissions_json() (which reads self.request)
@@ -199,6 +207,8 @@ class SingleInterfaceVerifyView(
         # JSON list) is unhashable, so cf_dict.get(server_key) would TypeError-500 this
         # endpoint. Anything unrecognized falls back to the degrading active-server resolve.
         server_key = self.resolve_requested_server_key(data)
+        if server_key is None:
+            return server_unavailable_json()
 
         # Restrict the lookup to the caller's viewable devices: the gate above only checked the
         # model-level view_device perm, so a site-scoped grant would otherwise read another
@@ -213,15 +223,9 @@ class SingleInterfaceVerifyView(
         if origin_error:
             return origin_error
 
-        # Normalise to the VC sync device so cache keys match what the sync view stored
-        if selected_device.virtual_chassis:
-            primary_device = get_librenms_sync_device(selected_device, server_key=server_key)
-            if primary_device is None:
-                return JsonResponse(
-                    {"status": "error", "message": "No sync device found for virtual chassis"}, status=404
-                )
-        else:
-            primary_device = selected_device
+        primary_device = self._sync_device(selected_device, server_key)
+        if primary_device is None:
+            return JsonResponse({"status": "error", "message": "No sync device found for virtual chassis"}, status=404)
 
         ports_cache_key = self.get_cache_key(primary_device, "ports", server_key)
         # Shape-guard the cached entry: a truthy but malformed snapshot must degrade to the
@@ -443,6 +447,8 @@ class SingleModuleVerifyView(
         # Configured-string-key-or-fallback, mirroring SingleInterfaceVerifyView above: a
         # forged/non-string key must neither probe another namespace nor TypeError-500.
         server_key = self.resolve_requested_server_key(data)
+        if server_key is None:
+            return server_unavailable_json()
 
         # Restrict the lookups to the caller's viewable devices: the gate above only checked the
         # model-level view_device perm, so a site-scoped grant would otherwise read another
@@ -808,6 +814,8 @@ class SaveVlanGroupOverridesView(
         # overrides into a server-scoped cache namespace, so a forged/non-string key must
         # neither address an arbitrary namespace nor TypeError-500 the cf lookups below.
         server_key = self.resolve_requested_server_key(data)
+        if server_key is None:
+            return server_unavailable_json()
 
         # Object-scope the lookup: require_write_permission_json above only checks plugin-wide write
         # access, so without this any plugin-writer could persist VLAN overrides for a device they
