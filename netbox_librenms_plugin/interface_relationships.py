@@ -15,12 +15,7 @@ from netbox_librenms_plugin.constants import (
 )
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.server_mappings import MappingRole, identity_q, name_match_may_be_port, read_mapping
-from netbox_librenms_plugin.utils import (
-    invert_relationship_edges,
-    is_list_of_dicts,
-    normalize_relationship_maps,
-    normalize_stacked_ports,
-)
+from netbox_librenms_plugin.utils import invert_relationship_edges
 
 RELATIONSHIP_CANDIDATE_BATCH_SIZE = 64
 
@@ -723,22 +718,23 @@ def resolve_port_relationships(  # noqa: C901
     }
 
 
-def build_relationship_maps(cached_data):
-    """Normalize relationship maps and index host ports by stable ID."""
-    relationships = cached_data.get("port_stack_relationships")
-    lag_members, sub_interfaces, bridge_members = normalize_relationship_maps(relationships)
-    stacked_ports = normalize_stacked_ports(relationships)
-    ports = cached_data.get("ports", [])
-    if not is_list_of_dicts(ports):
-        ports = []
+def build_relationship_maps(assessment):
+    """Return the relationship maps of an ``assess_interfaces`` result, with its host ports by stable ID."""
+    relationships = assessment["port_stack_relationships"]
     ports_by_id = {}
-    for port in ports:
+    for port in assessment["ports"]:
         if port.get("_source") == OOB_INVENTORY_SOURCE:
             continue
         port_id = normalize_librenms_port_id(port.get("port_id"))
         if port_id is not None:
             ports_by_id[port_id] = port
-    return RelationshipMaps(lag_members, sub_interfaces, ports_by_id, bridge_members, stacked_ports)
+    return RelationshipMaps(
+        relationships["lag_members"],
+        relationships["sub_interfaces"],
+        ports_by_id,
+        relationships["bridge_members"],
+        relationships["stacked_ports"],
+    )
 
 
 # How many unclassified pairs the report names before it stops listing them.
@@ -806,7 +802,7 @@ def relationship_diagnostics_report(assessment, interface_name_field="ifName"):
             names_by_id[port_id] = name
 
     # Rebuild the pairs from the symmetric adjacency, keeping each one once.
-    stacked_ports = normalize_stacked_ports(relationships)
+    stacked_ports = relationships["stacked_ports"]
     pairs = sorted(
         {
             (min(port_id, partner_id), max(port_id, partner_id))
