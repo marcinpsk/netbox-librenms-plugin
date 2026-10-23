@@ -97,39 +97,23 @@ class TestConfiguredServerCacheScoping:
         assert list(context["vlan_table"].data)[0]["vlan_id"] == 120
 
     def test_ip_addresses_render_the_requested_servers_snapshot(self, configured_servers):
-        from django.core.cache import cache
-
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot
         from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
 
-        device = make_device("multiserver-ip")
+        device = make_device("multiserver-ip", librenms_cf={"default": 31, "production": 13})
         interface = make_interface(device, "Ethernet3")
         make_ip("198.18.30.1/24", assigned_object=interface)
+        port = {"port_id": 13, "ifName": interface.name, "ifDescr": interface.name}
+        seed_ip_snapshot(device, [ip_address_row("198.18.29.1", 13)], [port], server_key="default")
+        seed_ip_snapshot(device, [ip_address_row("198.18.30.1", 13)], [port], server_key="production")
         view = DeviceIPAddressTableView()
         request = _request("production")
-        key = view.get_cache_key(device, "ip_addresses", "production")
-        cache.set(
-            key,
-            {
-                "ip_addresses": [
-                    {
-                        "ip_address": "198.18.30.1",
-                        "prefix_length": 24,
-                        "ip_with_mask": "198.18.30.1/24",
-                        "port_id": 13,
-                        "interface_name": interface.name,
-                    }
-                ],
-                "mgmt_ip": "",
-                "ports_by_id": {13: {"port_id": 13, "ifName": interface.name, "ifDescr": interface.name}},
-                "interface_name_field": "ifName",
-            },
-        )
 
         context = _bind(view, request).get_context_data(request, device)
 
         assert context["server_key"] == "production"
         assert context["table"] is not None
-        assert list(context["table"].data)[0]["ip_with_mask"] == "198.18.30.1/24"
+        assert [row["ip_with_mask"] for row in context["table"].data] == ["198.18.30.1/24"]
 
     def test_modules_use_the_requested_server_mapping_and_snapshot(self, configured_servers):
         from django.core.cache import cache
@@ -194,7 +178,7 @@ class TestRemovedServerFailsClosed:
             (
                 "netbox_librenms_plugin.views.object_sync.devices.DeviceIPAddressTableView",
                 "ip_addresses",
-                {"ip_addresses": [], "mgmt_ip": "", "ports_by_id": {}},
+                [{"ip_address": "198.18.32.1", "prefix_length": 24, "port_id": 22}],
                 "get_context_data",
                 "table",
                 (),
@@ -214,16 +198,20 @@ class TestRemovedServerFailsClosed:
         from django.utils.module_loading import import_string
 
         from netbox_librenms_plugin.acquisition.registry import Resource
-        from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_ip_snapshot, seed_source_snapshot
 
         view_class = import_string(view_path)
-        device = make_device(f"removed-{data_type}")
+        device = make_device(
+            f"removed-{data_type}", librenms_cf={"removed": 22} if data_type == "ip_addresses" else None
+        )
         if data_type == "ports":
             make_interface(device, "Ethernet4")
         view = view_class()
         request = _request("removed")
         if data_type == "vlans":
             seed_source_snapshot(device, Resource.VLANS, "removed", vlans=payload)
+        elif data_type == "ip_addresses":
+            seed_ip_snapshot(device, payload, server_key="removed")
         else:
             cache.set(view.get_cache_key(device, data_type, "removed"), payload)
 

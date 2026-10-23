@@ -277,12 +277,7 @@ def index_ip_source_interfaces(interfaces, server_key, obj_device_id=None):
     """Index one owner scope with identical ambiguity rules for reads and writes."""
     by_librenms_id = {}
     by_name = {}
-    by_pk = {}
     for iface in interfaces:
-        # Key by PK for the cached-interface_url fallback (rename-safe identity). Scoped to
-        # this object's (and its VC members') interfaces, so a stale URL can never bind the
-        # address to an unrelated device's interface — stricter than the old direct .get(id=).
-        by_pk[str(iface.pk)] = iface
         lib_id = read_mapping(iface).own_id(server_key)
         if lib_id is not None:
             key = str(lib_id)
@@ -305,23 +300,19 @@ def index_ip_source_interfaces(interfaces, server_key, obj_device_id=None):
             by_name[iface.name] = iface
         elif by_name[iface.name] is not None and getattr(by_name[iface.name], "device_id", None) != obj_device_id:
             by_name[iface.name] = None
-    return by_librenms_id, by_name, by_pk
+    return by_librenms_id, by_name
 
 
-def resolve_ip_source_interface(row, by_librenms_id, by_name, by_pk=None, *, server_key):
+def resolve_ip_source_interface(row, by_librenms_id, by_name, *, server_key):
     """Resolve a source interface without falling through an ambiguous or contradicted identity."""
     port_id = normalize_librenms_port_id(row.get("port_id"))
     if port_id is not None and str(port_id) in by_librenms_id:
         return by_librenms_id[str(port_id)]
     name = row.get("interface_name")
-    interface_url = row.get("interface_url")
-    if isinstance(name, str) and name in by_name:
-        candidate = by_name[name]
-    elif isinstance(interface_url, str) and by_pk:
-        candidate = by_pk.get(interface_url.rstrip("/").rsplit("/", 1)[-1])
-    else:
+    if not isinstance(name, str) or name not in by_name:
         return None
-    # A name or a cached URL never wins over a binding to a different port on this server.
+    candidate = by_name[name]
+    # A name never wins over a binding to a different port on this server.
     if candidate is None or not name_match_may_be_port(candidate, server=server_key, port_id=row.get("port_id")):
         return None
     return candidate

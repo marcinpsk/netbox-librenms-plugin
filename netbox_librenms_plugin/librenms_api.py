@@ -11,7 +11,6 @@ from django.db import transaction
 from netbox.plugins import get_plugin_config
 
 from netbox_librenms_plugin.constants import (
-    LIBRENMS_NO_IPS_MESSAGE,
     LIBRENMS_NO_LINKS_MESSAGES,
     LIBRENMS_NO_SENSORS_MESSAGE,
     LIBRENMS_NO_VRFS_MESSAGE,
@@ -1136,47 +1135,6 @@ class LibreNMSAPI:
                 return False, message if isinstance(message, str) and message else str(e)
             return False, str(e)
         except requests.exceptions.RequestException as e:
-            return False, str(e)
-
-    def get_device_ips(self, device_id):
-        """
-        Fetch IP address data for a specific device from LibreNMS.
-
-        Args:
-            device_id: LibreNMS Device ID
-
-        Returns:
-            tuple: (success: bool, data: dict)
-
-        """
-        try:
-            response = _session.get(
-                f"{self.librenms_url}/api/v0/devices/{device_id}/ip",
-                headers=self.headers,
-                timeout=DEFAULT_API_TIMEOUT,
-                verify=self.verify_ssl,
-            )
-            response.raise_for_status()
-            data = response.json()
-            addresses = data.get("addresses") if isinstance(data, dict) else None
-            if not isinstance(addresses, list):
-                message = data.get("message") if isinstance(data, dict) else None
-                return False, message or "Unexpected response format: 'addresses' must be a list"
-            return True, addresses
-        except requests.exceptions.HTTPError as e:
-            # LibreNMS returns this specific HTTP 404 for an existing device with no IP
-            # addresses. Other 404s (for example a stale device id) remain real failures.
-            if e.response is not None and e.response.status_code == 404:
-                try:
-                    error_data = e.response.json()
-                except ValueError:
-                    error_data = None
-                message = error_data.get("message") if isinstance(error_data, dict) else None
-                if isinstance(message, str) and LIBRENMS_NO_IPS_MESSAGE in message.lower():
-                    return True, []
-                return False, message or str(e)
-            return False, str(e)
-        except (requests.exceptions.RequestException, ValueError) as e:
             return False, str(e)
 
     def get_device_vrfs(self, device_id):
