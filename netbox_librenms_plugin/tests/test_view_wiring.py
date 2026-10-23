@@ -8,7 +8,7 @@ hierarchies and attribute presence.
 import json
 import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -1738,7 +1738,6 @@ class TestModuleMoveRequiresNetBoxRelocation:
         from netbox_librenms_plugin.views.sync.modules import MoveModuleView
 
         view = MoveModuleView()
-        view._librenms_api = MagicMock(server_key="default")
         request = make_request(
             "post",
             {
@@ -1852,7 +1851,6 @@ class TestInstallRefusesADuplicateSerial:
 
         user = user or make_superuser(f"dupserial-{empty_bay.pk}")
         view = InstallModuleView()
-        view._librenms_api = MagicMock(server_key="default")
         inventory_item = {
             "entPhysicalIndex": 100,
             "entPhysicalClass": "module",
