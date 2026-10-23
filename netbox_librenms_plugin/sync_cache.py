@@ -19,7 +19,7 @@ from django.utils.dateparse import parse_datetime
 from netbox_librenms_plugin.acquisition.registry import RESOURCE_SPECS, OwnerPolicy, Resource
 from netbox_librenms_plugin.librenms_api import configured_cache_timeout, stored_librenms_id
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
-from netbox_librenms_plugin.server_mappings import mapped_device_servers, read_mapping
+from netbox_librenms_plugin.server_mappings import mapped_device_servers, read_mapping, require_server_key
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
 logger = logging.getLogger(__name__)
@@ -382,25 +382,23 @@ def request_actor_id(request):
     return actor_id if isinstance(actor_id, int) and not isinstance(actor_id, bool) else None
 
 
-def sync_snapshot_key(obj, data_type, server_key=None):
-    """Return the shared snapshot key for one object, data type, and server."""
-    base = f"librenms_{data_type}_{obj._meta.model_name}_{obj.pk}"
-    return f"{base}_{server_key}" if server_key else base
+def sync_snapshot_key(obj, data_type, server_key):
+    """Return the shared snapshot key for one object, data type, and configured server."""
+    return f"librenms_{data_type}_{obj._meta.model_name}_{obj.pk}_{require_server_key(server_key)}"
 
 
-def sync_last_fetched_key(obj, data_type, server_key=None):
-    """Return the shared last-fetched key for one object, data type, and server."""
-    base = f"librenms_{data_type}_last_fetched_{obj._meta.model_name}_{obj.pk}"
-    return f"{base}_{server_key}" if server_key else base
+def sync_last_fetched_key(obj, data_type, server_key):
+    """Return the shared last-fetched key for one object, data type, and configured server."""
+    return f"librenms_{data_type}_last_fetched_{obj._meta.model_name}_{obj.pk}_{require_server_key(server_key)}"
 
 
-def sync_vlan_overrides_key(obj, server_key=None):
-    """Return the VLAN override key for one object and server."""
-    base = f"librenms_vlan_group_overrides_{obj._meta.model_name}_{obj.pk}"
-    return f"{base}_{server_key}" if server_key else base
+def sync_vlan_overrides_key(obj, server_key):
+    """Return the VLAN override key for one object and configured server."""
+    return f"librenms_vlan_group_overrides_{obj._meta.model_name}_{obj.pk}_{require_server_key(server_key)}"
 
 
 def _state_key(subject, server_key, tab):
+    server_key = require_server_key(server_key)
     return f"librenms_sync_tab_state_{subject._meta.model_name}_{subject.pk}_{server_key}_{tab.value}"
 
 

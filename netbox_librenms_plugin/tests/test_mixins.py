@@ -100,9 +100,17 @@ class TestCacheMixinKeyGeneration:
 
         return CacheMixin()
 
-    def test_get_cache_key_format(self):
-        device = make_device("cache-key-format")
-        assert self._mixin().get_cache_key(device, "ports") == f"librenms_ports_device_{device.pk}"
+    @pytest.mark.parametrize("server_key", [None, "", "  "])
+    def test_every_key_refuses_a_blank_server_key(self, server_key):
+        device = make_device(f"cache-key-blank-{len(server_key or '')}-{server_key is None}")
+        mixin = self._mixin()
+        for build in (
+            lambda: mixin.get_cache_key(device, "ports", server_key),
+            lambda: mixin.get_last_fetched_key(device, "ports", server_key),
+            lambda: mixin.get_vlan_overrides_key(device, server_key),
+        ):
+            with pytest.raises(ValueError, match="server key"):
+                build()
 
     def test_get_cache_key_includes_server_key(self):
         device = make_device("cache-key-server")
@@ -110,7 +118,9 @@ class TestCacheMixinKeyGeneration:
 
     def test_get_cache_key_includes_model_name(self):
         vm = make_vm("cache-key-vm")
-        assert self._mixin().get_cache_key(vm, "interfaces") == f"librenms_interfaces_virtualmachine_{vm.pk}"
+        assert (
+            self._mixin().get_cache_key(vm, "interfaces", "srv1") == f"librenms_interfaces_virtualmachine_{vm.pk}_srv1"
+        )
 
     def test_get_cache_key_different_data_types(self):
         device = make_device("cache-key-types")
@@ -120,7 +130,6 @@ class TestCacheMixinKeyGeneration:
     def test_get_last_fetched_key_format_and_scope(self):
         device = make_device("cache-last-fetched")
         mixin = self._mixin()
-        assert mixin.get_last_fetched_key(device, "ports") == f"librenms_ports_last_fetched_device_{device.pk}"
         assert mixin.get_last_fetched_key(device, "ports", "srv1") == (
             f"librenms_ports_last_fetched_device_{device.pk}_srv1"
         )
@@ -129,16 +138,15 @@ class TestCacheMixinKeyGeneration:
         first = make_device("cache-key-first")
         second = make_device("cache-key-second")
         mixin = self._mixin()
-        assert mixin.get_cache_key(first, "ports") != mixin.get_cache_key(second, "ports")
+        assert mixin.get_cache_key(first, "ports", "prod") != mixin.get_cache_key(second, "ports", "prod")
 
     def test_vlan_overrides_key_is_distinct_and_server_scoped(self):
         device = make_device("cache-vlan-overrides")
         mixin = self._mixin()
-        bare = mixin.get_vlan_overrides_key(device)
         scoped = mixin.get_vlan_overrides_key(device, "prod")
-        assert bare == f"librenms_vlan_group_overrides_device_{device.pk}"
-        assert scoped == f"{bare}_prod"
-        assert bare != mixin.get_cache_key(device, "vlans")
+        assert scoped == f"librenms_vlan_group_overrides_device_{device.pk}_prod"
+        assert scoped != mixin.get_vlan_overrides_key(device, "lab")
+        assert scoped != mixin.get_cache_key(device, "vlans", "prod")
 
 
 class TestRedirectWithServerKey:
