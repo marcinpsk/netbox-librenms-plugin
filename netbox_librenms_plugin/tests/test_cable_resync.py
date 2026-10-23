@@ -16,6 +16,8 @@ ConsoleServerPort / ConsolePort / FrontPort / RearPort / Cable / Tag rows:
       -> "Cable Mismatch", Sync offered -> the force-confirmation gate applies to every cable
 """
 
+from netbox_librenms_plugin.tests.cable_source_helpers import cable_rows, seed_cable_rows
+
 import pytest
 
 from netbox_librenms_plugin.tests.conftest import (
@@ -228,11 +230,8 @@ class TestSerialRowResyncStatus:
 def untagged_serial_cable(tag):
     """Seed one serial row whose cable exists untagged; return its port, the cable, a client, the URL and the form."""
     from django.contrib.auth import get_user_model
-    from django.core.cache import cache
     from django.test import Client
     from django.urls import reverse
-
-    from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
     acs, (csp,), _ = make_serial_device(f"acs-{tag}", csp_names=["ttyS9"])
     _r, _, (cp,) = make_serial_device(f"router-{tag}", cp_names=["console"])
@@ -251,8 +250,7 @@ def untagged_serial_cable(tag):
         "sensor_id": 9,
         "sensor_index_int": 9,
     }
-    key_view = object.__new__(SyncCablesView)
-    cache.set(key_view.get_cache_key(acs, "links", SERVER_KEY), {"links": [link]}, timeout=300)
+    seed_cable_rows(acs, [link], SERVER_KEY)
 
     user = get_user_model().objects.create_superuser(f"{tag}-admin", f"{tag}@example.com", "pw")
     client = Client()
@@ -308,7 +306,6 @@ class TestPatchPathSyncGuard:
     def test_patch_path_row_cannot_be_replaced_by_a_direct_cable(self):
         from dcim.models import Cable
         from django.contrib.auth import get_user_model
-        from django.core.cache import cache
         from django.test import Client
         from django.urls import reverse
 
@@ -330,12 +327,7 @@ class TestPatchPathSyncGuard:
             "_source": "main",
         }
         server_key = SERVER_KEY
-        sync_view = object.__new__(SyncCablesView)
-        cache.set(
-            sync_view.get_cache_key(local_device, "links", server_key),
-            {"links": [row], "snapshot_token": "patch-path-guard"},
-            timeout=300,
-        )
+        seed_cable_rows(local_device, [row], server_key)
         persist_test_server_mapping(local_device, server_key)
         user = get_user_model().objects.create_superuser(
             "patch-guard-admin",
@@ -434,22 +426,19 @@ class TestCabledSerialRowFarEndDisplay:
 
     def test_far_end_display_does_not_leak_into_the_cached_label(self):
         """Verify enrichment preserves the raw label across cache round-trips so cable status remains stable."""
-        from netbox_librenms_plugin.views.base.cables_view import _RAW_LINK_KEYS
-
         acs, (csp,), _ = make_serial_device("leak-ser", csp_names=["ttyS1"])
         _panel_dev, fp, rp = _panel("leak-ser-pp")
         _end, _, (cp,) = make_serial_device("leak-ser-end", cp_names=["console"])
         cable_together(csp, fp)
         cable_together(rp, cp)
 
-        fresh = self._enrich(acs, self._row(csp, "name-that-matches-nothing", acs))
+        seed_cable_rows(acs, [self._row(csp, "name-that-matches-nothing", acs)], SERVER_KEY)
+        fresh = self._enrich(acs, cable_rows(acs, SERVER_KEY)["links"][0])
         assert fresh["cable_status"] == "Cable Found"  # dead label: no sync target
         assert fresh["remote_device"] == "name-that-matches-nothing"  # RAW label untouched
         assert fresh["remote_device_display"] == "leak-ser-end"  # display shows reality
 
-        # Cache round-trip (what a browser F5 does): strip to raw keys, re-enrich.
-        stripped = {k: v for k, v in fresh.items() if k in _RAW_LINK_KEYS}
-        again = self._enrich(acs, stripped)
+        again = self._enrich(acs, cable_rows(acs, SERVER_KEY)["links"][0])
         assert again["cable_status"] == "Cable Found"  # same status as the fresh render
         assert again["remote_device"] == "name-that-matches-nothing"
 
@@ -526,7 +515,7 @@ def test_cable_creation_enforces_add_constraints_after_provenance(client, monkey
     )
     user = grant(user, "add", Cable, constraints=constraints)
     key = SyncCablesView().get_cache_key(local, "links", SERVER_KEY)
-    cache.set(key, {"links": [row]}, timeout=300)
+    seed_cable_rows(local, [row], SERVER_KEY)
     persist_test_server_mapping(local, SERVER_KEY)
     client.force_login(user)
     try:
