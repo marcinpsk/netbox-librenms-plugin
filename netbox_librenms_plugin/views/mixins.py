@@ -622,8 +622,8 @@ class LibreNMSAPIMixin:
 
         The lazy ``librenms_api`` property builds ``LibreNMSAPI()``, whose constructor raises
         KeyError/ValueError on a missing/misconfigured default server. A cached GET render (any sync
-        tab) must not 500 on that: fall back to ``None`` (default scope) so cached rows still render
-        and per-server lookups degrade to their bare-key clause instead of crashing during render.
+        tab) must not 500 on that: ``None`` means no usable server, so the caller reads no snapshot
+        (the key builders refuse a blank key) and renders the tab empty.
 
         Shared by the cables and IP-address table views so the degradation lives in one place
         rather than being maintained per view.
@@ -645,7 +645,7 @@ class LibreNMSAPIMixin:
         ``data["server_key"]`` is untrusted. A non-string (e.g. a JSON list) is unhashable and would
         TypeError-500 a later ``cf_dict.get(server_key)``; a stale/forged string must not address
         another server's cache namespace. Only a string that names a configured server is honoured —
-        anything else falls back to :meth:`_render_server_key` (default scope). Shared by the device
+        anything else falls back to :meth:`_render_server_key` (None when no server is usable). Shared by the device
         verify/render views so this "configured-string-key-or-fallback" rule lives in one place.
 
         Args:
