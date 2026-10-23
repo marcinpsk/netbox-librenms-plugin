@@ -92,6 +92,14 @@ class ObjectRef:
 
 
 @dataclass(frozen=True)
+class MappingLink:
+    """The state and the LibreNMS id of one mapping link, so a stored mapping and a current one compare."""
+
+    state: MappingState
+    librenms_id: int | None
+
+
+@dataclass(frozen=True)
 class MappingSource:
     """The requests made for one LibreNMS device: the owner itself, or its out-of-band controller."""
 
@@ -100,6 +108,11 @@ class MappingSource:
     state: MappingState
     # Part name -> request key of the record in SourceSnapshot.responses.
     parts: tuple[tuple[str, str], ...]
+
+    @property
+    def link(self):
+        """Return the mapping link that this source was acquired for."""
+        return MappingLink(self.state, self.librenms_id)
 
 
 @dataclass(frozen=True)
