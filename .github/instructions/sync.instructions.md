@@ -28,7 +28,7 @@ All four sync resources (interfaces, cables, IP addresses, VLANs) follow the sam
 Every base table view follows: **fetch → cache → compare → render**.
 
 - **Fetch:** Call LibreNMS API (e.g., `get_ports()`, `get_device_ips()`, `get_device_vlans()`).
-- **Cache:** Store results via `CacheMixin` keys: `librenms_{data_type}_{model_name}_{pk}`. Also store fetch timestamp at `librenms_{data_type}_last_fetched_{model_name}_{pk}`.
+- **Cache:** Store results via `CacheMixin` keys: `librenms_{data_type}_{model_name}_{pk}_{server_key}`. Also store fetch timestamp at `librenms_{data_type}_last_fetched_{model_name}_{pk}_{server_key}`. Every key needs a configured server key; a blank key raises `ValueError`.
 - **Compare:** Match LibreNMS data against NetBox objects. Each resource implements its own comparison (interface matching by name, IP matching by address/mask, VLAN matching by VID+group).
 - **Render:** Build a django-tables2 table, return a partial template (`_*_sync_content.html`).
 
@@ -56,7 +56,7 @@ class SyncSomeResourceView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
 
 ## Key Mixins Used by Sync Views
 - **`LibreNMSAPIMixin`** — lazy-creates `LibreNMSAPI` instance via `self.librenms_api` property. Also provides `get_server_info()` for template context.
-- **`CacheMixin`** — generates consistent cache keys via `get_cache_key(obj, data_type)` and `get_last_fetched_key(obj, data_type)`. Also provides `get_vlan_overrides_key(obj)` for VLAN group override persistence.
+- **`CacheMixin`** — generates consistent cache keys via `get_cache_key(obj, data_type, server_key)` and `get_last_fetched_key(obj, data_type, server_key)`. Also provides `get_vlan_overrides_key(obj, server_key)` for VLAN group override persistence.
 - **`VlanAssignmentMixin`** — VLAN group scope resolution: Rack → Location → Site → SiteGroup → Region → Global. Used by interface and VLAN sync for auto-selecting the most-specific VLAN group and building lookup maps.
 
 ## JavaScript (`librenms_sync.js`)
