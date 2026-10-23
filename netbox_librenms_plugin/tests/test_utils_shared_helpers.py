@@ -1,7 +1,7 @@
 """Unit tests for the shared utils helpers extracted to de-duplicate view logic.
 
-* ``is_valid_ports_payload`` — the ports-payload shape gate used by the interface and module
-  refresh paths (host, OOB and cached snapshots).
+* ``is_valid_ports_payload``: the ports-payload shape gate of the module refresh paths. The
+  interfaces tab checks its ports through the ports contract of source acquisition.
 * ``resolve_server_mapping_display_id`` — the per-server display-id resolver (host id, else the
   nested OOB controller id) shared by the device-sync page and the import-validation modal.
 
