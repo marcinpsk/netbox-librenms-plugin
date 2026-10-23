@@ -3,6 +3,7 @@
 from django.utils import timezone
 
 from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin.acquisition.coordinator import resource_owner
 from netbox_librenms_plugin.acquisition.resources import SCOPES
 from netbox_librenms_plugin.acquisition.snapshot import (
     MappingSource,
@@ -46,7 +47,7 @@ def build_source_snapshot(subject, resource, server_key="default", **parts):
     missing = {part for scope_parts in SCOPES[resource].values() for part in scope_parts} - set(parts)
     if missing:
         raise TypeError(f"build_source_snapshot() needs the parts {sorted(missing)} of {resource}.")
-    owner = source_cache.snapshot_owner(subject, resource, server_key)
+    owner = resource_owner(subject, resource, server_key)
     records = {name: _record(resource, name, value) for name, value in parts.items()}
     now = timezone.now()
     return SourceSnapshot(
