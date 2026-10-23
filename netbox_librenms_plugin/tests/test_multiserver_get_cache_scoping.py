@@ -81,15 +81,14 @@ class TestConfiguredServerCacheScoping:
         assert list(context["table"].data)[0]["local_port_id"] == 12
 
     def test_vlans_render_the_requested_servers_snapshot(self, configured_servers):
-        from django.core.cache import cache
-
+        from netbox_librenms_plugin.acquisition.registry import Resource
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
         from netbox_librenms_plugin.views.object_sync.devices import DeviceVLANTableView
 
         device = make_device("multiserver-vlan")
         view = DeviceVLANTableView()
         request = _request("production")
-        key = view.get_cache_key(device, "vlans", "production")
-        cache.set(key, [{"vlan_vlan": 120, "vlan_name": "DATA"}])
+        seed_source_snapshot(device, Resource.VLANS, "production", vlans=[{"vlan_vlan": 120, "vlan_name": "DATA"}])
 
         context = _bind(view, request).get_vlan_context(request, device)
 
@@ -214,13 +213,19 @@ class TestRemovedServerFailsClosed:
         from django.core.cache import cache
         from django.utils.module_loading import import_string
 
+        from netbox_librenms_plugin.acquisition.registry import Resource
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
+
         view_class = import_string(view_path)
         device = make_device(f"removed-{data_type}")
         if data_type == "ports":
             make_interface(device, "Ethernet4")
         view = view_class()
         request = _request("removed")
-        cache.set(view.get_cache_key(device, data_type, "removed"), payload)
+        if data_type == "vlans":
+            seed_source_snapshot(device, Resource.VLANS, "removed", vlans=payload)
+        else:
+            cache.set(view.get_cache_key(device, data_type, "removed"), payload)
 
         context = getattr(_bind(view, request), context_method)(request, device, *extra_args)
 

@@ -226,12 +226,6 @@ def test_stub_serves_recordings_and_derived_instance_endpoints_over_real_http():
         assert addresses[0]["ipv4_address"] == recorded_device["ip"]
         assert addresses[0]["port_id"] is not None
 
-        ok, vlans = api.get_device_vlans(device_id)
-        assert ok is True
-        assert {vlan["vlan_vlan"] for vlan in vlans} == {100, 200}
-        assert all(vlan["device_id"] == device_id for vlan in vlans)
-        assert len({vlan["vlan_id"] for vlan in vlans}) == len(vlans)
-
         ok, links = api.get_device_links(device_id)
         assert ok is True
         assert links["status"] == "ok"
@@ -244,6 +238,32 @@ def test_stub_serves_recordings_and_derived_instance_endpoints_over_real_http():
         ok, poller_groups = api.get_poller_groups()
         assert ok is True
         assert poller_groups == [{"id": 0, "group_name": "default", "descr": "Development stub"}]
+    finally:
+        server.stop()
+
+
+@pytest.mark.django_db
+def test_vlan_acquisition_keeps_only_the_devices_rows_of_the_instance_wide_stub_route(settings):
+    from netbox_librenms_plugin.acquisition.coordinator import acquire
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_device
+
+    server = _start_stub()
+    try:
+        configure_librenms_servers(
+            settings, {"stub": {"librenms_url": server.url, "api_token": TOKEN, "verify_ssl": False}}
+        )
+        device_id = _recording_device_id("arcos-lag-transceivers")
+        device = make_device("stub-vlan-device", librenms_cf={"stub": {"id": device_id}})
+
+        snapshot = acquire(device, server_key="stub", resources=[Resource.VLANS])
+
+        record = snapshot.record(Resource.VLANS, "vlans")
+        assert record.obtained and record.http_status == 200
+        vlans = snapshot.value(Resource.VLANS, "vlans")
+        assert {vlan["vlan_vlan"] for vlan in vlans} == {100, 200}
+        assert all(vlan["device_id"] == device_id for vlan in vlans)
+        assert len({vlan["vlan_id"] for vlan in vlans}) == len(vlans)
     finally:
         server.stop()
 

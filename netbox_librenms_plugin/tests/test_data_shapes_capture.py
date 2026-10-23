@@ -1,7 +1,7 @@
 """
 Round-trip tests for data-shape capture: capture from a seeded mock, replay, assert same outcome.
 
-These exercise the real LibreNMSAPI (via _raw_get) over real HTTP against the mock server, then
+These exercise the real LibreNMSAPI (via get_response) over real HTTP against the mock server, then
 re-run the real detection / relationship-resolution logic on the captured recording — proving
 capture and replay are faithful.
 """
@@ -42,7 +42,7 @@ class _StubApi:
         self.routes = routes  # {path (no /api/v0/ prefix, no query): (status, body)}
         self.server_key = "stub"
 
-    def _raw_get(self, path, params=None):
+    def get_response(self, path, params=None):
         if path in self.routes:
             return self.routes[path]
         row_field = _STUB_ROW_FIELDS.get(path.rsplit("/", 1)[-1])
@@ -586,7 +586,7 @@ def test_capture_raises_when_filtered_inventory_request_has_transport_error():
     routes = {
         "devices/1000": (200, {"status": "ok", "devices": [{"device_id": 1000, "os": "ios"}]}),
         # Production returns this failure immediately. It does not consult /all.
-        "inventory/1000": (0, None),
+        "inventory/1000": (None, None),
         # A successful /all response must not hide the failed filtered request.
         "inventory/1000/all": (200, {"status": "ok", "inventory": []}),
         "devices/1000/ports": (200, {"status": "ok", "ports": []}),
@@ -655,7 +655,7 @@ def _all_ok_routes():
 def test_capture_raises_when_required_route_has_transport_error():
     """A required structural route (here port_stack) with no HTTP response must fail the capture, not persist a partial recording."""
     api = _StubApi({k: (200, v) for k, v in _all_ok_routes().items()})
-    api.routes["devices/1000/port_stack"] = (0, None)  # transport error on a REQUIRED route
+    api.routes["devices/1000/port_stack"] = (None, None)  # transport error on a REQUIRED route
 
     with pytest.raises(RuntimeError, match="port_stack"):
         capture_device_recording(api, 1000)
@@ -677,7 +677,7 @@ def test_capture_raises_when_inventory_all_fallback_fails():
     """Once the filtered inventory comes back empty, /all is the ONLY inventory source — a transport failure there must fail the capture, not silently record an empty (wrong-topology) inventory."""
     api = _StubApi({k: (200, v) for k, v in _all_ok_routes().items()})
     # Filtered inventory is empty (see _all_ok_routes), so capture falls back to /all — make it fail.
-    api.routes["inventory/1000/all"] = (0, None)  # transport error on the /all fallback
+    api.routes["inventory/1000/all"] = (None, None)  # transport error on the /all fallback
 
     with pytest.raises(RuntimeError, match="inventory/1000/all"):
         capture_device_recording(api, 1000)
@@ -747,7 +747,7 @@ def test_capture_omits_serial_type_patterns_when_device_has_no_serial_sensors():
 def test_capture_fails_when_configured_oob_controller_ports_fail():
     """A failed configured OOB fetch must not become a successful non-OOB capture."""
     api = _StubApi({k: (200, v) for k, v in _all_ok_routes().items()})
-    api.routes["devices/2000/ports"] = (0, None)  # OOB controller ports fail at the transport layer
+    api.routes["devices/2000/ports"] = (None, None)  # OOB controller ports fail at the transport layer
 
     with pytest.raises(RuntimeError, match="devices/2000/ports"):
         capture_device_recording(api, 1000, oob_id=2000)
@@ -1094,8 +1094,8 @@ def test_a_list_body_survives_a_real_replay(recording_server):
     }
 
     _server, api = recording_server(recording)
-    # _raw_get takes a path relative to /api/v0/.
-    status, body = api._raw_get("devices/77/ports", None)
+    # get_response takes a path relative to /api/v0/.
+    status, body = api.get_response("devices/77/ports", None)
 
     assert status == 200, "the first list item was read as an HTTP status"
     assert body == [1, {"value": "x"}]
