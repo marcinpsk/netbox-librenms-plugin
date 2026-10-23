@@ -1,14 +1,14 @@
 """The web transport of source snapshots: the shared cache the sync page reads and refreshes."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from django.apps import apps
 from django.core.cache import cache
 from django.http import Http404
 
-from netbox_librenms_plugin.acquisition.coordinator import SubjectNotMapped, acquire, plan_acquisition, resource_owner
+from netbox_librenms_plugin.acquisition.coordinator import SubjectNotMapped, acquire, oob_link, plan_acquisition, resource_owner
 from netbox_librenms_plugin.acquisition.registry import RESOURCE_SPECS
-from netbox_librenms_plugin.acquisition.resources import blocked_scopes, is_ready
+from netbox_librenms_plugin.acquisition.resources import OOB_ACQUIRERS, blocked_scopes, is_ready
 from netbox_librenms_plugin.acquisition.snapshot import (
     MappingLink,
     MappingState,
@@ -17,6 +17,7 @@ from netbox_librenms_plugin.acquisition.snapshot import (
     SourceSnapshot,
 )
 from netbox_librenms_plugin.librenms_api import configured_cache_timeout, stored_librenms_id
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.sync_cache import sync_snapshot_key
 
 IDENTITY_CHANGED = "LibreNMS source identity changed or expired. Refresh this tab and try again."
@@ -36,6 +37,8 @@ class Refresh:
 
     snapshot: SourceSnapshot | None
     error: str | None = None
+    # Each blocked scope of the acquired snapshot, with its blockers; a stored snapshot can have some.
+    blocked: dict = field(default_factory=dict)
 
 
 def _key(owner, resource, server_key):
@@ -77,12 +80,12 @@ def refresh(request, plan):
         snapshot = acquire(plan)
     except SubjectNotMapped:
         return Refresh(None, IDENTITY_CHANGED)
+    blocked = blocked_scopes(snapshot, resource)
     if store(plan.subject, resource, snapshot):
-        return Refresh(snapshot)
+        return Refresh(snapshot, blocked=blocked)
     if is_ready(snapshot, resource):
-        return Refresh(None, IDENTITY_CHANGED)
-    record = next(iter(blocked_scopes(snapshot, resource).values()))[0]
-    return Refresh(snapshot, f"{record.request.path} was not obtained ({record.reason})")
+        return Refresh(None, IDENTITY_CHANGED, blocked)
+    return Refresh(snapshot, next(iter(blocked.values()))[0].message, blocked)
 
 
 def store(subject, resource, snapshot):
@@ -141,11 +144,12 @@ def read(subject, resource, server_key, *, user=None):
 def _binding_holds(snapshot, resource, owner):
     """Compare the acquired binding with the owner's current effective identity and source."""
     host_id = stored_librenms_id(owner, snapshot.server_key)
+    link = oob_link(read_mapping(owner), snapshot.server_key) if resource in OOB_ACQUIRERS else None
     current = SourceBinding(
         snapshot.server_key,
         ObjectRef.of(owner),
         MappingLink(MappingState.RESOLVED, host_id) if host_id is not None else None,
-        None,
+        MappingLink(*link) if link is not None else None,
     )
     return snapshot.binding(resource) == current
 
