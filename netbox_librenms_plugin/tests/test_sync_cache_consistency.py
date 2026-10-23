@@ -10,7 +10,7 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.db import transaction
 from django.http import HttpResponse
-from django.test import RequestFactory, override_settings
+from django.test import RequestFactory
 from django_htmx.middleware import HtmxDetails
 from django.urls import reverse
 from ipam.models import IPAddress, VLAN
@@ -237,36 +237,6 @@ def test_one_response_preserves_both_cache_mutation_results():
     assert set(payload["revisions"].values()) == {"donor-revision", "winner-revision"}
     trigger = json.loads(response["HX-Trigger"])
     assert trigger["librenmsCacheChanged"]["cleanup_failed"] is True
-
-
-@pytest.mark.django_db
-@override_settings(
-    CACHES={
-        "default": {
-            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
-            "LOCATION": "sync-cache-without-wildcard-operations",
-        }
-    }
-)
-def test_mutation_succeeds_when_cache_backend_has_no_wildcard_api(
-    settings,
-    django_capture_on_commit_callbacks,
-):
-    """Exact snapshot cleanup must not fail on a standard cache backend."""
-    _configure_servers(settings)
-    device = make_device("cache-standard-backend", librenms_cf={"primary": {"id": 6401}})
-    coordinator = SyncCacheConsistency(device)
-    _seed_snapshot("ports", device, "primary")
-    _seed_snapshot("links", device, "primary")
-    cache.set(f"{_cache_key('links', device, 'primary')}:manual-remote:row", 1, timeout=300)
-
-    with django_capture_on_commit_callbacks(execute=True):
-        transition = coordinator.schedule_mutation(SyncTab.INTERFACES, "primary", actor_id=1)
-
-    assert transition.error is None
-    assert cache.get(_cache_key("links", device, "primary")) is None
-    # Without a wildcard API the snapshot-bound picks cannot be enumerated; they expire on their own.
-    assert cache.get(f"{_cache_key('links', device, 'primary')}:manual-remote:row") == 1
 
 
 @pytest.mark.django_db

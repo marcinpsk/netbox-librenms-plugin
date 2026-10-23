@@ -60,7 +60,6 @@ from netbox_librenms_plugin.utils import (
     cable_manual_pick_cache_key,
     cable_path_reaches,
     cable_snapshot_token,
-    cache_remaining_ttl,
     get_interface_name_field,
     get_librenms_cable_tag,
     get_virtual_chassis_member,
@@ -3072,7 +3071,7 @@ class BaseCableTableView(
     @staticmethod
     def _cable_cache_expiry(cache_key):
         """Return when the cached snapshot expires, or None when it carries no TTL."""
-        cache_ttl = cache_remaining_ttl(cache, cache_key)
+        cache_ttl = cache.ttl(cache_key)
         if cache_ttl is None or cache_ttl <= 0:
             return None
         return timezone.now() + timezone.timedelta(seconds=cache_ttl)
@@ -3786,7 +3785,7 @@ class CableRemotePickerView(BaseCableTableView):
 
         # Keep unsaved UI state outside the shared LibreNMS snapshot. The key includes the
         # snapshot generation, user, and row, so users cannot see or overwrite each other's picks.
-        remaining_ttl = cache_remaining_ttl(cache, cache_key)
+        remaining_ttl = cache.ttl(cache_key)
         pick_key = cable_manual_pick_cache_key(
             cache_key,
             cable_snapshot_token(cached),

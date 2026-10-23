@@ -9,7 +9,6 @@ from netbox_librenms_plugin.sync_filters import filter_sync_table, parse_table_f
 from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
 from netbox_librenms_plugin.utils import (
     build_migrated_context,
-    cache_remaining_ttl,
     index_vlan_source_rows,
     is_list_of_dicts,
     normalize_vlan_vid,
@@ -284,7 +283,7 @@ class BaseVLANTableView(
             vlan_table.configure(request)
 
         # Calculate cache TTL
-        cache_ttl = cache_remaining_ttl(cache, self.get_cache_key(obj, "vlans", server_key))
+        cache_ttl = cache.ttl(self.get_cache_key(obj, "vlans", server_key))
         cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl and cache_ttl > 0 else None
 
         return {

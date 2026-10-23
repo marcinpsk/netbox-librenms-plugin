@@ -37,7 +37,6 @@ from netbox_librenms_plugin.sync_filters import filter_sync_table, parse_table_f
 from netbox_librenms_plugin.utils import (
     apply_lag_vlan_fill,
     build_migrated_context,
-    cache_remaining_ttl,
     get_interface_name_field,
     get_interface_port_identity_sets,
     interface_sync_options_menu,
@@ -1180,9 +1179,7 @@ class BaseInterfaceTableView(
         # (mirrors ip_addresses_view / modules_view).
         # On an unresolved key the render is empty (above); don't surface the stale server's TTL as
         # a misleading "cached until" on an empty table.
-        cache_ttl = (
-            None if unresolved else cache_remaining_ttl(cache, self.get_cache_key(cache_device, "ports", server_key))
-        )
+        cache_ttl = None if unresolved else cache.ttl(self.get_cache_key(cache_device, "ports", server_key))
         cache_expiry = (
             timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl is not None and cache_ttl > 0 else None
         )
