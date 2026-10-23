@@ -310,14 +310,9 @@ class BaseInterfaceTableView(
         # The host rows stay usable when only the OOB controller's ports are missing.
         oob_blocked = "oob" in result.blocked
         if oob_blocked:
-            logger.warning(
-                "Interfaces of %s refreshed without OOB rows: %s", sync_device, result.blocked["oob"][0].message
-            )
-            messages.warning(
-                request,
-                "Interfaces refreshed, but OOB controller ports fetch failed; "
-                "showing host interfaces only. See server logs for details.",
-            )
+            notice = source_cache.blocker_notice(result.blocked["oob"])
+            logger.warning("Interfaces of %s refreshed without OOB rows: %s", sync_device, notice)
+            messages.warning(request, f"Interfaces refreshed without the OOB controller rows: {notice}")
         if SyncCacheConsistency(obj).mark_refresh_outcome(
             SyncTab.INTERFACES,
             server_key,
@@ -478,6 +473,7 @@ class BaseInterfaceTableView(
         """
         table_rows = None
         oob_incomplete = False
+        oob_blockers = ()
         relationship_diagnostics = None
         netbox_only_interfaces = []
         ignored_count = 0
@@ -533,6 +529,7 @@ class BaseInterfaceTableView(
         if assessment is not None:
             ports_data = assessment["ports"]
             oob_incomplete = assessment["oob_incomplete"]
+            oob_blockers = assessment["oob_blockers"]
             # What the device's port_stack held and what each rule made of it, for the rows below.
             relationship_diagnostics = relationship_diagnostics_report(assessment, interface_name_field)
             matched_interface_ids = set()
@@ -790,6 +787,7 @@ class BaseInterfaceTableView(
             "actionable_owner_ids": actionable_owner_ids,
             "migrated": migrated,
             "oob_incomplete": oob_incomplete,
+            "oob_blockers": oob_blockers,
             "relationship_diagnostics": relationship_diagnostics,
         }
 
@@ -897,6 +895,7 @@ class BaseInterfaceTableView(
             "netbox_only_interfaces": netbox_only_interfaces,
             "server_key": server_key,
             "oob_incomplete": rows["oob_incomplete"],
+            "oob_blockers": rows["oob_blockers"],
             "relationship_diagnostics": rows["relationship_diagnostics"],
             "hidden_ipam_permissions": hidden_ipam_permissions,
             "vlan_scope_incomplete": vlan_scope_incomplete,

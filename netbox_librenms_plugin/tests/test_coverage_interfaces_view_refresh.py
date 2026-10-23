@@ -154,9 +154,10 @@ class TestInterfaceRefreshFailClosedExits:
 
         assert response.status_code == 200
         assert "Location" not in response
-        assert message_texts(request, "error") == [
-            "Failed to fetch interfaces from LibreNMS: devices/11/ports was not obtained (Device does not exist)"
-        ]
+        (error,) = message_texts(request, "error")
+        # The error names each failed source: the ports, and the port stack that the stub does not serve.
+        assert "devices/11/ports was not obtained (Device does not exist)" in error
+        assert "devices/11/port_stack" in error
         assert _tab_state(device)["state"] == "refresh_failed"
 
     def test_malformed_ports_payload_fails_closed(self, librenms_server, settings):
@@ -170,10 +171,8 @@ class TestInterfaceRefreshFailClosedExits:
 
         assert response.status_code == 200
         assert "Location" not in response
-        assert message_texts(request, "error") == [
-            "Failed to fetch interfaces from LibreNMS: devices/12/ports was not obtained "
-            "(LibreNMS returned a malformed response.)"
-        ]
+        (error,) = message_texts(request, "error")
+        assert "devices/12/ports was not obtained (LibreNMS returned a malformed response.)" in error
         assert _stored_rows(device) is None
 
 
@@ -219,12 +218,14 @@ class TestInterfaceRefreshOobMerge:
 
         _response, _view, request = _refresh(DeviceInterfaceTableView, device, librenms_server, settings)
 
-        assert message_texts(request, "warning") == [
-            "Interfaces refreshed, but OOB controller ports fetch failed; "
-            "showing host interfaces only. See server logs for details."
-        ]
-        assert message_texts(request, "success") == ["Host interface data refreshed successfully."]
-        assert _stored_rows(device)["oob_incomplete"] is True
+        rows = _stored_rows(device)
+        (warning,) = message_texts(request, "warning")
+        assert rows["oob_blockers"] == (
+            "devices/None/ports was not obtained (The linked OOB controller has no valid LibreNMS id.)",
+        )
+        assert rows["oob_blockers"][0] in warning
+        assert len(message_texts(request, "success")) == 1
+        assert rows["oob_incomplete"] is True
         # The corrupt id must never be turned into a request path. The refresh also reads the
         # port stack and the device OS, neither of which can be gated on the ports payload.
         paths = [r["path"] for r in librenms_server.requests]
@@ -260,7 +261,7 @@ class TestInterfaceRefreshOobMerge:
 
         _response, _view, request = _refresh(DeviceInterfaceTableView, device, librenms_server, settings)
 
-        assert message_texts(request, "success") == ["Interface data refreshed successfully."]
+        assert len(message_texts(request, "success")) == 1 and message_texts(request, "warning") == []
         rows = _stored_rows(device)
         assert rows["oob_incomplete"] is False
         by_port_id = {port["port_id"]: port for port in rows["ports"]}
@@ -279,12 +280,10 @@ class TestInterfaceRefreshOobMerge:
 
         _response, _view, request = _refresh(DeviceInterfaceTableView, device, librenms_server, settings)
 
-        assert message_texts(request, "warning") == [
-            "Interfaces refreshed, but OOB controller ports fetch failed; "
-            "showing host interfaces only. See server logs for details."
-        ]
-        assert message_texts(request, "success") == ["Host interface data refreshed successfully."]
         rows = _stored_rows(device)
+        (warning,) = message_texts(request, "warning")
+        assert "devices/42/ports was not obtained" in warning
+        assert len(message_texts(request, "success")) == 1
         assert rows["oob_incomplete"] is True
         assert [port["port_id"] for port in rows["ports"]] == [1]
         assert "/api/v0/devices/42/ports" in [r["path"] for r in librenms_server.requests]
