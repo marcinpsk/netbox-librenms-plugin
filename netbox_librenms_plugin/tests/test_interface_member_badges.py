@@ -61,7 +61,10 @@ def _cached_data(relationships=None, ports=None):
     """Return the assessed rows and relationships, in the shape the relationship enrichment reads."""
     return {
         "ports": [dict(port) for port in (ports if ports is not None else PORTS)],
-        "port_stack_relationships": relationships if relationships is not None else RELATIONSHIPS,
+        "port_stack_relationships": {
+            "stacked_ports": {},
+            **(relationships if relationships is not None else RELATIONSHIPS),
+        },
     }
 
 

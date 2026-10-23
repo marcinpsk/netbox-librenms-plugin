@@ -56,19 +56,23 @@ from netbox_librenms_plugin.views.mixins import (
 logger = logging.getLogger(__name__)
 
 
+def assess_stored_snapshot(snapshot, interface_name_field):
+    """Return the :func:`assess_interfaces` result of a stored snapshot, or None without one."""
+    return assess_interfaces(snapshot, interface_name_field) if snapshot is not None else None
+
+
 def read_interface_assessment(obj, server_key, interface_name_field):
     """
     Return the stored interfaces snapshot of *obj*, assessed for *interface_name_field*.
 
     Every interface reader (the tab, the verify, the sync and the relationship actions) reads through
-    this function, so they all show and act on one derivation.
+    this function or :func:`assess_stored_snapshot`, so they all show and act on one derivation.
 
     Returns:
         dict | None: The :func:`assess_interfaces` result, or None when no snapshot can be read.
 
     """
-    snapshot = source_cache.read(obj, Resource.INTERFACES, server_key)
-    return assess_interfaces(snapshot, interface_name_field) if snapshot is not None else None
+    return assess_stored_snapshot(source_cache.read(obj, Resource.INTERFACES, server_key), interface_name_field)
 
 
 class BaseInterfaceTableView(
@@ -414,14 +418,13 @@ class BaseInterfaceTableView(
         """Return the computed rows, reused while the snapshot, the viewer and the NetBox rows they read are unchanged."""
 
         def compute():
-            assessment = assess_interfaces(snapshot, interface_name_field) if snapshot is not None else None
             return self._compute_interface_rows(
                 request,
                 obj,
                 interface_name_field,
                 server_key,
                 cache_device,
-                assessment,
+                assess_stored_snapshot(snapshot, interface_name_field),
                 virtual_chassis_members,
                 show_ignored=show_ignored,
             )
