@@ -178,6 +178,22 @@ def test_a_failed_refresh_names_every_source_that_blocks_it(client, live_librenm
 
 
 @pytest.mark.django_db
+def test_an_oob_only_device_fails_the_refresh_because_interfaces_need_a_host_mapping(client, live_librenms):
+    device = map_device_to_librenms(
+        make_device("iface-snap-oob-only"), server_key=SERVER_KEY, oob={"id": OOB_ID, "type": "idrac"}
+    )
+    client.force_login(make_superuser("iface-snap-oob-only-user"))
+    live_librenms.server.register(f"/api/v0/devices/{OOB_ID}/ports", {"status": "ok", "ports": [_port(91, "idrac0")]})
+
+    response = _refresh(client, device)
+
+    assert len(_messages(response, messages.ERROR)) == 1
+    assert source_cache.read(device, Resource.INTERFACES, SERVER_KEY) is None
+    assert f"/api/v0/devices/{OOB_ID}/ports" not in [request["path"] for request in live_librenms.server.requests]
+    assert not _status(device)["snapshot_available"]
+
+
+@pytest.mark.django_db
 def test_oob_rows_join_the_host_rows_and_a_shared_mac_is_flagged(client, live_librenms):
     device = _device("iface-snap-oob", oob={"id": OOB_ID, "type": "idrac"})
     client.force_login(make_superuser("iface-snap-oob-user"))
