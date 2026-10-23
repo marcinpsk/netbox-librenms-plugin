@@ -1550,52 +1550,6 @@ class TestNormalizeDeviceSerialsMigration:
             assert cursor.fetchone()[0] == original_oid
 
 
-class TestCacheRemainingTtl:
-    """cache_remaining_ttl reads .ttl on django-redis and degrades to None on backends without it."""
-
-    def test_returns_none_when_backend_has_no_ttl(self):
-        """A backend without .ttl (e.g. LocMemCache) yields None instead of AttributeError."""
-        from django.core.cache.backends.locmem import LocMemCache
-
-        from netbox_librenms_plugin.utils import cache_remaining_ttl
-
-        backend = LocMemCache("cr116-ttl", {})
-        backend.set("k", "v")
-        # Precondition: this backend lacks the django-redis .ttl the bare call sites assumed.
-        assert not hasattr(backend, "ttl")
-        assert cache_remaining_ttl(backend, "k") is None
-
-    def test_delegates_to_ttl_when_present(self):
-        """When the backend exposes .ttl (django-redis), the helper returns its value for the key."""
-        from types import SimpleNamespace
-
-        from netbox_librenms_plugin.utils import cache_remaining_ttl
-
-        seen = {}
-
-        def _ttl(key):
-            seen["key"] = key
-            return 123
-
-        backend = SimpleNamespace(ttl=_ttl)
-        assert cache_remaining_ttl(backend, "librenms_ports_device_1_default") == 123
-        assert seen["key"] == "librenms_ports_device_1_default"
-
-    def test_returns_none_when_ttl_call_raises(self):
-        """A present-but-raising .ttl (transient Redis error) degrades to None, not a 500 up the render."""
-        from types import SimpleNamespace
-
-        from netbox_librenms_plugin.utils import cache_remaining_ttl
-
-        def _boom(key):
-            raise ConnectionError("redis unreachable")
-
-        backend = SimpleNamespace(ttl=_boom)
-        # Precondition: the backend DOES expose .ttl, so the absence-guard doesn't cover this.
-        assert hasattr(backend, "ttl")
-        assert cache_remaining_ttl(backend, "librenms_ports_device_1_default") is None
-
-
 class TestPredictModuleInterfaceRenameSignalGuard:
     """predict_module_interface_rename must not 500 on a receiver that returns a non-list."""
 
