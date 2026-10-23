@@ -1604,9 +1604,7 @@ class LibreNMSAPI:
                 return self._classify_missing_sensors(e)
             return False, f"HTTP error: {str(e)}"
         except ValueError as e:
-            # response.json() raises ValueError / requests JSONDecodeError on a non-JSON body.
-            # JSONDecodeError subclasses BOTH ValueError and RequestException, so this must precede
-            # the RequestException handler — otherwise a parse failure is mislabeled "connecting".
+            # JSONDecodeError subclasses ValueError and RequestException, so this handler comes first.
             return False, f"Invalid JSON from LibreNMS: {str(e)}"
         except requests.exceptions.RequestException as e:
             return False, f"Error connecting to LibreNMS: {str(e)}"

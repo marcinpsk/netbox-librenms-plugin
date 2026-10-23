@@ -10,7 +10,7 @@ All four sync resources (interfaces, cables, IP addresses, VLANs) follow the sam
 
 1. **Base views** (`views/base/`) — abstract classes that define the data pipeline:
    - `BaseLibreNMSSyncView` — tabbed sync page, orchestrates all tabs via abstract `get_*_context()` methods.
-   - `BaseInterfaceTableView` — acquire the interfaces snapshot → assess it (`assessment.interfaces.assess_interfaces`) → compare with NetBox interfaces → render table.
+   - `BaseInterfaceTableView`: acquire the interfaces snapshot → assess it (`assessment.interfaces.assess_interfaces`) → compare with NetBox interfaces → render table.
    - `BaseCableTableView` — fetch links → match remote devices → check cable status → render table.
    - `BaseIPAddressTableView` — acquire the IP snapshot → assess it for the user (`assess_snapshot`) → render table.
    - `BaseVLANTableView` — acquire the VLAN snapshot → compare with NetBox VLANs → auto-select groups → render table.
@@ -78,7 +78,7 @@ class SyncSomeResourceView(
 
 ## Key Mixins Used by Sync Views
 - **`LibreNMSAPIMixin`** — lazy-creates `LibreNMSAPI` instance via `self.librenms_api` property. Also provides `get_server_info()` for template context.
-- **`CacheMixin`** — generates consistent cache keys via `get_cache_key(obj, data_type, server_key)`. Also provides `get_vlan_overrides_key(obj, server_key)` for VLAN group override persistence.
+- **`CacheMixin`**: generates consistent cache keys via `get_cache_key(obj, data_type, server_key)`. Also provides `get_vlan_overrides_key(obj, server_key)` for VLAN group override persistence.
 - **`VlanAssignmentMixin`** — VLAN group scope resolution: Rack → Location → Site → SiteGroup → Region → Global. Used by interface and VLAN sync for auto-selecting the most-specific VLAN group and building lookup maps.
 
 ## JavaScript (`librenms_sync.js`)
