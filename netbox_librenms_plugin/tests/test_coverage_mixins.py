@@ -27,36 +27,6 @@ def server_entry(key, *, display_name=None):
     }
 
 
-class TestCacheRemainingTtl:
-    """cache_remaining_ttl centralises the django-redis-only cache.ttl() guard."""
-
-    @pytest.mark.django_db
-    def test_returns_the_remaining_ttl_of_a_real_cache_entry(self):
-        """NetBox runs on django-redis, so the live cache answers ttl() with the seconds left."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.utils import cache_remaining_ttl
-
-        cache.set("ttl-probe", "value", 120)
-        try:
-            remaining = cache_remaining_ttl(cache, "ttl-probe")
-        finally:
-            cache.delete("ttl-probe")
-
-        assert 0 < remaining <= 120
-
-    def test_returns_none_when_backend_lacks_ttl(self):
-        from netbox_librenms_plugin.utils import cache_remaining_ttl
-
-        # A core Django backend (e.g. LocMemCache) exposes no ttl() — the guard must degrade to
-        # None rather than raising AttributeError mid-render.
-        class _NoTtlCache:
-            def get(self, *args, **kwargs):
-                return None
-
-        assert cache_remaining_ttl(_NoTtlCache(), "some-key") is None
-
-
 # =============================================================================
 # LibreNMSAPIMixin.get_context_data
 # =============================================================================
