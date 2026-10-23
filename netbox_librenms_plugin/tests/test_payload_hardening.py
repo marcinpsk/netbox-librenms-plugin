@@ -88,11 +88,13 @@ class TestVlanCachedPayloadShape:
 @pytest.mark.django_db
 class TestInterfaceCachedPayloadShape:
     @pytest.mark.parametrize("bad_ports", [None, [{"port_id": 1}, "scalar"], "garbage-string"])
-    def test_malformed_cached_ports_render_empty_without_error(self, bad_ports):
+    def test_a_malformed_snapshot_payload_reads_as_no_snapshot(self, bad_ports):
         from django.contrib.auth.models import AnonymousUser
         from django.core.cache import cache
         from django.test import RequestFactory
 
+        from netbox_librenms_plugin import source_cache
+        from netbox_librenms_plugin.acquisition.registry import Resource
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         device = make_device(f"iface-cache-readguard-{type(bad_ports).__name__}")
@@ -102,11 +104,9 @@ class TestInterfaceCachedPayloadShape:
         request.user = AnonymousUser()
         view.setup(request)
         server_key = view.librenms_api.server_key
-        ports_key = view.get_cache_key(device, "ports", server_key)
-        cache.set(ports_key, {"ports": bad_ports}, timeout=300)
+        cache.set(source_cache.snapshot_key(device, Resource.INTERFACES, server_key), {"ports": bad_ports}, timeout=300)
 
         context = view.get_context_data(request, device, "ifName", server_key=server_key)
 
-        assert context["table"] is not None
-        assert len(list(context["table"].rows)) == 0
+        assert context["table"] is None
         assert context["netbox_only_interfaces"] == []

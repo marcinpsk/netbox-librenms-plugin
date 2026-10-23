@@ -13,7 +13,6 @@ from urllib.parse import parse_qs, urlencode
 
 import pytest
 from dcim.models import Interface
-from django.core.cache import cache
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
@@ -21,7 +20,6 @@ from extras.models import customfields
 from virtualization.models import VMInterface
 
 from netbox_librenms_plugin.models import InterfaceTypeMapping
-from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_filters import normalize_filter_text
 from netbox_librenms_plugin.tests.conftest import (
     bind_librenms_server,
@@ -34,7 +32,7 @@ from netbox_librenms_plugin.tests.conftest import (
     map_device_to_librenms,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
-from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+from netbox_librenms_plugin.tests.source_snapshot_helpers import port_pair, port_vlans, seed_interfaces_snapshot
 
 SERVER_KEY = "default"
 LIBRENMS_ID = 4242
@@ -63,10 +61,8 @@ def _port(port_id, name, **fields):
     return port
 
 
-def _seed(owner, ports, relationships=None):
-    cache_owner = get_librenms_sync_device(owner, server_key=SERVER_KEY) or owner
-    payload = {"ports": ports, "port_stack_relationships": relationships or {}}
-    cache.set(SyncInterfacesView().get_cache_key(cache_owner, "ports", SERVER_KEY), payload, timeout=300)
+def _seed(owner, ports, port_stack=()):
+    seed_interfaces_snapshot(owner, ports, port_stack, server_key=SERVER_KEY)
 
 
 def _bind(interface, port_id):
@@ -153,8 +149,7 @@ def _mixed_device(tag):
             ifSpeed=10_000_000_000,
             ifPhysAddress="aabbcc000003",
             ifAdminStatus="down",
-            untagged_vlan=100,
-            tagged_vlans=[200, 300, 400, 500],
+            **port_vlans("tagged", 100, [200, 300, 400, 500]),
         ),
         _port(1004, "Vlan10", ifType="propVirtual", ifSpeed=None),
         _port(1005, "po1", ifType="ieee8023adLag"),
@@ -162,8 +157,7 @@ def _mixed_device(tag):
         _port(1007, "eth9"),
         _port(1008, "loopback0", ifType="softwareLoopback"),
     ]
-    relationships = {"lag_members": {1006: 1005}, "sub_interfaces": {}, "bridge_members": {}}
-    _seed(device, ports, relationships)
+    _seed(device, ports, [port_pair(1006, 1005)])
     return device
 
 

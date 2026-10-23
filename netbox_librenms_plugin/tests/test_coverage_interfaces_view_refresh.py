@@ -47,11 +47,11 @@ def _refresh(view_class, device, server, settings, post_data=None):
     return response, view, request
 
 
-def _cached_ports(view, device):
-    """Read back the ports snapshot the refresh cached for *device*."""
-    from django.core.cache import cache
+def _stored_rows(device):
+    """Return the stored interfaces snapshot of *device*, assessed as the tab reads it, or None."""
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import interface_rows
 
-    return cache.get(view.get_cache_key(device, "ports", SERVER_KEY))
+    return interface_rows(device, server_key=SERVER_KEY)
 
 
 def _tab_state(device):
@@ -142,16 +142,21 @@ class TestInterfaceRefreshFailClosedExits:
         assert _tab_state(device)["state"] == "refresh_failed"
 
     def test_ports_fetch_failure_surfaces_the_librenms_error(self, librenms_server, settings):
-        """A 404 on the ports endpoint renders the tab with the client's error text."""
+        """A 404 on the ports endpoint renders the tab with the error that names the failed request."""
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         device = _map_device(make_device("iface-ports-404"), 11)
+        librenms_server.register(
+            "/api/v0/devices/11/ports", {"status": "error", "message": "Device does not exist"}, status=404
+        )
 
         response, _view, request = _refresh(DeviceInterfaceTableView, device, librenms_server, settings)
 
         assert response.status_code == 200
         assert "Location" not in response
-        assert message_texts(request, "error") == ["Device not found in LibreNMS"]
+        assert message_texts(request, "error") == [
+            "Failed to fetch interfaces from LibreNMS: devices/11/ports was not obtained (Device does not exist)"
+        ]
         assert _tab_state(device)["state"] == "refresh_failed"
 
     def test_malformed_ports_payload_fails_closed(self, librenms_server, settings):
@@ -161,12 +166,15 @@ class TestInterfaceRefreshFailClosedExits:
         device = _map_device(make_device("iface-ports-malformed"), 12)
         librenms_server.register("/api/v0/devices/12/ports", {"status": "ok", "ports": "not-a-list"})
 
-        response, view, request = _refresh(DeviceInterfaceTableView, device, librenms_server, settings)
+        response, _view, request = _refresh(DeviceInterfaceTableView, device, librenms_server, settings)
 
         assert response.status_code == 200
         assert "Location" not in response
-        assert message_texts(request, "error") == ["Unexpected response from LibreNMS (malformed ports payload)."]
-        assert _cached_ports(view, device) is None
+        assert message_texts(request, "error") == [
+            "Failed to fetch interfaces from LibreNMS: devices/12/ports was not obtained "
+            "(LibreNMS returned a malformed response.)"
+        ]
+        assert _stored_rows(device) is None
 
 
 @pytest.mark.django_db
@@ -202,26 +210,25 @@ class TestInterfaceRefreshFailureThroughTheUrl:
 
 @pytest.mark.django_db
 class TestInterfaceRefreshOobMerge:
-    def test_corrupt_oob_id_warns_and_tags_the_snapshot_incomplete(self, librenms_server, settings):
+    def test_corrupt_oob_id_warns_and_marks_the_snapshot_incomplete(self, librenms_server, settings):
         """A linked OOB controller with an uncoercible id must not be silently skipped."""
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         device = _map_device(make_device("iface-oob-corrupt"), 21, oob={"id": "not-an-id", "type": "idrac"})
         librenms_server.ports_response(device_id=21, ports=[{"port_id": 1, "ifName": "eth0"}])
 
-        _response, view, request = _refresh(DeviceInterfaceTableView, device, librenms_server, settings)
+        _response, _view, request = _refresh(DeviceInterfaceTableView, device, librenms_server, settings)
 
         assert message_texts(request, "warning") == [
             "Interfaces refreshed, but OOB controller ports fetch failed; "
             "showing host interfaces only. See server logs for details."
         ]
         assert message_texts(request, "success") == ["Host interface data refreshed successfully."]
-        snapshot = _cached_ports(view, device)
-        assert snapshot["oob_incomplete"] is True
+        assert _stored_rows(device)["oob_incomplete"] is True
         # The corrupt id must never be turned into a request path. The refresh also reads the
-        # device OS and the port stack, neither of which can be gated on the ports payload.
+        # port stack and the device OS, neither of which can be gated on the ports payload.
         paths = [r["path"] for r in librenms_server.requests]
-        assert paths == ["/api/v0/devices/21/ports", "/api/v0/devices/21", "/api/v0/devices/21/port_stack"]
+        assert paths == ["/api/v0/devices/21/ports", "/api/v0/devices/21/port_stack", "/api/v0/devices/21"]
         assert not any("not-an-id" in path for path in paths)
 
     def test_oob_ports_merge_and_only_real_shared_macs_are_flagged(self, librenms_server, settings):
@@ -251,35 +258,35 @@ class TestInterfaceRefreshOobMerge:
             ],
         )
 
-        _response, view, request = _refresh(DeviceInterfaceTableView, device, librenms_server, settings)
+        _response, _view, request = _refresh(DeviceInterfaceTableView, device, librenms_server, settings)
 
         assert message_texts(request, "success") == ["Interface data refreshed successfully."]
-        snapshot = _cached_ports(view, device)
-        assert "oob_incomplete" not in snapshot
-        by_port_id = {port["port_id"]: port for port in snapshot["ports"]}
+        rows = _stored_rows(device)
+        assert rows["oob_incomplete"] is False
+        by_port_id = {port["port_id"]: port for port in rows["ports"]}
         assert [by_port_id[pid]["_source"] for pid in (1, 2, 3, 4)] == ["main"] * 4
         assert [by_port_id[pid]["_source"] for pid in (91, 92, 93)] == ["oob"] * 3
         conflicts = {pid for pid, port in by_port_id.items() if port.get("_dedup_conflict")}
         assert conflicts == {1, 91}
 
     def test_oob_ports_fetch_failure_warns_and_keeps_the_host_snapshot(self, librenms_server, settings):
-        """A failed OOB ports fetch keeps host rows, warns, and tags the snapshot oob_incomplete."""
+        """A failed OOB ports fetch keeps host rows, warns, and the snapshot reads as oob_incomplete."""
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         device = _map_device(make_device("iface-oob-fetch-fail"), 41, oob={"id": 42, "type": "idrac"})
         librenms_server.ports_response(device_id=41, ports=[{"port_id": 1, "ifName": "eth0"}])
         # /api/v0/devices/42/ports stays unregistered, so the loopback answers 404.
 
-        _response, view, request = _refresh(DeviceInterfaceTableView, device, librenms_server, settings)
+        _response, _view, request = _refresh(DeviceInterfaceTableView, device, librenms_server, settings)
 
         assert message_texts(request, "warning") == [
             "Interfaces refreshed, but OOB controller ports fetch failed; "
             "showing host interfaces only. See server logs for details."
         ]
         assert message_texts(request, "success") == ["Host interface data refreshed successfully."]
-        snapshot = _cached_ports(view, device)
-        assert snapshot["oob_incomplete"] is True
-        assert [port["port_id"] for port in snapshot["ports"]] == [1]
+        rows = _stored_rows(device)
+        assert rows["oob_incomplete"] is True
+        assert [port["port_id"] for port in rows["ports"]] == [1]
         assert "/api/v0/devices/42/ports" in [r["path"] for r in librenms_server.requests]
 
 

@@ -44,6 +44,7 @@ from netbox_librenms_plugin.tests.lock_conflict_helpers import (
     second_connection,
     wait_for_lock_wait,
 )
+from netbox_librenms_plugin.tests.source_snapshot_helpers import port_pair
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms, messages_on
 from netbox_librenms_plugin.views.sync import interfaces as interfaces_view
 from netbox_librenms_plugin.views.sync.interfaces import (
@@ -254,7 +255,7 @@ def _seed_relationship_sync(device, base, mac):
         sync_port(base + 1, "eth1", mac=mac),
         sync_port(base + 100, "Po1", if_type="ieee8023adLag"),
     ]
-    seed_ports(device, ports, lag_members={base + 1: base + 100})
+    seed_ports(device, ports, [port_pair(base + 1, base + 100)])
     return aggregate, [base + 7, base + 11, base + 1]
 
 
