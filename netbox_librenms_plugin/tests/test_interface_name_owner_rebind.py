@@ -7,7 +7,6 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from dcim.models import Cable, Device, Interface
 from django.contrib.messages import get_messages
-from django.core.cache import cache
 from django.urls import reverse
 from virtualization.models import VMInterface
 
@@ -27,14 +26,16 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_vm,
 )
+from netbox_librenms_plugin.tests.interface_sync_post_helpers import seed_ports
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.source_snapshot_helpers import Failed
 from netbox_librenms_plugin.utils import reported_name_owners, synced_interface_names
-from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
 
 SERVER_KEY = "default"
 HOST_PORT = 9001
 STALE_PORT = 8679
+OOB_ID = 72
 
 
 def _port(port_id, name, *, source=None):
@@ -54,11 +55,11 @@ def _port(port_id, name, *, source=None):
     return port
 
 
-def _seed(owner, ports, *, oob_incomplete=False):
-    payload = {"ports": ports, "port_stack_relationships": {}}
-    if oob_incomplete:
-        payload["oob_incomplete"] = True
-    cache.set(SyncInterfacesView().get_cache_key(owner, "ports", SERVER_KEY), payload, timeout=300)
+def _seed(owner, ports, *, oob_ports=None):
+    """Store a snapshot of the host *ports*; *oob_ports* (rows or Failed) first links an OOB controller."""
+    if oob_ports is not None:
+        seed_mapping(owner, SERVER_KEY, oob=OOB_ID)
+    seed_ports(owner, ports, oob_ports=oob_ports)
 
 
 def _bound_interface(owner, name, port_id):
@@ -212,7 +213,7 @@ class TestTheTabReportsTheHolder:
         configure_default_librenms_server(settings)
         device = _device("name-owner-live-tab")
         _bound_interface(device, "eth0", STALE_PORT)
-        _seed(device, [_port(HOST_PORT, "eth0"), _port(STALE_PORT, "eth0", source="oob")])
+        _seed(device, [_port(HOST_PORT, "eth0")], oob_ports=[_port(STALE_PORT, "eth0")])
         client.force_login(make_superuser("name-owner-live-tab-user"))
 
         row = _row_html(device, client, HOST_PORT)
@@ -225,7 +226,7 @@ class TestTheTabReportsTheHolder:
         configure_default_librenms_server(settings)
         device = _device("name-owner-unknown-tab")
         _bound_interface(device, "eth0", STALE_PORT)
-        _seed(device, [_port(HOST_PORT, "eth0")], oob_incomplete=True)
+        _seed(device, [_port(HOST_PORT, "eth0")], oob_ports=Failed())
         client.force_login(make_superuser("name-owner-unknown-tab-user"))
 
         row = _row_html(device, client, HOST_PORT)
@@ -309,18 +310,18 @@ class TestRebind:
         )
 
     @pytest.mark.parametrize(
-        ("ports", "oob_incomplete"),
+        ("ports", "oob_ports"),
         [
-            pytest.param([_port(HOST_PORT, "eth0"), _port(STALE_PORT, "eth0", source="oob")], False, id="live"),
-            pytest.param([_port(HOST_PORT, "eth0")], True, id="unknown"),
-            pytest.param([_port(HOST_PORT + 1, "eth1")], False, id="row-not-in-snapshot"),
+            pytest.param([_port(HOST_PORT, "eth0")], [_port(STALE_PORT, "eth0")], id="live"),
+            pytest.param([_port(HOST_PORT, "eth0")], Failed(), id="unknown"),
+            pytest.param([_port(HOST_PORT + 1, "eth1")], None, id="row-not-in-snapshot"),
         ],
     )
-    def test_rebind_is_refused_unless_the_holder_is_stale(self, client, settings, ports, oob_incomplete):
+    def test_rebind_is_refused_unless_the_holder_is_stale(self, client, settings, ports, oob_ports):
         configure_default_librenms_server(settings)
         device = _device("name-owner-rebind-refused")
         interface = _bound_interface(device, "eth0", STALE_PORT)
-        _seed(device, ports, oob_incomplete=oob_incomplete)
+        _seed(device, ports, oob_ports=oob_ports)
         client.force_login(make_superuser("name-owner-rebind-refused-user"))
 
         response = _rebind(client, device, HOST_PORT)
@@ -392,14 +393,14 @@ class TestRebind:
         assert _binding(vm_interface) == HOST_PORT
         assert len(_messages(response, "danger")) == 1
 
-    @pytest.mark.parametrize("holder_row", [None, _port(STALE_PORT, "eth0", source="oob")], ids=["stale", "live"])
-    def test_a_holder_outside_the_view_scope_is_refused_without_naming_its_port(self, client, settings, holder_row):
+    @pytest.mark.parametrize("oob_ports", [None, [_port(STALE_PORT, "eth0")]], ids=["stale", "live"])
+    def test_a_holder_outside_the_view_scope_is_refused_without_naming_its_port(self, client, settings, oob_ports):
         from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
         configure_default_librenms_server(settings)
         device = _device("name-owner-rebind-hidden")
         interface = _bound_interface(device, "eth0", STALE_PORT)
-        _seed(device, [_port(HOST_PORT, "eth0"), *([holder_row] if holder_row else [])])
+        _seed(device, [_port(HOST_PORT, "eth0")], oob_ports=oob_ports)
         user = make_user_with_perms("name-owner-rebind-hidden-user", [("view", Device), ("change", Interface)])
         user = grant(user, "view", Interface, constraints={"name": "not-eth0"})
         client.force_login(user)
@@ -477,7 +478,7 @@ def test_a_live_holder_releases_the_name_after_its_own_row_syncs(client, setting
     configure_default_librenms_server(settings)
     device = _device("name-owner-live-two-step")
     legacy = _bound_interface(device, "eth0", STALE_PORT)
-    _seed(device, [_port(HOST_PORT, "eth0"), _port(STALE_PORT, "eth0", source="oob")])
+    _seed(device, [_port(HOST_PORT, "eth0")], oob_ports=[_port(STALE_PORT, "eth0")])
     client.force_login(make_superuser("name-owner-live-two-step-user"))
 
     blocked = _sync(client, device, HOST_PORT)

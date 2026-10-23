@@ -26,6 +26,7 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import SERVER_KEY, seed_ports, sync_port
+from netbox_librenms_plugin.tests.source_snapshot_helpers import port_pair
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 from netbox_librenms_plugin.transactions import row_changed
 from netbox_librenms_plugin.views.sync import interfaces as interfaces_view
@@ -91,7 +92,7 @@ def _lag_scenario(tag):
     device = make_device(tag)
     member = _bound(device, "eth1", 1)
     aggregate = _bound(device, "Po1", 100)
-    seed_ports(device, [sync_port(1, "eth1"), sync_port(100, "Po1", if_type="ieee8023adLag")], lag_members={1: 100})
+    seed_ports(device, [sync_port(1, "eth1"), sync_port(100, "Po1", if_type="ieee8023adLag")], [port_pair(1, 100)])
     return device, member, aggregate
 
 
@@ -161,9 +162,11 @@ def test_a_parent_or_bridge_link_that_moves_the_source_out_of_the_change_scope_s
     owner = make_device(tag) if owner_model is Device else make_vm(tag)
     related_fields = {"type": "bridge"} if relation == "bridge" and owner_model is Device else {}
     source = _bound(owner, "eth1.100", 11)
-    related = _bound(owner, "eth1", 10, **related_fields)
-    edges = {"sub_interfaces": {11: 10}} if relation == "parent" else {"bridge_members": {11: 10}}
-    seed_ports(owner, [sync_port(11, "eth1.100"), sync_port(10, "eth1")], **edges)
+    related_name = "eth1" if relation == "parent" else "br1"
+    related = _bound(owner, related_name, 10, **related_fields)
+    # The child name gives the parent edge; the stored linux rule names br1 a bridge.
+    ports = [sync_port(11, "eth1.100"), sync_port(10, related_name)]
+    seed_ports(owner, ports, [port_pair(11, 10)], device={"os": "linux"})
     client.force_login(_user(f"{tag}-user", owner_model, interface_model, change={f"{relation}__isnull": True}))
 
     response = _link(client, owner, relation, 11, 10)

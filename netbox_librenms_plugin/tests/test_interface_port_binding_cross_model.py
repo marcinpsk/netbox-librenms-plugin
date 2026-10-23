@@ -3,7 +3,6 @@
 import pytest
 from dcim.models import Interface
 from django.contrib.messages import get_messages
-from django.core.cache import cache
 from django.urls import reverse
 from virtualization.models import VMInterface
 
@@ -27,7 +26,8 @@ from netbox_librenms_plugin.tests.mapping_fixtures import (
     seed_mapping,
     stored_mapping_for_test,
 )
-from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+from netbox_librenms_plugin.tests.interface_sync_post_helpers import seed_ports
+from netbox_librenms_plugin.tests.source_snapshot_helpers import interface_rows, port_pair
 
 
 SERVER_KEY = "default"
@@ -77,11 +77,7 @@ def _vm_interface(name, port_id):
 
 
 def _sync(client, owner, object_type, port_id):
-    cache.set(
-        SyncInterfacesView().get_cache_key(owner, "ports", SERVER_KEY),
-        {"ports": [_port(port_id, "eth0")], "port_stack_relationships": {}},
-        timeout=300,
-    )
+    seed_ports(owner, [_port(port_id, "eth0")])
     return client.post(
         reverse(
             "plugins:netbox_librenms_plugin:sync_selected_interfaces",
@@ -365,11 +361,7 @@ def test_a_persistent_foreign_binding_skips_only_its_row(client, settings, objec
         owner = make_vm("bulk-conflict-owner", make_cluster("bulk-conflict-cluster"))
         model, owner_filter = VMInterface, {"virtual_machine": owner}
     client.force_login(make_superuser("bulk-conflict-user"))
-    cache.set(
-        SyncInterfacesView().get_cache_key(owner, "ports", SERVER_KEY),
-        {"ports": [_port(PORT + 1, "clean-port"), _port(PORT, "conflicting-port")], "port_stack_relationships": {}},
-        timeout=300,
-    )
+    seed_ports(owner, [_port(PORT + 1, "clean-port"), _port(PORT, "conflicting-port")])
     response = client.post(
         reverse(
             "plugins:netbox_librenms_plugin:sync_selected_interfaces",
@@ -404,21 +396,21 @@ def test_a_foreign_bound_related_row_cannot_use_a_local_name_fallback(client, se
         else _vm_interface("related-foreign-holder", PORT)
     )
     owner = make_device("related-conflict-owner", librenms_cf={SERVER_KEY: {"id": 71}})
-    member = make_interface(owner, "eth0", iface_type="1000base-t")
-    related = make_interface(owner, "Po1", iface_type="other")
+    # Each relation comes from the raw facts that the assessment classifies as that relation.
+    member_name, related_name, member_type, related_type, device_record = {
+        "lag": ("eth0", "Po1", "ethernetCsmacd", "ieee8023adLag", None),
+        "parent": ("Po1.5", "Po1", "ethernetCsmacd", "ethernetCsmacd", None),
+        "bridge": ("eth0", "br0", "ethernetCsmacd", "bridge", {"os": "linux"}),
+    }[relation]
+    member = make_interface(owner, member_name, iface_type="1000base-t")
+    related = make_interface(owner, related_name, iface_type="other")
     related_before = Interface.objects.filter(pk=related.pk).values().get()
     client.force_login(make_superuser("related-conflict-user"))
+    member_port = {**_port(PORT + 1, member.name), "ifType": member_type}
+    related_port = {**_port(PORT, related.name), "ifType": related_type}
+    seed_ports(owner, [member_port, related_port], [port_pair(PORT + 1, PORT)], device=device_record)
     relationship_key = {"lag": "lag_members", "parent": "sub_interfaces", "bridge": "bridge_members"}[relation]
-    related_port = _port(PORT, related.name)
-    related_port["ifType"] = {"lag": "ieee8023adLag", "parent": "ethernetCsmacd", "bridge": "bridge"}[relation]
-    cache.set(
-        SyncInterfacesView().get_cache_key(owner, "ports", SERVER_KEY),
-        {
-            "ports": [_port(PORT + 1, member.name), related_port],
-            "port_stack_relationships": {relationship_key: {PORT + 1: PORT}},
-        },
-        timeout=300,
-    )
+    assert interface_rows(owner)["port_stack_relationships"][relationship_key] == {PORT + 1: PORT}
     response = client.post(
         reverse(
             "plugins:netbox_librenms_plugin:sync_selected_interfaces",
@@ -436,4 +428,4 @@ def test_a_foreign_bound_related_row_cannot_use_a_local_name_fallback(client, se
     assert getattr(member, f"{relation}_id") is None
     assert Interface.objects.filter(pk=related.pk).values().get() == related_before
     assert _binding(holder) == PORT
-    assert any("Po1" in text and "already assigned" in text for text in _warnings(response))
+    assert any(related.name in text and "already assigned" in text for text in _warnings(response))

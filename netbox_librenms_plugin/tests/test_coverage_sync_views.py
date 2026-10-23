@@ -21,10 +21,14 @@ from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
-from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot, seed_source_snapshot
+from netbox_librenms_plugin.tests.source_snapshot_helpers import (
+    ip_address_row,
+    seed_interfaces_snapshot,
+    seed_ip_snapshot,
+    seed_source_snapshot,
+)
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts
 from netbox_librenms_plugin.views.sync.cables import SyncCablesView
-from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
 
 
@@ -150,22 +154,17 @@ class TestCableSynchronization:
 class TestInterfaceSynchronization:
     def test_cached_port_creates_a_real_interface(self, client, live_librenms):
         device = make_device("interface-create", librenms_cf={SERVER_KEY: {"id": 71}})
-        payload = {
-            "ports": [
-                {
-                    "port_id": 8101,
-                    "ifName": "Ethernet1/1",
-                    "ifDescr": "Server uplink",
-                    "ifType": "ethernetCsmacd",
-                    "ifAdminStatus": "up",
-                    "ifSpeed": 1_000_000_000,
-                    "ifMtu": 1500,
-                    "ifPhysAddress": "",
-                }
-            ],
-            "port_stack_relationships": {},
+        port = {
+            "port_id": 8101,
+            "ifName": "Ethernet1/1",
+            "ifDescr": "Server uplink",
+            "ifType": "ethernetCsmacd",
+            "ifAdminStatus": "up",
+            "ifSpeed": 1_000_000_000,
+            "ifMtu": 1500,
+            "ifPhysAddress": "",
         }
-        _seed_snapshot(SyncInterfacesView(), device, "ports", payload)
+        seed_interfaces_snapshot(device, [port], server_key=SERVER_KEY)
         _login(client, "interface-create-user")
 
         response = client.post(
@@ -189,8 +188,7 @@ class TestInterfaceSynchronization:
 
     def test_empty_selection_does_not_change_interfaces(self, client, live_librenms):
         device = make_device("interface-no-selection", librenms_cf={SERVER_KEY: {"id": 72}})
-        payload = {"ports": [], "port_stack_relationships": {}}
-        _seed_snapshot(SyncInterfacesView(), device, "ports", payload)
+        seed_interfaces_snapshot(device, [], server_key=SERVER_KEY)
         _login(client, "interface-no-selection-user")
 
         response = client.post(

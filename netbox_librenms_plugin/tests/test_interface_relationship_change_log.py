@@ -20,6 +20,7 @@ from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
     seed_ports,
     sync_port,
 )
+from netbox_librenms_plugin.tests.source_snapshot_helpers import port_pair
 from netbox_librenms_plugin.tests.view_test_helpers import messages_on
 
 
@@ -39,9 +40,9 @@ def _lag_link_and_aggregate_type(device):
     """The member gets its LAG; the aggregate is promoted to type ``lag``."""
     member = _synced_interface(device, "eth1", 1)
     aggregate = _synced_interface(device, "Po1", 2)
-    ports = [sync_port(1, "eth1"), sync_port(2, "Po1")]
+    ports = [sync_port(1, "eth1"), sync_port(2, "Po1", if_type="ieee8023adLag")]
     changes = {member.pk: {"lag": (None, aggregate.pk)}, aggregate.pk: {"type": ("other", "lag")}}
-    return ports, {"lag_members": {1: 2}}, changes
+    return ports, {"port_stack": [port_pair(1, 2)]}, changes
 
 
 def _parent_link_and_child_type(device):
@@ -50,7 +51,7 @@ def _parent_link_and_child_type(device):
     parent = _synced_interface(device, "eth1", 10)
     ports = [sync_port(11, "eth1.100"), sync_port(10, "eth1")]
     changes = {child.pk: {"parent": (None, parent.pk), "type": ("other", "virtual")}}
-    return ports, {"sub_interfaces": {11: 10}}, changes
+    return ports, {"port_stack": [port_pair(11, 10)]}, changes
 
 
 def _bridge_link(device):
@@ -58,7 +59,12 @@ def _bridge_link(device):
     member = _synced_interface(device, "eth2", 20)
     bridge = _synced_interface(device, "br0", 21, iface_type="bridge")
     ports = [sync_port(20, "eth2"), sync_port(21, "br0", if_type="bridge")]
-    return ports, {"bridge_members": {20: 21}}, {member.pk: {"bridge": (None, bridge.pk)}}
+    # The stored linux rule names br0 a bridge.
+    return (
+        ports,
+        {"port_stack": [port_pair(20, 21)], "device": {"os": "linux"}},
+        {member.pk: {"bridge": (None, bridge.pk)}},
+    )
 
 
 @pytest.mark.django_db
@@ -69,8 +75,8 @@ def _bridge_link(device):
 )
 def test_a_relationship_write_records_the_row_before_and_after_and_moves_last_updated(client, edge):
     device = make_device(f"relationship-change-log{edge.__name__}", librenms_cf={SERVER_KEY: {"id": 30}})
-    ports, relationships, changes = edge(device)
-    seed_ports(device, ports, **relationships)
+    ports, source_facts, changes = edge(device)
+    seed_ports(device, ports, **source_facts)
     last_updated = dict(Interface.objects.filter(pk__in=changes).values_list("pk", "last_updated"))
     client.force_login(make_superuser("relationship-change-log-user"))
 
