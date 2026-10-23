@@ -15,14 +15,15 @@ Covers:
 import json
 from copy import deepcopy
 
-from netbox_librenms_plugin.tests.cable_source_helpers import seed_cable_rows
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_cables_snapshot, link_row, port_row
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 import pytest
 from django.conf import settings
 from django.core.cache import cache as real_cache
 from django.test import RequestFactory, override_settings
 from netbox_librenms_plugin.server_mappings import resolve_device_port
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
 
 SERVER_KEY = "default"
 
@@ -89,7 +90,8 @@ def _cable_view_and_request(tag, body):
 def _post_with_links(view, request, device, links):
     """Warm the real links cache for *device*, run post() (with 'default' configured), clean up, return JSON."""
     key = view.get_cache_key(device, "links", SERVER_KEY)
-    seed_cable_rows(device, links, SERVER_KEY)
+    seed_mapping(device, SERVER_KEY, own=8)
+    seed_cables_snapshot(device, links, [], server_key=SERVER_KEY)
     try:
         with _server_settings(SERVER_KEY):
             response = view.post(request)
@@ -119,18 +121,23 @@ class TestVerifyUsesCurrentNetBoxState:
 
         local, lifaces = _cable_device("current-local", [("eth0", 100)])
         remote, rifaces = _cable_device("current-remote", [("eth1", 200)])
-        seed_cable_rows(
+        seed_mapping(local, SERVER_KEY, own=8)
+        seed_cables_snapshot(
             local,
             [
-                {
-                    "local_port": "eth0",
-                    "local_port_id": 100,
-                    "remote_port": "eth1",
-                    "remote_port_id": 200,
-                    "remote_device": remote.name,
-                }
+                link_row(
+                    100,
+                    "eth1",
+                    local_port="eth0",
+                    remote_hostname=remote.name,
+                    remote_device_id=None,
+                    remote_port_id=200,
+                    protocol=None,
+                    id=None,
+                )
             ],
-            SERVER_KEY,
+            [port_row(100, "eth0", device_id=8, if_descr=None)],
+            server_key=SERVER_KEY,
         )
         cable = Cable(a_terminations=[lifaces["eth0"]], b_terminations=[rifaces["eth1"]])
         cable.save()
@@ -152,7 +159,24 @@ class TestVerifyUsesCurrentNetBoxState:
 
         local, lifaces = _cable_device("current-local-replaced", [("eth0", 100)])
         old_id = lifaces["eth0"].pk
-        seed_cable_rows(local, [{"local_port": "eth0", "local_port_id": 100}], SERVER_KEY)
+        seed_mapping(local, SERVER_KEY, own=8)
+        seed_cables_snapshot(
+            local,
+            [
+                link_row(
+                    100,
+                    None,
+                    local_port="eth0",
+                    remote_hostname="",
+                    remote_device_id=None,
+                    remote_port_id=None,
+                    protocol=None,
+                    id=None,
+                )
+            ],
+            [port_row(100, "eth0", device_id=8, if_descr=None)],
+            server_key=SERVER_KEY,
+        )
         lifaces["eth0"].delete()
         replacement = Interface.objects.create(device=local, name="eth0", type="1000base-t")
         view, request = _cable_view_and_request(
@@ -189,7 +213,7 @@ class TestXSSEscaping:
                     "local_port_id": 100,
                     "remote_port": "eth1",
                     "remote_port_id": 200,
-                    "remote_device": "",
+                    "remote_hostname": "",
                     "remote_device_id": None,
                 }
             ],
@@ -217,7 +241,7 @@ class TestXSSEscaping:
                     "local_port_id": 100,
                     "remote_port": "eth1",
                     "remote_port_id": 200,
-                    "remote_device": xss_device,  # no NetBox device by this name → escaped as text
+                    "remote_hostname": xss_device,  # no NetBox device by this name → escaped as text
                     "remote_device_id": None,
                 }
             ],
@@ -261,7 +285,24 @@ class TestServerKeyGuard:
         device, _ = _cable_device("guard-valid", [("eth0", 100)])
         view, request = _cable_view_with_api("valid", {"device_id": device.pk, "row_id": "100", "server_key": "prod"})
         key = view.get_cache_key(device, "links", "prod")
-        seed_cable_rows(device, [{"local_port": "eth0", "local_port_id": 100, "remote_device": ""}], "prod")
+        seed_mapping(device, "prod", own=8)
+        seed_cables_snapshot(
+            device,
+            [
+                link_row(
+                    100,
+                    None,
+                    local_port="eth0",
+                    remote_hostname="",
+                    remote_device_id=None,
+                    remote_port_id=None,
+                    protocol=None,
+                    id=None,
+                )
+            ],
+            [port_row(100, "eth0", device_id=8, if_descr=None)],
+            server_key="prod",
+        )
         try:
             with _server_settings("prod"):
                 row = json.loads(view.post(request).content)["formatted_row"]
@@ -392,16 +433,24 @@ class TestVerifyDualNameFallback:
         # Seed the links cache exactly as the GET path would. local_port_id (555) matches no
         # interface librenms_id, so resolution must fall back to the name — and only the
         # alternate name matches.
-        link = {
-            "local_port": "Gi0/1",  # displayed name — does NOT match iface.name
-            "local_port_alt": "GigabitEthernet0/1",  # alternate field — matches iface.name
-            "local_port_id": 555,
-            "remote_device": "",
-            "remote_port": "",
-            "remote_port_id": None,
-            "remote_device_id": None,
-        }
-        seed_cable_rows(device, [link], "default")
+        seed_mapping(device, "default", own=8)
+        seed_cables_snapshot(
+            device,
+            [
+                link_row(
+                    555,
+                    "",
+                    local_port="Gi0/1",
+                    remote_hostname="",
+                    remote_device_id=None,
+                    remote_port_id=None,
+                    protocol=None,
+                    id=None,
+                )
+            ],
+            [port_row(555, "Gi0/1", device_id=8, if_descr="GigabitEthernet0/1")],
+            server_key="default",
+        )
 
         request = _make_request({"device_id": device.pk, "row_id": "555", "server_key": "default"})
         response = view.post(request)
@@ -420,17 +469,27 @@ class TestVerifyDualNameFallback:
         view = _make_view()
         # OOB row whose local interface name couldn't be resolved: local_port is None while
         # local_port_id is set (matches no NetBox interface → falls to the unmatched branch).
-        link = {
-            "local_port": None,
-            "local_port_alt": None,
-            "local_port_id": 7777,
-            "remote_device": "",
-            "remote_port": "",
-            "remote_port_id": None,
-            "remote_device_id": None,
-            "_source": "oob",
-        }
-        seed_cable_rows(device, [link], "default")
+        seed_mapping(device, "default", own=8)
+        seed_mapping(device, "default", oob=18)
+        seed_cables_snapshot(
+            device,
+            [],
+            [],
+            oob_links=[
+                link_row(
+                    7777,
+                    "",
+                    local_port=None,
+                    remote_hostname="",
+                    remote_device_id=None,
+                    remote_port_id=None,
+                    protocol=None,
+                    id=None,
+                )
+            ],
+            oob_ports=[port_row(7777, None, device_id=18, if_descr=None)],
+            server_key="default",
+        )
 
         request = _make_request({"device_id": device.pk, "row_id": "7777", "server_key": "default"})
         response = view.post(request)
@@ -533,16 +592,13 @@ class TestOOBRowsNeverActionable:
         Interface.objects.create(device=remote_dev, name="eth9", type="1000base-t")
 
         view = _make_view()
-        link = {
-            "local_port": "eth0",
-            "local_port_id": 700,
-            "remote_port": "eth9",
-            "remote_device": remote_dev.name,
-            "remote_port_id": None,
-            "remote_device_id": None,
-            "_source": source,
-        }
-        seed_cable_rows(local_dev, [link], "default")
+        seed_mapping(local_dev, "default", own=8)
+        links = [link_row(700, "eth9", local_port="eth0", remote_hostname=remote_dev.name)]
+        if source == "oob":
+            seed_mapping(local_dev, "default", oob=18)
+            seed_cables_snapshot(local_dev, oob_links=links, oob_ports=[port_row(700, "eth0", device_id=18)])
+        else:
+            seed_cables_snapshot(local_dev, links, [port_row(700, "eth0", device_id=8)])
 
         request = _make_request({"device_id": local_dev.pk, "row_id": "700", "server_key": "default"})
         payload = json.loads(view.post(request).content)
@@ -561,8 +617,27 @@ class TestOOBRowsNeverActionable:
         Interface.objects.create(device=local_dev, name="eth0", type="1000base-t")  # host iface, same name
 
         view = _make_view()
-        link = {"local_port": "eth0", "local_port_id": 700, "remote_device": "", "_source": "oob"}
-        seed_cable_rows(local_dev, [link], "default")
+        seed_mapping(local_dev, "default", own=8)
+        seed_mapping(local_dev, "default", oob=18)
+        seed_cables_snapshot(
+            local_dev,
+            [],
+            [],
+            oob_links=[
+                link_row(
+                    700,
+                    None,
+                    local_port="eth0",
+                    remote_hostname="",
+                    remote_device_id=None,
+                    remote_port_id=None,
+                    protocol=None,
+                    id=None,
+                )
+            ],
+            oob_ports=[port_row(700, "eth0", device_id=18, if_descr=None)],
+            server_key="default",
+        )
 
         request = _make_request({"device_id": local_dev.pk, "row_id": "700", "server_key": "default"})
         row = json.loads(view.post(request).content)["formatted_row"]
@@ -579,8 +654,24 @@ class TestSingleCableVerifyServerKeyRouting:
     def _seed(self, view, device, server_key):
 
         # A minimal host link keyed under *server_key*; local port matches the interface by name.
-        link = {"local_port": "eth0", "local_port_id": 700, "remote_device": "", "_source": "main"}
-        seed_cable_rows(device, [link], server_key)
+        seed_mapping(device, server_key, own=8)
+        seed_cables_snapshot(
+            device,
+            [
+                link_row(
+                    700,
+                    None,
+                    local_port="eth0",
+                    remote_hostname="",
+                    remote_device_id=None,
+                    remote_port_id=None,
+                    protocol=None,
+                    id=None,
+                )
+            ],
+            [port_row(700, "eth0", device_id=8, if_descr=None)],
+            server_key=server_key,
+        )
 
     def test_post_server_key_selects_that_servers_cache(self):
         from dcim.models import Interface

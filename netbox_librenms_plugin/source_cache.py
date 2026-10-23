@@ -6,7 +6,7 @@ from dcim.models import ConsoleServerPort, Device
 from django.core.cache import cache
 
 from netbox_librenms_plugin.acquisition.coordinator import SubjectNotMapped, acquire, oob_link, resource_owner
-from netbox_librenms_plugin.acquisition.registry import RESOURCE_SPECS, Resource
+from netbox_librenms_plugin.acquisition.registry import RESOURCE_SPECS
 from netbox_librenms_plugin.acquisition.resources import OOB_ACQUIRERS, blocked_scopes, is_ready
 from netbox_librenms_plugin.acquisition.snapshot import ObjectRef, SourceSnapshot
 from netbox_librenms_plugin.librenms_api import configured_cache_timeout
@@ -33,22 +33,28 @@ def snapshot_key(subject, resource, server_key):
     return _key(resource_owner(subject, resource, server_key), resource, server_key)
 
 
-def refresh(subject, resource, server_key, *, request=None):
+def can_view_serial_ports(user, owner):
+    """Return whether the actor can view a ConsoleServerPort on the source owner."""
+    return bool(
+        isinstance(owner, Device)
+        and user.has_perm("dcim.view_consoleserverport")
+        and ConsoleServerPort.objects.restrict(user, "view").filter(device=owner).exists()
+    )
+
+
+def refresh(request, subject, resource, server_key):
     """
     Acquire the resource's snapshot and store it; a refresh that stores nothing leaves no older snapshot.
 
     The caller runs discovery first, so the subject's mapping exists when one could be found.
 
     """
+    if request is None:
+        raise TypeError("A source refresh needs a request.")
     options = {}
-    if resource is Resource.CABLES:
+    if RESOURCE_SPECS[resource].serial_sensors:
         owner = resource_owner(subject, resource, server_key)
-        options["include_serial"] = bool(
-            request is not None
-            and isinstance(owner, Device)
-            and request.user.has_perm("dcim.view_consoleserverport")
-            and ConsoleServerPort.objects.restrict(request.user, "view").filter(device=owner).exists()
-        )
+        options["include_serial"] = can_view_serial_ports(request.user, owner)
     delete(subject, resource, server_key)
     try:
         snapshot = acquire(subject, server_key=server_key, resources=[resource], **options)
@@ -106,7 +112,8 @@ def _binding_holds(snapshot, resource, owner):
     """Return whether the snapshot was acquired for the owner's current mapping, its OOB link included."""
     source = snapshot.resources[resource]
     mapping = read_mapping(owner)
-    if source.owner != ObjectRef.of(owner) or mapping.own_id(snapshot.server_key) != source.host.librenms_id:
+    host_id = source.host.librenms_id if source.host is not None else None
+    if source.owner != ObjectRef.of(owner) or mapping.own_id(snapshot.server_key) != host_id:
         return False
     if resource not in OOB_ACQUIRERS:
         return True

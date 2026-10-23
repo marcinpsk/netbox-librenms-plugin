@@ -322,18 +322,6 @@ READ_ENDPOINTS = [
         id="get_inventory_filtered",
     ),
     pytest.param(
-        "/api/v0/devices/1/links",
-        lambda api: api.get_device_links(1),
-        {"status": "ok", "links": [{"id": 3}]},
-        {"status": "ok", "links": [{"id": 3}]},
-        {},
-        {
-            404: ("404",),
-            500: ("500",),
-        },
-        id="get_device_links",
-    ),
-    pytest.param(
         "/api/v0/devices",
         lambda api: api.list_devices(),
         {"status": "ok", "devices": [{"device_id": 1}]},
@@ -1255,27 +1243,6 @@ class TestGetDeviceInfoResponseFormats:
 
         assert success is True
         assert result == device
-
-
-class TestGetPortByIdErrors:
-    """get_port_by_id reads a real port response and handles a refused connection."""
-
-    def test_success_returns_port_response(self, settings, librenms_server):
-        """A port response reaches the caller unchanged."""
-        body = {"status": "ok", "ports": [{"port_id": 1}]}
-        librenms_server.register("/api/v0/ports/1", body, method="GET")
-
-        assert api_for(settings, librenms_server.url).get_port_by_id(1) == (True, body)
-
-    def test_request_exception_returns_false(self, settings, librenms_server):
-        """A refused connection returns a failed result."""
-        api = api_for(settings, librenms_server.url)
-        librenms_server.stop()
-
-        ok, msg = api.get_port_by_id(1)
-
-        assert ok is False
-        assert msg
 
 
 class TestGetDeviceInventoryErrors:

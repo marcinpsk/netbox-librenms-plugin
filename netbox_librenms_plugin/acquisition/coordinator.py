@@ -5,7 +5,7 @@ from uuid import uuid4
 from django.utils import timezone
 from virtualization.models import VirtualMachine
 
-from netbox_librenms_plugin.acquisition.registry import RESOURCE_SPECS, OwnerPolicy, Resource
+from netbox_librenms_plugin.acquisition.registry import RESOURCE_SPECS, OwnerPolicy
 from netbox_librenms_plugin.acquisition.resources import ACQUIRERS, OOB_ACQUIRERS
 from netbox_librenms_plugin.acquisition.snapshot import (
     MappingLink,
@@ -70,17 +70,12 @@ class _Fetch:
 class _Refused:
     """Record requests not made because a mapping has no usable device."""
 
-    def __init__(self, fetch, reason, outcome=Outcome.FAILED):
+    def __init__(self, fetch, reason):
         self._fetch = fetch
         self._reason = reason
-        self._outcome = outcome
 
     def __call__(self, endpoint):
-        return self._fetch.skip(endpoint, self._outcome, self._reason)
-
-    def skip(self, endpoint, outcome, reason):
-        """Keep the mapping's refusal for a request its resource would otherwise skip."""
-        return self(endpoint)
+        return self._fetch.skip(endpoint, Outcome.FAILED, self._reason)
 
 
 def oob_link(mapping, server_key):
@@ -130,23 +125,23 @@ def _resource_source(fetch, resource, owner, server_key, *, include_serial=False
     """Acquire one resource from the owner's own mapping and, when it links one, its OOB controller."""
     mapping = read_mapping(owner)
     librenms_id = mapping.own_id(server_key)
-    oob_only = resource is Resource.CABLES and librenms_id is None and mapping.has_oob(server_key)
+    spec = RESOURCE_SPECS[resource]
+    oob_only = spec.permits_oob_only and librenms_id is None and mapping.has_oob(server_key)
     if librenms_id is None and not oob_only:
         raise SubjectNotMapped(owner, server_key)
-    host_fetch = _Refused(fetch, "The owner has only an OOB mapping.", Outcome.NOT_APPLICABLE) if oob_only else fetch
-    options = {"include_serial": include_serial} if resource is Resource.CABLES else {}
-    # An absent host and an invalid OOB mapping must keep separate skipped responses.
-    host_request_id = "unmapped" if oob_only else librenms_id
-    parts = ACQUIRERS[resource](host_fetch, host_request_id, **options)
+    host = None
+    if librenms_id is not None:
+        parts = ACQUIRERS[resource](fetch, librenms_id, **spec.acquisition_options(include_serial=include_serial))
+        host = MappingSource(
+            role=MappingRole.OWN,
+            librenms_id=librenms_id,
+            state=MappingState.RESOLVED,
+            parts=_part_keys(parts),
+        )
     return ResourceSource(
         resource=resource,
         owner=ObjectRef.of(owner),
-        host=MappingSource(
-            role=MappingRole.OWN,
-            librenms_id=librenms_id,
-            state=MappingState.INVALID if oob_only else MappingState.RESOLVED,
-            parts=_part_keys(parts),
-        ),
+        host=host,
         oob=oob_source(fetch, resource, mapping, server_key),
     )
 

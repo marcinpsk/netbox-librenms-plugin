@@ -995,7 +995,6 @@ class TestTheCableFarEndCreate:
             map_device_to_librenms,
         )
         from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_cables_snapshot
-        from netbox_librenms_plugin.views.base.cables_view import read_cable_assessment
 
         server_key = configured_server_key()
         bind_librenms_server(settings, librenms_server, server_key=server_key)
@@ -1030,9 +1029,9 @@ class TestTheCableFarEndCreate:
             neighbour_ports={9: [port]},
             server_key=server_key,
         )
-        (row,) = read_cable_assessment(local_device, server_key)["links"]
+        row_id = "100"
         url = reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[local_device.pk])
-        data = {"expected_local_id": local_interface.pk, "row_id": row["row_id"], "server_key": server_key}
+        data = {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key}
         return url, data, local_device, remote_device, rule
 
     @pytest.mark.parametrize("ignored", [True, False], ids=["remote-ignored", "control"])

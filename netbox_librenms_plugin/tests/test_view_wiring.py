@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
-from netbox_librenms_plugin.tests.cable_source_helpers import seed_cable_rows
+from netbox_librenms_plugin.tests.source_snapshot_helpers import link_row, port_row, seed_cables_snapshot
 
 from netbox_librenms_plugin.tests.conftest import configured_server_key
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, stored_mapping_for_test
@@ -851,7 +851,13 @@ class TestSingleCableVerifyServerKey:
             api_server_key="production",
         )
         key = view.get_cache_key(device, "links", "production")
-        seed_cable_rows(device, [{"local_port": "eth0", "local_port_id": 42, "remote_device": ""}], "production")
+        seed_mapping(device, "production", own=401)
+        seed_cables_snapshot(
+            device,
+            [link_row(42, "", local_port="eth0")],
+            [port_row(42, "eth0", device_id=401)],
+            server_key="production",
+        )
         try:
             row = json.loads(view.post(request).content)["formatted_row"]
         finally:
@@ -874,7 +880,13 @@ class TestSingleCableVerifyServerKey:
             device, {"device_id": device.pk, "row_id": "42"}, api_server_key="fallback-server"
         )
         key = view.get_cache_key(device, "links", "fallback-server")
-        seed_cable_rows(device, [{"local_port": "eth0", "local_port_id": 42, "remote_device": ""}], "fallback-server")
+        seed_mapping(device, "fallback-server", own=401)
+        seed_cables_snapshot(
+            device,
+            [link_row(42, "", local_port="eth0")],
+            [port_row(42, "eth0", device_id=401)],
+            server_key="fallback-server",
+        )
         try:
             row = json.loads(view.post(request).content)["formatted_row"]
         finally:
