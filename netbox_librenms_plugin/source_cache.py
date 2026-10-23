@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 
+from dcim.models import ConsoleServerPort, Device
 from django.apps import apps
 from django.core.cache import cache
 from django.http import Http404
@@ -13,7 +14,7 @@ from netbox_librenms_plugin.acquisition.coordinator import (
     plan_acquisition,
     resource_owner,
 )
-from netbox_librenms_plugin.acquisition.registry import RESOURCE_SPECS
+from netbox_librenms_plugin.acquisition.registry import RESOURCE_SPECS, Resource
 from netbox_librenms_plugin.acquisition.resources import OOB_ACQUIRERS, blocked_scopes, is_ready
 from netbox_librenms_plugin.acquisition.snapshot import (
     MappingLink,
@@ -81,9 +82,16 @@ def refresh(request, plan):
     ((resource, owner),) = plan.owners
     if not type(owner).objects.restrict(request.user, "view").filter(pk=owner.pk).exists():
         raise Http404
+    options = {}
+    if resource is Resource.CABLES:
+        options["include_serial"] = bool(
+            isinstance(owner, Device)
+            and request.user.has_perm("dcim.view_consoleserverport")
+            and ConsoleServerPort.objects.restrict(request.user, "view").filter(device=owner).exists()
+        )
     delete_planned(plan)
     try:
-        snapshot = acquire(plan)
+        snapshot = acquire(plan, **options)
     except SubjectNotMapped:
         return Refresh(None, IDENTITY_CHANGED)
     blocked = blocked_scopes(snapshot, resource)
