@@ -46,7 +46,7 @@ class TestVlanCachedPayloadShape:
         ["garbage-string", [42], [{"vlan_vlan": 1}, "scalar"], [{"vlan_vlan": 1, "vlan_name": "v1"}], {"schema": 0}],
         ids=["string", "scalar-list", "mixed-list", "raw-vlan-list", "other-schema"],
     )
-    def test_malformed_cached_vlans_are_purged_and_render_empty(self, bad):
+    def test_malformed_cached_vlans_render_empty_and_are_left_for_a_refresh(self, bad):
         from django.contrib.auth.models import AnonymousUser
         from django.core.cache import cache
         from django.test import RequestFactory
@@ -62,7 +62,8 @@ class TestVlanCachedPayloadShape:
         context = view.get_vlan_context(request, device, server_key=server_key)
 
         assert context["vlan_table"] is None
-        assert cache.get(vlans_key) is None
+        # A read never deletes: a concurrent refresh can store a new snapshot under the same key.
+        assert cache.get(vlans_key) == bad
 
     def test_empty_cached_vlans_render_an_empty_table(self):
         from django.contrib.auth.models import AnonymousUser

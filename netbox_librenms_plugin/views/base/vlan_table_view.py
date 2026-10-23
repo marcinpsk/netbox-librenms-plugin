@@ -3,7 +3,6 @@ from django.utils import timezone
 from django.views import View
 
 from netbox_librenms_plugin import source_cache
-from netbox_librenms_plugin.acquisition.coordinator import acquire
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.constants import LIBRENMS_VLAN_STATE_ACTIVE
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
@@ -78,19 +77,17 @@ class BaseVLANTableView(
         # Discovery may find the LibreNMS device by IP or hostname and store the mapping; acquisition
         # then reads that mapping and never writes.
         self.librenms_id, lookup_error = self.resolve_librenms_id(obj)
-        error_message = None
         if self.librenms_id is None:
+            # A failed refresh on a previously-synced device must not leave a stale VLAN table to act on.
+            source_cache.delete(obj, Resource.VLANS, server_key)
             error_message = (
                 self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS."
             )
         else:
-            snapshot = acquire(obj, server_key=server_key, resources=[Resource.VLANS])
-            if not source_cache.store(obj, Resource.VLANS, snapshot):
-                error_message = f"Failed to fetch VLANs: {snapshot.record(Resource.VLANS, 'vlans').reason}"
+            error = source_cache.refresh(obj, Resource.VLANS, server_key).error
+            error_message = error and f"Failed to fetch VLANs: {error}"
 
         if error_message is not None:
-            # A failed refresh on a previously-synced device must not leave a stale VLAN table to act on.
-            source_cache.delete(obj, Resource.VLANS, server_key)
             SyncCacheConsistency(obj).mark_refresh_failure(
                 SyncTab.VLANS,
                 server_key,

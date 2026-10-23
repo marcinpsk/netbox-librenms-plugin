@@ -15,9 +15,8 @@ from ipam.models import VRF, IPAddress
 from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin import source_cache
-from netbox_librenms_plugin.acquisition.coordinator import acquire
 from netbox_librenms_plugin.acquisition.registry import Resource
-from netbox_librenms_plugin.acquisition.resources import blocked_scopes, port_vrf_id
+from netbox_librenms_plugin.acquisition.resources import port_vrf_id
 from netbox_librenms_plugin.acquisition.snapshot import Outcome
 from netbox_librenms_plugin.constants import LIBRENMS_GLOBAL_ROUTING_INSTANCE
 from netbox_librenms_plugin.interface_rules import interface_rules_for_request, row_rule_block
@@ -711,9 +710,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         """Get the context data for the IP address sync view."""
         # The filters show their errors also when no snapshot is cached.
         filters = parse_table_filters(request.GET, lambda rows: IPAddressTable(rows, mgmt_row_ids=[]))
-        # GET render: scope the snapshot read to ?server_key, so a non-default-server tab reads that
-        # server's snapshot. A key that no longer resolves renders an empty table scoped to that key,
-        # never the default server's snapshot.
+        # Read the snapshot of ?server_key; a key that no longer resolves renders an empty table, never the default's.
         scoped, unresolved = self.resolve_get_render_server_key(request)
         server_key = None if unresolved else scoped or self._render_server_key()
         context = self._prepare_context(request, obj, server_key) if server_key is not None else None
@@ -746,17 +743,16 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         # Discovery may find the LibreNMS device by IP or hostname and store the mapping; acquisition
         # then reads that mapping and never writes.
         librenms_id, lookup_error = self.resolve_librenms_id(obj)
-        error_message = None
         if librenms_id is None:
-            error_message = self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS"
-        else:
-            snapshot = acquire(obj, server_key=server_key, resources=[Resource.IP_ADDRESSES])
-            if not source_cache.store(obj, Resource.IP_ADDRESSES, snapshot):
-                error_message = _refresh_failure_message(snapshot)
-
-        if error_message is not None:
             # A failed refresh must not leave an older snapshot to act on.
             source_cache.delete(obj, Resource.IP_ADDRESSES, server_key)
+            error_message = self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS"
+        else:
+            result = source_cache.refresh(obj, Resource.IP_ADDRESSES, server_key)
+            snapshot = result.snapshot
+            error_message = result.error and f"Failed to fetch IP addresses from LibreNMS: {result.error}"
+
+        if error_message is not None:
             messages.error(request, error_message)
             SyncCacheConsistency(obj).mark_refresh_failure(
                 SyncTab.IP_ADDRESSES,
@@ -787,13 +783,6 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         )
 
 
-def _refresh_failure_message(snapshot):
-    """Return the refresh error that names the first response the IP rows could not do without."""
-    (records,) = blocked_scopes(snapshot, Resource.IP_ADDRESSES).values()
-    record = records[0]
-    return f"Failed to fetch IP addresses from LibreNMS: {record.request.path} was not obtained ({record.reason})"
-
-
 class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionMixin, CacheMixin, View):
     """View for verifying single IP address data with different VRF."""
 
@@ -802,7 +791,7 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
 
     # Read-only verify endpoint: require object-view permission (mirrors the interface/module/
     # cable verify views). Without it any user with mere plugin-view rights could POST an
-    # arbitrary device id and read back that object's name/url/cached IP rows. The effective
+    # arbitrary device id and read back that object's name/url/IP rows. The effective
     # requirement is narrowed per-request in post() to the model the request actually targets
     # (Device vs VirtualMachine); this class-level default (both) is the fail-closed fallback the
     # permission-wiring test asserts.
@@ -865,7 +854,7 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
 
         Resolves through permission-restricted querysets: the POST gate only checks model-level
         view perms, so a constrained grant must not resolve an out-of-scope id here. It returns a 404
-        instead of exposing the object's cached IP verify payload.
+        instead of exposing the object's assessed IP rows.
 
         Args:
             object_id (int): The object ID.
