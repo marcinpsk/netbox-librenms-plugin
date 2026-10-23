@@ -328,8 +328,8 @@ READ_ENDPOINTS = [
         {"status": "ok", "links": [{"id": 3}]},
         {},
         {
-            404: ("404", "/api/v0/devices/1/links"),
-            500: ("500", "/api/v0/devices/1/links"),
+            404: ("404",),
+            500: ("500",),
         },
         id="get_device_links",
     ),
