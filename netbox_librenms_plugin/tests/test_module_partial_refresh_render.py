@@ -109,7 +109,7 @@ class TestPartialModuleRefreshRendersEmpty:
 
         device = self._device("partial-refresh-complete")
         # Built by the production helpers, so a renamed key cannot make the cleanup a silent no-op.
-        # The modules tab has no last-fetched key (TAB_SPECS[MODULES].has_last_fetched_key is False).
+        # The modules tab has no last-fetched key.
         written_keys = (
             sync_snapshot_key(device, "inventory", SERVER_KEY),
             SyncCacheConsistency(device).state_key(SyncTab.MODULES, SERVER_KEY),
