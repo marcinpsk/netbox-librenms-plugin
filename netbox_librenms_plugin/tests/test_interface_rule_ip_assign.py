@@ -54,7 +54,7 @@ def _row(address, port_id, name):
 
 def _seed(device, rows, ports_by_id, bound_ports_by_id=None):
     cache.set(
-        sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].data_type, SERVER_KEY),
+        sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].source.data_type, SERVER_KEY),
         {
             "ip_addresses": rows,
             "mgmt_ip": "",
@@ -264,7 +264,7 @@ def test_a_refresh_keeps_the_record_of_the_port_bound_to_the_target_interface(cl
         {"server_key": SERVER_KEY, "interface_name_field": "ifName"},
         HTTP_HX_REQUEST="true",
     )
-    snapshot = cache.get(sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].data_type, SERVER_KEY))
+    snapshot = cache.get(sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].source.data_type, SERVER_KEY))
     response = _sync(client, device, [_row("198.18.80.10", 7101, "eth0")])
 
     assert refreshed.status_code == 200
