@@ -88,7 +88,8 @@ class TestRelationshipPillWithoutALibreNMSName:
         member.lag = lag
         member.save()
         record = _port(netbox_interface=member, exists_in_netbox=True)
-        maps = build_relationship_maps({"ports": [record], "port_stack_relationships": {}})
+        no_relationships = dict.fromkeys(("lag_members", "sub_interfaces", "bridge_members", "stacked_ports"), {})
+        maps = build_relationship_maps({"ports": [record], "port_stack_relationships": no_relationships})
 
         enrich_port_relationships(record, maps, interface_name_field="ifName", server_key="default")
         html = str(_interface_table(device).render_parent(None, record))

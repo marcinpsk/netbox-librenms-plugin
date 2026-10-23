@@ -227,9 +227,9 @@ class SingleInterfaceVerifyView(
         if primary_device is None:
             return JsonResponse({"status": "error", "message": "No sync device found for virtual chassis"}, status=404)
 
-        cached_data = read_interface_assessment(primary_device, server_key, interface_name_field)
-        if cached_data is not None:
-            ports = cached_data["ports"]
+        assessment = read_interface_assessment(primary_device, server_key, interface_name_field)
+        if assessment is not None:
+            ports = assessment["ports"]
             unique_host_port_ids, unambiguous_name_port_ids = get_interface_port_identity_sets(
                 ports, interface_name_field
             )
@@ -293,7 +293,7 @@ class SingleInterfaceVerifyView(
                 if port_id is not None:
                     port_data["port_id"] = port_id
                 name_fallback_allowed = port_id in unambiguous_name_port_ids
-                relationship_maps = build_relationship_maps(cached_data)
+                relationship_maps = build_relationship_maps(assessment)
                 candidate_port_ids = [raw_port_id]
                 candidate_names = [port_data.get(interface_name_field)] if name_fallback_allowed else []
                 for related_port_id in (
@@ -332,7 +332,7 @@ class SingleInterfaceVerifyView(
                     posted_port_id,
                     interface_name_field,
                     server_key,
-                    snapshot_complete=not cached_data["oob_incomplete"],
+                    snapshot_complete=not assessment["oob_incomplete"],
                 )
                 # The selected member owns the row now, so the rules read its platform.
                 port_data["rule_decision"] = interface_rules_for_request(request).check_interface_write(
