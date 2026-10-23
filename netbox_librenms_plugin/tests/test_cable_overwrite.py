@@ -17,7 +17,8 @@ force.
 import pytest
 from django.core.exceptions import PermissionDenied
 
-from netbox_librenms_plugin.tests.cable_source_helpers import seed_cable_rows
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_cables_snapshot, link_row, port_row, sensor_row
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.conftest import (
     cable_together,
     configured_server_key,
@@ -29,7 +30,6 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     persist_test_server_mapping,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 SERVER_KEY = configured_server_key()
 
@@ -57,11 +57,10 @@ def _sync_view(server_key=SERVER_KEY):
 
 
 def _serial_link(csp, cp):
-    row_id = f"serial:{csp.pk}"
     return {
         "local_port": csp.name,
-        "local_port_id": row_id,
-        "row_id": row_id,
+        "local_port_id": f"serial:{csp.pk}",
+        "row_id": f"serial:{csp.pk}",
         "sensor_id": csp.pk,
         "remote_device": cp.device.name,
         "device_id": csp.device_id,
@@ -154,15 +153,24 @@ class TestNameFallbackRespectsThePortBinding:
         local.save()
         remote_device = make_device(f"fallback-remote-{attached}")
         remote = make_interface(remote_device, "Ethernet2")
-        row = {
-            "_source": "main",
-            "local_port_id": 6,
-            "local_port": "eth0",
-            "remote_device": remote_device.name,
-            "remote_port": remote.name,
-            "remote_port_id": 202,
-        }
-        seed_cable_rows(local_device, [row], SERVER_KEY)
+        seed_mapping(local_device, SERVER_KEY, own=8)
+        seed_cables_snapshot(
+            local_device,
+            [
+                link_row(
+                    6,
+                    remote.name,
+                    local_port="eth0",
+                    remote_hostname=remote_device.name,
+                    remote_device_id=None,
+                    remote_port_id=202,
+                    protocol=None,
+                    id=None,
+                )
+            ],
+            [port_row(6, "eth0", device_id=8, if_descr=None)],
+            server_key=SERVER_KEY,
+        )
         client = Client()
         client.force_login(make_superuser(f"fallback-user-{attached}"))
         persist_test_server_mapping(local_device, SERVER_KEY)
@@ -206,15 +214,24 @@ class TestNameFallbackRespectsThePortBinding:
         local = make_interface(local_device, "eth0")
         remote_device = make_device("fallback-remote-rebound")
         remote = make_interface(remote_device, "Ethernet2")
-        row = {
-            "_source": "main",
-            "local_port_id": 6,
-            "local_port": "eth0",
-            "remote_device": remote_device.name,
-            "remote_port": remote.name,
-            "remote_port_id": 202,
-        }
-        seed_cable_rows(local_device, [row], SERVER_KEY)
+        seed_mapping(local_device, SERVER_KEY, own=8)
+        seed_cables_snapshot(
+            local_device,
+            [
+                link_row(
+                    6,
+                    remote.name,
+                    local_port="eth0",
+                    remote_hostname=remote_device.name,
+                    remote_device_id=None,
+                    remote_port_id=202,
+                    protocol=None,
+                    id=None,
+                )
+            ],
+            [port_row(6, "eth0", device_id=8, if_descr=None)],
+            server_key=SERVER_KEY,
+        )
         client = Client()
         client.force_login(make_superuser("fallback-user-rebound"))
         persist_test_server_mapping(local_device, SERVER_KEY)
@@ -675,7 +692,24 @@ class TestSerialCableOverwriteBehaviour:
             "remote_port": remote.name,
             "remote_port_id": 202,
         }
-        seed_cable_rows(local_device, [row], SERVER_KEY)
+        seed_mapping(local_device, SERVER_KEY, own=8)
+        seed_cables_snapshot(
+            local_device,
+            [
+                link_row(
+                    101,
+                    remote.name,
+                    local_port=local.name,
+                    remote_hostname=remote_device.name,
+                    remote_device_id=None,
+                    remote_port_id=202,
+                    protocol=None,
+                    id=None,
+                )
+            ],
+            [port_row(101, local.name, device_id=8, if_descr=None)],
+            server_key=SERVER_KEY,
+        )
         user = get_user_model().objects.create_superuser(
             f"signal-user-{error_type.__name__}",
             password="pw",
@@ -833,7 +867,7 @@ class TestCableOverwriteHtmxModal:
         # Seed the raw LibreNMS snapshot targeting console-B on another device.
         link = {
             "local_port": "ttyS5",
-            "local_port_id": f"serial:{csp.pk}-s",
+            "local_port_id": f"serial:{1}",
             "_source": "serial",
             "device_id": acs.id,
             "remote_device": f"router-{name}",
@@ -844,7 +878,10 @@ class TestCableOverwriteHtmxModal:
             "sensor_id": 1,
             "sensor_index_int": 5,
         }
-        seed_cable_rows(acs, [link], SERVER_KEY)
+        seed_mapping(acs, SERVER_KEY, own=8)
+        seed_cables_snapshot(
+            acs, [], [], sensors=[sensor_row(1, 5, device_id=8, sensor_descr=f"router-{name}")], server_key=SERVER_KEY
+        )
 
         user = get_user_model().objects.create_superuser(f"modal-admin-{name}", f"{name}@example.com", "pw")
         client = Client()
@@ -949,7 +986,14 @@ class TestCableOverwriteHtmxModal:
         seed_mapping(acs, SERVER_KEY, own=13)
         row = make_serial_row(csps[0], target_device.name, acs)
         cache_key = object.__new__(SyncCablesView).get_cache_key(acs, "links", SERVER_KEY)
-        snapshot = seed_cable_rows(acs, [row], SERVER_KEY)
+        seed_mapping(acs, SERVER_KEY, own=13)
+        snapshot = seed_cables_snapshot(
+            acs,
+            [],
+            [],
+            sensors=[sensor_row(csps[0].pk, 1, device_id=13, sensor_descr=target_device.name)],
+            server_key=SERVER_KEY,
+        )
         user = get_user_model().objects.create_superuser("multi-termination-admin", "", "pw")
         cache.set(
             cable_manual_pick_cache_key(cache_key, snapshot.snapshot_id, user.pk, row["local_port_id"]),
@@ -1223,7 +1267,10 @@ class TestOverwritePreservesMidPathSegments:
         link["device_id"] = acs.id
         link["remote_device"] = target_cp.device.name
         link["is_configured"] = True
-        seed_cable_rows(acs, [link], SERVER_KEY)
+        seed_mapping(acs, SERVER_KEY, own=8)
+        seed_cables_snapshot(
+            acs, sensors=[sensor_row(csp.pk, 1, device_id=8, sensor_descr=target_cp.device.name)], server_key=SERVER_KEY
+        )
 
         user = get_user_model().objects.create_superuser("midmodal-admin", "midmodal@example.com", "pw")
         client = Client()
@@ -1495,10 +1542,11 @@ class TestCableSyncLeastPrivilegeByRowType:
         return client
 
     @staticmethod
-    def _cache_and_url(device, link):
+    def _cache_and_url(device, *, links=(), ports=(), sensors=None):
         from django.urls import reverse
 
-        seed_cable_rows(device, [link], SERVER_KEY)
+        seed_mapping(device, SERVER_KEY, own=8)
+        seed_cables_snapshot(device, links, ports, sensors=sensors, server_key=SERVER_KEY)
         return reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[device.pk])
 
     def test_interface_only_user_does_not_need_console_port_permissions(self):
@@ -1519,7 +1567,11 @@ class TestCableSyncLeastPrivilegeByRowType:
             "netbox_remote_device_id": remote_device.pk,
         }
         client = self._client("interface", [Interface])
-        url = self._cache_and_url(local_device, link)
+        url = self._cache_and_url(
+            local_device,
+            links=[link_row(101, remote.name, remote_hostname=remote_device.name)],
+            ports=[port_row(101, local.name, device_id=8)],
+        )
         post_data = _rendered_sync_data(client, local_device, link["local_port_id"])
 
         response = client.post(
@@ -1539,7 +1591,7 @@ class TestCableSyncLeastPrivilegeByRowType:
         link = {
             "_source": "serial",
             "local_port": local.name,
-            "local_port_id": "serial:201",
+            "local_port_id": f"serial:{201}",
             "device_id": local_device.pk,
             "remote_device": remote_device.name,
             "is_configured": True,
@@ -1550,7 +1602,9 @@ class TestCableSyncLeastPrivilegeByRowType:
             "netbox_remote_device_id": remote_device.pk,
         }
         client = self._client("serial", [ConsoleServerPort, ConsolePort])
-        url = self._cache_and_url(local_device, link)
+        url = self._cache_and_url(
+            local_device, sensors=[sensor_row(201, 1, device_id=8, sensor_descr=remote_device.name)]
+        )
         post_data = _rendered_sync_data(client, local_device, link["local_port_id"])
 
         response = client.post(

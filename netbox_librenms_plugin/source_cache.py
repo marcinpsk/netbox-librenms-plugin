@@ -57,6 +57,16 @@ def snapshot_key(subject, resource, server_key):
     return _key(resource_owner(subject, resource, server_key), resource, server_key)
 
 
+def can_view_serial_ports(user, owner):
+    """Return whether the actor can view a ConsoleServerPort on the source owner."""
+    return bool(
+        isinstance(owner, Device)
+        and user.has_perm("dcim.view_consoleserverport")
+        and ConsoleServerPort.objects.restrict(user, "view").filter(device=owner).exists()
+    )
+
+
+
 def authorized_plan(request, subject, *, server_key, resources):
     """Resolve and authorize every source owner before discovery or any resource request."""
     if request is None:
@@ -83,12 +93,8 @@ def refresh(request, plan):
     if not type(owner).objects.restrict(request.user, "view").filter(pk=owner.pk).exists():
         raise Http404
     options = {}
-    if resource is Resource.CABLES:
-        options["include_serial"] = bool(
-            isinstance(owner, Device)
-            and request.user.has_perm("dcim.view_consoleserverport")
-            and ConsoleServerPort.objects.restrict(request.user, "view").filter(device=owner).exists()
-        )
+    if RESOURCE_SPECS[resource].serial_sensors:
+        options["include_serial"] = can_view_serial_ports(request.user, owner)
     delete_planned(plan)
     try:
         snapshot = acquire(plan, **options)
