@@ -962,18 +962,17 @@ def cable_manual_pick_cache_key(snapshot_key, snapshot_id, user_id, row_id) -> s
 
 
 def apply_cable_manual_picks(cache_backend, snapshot_key, snapshot_id, user_id, links):
-    """Copy *links* and overlay only the current user's manual remote picks."""
-    from netbox_librenms_plugin.utils import assign_cable_row_ids
-
+    """Overlay the current user's picks without changing assessed action identities."""
     if not isinstance(snapshot_id, str) or not snapshot_id:
         raise ValueError("A cable pick needs a snapshot id.")
-    links = assign_cable_row_ids(links)
-    if links is None:
-        return [], False
-    pick_keys = {
-        link["row_id"]: cable_manual_pick_cache_key(snapshot_key, snapshot_id, user_id, link["row_id"])
-        for link in links
-    }
+    if any(
+        not isinstance(link, dict) or not isinstance(link.get("row_id"), str) or not link["row_id"] for link in links
+    ):
+        raise ValueError("Cable picks need assessed rows with nonblank action identities.")
+    row_ids = [link["row_id"] for link in links]
+    if len(row_ids) != len(set(row_ids)):
+        raise ValueError("Cable picks need unique assessed action identities.")
+    pick_keys = {row_id: cable_manual_pick_cache_key(snapshot_key, snapshot_id, user_id, row_id) for row_id in row_ids}
     picks = cache_backend.get_many(pick_keys.values())
     result = []
     applied = False
@@ -981,12 +980,7 @@ def apply_cable_manual_picks(cache_backend, snapshot_key, snapshot_id, user_id, 
         copied = dict(link)
         pick = picks.get(pick_keys[copied["row_id"]])
         if isinstance(pick, dict) and coerce_librenms_id(pick.get("manual_remote_id")):
-            copied.update(
-                {
-                    "manual_remote_id": pick["manual_remote_id"],
-                    "manual_remote": True,
-                }
-            )
+            copied.update({"manual_remote_id": pick["manual_remote_id"], "manual_remote": True})
             applied = True
         result.append(copied)
     return result, applied

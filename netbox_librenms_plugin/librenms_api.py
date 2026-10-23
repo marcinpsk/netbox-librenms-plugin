@@ -1054,16 +1054,6 @@ class LibreNMSAPI:
                 error_message = error_details.get("message", error_message)
             return False, error_message
 
-    def get_device_links(self, device_id):
-        """Return device links through the shared endpoint contract."""
-        endpoint = responses.links(device_id)
-        decoded = endpoint.decode(*self.get_response(endpoint.request.path))
-        return (
-            (True, {"status": "ok", "links": decoded.value})
-            if decoded.outcome is Outcome.OBTAINED
-            else (False, decoded.reason)
-        )
-
     def get_device_vrfs(self, device_id):
         """
         Return the VRFs LibreNMS holds for one device.
@@ -1123,29 +1113,6 @@ class LibreNMSAPI:
         if isinstance(message, str) and LIBRENMS_NO_VRFS_MESSAGE in message.lower():
             return True, []
         return False, message or str(error)
-
-    def get_port_by_id(self, port_id):
-        """
-        Fetch specific port data from LibreNMS using port ID.
-
-        Args:
-            port_id: LibreNMS Port ID
-
-        Returns:
-            tuple: (success: bool, data: dict)
-
-        """
-        try:
-            response = _session.get(
-                f"{self.librenms_url}/api/v0/ports/{port_id}",
-                headers=self.headers,
-                timeout=DEFAULT_API_TIMEOUT,
-                verify=self.verify_ssl,
-            )
-            response.raise_for_status()
-            return True, response.json()
-        except requests.exceptions.RequestException as e:
-            return False, str(e)
 
     def get_device_inventory(self, device_id, missing_is_empty=False):
         """

@@ -306,10 +306,14 @@ class VCCableTable(LibreNMSCableTable):
         return (FilterColumn("vc_member", str(self.columns["device_selection"].header), self.text_vc_member),)
 
     def _row_member_id(self, record):
-        """Return the member that the row's select marks selected: a serial port's own member, else the port's."""
-        serial_owner_id = record.get("device_id") if record.get("_source") == SERIAL_INVENTORY_SOURCE else None
-        if serial_owner_id and any(str(member.pk) == str(serial_owner_id) for member in self._vc_members):
-            return serial_owner_id
+        """Select the resolved port owner when it is a visible chassis member."""
+        owner_id = (
+            record.get("device_id")
+            if record.get("_source") == SERIAL_INVENTORY_SOURCE
+            else record.get("netbox_local_device_id")
+        )
+        if owner_id and any(str(member.pk) == str(owner_id) for member in self._vc_members):
+            return owner_id
         return self._selected_member_id(record["local_port"])
 
     def text_vc_member(self, record):

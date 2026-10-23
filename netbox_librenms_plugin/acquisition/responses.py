@@ -12,6 +12,7 @@ from netbox_librenms_plugin.constants import (
     LIBRENMS_PORTS_COLUMNS,
 )
 from netbox_librenms_plugin.ip_addressing import parse_librenms_ip_entry
+from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.utils import is_list_of_dicts
 
 HTTP_NOT_FOUND = 404
@@ -111,12 +112,26 @@ def _has_usable_vlans(port):
     )
 
 
+def _optional_text(row, fields):
+    return all(row.get(field) is None or isinstance(row[field], str) for field in fields)
+
+
+def _is_usable_port_row(port):
+    return coerce_librenms_id(port.get("port_id")) is not None and _optional_text(
+        port, ("ifName", "ifDescr", "ifAlias")
+    )
+
+
 def ports(device_id, *, with_vlans):
     """Return the ports endpoint; a recording keys it on the path only."""
     contract = _rows_contract("ports")
 
     def decode(status, body):
         decoded = contract(status, body)
+        if decoded.outcome is Outcome.OBTAINED and not all(_is_usable_port_row(port) for port in decoded.value):
+            return Decoded(
+                Outcome.FAILED, reason="LibreNMS returned a port row without a valid identity or name field."
+            )
         # A VLAN reader never drops a VLAN silently: one unusable row makes its answer malformed.
         if (
             with_vlans
@@ -210,9 +225,30 @@ def links(device_id):
             message in _message(body).lower() for message in LIBRENMS_NO_LINKS_MESSAGES
         ):
             return Decoded(Outcome.OBTAINED, value=[])
-        return contract(status, body)
+        decoded = contract(status, body)
+        if decoded.outcome is Outcome.OBTAINED and not all(_is_usable_link_row(link) for link in decoded.value):
+            return Decoded(
+                Outcome.FAILED, reason="LibreNMS returned a link row with an invalid identity or text field."
+            )
+        return decoded
 
     return Endpoint(SourceRequest(f"devices/{device_id}/links"), decode)
+
+
+def _optional_link_id(value):
+    if value is None:
+        return True
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return False
+    return value in ("", 0, "0") or coerce_librenms_id(value) is not None
+
+
+def _is_usable_link_row(link):
+    return (
+        coerce_librenms_id(link.get("local_port_id")) is not None
+        and all(_optional_link_id(link.get(field)) for field in ("id", "remote_device_id", "remote_port_id"))
+        and _optional_text(link, ("local_port", "remote_port", "remote_hostname", "protocol"))
+    )
 
 
 def sensors(device_id):
