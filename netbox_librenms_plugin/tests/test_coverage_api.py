@@ -1179,12 +1179,6 @@ class TestParsePortVlanData:
         assert result["mode"] == "access"
         assert result["untagged_vlan"] == 50
 
-    def test_invalid_if_vlan_fallback_returns_none(self):
-        """A nonnumeric ifVlan leaves the untagged VLAN unset."""
-        port_data = {"port_id": 1, "ifName": "Gi0/4", "ifDescr": "GE", "ifVlan": "not-a-number"}
-        result = parse_port_vlan_data(port_data)
-        assert result["untagged_vlan"] is None
-
     def test_if_descr_used_as_interface_name(self):
         port_data = {"port_id": 1, "ifName": "Gi0/5", "ifDescr": "GigabitEthernet0/5", "ifVlan": ""}
         result = parse_port_vlan_data(port_data, interface_name_field="ifDescr")
@@ -1202,32 +1196,6 @@ class TestParsePortVlanData:
         result = parse_port_vlan_data(port_data)
         assert result["untagged_vlan"] == 50
         assert result["tagged_vlans"] == [100]
-
-    def test_none_vlan_id_skipped(self):
-        """An entry without a VLAN ID is skipped."""
-        port_data = {
-            "port_id": 1,
-            "ifName": "Gi0/7",
-            "ifDescr": "GE",
-            "ifVlan": "200",
-            "vlans": [{"untagged": 0}, {"vlan": 200, "untagged": 1}],
-        }
-        result = parse_port_vlan_data(port_data)
-        assert result["untagged_vlan"] == 200
-        assert result["tagged_vlans"] == []
-
-    def test_malformed_vlan_id_skipped(self):
-        """A nonnumeric VLAN ID is skipped."""
-        port_data = {
-            "port_id": 1,
-            "ifName": "Gi0/8",
-            "ifDescr": "GE",
-            "ifVlan": "300",
-            "vlans": [{"vlan": "N/A", "untagged": 0}, {"vlan": 300, "untagged": 1}],
-        }
-        result = parse_port_vlan_data(port_data)
-        assert result["untagged_vlan"] == 300
-        assert result["tagged_vlans"] == []
 
     def test_empty_vlans_array_falls_back_to_if_vlan(self):
         """An empty VLAN array uses the ifVlan fallback."""

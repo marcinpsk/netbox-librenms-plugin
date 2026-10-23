@@ -81,10 +81,37 @@ def device(device_id):
     return Endpoint(SourceRequest(f"devices/{device_id}"), decode)
 
 
+def _is_vlan_id(value):
+    """Return whether a value names a VLAN id: an int, or a string of ASCII digits."""
+    if isinstance(value, str):
+        return value.isascii() and value.isdigit()
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _has_usable_vlans(port):
+    """Return whether every VLAN field of a port row names a VLAN id, so the assessment parses it."""
+    if_vlan = port.get("ifVlan")
+    if if_vlan not in (None, "") and not _is_vlan_id(if_vlan):
+        return False
+    vlans = port.get("vlans")
+    return vlans is None or (
+        isinstance(vlans, list) and all(isinstance(row, dict) and _is_vlan_id(row.get("vlan")) for row in vlans)
+    )
+
+
 def ports(device_id, *, with_vlans):
     """Return the ports endpoint; a recording keys it on the path only."""
+    contract = _rows_contract("ports")
+
+    def decode(status, body):
+        decoded = contract(status, body)
+        # One unusable row makes the answer malformed, so a reader never drops a VLAN silently.
+        if decoded.outcome is Outcome.OBTAINED and not all(_has_usable_vlans(port) for port in decoded.value):
+            return Decoded(Outcome.FAILED, reason="LibreNMS returned a port row whose VLAN fields name no VLAN id.")
+        return decoded
+
     params = (("columns", LIBRENMS_PORTS_COLUMNS),) + ((("with", "vlans"),) if with_vlans else ())
-    return Endpoint(SourceRequest(f"devices/{device_id}/ports", params, key_params=False), _rows_contract("ports"))
+    return Endpoint(SourceRequest(f"devices/{device_id}/ports", params, key_params=False), decode)
 
 
 def _is_port_pair(row):
