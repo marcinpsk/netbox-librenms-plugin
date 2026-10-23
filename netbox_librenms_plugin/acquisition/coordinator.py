@@ -8,6 +8,7 @@ from virtualization.models import VirtualMachine
 from netbox_librenms_plugin.acquisition.registry import RESOURCE_SPECS, OwnerPolicy
 from netbox_librenms_plugin.acquisition.resources import ACQUIRERS, OOB_ACQUIRERS
 from netbox_librenms_plugin.acquisition.snapshot import (
+    MappingLink,
     MappingSource,
     MappingState,
     ObjectRef,
@@ -83,32 +84,37 @@ def oob_link(mapping, server_key):
         server_key (str): The LibreNMS server key.
 
     Returns:
-        tuple[MappingState, int | None] | None: The link state and its LibreNMS id, or None when the
-            owner links no OOB controller. A corrupt stored id is INVALID, with no id.
+        MappingLink | None: The link, or None when the owner links no OOB controller. A corrupt stored
+            id is an INVALID link with no id.
 
     """
     if not mapping.has_oob(server_key):
         return None
     oob_id = mapping.oob_id(server_key)
-    return (MappingState.RESOLVED, oob_id) if oob_id is not None else (MappingState.INVALID, None)
+    return MappingLink(MappingState.RESOLVED if oob_id is not None else MappingState.INVALID, oob_id)
 
 
 def _part_keys(parts):
     return tuple((name, record.request.key) for name, record in parts.items())
 
 
-def _oob_source(fetch, resource, mapping, server_key):
-    """Acquire the OOB controller as its own mapping, or return None when the resource or owner has none."""
+def oob_source(fetch, resource, mapping, server_key):
+    """
+    Acquire the OOB controller as its own mapping through *fetch*, or return None without one.
+
+    Returns:
+        MappingSource | None: None when the resource shows no OOB rows or the owner links no OOB controller.
+
+    """
     link = oob_link(mapping, server_key) if resource in OOB_ACQUIRERS else None
     if link is None:
         return None
-    state, oob_id = link
-    oob_fetch = fetch if state is MappingState.RESOLVED else _Refused(fetch, INVALID_OOB_REASON)
+    oob_fetch = fetch if link.state is MappingState.RESOLVED else _Refused(fetch, INVALID_OOB_REASON)
     return MappingSource(
         role=MappingRole.OOB,
-        librenms_id=oob_id,
-        state=state,
-        parts=_part_keys(OOB_ACQUIRERS[resource](oob_fetch, oob_id)),
+        librenms_id=link.librenms_id,
+        state=link.state,
+        parts=_part_keys(OOB_ACQUIRERS[resource](oob_fetch, link.librenms_id)),
     )
 
 
@@ -128,7 +134,7 @@ def _resource_source(fetch, resource, owner, server_key):
             state=MappingState.RESOLVED,
             parts=_part_keys(parts),
         ),
-        oob=_oob_source(fetch, resource, mapping, server_key),
+        oob=oob_source(fetch, resource, mapping, server_key),
     )
 
 
