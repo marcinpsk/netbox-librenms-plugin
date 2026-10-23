@@ -7,6 +7,9 @@ from threading import Event
 import pytest
 from django.apps import apps
 
+from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin.acquisition.registry import Resource
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import (
     _PORT_KEYS_UNSET,
@@ -17,6 +20,7 @@ from netbox_librenms_plugin.tests.conftest import (
     run_in_threads,
 )
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import SYNCED, post_interface_sync, seed_ports
+from netbox_librenms_plugin.tests.source_snapshot_helpers import port_pair, port_vlans, seed_interfaces_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import messages_on
 from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
 
@@ -133,8 +137,6 @@ def test_selected_vc_target_is_locked_through_interface_sync(settings, monkeypat
 
 def _run_vlan_scope_sync(*, move_target, suffix, settings):
     """Run one VLAN-scope sync, optionally commit a target site change inside the lock window, and return its interface."""
-    from types import SimpleNamespace
-
     from dcim.models import Device, Site
     from django.contrib.auth import get_user_model
     from django.contrib.contenttypes.models import ContentType
@@ -162,29 +164,20 @@ def _run_vlan_scope_sync(*, move_target, suffix, settings):
     )
     VLAN.objects.create(vid=100, name="Sync VLAN 100", group=vlan_group, status="active")
     user = make_superuser(f"sync-vlan-scope-{suffix}-user")
-    view_template = SyncInterfacesView()
-    cache_key = view_template.get_cache_key(page_device, "ports", server_key)
-    cache.set(
-        cache_key,
-        {
-            "ports": [
-                {
-                    "port_id": 10,
-                    "ifName": "Ethernet2",
-                    "ifDescr": "Ethernet2",
-                    "ifAlias": "",
-                    "ifType": "ethernetCsmacd",
-                    "ifSpeed": 1_000_000_000,
-                    "ifPhysAddress": "",
-                    "ifMtu": 1500,
-                    "ifAdminStatus": "up",
-                    "untagged_vlan": None,
-                    "tagged_vlans": [100],
-                }
-            ],
-            "port_stack_relationships": {},
-        },
-    )
+    port = {
+        "port_id": 10,
+        "ifName": "Ethernet2",
+        "ifDescr": "Ethernet2",
+        "ifAlias": "",
+        "ifType": "ethernetCsmacd",
+        "ifSpeed": 1_000_000_000,
+        "ifPhysAddress": "",
+        "ifMtu": 1500,
+        "ifAdminStatus": "up",
+        **port_vlans(None, None, [100]),
+    }
+    seed_interfaces_snapshot(page_device, [port], server_key=server_key)
+    cache_key = source_cache.snapshot_key(page_device, Resource.INTERFACES, server_key)
     target_lock_reached = Event()
     release_sync = Event()
 
@@ -215,7 +208,7 @@ def _run_vlan_scope_sync(*, move_target, suffix, settings):
             request.GET = request.GET.copy()
             request.GET["interface_name_field"] = "ifName"
             view = PausingSyncInterfacesView()
-            view._librenms_api = SimpleNamespace(server_key=server_key)
+            view._librenms_api = LibreNMSAPI(server_key=server_key)
             response = post(view, request, object_type="device", object_id=page_device.pk)
             assert response.status_code == 302
         finally:
@@ -490,8 +483,6 @@ def test_vm_sync_serializes_duplicate_display_name_resolution(settings, monkeypa
 
 def test_relationship_write_locks_virtual_chassis_members_through_validation():
     """A membership update must wait until relationship validation and persistence commit."""
-    from types import SimpleNamespace
-
     from dcim.models import Device
     from django.contrib.auth import get_user_model
     from django.core.cache import cache
@@ -512,17 +503,12 @@ def test_relationship_write_locks_virtual_chassis_members_through_validation():
     aggregate.save()
     member.save()
     user = make_superuser("relationship-scope-lock-user")
-    cache_key = SyncInterfaceLagView().get_cache_key(aggregate_device, "ports", server_key)
-    cache.set(
-        cache_key,
-        {
-            "ports": [
-                {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": member.name},
-                {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": aggregate.name},
-            ],
-            "port_stack_relationships": {"lag_members": {10: 20}, "sub_interfaces": {}},
-        },
-    )
+    ports = [
+        {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": member.name},
+        {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": aggregate.name, "ifType": "ieee8023adLag"},
+    ]
+    seed_interfaces_snapshot(aggregate_device, ports, [port_pair(10, 20)], server_key=server_key)
+    cache_key = source_cache.snapshot_key(aggregate_device, Resource.INTERFACES, server_key)
     validation_reached = Event()
     release_relationship = Event()
     membership_changed = Event()
@@ -540,7 +526,7 @@ def test_relationship_write_locks_virtual_chassis_members_through_validation():
                 user=thread_user,
             )
             view = SyncInterfaceLagView()
-            view._librenms_api = SimpleNamespace(server_key=server_key)
+            view._librenms_api = LibreNMSAPI(server_key=server_key)
             prepare_related = view._prepare_related
 
             def pause_before_validation(related_interface):
@@ -592,8 +578,6 @@ def test_relationship_write_locks_virtual_chassis_members_through_validation():
 
 def test_inline_relationship_rechecks_migrated_donor_after_lock():
     """A donor migrated while the request waits for its lock must stay read-only."""
-    from types import SimpleNamespace
-
     from dcim.models import Device
     from django.contrib.auth import get_user_model
     from django.core.cache import cache
@@ -617,18 +601,10 @@ def test_inline_relationship_rechecks_migrated_donor_after_lock():
     child.save()
     parent.save()
     user = make_superuser("relationship-migrated-user")
-    view_template = SyncInterfaceParentView()
-    cache_key = view_template.get_cache_key(donor, "ports", server_key)
-    cache.set(
-        cache_key,
-        {
-            "ports": [
-                {"port_id": 10, "ifName": child.name},
-                {"port_id": 20, "ifName": parent.name},
-            ],
-            "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {10: 20}},
-        },
-    )
+    # The child name is the parent name plus ".100", which makes it a sub-interface.
+    ports = [{"port_id": 10, "ifName": child.name}, {"port_id": 20, "ifName": parent.name}]
+    seed_interfaces_snapshot(donor, ports, [port_pair(10, 20)], server_key=server_key)
+    cache_key = source_cache.snapshot_key(donor, Resource.INTERFACES, server_key)
     donor_locked = Event()
     request_checked_cache = Event()
 
@@ -663,7 +639,7 @@ def test_inline_relationship_rechecks_migrated_donor_after_lock():
                 user=thread_user,
             )
             view = PausingSyncInterfaceParentView()
-            view._librenms_api = SimpleNamespace(server_key=server_key)
+            view._librenms_api = LibreNMSAPI(server_key=server_key)
             return post(view, request, object_type="device", object_id=donor.pk)
         finally:
             close_old_connections()
@@ -685,8 +661,6 @@ def test_inline_relationship_rechecks_migrated_donor_after_lock():
 
 def test_inline_relationship_does_not_lock_unrelated_interfaces():
     """A single parent update must not lock every interface on the Device."""
-    from types import SimpleNamespace
-
     from django.contrib.auth import get_user_model
     from django.core.cache import cache
     from django.db import close_old_connections, connection
@@ -707,18 +681,12 @@ def test_inline_relationship_does_not_lock_unrelated_interfaces():
     child.save()
     parent.save()
     user = make_superuser("targeted-inline-lock-user")
-    view_template = SyncInterfaceParentView()
-    cache_key = view_template.get_cache_key(device, "ports", server_key)
-    cache.set(
-        cache_key,
-        {
-            "ports": [
-                {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": child.name},
-                {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": parent.name},
-            ],
-            "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {10: 20}},
-        },
-    )
+    ports = [
+        {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": child.name},
+        {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": parent.name},
+    ]
+    seed_interfaces_snapshot(device, ports, [port_pair(10, 20)], server_key=server_key)
+    cache_key = source_cache.snapshot_key(device, Resource.INTERFACES, server_key)
     validation_reached = Event()
     release_relationship = Event()
     unrelated_updated = Event()
@@ -736,7 +704,7 @@ def test_inline_relationship_does_not_lock_unrelated_interfaces():
                 user=thread_user,
             )
             view = SyncInterfaceParentView()
-            view._librenms_api = SimpleNamespace(server_key=server_key)
+            view._librenms_api = LibreNMSAPI(server_key=server_key)
 
             def pause_before_validation(_related_interface):
                 validation_reached.set()
@@ -801,7 +769,7 @@ def test_bulk_relationship_pass_skips_scope_locks_without_selected_edges(client,
         {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": child.name},
         {**_PORT_KEYS_UNSET, "port_id": 30, "ifName": parent.name},
     ]
-    seed_ports(device, ports, sub_interfaces={20: 30})
+    seed_ports(device, ports, [port_pair(20, 30)])
     client.force_login(make_superuser("bulk-unrelated-edge-user"))
     pass_locks = []
     real_pass = SyncInterfacesView._sync_interface_relationships
@@ -848,7 +816,7 @@ def test_bulk_relationship_pass_does_not_lock_unrelated_interfaces(settings):
         {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": parent.name},
         {**_PORT_KEYS_UNSET, "port_id": 30, "ifName": unrelated.name},
     ]
-    seed_ports(device, ports, sub_interfaces={10: 20})
+    seed_ports(device, ports, [port_pair(10, 20)])
 
     def post_the_sync():
         close_old_connections()

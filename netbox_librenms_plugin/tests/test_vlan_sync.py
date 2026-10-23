@@ -4,6 +4,8 @@ from copy import deepcopy
 
 import pytest
 
+from netbox_librenms_plugin.assessment.interfaces import parse_port_vlan_data
+
 
 def _api(settings):
     """Build a real client from a local-only configuration."""
@@ -51,14 +53,14 @@ class TestVLANModeDetection:
             ),
         ],
     )
-    def test_parse_port_vlan_data(self, settings, port, expected):
-        result = _api(settings).parse_port_vlan_data(port)
+    def test_parse_port_vlan_data(self, port, expected):
+        result = parse_port_vlan_data(port)
 
         assert result["mode"] == expected["mode"]
         assert result["untagged_vlan"] == expected["untagged_vlan"]
         assert result["tagged_vlans"] == expected["tagged_vlans"]
 
-    def test_non_dict_vlan_entries_are_ignored(self, settings):
+    def test_non_dict_vlan_entries_are_ignored(self):
         port = {
             "port_id": 4,
             "ifName": "Gi0/0",
@@ -67,7 +69,7 @@ class TestVLANModeDetection:
             "vlans": [{"vlan": 10, "untagged": 1}, "invalid", {"vlan": 20}],
         }
 
-        result = _api(settings).parse_port_vlan_data(port)
+        result = parse_port_vlan_data(port)
 
         assert result["untagged_vlan"] == 10
         assert result["tagged_vlans"] == [20]

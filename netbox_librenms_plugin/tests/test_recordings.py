@@ -30,7 +30,7 @@ from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
 from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns, compile_sap_patterns
 from netbox_librenms_plugin.interface_relationships import resolve_port_relationships
 
-from netbox_librenms_plugin.tests.conftest import run_in_threads
+from netbox_librenms_plugin.tests.conftest import name_rules, run_in_threads
 from netbox_librenms_plugin.tests.recordings import iter_recording_paths, iter_recordings
 
 _RECORDINGS = iter_recordings()
@@ -691,14 +691,7 @@ def _assert_port_relationships(api, device_id, recording, expected):
     relationships = resolve_port_relationships(
         ports_data["ports"],
         port_stack,
-        # Normalize missing and explicit null patterns so resolution never touches the DB.
-        compiled_lag_patterns=compile_lag_patterns(recording),
-        # `(meta or {})` not `meta, {}`: an explicit "meta": null (a shape recording_schema_errors()
-        # doesn't reject) returns None, and the chained .get("os") would then AttributeError.
-        device_os=(recording.get("meta") or {}).get("os"),
-        # Supplying compiled LAG patterns keeps resolution off the DB, so the stored SAP
-        # rule is not read; feed the recording's own snapshot so replay matches production.
-        compiled_sap_patterns=compile_sap_patterns(recording),
+        **name_rules(lag=compile_lag_patterns(recording), sap=compile_sap_patterns(recording)),
     )
 
     # port_stack and ports are independent payloads whose ids may differ in type,

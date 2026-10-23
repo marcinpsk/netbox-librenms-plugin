@@ -3,7 +3,9 @@
 import pytest
 from django.core.exceptions import ValidationError
 
+from netbox_librenms_plugin.assessment.interfaces import stored_name_rules
 from netbox_librenms_plugin.interface_relationships import resolve_port_relationships
+from netbox_librenms_plugin.tests.conftest import name_rules
 
 
 @pytest.mark.django_db
@@ -470,7 +472,7 @@ class TestLagPatternSharedLoad:
         port_stack = [{"high_port_id": 11, "low_port_id": 12}]
 
         with CaptureQueriesContext(connection) as ctx:
-            result = resolve_port_relationships(ports, port_stack, device_os="sharedos", compiled_lag_patterns=compiled)
+            result = resolve_port_relationships(ports, port_stack, **name_rules(lag=compiled))
 
         # Po1 aggregate matched via the supplied pattern (behavior preserved) and no pattern query.
         assert result["lag_members"] == {11: 12}
@@ -498,7 +500,7 @@ class TestLagPatternSharedLoad:
             {"high_port_id": 200, "low_port_id": 102},
         ]
 
-        result = resolve_port_relationships(ports, port_stack, device_os="storedos")
+        result = resolve_port_relationships(ports, port_stack, **stored_name_rules("storedos"))
 
         assert result["lag_members"] == {101: 102}
         # An ipForward port is never a LAG member, so only the skip count proves the rule was read.
@@ -516,7 +518,7 @@ class TestLagPatternSharedLoad:
         ]
         port_stack = [{"high_port_id": "0", "low_port_id": 12}]
 
-        result = resolve_port_relationships(ports, port_stack, device_os="sharedos", compiled_lag_patterns=compiled)
+        result = resolve_port_relationships(ports, port_stack, **name_rules(lag=compiled))
 
         # The sentinel entry created no relationship at all (nothing references the phantom port 0).
         assert result["lag_members"] == {}

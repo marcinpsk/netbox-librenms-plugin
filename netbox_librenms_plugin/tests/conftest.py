@@ -513,6 +513,20 @@ def _reseed_after_transactional_flush(django_db_setup, django_db_blocker):
 # row set per test transaction, and everything is rolled back between tests.
 
 
+def name_rules(*, lag=(), sap=(), bridge=()):
+    """
+    Return the name rule arguments of ``resolve_port_relationships``, each pattern compiled.
+
+    A rule that is not given matches no name. A compiled pattern, an RE2 one too, is taken as it is.
+    """
+    import re
+
+    def compiled(patterns):
+        return [re.compile(pattern) if isinstance(pattern, str) else pattern for pattern in patterns]
+
+    return {"lag_patterns": compiled(lag), "sap_patterns": compiled(sap), "bridge_patterns": compiled(bridge)}
+
+
 def typed_maps(relationships):
     """Return only the typed relationship maps from a resolver result.
 

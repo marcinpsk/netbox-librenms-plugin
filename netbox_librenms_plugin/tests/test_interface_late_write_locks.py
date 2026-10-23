@@ -40,6 +40,7 @@ from netbox_librenms_plugin.tests.lock_conflict_helpers import (
     second_connection,
     wait_for_lock_wait,
 )
+from netbox_librenms_plugin.tests.source_snapshot_helpers import port_vlans
 from netbox_librenms_plugin.tests.view_test_helpers import messages_on
 from netbox_librenms_plugin.transactions import key_columns, save_at_version
 
@@ -186,7 +187,7 @@ def test_the_tagged_vlan_clear_schedule_completes_without_a_deadlock(client, att
         # The sync takes the row out of tagged mode; the attribute writer has nothing to write.
         interface = synced_interface(device, "eth10", 10, mode="tagged")
         untagged = VLAN.objects.create(vid=200, name=f"late-lock-clear-{writer}-200")
-        port = sync_port(10, "eth10", untagged_vlan=200, tagged_vlans=[])
+        port = sync_port(10, "eth10", **port_vlans("access", 200, []))
         exclude_columns = ("mac_address",)
     else:
         # An access row that still has a tagged VLAN: the attribute write's save() clears it.

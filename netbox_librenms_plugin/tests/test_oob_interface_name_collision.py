@@ -6,6 +6,8 @@ from django.contrib.messages import get_messages
 from django.core.cache import cache
 from django.urls import reverse
 
+from netbox_librenms_plugin.acquisition.coordinator import resource_owner
+from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import (
     configure_default_librenms_server,
@@ -15,29 +17,35 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis_members,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
-from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_interfaces_snapshot
 
 
 SERVER_KEY = "default"
+OOB_ID = 99
 CONTESTED_REASON = "derived interface name is already used by another row"
 
 
-def _port(port_id, name, *, source=None, description=None, dedup_conflict=False):
-    port = {
+def _port(port_id, name, *, mac=""):
+    return {
         "port_id": port_id,
         "ifName": name,
-        "ifDescr": description or name,
+        "ifDescr": name,
         "ifType": "ethernetCsmacd",
         "ifAdminStatus": "up",
         "ifSpeed": 1_000_000_000,
         "ifMtu": 1500,
-        "ifPhysAddress": "",
+        "ifPhysAddress": mac,
     }
-    if source is not None:
-        port["_source"] = source
-    if dedup_conflict:
-        port["_dedup_conflict"] = True
-    return port
+
+
+def _seed(device, ports, oob_ports):
+    """Store a snapshot of the host *ports* and the OOB controller's *oob_ports*, with the OOB link on the owner."""
+    owner = resource_owner(device, Resource.INTERFACES, SERVER_KEY)
+    linked = read_mapping(owner).has_oob(SERVER_KEY)
+    if oob_ports and not linked:
+        seed_mapping(owner, SERVER_KEY, oob=OOB_ID)
+        linked = True
+    seed_interfaces_snapshot(device, ports, oob_ports=list(oob_ports) if linked else None, server_key=SERVER_KEY)
 
 
 def _sync(
@@ -46,15 +54,12 @@ def _sync(
     ports,
     selected,
     *,
+    oob_ports=(),
     name_field="ifName",
     exclude_columns=None,
     target_devices=None,
 ):
-    cache.set(
-        SyncInterfacesView().get_cache_key(device, "ports", SERVER_KEY),
-        {"ports": ports, "port_stack_relationships": {}},
-        timeout=300,
-    )
+    _seed(device, ports, oob_ports)
     post_data = {
         "server_key": SERVER_KEY,
         "interface_name_field": name_field,
@@ -81,13 +86,9 @@ def test_host_and_colliding_oob_rows_sync_under_distinct_names(client, settings)
     configure_default_librenms_server(settings)
     device = make_device("oob-derived-name", librenms_cf={SERVER_KEY: {"id": 71}})
     client.force_login(make_superuser("oob-derived-name-user"))
-    ports = [
-        _port("8501", "eth0"),
-        _port("8502", "eth0", source="oob"),
-        _port("8503", "bmc0", source="oob"),
-    ]
+    oob_ports = [_port("8502", "eth0"), _port("8503", "bmc0")]
 
-    response = _sync(client, device, ports, [8501, 8502, 8503])
+    response = _sync(client, device, [_port("8501", "eth0")], [8501, 8502, 8503], oob_ports=oob_ports)
 
     assert response.status_code == 302
     interfaces = {interface.name: interface for interface in Interface.objects.filter(device=device)}
@@ -102,13 +103,9 @@ def test_oob_row_is_skipped_when_the_host_owns_its_derived_name(client, settings
     configure_default_librenms_server(settings)
     device = make_device("oob-derived-name-taken", librenms_cf={SERVER_KEY: {"id": 72}})
     client.force_login(make_superuser("oob-derived-name-taken-user"))
-    ports = [
-        _port(8511, "eth0"),
-        _port(8512, "eth0-oob"),
-        _port(8513, "eth0", source="oob"),
-    ]
+    ports = [_port(8511, "eth0"), _port(8512, "eth0-oob")]
 
-    response = _sync(client, device, ports, [8513])
+    response = _sync(client, device, ports, [8513], oob_ports=[_port(8513, "eth0")])
 
     assert response.status_code == 302
     assert not Interface.objects.filter(device=device).exists()
@@ -120,12 +117,7 @@ def test_cross_source_duplicate_port_id_is_rejected_before_writes(client, settin
     configure_default_librenms_server(settings)
     device = make_device("oob-cross-source-port-id", librenms_cf={SERVER_KEY: {"id": 80}})
     client.force_login(make_superuser("oob-cross-source-port-id-user"))
-    ports = [
-        _port("1", "eth0"),
-        _port(1, "eth0", source="oob"),
-    ]
-
-    response = _sync(client, device, ports, [1])
+    response = _sync(client, device, [_port("1", "eth0")], [1], oob_ports=[_port(1, "eth0")])
 
     assert response.status_code == 302
     assert not Interface.objects.filter(device=device).exists()
@@ -138,13 +130,9 @@ def test_two_oob_rows_contesting_one_synced_name_are_both_skipped(client, settin
     configure_default_librenms_server(settings)
     device = make_device("oob-derived-name-contested", librenms_cf={SERVER_KEY: {"id": 73}})
     client.force_login(make_superuser("oob-derived-name-contested-user"))
-    ports = [
-        _port(8521, "eth0"),
-        _port(8522, "eth0", source="oob"),
-        _port(8523, "eth0-oob", source="oob"),
-    ]
+    oob_ports = [_port(8522, "eth0"), _port(8523, "eth0-oob")]
 
-    response = _sync(client, device, ports, [8522, 8523])
+    response = _sync(client, device, [_port(8521, "eth0")], [8522, 8523], oob_ports=oob_ports)
 
     assert response.status_code == 302
     assert not Interface.objects.filter(device=device).exists()
@@ -158,13 +146,11 @@ def test_shared_lom_does_not_contest_an_ordinary_oob_name(client, settings):
     configure_default_librenms_server(settings)
     device = make_device("oob-shared-lom-name-claim", librenms_cf={SERVER_KEY: {"id": 81}})
     client.force_login(make_superuser("oob-shared-lom-name-claim-user"))
-    ports = [
-        _port(9201, "eth0"),
-        _port(9202, "eth0", source="oob", dedup_conflict=True),
-        _port(9203, "eth0-oob", source="oob"),
-    ]
+    # The host and the OOB controller report one MAC, so the assessment flags 9202 as a shared LOM port.
+    shared_mac = "aa:bb:cc:dd:ee:01"
+    oob_ports = [_port(9202, "eth0", mac=shared_mac), _port(9203, "eth0-oob")]
 
-    response = _sync(client, device, ports, [9201, 9203])
+    response = _sync(client, device, [_port(9201, "eth0", mac=shared_mac)], [9201, 9203], oob_ports=oob_ports)
 
     assert response.status_code == 302
     interfaces = {interface.name: interface for interface in Interface.objects.filter(device=device)}
@@ -186,19 +172,16 @@ def test_syncing_a_derived_oob_name_twice_is_idempotent(
     configure_default_librenms_server(settings)
     device = make_device("oob-derived-name-idempotent", librenms_cf={SERVER_KEY: {"id": 74}})
     client.force_login(make_superuser("oob-derived-name-idempotent-user"))
-    ports = [
-        _port(8531, "eth0"),
-        _port(8532, "eth0", source="oob"),
-    ]
+    ports, oob_ports = [_port(8531, "eth0")], [_port(8532, "eth0")]
 
     with django_capture_on_commit_callbacks(execute=True):
-        first_response = _sync(client, device, ports, [8531, 8532])
+        first_response = _sync(client, device, ports, [8531, 8532], oob_ports=oob_ports)
     list(get_messages(first_response.wsgi_request))
     coordinator = SyncCacheConsistency(device)
     cache.delete(coordinator.state_key(SyncTab.INTERFACES, SERVER_KEY))
 
     with django_capture_on_commit_callbacks(execute=True):
-        second_response = _sync(client, device, ports, [8531, 8532])
+        second_response = _sync(client, device, ports, [8531, 8532], oob_ports=oob_ports)
 
     assert first_response.status_code == second_response.status_code == 302
     interfaces = {interface.name: interface for interface in Interface.objects.filter(device=device)}
@@ -216,9 +199,9 @@ def test_derived_oob_name_survives_the_host_row_leaving_the_snapshot(client, set
     device = make_device("oob-derived-name-host-gone", librenms_cf={SERVER_KEY: {"id": 79}})
     client.force_login(make_superuser("oob-derived-name-host-gone-user"))
     host = _port(9101, "eth0")
-    oob = _port(9102, "eth0", source="oob")
+    oob = _port(9102, "eth0")
 
-    first_response = _sync(client, device, [host, oob], [9101, 9102])
+    first_response = _sync(client, device, [host], [9101, 9102], oob_ports=[oob])
 
     assert first_response.status_code == 302
     interfaces = {interface.name: interface for interface in Interface.objects.filter(device=device)}
@@ -227,7 +210,7 @@ def test_derived_oob_name_survives_the_host_row_leaving_the_snapshot(client, set
     assert _binding(interfaces["eth0-oob"]) == 9102
     list(get_messages(first_response.wsgi_request))
 
-    second_response = _sync(client, device, [oob], [9102])
+    second_response = _sync(client, device, [], [9102], oob_ports=[oob])
 
     assert second_response.status_code == 302
     interfaces = {interface.name: interface for interface in Interface.objects.filter(device=device)}
@@ -245,9 +228,9 @@ def test_bound_oob_keeps_its_name_when_unbound_reported_name_is_occupied(client,
     make_interface(device, "eth0")
     client.force_login(make_superuser("oob-derived-name-unbound-destination-user"))
     host = _port(9301, "eth0")
-    oob = _port(9302, "eth0", source="oob")
+    oob = _port(9302, "eth0")
 
-    first_response = _sync(client, device, [host, oob], [9302])
+    first_response = _sync(client, device, [host], [9302], oob_ports=[oob])
 
     assert first_response.status_code == 302
     bound = Interface.objects.get(device=device, name="eth0-oob")
@@ -256,7 +239,7 @@ def test_bound_oob_keeps_its_name_when_unbound_reported_name_is_occupied(client,
     bound.save(update_fields=["enabled"])
     list(get_messages(first_response.wsgi_request))
 
-    second_response = _sync(client, device, [oob], [9302])
+    second_response = _sync(client, device, [], [9302], oob_ports=[oob])
 
     assert second_response.status_code == 302
     bound.refresh_from_db()
@@ -280,9 +263,9 @@ def test_bound_oob_keeps_its_name_when_reported_name_is_bound_to_another_server(
     occupied.save()
     client.force_login(make_superuser("oob-derived-name-other-server-user"))
     host = _port(9311, "eth0")
-    oob = _port(9312, "eth0", source="oob")
+    oob = _port(9312, "eth0")
 
-    first_response = _sync(client, device, [host, oob], [9312])
+    first_response = _sync(client, device, [host], [9312], oob_ports=[oob])
 
     assert first_response.status_code == 302
     bound = Interface.objects.get(device=device, name="eth0-oob")
@@ -291,7 +274,7 @@ def test_bound_oob_keeps_its_name_when_reported_name_is_bound_to_another_server(
     bound.save(update_fields=["enabled"])
     list(get_messages(first_response.wsgi_request))
 
-    second_response = _sync(client, device, [oob], [9312])
+    second_response = _sync(client, device, [], [9312], oob_ports=[oob])
 
     assert second_response.status_code == 302
     bound.refresh_from_db()
@@ -312,13 +295,10 @@ def test_syncing_oob_before_host_keeps_the_same_names_and_bindings(client, setti
     configure_default_librenms_server(settings)
     device = make_device("oob-derived-name-order", librenms_cf={SERVER_KEY: {"id": 75}})
     client.force_login(make_superuser("oob-derived-name-order-user"))
-    ports = [
-        _port(8541, "eth1"),
-        _port(8542, "eth1", source="oob"),
-    ]
+    ports, oob_ports = [_port(8541, "eth1")], [_port(8542, "eth1")]
 
-    first_response = _sync(client, device, ports, [8542])
-    second_response = _sync(client, device, ports, [8541])
+    first_response = _sync(client, device, ports, [8542], oob_ports=oob_ports)
+    second_response = _sync(client, device, ports, [8541], oob_ports=oob_ports)
 
     assert first_response.status_code == second_response.status_code == 302
     interfaces = {interface.name: interface for interface in Interface.objects.filter(device=device)}
@@ -334,12 +314,7 @@ def test_oob_derived_name_that_exceeds_the_model_limit_is_skipped(client, settin
     client.force_login(make_superuser("oob-derived-name-too-long-user"))
     limit = Interface._meta.get_field("name").max_length
     name = "x" * limit
-    ports = [
-        _port(8561, name),
-        _port(8562, name, source="oob"),
-    ]
-
-    response = _sync(client, device, ports, [8562])
+    response = _sync(client, device, [_port(8561, name)], [8562], oob_ports=[_port(8562, name)])
 
     assert response.status_code == 302
     assert not Interface.objects.filter(device=device).exists()
@@ -354,9 +329,9 @@ def test_excluding_name_does_not_bind_an_oob_port_to_an_overlong_host_name(clien
     client.force_login(make_superuser("oob-excluded-derived-name-too-long-user"))
     name = "x" * Interface._meta.get_field("name").max_length
     host = _port(8581, name)
-    oob = _port(8582, name, source="oob")
+    oob = _port(8582, name)
 
-    oob_response = _sync(client, device, [host, oob], [8582], exclude_columns=["name", "vlans"])
+    oob_response = _sync(client, device, [host], [8582], oob_ports=[oob], exclude_columns=["name", "vlans"])
 
     assert oob_response.status_code == 302
     assert not Interface.objects.filter(device=device).exists()
@@ -364,7 +339,7 @@ def test_excluding_name_does_not_bind_an_oob_port_to_an_overlong_host_name(clien
         "derived interface name is longer" in str(message) for message in get_messages(oob_response.wsgi_request)
     )
 
-    host_response = _sync(client, device, [host, oob], [8581])
+    host_response = _sync(client, device, [host], [8581], oob_ports=[oob])
 
     assert host_response.status_code == 302
     host_interface = Interface.objects.get(device=device, name=name)
@@ -381,9 +356,9 @@ def test_excluding_name_still_updates_an_oob_interface_bound_by_port_id(client, 
     interface.save()
     client.force_login(make_superuser("oob-excluded-derived-name-bound-user"))
     name = "x" * Interface._meta.get_field("name").max_length
-    ports = [_port(8591, name), _port(8592, name, source="oob")]
-
-    response = _sync(client, device, ports, [8592], exclude_columns=["name", "vlans"])
+    response = _sync(
+        client, device, [_port(8591, name)], [8592], oob_ports=[_port(8592, name)], exclude_columns=["name", "vlans"]
+    )
 
     assert response.status_code == 302
     interface.refresh_from_db()
@@ -402,16 +377,12 @@ def test_excluding_name_preserves_an_operator_chosen_name(client, settings):
     seed_mapping(interface, SERVER_KEY, own=8572, save=False)
     interface.save()
     client.force_login(make_superuser("oob-excluded-name-user"))
-    ports = [
-        _port(8571, "eth0"),
-        _port(8572, "eth0", source="oob"),
-    ]
-
     response = _sync(
         client,
         device,
-        ports,
+        [_port(8571, "eth0")],
         [8572],
+        oob_ports=[_port(8572, "eth0")],
         exclude_columns=["name", "vlans", "mac_address", "description", "mtu", "speed", "type"],
     )
 
@@ -429,17 +400,12 @@ def test_excluding_name_does_not_bind_oob_port_to_unbound_host_interface(client,
     device = make_device("oob-excluded-colliding-name", librenms_cf={SERVER_KEY: {"id": 87}})
     host_interface = make_interface(device, "eth0")
     client.force_login(make_superuser("oob-excluded-colliding-name-user"))
-    ports = [
-        _port(9501, "eth0"),
-        _port(9502, "eth0-oob"),
-        _port(9503, "eth0", source="oob"),
-    ]
-
     response = _sync(
         client,
         device,
-        ports,
+        [_port(9501, "eth0"), _port(9502, "eth0-oob")],
         [9503],
+        oob_ports=[_port(9503, "eth0")],
         exclude_columns=["name", "vlans", "mac_address", "description", "mtu", "speed", "type"],
     )
 
@@ -519,14 +485,12 @@ def test_cross_page_host_row_reserves_its_inferred_member_name(client, settings)
     viewed_member.save()
     host_interface = make_interface(target_member, "Ethernet2/1")
     client.force_login(make_superuser("oob-cross-page-name-user"))
-    host = _port(9401, "Ethernet2/1")
-    oob = _port(9402, "Ethernet2/1", source="oob")
-
     response = _sync(
         client,
         viewed_member,
-        [host, oob],
+        [_port(9401, "Ethernet2/1")],
         [9402],
+        oob_ports=[_port(9402, "Ethernet2/1")],
         target_devices={9402: target_member},
     )
 
@@ -552,16 +516,12 @@ def test_verify_preserves_the_full_table_name_and_action_metadata(client, settin
         interface = make_interface(device, "eth0")
         seed_mapping(interface, SERVER_KEY, own=8501, save=False)
         interface.save()
-        ports = [_port(8502, "eth0")]
+        ports, oob_ports = [_port(8502, "eth0")], ()
     else:
-        ports = [_port(8501, "eth0"), _port(8502, "eth0", source="oob")]
+        ports, oob_ports = [_port(8501, "eth0")], [_port(8502, "eth0")]
         if case == "contested":
             ports.append(_port(8503, "eth0-oob"))
-    cache.set(
-        SyncInterfacesView().get_cache_key(device, "ports", SERVER_KEY),
-        {"ports": ports, "port_stack_relationships": {}},
-        timeout=300,
-    )
+    _seed(device, ports, oob_ports)
     request = make_request("get", {"server_key": SERVER_KEY}, user=user)
     view = DeviceInterfaceTableView()
     view.setup(request, pk=device.pk)

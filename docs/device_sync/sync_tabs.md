@@ -34,6 +34,8 @@ Available for Devices and Virtual Machines. This tab creates or updates interfac
 
 Interface names can come from different LibreNMS fields. Type mappings control how LibreNMS interface types become NetBox interface types. The tab also handles LAG and parent relationships, NetBox-only interfaces, and Virtual Chassis member assignment.
 
+A refresh needs the device's ports and port stack from LibreNMS. When the port stack has pairs, the refresh also needs the device OS, because the OS selects the name patterns that classify the pairs. If one of these is missing, the refresh fails and keeps no data. If only the ports of a linked OOB controller are missing, the tab shows the host interfaces with a notice. The tab applies the current port stack patterns each time it shows the data, so a pattern change needs no refresh.
+
 In the [filter](#filters), **Sync state** shows the interfaces that match NetBox, the interfaces with a different value in NetBox, or the interfaces that NetBox does not have. An ignored, ambiguous or incomplete row is in no state. The counts of ignored and NetBox-only interfaces describe the whole device, also under a filter.
 
 A row cannot sync when its name is already used by a NetBox interface that is bound to a different LibreNMS port. The row shows that port. If the port is another row in the table, sync that row first, then sync this row. If LibreNMS no longer reports the port (for example, after the device was rediscovered), the row shows **Rebind**. Rebind moves only the LibreNMS binding of that interface to the row's port. The interface keeps its name, IP addresses, and cables. Rebind is not offered while the OOB controller data is incomplete.

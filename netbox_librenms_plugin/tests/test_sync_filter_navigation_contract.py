@@ -142,6 +142,7 @@ def _routes(owner, object_type):
         "refresh": plugin_url(f"{'device' if object_type == 'device' else 'vm'}_interface_sync", pk=owner.pk),
         "fragment": plugin_url("sync_cache_fragment", object_type=object_type, pk=owner.pk, tab="interfaces"),
         "netbox_only": plugin_url("netbox_only_interfaces", object_type=object_type, pk=owner.pk),
+        "patterns": plugin_url("portstacklagpattern_list"),
     }
 
 
@@ -164,8 +165,12 @@ def _classify(hop, page_path, routes):
     if path == routes["fragment"]:
         # The loader states only its tab; the browser adds the page query (the browser test checks it).
         return "fragment"
-    if "/sync-interface-" in path or path.startswith(("/dcim/interfaces/", "/virtualization/interfaces/")):
-        # A relationship sync answers JSON and repaints one button; an object link leaves the page.
+    if (
+        "/sync-interface-" in path
+        or path.startswith(("/dcim/interfaces/", "/virtualization/interfaces/"))
+        or path == routes["patterns"]
+    ):
+        # A relationship sync answers JSON and repaints one button; an object or rules link leaves the page.
         return "follow-up"
     if _is_filter_form(hop):
         return "filter form"
