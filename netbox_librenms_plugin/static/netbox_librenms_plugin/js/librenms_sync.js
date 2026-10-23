@@ -4085,6 +4085,9 @@ function openBulkVCModal() {
 // The longest wait for the preference save before the page loads with the other name field.
 const NAME_FIELD_SAVE_TIMEOUT_MS = 3000;
 
+// True from a name field choice until the page loads with it.
+let interfaceNameFieldSaving = false;
+
 /**
  * Bind the interface name field radios: a change saves the preference, then loads the page again.
  *
@@ -4095,6 +4098,8 @@ const NAME_FIELD_SAVE_TIMEOUT_MS = 3000;
  * @returns {void}
  */
 function updateInterfaceNameField() {
+    // A tab swap during the save renders the radios again, enabled, and this initializer runs on them.
+    if (interfaceNameFieldSaving) setInterfaceNameFieldsDisabled(true);
     document.querySelectorAll('.interface-name-field').forEach(radio => {
         // The initializer runs again after every htmx swap, so each radio binds once.
         if (radio.dataset.nameFieldBound) return;
@@ -4102,6 +4107,7 @@ function updateInterfaceNameField() {
         radio.addEventListener('change', function () {
             const target = interfaceNameFieldUrl(this.value);
             // One choice loads the page, so an earlier save cannot navigate after a later choice.
+            interfaceNameFieldSaving = true;
             setInterfaceNameFieldsDisabled(true);
             saveInterfaceNameFieldPreference(this.closest('[data-save-pref-url]'), this.value)
                 .then(() => window.location.assign(target));
@@ -4123,7 +4129,9 @@ function setInterfaceNameFieldsDisabled(disabled) {
 
 // A page that the back button restores from the back-forward cache still has the radios disabled.
 window.addEventListener('pageshow', event => {
-    if (event.persisted) setInterfaceNameFieldsDisabled(false);
+    if (!event.persisted) return;
+    interfaceNameFieldSaving = false;
+    setInterfaceNameFieldsDisabled(false);
 });
 
 /**
