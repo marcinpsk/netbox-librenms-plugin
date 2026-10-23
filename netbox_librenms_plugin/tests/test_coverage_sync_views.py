@@ -17,15 +17,16 @@ from django.core.cache import cache
 from django.urls import reverse
 from ipam.models import IPAddress, VLAN
 
+from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts
 from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
-from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
 
 
 SERVER_KEY = "default"
@@ -305,8 +306,9 @@ class TestIPAddressSynchronization:
 class TestVLANSynchronization:
     def test_cached_vlan_is_created(self, client, live_librenms):
         device = make_device("vlan-create", librenms_cf={SERVER_KEY: {"id": 91}})
-        view = SyncVLANsView()
-        _seed_snapshot(view, device, "vlans", [{"vlan_vlan": 3091, "vlan_name": "Application"}])
+        seed_source_snapshot(
+            device, Resource.VLANS, SERVER_KEY, vlans=[{"vlan_vlan": 3091, "vlan_name": "Application"}]
+        )
         _login(client, "vlan-create-user")
         url = reverse(
             "plugins:netbox_librenms_plugin:sync_selected_vlans",
@@ -326,13 +328,14 @@ class TestVLANSynchronization:
     def test_cached_vlan_updates_an_existing_global_vlan(self, client, live_librenms):
         device = make_device("vlan-update", librenms_cf={SERVER_KEY: {"id": 93}})
         vlan = VLAN.objects.create(vid=3093, name="Old Name", status="active")
-        view = SyncVLANsView()
         _login(client, "vlan-update-user")
         url = reverse(
             "plugins:netbox_librenms_plugin:sync_selected_vlans",
             kwargs={"object_type": "device", "object_id": device.pk},
         )
-        _seed_snapshot(view, device, "vlans", [{"vlan_vlan": 3093, "vlan_name": "Application Servers"}])
+        seed_source_snapshot(
+            device, Resource.VLANS, SERVER_KEY, vlans=[{"vlan_vlan": 3093, "vlan_name": "Application Servers"}]
+        )
         updated = client.post(
             url,
             {"server_key": SERVER_KEY, "action": "create_vlans", "select": "3093", "vlan_group_3093": ""},

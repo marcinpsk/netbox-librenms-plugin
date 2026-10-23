@@ -15,6 +15,7 @@ from django_htmx.middleware import HtmxDetails
 from django.urls import reverse
 from ipam.models import IPAddress, VLAN
 
+from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.sync_cache import _ACKNOWLEDGED_REVISIONS_SESSION_KEY as SYNC_CACHE_ACKNOWLEDGED_SESSION_KEY
 from netbox_librenms_plugin.sync_cache import (
     CacheMutationTransition,
@@ -42,6 +43,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change, seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot, stored_source_value
 from netbox_librenms_plugin.tests.view_test_helpers import render_module_tab, rendered_module_form
 from netbox_librenms_plugin.server_mappings import mark_migrated
 from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
@@ -1131,7 +1133,7 @@ def test_vlan_sync_invalidates_other_tabs_after_creating_a_vlan(
     _configure_servers(settings)
     device = make_device("cache-vlan-writer", librenms_cf={"primary": {"id": 62}})
     vlan_payload = [{"vlan_vlan": 3062, "vlan_name": "Cache Test VLAN"}]
-    _seed_snapshot("vlans", device, "primary", vlan_payload)
+    seed_source_snapshot(device, Resource.VLANS, "primary", vlans=vlan_payload)
     _seed_snapshot("links", device, "primary")
 
     client.force_login(make_superuser("cache-vlan-writer-user"))
@@ -1147,7 +1149,7 @@ def test_vlan_sync_invalidates_other_tabs_after_creating_a_vlan(
 
     assert response.status_code == 302
     assert VLAN.objects.filter(vid=3062, name="Cache Test VLAN").exists()
-    assert cache.get(_cache_key("vlans", device, "primary")) == vlan_payload
+    assert stored_source_value(device, Resource.VLANS, "vlans", "primary") == vlan_payload
     assert cache.get(_cache_key("links", device, "primary")) is None
 
 
@@ -3031,7 +3033,7 @@ def test_blocked_vlan_tab_does_not_render_its_cached_rows(client, settings, prim
     """A blocked tab must lose its rendered rows whatever context key its table uses."""
     _configure_servers(settings)
     device = make_device("cache-vlan-blocked", librenms_cf={"primary": {"id": 7802}})
-    _seed_snapshot("vlans", device, "primary", [{"vlan_vlan": 10, "vlan_name": "CACHED-VLAN-10"}])
+    seed_source_snapshot(device, Resource.VLANS, "primary", vlans=[{"vlan_vlan": 10, "vlan_name": "CACHED-VLAN-10"}])
     coordinator = SyncCacheConsistency(device)
     coordinator.mark_refresh_failure(SyncTab.VLANS, "primary", actor_id=1)
     # Pin the seeding: the blanking only runs while the snapshot counts as unavailable.
