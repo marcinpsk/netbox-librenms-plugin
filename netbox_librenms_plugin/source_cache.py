@@ -154,7 +154,7 @@ def _binding_holds(snapshot, resource, owner):
         snapshot.server_key,
         ObjectRef.of(owner),
         MappingLink(MappingState.RESOLVED, host_id) if host_id is not None else None,
-        MappingLink(*link) if link is not None else None,
+        link,
     )
     return snapshot.binding(resource) == current
 
