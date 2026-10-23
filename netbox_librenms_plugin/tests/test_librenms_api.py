@@ -12,7 +12,7 @@ import time
 import pytest
 import requests
 
-from netbox_librenms_plugin.assessment.interfaces import parse_port_vlan_data, stored_name_rules
+from netbox_librenms_plugin.assessment.interfaces import stored_name_rules
 from netbox_librenms_plugin.interface_relationships import resolve_port_relationships
 from netbox_librenms_plugin.tests.conftest import name_rules, typed_maps
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
@@ -1445,42 +1445,6 @@ class TestGetLibreNMSIdIntGuard:
         assert result == 42
         assert cache.get(local_librenms_api._get_cache_key(obj)) == 42
         assert [request["path"] for request in librenms_server.requests] == [path]
-
-
-class TestVlanEntryDictGuard:
-    """Tests for the isinstance(vlan_entry, dict) guard of parse_port_vlan_data."""
-
-    def test_non_dict_entry_is_skipped(self):
-        """Non-dict entries in vlans_data should be skipped without error."""
-        port_data = {
-            "ifName": "eth0",
-            "ifDescr": "eth0",
-            "port_id": 1,
-            "ifTrunk": "dot1Q",
-            "ifVlan": None,
-            "vlans": [{"vlan": 10, "untagged": 1}, "bad_entry", {"vlan": 20}],
-        }
-        result = parse_port_vlan_data(port_data)
-
-        # Only VIDs 10 and 20 should be parsed; string entry is skipped
-        assert result["untagged_vlan"] == 10
-        assert 20 in result["tagged_vlans"]
-        assert len(result["tagged_vlans"]) == 1
-
-    def test_mixed_bad_entries_no_exception(self):
-        """Multiple non-dict entries mixed with valid dicts should not raise."""
-        port_data = {
-            "ifName": "eth0",
-            "ifDescr": "eth0",
-            "port_id": 2,
-            "ifTrunk": "dot1Q",
-            "ifVlan": None,
-            "vlans": [None, 123, "unexpected", {"vlan": 30}],
-        }
-        result = parse_port_vlan_data(port_data)
-
-        assert result["tagged_vlans"] == [30]
-        assert result["untagged_vlan"] is None
 
 
 # ====================================================================================

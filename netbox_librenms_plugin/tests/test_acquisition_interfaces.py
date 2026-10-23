@@ -89,6 +89,23 @@ def test_the_snapshot_holds_the_raw_ports_pairs_and_device_record(live_librenms)
 
 
 @pytest.mark.django_db
+def test_the_vlan_fields_that_librenms_reports_are_obtained(live_librenms):
+    from netbox_librenms_plugin.acquisition.registry import Resource
+
+    ports = [
+        {"port_id": 1, "ifVlan": "10", "ifTrunk": "dot1Q", "vlans": [{"vlan": 10, "untagged": 1}, {"vlan": "20"}]},
+        {"port_id": 2, "ifVlan": 30, "ifTrunk": None},
+        {"port_id": 3, "ifVlan": None, "vlans": []},
+        {"port_id": 4, "ifVlan": ""},
+    ]
+    _serve(live_librenms.server, ports=ports)
+
+    snapshot = _acquire(_device("acq-iface-vlan-shapes"))
+
+    assert snapshot.value(Resource.INTERFACES, "ports") == ports
+
+
+@pytest.mark.django_db
 def test_a_device_with_no_ports_and_no_pairs_is_an_obtained_empty_source(live_librenms):
     from netbox_librenms_plugin.acquisition.registry import Resource
 
@@ -109,6 +126,11 @@ def _break_stack(body, status=200):
     return lambda server: (_serve(server), server.register(STACK_PATH, body, status=status))
 
 
+def _ports_with(**vlan_fields):
+    """Serve one host port whose VLAN fields are *vlan_fields*."""
+    return _break_ports(lambda s, p: s.register(p, {"status": "ok", "ports": [{"port_id": 1, **vlan_fields}]}))
+
+
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     ("serve", "failed_path", "reason"),
@@ -120,6 +142,12 @@ def _break_stack(body, status=200):
             "boom",
         ),
         (_break_ports(lambda s, p: s.register_disconnect(p)), PORTS_PATH, "could not be reached"),
+        (_ports_with(ifVlan="trunk"), PORTS_PATH, "VLAN"),
+        (_ports_with(ifVlan=True), PORTS_PATH, "VLAN"),
+        (_ports_with(vlans={"vlan": 10}), PORTS_PATH, "VLAN"),
+        (_ports_with(vlans=["10"]), PORTS_PATH, "VLAN"),
+        (_ports_with(vlans=[{"untagged": 1}]), PORTS_PATH, "VLAN"),
+        (_ports_with(vlans=[{"vlan": "N/A", "untagged": 0}]), PORTS_PATH, "VLAN"),
         (_break_stack([port_pair(1, 100)]), STACK_PATH, "malformed"),
         (_break_stack({"status": "error", "message": "polling off", "mappings": []}), STACK_PATH, "polling off"),
         (_break_stack({"status": False, "mappings": []}), STACK_PATH, "malformed"),
@@ -134,6 +162,12 @@ def _break_stack(body, status=200):
         "ports-malformed-envelope",
         "ports-http-500",
         "ports-disconnect",
+        "ports-ifvlan-not-a-vid",
+        "ports-ifvlan-bool",
+        "ports-vlans-not-a-list",
+        "ports-vlans-entry-not-an-object",
+        "ports-vlans-entry-without-vid",
+        "ports-vlans-entry-vid-not-a-number",
         "stack-not-an-object",
         "stack-error-status",
         "stack-non-string-status",
