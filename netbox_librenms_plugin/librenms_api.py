@@ -10,6 +10,8 @@ from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
 from netbox.plugins import get_plugin_config
 
+from netbox_librenms_plugin.acquisition import responses
+from netbox_librenms_plugin.acquisition.snapshot import Outcome
 from netbox_librenms_plugin.constants import (
     LIBRENMS_NO_LINKS_MESSAGES,
     LIBRENMS_NO_SENSORS_MESSAGE,
@@ -824,70 +826,19 @@ class LibreNMSAPI:
 
     def get_port_stack(self, device_id: int):
         """
-        Fetch ifStackTable relationships from LibreNMS for a device.
-
-        Returns port_stack pairs showing parent/child interface relationships
-        (LAG membership and sub-interface nesting).
+        Fetch ifStackTable relationships from LibreNMS for a device, through the port_stack contract.
 
         Args:
             device_id: LibreNMS device ID
 
         Returns:
-            tuple: (success: bool, data: list[dict] | str)
-                On success: list of {high_port_id, low_port_id, high_ifIndex, low_ifIndex} dicts
-                On failure: error string
+            tuple: ``(True, mappings)`` with each ``{high_port_id, low_port_id, ...}`` pair, or
+                ``(False, reason)`` when the contract refuses the answer.
 
         """
-        try:
-            response = _session.get(
-                f"{self.librenms_url}/api/v0/devices/{device_id}/port_stack",
-                headers=self.headers,
-                timeout=DEFAULT_API_TIMEOUT,
-                verify=self.verify_ssl,
-            )
-            response.raise_for_status()
-            data = response.json()
-            # A non-object top-level payload (list, string, null) is malformed — not a valid
-            # "no relationships" answer. Fail rather than silently returning (True, []), which
-            # would be indistinguishable from "no relationships" and skip valid sync updates.
-            if not isinstance(data, dict):
-                logger.warning("Unexpected port_stack response for device %s: %r", device_id, data)
-                return False, "Unexpected response format from LibreNMS (non-object payload)"
-            # Honor an explicit error status *before* consuming mappings: an error payload can
-            # still carry mappings (e.g. {"status": "error", "message": ..., "mappings": []}),
-            # and treating that as "no relationships" would mask a real API failure and silently
-            # skip valid LAG/sub-interface sync. A genuine answer has no status (or "ok").
-            status = data.get("status")
-            if status is not None and (not isinstance(status, str) or status.lower() != "ok"):
-                # Only an absent status or a case-insensitive "ok" string is a genuine answer.
-                # A non-string status (e.g. {"status": false, "mappings": []}) is malformed and
-                # must fail the call, not be accepted as an empty "no relationships" result.
-                message = data.get("message") or "LibreNMS reported an error fetching port stack"
-                logger.warning("port_stack error status for device %s: %r", device_id, data)
-                return False, str(message)
-            mappings = data.get("mappings")
-            # The documented success envelope always contains a list-valued mappings field,
-            # including when no relationships exist. Missing, null, non-list, or mixed-list data
-            # is malformed. It must not become an authoritative empty relationship snapshot.
-            if not isinstance(mappings, list) or any(
-                not isinstance(item, dict) or "high_port_id" not in item or "low_port_id" not in item
-                for item in mappings
-            ):
-                logger.warning("Unexpected port_stack response for device %s: %r", device_id, data)
-                return False, "Unexpected response format from LibreNMS (invalid 'mappings' payload)"
-            return True, mappings
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 404:
-                return False, "Device not found in LibreNMS"
-            return False, f"HTTP error: {str(e)}"
-        except ValueError as e:
-            # response.json() raises ValueError (older requests) / JSONDecodeError on a non-JSON
-            # body. requests.exceptions.JSONDecodeError subclasses BOTH ValueError and
-            # RequestException, so this must precede the RequestException handler — otherwise the
-            # broad handler swallows JSON decode failures and reports "Error connecting" instead.
-            return False, f"Invalid JSON from LibreNMS: {str(e)}"
-        except requests.exceptions.RequestException as e:
-            return False, f"Error connecting to LibreNMS: {str(e)}"
+        endpoint = responses.port_stack(device_id)
+        decoded = endpoint.decode(*self.get_response(endpoint.request.path))
+        return (True, decoded.value) if decoded.outcome is Outcome.OBTAINED else (False, decoded.reason)
 
     def add_device(self, data):
         """
@@ -1169,8 +1120,7 @@ class LibreNMSAPI:
             return False, str(e)
         except ValueError as e:
             # JSONDecodeError subclasses both ValueError and RequestException, so a parse failure
-            # must be classified here or it is mislabeled as a connection problem (mirrors
-            # get_port_stack).
+            # must be classified here or it is mislabeled as a connection problem.
             return False, f"Invalid JSON from LibreNMS: {str(e)}"
         except requests.exceptions.RequestException as e:
             return False, str(e)
@@ -1656,8 +1606,7 @@ class LibreNMSAPI:
         except ValueError as e:
             # response.json() raises ValueError / requests JSONDecodeError on a non-JSON body.
             # JSONDecodeError subclasses BOTH ValueError and RequestException, so this must precede
-            # the RequestException handler — otherwise a parse failure is mislabeled "connecting"
-            # (mirrors get_port_stack).
+            # the RequestException handler — otherwise a parse failure is mislabeled "connecting".
             return False, f"Invalid JSON from LibreNMS: {str(e)}"
         except requests.exceptions.RequestException as e:
             return False, f"Error connecting to LibreNMS: {str(e)}"
