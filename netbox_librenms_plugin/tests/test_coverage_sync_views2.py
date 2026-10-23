@@ -11,6 +11,7 @@ from django.urls import reverse
 from ipam.models import IPAddress, VLAN, VLANGroup, VRF
 from virtualization.models import VMInterface, VirtualMachine
 
+from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.tests.conftest import (
     cable_together,
     make_device,
@@ -19,11 +20,11 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 from netbox_librenms_plugin.utils import get_librenms_cable_tag
 from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
-from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
 
 
 SERVER_KEY = "default"
@@ -375,7 +376,9 @@ class TestVLANWriteFailures:
     @pytest.mark.parametrize("posted_keys", [["bad__key"], ["removed", SERVER_KEY]], ids=["malformed", "ambiguous"])
     def test_an_unusable_server_key_fails_closed(self, client, live_librenms, posted_keys):
         device = make_device("vlan-unusable-server", librenms_cf={SERVER_KEY: {"id": 132}})
-        _seed(SyncVLANsView(), device, "vlans", [{"vlan_vlan": 3132, "vlan_name": "Application"}])
+        seed_source_snapshot(
+            device, Resource.VLANS, SERVER_KEY, vlans=[{"vlan_vlan": 3132, "vlan_name": "Application"}]
+        )
         _login(client, "vlan-unusable-server-user")
 
         response = client.post(
@@ -391,7 +394,9 @@ class TestVLANWriteFailures:
     def test_grouped_vlan_is_created_in_the_selected_scope(self, client, live_librenms):
         device = make_device("vlan-group", librenms_cf={SERVER_KEY: {"id": 131}})
         group = VLANGroup.objects.create(name="Application Group", slug="application-group")
-        _seed(SyncVLANsView(), device, "vlans", [{"vlan_vlan": 3131, "vlan_name": "Application"}])
+        seed_source_snapshot(
+            device, Resource.VLANS, SERVER_KEY, vlans=[{"vlan_vlan": 3131, "vlan_name": "Application"}]
+        )
         _login(client, "vlan-group-user")
 
         response = client.post(
@@ -414,7 +419,9 @@ class TestVLANWriteFailures:
         from netbox_librenms_plugin.tests.view_test_helpers import grant
 
         device = make_device("vlan-add-scope", librenms_cf={SERVER_KEY: {"id": 135}})
-        _seed(SyncVLANsView(), device, "vlans", [{"vlan_vlan": 3136, "vlan_name": "Outside add scope"}])
+        seed_source_snapshot(
+            device, Resource.VLANS, SERVER_KEY, vlans=[{"vlan_vlan": 3136, "vlan_name": "Outside add scope"}]
+        )
         user = make_user_with_perms(
             "vlan-add-scope-user",
             [("view", Device), ("change", VLAN)],
@@ -441,7 +448,9 @@ class TestVLANWriteFailures:
 
     def test_missing_group_fails_closed_instead_of_creating_global_vlan(self, client, live_librenms):
         device = make_device("vlan-group-missing", librenms_cf={SERVER_KEY: {"id": 132}})
-        _seed(SyncVLANsView(), device, "vlans", [{"vlan_vlan": 3132, "vlan_name": "Application"}])
+        seed_source_snapshot(
+            device, Resource.VLANS, SERVER_KEY, vlans=[{"vlan_vlan": 3132, "vlan_name": "Application"}]
+        )
         _login(client, "vlan-group-missing-user")
 
         response = client.post(
@@ -462,11 +471,11 @@ class TestVLANWriteFailures:
     def test_invalid_rows_do_not_abort_a_valid_vlan_in_the_batch(self, client, live_librenms):
         device = make_device("vlan-invalid-batch", librenms_cf={SERVER_KEY: {"id": 133}})
         too_long = "x" * (VLAN._meta.get_field("name").max_length + 1)
-        _seed(
-            SyncVLANsView(),
+        seed_source_snapshot(
             device,
-            "vlans",
-            [
+            Resource.VLANS,
+            SERVER_KEY,
+            vlans=[
                 {"vlan_vlan": 0, "vlan_name": "Invalid VID"},
                 {"vlan_vlan": 3133, "vlan_name": too_long},
                 {"vlan_vlan": 3134, "vlan_name": "Valid VLAN"},
@@ -498,7 +507,9 @@ class TestVLANWriteFailures:
         device = make_device("vlan-unchanged", librenms_cf={SERVER_KEY: {"id": 134}})
         vlan = VLAN.objects.create(vid=3135, name="Stable VLAN", status="active")
         before = vlan.last_updated
-        _seed(SyncVLANsView(), device, "vlans", [{"vlan_vlan": 3135, "vlan_name": "Stable VLAN"}])
+        seed_source_snapshot(
+            device, Resource.VLANS, SERVER_KEY, vlans=[{"vlan_vlan": 3135, "vlan_name": "Stable VLAN"}]
+        )
         _login(client, "vlan-unchanged-user")
 
         response = client.post(

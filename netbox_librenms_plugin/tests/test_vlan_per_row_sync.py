@@ -40,12 +40,11 @@ def _sync_url(device):
 
 
 def _seed_vlan_snapshot(device, rows, server_key="default"):
-    """Store VLAN source rows under the real synchronization cache key."""
-    from django.core.cache import cache
+    """Store a VLAN source snapshot holding *rows*."""
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
 
-    from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
-
-    cache.set(SyncVLANsView().get_cache_key(device, "vlans", server_key), rows, timeout=60)
+    seed_source_snapshot(device, Resource.VLANS, server_key, vlans=rows)
 
 
 @pytest.mark.django_db

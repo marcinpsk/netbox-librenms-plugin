@@ -1525,7 +1525,7 @@ class TestVlanEntryDictGuard:
 
 # ====================================================================================
 # Response-shape regression tests for get_device_transceivers / get_device_info /
-# get_device_vlans / get_port_vlan_details. These guard the malformed-payload
+# VLAN acquisition / get_port_vlan_details. These guard the malformed-payload
 # branches that were tightened up alongside the inventory/transceiver work.
 # ====================================================================================
 
@@ -1774,94 +1774,58 @@ class TestGetDeviceVrfs:
         assert message
 
 
-class TestGetDeviceVlansResponseShape:
-    """Cover response-shape branches in get_device_vlans()."""
+@pytest.mark.django_db
+class TestVlanAcquisitionResponseShape:
+    """Cover the VLAN contract over real HTTP; test_acquisition_vlans.py covers the 200, 500 and disconnect cases."""
 
     PATH = "/api/v0/resources/vlans"
 
-    def test_success_filters_by_device_id(self, local_librenms_api, librenms_server):
-        librenms_server.register(
-            self.PATH,
-            {
-                "status": "ok",
-                "vlans": [
-                    {"vlan_id": 1, "device_id": 7, "vlan_vlan": 10, "vlan_name": "DATA"},
-                    {"vlan_id": 2, "device_id": 8, "vlan_vlan": 20, "vlan_name": "VOICE"},
-                ],
-            },
-            method="GET",
-        )
+    @pytest.mark.parametrize(
+        ("serve", "reason"),
+        [
+            # A 200 that reports an error keeps LibreNMS's own message.
+            (lambda server, path: server.register(path, {"status": "error", "message": "nope"}), "nope"),
+            (lambda server, path: server.register(path, {"status": "ok", "vlans": None}), "malformed"),
+            (
+                lambda server, path: server.register(
+                    path, {"status": "ok", "vlans": [{"vlan_id": 1, "device_id": 7}, "not-a-dict"]}
+                ),
+                "malformed",
+            ),
+            (lambda server, path: server.register(path, ["unexpected"]), "malformed"),
+            (lambda server, path: server.register_raw(path, "not-json"), "malformed"),
+            (lambda server, path: server.register(path, {"status": "error"}, status=404), "HTTP 404"),
+            (lambda server, path: server.register(path, {"status": "error"}, status=503), "HTTP 503"),
+            (
+                lambda server, path: server.register(path, {"status": "error", "message": "not found"}, status=404),
+                "not found",
+            ),
+        ],
+        ids=[
+            "status-not-ok",
+            "null-vlans",
+            "non-dict-item",
+            "non-dict-body",
+            "non-json-body",
+            "http-404",
+            "http-503",
+            "http-error-message",
+        ],
+    )
+    def test_an_unusable_answer_is_a_failed_record(self, live_librenms, serve, reason):
+        from netbox_librenms_plugin.acquisition.coordinator import acquire
+        from netbox_librenms_plugin.acquisition.registry import Resource
+        from netbox_librenms_plugin.acquisition.snapshot import Outcome
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-        success, vlans = local_librenms_api.get_device_vlans(device_id=7)
+        serve(live_librenms.server, self.PATH)
+        device = make_device("vlan-shape", librenms_cf={"default": {"id": 7}})
 
-        assert success is True
-        assert len(vlans) == 1
-        assert vlans[0]["vlan_vlan"] == 10
+        record = acquire(device, server_key="default", resources=[Resource.VLANS]).record(Resource.VLANS, "vlans")
 
-    def test_vlans_not_list_returns_failure(self, local_librenms_api, librenms_server):
-        librenms_server.register(
-            self.PATH,
-            {"status": "ok", "vlans": "oops", "message": "bad payload"},
-            method="GET",
-        )
-
-        success, msg = local_librenms_api.get_device_vlans(device_id=7)
-
-        assert success is False
-        assert msg == "bad payload"
-
-    def test_non_dict_item_in_vlans_returns_failure(self, local_librenms_api, librenms_server):
-        librenms_server.register(
-            self.PATH,
-            {"status": "ok", "vlans": [{"vlan_id": 1, "device_id": 7}, "not-a-dict"]},
-            method="GET",
-        )
-
-        success, msg = local_librenms_api.get_device_vlans(device_id=7)
-
-        assert success is False
-        assert "invalid item shape" in msg
-
-    def test_status_not_ok_returns_failure(self, local_librenms_api, librenms_server):
-        librenms_server.register(
-            self.PATH,
-            {"status": "error", "message": "nope"},
-            method="GET",
-        )
-
-        success, msg = local_librenms_api.get_device_vlans(device_id=7)
-
-        assert success is False
-        assert msg == "nope"
-
-    def test_non_dict_response_returns_failure(self, local_librenms_api, librenms_server):
-        librenms_server.register(self.PATH, ["unexpected"], method="GET")
-
-        success, msg = local_librenms_api.get_device_vlans(device_id=7)
-
-        assert success is False
-        assert msg == "Unexpected response format"
-
-    def test_http_404_returns_dedicated_message(self, local_librenms_api, librenms_server):
-        librenms_server.register(
-            self.PATH,
-            {"status": "error", "message": "not found"},
-            status=404,
-            method="GET",
-        )
-
-        success, msg = local_librenms_api.get_device_vlans(device_id=7)
-
-        assert success is False
-        assert msg == "VLANs resource not found"
-
-    def test_value_error_returns_connection_message(self, local_librenms_api, librenms_server):
-        librenms_server.register_raw(self.PATH, "not-json", method="GET")
-
-        success, msg = local_librenms_api.get_device_vlans(device_id=7)
-
-        assert success is False
-        assert "Error connecting to LibreNMS" in msg
+        assert record.outcome is Outcome.FAILED
+        assert record.value is None
+        assert reason in record.reason
 
 
 class TestGetPortVlanDetailsResponseShape:

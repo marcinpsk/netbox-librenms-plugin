@@ -3,7 +3,6 @@ from dataclasses import dataclass, field
 from dcim.models import Device
 from django.contrib import messages
 from django.core import signing
-from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.http import Http404, HttpResponse
@@ -13,6 +12,8 @@ from django.views import View
 from ipam.models import VLAN, VLANGroup
 from utilities.exceptions import PermissionsViolation
 
+from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
@@ -707,12 +708,12 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                 messages.error(request, "No VLAN changes selected.")
             return self._redirect(object_type, object_id)
 
-        cached_vlans = cache.get(self.get_cache_key(obj, "vlans", self._post_server_key))
-        if not cached_vlans:
+        snapshot = source_cache.read(obj, Resource.VLANS, self._post_server_key)
+        if snapshot is None:
             messages.error(request, "No cached VLAN data. Please refresh VLANs first.")
             return self._redirect(object_type, object_id)
 
-        librenms_vlans, invalid_rows = index_vlan_source_rows(cached_vlans)
+        librenms_vlans, invalid_rows = index_vlan_source_rows(snapshot.value(Resource.VLANS, "vlans"))
         duplicate_source_vids = {
             vid for row in invalid_rows if (vid := normalize_vlan_vid(row.get("vlan_vlan"))) is not None
         }
