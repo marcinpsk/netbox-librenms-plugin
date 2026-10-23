@@ -940,7 +940,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         # The management rows and the row identities describe the whole snapshot, so they come before the filter.
         mgmt_row_ids = list(dict.fromkeys(row["row_id"] for row in ip_data if row.get("is_mgmt_ip") and row["row_id"]))
         table, filters, filtered_from = filter_sync_table(
-            request, obj, ip_data, lambda rows: IPAddressTable(rows, mgmt_row_ids=mgmt_row_ids)
+            request, obj, ip_data, lambda rows: IPAddressTable(rows, mgmt_row_ids=mgmt_row_ids), server_key=server_key
         )
         table.configure(request)
 
