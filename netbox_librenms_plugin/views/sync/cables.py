@@ -71,7 +71,7 @@ from netbox_librenms_plugin.utils import (
     exception_text_for,
     render_cable_trace,
 )
-from netbox_librenms_plugin.assessment.cables import port_record, remote_port_ref
+from netbox_librenms_plugin.assessment.cables import remote_port_ref
 from netbox_librenms_plugin.views.base.cables_view import (
     CABLE_MODAL_QUERY_KEYS,
     cable_row_ports,
@@ -84,6 +84,9 @@ from netbox_librenms_plugin.views.mixins import (
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
 )
+
+from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin.acquisition.registry import Resource
 
 logger = logging.getLogger(__name__)
 
@@ -225,17 +228,19 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         """
         self._cable_row_identity_error = False
         self._cable_source_permission_error = False
+        self._snapshot_port_records = {}
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
         cache_obj = get_librenms_sync_device(obj, server_key=server_key) or obj
         if not self.restricted_queryset(Device, "view").filter(pk=cache_obj.pk).exists():
             self._cable_source_permission_error = True
             return None
         self._cache_device = cache_obj
-        cache_key = self.get_cache_key(cache_obj, "links", server_key)
-        assessed = read_cable_assessment(obj, server_key, get_interface_name_field(request, obj))
+        cache_key = source_cache.snapshot_key(obj, Resource.CABLES, server_key)
+        assessed = read_cable_assessment(request, obj, server_key, get_interface_name_field(request, obj))
         if assessed is None:
             return None
-        self._cable_row_identity_error = assessed.get("identity_error", False)
+        self._cable_row_identity_error = assessed["identity_error"]
+        self._snapshot_port_records = assessed["port_records"]
         if assessed["blockers"]:
             from netbox_librenms_plugin.source_cache import blocker_notice
 
@@ -342,7 +347,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             display_name (str): Human label for the local port, echoed in the result.
             force (bool): When True, a ``needs_force`` conflict is overwritten instead of deferred.
             port_records (dict | None): LibreNMS port records by port id, read before the
-                transaction (:meth:`_fetch_cable_port_records`).
+                transaction (:meth:`_snapshot_cable_port_records`).
 
         Returns:
             dict: A result with ``status`` in ``{valid, overwritten, tagged, duplicate, conflict,
@@ -606,7 +611,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         Args:
             link_data (dict): The cached row, with the records its snapshot kept.
             touched_interfaces (list[Interface]): From :meth:`_locked_touched_interfaces`.
-            port_records (dict): Records by port id, read before the transaction.
+            port_records (dict): Snapshot records by port id, read before the transaction.
 
         Returns:
             str | None: The reason, naming the port and the rule.
@@ -636,27 +641,12 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         )
         return None if blocked is None else blocked[1]
 
-    def _fetch_cable_port_records(self, link_data, terminations):
-        """
-        Read, before the transaction, the records of every LibreNMS port a cable write may touch.
-
-        The snapshot keeps the row's own records; any other port bound to an endpoint or to the far
-        end of a cable on an endpoint is fetched by id. Nothing is fetched when no Ignore rule exists.
-
-        Args:
-            link_data (dict): The cached row.
-            terminations (tuple): The resolved endpoints known before the write.
-
-        Returns:
-            dict: Records by port id (only the keys the rules read).
-
-        """
+    def _snapshot_cable_port_records(self, link_data, terminations):
+        """Read rule evidence for row endpoints and displaced ports from the bound snapshot."""
         if not interface_rules_for_request(self.request).ignores_any_port:
             return {}
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
-        row_ports = cable_row_ports(link_data)
-        records = {port_id: record for _side, port_id, record in row_ports if record is not None}
-        wanted = {port_id for _side, port_id, record in row_ports if record is None}
+        wanted = {port_id for _side, port_id, _record in cable_row_ports(link_data)}
         interfaces = [term for term in terminations if isinstance(term, Interface)]
         interfaces.extend(
             Interface.objects.filter(pk__in=[pk for _model, pk in self._displaced_interfaces(*terminations)])
@@ -664,26 +654,21 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         for interface in interfaces:
             if (port_id := read_mapping(interface).own_id(server_key)) is not None:
                 wanted.add(port_id)
-        for port_id in sorted(wanted - set(records)):
-            if (record := self._fetch_port_record(port_id)) is not None:
-                records[port_id] = port_record(record)
-        return records
+        return {
+            port_id: self._snapshot_port_records[port_id]
+            for port_id in wanted
+            if port_id in self._snapshot_port_records
+        }
 
-    def _fetch_port_record(self, port_id):
-        """Read one LibreNMS port record by id, or None when LibreNMS returns none."""
-        success, data = self.librenms_api.get_port_by_id(port_id)
-        ports = data.get("port") if success and isinstance(data, dict) else None
-        return ports[0] if isinstance(ports, list) and ports and isinstance(ports[0], dict) else None
-
-    def _prefetch_cable_port_records(self, interface, cached_links):
-        """Resolve one selected row read-only and fetch its port records, before its transaction."""
+    def _selected_port_records(self, interface, cached_links):
+        """Resolve one selected row and read its snapshot evidence before the transaction."""
         link_data, result = self._selected_row_link_data(interface, cached_links)
         if result is not None:
             return {}
         resolved = self._resolve_cable_terminations(link_data, interface)
         if "status" in resolved:
             return {}
-        return self._fetch_cable_port_records(link_data, (resolved["local"], resolved["remote"]))
+        return self._snapshot_cable_port_records(link_data, (resolved["local"], resolved["remote"]))
 
     def _terminations_are_changeable(self, grouped):
         """Return whether the request may change every submitted termination."""
@@ -1265,8 +1250,8 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
         for interface in selected_interfaces:
             try:
-                # Live LibreNMS reads happen here, before the row's transaction takes any lock.
-                port_records = self._prefetch_cable_port_records(interface, cached_links)
+                # Read snapshot evidence before the row transaction takes a lock.
+                port_records = self._selected_port_records(interface, cached_links)
                 result = run_transaction(
                     functools.partial(self._sync_row_attempt, interface, cached_links, force, port_records)
                 )
@@ -1562,7 +1547,7 @@ class CableRemoteCreateView(SyncCablesView):
         ):
             messages.error(request, "This device has been migrated and is read-only for this LibreNMS server.")
             return self._sync_response(request, obj, server_key, redirect_url, close_modal=True)
-        port_records = self._fetch_cable_port_records(context["row"], (context["local_interface"],))
+        port_records = self._snapshot_cable_port_records(context["row"], (context["local_interface"],))
         try:
             with transaction.atomic():
                 # Lock owners before the insert can take a foreign-key lock on the remote device.
@@ -1665,7 +1650,7 @@ class CableRemoteCreateView(SyncCablesView):
         port = self._remote_port_record(row)
         if port is None:
             return None, HttpResponse(
-                "LibreNMS returned no record for the remote port. Refresh the cable data and try again.", status=409
+                "The snapshot has no record for the remote port. Refresh Cables before creating it.", status=409
             )
         if not self._port_record_is_live_on_neighbour(port, row):
             return None, HttpResponse(
@@ -1710,11 +1695,8 @@ class CableRemoteCreateView(SyncCablesView):
         }, None
 
     def _remote_port_record(self, row):
-        """Read the neighbour's port record, for the name and the type it would be created with."""
-        port_id = remote_port_ref(row)
-        if port_id is None:
-            return None
-        return self._fetch_port_record(port_id)
+        """Read the neighbour's port evidence from the bound source snapshot."""
+        return self._snapshot_port_records.get(remote_port_ref(row))
 
     @staticmethod
     def _port_record_is_live_on_neighbour(port, row):
@@ -1723,7 +1705,7 @@ class CableRemoteCreateView(SyncCablesView):
         return (
             neighbour_id is not None
             and coerce_librenms_id(port.get("device_id")) == neighbour_id
-            and port.get("deleted") in (None, 0, "0")
+            and ((type(port.get("deleted")) is int and port["deleted"] == 0) or port.get("deleted") == "0")
         )
 
     @staticmethod

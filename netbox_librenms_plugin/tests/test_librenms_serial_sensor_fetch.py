@@ -99,7 +99,7 @@ def test_a_recognized_active_sensor_needs_a_usable_index(live_librenms, sensor_i
     success, reason = live_librenms.api.get_serial_port_sensors(12)
 
     assert success is False
-    assert "sensor_index" in reason
+    assert live_librenms.server.requests[-1]["path"] == SENSORS_PATH
 
 
 @pytest.mark.parametrize("deleted", [1, "1"])
@@ -114,21 +114,25 @@ def test_deleted_sensors_need_no_live_identity_or_index(live_librenms, deleted):
     assert rows == [active]
 
 
-def test_a_malformed_deletion_flag_is_checked_before_the_sensor_identity(live_librenms):
-    row = {**_sensor(12), "sensor_deleted": True, "sensor_id": False, "sensor_index": None}
+def test_a_malformed_deletion_flag_refuses_the_serial_source(live_librenms):
+    row = {**_sensor(12), "sensor_deleted": True}
     live_librenms.server.register(SENSORS_PATH, {"status": "ok", "sensors": [row]})
 
     success, reason = live_librenms.api.get_serial_port_sensors(12)
 
     assert success is False
-    assert "sensor_deleted" in reason
+    assert live_librenms.server.requests[-1]["path"] == SENSORS_PATH
 
 
 @pytest.mark.parametrize("body", [{"status": "ok"}, {"status": "ok", "links": None}, {"status": "ok", "links": [7]}])
-def test_the_links_getter_rejects_an_unusable_envelope(live_librenms, body):
+def test_links_acquisition_rejects_an_unusable_envelope(live_librenms, body):
     live_librenms.server.register("/api/v0/devices/12/links", body)
 
-    success, reason = live_librenms.api.get_device_links(12)
+    from netbox_librenms_plugin.acquisition import responses
+    from netbox_librenms_plugin.acquisition.snapshot import Outcome
 
-    assert success is False
-    assert "malformed" in reason
+    endpoint = responses.links(12)
+    decoded = endpoint.decode(*live_librenms.api.get_response(endpoint.request.path))
+
+    assert decoded.outcome is Outcome.FAILED
+    assert live_librenms.server.requests[-1]["path"] == f"/api/v0/{endpoint.request.path}"

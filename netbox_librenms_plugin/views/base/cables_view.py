@@ -37,6 +37,7 @@ from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
     MappingRole,
     find_port_owner,
+    port_holders,
     identity_q,
     name_match_may_be_port,
     read_mapping,
@@ -76,24 +77,32 @@ from netbox_librenms_plugin.views.mixins import (
 )
 
 from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin.acquisition.coordinator import resource_owner
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.assessment.cables import (
     assess,
     remote_port_ref,
-    _dedupe_protocol_duplicates,
-    _also_reported_by,
+    dedupe_protocol_duplicates,
+    also_reported_by,
 )
 
 logger = logging.getLogger(__name__)
 
 
-def read_cable_assessment(subject, server_key, interface_name_field="ifName"):
+def read_cable_assessment(request, subject, server_key, interface_name_field="ifName"):
     """Read the bound source snapshot and assess its cable rows for the current name option."""
     snapshot = source_cache.read(subject, Resource.CABLES, server_key)
     if snapshot is None:
         return None
     return {
-        **assess(snapshot, subject=subject, interface_name_field=interface_name_field),
+        **assess(
+            snapshot,
+            subject=subject,
+            interface_name_field=interface_name_field,
+            include_serial=source_cache.can_view_serial_ports(
+                request.user, resource_owner(subject, Resource.CABLES, server_key)
+            ),
+        ),
         "snapshot_id": snapshot.snapshot_id,
         "last_fetched": snapshot.finished_at,
     }
@@ -374,7 +383,7 @@ class BaseCableTableView(
             normal_links, devices_by_name, devices_by_librenms_id, visible_device_ids
         )
         remote_owner_by_link = self._resolve_remote_owners(normal_links, remote_device_by_link)
-        chassis_members, local_owner_by_link = self._resolve_local_owners(normal_links, obj)
+        chassis_members, local_owner_by_link = self._resolve_local_owners(normal_links, obj, server_key)
         manual_ids, candidate_specs = self._collect_interface_candidates(
             normal_links, local_owner_by_link, remote_owner_by_link
         )
@@ -479,24 +488,35 @@ class BaseCableTableView(
             remote_owner_by_link[id(link)] = remote_owner
         return remote_owner_by_link
 
-    def _resolve_local_owners(self, normal_links, obj):
-        """Resolve which chassis member owns each row's local port, and the page's member set."""
-        if getattr(obj, "virtual_chassis_id", None):
-            chassis_members = list(obj.virtual_chassis.members.all())
-            members_by_position = {
-                member.vc_position: member for member in chassis_members if member.vc_position is not None
-            }
-        else:
-            chassis_members = [obj]
-            members_by_position = {}
-        local_owner_by_link = {}
+    def _resolve_local_owners(self, normal_links, obj, server_key):
+        """Resolve local owners by stable port binding before a chassis member name."""
+        if obj.virtual_chassis_id is None:
+            return [obj], {id(link): obj for link in normal_links}
+        chassis_members = list(obj.virtual_chassis.members.all())
+        members_by_id = {member.pk: member for member in chassis_members}
+        members_by_position = {
+            member.vc_position: member for member in chassis_members if member.vc_position is not None
+        }
+        holders = port_holders((link.get("local_port_id") for link in normal_links), server=server_key)
+        owner_ids = dict(
+            Interface.objects.filter(
+                pk__in=[
+                    holder[1] for holder in holders.values() if holder is not None and holder[0] == "dcim.interface"
+                ]
+            ).values_list("pk", "device_id")
+        )
+        owners = {}
         for link in normal_links:
-            local_owner_by_link[id(link)] = get_virtual_chassis_member(
-                obj,
-                link.get("local_port"),
-                members_by_position=members_by_position,
-            )
-        return chassis_members, local_owner_by_link
+            port_id = coerce_librenms_id(link.get("local_port_id"))
+            if port_id in holders:
+                holder = holders[port_id]
+                owner_id = owner_ids.get(holder[1]) if holder is not None and holder[0] == "dcim.interface" else None
+                owners[id(link)] = members_by_id.get(owner_id)
+            else:
+                owners[id(link)] = get_virtual_chassis_member(
+                    obj, link.get("local_port"), members_by_position=members_by_position
+                )
+        return chassis_members, owners
 
     @staticmethod
     def _collect_interface_candidates(normal_links, local_owner_by_link, remote_owner_by_link):
@@ -2029,7 +2049,7 @@ class BaseCableTableView(
                 ]
         # After resolution, so one adjacency reported over two protocols collapses on what the
         # rows resolved to rather than on the two protocols' differing name strings.
-        links_data[:] = _dedupe_protocol_duplicates(links_data)
+        links_data[:] = dedupe_protocol_duplicates(links_data)
         self._apply_termination_change_scope(
             links_data,
             preloaded_changeable_ids={
@@ -2139,18 +2159,13 @@ class BaseCableTableView(
                     self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS."
                 )
                 return None
-            result = source_cache.refresh(obj, Resource.CABLES, server_key, request=request)
+            result = source_cache.refresh(request, obj, Resource.CABLES, server_key)
             self._cable_refresh_error = result.error
             if result.error is not None:
                 return None
-        assessed = read_cable_assessment(obj, server_key, interface_name_field)
+        assessed = read_cable_assessment(request, obj, server_key, interface_name_field)
         if assessed is None and result is not None:
-            # Show the acquired rows when the cache write failed; writers still require a stored snapshot.
-            assessed = {
-                **assess(result.snapshot, subject=obj, interface_name_field=interface_name_field),
-                "snapshot_id": result.snapshot.snapshot_id,
-                "last_fetched": result.snapshot.finished_at,
-            }
+            self._cable_refresh_error = "Cable data could not be cached. Refresh before syncing."
         if assessed is None:
             return None
         cache_key = source_cache.snapshot_key(obj, Resource.CABLES, server_key)
@@ -2164,7 +2179,7 @@ class BaseCableTableView(
             self._disable_actions_for_migrated_owners(links_data, obj, owner, server_key)
         table, filters, filtered_from = self._build_cable_table(request, links_data, obj, server_key)
         return {
-            "table": None if assessed.get("identity_error") else table,
+            "table": None if assessed["identity_error"] else table,
             "filters": filters,
             "filtered_from": filtered_from,
             "object": obj,
@@ -2374,9 +2389,9 @@ class SingleCableVerifyView(BaseCableTableView):
                 for device in {origin_device, primary_device, selected_device}
             )
 
-            links_cache_key = self.get_cache_key(primary_device, "links", server_key)
+            links_cache_key = source_cache.snapshot_key(origin_device, Resource.CABLES, server_key)
             assessed = read_cable_assessment(
-                primary_device, server_key, get_interface_name_field(request, origin_device)
+                request, origin_device, server_key, get_interface_name_field(request, origin_device)
             )
             valid_links = assessed["links"] if assessed is not None else None
             if valid_links and request.user.pk is not None:
@@ -2394,13 +2409,13 @@ class SingleCableVerifyView(BaseCableTableView):
                 )
                 if link_data:
                     manual_remote_id = link_data.get("manual_remote_id")
-                    also_reported_by = _also_reported_by(valid_links, row_id)
+                    other_protocols = also_reported_by(valid_links, row_id)
                     # Keep the assessment local to this verify request.
                     link_data = dict(link_data)
                     if manual_remote_id is not None:
                         link_data["manual_remote_id"] = manual_remote_id
-                    if also_reported_by:
-                        link_data["also_reported_by"] = also_reported_by
+                    if other_protocols:
+                        link_data["also_reported_by"] = other_protocols
 
                     # Serial rows have a fixed ConsoleServerPort owner. Their owner selector is
                     # disabled, so they never need the member-change verify path.
@@ -2602,7 +2617,9 @@ class CableRemotePickerView(BaseCableTableView):
         cache_key = source_cache.snapshot_key(obj, Resource.CABLES, server_key)
         if owner is None:
             return cache_key, None
-        return cache_key, read_cable_assessment(obj, server_key, get_interface_name_field(self.request, obj))
+        return cache_key, read_cable_assessment(
+            self.request, obj, server_key, get_interface_name_field(self.request, obj)
+        )
 
     def _row_is_viewable(self, request, row, obj, server_key):
         """Return whether the picker requester may view a cached row's local endpoint."""
@@ -2613,7 +2630,8 @@ class CableRemotePickerView(BaseCableTableView):
         if not isinstance(local_name, str) or not local_name:
             return False
         if source != SERIAL_INVENTORY_SOURCE:
-            owner = get_virtual_chassis_member(obj, local_name)
+            _members, owners = self._resolve_local_owners([row], obj, server_key)
+            owner = owners[id(row)]
             if owner is None or not self.restricted_queryset(Device).filter(pk=owner.pk).exists():
                 return False
             interface = resolve_device_port(

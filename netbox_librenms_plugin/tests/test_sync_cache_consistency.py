@@ -7,6 +7,7 @@ import pytest
 from dcim.models import Cable, Module, ModuleBay, ModuleBayTemplate, ModuleType
 from django.apps import apps as django_apps
 from django.contrib.auth import get_user_model
+from django.contrib.messages import get_messages
 from django.core.cache import cache
 from django.db import transaction
 from django.http import HttpResponse
@@ -30,7 +31,7 @@ from netbox_librenms_plugin.sync_cache import (
     sync_cache_browser_contract,
     sync_subject_key,
 )
-from netbox_librenms_plugin.tests.cable_source_helpers import cable_rows, seed_cable_rows
+from netbox_librenms_plugin.tests.source_snapshot_helpers import link_row, port_row, seed_cables_snapshot
 from netbox_librenms_plugin.tests.conftest import (
     _PORT_KEYS_UNSET,
     configure_librenms_servers,
@@ -48,7 +49,6 @@ from netbox_librenms_plugin.tests.mapping_fixtures import (
     apply_mapping_change,
     seed_mapping,
     seed_stored_mapping,
-    stored_mapping_for_test,
 )
 from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     ip_address_row,
@@ -129,18 +129,8 @@ def _vlan_overrides_key(obj, server_key):
 def _seed_snapshot(data_type, obj, server_key, payload=None):
     assert data_type != "ip_addresses", "seed the IP tab with seed_ip_snapshot"
     if data_type == "links":
-        from netbox_librenms_plugin.acquisition.coordinator import resource_owner
-        from netbox_librenms_plugin.server_mappings import read_mapping
-
-        owner = resource_owner(obj, Resource.CABLES, server_key)
-        original_mapping = stored_mapping_for_test(owner)
-        had_mapping = read_mapping(owner).own_id(server_key) is not None
-        snapshot = seed_cable_rows(obj, (payload or {}).get("links", []), server_key)
-        # Namespace cleanup tests also seed page keys beside the shared VC owner's key.
-        cache.set(_cache_key(data_type, obj, server_key), snapshot.to_payload(), timeout=300)
-        if not had_mapping:
-            seed_stored_mapping(owner, original_mapping, save=True)
-        return snapshot
+        assert payload is None, "seed cable endpoint facts with seed_cables_snapshot"
+        return seed_cables_snapshot(obj, server_key=server_key)
     cache.set(_cache_key(data_type, obj, server_key), payload or {"snapshot": data_type}, timeout=300)
 
 
@@ -314,20 +304,14 @@ def test_cable_cache_fragment_does_not_rewrite_the_snapshot(client, settings, pr
     seed_mapping(remote, "primary", own=7404, save=False)
     local.save(update_fields=["custom_field_data"])
     remote.save(update_fields=["custom_field_data"])
-    payload = {
-        "links": [
-            {
-                "local_port_id": 7403,
-                "local_port": local.name,
-                "remote_port_id": 7404,
-                "remote_port": remote.name,
-                "remote_device": remote_device.name,
-                "remote_device_id": 6404,
-            }
-        ]
-    }
     cache_key = _cache_key("links", local_device, "primary")
-    snapshot = seed_cable_rows(local_device, payload["links"], "primary")
+    snapshot = seed_cables_snapshot(
+        local_device,
+        [link_row(7403, remote.name, remote_device_id=6404, remote_hostname=remote_device.name, remote_port_id=7404)],
+        [port_row(7403, local.name, device_id=6403)],
+        neighbour_ports={6404: [port_row(7404, remote.name, device_id=6404)]},
+        server_key="primary",
+    )
     client.force_login(make_superuser("cache-only-cable-user"))
     url = reverse(
         "plugins:netbox_librenms_plugin:sync_cache_fragment",
@@ -653,7 +637,7 @@ def test_committed_interface_sync_invalidates_only_mapped_page_and_shared_snapsh
         seed_ip_snapshot(subject, [], server_key="secondary")
     cache.set(_vlan_overrides_key(secondary_owner, "secondary"), {"200": "2"}, timeout=300)
 
-    for data_type in ("ports", "links", "inventory", "vlans"):
+    for data_type in ("ports", "inventory", "vlans"):
         _seed_snapshot(data_type, page_device, "unmapped")
     seed_ip_snapshot(page_device, [], server_key="unmapped")
 
@@ -686,8 +670,9 @@ def test_committed_interface_sync_invalidates_only_mapped_page_and_shared_snapsh
         assert cache.get(_cache_key(data_type, page_device, "secondary")) is None
         assert cache.get(_cache_key(data_type, sibling, "secondary")) is not None
 
-    for data_type in ("ports", "links", "ip_addresses", "inventory", "vlans"):
+    for data_type in ("ports", "ip_addresses", "inventory", "vlans"):
         assert cache.get(_cache_key(data_type, page_device, "unmapped")) is not None
+    assert source_cache.read(page_device, Resource.CABLES, "unmapped") is None
 
     coordinator = SyncCacheConsistency(page_device)
     primary_state = cache.get(coordinator.state_key(SyncTab.INTERFACES, "primary"))
@@ -1155,19 +1140,13 @@ def test_cable_sync_invalidates_other_tabs_after_creating_a_cable(
     seed_mapping(remote, "primary", own=7202, save=False)
     local.save(update_fields=["custom_field_data"])
     remote.save(update_fields=["custom_field_data"])
-    links_payload = {
-        "links": [
-            {
-                "local_port_id": 7201,
-                "local_port": local.name,
-                "remote_port_id": 7202,
-                "remote_port": remote.name,
-                "remote_device": remote_device.name,
-                "remote_device_id": 64,
-            }
-        ]
-    }
-    snapshot = _seed_snapshot("links", device, "primary", links_payload)
+    snapshot = seed_cables_snapshot(
+        device,
+        [link_row(7201, remote.name, remote_device_id=64, remote_hostname=remote_device.name, remote_port_id=7202)],
+        [port_row(7201, local.name, device_id=63)],
+        neighbour_ports={64: [port_row(7202, remote.name, device_id=64)]},
+        server_key="primary",
+    )
     _seed_snapshot("inventory", device, "primary")
 
     client.force_login(make_superuser("cache-cable-writer-user"))
@@ -1907,7 +1886,9 @@ def test_partial_cable_refresh_keeps_rows_from_available_sources(client, setting
 
     assert response.status_code == 200
     assert b'name="select"' in response.content
-    cached = cable_rows(device, "primary")
+    from netbox_librenms_plugin.views.base.cables_view import read_cable_assessment
+
+    cached = read_cable_assessment(response.wsgi_request, device, "primary")
     assert any(blocker.path.endswith("/649/links") for blocker in cached["blockers"])
     assert cached["links"][0]["local_port_id"] == 7471
 
@@ -2129,10 +2110,8 @@ def test_a_failed_module_cache_write_does_not_claim_there_is_nothing_to_show(
 
 
 @pytest.mark.django_db
-def test_a_failed_cable_cache_write_does_not_claim_there_is_nothing_to_show(
-    client, settings, primary_librenms, monkeypatch
-):
-    """A failed cache write must still render fresh cable rows with an accurate warning."""
+def test_a_failed_cable_cache_write_exposes_no_unstored_rows(client, settings, primary_librenms, monkeypatch):
+    """A failed cache write exposes no actionable rows from an unstored source."""
     _configure_servers(settings)
     device = make_device("cache-cable-rows", librenms_cf={"primary": {"id": 661}})
     remote_device = make_device("cache-cable-rows-remote", librenms_cf={"primary": {"id": 662}})
@@ -2171,9 +2150,11 @@ def test_a_failed_cable_cache_write_does_not_claim_there_is_nothing_to_show(
 
     assert response.status_code == 200
     assert skipped == [SyncCacheConsistency(device).snapshot_key(SyncTab.CABLES, "primary")]
-    assert b"Ethernet42" in response.content
-    assert b"could not be cached" in response.content
-    assert b"no snapshot to show" not in response.content
+    assert response.context["cable_sync"]["table"] is None
+    assert source_cache.read(device, Resource.CABLES, "primary") is None
+    state = SyncCacheConsistency(device).status("primary")[SyncTab.CABLES.value]
+    assert state["state"] == SyncTabState.REFRESH_FAILED.value
+    assert all(message.level_tag != "success" for message in get_messages(response.wsgi_request))
 
 
 @pytest.mark.django_db

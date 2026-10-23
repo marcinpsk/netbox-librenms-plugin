@@ -18,14 +18,13 @@ from django.urls import reverse
 
 from netbox_librenms_plugin.models import InterfaceTypeMapping, LibreNMSSettings
 from netbox_librenms_plugin.constants import MATCHING, MISMATCHED, NOT_IN_NETBOX
-from netbox_librenms_plugin.tests.cable_source_helpers import seed_cable_rows
+from netbox_librenms_plugin.tests.source_snapshot_helpers import link_row, port_row, sensor_row, seed_cables_snapshot
 from netbox_librenms_plugin.tests.conftest import (
     cable_together,
     librenms_cable_tag,
     make_device,
     make_interface,
     make_patch_panel,
-    make_serial_row,
     make_virtual_chassis_members,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
@@ -37,9 +36,7 @@ from netbox_librenms_plugin.tests.test_interface_sync_filters import (
     _visible_text,
     serve_sync_page,
 )
-from netbox_librenms_plugin.tests.test_interface_rule_writes import _port as _rule_port
 from netbox_librenms_plugin.tests.view_test_helpers import grant
-from netbox_librenms_plugin.assessment.cables import port_record
 
 ROW = re.compile(r'<tr[^>]*data-interface="([^"]+)"[^>]*>.*?</tr>', re.S)
 TABLE = re.compile(r'<table[^>]*id="librenms-cable-table(?:-vc)?".*?</table>', re.S)
@@ -52,20 +49,15 @@ FIELD_COLUMNS = {
 }
 
 
-def _seed(owner, links):
-    """Store source endpoint facts for the resource owner of the page."""
-    return seed_cable_rows(owner, links, SERVER_KEY)
+def _seed(owner, links=(), ports=(), *, sensors=None):
+    """Store the raw endpoint answers for the owner of the page."""
+    return seed_cables_snapshot(owner, links, ports, sensors=sensors, server_key=SERVER_KEY)
 
 
 def _link(port_id, local, remote_device, remote_port):
-    return {
-        "_source": "main",
-        "local_port_id": port_id,
-        "local_port": local,
-        "remote_device": remote_device,
-        "remote_port": remote_port,
-        "remote_port_id": 50000 + port_id,
-    }
+    return link_row(
+        port_id, remote_port, local_port=local, remote_hostname=remote_device, remote_port_id=50000 + port_id
+    )
 
 
 def _fragment(client, device, **params):
@@ -136,14 +128,12 @@ def _mixed_device(tag):
     _serial_panel, serial_front, serial_rear = make_patch_panel(f"cables-{tag}-serial-panel")
     cable_together(csps[2], serial_front)
     cable_together(serial_rear, con[3])
-    links += [
-        make_serial_row(csps[0], console.name, device, sensor_index_int=1),
-        make_serial_row(csps[1], console.name, device, sensor_index_int=2),
-        make_serial_row(csps[2], console.name, device, sensor_index_int=3),
-        make_serial_row(csps[3], console.name, device, sensor_index_int=4, is_configured=False),
+    sensors = [
+        sensor_row(10000 + n, n, device_id=LIBRENMS_ID, sensor_descr=f"{console.name if n < 4 else 'ttyS4'} Status")
+        for n in range(1, 5)
     ]
-    _seed(device, links)
-    serial = [f"serial:{csp.pk}" for csp in csps]
+    _seed(device, links, [port_row(1000 + n, f"Gi0/{n}", device_id=LIBRENMS_ID) for n in range(1, 8)], sensors=sensors)
+    serial = [f"serial:{10000 + n}" for n in range(1, 5)]
     return device, {
         # Both ends are in NetBox and neither has a cable.
         "1001": NOT_IN_NETBOX,
@@ -190,7 +180,11 @@ def _breakout_device(tag):
     cable = Cable(a_terminations=[parent], b_terminations=[far[0]], profile="breakout-1c4p-4c1p")
     cable.save()
     cable.tags.add(librenms_cable_tag())
-    _seed(device, [_link(100 + n, channels[n - 1].name, peer.name, f"Ethernet{n}") for n in (1, 2, 3)])
+    _seed(
+        device,
+        [_link(100 + n, channels[n - 1].name, peer.name, f"Ethernet{n}") for n in (1, 2, 3)],
+        [port_row(100 + n, channels[n - 1].name, device_id=LIBRENMS_ID) for n in (1, 2, 3)],
+    )
     return device, {"101": MATCHING, "102": NOT_IN_NETBOX, "103": None}
 
 
@@ -201,7 +195,11 @@ class TestMatching:
     def test_a_port_search_finds_a_row_on_another_page_with_the_filtered_total(self, client, settings):
         client = _superuser_client(client, settings, "cable-page-two")
         device = _device("page-two")
-        _seed(device, [_link(3000 + n, f"eth{n:02d}", "peer-not-in-netbox", f"xe-{n}") for n in range(1, 61)])
+        _seed(
+            device,
+            [_link(3000 + n, f"eth{n:02d}", "peer-not-in-netbox", f"xe-{n}") for n in range(1, 61)],
+            [port_row(3000 + n, f"eth{n:02d}", device_id=LIBRENMS_ID) for n in range(1, 61)],
+        )
 
         assert "3057" not in _rows(_tab(client, device, cables_per_page="25"))
 
@@ -256,6 +254,11 @@ def _chassis(tag):
             _link(4001, "Ethernet1/1", peer.name, "xe-1"),
             _link(4002, "Ethernet2/1", peer.name, "xe-2"),
             _link(4003, "Ethernet2/2", "no-such-device", "xe-3"),
+        ],
+        [
+            port_row(4001, "Ethernet1/1", device_id=LIBRENMS_ID),
+            port_row(4002, "Ethernet2/1", device_id=LIBRENMS_ID),
+            port_row(4003, "Ethernet2/2", device_id=LIBRENMS_ID),
         ],
     )
     return first
@@ -335,9 +338,9 @@ class TestCableComparison:
         # The tagged cable ends at a patch panel whose rear port has no cable, so no console is reached.
         _panel, front, _rear = make_patch_panel("cables-open-path-panel")
         cable_together(csp, front).tags.add(librenms_cable_tag())
-        _seed(device, [make_serial_row(csp, console.name, device)])
+        _seed(device, sensors=[sensor_row(10001, 1, device_id=LIBRENMS_ID, sensor_descr=f"{console.name} Status")])
 
-        record = _records(_fragment(client, device))[f"serial:{csp.pk}"]
+        record = _records(_fragment(client, device))["serial:10001"]
 
         assert record["cable_comparison"] == "unclassified"
         # The tag still keeps the cable: the row offers no sync that re-points it.
@@ -350,12 +353,13 @@ class TestCableComparison:
         device = _device("rule-refused")
         peer = make_device("cables-rule-refused-peer")
         links = []
+        ports = []
         for n in (1, 2):
             make_interface(device, f"Gi0/{n}")
             make_interface(peer, f"Ethernet{n}")
-            record = port_record(_rule_port(8000 + n, f"Gi0/{n}"))
-            links.append({**_link(8000 + n, f"Gi0/{n}", peer.name, f"Ethernet{n}"), "local_port_record": record})
-        _seed(device, links)
+            ports.append(port_row(8000 + n, f"Gi0/{n}", device_id=LIBRENMS_ID))
+            links.append(_link(8000 + n, f"Gi0/{n}", peer.name, f"Ethernet{n}"))
+        _seed(device, links, ports)
         InterfaceTypeMapping.objects.create(action=InterfaceTypeMapping.ACTION_IGNORE, name_pattern="^Gi0/1$")
 
         records = _records(_fragment(client, device))
@@ -413,7 +417,11 @@ class TestWholeSnapshotData:
             {**_link(6001, "Gi0/1", "peer-b", "xe-2"), "protocol": "lldp"},
             _link(6002, "Gi0/2", "peer-a", "xe-3"),
         ]
-        _seed(device, links)
+        _seed(
+            device,
+            links,
+            [port_row(6001, "Gi0/1", device_id=LIBRENMS_ID), port_row(6002, "Gi0/2", device_id=LIBRENMS_ID)],
+        )
         unfiltered = _rows(_tab(client, device))
         (peer_b,) = [row_id for row_id, row in unfiltered.items() if "peer-b" in row]
 
@@ -431,7 +439,7 @@ class TestWholeSnapshotData:
     def test_the_selection_signature_changes_with_the_interface_name_field(self, client, settings):
         client = _superuser_client(client, settings, "cable-signature")
         device = _device("signature")
-        _seed(device, [_link(6101, "uplink", "peer-a", "xe-1")])
+        _seed(device, [_link(6101, "uplink", "peer-a", "xe-1")], [port_row(6101, "uplink", device_id=LIBRENMS_ID)])
 
         signatures = {
             field: _table_attr(
@@ -449,15 +457,18 @@ class TestWholeSnapshotData:
         client = _superuser_client(client, settings, "cable-whole-device")
         device = _device("whole-device")
         console = make_device("cables-whole-device-console")
-        csps = [ConsoleServerPort.objects.create(device=device, name=f"ttyS{n}") for n in (1, 2)]
+        for n in (1, 2):
+            ConsoleServerPort.objects.create(device=device, name=f"ttyS{n}")
         for name in ("con1", "con2"):
             ConsolePort.objects.create(device=console, name=name)
-        links = [make_serial_row(csp, console.name, device, sensor_index_int=n) for n, csp in enumerate(csps, 1)]
+        sensors = [
+            sensor_row(10000 + n, n, device_id=LIBRENMS_ID, sensor_descr=f"{console.name} Status") for n in (1, 2)
+        ]
         from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
         from netbox_librenms_plugin.tests.source_snapshot_helpers import Failed, seed_cables_snapshot
         from netbox_librenms_plugin.acquisition.registry import Resource
 
-        snapshot = _seed(device, links)
+        snapshot = _seed(device, sensors=sensors)
         seed_mapping(device, SERVER_KEY, oob=99001)
         seed_cables_snapshot(
             device,
@@ -476,8 +487,8 @@ class TestWholeSnapshotData:
         filtered = _tab(client, device, cables_filter_local_port="ttyS2")
 
         # The second server port still targets the second free console port: the first row claims con1.
-        assert remote_ports(filtered) == {f"serial:{csps[1].pk}": "con2"}
-        assert remote_ports(unfiltered)[f"serial:{csps[1].pk}"] == "con2"
+        assert remote_ports(filtered) == {"serial:10002": "con2"}
+        assert remote_ports(unfiltered)["serial:10002"] == "con2"
         # The incomplete-source warning describes the snapshot, so the filter keeps it.
         for html in (unfiltered, filtered):
             assert "devices/99001/links" in html
@@ -633,7 +644,7 @@ def _picker_device(tag):
     free = make_interface(peer, "Ethernet99")
     links = [_link(7000 + n, f"Gi0/{n}", peer.name, f"Ethernet{n}") for n in range(1, 11)]
     links += [_link(7000 + n, f"Gi0/{n}", "remote-x", f"Ethernet{n}") for n in (11, 12)]
-    _seed(device, links)
+    _seed(device, links, [port_row(7000 + n, f"Gi0/{n}", device_id=LIBRENMS_ID) for n in range(1, 13)])
     return device, free
 
 

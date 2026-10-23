@@ -16,7 +16,14 @@ ConsoleServerPort / ConsolePort / FrontPort / RearPort / Cable / Tag rows:
       -> "Cable Mismatch", Sync offered -> the force-confirmation gate applies to every cable
 """
 
-from netbox_librenms_plugin.tests.cable_source_helpers import cable_rows, seed_cable_rows
+from netbox_librenms_plugin.tests.source_snapshot_helpers import (
+    cable_rows,
+    seed_cables_snapshot,
+    link_row,
+    port_row,
+    sensor_row,
+)
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 import pytest
 
@@ -26,6 +33,7 @@ from netbox_librenms_plugin.tests.conftest import (
     librenms_cable_tag as _librenms_tag,
     make_device,
     make_interface,
+    make_superuser,
     make_patch_panel as _panel,  # 1-position patch panel; version-gated front/rear wiring
     make_serial_device,
     make_serial_row as _serial_row,
@@ -241,20 +249,10 @@ class TestCableAdoptHtmx:
         _r, _, (cp,) = make_serial_device("router-adopt-e2e", cp_names=["console"])
         cable = cable_together(csp, cp)  # untagged: the pre-enrichment plugin cable case
 
-        link = {
-            "local_port": "ttyS9",
-            "local_port_id": f"serial:{csp.pk}-s",
-            "_source": "serial",
-            "device_id": acs.id,
-            "remote_device": "router-adopt-e2e",
-            "netbox_local_interface_id": csp.pk,
-            "netbox_remote_interface_id": cp.pk,
-            "can_create_cable": True,
-            "is_configured": True,
-            "sensor_id": 9,
-            "sensor_index_int": 9,
-        }
-        seed_cable_rows(acs, [link], SERVER_KEY)
+        seed_mapping(acs, SERVER_KEY, own=8)
+        seed_cables_snapshot(
+            acs, [], [], sensors=[sensor_row(9, 9, device_id=8, sensor_descr="router-adopt-e2e")], server_key=SERVER_KEY
+        )
 
         user = get_user_model().objects.create_superuser("adopt-admin", "adopt@example.com", "pw")
         client = Client()
@@ -314,16 +312,25 @@ class TestPatchPathSyncGuard:
         _panel_device, front_port, rear_port = _panel("patch-guard-panel")
         local_segment = cable_together(local, front_port)
         remote_segment = cable_together(rear_port, remote)
-        row = {
-            "local_port": local.name,
-            "local_port_id": 10,
-            "remote_device": remote_device.name,
-            "remote_port": remote.name,
-            "remote_port_id": 20,
-            "_source": "main",
-        }
         server_key = SERVER_KEY
-        seed_cable_rows(local_device, [row], server_key)
+        seed_mapping(local_device, server_key, own=8)
+        seed_cables_snapshot(
+            local_device,
+            [
+                link_row(
+                    10,
+                    remote.name,
+                    local_port=local.name,
+                    remote_hostname=remote_device.name,
+                    remote_device_id=None,
+                    remote_port_id=20,
+                    protocol=None,
+                    id=None,
+                )
+            ],
+            [port_row(10, local.name, device_id=8, if_descr=None)],
+            server_key=server_key,
+        )
         persist_test_server_mapping(local_device, server_key)
         user = get_user_model().objects.create_superuser(
             "patch-guard-admin",
@@ -421,6 +428,9 @@ class TestCabledSerialRowFarEndDisplay:
         assert link["can_create_cable"] is False
 
     def test_far_end_display_does_not_leak_into_the_cached_label(self):
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
+
+        request = make_request("get", user=make_superuser("serial-label-reader"))
         """Verify enrichment preserves the raw label across cache round-trips so cable status remains stable."""
         acs, (csp,), _ = make_serial_device("leak-ser", csp_names=["ttyS1"])
         _panel_dev, fp, rp = _panel("leak-ser-pp")
@@ -428,13 +438,20 @@ class TestCabledSerialRowFarEndDisplay:
         cable_together(csp, fp)
         cable_together(rp, cp)
 
-        seed_cable_rows(acs, [self._row(csp, "name-that-matches-nothing", acs)], SERVER_KEY)
-        fresh = self._enrich(acs, cable_rows(acs, SERVER_KEY)["links"][0])
+        seed_mapping(acs, SERVER_KEY, own=8)
+        seed_cables_snapshot(
+            acs,
+            [],
+            [],
+            sensors=[sensor_row(csp.pk, 1, device_id=8, sensor_descr="name-that-matches-nothing")],
+            server_key=SERVER_KEY,
+        )
+        fresh = self._enrich(acs, cable_rows(request, acs, SERVER_KEY)["links"][0])
         assert fresh["cable_status"] == "Cable Found"  # dead label: no sync target
         assert fresh["remote_device"] == "name-that-matches-nothing"  # RAW label untouched
         assert fresh["remote_device_display"] == "leak-ser-end"  # display shows reality
 
-        again = self._enrich(acs, cable_rows(acs, SERVER_KEY)["links"][0])
+        again = self._enrich(acs, cable_rows(request, acs, SERVER_KEY)["links"][0])
         assert again["cable_status"] == "Cable Found"  # same status as the fresh render
         assert again["remote_device"] == "name-that-matches-nothing"
 
@@ -470,7 +487,7 @@ class TestMakeSerialRowSensorIndex:
 @pytest.mark.parametrize(
     "constraints, allowed", [(None, True), ({"label": "permitted"}, False), ({"tags__name": "librenms"}, True)]
 )
-def test_cable_creation_enforces_add_constraints_after_provenance(client, monkeypatch, constraints, allowed):
+def test_cable_creation_enforces_add_constraints_after_provenance(client, live_librenms, constraints, allowed):
     from dcim.models import Cable, ConsolePort, ConsoleServerPort, Device, Interface
     from django.core.cache import cache
     from django.urls import reverse
@@ -478,24 +495,9 @@ def test_cable_creation_enforces_add_constraints_after_provenance(client, monkey
     from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
     from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
-    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-    monkeypatch.setattr(LibreNMSAPI, "get_device_info", lambda *_args, **_kwargs: (False, None))
+    live_librenms.server.register("/api/v0/devices/8", {"status": "error"}, status=500)
     local, (near,), _ = make_serial_device("scoped-add-local", csp_names=["ttyS9"])
     remote, _, (far,) = make_serial_device("scoped-add-remote", cp_names=["console"])
-    row = {
-        "local_port": "ttyS9",
-        "local_port_id": f"serial:{near.pk}-s",
-        "_source": "serial",
-        "device_id": local.pk,
-        "remote_device": remote.name,
-        "netbox_local_interface_id": near.pk,
-        "netbox_remote_interface_id": far.pk,
-        "can_create_cable": True,
-        "is_configured": True,
-        "sensor_id": 9,
-        "sensor_index_int": 9,
-    }
     user = make_user_with_perms(
         "cable-scoped-add",
         [
@@ -511,7 +513,10 @@ def test_cable_creation_enforces_add_constraints_after_provenance(client, monkey
     )
     user = grant(user, "add", Cable, constraints=constraints)
     key = SyncCablesView().get_cache_key(local, "links", SERVER_KEY)
-    seed_cable_rows(local, [row], SERVER_KEY)
+    seed_mapping(local, SERVER_KEY, own=8)
+    seed_cables_snapshot(
+        local, [], [], sensors=[sensor_row(9, 9, device_id=8, sensor_descr=remote.name)], server_key=SERVER_KEY
+    )
     persist_test_server_mapping(local, SERVER_KEY)
     client.force_login(user)
     try:

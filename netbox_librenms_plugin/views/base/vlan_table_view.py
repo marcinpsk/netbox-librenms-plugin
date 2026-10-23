@@ -84,7 +84,7 @@ class BaseVLANTableView(
                 self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS."
             )
         else:
-            error = source_cache.refresh(obj, Resource.VLANS, server_key).error
+            error = source_cache.refresh(request, obj, Resource.VLANS, server_key).error
             error_message = error and f"Failed to fetch VLANs: {error}"
 
         if error_message is not None:

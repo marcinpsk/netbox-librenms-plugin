@@ -17,7 +17,14 @@ Covered so far:
 - ``SyncCablesView.display_sync_results``: every result category's text and order.
 """
 
-from netbox_librenms_plugin.tests.cable_source_helpers import cable_rows, seed_cable_rows
+from netbox_librenms_plugin.tests.source_snapshot_helpers import (
+    cable_rows,
+    seed_cables_snapshot,
+    link_row,
+    port_row,
+    sensor_row,
+)
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 import pytest
 
@@ -28,7 +35,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_virtual_chassis,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_view
 
 SERVER_KEY = "default"
@@ -612,7 +619,8 @@ class TestPrepareContextIncompleteRefresh:
         user = grant(user, "view", Device)
         view = _api_view(user, server_key)
         cache_key = view.get_cache_key(target, "links", server_key)
-        seed_cable_rows(target, [], server_key)
+        seed_mapping(target, server_key, own=8)
+        seed_cables_snapshot(target, [], [], server_key=server_key)
         seed_stored_mapping(target, {server_key: None}, save=True)
 
         context = view._prepare_context(view.request, target, fetch_fresh=True, server_key=server_key)
@@ -638,23 +646,20 @@ class TestPrepareContextIncompleteRefresh:
         user = make_user_with_perms("ctx-serialskip-user", [])
         user = grant(user, "view", Device)
         view = _api_view(user, server_key)
-        prior_serial_row = {
-            "_source": "serial",
-            "device_id": device.pk,
-            "local_port": csp.name,
-            "local_port_id": f"serial:{csp.pk}",
-            "sensor_id": csp.pk,
-            "sensor_index_int": 1,
-            "is_configured": True,
-            "remote_device": "some-router",
-        }
-        seed_cable_rows(device, [prior_serial_row], server_key)
+        seed_mapping(device, server_key, own=8802)
+        seed_cables_snapshot(
+            device,
+            [],
+            [],
+            sensors=[sensor_row(csp.pk, 0, device_id=8802, sensor_descr="some-router")],
+            server_key=server_key,
+        )
 
         context = view._prepare_context(view.request, device, fetch_fresh=True, server_key=server_key)
 
-        current = cable_rows(device, server_key)
+        current = cable_rows(view.request, device, server_key)
         assert current["links"] == []
-        assert current["blockers"]
+        assert current["blockers"] == ()
         assert context["table"] is not None
         assert all(request["path"] != "/api/v0/resources/sensors" for request in librenms_server.requests)
 
@@ -671,19 +676,23 @@ class TestPrepareContextReadOnlyDonor:
         make_interface(peer, "Gi1/1")
         make_interface(donor, "Gi0/1")
         view = _api_view(make_superuser("ctx-donor-user"), server_key)
-        seed_cable_rows(
+        seed_mapping(donor, server_key, own=8)
+        seed_cables_snapshot(
             donor,
             [
-                {
-                    "_source": "lldp",
-                    "device_id": donor.pk,
-                    "local_port": "Gi0/1",
-                    "local_port_id": 10,
-                    "remote_device": peer.name,
-                    "remote_port": "Gi1/1",
-                }
+                link_row(
+                    10,
+                    "Gi1/1",
+                    local_port="Gi0/1",
+                    remote_hostname=peer.name,
+                    remote_device_id=None,
+                    remote_port_id=None,
+                    protocol=None,
+                    id=None,
+                )
             ],
-            server_key,
+            [port_row(10, "Gi0/1", device_id=8, if_descr=None)],
+            server_key=server_key,
         )
 
         seed_stored_mapping(
@@ -694,7 +703,7 @@ class TestPrepareContextReadOnlyDonor:
 
         context = view._prepare_context(view.request, donor, fetch_fresh=False, server_key=server_key)
 
-        assert cable_rows(donor, server_key) is None
+        assert cable_rows(view.request, donor, server_key) is None
         assert context is None
 
 

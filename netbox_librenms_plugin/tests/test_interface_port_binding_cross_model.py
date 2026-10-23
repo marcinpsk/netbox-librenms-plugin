@@ -236,7 +236,7 @@ def _cable_scenario(librenms_server, settings, name, *, holder=None):
         configured_server_key,
         map_device_to_librenms,
     )
-    from netbox_librenms_plugin.tests.test_cable_remote_matching import _row, _seed_cable_row
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import link_row, port_row, seed_cables_snapshot
 
     server_key = configured_server_key()
     bind_librenms_server(settings, librenms_server, server_key=server_key)
@@ -264,11 +264,14 @@ def _cable_scenario(librenms_server, settings, name, *, holder=None):
     )
     if holder is not None:
         _hold_cable_port(name, holder, server_key)
-    row_id = _seed_cable_row(
+    seed_cables_snapshot(
         local_device,
-        _row(local_port="eth0", remote_device=remote_device.name, remote_port="Gi0/1", remote_port_key=500),
-        server_key,
+        [link_row(100, "Gi0/1", remote_device_id=9, remote_hostname=remote_device.name, remote_port_id=500)],
+        [port_row(100, "eth0", device_id=8)],
+        neighbour_ports={9: [port_row(500, "Gi0/1", device_id=9)]},
+        server_key=server_key,
     )
+    row_id = "100"
     return server_key, local_device, local_interface, remote_device, row_id
 
 
