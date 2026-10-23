@@ -6,7 +6,7 @@ of that is high-cardinality, low-novelty repetition — 48 near-identical access
 a new shape, and nothing the outcome tests read distinguishes them. This collapses such repetition
 to one representative per distinct port *fingerprint*, while keeping every port that the LAG /
 sub-interface relationship resolution actually needs. The result drives
-:func:`~netbox_librenms_plugin.librenms_api.LibreNMSAPI.resolve_port_relationships` and
+:func:`~netbox_librenms_plugin.interface_relationships.resolve_port_relationships` and
 :func:`~netbox_librenms_plugin.data_shapes.signature.compute_shape_signature` to identical output —
 only smaller and reviewable.
 
