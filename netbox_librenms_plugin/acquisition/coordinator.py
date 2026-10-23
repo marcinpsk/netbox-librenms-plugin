@@ -6,11 +6,12 @@ from django.utils import timezone
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.acquisition.registry import RESOURCE_SPECS, OwnerPolicy
-from netbox_librenms_plugin.acquisition.resources import ACQUIRERS
+from netbox_librenms_plugin.acquisition.resources import ACQUIRERS, OOB_ACQUIRERS
 from netbox_librenms_plugin.acquisition.snapshot import (
     MappingSource,
     MappingState,
     ObjectRef,
+    Outcome,
     ResourceSource,
     ResponseRecord,
     SourceSnapshot,
@@ -18,6 +19,9 @@ from netbox_librenms_plugin.acquisition.snapshot import (
 from netbox_librenms_plugin.librenms_api import build_librenms_api
 from netbox_librenms_plugin.server_mappings import MappingRole, read_mapping, require_server_key
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+
+
+INVALID_OOB_REASON = "The linked OOB controller has no valid LibreNMS id."
 
 
 class SubjectNotMapped(Exception):
@@ -57,6 +61,75 @@ class _Fetch:
         record = ResponseRecord(request=endpoint.request, outcome=outcome, reason=reason)
         self.responses.setdefault(endpoint.request.key, record)
         return self.responses[endpoint.request.key]
+
+
+class _Refused:
+    """Record each request of a mapping as failed without making it, because the mapping names no device."""
+
+    def __init__(self, fetch, reason):
+        self._fetch = fetch
+        self._reason = reason
+
+    def __call__(self, endpoint):
+        return self._fetch.skip(endpoint, Outcome.FAILED, self._reason)
+
+
+def oob_link(mapping, server_key):
+    """
+    Return the OOB controller link that a mapping records on the server.
+
+    Args:
+        mapping (server_mappings.MappingState): The owner's mapping, from ``read_mapping``.
+        server_key (str): The LibreNMS server key.
+
+    Returns:
+        tuple[MappingState, int | None] | None: The link state and its LibreNMS id, or None when the
+            owner links no OOB controller. A corrupt stored id is INVALID, with no id.
+
+    """
+    if not mapping.has_oob(server_key):
+        return None
+    oob_id = mapping.oob_id(server_key)
+    return (MappingState.RESOLVED, oob_id) if oob_id is not None else (MappingState.INVALID, None)
+
+
+def _part_keys(parts):
+    return tuple((name, record.request.key) for name, record in parts.items())
+
+
+def _oob_source(fetch, resource, mapping, server_key):
+    """Acquire the OOB controller as its own mapping, or return None when the resource or owner has none."""
+    link = oob_link(mapping, server_key) if resource in OOB_ACQUIRERS else None
+    if link is None:
+        return None
+    state, oob_id = link
+    oob_fetch = fetch if state is MappingState.RESOLVED else _Refused(fetch, INVALID_OOB_REASON)
+    return MappingSource(
+        role=MappingRole.OOB,
+        librenms_id=oob_id,
+        state=state,
+        parts=_part_keys(OOB_ACQUIRERS[resource](oob_fetch, oob_id)),
+    )
+
+
+def _resource_source(fetch, resource, owner, server_key):
+    """Acquire one resource from the owner's own mapping and, when it links one, its OOB controller."""
+    mapping = read_mapping(owner)
+    librenms_id = mapping.own_id(server_key)
+    if librenms_id is None:
+        raise SubjectNotMapped(owner, server_key)
+    parts = ACQUIRERS[resource](fetch, librenms_id)
+    return ResourceSource(
+        resource=resource,
+        owner=ObjectRef.of(owner),
+        host=MappingSource(
+            role=MappingRole.OWN,
+            librenms_id=librenms_id,
+            state=MappingState.RESOLVED,
+            parts=_part_keys(parts),
+        ),
+        oob=_oob_source(fetch, resource, mapping, server_key),
+    )
 
 
 def resource_owner(subject, resource, server_key):
@@ -99,23 +172,10 @@ def acquire(subject, *, server_key, resources):
 
     started_at = timezone.now()
     fetch = _Fetch(api)
-    sources = {}
-    for resource in resources:
-        owner = resource_owner(subject, resource, server_key)
-        librenms_id = read_mapping(owner).own_id(server_key)
-        if librenms_id is None:
-            raise SubjectNotMapped(owner, server_key)
-        parts = ACQUIRERS[resource](fetch, librenms_id)
-        sources[resource] = ResourceSource(
-            resource=resource,
-            owner=ObjectRef.of(owner),
-            host=MappingSource(
-                role=MappingRole.OWN,
-                librenms_id=librenms_id,
-                state=MappingState.RESOLVED,
-                parts=tuple((name, record.request.key) for name, record in parts.items()),
-            ),
-        )
+    sources = {
+        resource: _resource_source(fetch, resource, resource_owner(subject, resource, server_key), server_key)
+        for resource in resources
+    }
     return SourceSnapshot(
         snapshot_id=uuid4().hex,
         server_key=server_key,
