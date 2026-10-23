@@ -176,14 +176,6 @@ class TestCablePayloadBoundaries:
 
 
 class TestCableHTTPAndORM:
-    def test_ports_before_link_resolution_do_not_contact_librenms(self, live_librenms):
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
-
-        view = _view(DeviceCableTableView, live_librenms)
-
-        assert view.get_ports_data() == {"ports": []}
-        assert live_librenms.server.requests == []
-
     def test_links_and_names_are_loaded_over_real_http(self, live_librenms):
         from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
 
@@ -316,9 +308,8 @@ class TestCableHTTPAndORM:
         seed_interfaces_snapshot(device, [{"port_id": 999, "ifName": "snapshot-only"}])
         ports = _register_ports(live_librenms)
         view = _view(DeviceCableTableView, live_librenms)
-        view.librenms_id = 42
 
-        assert [port["port_id"] for port in view.get_ports_data()["ports"]] == [port["port_id"] for port in ports]
+        assert [port["port_id"] for port in view.get_ports_data(42)["ports"]] == [port["port_id"] for port in ports]
         assert [item["path"] for item in live_librenms.server.requests] == ["/api/v0/devices/42/ports"]
 
     def test_exact_name_fallback_accepts_a_fqdn(self, live_librenms):
