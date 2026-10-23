@@ -4,7 +4,13 @@ from dataclasses import dataclass
 from typing import Callable
 
 from netbox_librenms_plugin.acquisition.snapshot import Outcome, SourceRequest
-from netbox_librenms_plugin.constants import LIBRENMS_NO_IPS_MESSAGE, LIBRENMS_NO_VRFS_MESSAGE, LIBRENMS_PORTS_COLUMNS
+from netbox_librenms_plugin.constants import (
+    LIBRENMS_NO_IPS_MESSAGE,
+    LIBRENMS_NO_LINKS_MESSAGES,
+    LIBRENMS_NO_SENSORS_MESSAGE,
+    LIBRENMS_NO_VRFS_MESSAGE,
+    LIBRENMS_PORTS_COLUMNS,
+)
 from netbox_librenms_plugin.ip_addressing import parse_librenms_ip_entry
 from netbox_librenms_plugin.utils import is_list_of_dicts
 
@@ -29,6 +35,7 @@ class Endpoint:
 
     request: SourceRequest
     decode: Callable[[int | None, object], Decoded]
+    extended_timeout: bool = False
 
 
 def _is_success(status):
@@ -192,3 +199,42 @@ def vrfs(device_id):
 def vlans(device_id):
     """Return the instance-wide VLAN endpoint, kept to this device's rows."""
     return Endpoint(SourceRequest("resources/vlans"), _rows_contract("vlans", device_id=device_id))
+
+
+def links(device_id):
+    """Return the links endpoint, including LibreNMS's two empty-table 404 answers."""
+    contract = _rows_contract("links")
+
+    def decode(status, body):
+        if status == HTTP_NOT_FOUND and any(
+            message in _message(body).lower() for message in LIBRENMS_NO_LINKS_MESSAGES
+        ):
+            return Decoded(Outcome.OBTAINED, value=[])
+        return contract(status, body)
+
+    return Endpoint(SourceRequest(f"devices/{device_id}/links"), decode)
+
+
+def sensors(device_id):
+    """Return raw sensors for one device, before serial type recognition or projection."""
+
+    def decode(status, body):
+        if status is None:
+            return Decoded(Outcome.FAILED, reason="Error connecting to LibreNMS: the server could not be reached.")
+        if status == HTTP_NOT_FOUND:
+            if LIBRENMS_NO_SENSORS_MESSAGE in _message(body).lower():
+                return Decoded(Outcome.OBTAINED, value=[])
+            return Decoded(Outcome.FAILED, reason="Sensors resource endpoint not found")
+        if _is_success(status) and body is None:
+            return Decoded(Outcome.FAILED, reason="Invalid JSON sensor envelope from LibreNMS.")
+        if not _is_success(status) or not isinstance(body, dict) or body.get("status") != "ok":
+            return _failed_status(status, body)
+        field = "sensors" if "sensors" in body else "resources"
+        rows = body.get(field)
+        if not isinstance(rows, list):
+            return Decoded(Outcome.FAILED, reason=_message(body) or "Unexpected response format: missing sensor list")
+        if not is_list_of_dicts(rows):
+            return Decoded(Outcome.FAILED, reason=_message(body) or "Unexpected response format: invalid sensor item")
+        return _rows_contract(field, device_id=device_id)(status, body)
+
+    return Endpoint(SourceRequest("resources/sensors"), decode, extended_timeout=True)
