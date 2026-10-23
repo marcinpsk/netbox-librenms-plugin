@@ -10,7 +10,14 @@ Covers:
   - LibreNMSCableTable.render_remote_device() dims unconfigured serial ports
 """
 
-from netbox_librenms_plugin.tests.cable_source_helpers import cable_rows, seed_cable_rows
+from netbox_librenms_plugin.tests.source_snapshot_helpers import (
+    cable_rows,
+    seed_cables_snapshot,
+    link_row,
+    port_row,
+    sensor_row,
+)
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 import pytest
 
@@ -228,10 +235,9 @@ class TestSerialSourceAssessment:
 
         obj, (csp,), _ = make_serial_device("ser-cached-devid", csp_names=["ttyS0"])
         server_key = configured_server_key()
-        snapshot = seed_cable_rows(
-            obj,
-            [{"_source": "serial", "local_port": csp.name, "sensor_id": 1000}],
-            server_key,
+        seed_mapping(obj, server_key, own=8)
+        snapshot = seed_cables_snapshot(
+            obj, [], [], sensors=[sensor_row(1000, 0, device_id=8, sensor_descr="")], server_key=server_key
         )
         client.force_login(make_superuser())
         url = reverse(
@@ -469,15 +475,18 @@ def test_verify_rejects_serial_row_with_fixed_owner():
 
     device, (csp,), _ = make_serial_device("serial-fixed-owner", csp_names=["ttyS7"])
     row = {
-        "row_id": "serial:1007",
+        "row_id": f"serial:{1007}",
         "local_port": csp.name,
-        "local_port_id": "serial:1007",
+        "local_port_id": f"serial:{1007}",
         "_source": "serial",
         "device_id": device.pk,
         "sensor_id": 1007,
     }
     server_key = configured_server_key()
-    seed_cable_rows(device, [row], server_key)
+    seed_mapping(device, server_key, own=8)
+    seed_cables_snapshot(
+        device, [], [], sensors=[sensor_row(1007, 7, device_id=8, sensor_descr="")], server_key=server_key
+    )
 
     user = get_user_model().objects.create_superuser(
         "serial-fixed-owner-admin",
@@ -522,20 +531,17 @@ class TestSerialDeviceIdPreserved:
     def test_vc_serial_row_pins_selection_to_the_console_server_port_owner(self):
         from django.test import RequestFactory
 
+        from netbox_librenms_plugin.assessment.cables import assess as assess_cables
         from netbox_librenms_plugin.tables.cables import VCCableTable
         from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
-        from netbox_librenms_plugin.utils import assign_cable_row_ids
 
         viewed, _, _ = make_serial_device("serial-vc-viewed")
         owner, (csp,), _ = make_serial_device("serial-vc-owner", csp_names=["ttyS1"])
         make_virtual_chassis("serial-vc", viewed, owner)
-        row = {
-            "_source": "serial",
-            "device_id": owner.pk,
-            "local_port": csp.name,
-            "local_port_id": "serial:501",
-        }
-        table = VCCableTable(assign_cable_row_ids([row]), device=viewed)
+        server_key = configured_server_key()
+        seed_mapping(owner, server_key, own=8)
+        snapshot = seed_cables_snapshot(viewed, sensors=[sensor_row(501, 1, device_id=8)], server_key=server_key)
+        table = VCCableTable(assess_cables(snapshot, subject=viewed)["links"], device=viewed)
         request = RequestFactory().get("/")
 
         html = table.as_html(request)
@@ -845,16 +851,25 @@ class TestNormalCableLinkQueryBound:
             status="connected",
         )
         breakout.save()
-        row = {
-            "_source": "main",
-            "local_port": local_interface.name,
-            "local_port_id": 10,
-            "remote_device": remote.name,
-            "remote_port": remote_interface.name,
-            "remote_port_id": 20,
-        }
         server_key = configured_server_key()
-        seed_cable_rows(local, [row], server_key)
+        seed_mapping(local, server_key, own=8)
+        seed_cables_snapshot(
+            local,
+            [
+                link_row(
+                    10,
+                    remote_interface.name,
+                    local_port=local_interface.name,
+                    remote_hostname=remote.name,
+                    remote_device_id=None,
+                    remote_port_id=20,
+                    protocol=None,
+                    id=None,
+                )
+            ],
+            [port_row(10, local_interface.name, device_id=8, if_descr=None)],
+            server_key=server_key,
+        )
         user = get_user_model().objects.create_superuser("normal-multi-url-user", "", "pw")
         client.force_login(user)
         persist_test_server_mapping(local, server_key)
@@ -1022,7 +1037,7 @@ class TestSerialSyncSurvivesHostLinks404:
         from netbox_librenms_plugin.acquisition.registry import Resource
 
         snapshot = source_cache.read(acs, Resource.CABLES, server_key)
-        cached = cable_rows(acs, server_key)
+        cached = cable_rows(refreshed.wsgi_request, acs, server_key)
         assert snapshot is not None, "a host /links 404 must not delete the serial cache"
         serial_rows = [link for link in cached["links"] if link.get("_source") == "serial"]
         assert len(serial_rows) == 1
@@ -1101,12 +1116,12 @@ class TestSerialSyncSurvivesHostLinks404:
 
         # A privileged refresh reads the sensors and caches the serial row.
         client.force_login(make_superuser())
-        client.post(
+        source_response = client.post(
             reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[local.pk]),
             {"server_key": server_key},
             HTTP_HX_REQUEST="true",
         )
-        assert cable_rows(local, server_key)["blockers"] == ()
+        assert cable_rows(source_response.wsgi_request, local, server_key)["blockers"] == ()
 
         # A user without ConsoleServerPort visibility replaces the snapshot without sensors.
         requests_before = len(live_librenms.server.requests)
@@ -1116,12 +1131,12 @@ class TestSerialSyncSurvivesHostLinks404:
                 [("view", Device), ("view", Interface), ("view", ConsolePort), ("view", Cable)],
             )
         )
-        client.post(
+        source_response = client.post(
             reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[local.pk]),
             {"server_key": server_key},
             HTTP_HX_REQUEST="true",
         )
-        current = cable_rows(local, server_key)
+        current = cable_rows(source_response.wsgi_request, local, server_key)
         assert current["links"] == []
         assert all(
             request["path"] != "/api/v0/resources/sensors"
@@ -1144,7 +1159,7 @@ class TestSerialSyncSurvivesHostLinks404:
         )
 
         assert synced.status_code == 200
-        assert cable_rows(local, server_key)["links"] == []
+        assert cable_rows(synced.wsgi_request, local, server_key)["links"] == []
         csp.refresh_from_db()
         console_port.refresh_from_db()
         assert csp.cable_id is None
@@ -1201,8 +1216,11 @@ class TestSerialSyncSurvivesHostLinks404:
         )
 
         assert refreshed.status_code == 200
-        assert any(blocker.path == "resources/sensors" for blocker in cable_rows(local, server_key)["blockers"])
-        cached = cable_rows(local, server_key)
+        assert any(
+            blocker.path == "resources/sensors"
+            for blocker in cable_rows(refreshed.wsgi_request, local, server_key)["blockers"]
+        )
+        cached = cable_rows(refreshed.wsgi_request, local, server_key)
         assert cached is not None
         assert cached["blockers"]
         row_id = cached["links"][0]["row_id"]
@@ -1276,8 +1294,11 @@ class TestSerialSyncSurvivesHostLinks404:
         )
 
         assert refreshed.status_code == 200
-        assert any(blocker.path.endswith("/13/links") for blocker in cable_rows(local, server_key)["blockers"])
-        cached = cable_rows(local, server_key)
+        assert any(
+            blocker.path.endswith("/13/links")
+            for blocker in cable_rows(refreshed.wsgi_request, local, server_key)["blockers"]
+        )
+        cached = cable_rows(refreshed.wsgi_request, local, server_key)
         assert cached is not None
         assert cached["blockers"]
 
@@ -1321,7 +1342,7 @@ class TestCableSyncLockConflicts:
         server_key = configured_server_key()
         link = {
             "local_port": "ttyS3",
-            "local_port_id": f"serial:{csp.pk}-s",
+            "local_port_id": f"serial:{1}",
             "_source": "serial",
             "device_id": acs.id,
             "remote_device": f"router-{tag}",
@@ -1329,7 +1350,10 @@ class TestCableSyncLockConflicts:
             "sensor_id": 1,
             "sensor_index_int": 3,
         }
-        seed_cable_rows(acs, [link], server_key)
+        seed_mapping(acs, server_key, own=8)
+        seed_cables_snapshot(
+            acs, [], [], sensors=[sensor_row(1, 3, device_id=8, sensor_descr=f"router-{tag}")], server_key=server_key
+        )
         return acs, csp, cp, link["local_port_id"], server_key
 
     @staticmethod
@@ -1483,7 +1507,7 @@ class TestCableSyncHtmxPartial:
         server_key = configured_server_key()
         link = {
             "local_port": "ttyS3",
-            "local_port_id": f"serial:{csp.pk}-s",
+            "local_port_id": f"serial:{1}",
             "_source": "serial",
             "device_id": acs.id,
             "remote_device": "router-htmx",
@@ -1491,7 +1515,10 @@ class TestCableSyncHtmxPartial:
             "sensor_id": 1,
             "sensor_index_int": 3,
         }
-        seed_cable_rows(acs, [link], server_key)
+        seed_mapping(acs, server_key, own=8)
+        seed_cables_snapshot(
+            acs, [], [], sensors=[sensor_row(1, 3, device_id=8, sensor_descr="router-htmx")], server_key=server_key
+        )
 
         user = get_user_model().objects.create_superuser("htmx-cable-admin", "htmx@example.com", "pw")
         client = Client()
@@ -1558,7 +1585,12 @@ class TestCableSyncHtmxPartial:
             for index, csp in enumerate((first_csp, second_csp), start=1)
         ]
         server_key = configured_server_key()
-        seed_cable_rows(acs, rows, server_key)
+        seed_mapping(acs, server_key, own=8)
+        seed_cables_snapshot(
+            acs,
+            sensors=[sensor_row(index, index, device_id=8, sensor_descr=_router.name) for index in (1, 2)],
+            server_key=server_key,
+        )
 
         user = get_user_model().objects.create_superuser(
             "row-button-admin",
@@ -1610,17 +1642,14 @@ class TestCableSyncHtmxPartial:
         server_key = configured_server_key()
         original_csp_id = original_csp.pk
         row_id = f"serial:{original_csp_id}"
-        raw_row = {
-            "_source": "serial",
-            "device_id": local.pk,
-            "local_port": original_csp.name,
-            "local_port_id": row_id,
-            "remote_device": remote.name,
-            "sensor_id": original_csp.pk,
-            "sensor_index_int": 1,
-            "is_configured": True,
-        }
-        seed_cable_rows(local, [raw_row], server_key)
+        seed_mapping(local, server_key, own=8)
+        seed_cables_snapshot(
+            local,
+            [],
+            [],
+            sensors=[sensor_row(original_csp.pk, 1, device_id=8, sensor_descr=remote.name)],
+            server_key=server_key,
+        )
 
         user = get_user_model().objects.create_superuser("serial-local-rebind-user", "", "pw")
         client = Client()
@@ -1696,7 +1725,14 @@ class TestSerialCableReadScope:
             "sensor_index_int": 1,
             "is_configured": True,
         }
-        seed_cable_rows(device, [row], server_key)
+        seed_mapping(device, server_key, own=8)
+        seed_cables_snapshot(
+            device,
+            [],
+            [],
+            sensors=[sensor_row(csp.pk, 1, device_id=8, sensor_descr=remote_device.name)],
+            server_key=server_key,
+        )
         return row
 
     def test_sensor_without_a_netbox_port_stays_visible_to_a_granted_user(self, client, live_librenms):
@@ -1874,7 +1910,7 @@ class TestSerialCableReadScope:
         assert "visible-serial-label" in html
         assert hidden_csp.name not in html
         assert "hidden-serial-label" not in html
-        raw_links = cable_rows(device, server_key)["links"]
+        raw_links = cable_rows(response.wsgi_request, device, server_key)["links"]
         assert {row["local_port"] for row in raw_links if row.get("_source") == "serial"} == {
             visible_csp.name,
             hidden_csp.name,
@@ -1918,18 +1954,23 @@ class TestSerialCableReadScope:
         local = make_device("cable-verify-local-scope")
         interface = make_interface(local, "Ethernet1")
         server_key = configured_server_key()
-        seed_cable_rows(
+        seed_mapping(local, server_key, own=8)
+        seed_cables_snapshot(
             local,
             [
-                {
-                    "local_port": interface.name,
-                    "local_port_id": 10,
-                    "remote_device": None,
-                    "remote_port": None,
-                    "_source": "main",
-                }
+                link_row(
+                    10,
+                    None,
+                    local_port=interface.name,
+                    remote_hostname=None,
+                    remote_device_id=None,
+                    remote_port_id=None,
+                    protocol=None,
+                    id=None,
+                )
             ],
-            server_key,
+            [port_row(10, interface.name, device_id=8, if_descr=None)],
+            server_key=server_key,
         )
         user = self._user("cable-verify-local-scope-user", local)
         client.force_login(user)
@@ -1969,20 +2010,24 @@ class TestSerialCableReadScope:
         seed_mapping(hidden, server_key, own=42, save=False)
         hidden.save()
         map_device_to_librenms(local, 41, server_key=server_key)
-        seed_cable_rows(
+        seed_mapping(local, server_key, own=8)
+        seed_cables_snapshot(
             local,
             [
-                {
-                    "local_port": local_interface.name,
-                    "local_port_id": 10,
-                    "remote_device": visible.name,
-                    "remote_device_id": 42,
-                    "remote_port": visible_interface.name,
-                    "remote_port_id": 20,
-                    "_source": "main",
-                }
+                link_row(
+                    10,
+                    visible_interface.name,
+                    local_port=local_interface.name,
+                    remote_hostname=visible.name,
+                    remote_device_id=42,
+                    remote_port_id=20,
+                    protocol=None,
+                    id=None,
+                )
             ],
-            server_key,
+            [port_row(10, local_interface.name, device_id=8, if_descr=None)],
+            neighbour_ports={42: [port_row(20, visible_interface.name, device_id=42, if_descr=visible_interface.name)]},
+            server_key=server_key,
         )
         user = get_user_model().objects.create_user("cable-strong-id-user")
         self._grant(user, "cable-strong-id-plugin", LibreNMSSettings, ["view"])
@@ -2245,7 +2290,7 @@ class TestC8300RecordingAsyncLines:
         )
 
         assert refreshed.status_code == 200
-        cached = cable_rows(router, server_key)
+        cached = cable_rows(refreshed.wsgi_request, router, server_key)
         serial_rows = [link for link in cached["links"] if link.get("_source") == "serial"]
         assert [row["local_port"] for row in serial_rows] == lines
         assert all(row["is_configured"] for row in serial_rows)

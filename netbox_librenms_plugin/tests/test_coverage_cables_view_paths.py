@@ -12,7 +12,7 @@ HTTP calls.
 import json
 from functools import partial
 
-from netbox_librenms_plugin.tests.cable_source_helpers import cable_rows, seed_cable_rows
+from netbox_librenms_plugin.tests.source_snapshot_helpers import link_row, port_row, seed_cables_snapshot
 
 import pytest
 
@@ -105,7 +105,7 @@ class TestCableSourceCompleteness:
 
         device = _map_device(make_device("cable-ports-failed"), 141)
         _bind_server(settings, librenms_server)
-        _links_route(librenms_server, 141, [{"local_port_id": 1, "local_port": "eth0"}])
+        _links_route(librenms_server, 141, [link_row(1, "eth1", local_port="eth0")])
 
         snapshot = acquire(device, server_key=SERVER_KEY, resources=[Resource.CABLES])
         assessment = assess(snapshot, subject=device)
@@ -125,7 +125,7 @@ class TestCableSourceCompleteness:
         _links_route(
             librenms_server,
             61,
-            [{"id": 1, "local_port_id": 999, "local_port": "eth9", "remote_hostname": "peer", "remote_port": "e1"}],
+            [link_row(999, "e1", id=1, local_port="eth9", remote_hostname="peer")],
         )
 
         snapshot = acquire(device, server_key=SERVER_KEY, resources=[Resource.CABLES])
@@ -266,7 +266,7 @@ class TestCableRefreshFetchFailure:
         # /api/v0/devices/101/links stays unregistered, so the loopback answers 404.
         view = _cable_view(settings, librenms_server)
         links_key = view.get_cache_key(device, "links", SERVER_KEY)
-        seed_cable_rows(device, [{"local_port": "eth0", "local_port_id": 1}], SERVER_KEY)
+        seed_cables_snapshot(device, [link_row(1, "")], [port_row(1, "eth0", device_id=101)], server_key=SERVER_KEY)
         request = make_request("post", {"server_key": SERVER_KEY}, user=make_superuser())
 
         response = _post(view, request, pk=device.pk)
@@ -317,14 +317,16 @@ class TestCableRefreshOobMerge:
         _links_route(
             librenms_server,
             111,
-            [{"id": 1, "local_port_id": 1, "local_port": "eth0", "remote_hostname": "peer", "remote_port": "e1"}],
+            [link_row(1, "e1", id=1, local_port="eth0", remote_hostname="peer")],
         )
         view = _cable_view(settings, librenms_server)
         request = make_request("post", {"server_key": SERVER_KEY}, user=make_superuser())
 
         _post(view, request, pk=device.pk)
 
-        assessment = cable_rows(device, SERVER_KEY)
+        from netbox_librenms_plugin.views.base.cables_view import read_cable_assessment
+
+        assessment = read_cable_assessment(request, device, SERVER_KEY)
         assert [row["_source"] for row in assessment["links"]] == ["main"]
         assert assessment["blockers"]
         assert message_texts(request, "warning")
@@ -338,7 +340,7 @@ class TestCableRefreshOobMerge:
         _links_route(
             librenms_server,
             121,
-            [{"id": 1, "local_port_id": 1, "local_port": "eth0", "remote_hostname": "peer", "remote_port": "e1"}],
+            [link_row(1, "e1", id=1, local_port="eth0", remote_hostname="peer")],
         )
         # /api/v0/devices/122/links stays unregistered, so the loopback answers 404.
         view = _cable_view(settings, librenms_server)
@@ -346,7 +348,9 @@ class TestCableRefreshOobMerge:
 
         _post(view, request, pk=device.pk)
 
-        assessment = cable_rows(device, SERVER_KEY)
+        from netbox_librenms_plugin.views.base.cables_view import read_cable_assessment
+
+        assessment = read_cable_assessment(request, device, SERVER_KEY)
         assert [row["_source"] for row in assessment["links"]] == ["main"]
         assert assessment["blockers"]
         assert message_texts(request, "warning")
@@ -359,7 +363,7 @@ class TestCableRefreshOobMerge:
         _links_route(
             librenms_server,
             151,
-            [{"id": 1, "local_port_id": 1, "local_port": "eth0", "remote_hostname": "peer", "remote_port": "e1"}],
+            [link_row(1, "e1", id=1, local_port="eth0", remote_hostname="peer")],
         )
         librenms_server.register("/api/v0/devices/152/links", {"status": "ok", "links": {"not": "a list"}})
         view = _cable_view(settings, librenms_server)
@@ -367,7 +371,9 @@ class TestCableRefreshOobMerge:
 
         _post(view, request, pk=device.pk)
 
-        assessment = cable_rows(device, SERVER_KEY)
+        from netbox_librenms_plugin.views.base.cables_view import read_cable_assessment
+
+        assessment = read_cable_assessment(request, device, SERVER_KEY)
         assert [row["_source"] for row in assessment["links"]] == ["main"]
         assert assessment["blockers"]
         assert message_texts(request, "warning")
@@ -405,20 +411,11 @@ class TestSingleCableVerifyRemoteDeviceMissing:
 
         device = _map_device(make_device("cable-verify-remote-missing"), 131)
         _bind_server(settings, librenms_server)
-        seed_cable_rows(
+        seed_cables_snapshot(
             device,
-            [
-                {
-                    # No NetBox interface carries this name, so the local end stays unresolved.
-                    "local_port": "eth-absent",
-                    "local_port_id": 700,
-                    "remote_port": "Gi0/1",
-                    "remote_device": "not-in-netbox",
-                    "remote_device_id": None,
-                    "_source": "main",
-                }
-            ],
-            SERVER_KEY,
+            [link_row(700, "Gi0/1", remote_hostname="not-in-netbox")],
+            [port_row(700, "eth-absent", device_id=131)],
+            server_key=SERVER_KEY,
         )
         request = make_request(
             "post",

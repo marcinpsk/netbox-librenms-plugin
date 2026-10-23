@@ -18,7 +18,7 @@ from ipam.models import IPAddress, VLAN
 
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.server_mappings import read_mapping
-from netbox_librenms_plugin.tests.cable_source_helpers import seed_cable_rows
+from netbox_librenms_plugin.tests.source_snapshot_helpers import link_row, port_row, seed_cables_snapshot
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import (
@@ -50,11 +50,6 @@ def _response_messages(response, level=None):
 
 def _set_librenms_id(obj, value):
     seed_mapping(obj, SERVER_KEY, own=value)
-
-
-def _seed_snapshot(view, obj, data_type, payload):
-    assert data_type == "links"
-    seed_cable_rows(obj, payload["links"], SERVER_KEY)
 
 
 @pytest.mark.django_db
@@ -100,19 +95,13 @@ class TestCableSynchronization:
         remote = make_interface(remote_device, "Ethernet2", iface_type="1000base-t")
         _set_librenms_id(local, 7201)
         _set_librenms_id(remote, 7202)
-        payload = {
-            "links": [
-                {
-                    "local_port_id": 7201,
-                    "local_port": local.name,
-                    "remote_port_id": 7202,
-                    "remote_port": remote.name,
-                    "remote_device": remote_device.name,
-                    "remote_device_id": 62,
-                }
-            ]
-        }
-        _seed_snapshot(SyncCablesView(), local_device, "links", payload)
+        seed_cables_snapshot(
+            local_device,
+            [link_row(7201, remote.name, remote_device_id=62, remote_hostname=remote_device.name, remote_port_id=7202)],
+            [port_row(7201, local.name, device_id=61)],
+            neighbour_ports={62: [port_row(7202, remote.name, device_id=62)]},
+            server_key=SERVER_KEY,
+        )
         _login(client, "cable-sync-user")
 
         response = client.post(

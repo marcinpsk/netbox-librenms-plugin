@@ -7,11 +7,16 @@ from netbox_librenms_plugin.acquisition import responses
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.acquisition.snapshot import MappingState, Outcome
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
-from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns, project_serial_sensors
+from netbox_librenms_plugin.serial_utils import (
+    SerialSensorProjection,
+    get_serial_sensor_type_patterns,
+    project_serial_sensors,
+)
 from netbox_librenms_plugin.server_mappings import MappingRole
 
 REMOTE_ALIAS_FETCH_BUDGET_SECONDS = 15.0
 NEIGHBOUR_PORTS_PREFIX = "neighbour_ports:"
+NEIGHBOUR_BUDGET_EXHAUSTED_REASON = f"The {REMOTE_ALIAS_FETCH_BUDGET_SECONDS:g} s neighbour request budget was spent."
 
 
 @dataclass(frozen=True)
@@ -25,6 +30,23 @@ class Blocker:
     def of(cls, record):
         """Return the blocker of a response that was not obtained."""
         return cls(record.request.path, f"{record.request.path} was not obtained ({record.reason})")
+
+
+@dataclass(frozen=True)
+class CableSourceState:
+    """Cable scopes and the serial projection used to decide their readiness."""
+
+    scopes: dict
+    serial: SerialSensorProjection | None = None
+
+    @property
+    def blocked_scopes(self):
+        return {scope: blockers for scope, blockers in self.scopes.items() if blockers}
+
+
+def neighbor_scope_key(scope, device_id):
+    """Return the scope of rows that need one neighbour's ports."""
+    return f"{scope}:neighbour:{device_id}"
 
 
 def port_vrf_id(port):
@@ -92,7 +114,7 @@ def _cable_parts(fetch, librenms_id):
             if fetch.neighbour_deadline is None:
                 fetch.neighbour_deadline = monotonic() + REMOTE_ALIAS_FETCH_BUDGET_SECONDS
             if monotonic() >= fetch.neighbour_deadline:
-                record = fetch.skip(endpoint, Outcome.FAILED, "The 15 s neighbour request budget was spent.")
+                record = fetch.skip(endpoint, Outcome.FAILED, NEIGHBOUR_BUDGET_EXHAUSTED_REASON)
             else:
                 record = fetch(endpoint)
         parts[f"{NEIGHBOUR_PORTS_PREFIX}{neighbour_id}"] = record
@@ -163,22 +185,24 @@ def _interface_scopes(snapshot):
     return scopes
 
 
-def _cable_scopes(snapshot):
+def cable_source_state(snapshot):
+    """Compute cable scope blockers and project serial sensors once."""
     resource = Resource.CABLES
     source = snapshot.resources[resource]
     scopes = {}
     for name, mapping in (("host", source.host), ("oob", source.oob)):
-        if mapping is None or snapshot.record(resource, "links", mapping.role).outcome is Outcome.NOT_APPLICABLE:
+        if mapping is None:
             continue
         scopes[name] = _blockers(snapshot, resource, ("links", "ports"), mapping.role)
         for part, _key in mapping.parts:
             if part.startswith(NEIGHBOUR_PORTS_PREFIX):
                 neighbour_id = part.removeprefix(NEIGHBOUR_PORTS_PREFIX)
-                scopes[f"{name}:neighbour:{neighbour_id}"] = scopes[name] + _blockers(
+                scopes[neighbor_scope_key(name, neighbour_id)] = scopes[name] + _blockers(
                     snapshot, resource, (part,), mapping.role
                 )
-    sensors = snapshot.record(resource, "sensors")
-    if sensors.outcome is not Outcome.NOT_APPLICABLE:
+    sensors = snapshot.record(resource, "sensors") if source.host is not None else None
+    projection = None
+    if sensors is not None and sensors.outcome not in (Outcome.NOT_APPLICABLE, Outcome.NOT_REQUESTED):
         serial = _blockers(snapshot, resource, ("sensors",))
         if sensors.obtained:
             projection = project_serial_sensors(sensors.value, get_serial_sensor_type_patterns())
@@ -186,7 +210,11 @@ def _cable_scopes(snapshot):
                 path = sensors.request.path
                 serial = (Blocker(path, f"{path} was not usable ({projection.reason})"),)
         scopes["serial"] = serial
-    return scopes
+    return CableSourceState(scopes, projection)
+
+
+def _cable_scopes(snapshot):
+    return cable_source_state(snapshot).scopes
 
 
 # Resource -> a function that returns each scope with its blockers; a scope without blockers is ready.

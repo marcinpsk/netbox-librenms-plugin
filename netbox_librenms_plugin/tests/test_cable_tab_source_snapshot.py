@@ -110,7 +110,10 @@ def test_refresh_stores_raw_facts_and_reads_current_name_options(client, live_li
     assert response.context["cable_sync"]["last_fetched"] == snapshot.finished_at
     from netbox_librenms_plugin.views.base.cables_view import read_cable_assessment
 
-    assert read_cable_assessment(device, SERVER_KEY, "ifDescr")["links"][0]["local_port"] == "Ethernet 1"
+    assert (
+        read_cable_assessment(response.wsgi_request, device, SERVER_KEY, "ifDescr")["links"][0]["local_port"]
+        == "Ethernet 1"
+    )
     requests_before = list(live_librenms.server.requests)
     assert len(_rows(_fragment(client, device))) == 1
     assert live_librenms.server.requests == requests_before

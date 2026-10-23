@@ -14,9 +14,7 @@ LIBRENMS_GLOBAL_ROUTING_INSTANCE = "Base"
 # share this one string, so a captured ports payload can never carry fewer fields than the sync
 # logic reads. ifVrf is the per-port VRF id the IP tab joins against /routing/vrf. ifIndex links a
 # transceiver to its ENTITY-MIB row.
-LIBRENMS_PORTS_COLUMNS = (
-    "port_id,ifName,ifIndex,ifType,ifSpeed,ifAdminStatus,ifDescr,ifAlias,ifPhysAddress,ifMtu,ifVlan,ifTrunk,ifVrf"
-)
+LIBRENMS_PORTS_COLUMNS = "port_id,device_id,deleted,ifName,ifIndex,ifType,ifSpeed,ifAdminStatus,ifDescr,ifAlias,ifPhysAddress,ifMtu,ifVlan,ifTrunk,ifVrf"
 
 # LibreNMS port fields the plugin can display as the interface name. The preference resolver,
 # the snapshot writers, and the snapshot readers all validate against this one set, so a value

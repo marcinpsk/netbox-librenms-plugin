@@ -13,25 +13,25 @@ def test_a_malformed_deletion_flag_invalidates_the_projection(deleted):
     result = project_serial_sensors([{**ROW, "sensor_deleted": deleted}], TYPE_MAP)
 
     assert not result.ready
-    assert "sensor_deleted" in result.reason
+    assert result.rows == []
     assert result.type_map == TYPE_MAP
 
 
 @pytest.mark.parametrize(
-    "changes, reason",
+    "changes",
     [
-        ({"sensor_id": False}, "sensor_id"),
-        ({"sensor_index": "bad"}, "sensor_index"),
-        ({"sensor_index": 1.3}, "sensor_index"),
+        {"sensor_id": False},
+        {"sensor_index": "bad"},
+        {"sensor_index": 1.3},
     ],
 )
-def test_invalid_active_sensor_identity_or_index_invalidates_projection(changes, reason):
+def test_invalid_active_sensor_identity_or_index_invalidates_projection(changes):
     from netbox_librenms_plugin.serial_utils import project_serial_sensors
 
     result = project_serial_sensors([{**ROW, **changes}], TYPE_MAP)
 
     assert not result.ready
-    assert reason in result.reason
+    assert result.rows == []
 
 
 @pytest.mark.parametrize("deleted", [1, "1"])
