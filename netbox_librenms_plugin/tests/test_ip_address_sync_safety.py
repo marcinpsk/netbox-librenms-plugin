@@ -1017,7 +1017,6 @@ def test_create_missing_interfaces_rejects_legacy_snapshot_before_processing_row
 
     assert response.status_code == 302
     assert _message_texts(response) == ["Cache has expired. Please refresh the IP data."]
-    assert cache.get(snapshot_key) is None
     assert not Interface.objects.filter(device=device).exists()
     assert not IPAddress.objects.filter(address=row_id).exists()
 

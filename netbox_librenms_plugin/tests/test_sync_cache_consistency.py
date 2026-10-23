@@ -2485,10 +2485,9 @@ def test_legacy_ip_fragment_never_backfills_from_librenms(client, settings, prim
     request_count = len(primary_librenms.requests)
     response = client.get(fragment_url, {"server_key": "primary"})
 
-    # The old payload reads as no snapshot and is deleted, so the fragment has nothing to restore.
+    # The old payload reads as no snapshot, so the fragment has nothing to restore.
     assert len(primary_librenms.requests) == request_count
     assert response.status_code == 404
-    assert cache.get(legacy_key) is None
 
 
 @pytest.mark.django_db

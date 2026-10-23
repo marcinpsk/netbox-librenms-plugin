@@ -1,4 +1,9 @@
-"""Source acquisition runs without a request, session, user or shared cache; its imports prove it."""
+"""
+Source acquisition runs without a request, session, user or shared cache; its own imports show it.
+
+The check reads the direct imports of acquisition/ only. A module it imports, such as librenms_api,
+can still import django.core.cache for its own reads.
+"""
 
 import ast
 from pathlib import Path
@@ -10,6 +15,7 @@ ACQUISITION = Path(__file__).resolve().parents[1] / "acquisition"
 FORBIDDEN = (
     "django.core.cache",
     "django.contrib.messages",
+    "django.contrib.sessions",
     "django.http",
     "django.shortcuts",
     "netbox_librenms_plugin.source_cache",

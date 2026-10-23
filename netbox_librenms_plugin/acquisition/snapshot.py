@@ -5,10 +5,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
+from netbox_librenms_plugin import __version__
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.server_mappings import MappingRole
 
-# Increase when the payload changes meaning; a reader treats any other payload as a miss.
+# Increase when the payload changes meaning. A reader also refuses a payload that another plugin version
+# wrote, because a decoder change alters what a stored value means.
 SNAPSHOT_SCHEMA_VERSION = 1
 
 
@@ -141,6 +143,7 @@ class SourceSnapshot:
         """Return the plain data the web transport stores."""
         return {
             "schema": SNAPSHOT_SCHEMA_VERSION,
+            "plugin_version": __version__,
             "snapshot_id": self.snapshot_id,
             "server_key": self.server_key,
             "subject": (self.subject.label, self.subject.pk),
@@ -152,8 +155,12 @@ class SourceSnapshot:
 
     @classmethod
     def from_payload(cls, payload):
-        """Return the snapshot a payload holds, or None when the payload has another schema."""
-        if not isinstance(payload, dict) or payload.get("schema") != SNAPSHOT_SCHEMA_VERSION:
+        """Return the snapshot a payload holds, or None when another schema or plugin version wrote it."""
+        if (
+            not isinstance(payload, dict)
+            or payload.get("schema") != SNAPSHOT_SCHEMA_VERSION
+            or payload.get("plugin_version") != __version__
+        ):
             return None
         resources = {}
         for item in payload["resources"]:
