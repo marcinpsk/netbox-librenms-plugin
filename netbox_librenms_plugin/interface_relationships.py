@@ -387,7 +387,7 @@ def resolve_port_relationships(  # noqa: C901
     """
     # A 0-port device (e.g. an iosxr management node with an empty ifTable) can surface
     # `ports`/`port_stack` as None when a caller threads a missing or `null` payload field
-    # straight in — `ports_data["ports"]` is None when the LibreNMS body carries
+    # straight in: `ports_data["ports"]` is None when the LibreNMS body carries
     # `"ports": null`, and likewise a null `mappings`. Coerce any non-list input to [] so
     # resolution is a clean no-op instead of crashing on iteration ("'NoneType' object is
     # not iterable"). A dict/str input already yields no usable entries below; normalizing
