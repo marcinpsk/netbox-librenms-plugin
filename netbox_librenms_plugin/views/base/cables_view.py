@@ -75,6 +75,7 @@ from netbox_librenms_plugin.views.mixins import (
     NetBoxObjectPermissionMixin,
     extract_cached_ports,
     parse_request_json,
+    server_unavailable_json,
 )
 
 logger = logging.getLogger(__name__)
@@ -3245,26 +3246,11 @@ class SingleCableVerifyView(BaseCableTableView):
             return error
         selected_device_id = data.get("device_id")
         row_id = data.get("row_id")
-        # Read server_key from POST so we use the exact server the user was viewing, but only honour
-        # it when it names a configured server: the raw value scopes the links cache and the
-        # mapping lookups below, so a forged/unconfigured key must not address
-        # another server's namespace (mirrors the interfaces POST path, issues #108/#109). Fall back
-        # to the active server when the POSTed key isn't configured.
-        # get_available_servers() is a dict, so the membership test hashes requested_server_key;
-        # a forged JSON array/object would raise TypeError (unhashable). Require a str first so a
-        # malformed key falls back to the active server instead of crashing the endpoint.
-        # Resolve the configured-server set via the CLASSMETHOD, not self.librenms_api: the lazy
-        # ``librenms_api`` property builds ``LibreNMSAPI()``, whose constructor raises KeyError/
-        # ValueError on a missing/misconfigured default server — so probing membership through the
-        # instance would 500 this verify POST exactly where the sibling IP-verify path degrades.
-        # get_available_servers() needs no instance.
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        requested_server_key = data.get("server_key")
-        if isinstance(requested_server_key, str) and requested_server_key in LibreNMSAPI.get_available_servers():
-            server_key = requested_server_key
-        else:
-            server_key = self._render_server_key()
+        # Honour only a posted key that names a configured server (mirrors the interfaces POST path,
+        # issues #108/#109); anything else falls back to the active server.
+        server_key = self.resolve_requested_server_key(data)
+        if server_key is None:
+            return server_unavailable_json()
 
         formatted_row = {
             "local_port": "",

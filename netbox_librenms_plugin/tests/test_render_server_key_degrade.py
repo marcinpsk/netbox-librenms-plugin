@@ -77,6 +77,27 @@ class TestModulesTabDegradesOnUnbuildableClient:
 
 
 @pytest.mark.django_db
+class TestIPAddressTabDegradesOnUnbuildableClient:
+    def test_get_context_data_returns_empty_panel_not_500(self):
+        from django.contrib.auth.models import AnonymousUser
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
+
+        device = _make_device("degrade-ip-dev")
+        request = RequestFactory().get("/")
+        request.user = AnonymousUser()
+        view = DeviceIPAddressTableView()
+        view.request = request
+
+        with _patch_unbuildable_config():
+            context = view.get_context_data(request, device)
+
+        assert context["table"] is None
+        assert context["object"] == device
+
+
+@pytest.mark.django_db
 class TestInterfacesTabDegradesOnUnbuildableClient:
     def test_get_context_data_renders_with_none_key_not_500(self):
         from django.contrib.auth.models import AnonymousUser
@@ -163,6 +184,7 @@ class TestVlanTabDegradesOnUnbuildableClient:
     ("route_name", "body"),
     [
         ("verify_interface", {"port_id": 4001}),
+        ("verify_cable", {"row_id": "row-1"}),
         ("verify_module", {"ent_physical_index": 100, "depth": 0}),
         ("save_vlan_group_overrides", {"vid_group_map": {"10": "1"}}),
     ],

@@ -18,7 +18,7 @@ def _redis_caches(settings, **options):
     return caches
 
 
-def test_the_configured_redis_cache_is_accepted(settings):
+def test_the_configured_redis_cache_is_accepted():
     _plugin_config()._validate_cache_backend()
 
 
@@ -39,7 +39,7 @@ def test_a_redis_cache_that_ignores_its_errors_is_refused(settings):
             _plugin_config()._validate_cache_backend()
 
 
-def test_the_global_ignore_exceptions_switch_is_refused(settings):
+def test_the_global_ignore_exceptions_switch_is_refused():
     with override_settings(DJANGO_REDIS_IGNORE_EXCEPTIONS=True):
         with pytest.raises(ImproperlyConfigured, match="IGNORE_EXCEPTIONS"):
             _plugin_config()._validate_cache_backend()
