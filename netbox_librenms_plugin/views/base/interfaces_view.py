@@ -757,7 +757,9 @@ class BaseInterfaceTableView(
         # Read overrides under the same VC-scoped key SaveVlanGroupOverridesView writes
         # (the sync device, not the viewed member) — otherwise an "apply to all" made on a VC
         # member is lost on the next render/member switch. cache_device mirrors that writer.
-        vlan_group_overrides = cache.get(self.get_vlan_overrides_key(cache_device, server_key)) or {}
+        vlan_group_overrides = (
+            cache.get(self.get_vlan_overrides_key(cache_device, server_key)) or {} if server_key is not None else {}
+        )
 
         # isinstance(dict) guard (mirroring the IP/VLAN/Cables/Modules render paths and the
         # interfaces SYNC path): a truthy-but-malformed cache entry — a legacy/older-shape snapshot
@@ -1084,7 +1086,8 @@ class BaseInterfaceTableView(
         if fresh_data is not None:
             cached_data = fresh_data
             last_fetched = timezone.now()
-        elif unresolved:
+        elif unresolved or server_key is None:
+            # No usable server means no scoped snapshot to read, so the tab renders empty.
             # ?server_key named a server that no longer resolves (deleted/misconfigured). Its ports
             # snapshot may still be cached, but the failed rebind left self.librenms_api bound to the
             # DEFAULT server, so the per-interface librenms_id index (_get_object_librenms_ids) is
@@ -1180,7 +1183,11 @@ class BaseInterfaceTableView(
         # (mirrors ip_addresses_view / modules_view).
         # On an unresolved key the render is empty (above); don't surface the stale server's TTL as
         # a misleading "cached until" on an empty table.
-        cache_ttl = None if unresolved else cache.ttl(self.get_cache_key(cache_device, "ports", server_key))
+        cache_ttl = (
+            None
+            if unresolved or server_key is None
+            else cache.ttl(self.get_cache_key(cache_device, "ports", server_key))
+        )
         cache_expiry = (
             timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl is not None and cache_ttl > 0 else None
         )

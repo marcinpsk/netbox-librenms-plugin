@@ -302,7 +302,6 @@ class TestCablesGetRenderDegradesOnBrokenDefaultServer:
     def test_cached_render_does_not_500_when_default_server_build_fails(self):
         from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
         from django.contrib.auth import get_user_model
-        from django.core.cache import cache
         from django.test import RequestFactory
 
         from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
@@ -321,25 +320,13 @@ class TestCablesGetRenderDegradesOnBrokenDefaultServer:
         )
         view.request = request
 
-        # Seed the links cache under the DEGRADED (None) server_key — what the broken-server render reads.
-        key = view.get_cache_key(device, "links", None)
-        cache.set(
-            key,
-            {"links": [{"local_port": "Gi0/1", "local_port_id": "1", "remote_device": None}]},
-            timeout=300,
-        )
-
-        try:
-            plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-            plugin_config.setdefault("netbox_librenms_plugin", {})["servers"] = {"alpha": "not-a-dict"}
-            with override_settings(PLUGINS_CONFIG=plugin_config):
-                context = view.get_context_data(request, device)
-            # Degrades: the cached links still render (server_key falls back to None) instead of a 500.
-            assert context is not None
-            assert context["table"] is not None
-            assert context["server_key"] is None
-        finally:
-            cache.delete(key)
+        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+        plugin_config.setdefault("netbox_librenms_plugin", {})["servers"] = {"alpha": "not-a-dict"}
+        with override_settings(PLUGINS_CONFIG=plugin_config):
+            context = view.get_context_data(request, device)
+        # No usable server has no snapshot to read, so the tab renders empty instead of a 500.
+        assert context["table"] is None
+        assert context["server_key"] is None
 
 
 @pytest.mark.django_db

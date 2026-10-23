@@ -195,48 +195,46 @@ class BaseVLANTableView(
         # Get cached data (scoped to the POST-resolved server when provided, else the GET-query
         # server on a page render — without the rebind a non-default-server tab reads the default
         # cache and renders empty after a successful refresh). Mirrors modules_view.get_context_data.
+        unresolved = False
         if server_key is None:
             # GET render: rebind + scope the VLAN-cache read to ?server_key (shared helper) so a
             # non-default-server tab reads that server's cache, not the default's.
             server_key, unresolved = self.resolve_get_render_server_key(request)
-            if unresolved:
-                # The query named a server that no longer resolves (deleted/misconfigured). Its
-                # VLAN snapshot may still be cached until TTL — render empty scoped to the
-                # requested key instead of serving a removed server's VLANs as live data
-                # (mirrors the interfaces/modules/cables tabs' unresolved guards).
-                vlan_groups = self.get_vlan_groups_for_device(obj, user=vlan_scope_user)
-                unscoped_groups = (
-                    vlan_groups
-                    if vlan_scope_user is None or vlan_scope_user.is_superuser
-                    else self.get_vlan_groups_for_device(obj)
-                )
-                return {
-                    "object": obj,
-                    "vlan_table": None,
-                    "filters": filters,
-                    "vlan_groups": vlan_groups,
-                    "last_fetched": None,
-                    "cache_expiry": None,
-                    "server_key": server_key,
-                    "hidden_ipam_permissions": self.hidden_vlan_permissions(
-                        [obj], vlan_scope_user, unscoped_groups=unscoped_groups
-                    ),
-                    "vlan_scope_incomplete": self.vlan_scope_is_incomplete(
-                        [obj],
-                        vlan_scope_user,
-                        scoped_groups=vlan_groups,
-                        unscoped_groups=unscoped_groups,
-                    ),
-                }
-            # No buildable client → no valid server scope: degrade to None (empty table) instead of
-            # the "default" placeholder resolve_get_render_server_key falls back to, mirroring the
-            # sibling tabs' _render_server_key() None fallback (develop hardening).
-            if self._render_server_key() is None:
+            # No buildable client means no valid server scope, so the "default" placeholder of
+            # resolve_get_render_server_key does not apply.
+            if not unresolved and self._render_server_key() is None:
                 server_key = None
         # Honour the POST-resolved server when provided; otherwise use the shared degrading resolver
         # (not a bare getattr on the lazy librenms_api property): on a missing/misconfigured default
         # the property raises KeyError/ValueError, which would 500 the VLAN tab on GET.
         server_key = server_key or self._render_server_key()
+        if unresolved or server_key is None:
+            # A server that no longer resolves, or no usable server, has no snapshot to read: its VLANs
+            # may still be cached until TTL, but they are not live data.
+            vlan_groups = self.get_vlan_groups_for_device(obj, user=vlan_scope_user)
+            unscoped_groups = (
+                vlan_groups
+                if vlan_scope_user is None or vlan_scope_user.is_superuser
+                else self.get_vlan_groups_for_device(obj)
+            )
+            return {
+                "object": obj,
+                "vlan_table": None,
+                "filters": filters,
+                "vlan_groups": vlan_groups,
+                "last_fetched": None,
+                "cache_expiry": None,
+                "server_key": server_key,
+                "hidden_ipam_permissions": self.hidden_vlan_permissions(
+                    [obj], vlan_scope_user, unscoped_groups=unscoped_groups
+                ),
+                "vlan_scope_incomplete": self.vlan_scope_is_incomplete(
+                    [obj],
+                    vlan_scope_user,
+                    scoped_groups=vlan_groups,
+                    unscoped_groups=unscoped_groups,
+                ),
+            }
         cached_vlans = cache.get(self.get_cache_key(obj, "vlans", server_key))
         last_fetched = cache.get(self.get_last_fetched_key(obj, "vlans", server_key))
 

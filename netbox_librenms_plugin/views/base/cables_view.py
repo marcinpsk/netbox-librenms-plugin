@@ -2897,6 +2897,9 @@ class BaseCableTableView(
         """Prepare the context data for cable sync views."""
         # Scoped to the POST-resolved server when provided; else the degrading resolver.
         server_key = server_key or self._render_server_key()
+        if server_key is None:
+            # No usable server means no scoped snapshot to read.
+            return None
         # For VC devices, cache under the sync device's key so SingleCableVerifyView reads the same entry.
         cache_device = self._viewable_sync_device(obj, server_key)
         if cache_device is None:
