@@ -7,21 +7,16 @@ from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.acquisition.resources import (
     Blocker,
     NEIGHBOUR_PORTS_PREFIX,
-    blocked_scopes as source_blocked_scopes,
+    cable_source_state,
+    neighbor_scope_key,
 )
-from netbox_librenms_plugin.acquisition.snapshot import Outcome
 from netbox_librenms_plugin.constants import (
     INTERFACE_NAME_FIELDS,
     MAIN_INVENTORY_SOURCE,
     OOB_INVENTORY_SOURCE,
 )
-from netbox_librenms_plugin.interface_rules import PORT_RECORD_KEYS
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
-from netbox_librenms_plugin.serial_utils import (
-    get_serial_sensor_type_patterns,
-    map_sensors_to_serial_links,
-    project_serial_sensors,
-)
+from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 from netbox_librenms_plugin.utils import assign_cable_row_ids
 
 _SUB_UNIT_RE = re.compile(r"^(?P<physical>.+)\.\d+$")
@@ -71,8 +66,8 @@ def remote_port_ref(link):
 
 
 def port_record(port):
-    """Return the part of a LibreNMS port record the interface rules read (``PORT_RECORD_KEYS``)."""
-    return {key: port[key] for key in PORT_RECORD_KEYS if key in port}
+    """Copy the complete source port record, including its owner and deletion evidence."""
+    return dict(port)
 
 
 def _drop_masked_sub_units(rows):
@@ -94,70 +89,51 @@ def _drop_masked_sub_units(rows):
     return kept
 
 
-def _build_cable_port_name_maps(ports_data, interface_name_field, alt_name_field):
-    """Index displayed and alternate local names from a ports response."""
-    name_map = {}
-    alt_map = {}
-    ports = ports_data.get("ports") if isinstance(ports_data, dict) else None
-    for port in ports if isinstance(ports, list) else []:
-        # Ignore rows that cannot name a port.
-        if not isinstance(port, dict):
-            continue
-        raw_port_id = port.get("port_id")
-        if raw_port_id is None:
-            continue
-        port_id = str(raw_port_id)
-        port_name = port.get(interface_name_field)
-        if port_name is None:
-            continue
-        name_map[port_id] = port_name
-        # Record only alternates that differ from the displayed name.
-        alt_name = port.get(alt_name_field)
-        if alt_name and alt_name != port_name:
-            alt_map[port_id] = alt_name
-    return name_map, alt_map
+def _build_cable_port_name_maps(ports, interface_name_field, alt_name_field):
+    """Index obtained port names by their canonical LibreNMS identities."""
+    names = {}
+    alternates = {}
+    for port in ports:
+        port_id = coerce_librenms_id(port["port_id"])
+        name = port.get(interface_name_field)
+        names[port_id] = name
+        alternate = port.get(alt_name_field)
+        if alternate and alternate != name:
+            alternates[port_id] = alternate
+    return names, alternates
 
 
-def _port_records_by_id(ports_data):
-    """Index a get_ports payload's rule inputs by port id; malformed rows are skipped."""
-    ports = ports_data.get("ports") if isinstance(ports_data, dict) else None
-    return {
-        port_id: port_record(port)
-        for port in (ports if isinstance(ports, list) else [])
-        if isinstance(port, dict) and (port_id := coerce_librenms_id(port.get("port_id"))) is not None
-    }
+def _port_records_by_id(ports):
+    """Index all obtained port records by their canonical LibreNMS identities."""
+    return {coerce_librenms_id(port["port_id"]): port_record(port) for port in ports}
 
 
 def _collect_cable_links(links, name_map, alt_map, source):
-    """Derive cable rows and mask sub-units within one source."""
+    """Derive cable rows from validated links and mask sub-units within one source."""
     rows = []
     for link in links:
-        if not isinstance(link, dict):
-            continue
-        port_id = link.get("local_port_id")
-        key = str(port_id)
-        local_port_name = name_map.get(key)
-        if local_port_name is None:
-            # A link can supply its name when the obtained ports list omits its port.
-            local_port_name = link.get("local_port")
+        port_id = coerce_librenms_id(link["local_port_id"])
+        local_name = name_map.get(port_id)
+        if local_name is None:
+            local_name = link.get("local_port")
         rows.append(
             {
-                "local_port": local_port_name,
-                "local_port_alt": alt_map.get(key),
+                "local_port": local_name,
+                "local_port_alt": alt_map.get(port_id),
                 "local_port_id": port_id,
-                "link_id": link.get("id"),
+                "link_id": coerce_librenms_id(link.get("id")),
                 "protocol": link.get("protocol"),
                 "remote_port": link.get("remote_port"),
                 "remote_device": link.get("remote_hostname"),
-                "remote_port_id": link.get("remote_port_id"),
-                "remote_device_id": link.get("remote_device_id"),
+                "remote_port_id": coerce_librenms_id(link.get("remote_port_id")),
+                "remote_device_id": coerce_librenms_id(link.get("remote_device_id")),
                 "_source": source,
             }
         )
     return _drop_masked_sub_units(rows)
 
 
-def _dedupe_protocol_duplicates(links_data):
+def dedupe_protocol_duplicates(links_data):
     """Collapse proven endpoint duplicates after NetBox enrichment and preserve their protocols."""
     dropped = set()
     for positions in _endpoint_groups(links_data).values():
@@ -181,20 +157,19 @@ def _endpoint_groups(links_data):
 
 def _absorbed_protocols(links_data, positions, keeper):
     """Name the protocols the *keeper* row speaks for: its group's, minus its own."""
-    # Only a string is a protocol, on the keeper side too: LibreNMS ``protocol`` is copied
-    # unvalidated, and an unhashable one would 500 the table and the verify alike.
+    # The endpoint contract permits a protocol string or an unknown protocol (None).
     keeper_protocol = links_data[keeper].get("protocol")
     return sorted(
         {
             protocol
             for position in positions
-            if position != keeper and isinstance(protocol := links_data[position].get("protocol"), str)
+            if position != keeper and (protocol := links_data[position].get("protocol")) is not None
         }
-        - ({keeper_protocol} if isinstance(keeper_protocol, str) else set())
+        - ({keeper_protocol} if keeper_protocol is not None else set())
     )
 
 
-def _also_reported_by(links_data, row_id):
+def also_reported_by(links_data, row_id):
     """Return the other protocols for one source row without collapsing the rows."""
     position = next((index for index, link in enumerate(links_data) if link.get("row_id") == row_id), None)
     if position is None:
@@ -223,28 +198,25 @@ def _best_duplicate_row(links_data, positions):
 
 
 def _remote_port_name_index(ports):
-    """Index a neighbour's port IDs and unambiguous names with their rule inputs."""
+    """Index all neighbour ports by ID, and named ports by each unambiguous name."""
     by_port_id = {}
     by_name = {}
-    owner_by_name = {}
+    ambiguous_names = set()
     for port in ports:
-        port_id = coerce_librenms_id(port.get("port_id"))
-        if port_id is None:
-            continue
-        names = {
-            field: port[field] for field in INTERFACE_NAME_FIELDS if isinstance(port.get(field), str) and port[field]
-        }
-        if not names:
-            continue
+        port_id = coerce_librenms_id(port["port_id"])
+        names = {field: port[field] for field in INTERFACE_NAME_FIELDS if port.get(field)}
         record = (port_id, names, port_record(port))
         by_port_id[port_id] = record
         for name in names.values():
             folded = name.casefold()
-            # A name shared by two ports cannot identify either port.
-            if owner_by_name.setdefault(folded, port_id) != port_id:
-                by_name.pop(folded, None)
+            if folded in ambiguous_names:
+                continue
+            previous = by_name.get(folded)
+            if previous is not None and previous[0] != port_id:
+                by_name.pop(folded)
+                ambiguous_names.add(folded)
             else:
-                by_name.setdefault(folded, record)
+                by_name[folded] = record
     return by_port_id, by_name
 
 
@@ -275,58 +247,74 @@ def _attach_remote_port_aliases(links, ports_by_neighbour):
 
 
 def _mapping_rows(snapshot, mapping, scope, blocked, interface_name_field):
-    """Assess a ready host or OOB scope and omit each blocked neighbour's rows."""
+    """Assess one ready mapping and omit the rows of each blocked neighbour."""
     resource = Resource.CABLES
     if mapping is None or scope in blocked:
         return []
-    if snapshot.record(resource, "links", mapping.role).outcome is Outcome.NOT_APPLICABLE:
-        return []
-    ports = {"ports": snapshot.value(resource, "ports", mapping.role)}
+    ports = snapshot.value(resource, "ports", mapping.role)
     alternate = "ifDescr" if interface_name_field == "ifName" else "ifName"
     name_map, alt_map = _build_cable_port_name_maps(ports, interface_name_field, alternate)
     source = MAIN_INVENTORY_SOURCE if scope == "host" else OOB_INVENTORY_SOURCE
     rows = _collect_cable_links(snapshot.value(resource, "links", mapping.role), name_map, alt_map, source)
+    rows = [row for row in rows if neighbor_scope_key(scope, row["remote_device_id"]) not in blocked]
     local_records = _port_records_by_id(ports)
-    rows = [
-        row for row in rows if f"{scope}:neighbour:{coerce_librenms_id(row.get('remote_device_id'))}" not in blocked
-    ]
     for row in rows:
-        record = local_records.get(coerce_librenms_id(row.get("local_port_id")))
+        record = local_records.get(row["local_port_id"])
         if record is not None:
             row["local_port_record"] = record
     neighbours = {
         int(part.removeprefix(NEIGHBOUR_PORTS_PREFIX)): snapshot.value(resource, part, mapping.role)
         for part, _key in mapping.parts
         if part.startswith(NEIGHBOUR_PORTS_PREFIX)
-        and f"{scope}:neighbour:{part.removeprefix(NEIGHBOUR_PORTS_PREFIX)}" not in blocked
+        and neighbor_scope_key(scope, int(part.removeprefix(NEIGHBOUR_PORTS_PREFIX))) not in blocked
     }
     _attach_remote_port_aliases(rows, neighbours)
     return rows
 
 
-def assess(snapshot, *, subject, interface_name_field="ifName"):
-    """Derive cable rows from obtained source responses and the current serial rules."""
+def assessed_port_records(snapshot):
+    """Index every obtained host, OOB and neighbour port, including ports without links."""
+    records = {}
+    source = snapshot.resources[Resource.CABLES]
+    for mapping in (source.host, source.oob):
+        if mapping is None:
+            continue
+        for part, key in mapping.parts:
+            if part != "ports" and not part.startswith(NEIGHBOUR_PORTS_PREFIX):
+                continue
+            response = snapshot.responses[key]
+            if response.obtained:
+                records.update(_port_records_by_id(response.value))
+    return records
+
+
+def assess(snapshot, *, subject, interface_name_field="ifName", include_serial=True):
+    """Assess source facts once, with serial rows limited by the caller's visibility."""
     resource = Resource.CABLES
     source = snapshot.resources[resource]
-    blocked = source_blocked_scopes(snapshot, resource)
+    state = cable_source_state(snapshot)
+    blocked = state.blocked_scopes
+    if not include_serial:
+        blocked.pop("serial", None)
     links = _mapping_rows(snapshot, source.host, "host", blocked, interface_name_field)
     links.extend(_mapping_rows(snapshot, source.oob, "oob", blocked, interface_name_field))
-    sensors = snapshot.record(resource, "sensors")
-    if sensors.obtained and "serial" not in blocked:
-        projection = project_serial_sensors(sensors.value, get_serial_sensor_type_patterns())
-        if projection.ready:
-            links.extend(
-                map_sensors_to_serial_links(
-                    projection.rows, device_id=source.owner.pk, sensor_types=projection.type_map
-                )
+    if include_serial and state.serial is not None and state.serial.ready:
+        links.extend(
+            map_sensors_to_serial_links(
+                state.serial.rows, device_id=source.owner.pk, sensor_types=state.serial.type_map
             )
-        else:
-            path = sensors.request.path
-            blocked["serial"] = (Blocker(path, f"{path} was not usable ({projection.reason})"),)
+        )
     blockers = tuple(dict.fromkeys(blocker for scope in blocked.values() for blocker in scope))
-    links = assign_cable_row_ids(links)
-    if links is None:
-        path = snapshot.record(resource, "links").request.path
-        blocker = Blocker(path, f"{path} has cable rows with duplicate or invalid action identities")
-        return {"links": [], "blockers": (*blockers, blocker), "blocked_scopes": blocked, "identity_error": True}
-    return {"links": links, "blockers": blockers, "blocked_scopes": blocked}
+    rows = assign_cable_row_ids(links)
+    identity_error = rows is None
+    if identity_error:
+        mapping = source.host if source.host is not None else source.oob
+        path = snapshot.record(resource, "links", mapping.role).request.path
+        blockers += (Blocker(path, f"{path} has cable rows with duplicate or invalid action identities"),)
+    return {
+        "links": [] if identity_error else rows,
+        "blockers": blockers,
+        "blocked_scopes": blocked,
+        "identity_error": identity_error,
+        "port_records": assessed_port_records(snapshot),
+    }

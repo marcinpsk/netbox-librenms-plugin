@@ -8,7 +8,9 @@ from django.contrib.messages import get_messages
 from django.test import Client
 from django.urls import reverse
 
-from netbox_librenms_plugin.tests.cable_source_helpers import seed_cable_rows
+from netbox_librenms_plugin.tests.source_snapshot_helpers import link_row, port_row, seed_cables_snapshot
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import (
     bind_librenms_server,
     configured_server_key,
@@ -16,7 +18,6 @@ from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_interface,
     make_superuser,
-    persist_test_server_mapping,
     transactional_db_with_all_apps,
 )
 from netbox_librenms_plugin.tests.test_cable_overwrite import _rendered_sync_data
@@ -38,7 +39,7 @@ class _Breakout:
 
     def __init__(self, tag, channels=4):
         self.device = make_device(f"breakout-{tag}")
-        persist_test_server_mapping(self.device, SERVER_KEY)
+        seed_mapping(self.device, SERVER_KEY, own=601)
         self.parent = Interface.objects.create(
             device=self.device, name="et-0/0/1", type="100gbase-x-qsfp28", channels=channels
         )
@@ -53,26 +54,37 @@ class _Breakout:
             for lane in range(channels)
         ]
         self.peer = make_device(f"breakout-{tag}-peer")
+        seed_mapping(self.peer, SERVER_KEY, own=602)
         self.far_ends = [make_interface(self.peer, f"Ethernet{lane + 1}") for lane in range(channels)]
+        self.source_ports = [
+            port_row(101 + lane, channel.name, device_id=601) for lane, channel in enumerate(self.channels)
+        ]
+        self.neighbour_ports = {
+            602: [port_row(201 + lane, far.name, device_id=602) for lane, far in enumerate(self.far_ends)]
+        }
         self.client = Client()
         self.client.force_login(make_superuser())
 
     def row(self, channel_id, far_end=None):
         """One LibreNMS LLDP row from channel *channel_id* to its peer port; the row id is the local port id."""
         far_end = far_end or self.far_ends[channel_id - 1]
-        return {
-            "_source": "main",
-            "local_port_id": 100 + channel_id,
-            "local_port": self.channels[channel_id - 1].name,
-            "remote_device": far_end.device.name,
-            "remote_port": far_end.name,
-            "remote_port_id": 200 + channel_id,
-        }
+        return link_row(
+            100 + channel_id,
+            far_end.name,
+            local_port=self.channels[channel_id - 1].name,
+            remote_hostname=far_end.device.name,
+            remote_port_id=200 + channel_id,
+        )
 
-    def seed(self, *rows, device=None):
-
+    def seed(self, *rows, device=None, ports=None):
         device = device or self.device
-        seed_cable_rows(device, list(rows), SERVER_KEY)
+        seed_cables_snapshot(
+            device,
+            list(rows),
+            self.source_ports if ports is None else ports,
+            neighbour_ports=self.neighbour_ports,
+            server_key=SERVER_KEY,
+        )
 
     def records(self, device=None):
         """Return the table records by row id, from a real page render."""
@@ -163,21 +175,10 @@ class TestBreakoutCableWrites:
 
     def test_channel_two_writes_nothing_while_channel_one_has_no_cable_also_when_channel_one_is_ignored(self):
         from netbox_librenms_plugin.models import InterfaceTypeMapping
-        from netbox_librenms_plugin.tests.test_interface_rule_writes import _port
-        from netbox_librenms_plugin.assessment.cables import port_record
 
         setup = _Breakout("lower-ignored")
         InterfaceTypeMapping.objects.create(action=InterfaceTypeMapping.ACTION_IGNORE, name_pattern=r"^et-0/0/1:0$")
-        rows = [
-            {
-                **setup.row(channel_id),
-                "local_port_record": port_record(_port(100 + channel_id, setup.channels[channel_id - 1].name)),
-                "remote_port_record": port_record(_port(200 + channel_id, setup.far_ends[channel_id - 1].name)),
-                "remote_port_key": 200 + channel_id,
-            }
-            for channel_id in (1, 2)
-        ]
-        setup.seed(*rows)
+        setup.seed(setup.row(1), setup.row(2))
 
         texts = setup.sync(2)
 
@@ -335,7 +336,7 @@ def test_a_port_that_is_not_a_channel_still_gets_a_plain_cable():
     setup = _Breakout("plain")
     plain = make_interface(setup.device, "et-0/0/9")
     row = {**setup.row(1), "local_port_id": 109, "local_port": plain.name}
-    setup.seed(row)
+    setup.seed(row, ports=[port_row(109, plain.name, device_id=601)])
 
     setup.sync(9)
 
@@ -349,17 +350,16 @@ def test_a_port_that_is_not_a_channel_still_gets_a_plain_cable():
 @pytest.mark.usefixtures("breakout_server")
 def test_a_plain_port_whose_far_end_is_a_channel_is_refused_until_the_channel_side_writes_the_cable():
     setup = _Breakout("peer-side")
-    persist_test_server_mapping(setup.peer, SERVER_KEY)
     # The peer's own row: its Ethernet1 sees channel 1 of the breakout device.
     peer_row = {
-        "_source": "main",
+        "protocol": "lldp",
         "local_port_id": 101,
         "local_port": setup.far_ends[0].name,
-        "remote_device": setup.device.name,
+        "remote_hostname": setup.device.name,
         "remote_port": setup.channels[0].name,
         "remote_port_id": 301,
     }
-    setup.seed(peer_row, device=setup.peer)
+    setup.seed(peer_row, device=setup.peer, ports=[port_row(101, setup.far_ends[0].name, device_id=602)])
     setup.seed(setup.row(1))
 
     before = setup.records(setup.peer)["101"]
@@ -384,7 +384,7 @@ def test_a_channel_reads_the_far_end_at_its_connector_and_never_its_parent():
     setup.sync(1)
     setup.sync(2)
     # The same channel, now towards a neighbour that NetBox does not know.
-    setup.seed({**setup.row(1), "remote_device": "breakout-far-read-unknown"})
+    setup.seed({**setup.row(1), "remote_hostname": "breakout-far-read-unknown"})
 
     record = setup.records()["101"]
 
@@ -443,7 +443,10 @@ def test_a_port_that_becomes_a_channel_before_the_lock_gets_no_cable(monkeypatch
     setup = _Breakout("becomes-channel")
     plain = make_interface(setup.device, "et-0/0/9")
     other_parent = Interface.objects.create(device=setup.device, name="et-0/0/8", type="100gbase-x-qsfp28", channels=4)
-    setup.seed({**setup.row(1), "local_port_id": 109, "local_port": plain.name})
+    setup.seed(
+        {**setup.row(1), "local_port_id": 109, "local_port": plain.name},
+        ports=[port_row(109, plain.name, device_id=601)],
+    )
     real_lock = SyncCablesView._lock_cable_terminations
 
     def channelize_then_lock(view, local_term, remote_term, **kwargs):
@@ -491,8 +494,9 @@ def test_a_channel_with_an_empty_connector_offers_to_create_its_far_end(librenms
         **setup.row(2),
         "remote_device_id": 9001,
         "remote_port": "Ethernet20",
-        "remote_port_key": 202,
+        "remote_port_id": 202,
     }
+    setup.neighbour_ports[9001] = [port_row(202, "Ethernet20", device_id=9001)]
     setup.seed(setup.row(1), unknown_far_end)
     setup.sync(1)
 
@@ -508,16 +512,8 @@ def test_a_channel_with_an_empty_connector_offers_to_create_its_far_end(librenms
 
 
 def _records_row(channel_id, setup, record):
-    """Return the port records and the matched remote key that let the rule gate decide a row offline."""
-    from netbox_librenms_plugin.tests.test_interface_rule_writes import _port
-    from netbox_librenms_plugin.assessment.cables import port_record
-
-    return {
-        **record,
-        "local_port_record": port_record(_port(100 + channel_id, record["local_port"])),
-        "remote_port_record": port_record(_port(record["remote_port_id"], record["remote_port"])),
-        "remote_port_key": record["remote_port_id"],
-    }
+    """Bind a raw link to the peer whose ports the source snapshot obtains."""
+    return {**record, "remote_device_id": read_mapping(setup.peer).own_id(SERVER_KEY)}
 
 
 @requires_channels
@@ -545,6 +541,10 @@ def test_creating_the_far_end_of_a_channel_needs_no_record_of_a_bound_parent(lib
         **_records_row(2, setup, {**setup.row(2), "remote_port": "Ethernet20"}),
         "remote_device_id": 9002,
     }
+    setup.neighbour_ports[9002] = [
+        port_row(201, setup.far_ends[0].name, device_id=9002),
+        port_row(202, "Ethernet20", device_id=9002),
+    ]
     setup.seed(_records_row(1, setup, setup.row(1)), unknown_far_end)
     texts = setup.sync(1)
 
@@ -652,7 +652,8 @@ def _missing_far_end(setup, librenms_server, channel_id, librenms_id):
             ],
         },
     )
-    return {**setup.row(channel_id), "remote_device_id": librenms_id, "remote_port": name, "remote_port_key": port_id}
+    setup.neighbour_ports[librenms_id] = [port_row(port_id, name, device_id=librenms_id, if_speed=25_000_000_000)]
+    return {**setup.row(channel_id), "remote_device_id": librenms_id, "remote_port": name, "remote_port_id": port_id}
 
 
 def _post_create_remote(setup, channel_id):
@@ -865,19 +866,19 @@ def test_a_confirmed_overwrite_from_a_far_end_never_removes_the_breakout_cable()
     setup.seed(setup.row(1))
     setup.sync(1)
     cable = setup.parent_cable()
-    persist_test_server_mapping(setup.peer, SERVER_KEY)
     other = make_interface(make_device("breakout-far-end-overwrite-q"), "Ethernet7")
     # The peer's Ethernet1 (far end of channel 1) now reports a plain neighbour.
     setup.seed(
         {
-            "_source": "main",
+            "protocol": "lldp",
             "local_port_id": 101,
             "local_port": setup.far_ends[0].name,
-            "remote_device": other.device.name,
+            "remote_hostname": other.device.name,
             "remote_port": other.name,
             "remote_port_id": 401,
         },
         device=setup.peer,
+        ports=[port_row(101, setup.far_ends[0].name, device_id=602)],
     )
 
     record = setup.records(setup.peer)["101"]
@@ -904,11 +905,11 @@ SINGLE = "single-1c1p"
 def _plain_pair(tag):
     """A page device with port eth0, a peer with port Gi0/1, and the page's cable row towards it."""
     device = make_device(f"single-{tag}")
-    persist_test_server_mapping(device, SERVER_KEY)
+    seed_mapping(device, SERVER_KEY, own=603)
     local = make_interface(device, "eth0")
     peer = make_device(f"single-{tag}-peer")
     remote = make_interface(peer, "Gi0/1")
-    row = {"_source": "main", "local_port_id": 100, "local_port": "eth0", "remote_device": peer.name}
+    row = link_row(100, "Gi0/1", local_port="eth0", remote_hostname=peer.name, remote_port_id=500)
     return device, local, remote, {**row, "remote_port": "Gi0/1", "remote_port_id": 500}
 
 
@@ -932,7 +933,7 @@ class TestASingleProfileCableIsPointToPoint:
 
     def _client(self, device, row):
 
-        seed_cable_rows(device, [row], SERVER_KEY)
+        seed_cables_snapshot(device, [row], [port_row(100, "eth0", device_id=603)], server_key=SERVER_KEY)
         client = Client()
         client.force_login(make_superuser())
         return client
@@ -1021,7 +1022,7 @@ def test_a_one_sided_channel_row_reveals_nothing_of_a_hidden_parent_or_cable(hid
     setup.sync(1)
     # Both channels now name a neighbour NetBox does not know: channel 1's connector is occupied, channel 2's is empty.
     unknown = "breakout-one-sided-unknown"
-    setup.seed({**setup.row(1), "remote_device": unknown}, {**setup.row(2), "remote_device": unknown})
+    setup.seed({**setup.row(1), "remote_hostname": unknown}, {**setup.row(2), "remote_hostname": unknown})
     setup.client.force_login(_constrained_user(f"breakout-one-sided-{next(iter(hidden))}", **hidden))
 
     records = setup.records()
@@ -1059,21 +1060,23 @@ def test_a_one_sided_channel_row_reports_a_parent_cable_on_another_profile():
 @pytest.mark.usefixtures("breakout_server")
 @pytest.mark.parametrize("channel", [pytest.param(True, marks=requires_channels), False], ids=["channel", "plain"])
 def test_a_one_sided_row_never_names_the_device_of_a_hidden_far_end(channel):
-    from netbox_librenms_plugin.views.sync.cables import SyncCablesView
-
+    # The neighbour is not in NetBox, so the row reports the cable that its local end has.
+    unknown = "hidden-far-end-unknown"
     if channel:
         setup = _Breakout("hidden-far-end")
         setup.seed(setup.row(1))
         setup.sync(1)
-        device, row, peer = setup.device, setup.row(1), setup.peer
+        device, peer = setup.device, setup.peer
+        setup.seed({**setup.row(1), "remote_hostname": unknown})
+        row_id = "101"
     else:
         device, local, remote, row = _plain_pair("hidden-far-end")
         Cable(a_terminations=[local], b_terminations=[remote]).save()
         peer = remote.device
-    # The neighbour is not in NetBox, so the row reports the cable that its local end has.
-    row = {**row, "remote_device": "hidden-far-end-unknown"}
-    cache_key = object.__new__(SyncCablesView).get_cache_key(device, "links", SERVER_KEY)
-    cache.set(cache_key, {"links": [row], "snapshot_token": f"hidden-far-end-{device.pk}"}, timeout=300)
+        seed_cables_snapshot(
+            device, [{**row, "remote_hostname": unknown}], [port_row(100, "eth0", device_id=603)], server_key=SERVER_KEY
+        )
+        row_id = "100"
     client = Client()
     # The user may view the peer device and the cable, but no interface of the peer.
     client.force_login(_constrained_user(f"hidden-far-end-{channel}", interface_view={"device_id": device.pk}))
@@ -1084,7 +1087,7 @@ def test_a_one_sided_row_never_names_the_device_of_a_hidden_far_end(channel):
     )
     verified = client.post(
         reverse("plugins:netbox_librenms_plugin:verify_cable"),
-        data=json.dumps({"device_id": device.pk, "row_id": str(row["local_port_id"]), "server_key": SERVER_KEY}),
+        data=json.dumps({"device_id": device.pk, "row_id": row_id, "server_key": SERVER_KEY}),
         content_type="application/json",
     ).json()["formatted_row"]
 

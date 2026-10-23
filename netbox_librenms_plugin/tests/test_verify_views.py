@@ -9,7 +9,7 @@ get_librenms_sync_device() and handle the None return gracefully
 import json
 from copy import deepcopy
 
-from netbox_librenms_plugin.tests.cable_source_helpers import seed_cable_rows
+from netbox_librenms_plugin.tests.source_snapshot_helpers import link_row, port_row, seed_cables_snapshot
 
 import pytest
 from django.conf import settings
@@ -1406,33 +1406,21 @@ def test_cable_verify_selects_the_cached_row_named_by_row_id():
     """Verify a populated cable cache selects the row named by row_id instead of returning the default row."""
     from django.core.cache import cache
 
-    from netbox_librenms_plugin.utils import assign_cable_row_ids
     from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
 
     device = _make_gate_device(name="cbl-rowid-device")
-    links = [
-        {
-            "local_port_id": 10,
-            "local_port": "ttyS0",
-            "remote_port": "console-A",
-            "remote_device": "peer-a",
-            "remote_port_id": 20,
-        },
-        {
-            "local_port_id": 11,
-            "local_port": "ttyS1",
-            "remote_port": "console-B",
-            "remote_device": "peer-b",
-            "remote_port_id": 21,
-        },
-    ]
-    with_row_ids = assign_cable_row_ids(links)
-    second_row_id = with_row_ids[1]["row_id"]
-    assert second_row_id != with_row_ids[0]["row_id"], "the two rows must be distinguishable"
-
+    server_key = configured_server_key()
+    seed_mapping(device, server_key, own=405)
+    links = [link_row(10, "console-A", remote_hostname="peer-a"), link_row(11, "console-B", remote_hostname="peer-b")]
+    seed_cables_snapshot(
+        device,
+        links,
+        [port_row(10, "ttyS0", device_id=405), port_row(11, "ttyS1", device_id=405)],
+        server_key=server_key,
+    )
+    second_row_id = "11"
     view_probe = SingleCableVerifyView()
-    cache_key = view_probe.get_cache_key(device, "links", configured_server_key())
-    seed_cable_rows(device, links, configured_server_key())
+    cache_key = view_probe.get_cache_key(device, "links", server_key)
 
     def _render(row_id, tag):
         view, request = _real_verify_view(
@@ -1447,7 +1435,7 @@ def test_cable_verify_selects_the_cached_row_named_by_row_id():
 
     try:
         second = _render(second_row_id, "second")
-        first = _render(with_row_ids[0]["row_id"], "first")
+        first = _render("10", "first")
     finally:
         cache.delete(cache_key)
 

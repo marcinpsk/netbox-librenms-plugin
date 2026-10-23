@@ -44,7 +44,7 @@ def test_cables_acquire_source_rows_and_neighbours_without_serial_by_default(liv
     assert snapshot.value(Resource.CABLES, f"neighbour_ports:{NEIGHBOUR_ID}") == PORTS
     assert snapshot.record(Resource.CABLES, "sensors").outcome is Outcome.NOT_REQUESTED
     assert SENSORS_PATH not in [r["path"] for r in live_librenms.server.requests]
-    assert set(blocked_scopes(snapshot, Resource.CABLES)) == {"serial"}
+    assert blocked_scopes(snapshot, Resource.CABLES) == {}
 
 
 @pytest.mark.django_db
@@ -100,7 +100,7 @@ def test_an_oob_failure_does_not_block_host_rows(live_librenms):
 
     snapshot = _acquire(_device("acq-cable-oob-fail", oob={"id": OOB_ID, "type": "idrac"}))
 
-    assert set(blocked_scopes(snapshot, Resource.CABLES)) == {"oob", "serial"}
+    assert set(blocked_scopes(snapshot, Resource.CABLES)) == {"oob"}
     assert is_ready(snapshot, Resource.CABLES)
 
 
@@ -112,7 +112,7 @@ def test_oob_rows_stay_ready_when_host_ports_fail(live_librenms):
 
     snapshot = _acquire(_device("acq-cable-host-fail", oob={"id": OOB_ID, "type": "idrac"}))
 
-    assert set(blocked_scopes(snapshot, Resource.CABLES)) == {"host", "serial"}
+    assert set(blocked_scopes(snapshot, Resource.CABLES)) == {"host"}
     assert is_ready(snapshot, Resource.CABLES)
 
 
@@ -122,10 +122,43 @@ def test_an_oob_only_mapping_has_no_host_scope(live_librenms):
 
     snapshot = _acquire(_device("acq-cable-oob-only", own=None, oob={"id": OOB_ID, "type": "idrac"}))
 
-    assert snapshot.record(Resource.CABLES, "links").outcome is Outcome.NOT_APPLICABLE
+    assert snapshot.resources[Resource.CABLES].host is None
     assert snapshot.value(Resource.CABLES, "ports", MappingRole.OOB) == PORTS
     assert is_ready(snapshot, Resource.CABLES)
     assert len(live_librenms.server.requests) == 2
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "port",
+    [{"ifName": "eth1"}, {"port_id": False, "ifName": "eth1"}, {"port_id": 1, "ifName": []}],
+)
+def test_invalid_port_identity_or_name_blocks_the_source(live_librenms, port):
+    _serve(live_librenms.server)
+    live_librenms.server.register(f"/api/v0/devices/{HOST_ID}/ports", {"status": "ok", "ports": [port]})
+
+    snapshot = _acquire(_device("acq-cable-invalid-port"))
+
+    record = snapshot.record(Resource.CABLES, "ports")
+    assert record.outcome is Outcome.FAILED
+    assert record.request.path == f"devices/{HOST_ID}/ports"
+    assert not is_ready(snapshot, Resource.CABLES)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "link",
+    [{"local_port_id": False}, {"local_port_id": 1, "protocol": []}, {"local_port_id": 1, "remote_port": {}}],
+)
+def test_invalid_link_identity_or_fields_block_the_source(live_librenms, link):
+    _serve(live_librenms.server, links=[link])
+
+    snapshot = _acquire(_device("acq-cable-invalid-link"))
+
+    record = snapshot.record(Resource.CABLES, "links")
+    assert record.outcome is Outcome.FAILED
+    assert record.request.path == f"devices/{HOST_ID}/links"
+    assert not is_ready(snapshot, Resource.CABLES)
 
 
 @pytest.mark.django_db
@@ -137,7 +170,7 @@ def test_a_failed_neighbour_blocks_only_that_neighbour(live_librenms):
 
     snapshot = _acquire(_device("acq-cable-neighbour-fail"))
 
-    assert set(blocked_scopes(snapshot, Resource.CABLES)) == {f"host:neighbour:{NEIGHBOUR_ID}", "serial"}
+    assert set(blocked_scopes(snapshot, Resource.CABLES)) == {f"host:neighbour:{NEIGHBOUR_ID}"}
     assert is_ready(snapshot, Resource.CABLES)
 
 
@@ -153,7 +186,7 @@ def test_the_neighbour_budget_records_omitted_requests_as_failed(live_librenms, 
 
     record = snapshot.record(Resource.CABLES, f"neighbour_ports:{NEIGHBOUR_ID}")
     assert record.outcome is Outcome.FAILED
-    assert "budget" in record.reason
+    assert record.request.path == f"devices/{NEIGHBOUR_ID}/ports"
     assert f"/api/v0/devices/{NEIGHBOUR_ID}/ports" not in [r["path"] for r in live_librenms.server.requests]
 
 
@@ -226,7 +259,7 @@ def test_host_and_oob_neighbours_share_one_budget(live_librenms, monkeypatch):
     from netbox_librenms_plugin.acquisition import resources
 
     _serve(live_librenms.server, links=LINKS)
-    _serve(live_librenms.server, OOB_ID, links=[{"remote_device_id": NEIGHBOUR_ID + 1}])
+    _serve(live_librenms.server, OOB_ID, links=[{"local_port_id": 2, "remote_device_id": NEIGHBOUR_ID + 1}])
     _serve(live_librenms.server, NEIGHBOUR_ID)
     ticks = iter([0.0, 0.0, 16.0])
     monkeypatch.setattr(resources, "monotonic", lambda: next(ticks))
@@ -236,7 +269,7 @@ def test_host_and_oob_neighbours_share_one_budget(live_librenms, monkeypatch):
     assert snapshot.record(Resource.CABLES, f"neighbour_ports:{NEIGHBOUR_ID}").obtained
     omitted = snapshot.record(Resource.CABLES, f"neighbour_ports:{NEIGHBOUR_ID + 1}", MappingRole.OOB)
     assert omitted.outcome is Outcome.FAILED
-    assert "budget" in omitted.reason
+    assert omitted.request.path == f"devices/{NEIGHBOUR_ID + 1}/ports"
 
 
 @pytest.mark.django_db
@@ -258,7 +291,7 @@ def test_acquisition_writes_no_netbox_row_or_cache_key(live_librenms):
 def test_neighbour_budget_cannot_skip_the_oob_mappings_own_ports(live_librenms, monkeypatch):
     from netbox_librenms_plugin.acquisition import resources
 
-    _serve(live_librenms.server, links=[{"remote_device_id": OOB_ID}])
+    _serve(live_librenms.server, links=[{"local_port_id": 1, "remote_device_id": OOB_ID}])
     _serve(live_librenms.server, OOB_ID)
     ticks = iter([0.0, 16.0])
     monkeypatch.setattr(resources, "monotonic", lambda: next(ticks))
@@ -332,19 +365,29 @@ def test_an_attempted_failed_neighbour_is_not_requested_again_for_another_resour
 
 @pytest.mark.django_db
 def test_an_absent_host_and_invalid_oob_mapping_keep_distinct_response_outcomes(live_librenms):
-    from netbox_librenms_plugin.acquisition.coordinator import INVALID_OOB_REASON
     from netbox_librenms_plugin.acquisition.snapshot import SourceSnapshot
 
     snapshot = _acquire(_device("acq-cable-absent-invalid", own=None, oob={"id": "bad-id", "type": "idrac"}))
 
+    assert snapshot.resources[Resource.CABLES].host is None
+    assert snapshot.to_payload()["schema"] == 2
     for part in ("links", "ports"):
-        host = snapshot.record(Resource.CABLES, part)
         oob = snapshot.record(Resource.CABLES, part, MappingRole.OOB)
-        assert host.outcome is Outcome.NOT_APPLICABLE
         assert oob.outcome is Outcome.FAILED
-        assert oob.reason == INVALID_OOB_REASON
-        assert host.request.key != oob.request.key
+        assert oob.request.path == f"devices/None/{part}"
     assert set(blocked_scopes(snapshot, Resource.CABLES)) == {"oob"}
     assert not is_ready(snapshot, Resource.CABLES)
     assert SourceSnapshot.from_payload(snapshot.to_payload()) == snapshot
+    assert SourceSnapshot.from_payload({**snapshot.to_payload(), "schema": 1}) is None
+    assert not any("unmapped" in record.request.path for record in snapshot.responses.values())
     assert live_librenms.server.requests == []
+
+
+@pytest.mark.django_db
+def test_cable_ports_request_owner_and_deletion_evidence(live_librenms):
+    _serve(live_librenms.server)
+
+    _acquire(_device("acq-cable-port-evidence"))
+
+    request = next(r for r in live_librenms.server.requests if r["path"].endswith("/ports"))
+    assert {"device_id", "deleted"} <= set(request["query"]["columns"][0].split(","))

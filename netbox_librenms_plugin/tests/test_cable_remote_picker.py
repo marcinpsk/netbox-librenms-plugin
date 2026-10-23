@@ -20,7 +20,14 @@ import re
 import pytest
 from django.core.cache.backends.locmem import LocMemCache
 
-from netbox_librenms_plugin.tests.cable_source_helpers import cable_rows, seed_cable_rows
+from netbox_librenms_plugin.tests.source_snapshot_helpers import (
+    cable_rows,
+    seed_cables_snapshot,
+    link_row,
+    port_row,
+    sensor_row,
+)
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.conftest import (
     cable_together,
     configured_server_key,
@@ -33,7 +40,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis,
     persist_test_server_mapping,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
 from netbox_librenms_plugin.tests.test_serial_cables_view import _make_view
 
 SERVER_KEY = configured_server_key()
@@ -243,15 +250,27 @@ class TestManualRemoteEnrichment:
         assert str(breakout.pk) in link["cable_url"]
 
 
+@pytest.mark.django_db
 def test_manual_pick_overlay_reads_the_real_cache_in_one_batch():
     """A large cable snapshot must not issue one cache read for each row."""
     from django.core.cache import cache
 
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.assessment.cables import assess
     from netbox_librenms_plugin.sync_cache import apply_cable_manual_picks, cable_manual_pick_cache_key
 
-    rows = [{"local_port_id": str(port_id), "row_id": str(port_id)} for port_id in range(1, 501)]
-    snapshot_key = "librenms_plugin:test:manual-pick-batch"
-    snapshot_id = "manual-pick-batch-token"
+    subject = make_device("picker-batch-source")
+    seed_mapping(subject, SERVER_KEY, own=8)
+    snapshot = seed_cables_snapshot(
+        subject,
+        [link_row(port_id, "Ethernet1", remote_hostname="peer") for port_id in range(1, 501)],
+        [port_row(port_id, f"Ethernet{port_id}", device_id=8) for port_id in range(1, 501)],
+        server_key=SERVER_KEY,
+    )
+    rows = assess(snapshot, subject=subject)["links"]
+    snapshot_key = source_cache.snapshot_key(subject, Resource.CABLES, SERVER_KEY)
+    snapshot_id = snapshot.snapshot_id
     user_id = 123
     picked_row = rows[-1]
     cache.set(
@@ -287,6 +306,45 @@ def test_manual_pick_overlay_reads_the_real_cache_in_one_batch():
     assert overlaid[-1]["manual_remote_id"] == 456
     assert counted_cache.get_calls == 0
     assert counted_cache.get_many_calls == 1
+
+
+@pytest.mark.django_db
+def test_a_manual_pick_preserves_the_assessed_identity_of_one_selected_row():
+    """Selecting one row cannot change the identity of a shared local port."""
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.assessment.cables import assess
+    from netbox_librenms_plugin.sync_cache import apply_cable_manual_picks, cable_manual_pick_cache_key
+
+    subject = make_device("picker-selected-identity")
+    seed_mapping(subject, SERVER_KEY, own=8)
+    snapshot = seed_cables_snapshot(
+        subject,
+        [
+            link_row(10, "Ethernet1", remote_hostname="peer-a", id=101),
+            link_row(10, "Ethernet2", remote_hostname="peer-b", id=102),
+        ],
+        [port_row(10, "Ethernet1", device_id=8)],
+        server_key=SERVER_KEY,
+    )
+    selected = assess(snapshot, subject=subject)["links"][1]
+    picked = make_interface(make_device("picker-selected-target"), "Ethernet9")
+    snapshot_key = source_cache.snapshot_key(subject, Resource.CABLES, SERVER_KEY)
+    user_id = 123
+    cache.set(
+        cable_manual_pick_cache_key(snapshot_key, snapshot.snapshot_id, user_id, selected["row_id"]),
+        {"manual_remote_id": picked.pk},
+        timeout=300,
+    )
+
+    overlaid, applied = apply_cable_manual_picks(cache, snapshot_key, snapshot.snapshot_id, user_id, [selected])
+
+    assert applied
+    assert overlaid[0]["row_id"] == selected["row_id"]
+    assert overlaid[0]["manual_remote_id"] == picked.pk
+    assert "manual_remote_id" not in selected
 
 
 # ---------------------------------------------------------------------------
@@ -344,8 +402,11 @@ class TestRemotePickerEndpoint:
 
         acs, (csp,), _ = make_serial_device(f"acs-{name}", csp_names=["ttyS5"])
         link = _serial_row(csp, label, acs)
-        link["local_port_id"] = f"serial:{csp.pk}-s"
-        seed_cable_rows(acs, [link], SERVER_KEY)
+
+        seed_mapping(acs, SERVER_KEY, own=8)
+        seed_cables_snapshot(
+            acs, [], [], sensors=[sensor_row(csp.pk, 5, device_id=8, sensor_descr=label)], server_key=SERVER_KEY
+        )
         url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[acs.pk])
         return acs, csp, link, url
 
@@ -373,14 +434,24 @@ class TestRemotePickerEndpoint:
         remote_device = make_device("picker-physical-remote")
         lag = make_interface(remote_device, "Port-Channel1", iface_type="lag")
         physical = make_interface(remote_device, "Ethernet9")
-        row = {
-            "_source": "main",
-            "local_port": local.name,
-            "local_port_id": 10,
-            "remote_device": "unknown",
-            "remote_port": "unknown",
-        }
-        seed_cable_rows(local_device, [row], SERVER_KEY)
+        seed_mapping(local_device, SERVER_KEY, own=8)
+        seed_cables_snapshot(
+            local_device,
+            [
+                link_row(
+                    10,
+                    "unknown",
+                    local_port=local.name,
+                    remote_hostname="unknown",
+                    remote_device_id=None,
+                    remote_port_id=None,
+                    protocol=None,
+                    id=None,
+                )
+            ],
+            [port_row(10, local.name, device_id=8, if_descr=None)],
+            server_key=SERVER_KEY,
+        )
         url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[local_device.pk])
 
         ports = client.get(
@@ -441,7 +512,10 @@ class TestRemotePickerEndpoint:
         remote, _, (cp,) = make_serial_device("ttyS49", cp_names=["console"])
         row = _serial_row(csp, csp.name, local, is_configured=False)
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        seed_cable_rows(local, [row], server_key)
+        seed_mapping(local, server_key, own=8)
+        seed_cables_snapshot(
+            local, [], [], sensors=[sensor_row(csp.pk, 49, device_id=8, sensor_descr=csp.name)], server_key=server_key
+        )
         persist_test_server_mapping(local, server_key)
 
         rendered = _render_cable_sync_page(client, local, server_key)
@@ -477,9 +551,12 @@ class TestRemotePickerEndpoint:
         local, (csp,), _ = make_serial_device("picker-removed-server-local", csp_names=["ttyS1"])
         remote, _, (cp,) = make_serial_device("picker-removed-server-remote", cp_names=["console"])
         row = _serial_row(csp, remote.name, local)
-        row["local_port_id"] = "serial:removed-server"
+
         stale_key = "removed-server"
-        seed_cable_rows(local, [row], stale_key)
+        seed_mapping(local, stale_key, own=8)
+        seed_cables_snapshot(
+            local, [], [], sensors=[sensor_row(csp.pk, 1, device_id=8, sensor_descr=remote.name)], server_key=stale_key
+        )
 
         picker_response = client.post(
             reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[local.pk]),
@@ -542,15 +619,24 @@ class TestRemotePickerEndpoint:
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
         seed_mapping(page, server_key, own=42, save=False)
         page.save()
-        row = {
-            "local_port": local_interface.name,
-            "local_port_id": 10,
-            "remote_device": remote.name,
-            "remote_port": remote_interface.name,
-            "remote_port_id": 20,
-            "_source": "main",
-        }
-        seed_cable_rows(page, [row], server_key)
+        seed_mapping(page, server_key, own=42)
+        seed_cables_snapshot(
+            page,
+            [
+                link_row(
+                    10,
+                    remote_interface.name,
+                    local_port=local_interface.name,
+                    remote_hostname=remote.name,
+                    remote_device_id=None,
+                    remote_port_id=20,
+                    protocol=None,
+                    id=None,
+                )
+            ],
+            [port_row(10, local_interface.name, device_id=42, if_descr=None)],
+            server_key=server_key,
+        )
         apply_mapping_change(selected, mark_migrated(selected, winner.pk, server_key))
         selected.save()
 
@@ -612,9 +698,11 @@ class TestRemotePickerEndpoint:
         winner = make_device("picker-migrated-winner")
         remote, _, (cp,) = make_serial_device("picker-migrated-remote", cp_names=["console"])
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        row = _serial_row(csp, remote.name, donor)
-        row["local_port_id"] = "serial:migrated-donor"
-        seed_cable_rows(donor, [row], server_key)
+
+        seed_mapping(donor, server_key, own=8)
+        seed_cables_snapshot(
+            donor, [], [], sensors=[sensor_row(csp.pk, 1, device_id=8, sensor_descr=remote.name)], server_key=server_key
+        )
         persist_test_server_mapping(donor, server_key)
         rendered = _render_cable_sync_page(client, donor, server_key)
         record = next(iter(rendered.context["cable_sync"]["table"].rows)).record
@@ -661,15 +749,24 @@ class TestRemotePickerEndpoint:
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
         seed_mapping(donor, server_key, own=42, save=False)
         donor.save()
-        row = {
-            "local_port": member_interface.name,
-            "local_port_id": 10,
-            "remote_device": remote.name,
-            "remote_port": remote_interface.name,
-            "remote_port_id": 20,
-            "_source": "main",
-        }
-        seed_cable_rows(donor, [row], server_key)
+        seed_mapping(donor, server_key, own=42)
+        seed_cables_snapshot(
+            donor,
+            [
+                link_row(
+                    10,
+                    remote_interface.name,
+                    local_port=member_interface.name,
+                    remote_hostname=remote.name,
+                    remote_device_id=None,
+                    remote_port_id=20,
+                    protocol=None,
+                    id=None,
+                )
+            ],
+            [port_row(10, member_interface.name, device_id=42, if_descr=None)],
+            server_key=server_key,
+        )
         apply_mapping_change(donor, mark_migrated(donor, winner.pk, server_key))
         donor.save()
 
@@ -742,15 +839,24 @@ class TestRemotePickerEndpoint:
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
         seed_mapping(origin, server_key, own=42, save=False)
         origin.save()
-        row = {
-            "local_port": local_interface.name,
-            "local_port_id": 10,
-            "remote_device": desired_device.name,
-            "remote_port": desired_interface.name,
-            "remote_port_id": 20,
-            "_source": "main",
-        }
-        seed_cable_rows(origin, [row], server_key)
+        seed_mapping(origin, server_key, own=42)
+        seed_cables_snapshot(
+            origin,
+            [
+                link_row(
+                    10,
+                    desired_interface.name,
+                    local_port=local_interface.name,
+                    remote_hostname=desired_device.name,
+                    remote_device_id=None,
+                    remote_port_id=20,
+                    protocol=None,
+                    id=None,
+                )
+            ],
+            [port_row(10, local_interface.name, device_id=42, if_descr=None)],
+            server_key=server_key,
+        )
         sync_url = reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[member.pk])
 
         conflict = client.post(
@@ -826,15 +932,24 @@ class TestRemotePickerEndpoint:
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
         seed_mapping(cache_owner, server_key, own=42, save=False)
         cache_owner.save()
-        row = {
-            "local_port": "Ethernet1",
-            "local_port_id": 10,
-            "remote_device": remote.name,
-            "remote_port": remote_interface.name,
-            "remote_port_id": 20,
-            "_source": "main",
-        }
-        seed_cable_rows(cache_owner, [row], server_key)
+        seed_mapping(cache_owner, server_key, own=42)
+        seed_cables_snapshot(
+            cache_owner,
+            [
+                link_row(
+                    10,
+                    remote_interface.name,
+                    local_port="Ethernet1",
+                    remote_hostname=remote.name,
+                    remote_device_id=None,
+                    remote_port_id=20,
+                    protocol=None,
+                    id=None,
+                )
+            ],
+            [port_row(10, "Ethernet1", device_id=42, if_descr=None)],
+            server_key=server_key,
+        )
         apply_mapping_change(cache_owner, mark_migrated(cache_owner, winner.pk, server_key))
         cache_owner.save()
 
@@ -1142,7 +1257,11 @@ class TestRemotePickerEndpoint:
         key_view = object.__new__(SyncCablesView)
         snapshot_key = key_view.get_cache_key(acs, "links", SERVER_KEY)
         cached = cache.get(snapshot_key)
-        row = next(r for r in cable_rows(acs, SERVER_KEY)["links"] if r["local_port_id"] == link["local_port_id"])
+        row = next(
+            r
+            for r in cable_rows(resp.wsgi_request, acs, SERVER_KEY)["links"]
+            if r["local_port_id"] == link["local_port_id"]
+        )
         assert "manual_remote_id" not in row
         user_id = client.session["_auth_user_id"]
         pick = cache.get(
@@ -1168,7 +1287,7 @@ class TestRemotePickerEndpoint:
 
         client = self._client("duplicate-link-rows")
         local_device = make_device("picker-duplicate-link-local")
-        seed_stored_mapping(local_device, 10, save=True)
+        seed_stored_mapping(local_device, {SERVER_KEY: {"id": 8}}, save=True)
         local = make_interface(local_device, "Ethernet1")
         first_device = make_device("picker-duplicate-link-first")
         make_interface(first_device, "Ethernet1")
@@ -1176,28 +1295,35 @@ class TestRemotePickerEndpoint:
         make_interface(second_device, "Ethernet1")
         picked_device = make_device("picker-duplicate-link-picked")
         picked = make_interface(picked_device, "Ethernet9")
-        rows = [
-            {
-                "link_id": 101,
-                "local_port": local.name,
-                "local_port_id": 10,
-                "remote_device": first_device.name,
-                "remote_port": "Ethernet1",
-                "remote_port_id": 20,
-                "_source": "main",
-            },
-            {
-                "link_id": 102,
-                "local_port": local.name,
-                "local_port_id": 10,
-                "remote_device": second_device.name,
-                "remote_port": "Ethernet1",
-                "remote_port_id": 30,
-                "_source": "main",
-            },
-        ]
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        seed_cable_rows(local_device, rows, server_key)
+        seed_mapping(local_device, server_key, own=8)
+        seed_cables_snapshot(
+            local_device,
+            [
+                link_row(
+                    10,
+                    "Ethernet1",
+                    local_port=local.name,
+                    remote_hostname=first_device.name,
+                    remote_device_id=None,
+                    remote_port_id=20,
+                    protocol=None,
+                    id=101,
+                ),
+                link_row(
+                    10,
+                    "Ethernet1",
+                    local_port=local.name,
+                    remote_hostname=second_device.name,
+                    remote_device_id=None,
+                    remote_port_id=30,
+                    protocol=None,
+                    id=102,
+                ),
+            ],
+            [port_row(10, local.name, device_id=8, if_descr=None)],
+            server_key=server_key,
+        )
 
         rendered = _render_cable_sync_page(client, local_device, server_key)
 
@@ -1247,7 +1373,17 @@ class TestRemotePickerEndpoint:
         )
         auto_row = _serial_row(auto_csp, remote.name, local, sensor_index_int=1)
         manual_row = _serial_row(manual_csp, "no-label-match", local, sensor_index_int=2)
-        seed_cable_rows(local, [auto_row, manual_row], SERVER_KEY)
+        seed_mapping(local, SERVER_KEY, own=8)
+        seed_cables_snapshot(
+            local,
+            [],
+            [],
+            sensors=[
+                sensor_row(auto_csp.pk, 1, device_id=8, sensor_descr=remote.name),
+                sensor_row(manual_csp.pk, 2, device_id=8, sensor_descr="no-label-match"),
+            ],
+            server_key=SERVER_KEY,
+        )
         picker_url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[local.pk])
         picked = client.post(
             picker_url,
@@ -1297,9 +1433,12 @@ class TestRemotePickerEndpoint:
             csp_names=["ttyS1"],
         )
         row = _serial_row(csp, remote.name, local)
-        row["local_port_id"] = "serial:stale-auto-target"
+
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        seed_cable_rows(local, [row], server_key)
+        seed_mapping(local, server_key, own=8)
+        seed_cables_snapshot(
+            local, [], [], sensors=[sensor_row(csp.pk, 1, device_id=8, sensor_descr=remote.name)], server_key=server_key
+        )
 
         rendered = _render_cable_sync_page(client, local, server_key)
         assert rendered.status_code == 200
@@ -1347,7 +1486,17 @@ class TestRemotePickerEndpoint:
         auto_row = _serial_row(auto_csp, remote.name, local, sensor_index_int=1)
         deleted_row = _serial_row(deleted_csp, "no-label-match", local, sensor_index_int=2)
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        seed_cable_rows(local, [auto_row, deleted_row], server_key)
+        seed_mapping(local, server_key, own=8)
+        seed_cables_snapshot(
+            local,
+            [],
+            [],
+            sensors=[
+                sensor_row(auto_csp.pk, 1, device_id=8, sensor_descr=remote.name),
+                sensor_row(deleted_csp.pk, 2, device_id=8, sensor_descr="no-label-match"),
+            ],
+            server_key=server_key,
+        )
         picker_url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[local.pk])
         picked = client.post(
             picker_url,
@@ -1407,7 +1556,14 @@ class TestRemotePickerEndpoint:
         )
         row = _serial_row(csp, automatic.name, local)
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        seed_cable_rows(local, [row], server_key)
+        seed_mapping(local, server_key, own=8)
+        seed_cables_snapshot(
+            local,
+            [],
+            [],
+            sensors=[sensor_row(csp.pk, 1, device_id=8, sensor_descr=automatic.name)],
+            server_key=server_key,
+        )
 
         picked = client.post(
             reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[local.pk]),
@@ -1448,16 +1604,25 @@ class TestRemotePickerEndpoint:
         automatic = make_interface(automatic_device, "Ethernet1")
         picked_device = make_device("picker-deleted-manual-interface-picked")
         picked = make_interface(picked_device, "Ethernet9")
-        row = {
-            "local_port": local.name,
-            "local_port_id": 10,
-            "remote_device": automatic_device.name,
-            "remote_port": automatic.name,
-            "remote_port_id": 20,
-            "_source": "main",
-        }
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        seed_cable_rows(local_device, [row], server_key)
+        seed_mapping(local_device, server_key, own=8)
+        seed_cables_snapshot(
+            local_device,
+            [
+                link_row(
+                    10,
+                    automatic.name,
+                    local_port=local.name,
+                    remote_hostname=automatic_device.name,
+                    remote_device_id=None,
+                    remote_port_id=20,
+                    protocol=None,
+                    id=None,
+                )
+            ],
+            [port_row(10, local.name, device_id=8, if_descr=None)],
+            server_key=server_key,
+        )
 
         picked_response = client.post(
             reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[local_device.pk]),
@@ -1498,7 +1663,14 @@ class TestRemotePickerEndpoint:
         existing_cable = cable_together(other_csp, occupied_cp)
         row = _serial_row(local_csp, "no-label-match", local)
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        seed_cable_rows(local, [row], server_key)
+        seed_mapping(local, server_key, own=8)
+        seed_cables_snapshot(
+            local,
+            [],
+            [],
+            sensors=[sensor_row(local_csp.pk, 1, device_id=8, sensor_descr="no-label-match")],
+            server_key=server_key,
+        )
 
         picked = client.post(
             reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[local.pk]),
@@ -1532,16 +1704,25 @@ class TestRemotePickerEndpoint:
         automatic = make_interface(automatic_device, "Ethernet1")
         picked_device = make_device("picker-verify-manual-picked")
         picked = make_interface(picked_device, "Ethernet9")
-        row = {
-            "local_port": local.name,
-            "local_port_id": 10,
-            "remote_device": automatic_device.name,
-            "remote_port": automatic.name,
-            "remote_port_id": 20,
-            "_source": "main",
-        }
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        seed_cable_rows(local_device, [row], server_key)
+        seed_mapping(local_device, server_key, own=8)
+        seed_cables_snapshot(
+            local_device,
+            [
+                link_row(
+                    10,
+                    automatic.name,
+                    local_port=local.name,
+                    remote_hostname=automatic_device.name,
+                    remote_device_id=None,
+                    remote_port_id=20,
+                    protocol=None,
+                    id=None,
+                )
+            ],
+            [port_row(10, local.name, device_id=8, if_descr=None)],
+            server_key=server_key,
+        )
 
         picked_response = client.post(
             reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[local_device.pk]),
@@ -1612,16 +1793,25 @@ class TestRemotePickerEndpoint:
         remote_second = make_device("picker-remote-vc-second")
         make_virtual_chassis("picker-remote-vc", remote_first, remote_second)
         remote = make_interface(remote_second, "ge-2/0/0")
-        row = {
-            "_source": "main",
-            "local_port": local.name,
-            "local_port_id": 10,
-            "remote_device": remote_first.name,
-            "remote_port": remote.name,
-            "remote_port_id": 20,
-        }
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        seed_cable_rows(local_device, [row], server_key)
+        seed_mapping(local_device, server_key, own=8)
+        seed_cables_snapshot(
+            local_device,
+            [
+                link_row(
+                    10,
+                    remote.name,
+                    local_port=local.name,
+                    remote_hostname=remote_first.name,
+                    remote_device_id=None,
+                    remote_port_id=20,
+                    protocol=None,
+                    id=None,
+                )
+            ],
+            [port_row(10, local.name, device_id=8, if_descr=None)],
+            server_key=server_key,
+        )
 
         rendered = _render_cable_sync_page(client, local_device, server_key)
 
@@ -1669,16 +1859,25 @@ class TestRemotePickerEndpoint:
         _panel, front, rear = make_patch_panel("picker-vc-topology-panel")
         cable_together(first_local, front)
         cable_together(rear, remote)
-        row = {
-            "local_port": "Ethernet1",
-            "local_port_id": 10,
-            "remote_device": remote_device.name,
-            "remote_port": remote.name,
-            "remote_port_id": 20,
-            "_source": "main",
-        }
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        seed_cable_rows(first, [row], server_key)
+        seed_mapping(first, server_key, own=600)
+        seed_cables_snapshot(
+            first,
+            [
+                link_row(
+                    10,
+                    remote.name,
+                    local_port="Ethernet1",
+                    remote_hostname=remote_device.name,
+                    remote_device_id=None,
+                    remote_port_id=20,
+                    protocol=None,
+                    id=None,
+                )
+            ],
+            [port_row(10, "Ethernet1", device_id=600, if_descr=None)],
+            server_key=server_key,
+        )
 
         verified = client.post(
             reverse("plugins:netbox_librenms_plugin:verify_cable"),
@@ -1731,15 +1930,24 @@ class TestRemotePickerEndpoint:
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
         seed_mapping(first, server_key, own=600, save=False)
         first.save()
-        row = {
-            "_source": "main",
-            "local_port": "Ethernet1",
-            "local_port_id": 10,
-            "remote_device": remote_device.name,
-            "remote_port": remote.name,
-            "remote_port_id": 20,
-        }
-        seed_cable_rows(first, [row], server_key)
+        seed_mapping(first, server_key, own=600)
+        seed_cables_snapshot(
+            first,
+            [
+                link_row(
+                    10,
+                    remote.name,
+                    local_port="Ethernet1",
+                    remote_hostname=remote_device.name,
+                    remote_device_id=None,
+                    remote_port_id=20,
+                    protocol=None,
+                    id=None,
+                )
+            ],
+            [port_row(10, "Ethernet1", device_id=600, if_descr=None)],
+            server_key=server_key,
+        )
         initial_render = _render_cable_sync_page(client, first, server_key)
         initial_record = next(iter(initial_render.context["cable_sync"]["table"].rows)).record
         assert initial_record["netbox_local_interface_id"] == first_local.pk
@@ -1848,7 +2056,11 @@ class TestRemotePickerEndpoint:
         )
 
         assert resp.status_code == 400
-        row = next(r for r in cable_rows(acs, SERVER_KEY)["links"] if r["local_port_id"] == link["local_port_id"])
+        row = next(
+            r
+            for r in cable_rows(resp.wsgi_request, acs, SERVER_KEY)["links"]
+            if r["local_port_id"] == link["local_port_id"]
+        )
         assert "manual_remote_id" not in row
 
     def test_pick_then_sync_creates_cable_to_picked_port(self):
@@ -1885,7 +2097,7 @@ class TestRemotePickerEndpoint:
             snapshot_key,
             cached["snapshot_id"],
             client.session["_auth_user_id"],
-            cable_rows(acs, SERVER_KEY)["links"],
+            cable_rows(pick.wsgi_request, acs, SERVER_KEY)["links"],
         )
         assert applied is True
         # The overlay only carries the pick; enrichment resolves it to the NetBox termination.
@@ -1919,7 +2131,17 @@ class TestRemotePickerEndpoint:
             _serial_row(csp_a, "no-label-a", acs, sensor_index_int=1),
             _serial_row(csp_b, "no-label-b", acs, sensor_index_int=2),
         ]
-        seed_cable_rows(acs, links, SERVER_KEY)
+        seed_mapping(acs, SERVER_KEY, own=8)
+        seed_cables_snapshot(
+            acs,
+            [],
+            [],
+            sensors=[
+                sensor_row(csp_a.pk, 1, device_id=8, sensor_descr="no-label-a"),
+                sensor_row(csp_b.pk, 2, device_id=8, sensor_descr="no-label-b"),
+            ],
+            server_key=SERVER_KEY,
+        )
         picker_url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[acs.pk])
         _remote, _, (remote_port,) = make_serial_device(
             "picker-duplicate-remote-target",
@@ -1955,6 +2177,8 @@ class TestRemotePickerEndpoint:
 
     def test_batch_rejects_an_endpoint_reused_across_local_and_remote_roles(self):
         from dcim.models import Cable
+
+        from netbox_librenms_plugin.assessment.cables import assess as assess_cables
         from django.urls import reverse
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
@@ -1963,34 +2187,42 @@ class TestRemotePickerEndpoint:
         first = make_interface(device, "Ethernet1")
         shared = make_interface(device, "Ethernet2")
         last = make_interface(device, "Ethernet3")
-        rows = [
-            {
-                "local_port": first.name,
-                "local_port_id": "cross-role-1",
-                "device_id": device.pk,
-                "remote_device": device.name,
-                "remote_port": shared.name,
-                "netbox_local_interface_id": first.pk,
-                "netbox_remote_interface_id": shared.pk,
-                "netbox_remote_device_id": device.pk,
-            },
-            {
-                "local_port": shared.name,
-                "local_port_id": "cross-role-2",
-                "device_id": device.pk,
-                "remote_device": device.name,
-                "remote_port": last.name,
-                "netbox_local_interface_id": shared.pk,
-                "netbox_remote_interface_id": last.pk,
-                "netbox_remote_device_id": device.pk,
-            },
-        ]
-        seed_cable_rows(device, rows, SERVER_KEY)
+        seed_mapping(device, SERVER_KEY, own=8)
+        snapshot = seed_cables_snapshot(
+            device,
+            [
+                link_row(
+                    10,
+                    shared.name,
+                    local_port=first.name,
+                    remote_hostname=device.name,
+                    remote_device_id=None,
+                    remote_port_id=None,
+                    protocol=None,
+                    id=None,
+                ),
+                link_row(
+                    20,
+                    last.name,
+                    local_port=shared.name,
+                    remote_hostname=device.name,
+                    remote_device_id=None,
+                    remote_port_id=None,
+                    protocol=None,
+                    id=None,
+                ),
+            ],
+            [
+                port_row(10, first.name, device_id=8, if_descr=None),
+                port_row(20, shared.name, device_id=8, if_descr=None),
+            ],
+            server_key=SERVER_KEY,
+        )
         client = self._client("cross-role")
         post_data = _rendered_sync_data(
             client,
             device,
-            [row["local_port_id"] for row in rows],
+            [row["row_id"] for row in assess_cables(snapshot, subject=device)["links"]],
         )
 
         response = client.post(
@@ -2021,24 +2253,37 @@ class TestRemotePickerEndpoint:
         second_remote = make_interface(remote_device, "R2")
         seed_mapping(page, SERVER_KEY, own=700, save=False)
         page.save()
-        rows = [
-            {
-                "_source": "main",
-                "local_port": "Ethernet1",
-                "local_port_id": 11,
-                "remote_device": remote_device.name,
-                "remote_port": first_remote.name,
-            },
-            {
-                "_source": "main",
-                "local_port": "Gi1/0/1",
-                "local_port_alt": "Ethernet1",
-                "local_port_id": 12,
-                "remote_device": remote_device.name,
-                "remote_port": second_remote.name,
-            },
-        ]
-        seed_cable_rows(page, rows, SERVER_KEY)
+        seed_mapping(page, SERVER_KEY, own=700)
+        seed_cables_snapshot(
+            page,
+            [
+                link_row(
+                    11,
+                    first_remote.name,
+                    local_port="Ethernet1",
+                    remote_hostname=remote_device.name,
+                    remote_device_id=None,
+                    remote_port_id=None,
+                    protocol=None,
+                    id=None,
+                ),
+                link_row(
+                    12,
+                    second_remote.name,
+                    local_port="Gi1/0/1",
+                    remote_hostname=remote_device.name,
+                    remote_device_id=None,
+                    remote_port_id=None,
+                    protocol=None,
+                    id=None,
+                ),
+            ],
+            [
+                port_row(11, "Ethernet1", device_id=700, if_descr=None),
+                port_row(12, "Gi1/0/1", device_id=700, if_descr="Ethernet1"),
+            ],
+            server_key=SERVER_KEY,
+        )
 
         post_data = {
             "server_key": SERVER_KEY,
@@ -2287,7 +2532,14 @@ class TestManualRepointOfExistingCable:
         old.tags.add(_librenms_tag())
 
         link = _serial_row(csp, f"router-{name}", acs, sensor_index_int=8)
-        seed_cable_rows(acs, [link], SERVER_KEY)
+        seed_mapping(acs, SERVER_KEY, own=8)
+        seed_cables_snapshot(
+            acs,
+            [],
+            [],
+            sensors=[sensor_row(csp.pk, 8, device_id=8, sensor_descr=f"router-{name}")],
+            server_key=SERVER_KEY,
+        )
         picker_url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[acs.pk])
         return acs, csp, old, link, picker_url
 
@@ -2345,8 +2597,11 @@ class TestRemotePickerObjectScope:
 
         acs, (csp,), _ = make_serial_device(f"acs-{name}", csp_names=["ttyS5"])
         link = _serial_row(csp, label, acs)
-        link["local_port_id"] = f"serial:{csp.pk}-s"
-        seed_cable_rows(acs, [link], SERVER_KEY)
+
+        seed_mapping(acs, SERVER_KEY, own=8)
+        seed_cables_snapshot(
+            acs, [], [], sensors=[sensor_row(csp.pk, 5, device_id=8, sensor_descr=label)], server_key=SERVER_KEY
+        )
         url = reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[acs.pk])
         return acs, link, url
 
@@ -2404,15 +2659,24 @@ class TestRemotePickerObjectScope:
         local_interface = make_interface(local_device, "Ethernet1")
         remote_device = make_device("picker-hidden-interface-remote")
         remote_interface = make_interface(remote_device, "Ethernet9")
-        row = {
-            "link_id": 10,
-            "_source": "main",
-            "local_port_id": 100,
-            "local_port": local_interface.name,
-            "remote_device": "restricted-neighbor-label",
-            "remote_port": remote_interface.name,
-        }
-        seed_cable_rows(local_device, [row], SERVER_KEY)
+        seed_mapping(local_device, SERVER_KEY, own=8)
+        seed_cables_snapshot(
+            local_device,
+            [
+                link_row(
+                    100,
+                    remote_interface.name,
+                    local_port=local_interface.name,
+                    remote_hostname="restricted-neighbor-label",
+                    remote_device_id=None,
+                    remote_port_id=None,
+                    protocol=None,
+                    id=10,
+                )
+            ],
+            [port_row(100, local_interface.name, device_id=8, if_descr=None)],
+            server_key=SERVER_KEY,
+        )
         user = make_user_with_perms(
             "picker-hidden-interface-user",
             [("view", Device)],
@@ -2444,7 +2708,7 @@ class TestRemotePickerObjectScope:
         remote, _, _ = make_serial_device("picker-view-only-target", cp_names=["console"])
         acs, link, _url = self._seed("view-only-picker", label=remote.name)
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        seed_cable_rows(acs, [link], server_key)
+
         client = self._scoped_client(
             "view-only-picker",
             [acs.name, remote.name],
@@ -2473,9 +2737,12 @@ class TestRemotePickerObjectScope:
         local, (csp,), _ = make_serial_device("picker-view-only-local", csp_names=["ttyS1"])
         remote, _, (cp,) = make_serial_device("picker-view-only-remote", cp_names=["console"])
         row = _serial_row(csp, remote.name, local)
-        row["local_port_id"] = "serial:view-only"
+
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        seed_cable_rows(local, [row], server_key)
+        seed_mapping(local, server_key, own=8)
+        seed_cables_snapshot(
+            local, [], [], sensors=[sensor_row(csp.pk, 1, device_id=8, sensor_descr=remote.name)], server_key=server_key
+        )
 
         user = get_user_model().objects.create_user("picker-view-only-user")
         grants = [
@@ -2532,10 +2799,12 @@ class TestRemotePickerObjectScope:
             "picker-actionable-remote",
             cp_names=["console-a", "console-b"],
         )
-        row = _serial_row(csp, remote.name, local)
-        row["local_port_id"] = "serial:actionable-port"
+
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        seed_cable_rows(local, [row], server_key)
+        seed_mapping(local, server_key, own=8)
+        seed_cables_snapshot(
+            local, [], [], sensors=[sensor_row(csp.pk, 1, device_id=8, sensor_descr=remote.name)], server_key=server_key
+        )
         user = make_user_with_perms(
             "picker-actionable-user",
             [
@@ -2575,11 +2844,21 @@ class TestRemotePickerObjectScope:
         )
         remote, _, (cp,) = make_serial_device("picker-dead-reservation-remote", cp_names=["console"])
         auto_row = _serial_row(actionable_csp, remote.name, local, sensor_index_int=1)
-        auto_row["local_port_id"] = "serial:auto-actionable"
+
         manual_row = _serial_row(view_only_csp, remote.name, local, sensor_index_int=2)
-        manual_row["local_port_id"] = "serial:manual-view-only"
+
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        seed_cable_rows(local, [auto_row, manual_row], server_key)
+        seed_mapping(local, server_key, own=8)
+        seed_cables_snapshot(
+            local,
+            [],
+            [],
+            sensors=[
+                sensor_row(actionable_csp.pk, 1, device_id=8, sensor_descr=remote.name),
+                sensor_row(view_only_csp.pk, 2, device_id=8, sensor_descr=remote.name),
+            ],
+            server_key=server_key,
+        )
         user = make_user_with_perms(
             "picker-dead-reservation-user",
             [
@@ -2631,9 +2910,12 @@ class TestRemotePickerObjectScope:
         local, (csp,), _ = make_serial_device("picker-no-tag-add-local", csp_names=["ttyS1"])
         remote, _, (cp,) = make_serial_device("picker-no-tag-add-remote", cp_names=["console"])
         row = _serial_row(csp, remote.name, local)
-        row["local_port_id"] = "serial:no-tag-add"
+
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        seed_cable_rows(local, [row], server_key)
+        seed_mapping(local, server_key, own=8)
+        seed_cables_snapshot(
+            local, [], [], sensors=[sensor_row(csp.pk, 1, device_id=8, sensor_descr=remote.name)], server_key=server_key
+        )
         Tag.objects.filter(name="librenms").delete()
         user = get_user_model().objects.create_user("picker-no-tag-add-user")
         grants = [
@@ -2686,16 +2968,25 @@ class TestRemotePickerObjectScope:
         second_local = make_interface(second, "Ethernet1")
         remote_device = make_device("picker-verify-scope-remote")
         remote = make_interface(remote_device, "Ethernet9")
-        row = {
-            "local_port": "Ethernet1",
-            "local_port_id": 10,
-            "remote_device": remote_device.name,
-            "remote_port": remote.name,
-            "remote_port_id": 20,
-            "_source": "main",
-        }
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        seed_cable_rows(first, [row], server_key)
+        seed_mapping(first, server_key, own=500)
+        seed_cables_snapshot(
+            first,
+            [
+                link_row(
+                    10,
+                    remote.name,
+                    local_port="Ethernet1",
+                    remote_hostname=remote_device.name,
+                    remote_device_id=None,
+                    remote_port_id=20,
+                    protocol=None,
+                    id=None,
+                )
+            ],
+            [port_row(10, "Ethernet1", device_id=500, if_descr=None)],
+            server_key=server_key,
+        )
 
         user = get_user_model().objects.create_user("picker-verify-scope-user")
         grants = [
@@ -2805,7 +3096,11 @@ class TestRemotePickerObjectScope:
         )
 
         assert resp.status_code == 400
-        row = next(r for r in cable_rows(acs, SERVER_KEY)["links"] if r["local_port_id"] == link["local_port_id"])
+        row = next(
+            r
+            for r in cable_rows(resp.wsgi_request, acs, SERVER_KEY)["links"]
+            if r["local_port_id"] == link["local_port_id"]
+        )
         assert "manual_remote_id" not in row  # nothing bound
 
     def test_ports_fragment_requires_console_port_view_permission(self):
@@ -2921,7 +3216,11 @@ class TestRemotePickerObjectScope:
         )
 
         assert resp.status_code == 200
-        row = next(r for r in cable_rows(acs, SERVER_KEY)["links"] if r["local_port_id"] == link["local_port_id"])
+        row = next(
+            r
+            for r in cable_rows(resp.wsgi_request, acs, SERVER_KEY)["links"]
+            if r["local_port_id"] == link["local_port_id"]
+        )
         assert "manual_remote_id" not in row
 
     def test_picker_declares_the_device_view_gate(self):
@@ -2957,16 +3256,25 @@ class TestNormalCableLinkObjectScope:
         hidden_local = make_interface(hidden, "Ethernet2")
         remote_device = make_device("normal-scope-remote")
         remote = make_interface(remote_device, "Ethernet9")
-        row = {
-            "_source": "main",
-            "local_port": hidden_local.name,
-            "local_port_id": 10,
-            "remote_device": remote_device.name,
-            "remote_port": remote.name,
-            "remote_port_id": 20,
-        }
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        seed_cable_rows(visible, [row], server_key)
+        seed_mapping(visible, server_key, own=8)
+        seed_cables_snapshot(
+            visible,
+            [
+                link_row(
+                    10,
+                    remote.name,
+                    local_port=hidden_local.name,
+                    remote_hostname=remote_device.name,
+                    remote_device_id=None,
+                    remote_port_id=20,
+                    protocol=None,
+                    id=None,
+                )
+            ],
+            [port_row(10, hidden_local.name, device_id=8, if_descr=None)],
+            server_key=server_key,
+        )
 
         user = get_user_model().objects.create_user("normal-scope-user")
         plugin_model = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
@@ -3026,16 +3334,25 @@ class TestNormalCableLinkObjectScope:
         remote_hidden = make_device("normal-verify-scope-remote-hidden")
         make_virtual_chassis("normal-verify-scope-vc", remote_visible, remote_hidden)
         remote = make_interface(remote_hidden, "ge-2/0/0")
-        row = {
-            "_source": "main",
-            "local_port": local.name,
-            "local_port_id": 10,
-            "remote_device": remote_visible.name,
-            "remote_port": remote.name,
-            "remote_port_id": 20,
-        }
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        seed_cable_rows(local_device, [row], server_key)
+        seed_mapping(local_device, server_key, own=8)
+        seed_cables_snapshot(
+            local_device,
+            [
+                link_row(
+                    10,
+                    remote.name,
+                    local_port=local.name,
+                    remote_hostname=remote_visible.name,
+                    remote_device_id=None,
+                    remote_port_id=20,
+                    protocol=None,
+                    id=None,
+                )
+            ],
+            [port_row(10, local.name, device_id=8, if_descr=None)],
+            server_key=server_key,
+        )
 
         user = get_user_model().objects.create_user("normal-verify-scope-user")
         plugin_model = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
@@ -3105,15 +3422,24 @@ class TestNormalCableLinkObjectScope:
         first_local.save()
         seed_mapping(hidden_stable, server_key, own=10, save=False)
         hidden_stable.save()
-        row = {
-            "_source": "main",
-            "local_port": "Ethernet1",
-            "local_port_id": 10,
-            "remote_device": remote_device.name,
-            "remote_port": remote.name,
-            "remote_port_id": 20,
-        }
-        seed_cable_rows(first, [row], server_key)
+        seed_mapping(first, server_key, own=8)
+        seed_cables_snapshot(
+            first,
+            [
+                link_row(
+                    10,
+                    remote.name,
+                    local_port="Ethernet1",
+                    remote_hostname=remote_device.name,
+                    remote_device_id=None,
+                    remote_port_id=20,
+                    protocol=None,
+                    id=None,
+                )
+            ],
+            [port_row(10, "Ethernet1", device_id=8, if_descr=None)],
+            server_key=server_key,
+        )
         get_librenms_cable_tag()
 
         user = get_user_model().objects.create_user("normal-writer-scope-user")
@@ -3192,15 +3518,24 @@ class TestNormalCableLinkObjectScope:
             interface.save()
         seed_mapping(remote, server_key, own=20, save=False)
         remote.save()
-        row = {
-            "_source": "main",
-            "local_port": first.name,
-            "local_port_id": 10,
-            "remote_device": remote_device.name,
-            "remote_port": remote.name,
-            "remote_port_id": 20,
-        }
-        seed_cable_rows(local_device, [row], server_key)
+        seed_mapping(local_device, server_key, own=8)
+        seed_cables_snapshot(
+            local_device,
+            [
+                link_row(
+                    10,
+                    remote.name,
+                    local_port=first.name,
+                    remote_hostname=remote_device.name,
+                    remote_device_id=None,
+                    remote_port_id=20,
+                    protocol=None,
+                    id=None,
+                )
+            ],
+            [port_row(10, first.name, device_id=8, if_descr=None)],
+            server_key=server_key,
+        )
         user = get_user_model().objects.create_superuser("normal-duplicate-id-user", "", "pw")
         client = Client()
         client.force_login(user)
@@ -3274,19 +3609,23 @@ class TestCablePathReadScope:
         assert middle.pk not in [first.pk, last.pk]
 
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        seed_cable_rows(
+        seed_mapping(local_device, server_key, own=8)
+        seed_cables_snapshot(
             local_device,
             [
-                {
-                    "local_port": local.name,
-                    "local_port_id": 10,
-                    "remote_device": remote_device.name,
-                    "remote_port": remote.name,
-                    "remote_port_id": 20,
-                    "_source": "main",
-                }
+                link_row(
+                    10,
+                    remote.name,
+                    local_port=local.name,
+                    remote_hostname=remote_device.name,
+                    remote_device_id=None,
+                    remote_port_id=20,
+                    protocol=None,
+                    id=None,
+                )
             ],
-            server_key,
+            [port_row(10, local.name, device_id=8, if_descr=None)],
+            server_key=server_key,
         )
         client.force_login(user)
 
