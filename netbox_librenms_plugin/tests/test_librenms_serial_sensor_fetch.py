@@ -1,5 +1,5 @@
 """
-Error and skip paths of ``LibreNMSAPI._fetch_serial_port_sensors``.
+Error and skip paths of ``LibreNMSAPI.get_serial_port_sensors``.
 
 ``test_librenms_api.py::TestGetSerialPortSensors`` covers the success and malformed-payload
 branches, the empty-table 404, and the non-JSON 200. These are the paths it does not reach: a
@@ -89,3 +89,46 @@ class TestUnreadableSensorType:
         assert success is True
         assert data == []
         assert any("Skipped 3 sensor(s)" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize("sensor_index", [None, 1.3, "not-an-index"])
+def test_a_recognized_active_sensor_needs_a_usable_index(live_librenms, sensor_index):
+    row = {**_sensor(12), "sensor_index": sensor_index}
+    live_librenms.server.register(SENSORS_PATH, {"status": "ok", "sensors": [row]})
+
+    success, reason = live_librenms.api.get_serial_port_sensors(12)
+
+    assert success is False
+    assert "sensor_index" in reason
+
+
+@pytest.mark.parametrize("deleted", [1, "1"])
+def test_deleted_sensors_need_no_live_identity_or_index(live_librenms, deleted):
+    active = _sensor(12)
+    removed = {**_sensor(12, port_num=8), "sensor_deleted": deleted, "sensor_id": False, "sensor_index": None}
+    live_librenms.server.register(SENSORS_PATH, {"status": "ok", "sensors": [removed, active]})
+
+    success, rows = live_librenms.api.get_serial_port_sensors(12)
+
+    assert success is True
+    assert rows == [active]
+
+
+def test_a_malformed_deletion_flag_is_checked_before_the_sensor_identity(live_librenms):
+    row = {**_sensor(12), "sensor_deleted": True, "sensor_id": False, "sensor_index": None}
+    live_librenms.server.register(SENSORS_PATH, {"status": "ok", "sensors": [row]})
+
+    success, reason = live_librenms.api.get_serial_port_sensors(12)
+
+    assert success is False
+    assert "sensor_deleted" in reason
+
+
+@pytest.mark.parametrize("body", [{"status": "ok"}, {"status": "ok", "links": None}, {"status": "ok", "links": [7]}])
+def test_the_links_getter_rejects_an_unusable_envelope(live_librenms, body):
+    live_librenms.server.register("/api/v0/devices/12/links", body)
+
+    success, reason = live_librenms.api.get_device_links(12)
+
+    assert success is False
+    assert "malformed" in reason

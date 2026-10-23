@@ -5,7 +5,7 @@ from uuid import uuid4
 from django.utils import timezone
 from virtualization.models import VirtualMachine
 
-from netbox_librenms_plugin.acquisition.registry import RESOURCE_SPECS, OwnerPolicy
+from netbox_librenms_plugin.acquisition.registry import RESOURCE_SPECS, OwnerPolicy, Resource
 from netbox_librenms_plugin.acquisition.resources import ACQUIRERS, OOB_ACQUIRERS
 from netbox_librenms_plugin.acquisition.snapshot import (
     MappingLink,
@@ -17,7 +17,7 @@ from netbox_librenms_plugin.acquisition.snapshot import (
     ResponseRecord,
     SourceSnapshot,
 )
-from netbox_librenms_plugin.librenms_api import build_librenms_api
+from netbox_librenms_plugin.librenms_api import EXTENDED_API_TIMEOUT, build_librenms_api
 from netbox_librenms_plugin.server_mappings import MappingRole, read_mapping, require_server_key
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
@@ -40,11 +40,14 @@ class _Fetch:
     def __init__(self, api):
         self._api = api
         self.responses = {}
+        self.neighbour_deadline = None
 
     def __call__(self, endpoint):
         key = endpoint.request.key
-        if key not in self.responses:
-            status, body = self._api.get_response(endpoint.request.path, dict(endpoint.request.params))
+        if key not in self.responses or self.responses[key].received_at is None:
+            # A budget omission is still available to a resource that requires this request.
+            options = {"timeout": EXTENDED_API_TIMEOUT} if endpoint.extended_timeout else {}
+            status, body = self._api.get_response(endpoint.request.path, dict(endpoint.request.params), **options)
             decoded = endpoint.decode(status, body)
             self.responses[key] = ResponseRecord(
                 request=endpoint.request,
@@ -65,14 +68,19 @@ class _Fetch:
 
 
 class _Refused:
-    """Record each request of a mapping as failed without making it, because the mapping names no device."""
+    """Record requests not made because a mapping has no usable device."""
 
-    def __init__(self, fetch, reason):
+    def __init__(self, fetch, reason, outcome=Outcome.FAILED):
         self._fetch = fetch
         self._reason = reason
+        self._outcome = outcome
 
     def __call__(self, endpoint):
-        return self._fetch.skip(endpoint, Outcome.FAILED, self._reason)
+        return self._fetch.skip(endpoint, self._outcome, self._reason)
+
+    def skip(self, endpoint, outcome, reason):
+        """Keep the mapping's refusal for a request its resource would otherwise skip."""
+        return self(endpoint)
 
 
 def oob_link(mapping, server_key):
@@ -118,20 +126,25 @@ def oob_source(fetch, resource, mapping, server_key):
     )
 
 
-def _resource_source(fetch, resource, owner, server_key):
+def _resource_source(fetch, resource, owner, server_key, *, include_serial=False):
     """Acquire one resource from the owner's own mapping and, when it links one, its OOB controller."""
     mapping = read_mapping(owner)
     librenms_id = mapping.own_id(server_key)
-    if librenms_id is None:
+    oob_only = resource is Resource.CABLES and librenms_id is None and mapping.has_oob(server_key)
+    if librenms_id is None and not oob_only:
         raise SubjectNotMapped(owner, server_key)
-    parts = ACQUIRERS[resource](fetch, librenms_id)
+    host_fetch = _Refused(fetch, "The owner has only an OOB mapping.", Outcome.NOT_APPLICABLE) if oob_only else fetch
+    options = {"include_serial": include_serial} if resource is Resource.CABLES else {}
+    # An absent host and an invalid OOB mapping must keep separate skipped responses.
+    host_request_id = "unmapped" if oob_only else librenms_id
+    parts = ACQUIRERS[resource](host_fetch, host_request_id, **options)
     return ResourceSource(
         resource=resource,
         owner=ObjectRef.of(owner),
         host=MappingSource(
             role=MappingRole.OWN,
             librenms_id=librenms_id,
-            state=MappingState.RESOLVED,
+            state=MappingState.INVALID if oob_only else MappingState.RESOLVED,
             parts=_part_keys(parts),
         ),
         oob=oob_source(fetch, resource, mapping, server_key),
@@ -145,7 +158,7 @@ def resource_owner(subject, resource, server_key):
     return get_librenms_sync_device(subject, server_key=server_key) or subject
 
 
-def acquire(subject, *, server_key, resources):
+def acquire(subject, *, server_key, resources, include_serial=False):
     """
     Acquire the source snapshot of each resource from one configured LibreNMS server.
 
@@ -155,6 +168,7 @@ def acquire(subject, *, server_key, resources):
         subject (Device | VirtualMachine): The synchronization subject.
         server_key (str): A configured LibreNMS server key.
         resources (Iterable[Resource]): The resources to acquire.
+        include_serial (bool): Whether cables acquisition requests serial sensors.
 
     Returns:
         SourceSnapshot: Every response obtained, with the outcome of each request.
@@ -179,7 +193,9 @@ def acquire(subject, *, server_key, resources):
     started_at = timezone.now()
     fetch = _Fetch(api)
     sources = {
-        resource: _resource_source(fetch, resource, resource_owner(subject, resource, server_key), server_key)
+        resource: _resource_source(
+            fetch, resource, resource_owner(subject, resource, server_key), server_key, include_serial=include_serial
+        )
         for resource in resources
     }
     return SourceSnapshot(
