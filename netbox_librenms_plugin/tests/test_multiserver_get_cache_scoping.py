@@ -2,6 +2,8 @@
 
 import pytest
 
+from netbox_librenms_plugin.tests.cable_source_helpers import seed_cable_rows
+
 from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_superuser
 
@@ -64,15 +66,13 @@ class TestConfiguredServerCacheScoping:
         assert list(context["table"].data)[0]["port_id"] == 11
 
     def test_cables_render_the_requested_servers_snapshot(self, configured_servers):
-        from django.core.cache import cache
 
         from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
 
         device = make_device("multiserver-cable")
         view = DeviceCableTableView()
         request = _request("production")
-        key = view.get_cache_key(device, "links", "production")
-        cache.set(key, {"links": [{"local_port": "Ethernet2", "local_port_id": 12}]})
+        seed_cable_rows(device, [{"local_port": "Ethernet2", "local_port_id": 12}], "production")
 
         context = _bind(view, request).get_context_data(request, device)
 
@@ -212,6 +212,8 @@ class TestRemovedServerFailsClosed:
             seed_source_snapshot(device, Resource.VLANS, "removed", vlans=payload)
         elif data_type == "ip_addresses":
             seed_ip_snapshot(device, payload, server_key="removed")
+        elif data_type == "links":
+            seed_cable_rows(device, payload["links"], "removed")
         else:
             cache.set(view.get_cache_key(device, data_type, "removed"), payload)
 

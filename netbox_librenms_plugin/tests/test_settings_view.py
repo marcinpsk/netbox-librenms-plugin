@@ -5,6 +5,7 @@ from django.urls import reverse
 
 from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.tests.conftest import cable_together, make_serial_device, make_superuser
+from netbox_librenms_plugin.tests.cable_source_helpers import seed_cable_rows
 
 
 @pytest.mark.django_db
@@ -497,7 +498,7 @@ class TestCableSyncSettingsTab:
             "is_configured": True,
         }
         cache_key = object.__new__(SyncCablesView).get_cache_key(local, "links", server_key)
-        cache.set(cache_key, {"links": [row]}, timeout=300)
+        seed_cable_rows(local, [row], server_key)
 
         row_id = row["local_port_id"]
         try:

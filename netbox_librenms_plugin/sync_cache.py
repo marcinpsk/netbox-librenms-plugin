@@ -1,5 +1,6 @@
 """Shared cache-consistency contract for the five device sync tabs."""
 
+import hashlib
 import json
 import logging
 import math
@@ -216,7 +217,7 @@ _CABLE_PICK_TABS = frozenset({SyncTab.CABLES})
 
 
 # The resources whose snapshot source_cache stores; the other tabs still store their own payload.
-_ACQUIRED_RESOURCES = frozenset({Resource.INTERFACES, Resource.IP_ADDRESSES, Resource.VLANS})
+_ACQUIRED_RESOURCES = frozenset({Resource.INTERFACES, Resource.CABLES, Resource.IP_ADDRESSES, Resource.VLANS})
 
 
 def _shares_vc_owner(tab):
@@ -952,3 +953,40 @@ def apply_request_cache_transition(request, response):
         response,
         merge_cache_transitions(transitions),
     )
+
+
+def cable_manual_pick_cache_key(snapshot_key, snapshot_id, user_id, row_id) -> str:
+    """Return the user- and row-scoped cache key for one unsaved remote pick."""
+    row_digest = hashlib.sha256(str(row_id).encode()).hexdigest()
+    return f"{snapshot_key}:manual-remote:{snapshot_id}:{user_id}:{row_digest}"
+
+
+def apply_cable_manual_picks(cache_backend, snapshot_key, snapshot_id, user_id, links):
+    """Copy *links* and overlay only the current user's manual remote picks."""
+    from netbox_librenms_plugin.utils import assign_cable_row_ids
+
+    if not isinstance(snapshot_id, str) or not snapshot_id:
+        raise ValueError("A cable pick needs a snapshot id.")
+    links = assign_cable_row_ids(links)
+    if links is None:
+        return [], False
+    pick_keys = {
+        link["row_id"]: cable_manual_pick_cache_key(snapshot_key, snapshot_id, user_id, link["row_id"])
+        for link in links
+    }
+    picks = cache_backend.get_many(pick_keys.values())
+    result = []
+    applied = False
+    for link in links:
+        copied = dict(link)
+        pick = picks.get(pick_keys[copied["row_id"]])
+        if isinstance(pick, dict) and coerce_librenms_id(pick.get("manual_remote_id")):
+            copied.update(
+                {
+                    "manual_remote_id": pick["manual_remote_id"],
+                    "manual_remote": True,
+                }
+            )
+            applied = True
+        result.append(copied)
+    return result, applied

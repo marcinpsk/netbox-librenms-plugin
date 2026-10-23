@@ -13,12 +13,12 @@ import pytest
 from dcim.models import Cable, Interface, Site
 from django.contrib import messages
 from django.contrib.messages import get_messages
-from django.core.cache import cache
 from django.urls import reverse
 from ipam.models import IPAddress, VLAN
 
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.server_mappings import read_mapping
+from netbox_librenms_plugin.tests.cable_source_helpers import seed_cable_rows
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import (
@@ -53,7 +53,8 @@ def _set_librenms_id(obj, value):
 
 
 def _seed_snapshot(view, obj, data_type, payload):
-    cache.set(view.get_cache_key(obj, data_type, SERVER_KEY), payload, timeout=300)
+    assert data_type == "links"
+    seed_cable_rows(obj, payload["links"], SERVER_KEY)
 
 
 @pytest.mark.django_db

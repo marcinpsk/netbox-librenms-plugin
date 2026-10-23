@@ -6,12 +6,12 @@ import pytest
 from dcim.models import Cable, Site
 from django.contrib import messages
 from django.contrib.messages import get_messages
-from django.core.cache import cache
 from django.urls import reverse
 from ipam.models import IPAddress, VLAN, VLANGroup, VRF
 from virtualization.models import VMInterface, VirtualMachine
 
 from netbox_librenms_plugin.acquisition.registry import Resource
+from netbox_librenms_plugin.tests.cable_source_helpers import seed_cable_rows
 from netbox_librenms_plugin.tests.conftest import (
     cable_together,
     make_device,
@@ -42,7 +42,8 @@ def _response_messages(response, level=None):
 
 
 def _seed(view, obj, data_type, payload):
-    cache.set(view.get_cache_key(obj, data_type, SERVER_KEY), payload, timeout=300)
+    assert data_type == "links"
+    seed_cable_rows(obj, payload["links"], SERVER_KEY)
 
 
 def _set_id(obj, value):

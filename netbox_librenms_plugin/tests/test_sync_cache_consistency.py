@@ -30,6 +30,7 @@ from netbox_librenms_plugin.sync_cache import (
     sync_cache_browser_contract,
     sync_subject_key,
 )
+from netbox_librenms_plugin.tests.cable_source_helpers import cable_rows, seed_cable_rows
 from netbox_librenms_plugin.tests.conftest import (
     _PORT_KEYS_UNSET,
     configure_librenms_servers,
@@ -43,7 +44,12 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis_members,
     make_vm,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change, seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import (
+    apply_mapping_change,
+    seed_mapping,
+    seed_stored_mapping,
+    stored_mapping_for_test,
+)
 from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     ip_address_row,
     port_pair,
@@ -122,6 +128,19 @@ def _vlan_overrides_key(obj, server_key):
 
 def _seed_snapshot(data_type, obj, server_key, payload=None):
     assert data_type != "ip_addresses", "seed the IP tab with seed_ip_snapshot"
+    if data_type == "links":
+        from netbox_librenms_plugin.acquisition.coordinator import resource_owner
+        from netbox_librenms_plugin.server_mappings import read_mapping
+
+        owner = resource_owner(obj, Resource.CABLES, server_key)
+        original_mapping = stored_mapping_for_test(owner)
+        had_mapping = read_mapping(owner).own_id(server_key) is not None
+        snapshot = seed_cable_rows(obj, (payload or {}).get("links", []), server_key)
+        # Namespace cleanup tests also seed page keys beside the shared VC owner's key.
+        cache.set(_cache_key(data_type, obj, server_key), snapshot.to_payload(), timeout=300)
+        if not had_mapping:
+            seed_stored_mapping(owner, original_mapping, save=True)
+        return snapshot
     cache.set(_cache_key(data_type, obj, server_key), payload or {"snapshot": data_type}, timeout=300)
 
 
@@ -302,13 +321,13 @@ def test_cable_cache_fragment_does_not_rewrite_the_snapshot(client, settings, pr
                 "local_port": local.name,
                 "remote_port_id": 7404,
                 "remote_port": remote.name,
-                "remote_hostname": remote_device.name,
+                "remote_device": remote_device.name,
                 "remote_device_id": 6404,
             }
         ]
     }
     cache_key = _cache_key("links", local_device, "primary")
-    cache.set(cache_key, payload, timeout=300)
+    snapshot = seed_cable_rows(local_device, payload["links"], "primary")
     client.force_login(make_superuser("cache-only-cable-user"))
     url = reverse(
         "plugins:netbox_librenms_plugin:sync_cache_fragment",
@@ -320,7 +339,7 @@ def test_cable_cache_fragment_does_not_rewrite_the_snapshot(client, settings, pr
 
     assert len(primary_librenms.requests) == request_count
     assert response.status_code == 200
-    assert cache.get(cache_key) == payload
+    assert cache.get(cache_key) == snapshot.to_payload()
 
 
 @pytest.mark.django_db
@@ -789,6 +808,7 @@ def test_a_sibling_refresh_clears_the_shared_tab_block_on_every_member(
         },
     )
     primary_librenms.register("/api/v0/devices/61/ports", {"status": "ok", "ports": ports})
+    primary_librenms.ports_response(62, [{"port_id": 7482, "ifName": remote.name, "ifDescr": remote.name}])
 
     # The owner refreshes the shared snapshot both members read.
     refresh_url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", kwargs={"pk": owner.pk})
@@ -1153,7 +1173,7 @@ def test_cable_sync_invalidates_other_tabs_after_creating_a_cable(
             }
         ]
     }
-    _seed_snapshot("links", device, "primary", links_payload)
+    snapshot = _seed_snapshot("links", device, "primary", links_payload)
     _seed_snapshot("inventory", device, "primary")
 
     client.force_login(make_superuser("cache-cable-writer-user"))
@@ -1173,7 +1193,7 @@ def test_cable_sync_invalidates_other_tabs_after_creating_a_cable(
 
     assert response.status_code == 302
     assert Cable.objects.filter(terminations__termination_id=local.pk).exists()
-    assert cache.get(_cache_key("links", device, "primary")) == links_payload
+    assert cache.get(_cache_key("links", device, "primary")) == snapshot.to_payload()
     assert cache.get(_cache_key("inventory", device, "primary")) is None
 
 
@@ -1886,22 +1906,20 @@ def test_partial_cable_refresh_keeps_rows_from_available_sources(client, setting
         {"status": "ok", "ports": [{"port_id": 7471, "ifName": local.name, "ifDescr": local.name}]},
     )
     primary_librenms.register("/api/v0/devices/649/links", {"message": "Unavailable"}, status=503)
+    primary_librenms.ports_response(648, [{"port_id": 7472, "ifName": remote.name, "ifDescr": remote.name}])
 
     url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", kwargs={"pk": device.pk})
     response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
 
     assert response.status_code == 200
-    assert b"OOB controller links fetch failed" in response.content
-    assert b"Cable data is incomplete" in response.content
-    assert b"Sync Selected Cables" in response.content
     assert b'name="select"' in response.content
-    cached = cache.get(_cache_key("links", device, "primary"))
-    assert cached["incomplete_sources"] == ["OOB"]
+    cached = cable_rows(device, "primary")
+    assert any(blocker.path.endswith("/649/links") for blocker in cached["blockers"])
     assert cached["links"][0]["local_port_id"] == 7471
 
 
 @pytest.mark.django_db
-def test_cable_refresh_refuses_an_ambiguous_server_key(client, settings):
+def test_cable_refresh_refuses_an_ambiguous_server_key(client, settings, primary_librenms):
     """QueryDict.get() keeps the LAST repeated value, so an ambiguous POST could refresh another server."""
     _configure_servers(settings)
     device = make_device(
@@ -1911,11 +1929,9 @@ def test_cable_refresh_refuses_an_ambiguous_server_key(client, settings):
     client.force_login(make_superuser("cache-cable-ambiguous-user"))
     url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", kwargs={"pk": device.pk})
 
-    def refuse(request_url, *args, **kwargs):
-        raise AssertionError(f"an ambiguous selection must fetch nothing, got: {request_url}")
+    response = client.post(url, {"server_key": ["primary", "secondary"]}, HTTP_HX_REQUEST="true")
 
-    with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=refuse):
-        response = client.post(url, {"server_key": ["primary", "secondary"]}, HTTP_HX_REQUEST="true")
+    assert primary_librenms.requests == []
 
     assert response.status_code == 200
     assert b"Select exactly one configured LibreNMS server." in response.content
@@ -1923,16 +1939,15 @@ def test_cable_refresh_refuses_an_ambiguous_server_key(client, settings):
 
 
 @pytest.mark.django_db
-def test_cable_refresh_reports_a_single_unconfigured_server_key(client, settings):
+def test_cable_refresh_reports_a_single_unconfigured_server_key(client, settings, primary_librenms):
     _configure_servers(settings)
     device = make_device("cache-cable-unconfigured", librenms_cf={"primary": {"id": 672}})
     client.force_login(make_superuser("cache-cable-unconfigured-user"))
     url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", kwargs={"pk": device.pk})
 
-    with patch("netbox_librenms_plugin.librenms_api._session.get") as request:
-        response = client.post(url, {"server_key": "removed"}, HTTP_HX_REQUEST="true")
+    response = client.post(url, {"server_key": "removed"}, HTTP_HX_REQUEST="true")
 
-    request.assert_not_called()
+    assert primary_librenms.requests == []
     assert response.status_code == 200
     assert b"Selected LibreNMS server is no longer configured." in response.content
 
@@ -1975,15 +1990,28 @@ def test_cable_refresh_without_a_cached_snapshot_reports_failure_not_success(
         {"status": "ok", "ports": [{"port_id": 7481, "ifName": local.name, "ifDescr": local.name}]},
     )
 
+    primary_librenms.ports_response(662, [{"port_id": 7482, "ifName": remote.name, "ifDescr": remote.name}])
     url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", kwargs={"pk": device.pk})
     # Inject the one condition the real flow cannot produce locally: the snapshot is gone by the
     # time the handler checks for it (an eviction between the write and the read).
-    monkeypatch.setattr(caches["default"], "has_key", lambda _key: False)
+    snapshot_key = SyncCacheConsistency(device).snapshot_key(SyncTab.CABLES, "primary")
+    original_get = cache.get
+
+    def evicted_snapshot(key, *args, **kwargs):
+        if key == snapshot_key:
+            cache.delete(key)
+            return None
+        return original_get(key, *args, **kwargs)
+
+    monkeypatch.setattr(caches["default"], "get", evicted_snapshot)
     response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
 
     assert response.status_code == 200
-    assert b"Cable data refreshed successfully" not in response.content
+    from django.contrib.messages import get_messages
+
+    assert all(message.level_tag != "success" for message in get_messages(response.wsgi_request))
     assert b"could not be cached" in response.content
+    assert source_cache.read(device, Resource.CABLES, "primary") is None
     state = SyncCacheConsistency(device).status("primary", actor_id=user.pk)[SyncTab.CABLES.value]
     assert state["state"] == SyncTabState.REFRESH_FAILED.value
 
@@ -2141,6 +2169,7 @@ def test_a_failed_cable_cache_write_does_not_claim_there_is_nothing_to_show(
         "/api/v0/devices/661/ports",
         {"status": "ok", "ports": [{"port_id": 7481, "ifName": local.name, "ifDescr": local.name}]},
     )
+    primary_librenms.ports_response(662, [{"port_id": 7482, "ifName": remote.name, "ifDescr": remote.name}])
     skipped = _drop_snapshot_write(monkeypatch, device, SyncTab.CABLES)
 
     url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", kwargs={"pk": device.pk})

@@ -87,6 +87,10 @@ def _register_links(live_librenms, device_id=42, links=None, *, status=200):
             }
         ]
     body = {"status": "ok", "links": links} if status == 200 else {"status": "error", "message": "unavailable"}
+    for neighbour in {row.get("remote_device_id") for row in links if row.get("remote_device_id")}:
+        live_librenms.server.ports_response(
+            neighbour, [{"port_id": 201, "ifName": "Ethernet9", "ifDescr": "Ethernet9"}]
+        )
     live_librenms.server.register(
         f"/api/v0/devices/{device_id}/links",
         body,
@@ -96,95 +100,23 @@ def _register_links(live_librenms, device_id=42, links=None, *, status=200):
     return links
 
 
-class TestCablePayloadBoundaries:
-    @pytest.mark.parametrize(
-        ("payload", "expected_names", "expected_alternates"),
-        [
-            (
-                {
-                    "ports": [
-                        {"port_id": 1, "ifName": "Ethernet1", "ifDescr": "uplink-1"},
-                        {"port_id": 2, "ifName": "Ethernet2", "ifDescr": "Ethernet2"},
-                    ]
-                },
-                {"1": "Ethernet1", "2": "Ethernet2"},
-                {"1": "uplink-1"},
-            ),
-            ({"ports": [None, "bad", {"ifName": "missing-id"}, {"port_id": 3}]}, {}, {}),
-            ({"ports": None}, {}, {}),
-            ([], {}, {}),
-        ],
-    )
-    def test_port_name_maps_validate_external_rows(self, payload, expected_names, expected_alternates):
-        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+def _acquired_cables(subject):
+    from netbox_librenms_plugin.acquisition.coordinator import acquire
+    from netbox_librenms_plugin.assessment.cables import assess
 
-        names, alternates = BaseCableTableView._build_cable_port_name_maps(payload, "ifName", "ifDescr")
-
-        assert names == expected_names
-        assert alternates == expected_alternates
-
-    def test_link_collection_keeps_real_identity_and_skips_malformed_rows(self):
-        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
-
-        rows = BaseCableTableView._collect_cable_links(
-            [
-                None,
-                {
-                    "id": 7,
-                    "local_port_id": 1,
-                    "local_port": "fallback",
-                    "protocol": "lldp",
-                    "remote_port": "Ethernet2",
-                    "remote_hostname": "remote.example",
-                    "remote_port_id": 2,
-                    "remote_device_id": 9,
-                },
-            ],
-            {"1": "Ethernet1"},
-            {"1": "uplink-1"},
-            "main",
-        )
-
-        assert rows == [
-            {
-                "local_port": "Ethernet1",
-                "local_port_alt": "uplink-1",
-                "local_port_id": 1,
-                "link_id": 7,
-                "protocol": "lldp",
-                "remote_port": "Ethernet2",
-                "remote_device": "remote.example",
-                "remote_port_id": 2,
-                "remote_device_id": 9,
-                "_source": "main",
-            }
-        ]
-
-    @pytest.mark.parametrize(
-        ("success", "data", "text"),
-        [
-            (False, {"error": "authentication failed"}, "authentication failed"),
-            (False, {"message": "server unavailable"}, "server unavailable"),
-            (True, {"status": "error", "message": "bad request"}, "bad request"),
-            (True, [], "expected an object"),
-        ],
-    )
-    def test_fetch_error_classification_preserves_external_detail(self, success, data, text):
-        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
-
-        assert text in BaseCableTableView._classify_links_fetch_error(success, data)
+    snapshot = acquire(subject, server_key="default", resources=[Resource.CABLES])
+    return snapshot, assess(snapshot, subject=subject)
 
 
 class TestCableHTTPAndORM:
     def test_links_and_names_are_loaded_over_real_http(self, live_librenms):
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
 
         device = _mapped_device("cable-live-http")
         _register_ports(live_librenms)
         _register_links(live_librenms)
-        view = _view(DeviceCableTableView, live_librenms)
 
-        links = view.get_links_data(device, server_key="default")
+        _snapshot, assessment = _acquired_cables(device)
+        links = assessment["links"]
 
         assert links[0]["local_port"] == "Ethernet1"
         assert links[0]["local_port_alt"] == "uplink-1"
@@ -207,18 +139,18 @@ class TestCableHTTPAndORM:
         ],
     )
     def test_malformed_or_failed_link_response_fails_closed(self, live_librenms, body):
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
 
         device = _mapped_device("cable-failed-http")
         _register_ports(live_librenms)
         live_librenms.server.register("/api/v0/devices/42/links", body)
-        view = _view(DeviceCableTableView, live_librenms)
 
-        assert view.get_links_data(device, server_key="default") is None
-        assert view._links_fetch_error
+        snapshot, assessment = _acquired_cables(device)
+
+        assert assessment["links"] == []
+        assert assessment["blockers"]
+        assert not source_cache.store(device, Resource.CABLES, snapshot)
 
     def test_host_and_oob_links_are_merged_from_two_real_devices(self, live_librenms):
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
 
         device = map_device_to_librenms(
             make_device("cable-oob"), 42, server_key="default", oob={"id": 99, "type": "controller"}
@@ -251,9 +183,9 @@ class TestCableHTTPAndORM:
                 }
             ],
         )
-        view = _view(DeviceCableTableView, live_librenms)
 
-        links = view.get_links_data(device, server_key="default")
+        _snapshot, assessment = _acquired_cables(device)
+        links = assessment["links"]
 
         assert [link["_source"] for link in links] == ["main", "oob"]
         assert links[1]["local_port"] == "management"
@@ -272,7 +204,8 @@ class TestCableHTTPAndORM:
         view = _view(DeviceCableTableView, live_librenms)
 
         found, matched, error = view.get_device_by_id_or_name(99, "wrong-name.example", "default")
-        rows = view.enrich_links_data(view.get_links_data(local_device, "default"), local_device, "default")
+        _snapshot, assessment = _acquired_cables(local_device)
+        rows = view.enrich_links_data(assessment["links"], local_device, "default")
 
         assert found == remote_device
         assert matched is True
@@ -296,21 +229,29 @@ class TestCableHTTPAndORM:
         _register_links(live_librenms)
         view = _view(DeviceCableTableView, live_librenms)
 
-        rows = view.enrich_links_data(view.get_links_data(local_device, "default"), local_device, "default")
+        _snapshot, assessment = _acquired_cables(local_device)
+        rows = view.enrich_links_data(assessment["links"], local_device, "default")
 
         assert rows[0]["cable_status"] == "Cable Found"
         assert rows[0]["cable_url"].endswith(f"/dcim/cables/{cable.pk}/")
 
     def test_host_ports_are_fetched_and_the_interfaces_snapshot_is_not_read(self, live_librenms):
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
 
         device = _mapped_device("cable-ports-fetch")
         seed_interfaces_snapshot(device, [{"port_id": 999, "ifName": "snapshot-only"}])
         ports = _register_ports(live_librenms)
-        view = _view(DeviceCableTableView, live_librenms)
 
-        assert [port["port_id"] for port in view.get_ports_data(42)["ports"]] == [port["port_id"] for port in ports]
-        assert [item["path"] for item in live_librenms.server.requests] == ["/api/v0/devices/42/ports"]
+        _register_links(live_librenms, links=[])
+
+        snapshot, _assessment = _acquired_cables(device)
+
+        assert [port["port_id"] for port in snapshot.value(Resource.CABLES, "ports")] == [
+            port["port_id"] for port in ports
+        ]
+        assert [item["path"] for item in live_librenms.server.requests] == [
+            "/api/v0/devices/42/links",
+            "/api/v0/devices/42/ports",
+        ]
 
     def test_exact_name_fallback_accepts_a_fqdn(self, live_librenms):
         from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView

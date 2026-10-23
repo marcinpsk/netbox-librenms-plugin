@@ -138,25 +138,24 @@ def test_a_blocked_vlan_refresh_reports_the_failed_source_and_keeps_no_snapshot(
 
 
 @pytest.mark.django_db
-def test_converted_and_unconverted_tabs_share_status_fragment_mutation_and_cleanup(
-    client, settings, django_capture_on_commit_callbacks
-):
-    from django.core.cache import cache
+def test_resource_tabs_share_status_fragment_mutation_and_cleanup(client, settings, django_capture_on_commit_callbacks):
     from django.urls import reverse
 
     from netbox_librenms_plugin import source_cache
     from netbox_librenms_plugin.acquisition.registry import Resource
-    from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, sync_snapshot_key
+    from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab
     from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_device, make_superuser
-    from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_interfaces_snapshot, seed_source_snapshot
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import (
+        seed_cables_snapshot,
+        seed_interfaces_snapshot,
+        seed_source_snapshot,
+    )
 
     configure_default_librenms_server(settings)
     device = make_device("coord-mixed", librenms_cf={SERVER_KEY: {"id": 506}})
     seed_source_snapshot(device, Resource.VLANS, SERVER_KEY, vlans=[])
     interfaces = seed_interfaces_snapshot(device, [{"port_id": 1, "ifName": "eth1"}], server_key=SERVER_KEY)
-    # The cables tab is not converted yet, so it still stores its own payload.
-    links_key = sync_snapshot_key(device, "links", SERVER_KEY)
-    cache.set(links_key, {"links": []}, timeout=300)
+    seed_cables_snapshot(device, server_key=SERVER_KEY)
     coordinator = SyncCacheConsistency(device)
 
     status = coordinator.status(SERVER_KEY)
@@ -180,7 +179,7 @@ def test_converted_and_unconverted_tabs_share_status_fragment_mutation_and_clean
     assert transition.completed
     assert source_cache.read(device, Resource.INTERFACES, SERVER_KEY) == interfaces
     assert source_cache.read(device, Resource.VLANS, SERVER_KEY) is None
-    assert not cache.has_key(links_key)
+    assert source_cache.read(device, Resource.CABLES, SERVER_KEY) is None
 
     coordinator.invalidate_every_tab()
 

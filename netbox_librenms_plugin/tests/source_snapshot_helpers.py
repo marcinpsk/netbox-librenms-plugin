@@ -46,6 +46,7 @@ class _SeededFetch:
         # Request key -> seeded value; without values, every request answers an empty list.
         self._values = values
         self.responses = {}
+        self.neighbour_deadline = None
 
     def __call__(self, endpoint):
         return self._keep(_record(endpoint.request, [] if self._values is None else self._values[endpoint.request.key]))
@@ -228,3 +229,55 @@ def interface_rows(subject, interface_name_field="ifName", server_key="default")
     from netbox_librenms_plugin.views.base.interfaces_view import read_interface_assessment
 
     return read_interface_assessment(subject, server_key, interface_name_field)
+
+
+def seed_cables_snapshot(
+    subject,
+    links=(),
+    ports=(),
+    neighbour_ports=None,
+    *,
+    oob_links=None,
+    oob_ports=None,
+    sensors=None,
+    server_key="default",
+):
+    """Store raw cable endpoint facts through the coordinator's real resource acquirer."""
+    from netbox_librenms_plugin.acquisition import responses
+    from netbox_librenms_plugin.acquisition.coordinator import _resource_source
+
+    owner = resource_owner(subject, Resource.CABLES, server_key)
+    mapping = read_mapping(owner)
+    host_id = mapping.own_id(server_key)
+    values = {
+        responses.links(host_id).request.key: links if isinstance(links, Failed) else list(links),
+        responses.ports(host_id, with_vlans=False).request.key: ports if isinstance(ports, Failed) else list(ports),
+    }
+    if sensors is not None:
+        values[responses.sensors(host_id).request.key] = sensors if isinstance(sensors, Failed) else list(sensors)
+    for device_id, rows in (neighbour_ports or {}).items():
+        values[responses.ports(device_id, with_vlans=False).request.key] = (
+            rows if isinstance(rows, Failed) else list(rows)
+        )
+    oob_id = mapping.oob_id(server_key)
+    if oob_id is not None:
+        if oob_links is None or oob_ports is None:
+            raise TypeError("A linked OOB controller needs links and ports in the cable seed.")
+        values[responses.links(oob_id).request.key] = oob_links if isinstance(oob_links, Failed) else list(oob_links)
+        values[responses.ports(oob_id, with_vlans=False).request.key] = (
+            oob_ports if isinstance(oob_ports, Failed) else list(oob_ports)
+        )
+    fetch = _SeededFetch(values)
+    source = _resource_source(fetch, Resource.CABLES, owner, server_key, include_serial=sensors is not None)
+    now = timezone.now()
+    snapshot = SourceSnapshot(
+        snapshot_id=uuid4().hex,
+        server_key=server_key,
+        subject=ObjectRef.of(subject),
+        started_at=now,
+        finished_at=now,
+        resources={Resource.CABLES: source},
+        responses=fetch.responses,
+    )
+    assert source_cache.store(subject, Resource.CABLES, snapshot), "the cables seed has no usable scope"
+    return snapshot
