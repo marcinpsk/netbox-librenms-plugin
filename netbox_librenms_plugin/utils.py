@@ -57,19 +57,6 @@ logger = logging.getLogger(__name__)
 _CABLE_ROW_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 
 
-def cable_snapshot_token(cached_payload) -> str:
-    """Return the stable generation token for one cached cable snapshot."""
-    if isinstance(cached_payload, dict) and cached_payload.get("snapshot_token"):
-        return str(cached_payload["snapshot_token"])
-    serialized = json.dumps(
-        cached_payload.get("links", []) if isinstance(cached_payload, dict) else [],
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
-    return hashlib.sha256(serialized.encode()).hexdigest()
-
-
 def assign_cable_row_ids(links):
     """Return copied cable rows with one stable action identity per snapshot row."""
     if not is_list_of_dicts(links):
@@ -111,40 +98,6 @@ def assign_cable_row_ids(links):
         copied["row_id"] = row_id
         result.append(copied)
     return result
-
-
-def cable_manual_pick_cache_key(snapshot_key, snapshot_token, user_id, row_id) -> str:
-    """Return the user- and row-scoped cache key for one unsaved remote pick."""
-    row_digest = hashlib.sha256(str(row_id).encode()).hexdigest()
-    return f"{snapshot_key}:manual-remote:{snapshot_token}:{user_id}:{row_digest}"
-
-
-def apply_cable_manual_picks(cache_backend, snapshot_key, cached_payload, user_id, links):
-    """Copy *links* and overlay only the current user's manual remote picks."""
-    snapshot_token = cable_snapshot_token(cached_payload)
-    links = assign_cable_row_ids(links)
-    if links is None:
-        return [], False
-    pick_keys = {
-        link["row_id"]: cable_manual_pick_cache_key(snapshot_key, snapshot_token, user_id, link["row_id"])
-        for link in links
-    }
-    picks = cache_backend.get_many(pick_keys.values())
-    result = []
-    applied = False
-    for link in links:
-        copied = dict(link)
-        pick = picks.get(pick_keys[copied["row_id"]])
-        if isinstance(pick, dict) and coerce_librenms_id(pick.get("manual_remote_id")):
-            copied.update(
-                {
-                    "manual_remote_id": pick["manual_remote_id"],
-                    "manual_remote": True,
-                }
-            )
-            applied = True
-        result.append(copied)
-    return result, applied
 
 
 def advisory_lock_key(lock_identity: str) -> int:

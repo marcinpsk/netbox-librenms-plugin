@@ -15,13 +15,12 @@ from html import unescape
 import pytest
 from dcim.models import Cable
 from django.contrib.messages import get_messages
-from django.core.cache import cache
 from django.urls import reverse
 
 from netbox_librenms_plugin.interface_rules import HIDDEN_PORT_REASON
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.server_mappings import read_mapping
-from netbox_librenms_plugin.sync_cache import sync_snapshot_key
+from netbox_librenms_plugin.tests.cable_source_helpers import cable_rows, seed_cable_rows
 from netbox_librenms_plugin.tests.conftest import (
     bind_librenms_server,
     cable_together,
@@ -33,8 +32,7 @@ from netbox_librenms_plugin.tests.conftest import (
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.test_cable_overwrite import _confirmed_intent
 from netbox_librenms_plugin.tests.test_interface_rule_writes import _platform, _port
-from netbox_librenms_plugin.utils import assign_cable_row_ids
-from netbox_librenms_plugin.views.base.cables_view import _RAW_LINK_KEYS, port_record
+from netbox_librenms_plugin.assessment.cables import port_record
 from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
 SERVER_KEY = "default"
@@ -59,7 +57,7 @@ def _row(local, remote_device, *, records=True, **overrides):
         "remote_port": "Gi0/1",
         "remote_device": remote_device.name,
         "remote_port_id": 500,
-        "remote_device_id": None,
+        "remote_device_id": read_mapping(remote_device).own_id(SERVER_KEY),
         "remote_port_key": 500,
         "_source": "main",
     }
@@ -71,11 +69,8 @@ def _row(local, remote_device, *, records=True, **overrides):
 
 
 def _seed(device, row):
-    raw = assign_cable_row_ids([{key: value for key, value in row.items() if key in _RAW_LINK_KEYS}])
-    cache.set(
-        sync_snapshot_key(device, "links", SERVER_KEY), {"links": raw, "snapshot_token": "rule-gate"}, timeout=300
-    )
-    return raw[0]["row_id"]
+    seed_cable_rows(device, [row], SERVER_KEY)
+    return cable_rows(device, SERVER_KEY)["links"][0]["row_id"]
 
 
 def _render(client, device):
@@ -193,7 +188,7 @@ def test_the_refresh_keeps_the_rule_inputs_and_an_ignored_remote_port_gets_no_ca
         HTTP_HX_REQUEST="true",
     )
     assert refreshed.status_code == 200
-    (raw,) = cache.get(sync_snapshot_key(link.local_device, "links", SERVER_KEY))["links"]
+    (raw,) = cable_rows(link.local_device, SERVER_KEY)["links"]
     assert raw["local_port_record"] == port_record(_port(100, "Te1/1"))
     assert raw["remote_port_record"] == port_record(_port(500, "Gi0/1"))
 
@@ -352,7 +347,7 @@ def _cable_render_queries(client, tag, count, first_port, *, blocked=True):
     from django.test.utils import CaptureQueriesContext
 
     local_device = map_device_to_librenms(make_device(f"{tag}-local"), first_port, server_key=SERVER_KEY)
-    remote_device = make_device(f"{tag}-remote")
+    remote_device = map_device_to_librenms(make_device(f"{tag}-remote"), first_port + 70000, server_key=SERVER_KEY)
     rows = []
     for index in range(count):
         local = _bound(local_device, f"Te1/{index}", first_port + index)
@@ -364,8 +359,7 @@ def _cable_render_queries(client, tag, count, first_port, *, blocked=True):
         row["local_port_record"] = port_record(_port(first_port + index, local.name))
         row["remote_port_record"] = port_record(_port(first_port + 500 + index, f"Gi0/{index}"))
         rows.append(row)
-    raw = assign_cable_row_ids([{key: value for key, value in row.items() if key in _RAW_LINK_KEYS} for row in rows])
-    cache.set(sync_snapshot_key(local_device, "links", SERVER_KEY), {"links": raw, "snapshot_token": tag}, timeout=300)
+    seed_cable_rows(local_device, rows, SERVER_KEY)
     url = reverse(
         "plugins:netbox_librenms_plugin:sync_cache_fragment",
         kwargs={"object_type": "device", "pk": local_device.pk, "tab": "cables"},
@@ -571,6 +565,7 @@ def test_a_manual_pick_for_a_neighbour_not_in_netbox(client, link, rule):
     ignore_rule = link.ignore(*ignore)
     row = _row(link.local, link.remote_device)
     row["remote_device"] = "not-in-netbox"
+    row["remote_device_id"] = 70009
     row_id = _seed(link.local_device, row)
     _pick(client, link.local_device, row_id, picked)
 
@@ -601,7 +596,7 @@ def test_a_missing_port_record_refuses_only_when_an_ignore_rule_could_apply(clie
     """The snapshot has no record for port 100, and LibreNMS returns none for it either."""
     link.ignore(link.local_platform if may_ignore else _platform("cable-rule-elsewhere"), "^no-such-port$")
     row = _row(link.local, link.remote_device)
-    del row["local_port_record"]
+    row["local_port_record"] = None
     _seed(link.local_device, row)
     record, _html = _render(client, link.local_device)
 

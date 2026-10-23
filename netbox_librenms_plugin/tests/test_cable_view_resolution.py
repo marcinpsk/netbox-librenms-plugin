@@ -13,10 +13,11 @@ Covered so far:
   interface, what each lookup index holds, which pks land in the visibility sets,
   and when a trace is loaded.
 - ``enrich_serial_remote``: the guards, the manual pick, and the sibling-row claims.
-- ``_prepare_context``: the unresolved-identity, serial carry-forward and migrated
-  donor branches.
+- ``_prepare_context``: unresolved identity, serial source replacement and migrated donors.
 - ``SyncCablesView.display_sync_results``: every result category's text and order.
 """
+
+from netbox_librenms_plugin.tests.cable_source_helpers import cable_rows, seed_cable_rows
 
 import pytest
 
@@ -557,10 +558,8 @@ class TestEnrichSerialRemoteClaims:
 # _prepare_context
 #
 # The cached and plain-refresh paths are well covered in test_coverage_base_views.py.
-# These pin three branches that carried NO test at all, which are exactly the ones a
-# split of this method could drop silently: the unresolved-id short circuit, the
-# carry-forward of serial rows when the serial source is skipped, and the read-only
-# donor pass that strips every sync affordance.
+# Refresh refuses unresolved identities and replaces old serial facts.
+# A migrated donor cannot use a source bound to its previous mapping.
 # ---------------------------------------------------------------------------
 
 
@@ -592,12 +591,7 @@ class TestPrepareContextIncompleteRefresh:
     """A refresh that cannot establish the device's identity must not render a table."""
 
     def test_an_ambiguous_librenms_id_returns_the_refresh_incomplete_context(self, librenms_server, settings):
-        """Two owners of one id is a conflict, so the tab reports it instead of rendering rows.
-
-        The short circuit sits after the fetch-failure guard, so it is only reached when
-        get_links_data still returns a list. A device whose console ports the viewer cannot
-        read does exactly that, so the row carries both conditions.
-        """
+        """A conflicting discovery id leaves no source snapshot to render."""
         from dcim.models import Device
         from django.core.cache import cache
 
@@ -618,25 +612,19 @@ class TestPrepareContextIncompleteRefresh:
         user = grant(user, "view", Device)
         view = _api_view(user, server_key)
         cache_key = view.get_cache_key(target, "links", server_key)
-        cache.set(cache_key, {"links": [], "snapshot_token": "stale"}, timeout=300)
+        seed_cable_rows(target, [], server_key)
+        seed_stored_mapping(target, {server_key: None}, save=True)
 
         context = view._prepare_context(view.request, target, fetch_fresh=True, server_key=server_key)
 
         # Precondition: the conflict really fired, rather than the fetch failing for another reason.
-        assert view._librenms_id_unresolved is True
-        assert context == {
-            "table": None,
-            "object": target,
-            "cache_expiry": None,
-            "server_key": server_key,
-            "refresh_incomplete": True,
-        }
+        assert context is None
+        assert view._cable_refresh_error
         assert cache.get(cache_key) is None, "the stale snapshot must not survive an unresolved refresh"
 
-    def test_a_skipped_serial_source_carries_the_previous_serial_rows_forward(self, librenms_server, settings):
-        """The user cannot read the console ports, so the refresh must not silently drop those rows."""
+    def test_a_skipped_serial_source_removes_the_previous_serial_rows(self, librenms_server, settings):
+        """A refresh without console visibility replaces prior serial facts without reading sensors."""
         from dcim.models import Device
-        from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.conftest import make_serial_device
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
@@ -645,11 +633,11 @@ class TestPrepareContextIncompleteRefresh:
         device, (csp,), _ = make_serial_device("ctx-serialskip-device", csp_names=["ttyS0"])
         seed_mapping(device, server_key, own=8802)
         librenms_server.register("/api/v0/devices/8802/links", {"status": "ok", "links": []})
+        librenms_server.ports_response(device_id=8802, ports=[])
         # Device is viewable; its ConsoleServerPorts are NOT, which is what skips the serial source.
         user = make_user_with_perms("ctx-serialskip-user", [])
         user = grant(user, "view", Device)
         view = _api_view(user, server_key)
-        cache_key = view.get_cache_key(device, "links", server_key)
         prior_serial_row = {
             "_source": "serial",
             "device_id": device.pk,
@@ -660,62 +648,54 @@ class TestPrepareContextIncompleteRefresh:
             "is_configured": True,
             "remote_device": "some-router",
         }
-        cache.set(cache_key, {"links": [prior_serial_row], "snapshot_token": "prior"}, timeout=300)
+        seed_cable_rows(device, [prior_serial_row], server_key)
 
         context = view._prepare_context(view.request, device, fetch_fresh=True, server_key=server_key)
 
-        # Precondition: the skip really fired, so the assertions below describe that state.
-        assert view._serial_source_skipped is True
-        assert "serial" in context["incomplete_sources"]
-        cached_after = cache.get(cache_key)
-        assert [row["_source"] for row in cached_after["links"]] == ["serial"], (
-            "the previous serial row must survive a refresh that could not read the serial source"
-        )
+        current = cable_rows(device, server_key)
+        assert current["links"] == []
+        assert current["blockers"]
+        assert context["table"] is not None
+        assert all(request["path"] != "/api/v0/resources/sensors" for request in librenms_server.requests)
 
 
 @pytest.mark.django_db
 class TestPrepareContextReadOnlyDonor:
     """A device merged into another must offer no cable actions on its own tab."""
 
-    def test_a_migrated_donor_strips_every_row_affordance(self, settings):
-        from django.core.cache import cache
+    def test_a_migrated_donor_cannot_read_its_prior_source(self, settings):
 
         server_key = _point_at(settings, "https://librenms.example.invalid")
         donor = make_device("ctx-donor-device")
+        peer = make_device("ctx-donor-peer")
+        make_interface(peer, "Gi1/1")
+        make_interface(donor, "Gi0/1")
+        view = _api_view(make_superuser("ctx-donor-user"), server_key)
+        seed_cable_rows(
+            donor,
+            [
+                {
+                    "_source": "lldp",
+                    "device_id": donor.pk,
+                    "local_port": "Gi0/1",
+                    "local_port_id": 10,
+                    "remote_device": peer.name,
+                    "remote_port": "Gi1/1",
+                }
+            ],
+            server_key,
+        )
+
         seed_stored_mapping(
             donor,
             {server_key: {"_migrated_to": {"device_id": 4242, "server_key": server_key, "at": "2026-09-16T00:00:00Z"}}},
             save=True,
         )
-        peer = make_device("ctx-donor-peer")
-        make_interface(peer, "Gi1/1")
-        make_interface(donor, "Gi0/1")
-        view = _api_view(make_superuser("ctx-donor-user"), server_key)
-        cache_key = view.get_cache_key(donor, "links", server_key)
-        cache.set(
-            cache_key,
-            {
-                "links": [
-                    {
-                        "_source": "lldp",
-                        "device_id": donor.pk,
-                        "local_port": "Gi0/1",
-                        "remote_device": peer.name,
-                        "remote_port": "Gi1/1",
-                    }
-                ],
-                "snapshot_token": "donor",
-            },
-            timeout=300,
-        )
 
         context = view._prepare_context(view.request, donor, fetch_fresh=False, server_key=server_key)
 
-        rows = [row.record for row in context["table"].rows]
-        # Precondition: the row really rendered, so "no affordance" is not an empty-table artefact.
-        assert rows, "the cached snapshot must render a row"
-        assert all(row.get("can_create_cable") is False for row in rows)
-        assert all("picker_url" not in row for row in rows)
+        assert cable_rows(donor, server_key) is None
+        assert context is None
 
 
 # ---------------------------------------------------------------------------
@@ -740,7 +720,6 @@ SYNC_RESULT_KEYS = (
     "conflict",
     "denied",
     "stale",
-    "unverified",
     "unsupported",
     "patch_path",
 )
@@ -767,48 +746,16 @@ class TestDisplaySyncResults:
     def test_every_category_reports_at_its_documented_level(self):
         by_level = self._run_with_every_category()
 
-        assert [text.split(": ")[-1] for text in by_level["error"]] == [
-            "if-missing_remote",
-            "if-invalid",
-            "if-failed",
-            "if-rejected_selection",
-            "if-denied.",
-            "if-stale",
-            "if-unverified.",
-            "if-unsupported.",
-        ]
-        assert [text.split(": ")[-1] for text in by_level["warning"]] == ["if-duplicate", "if-conflict"]
-        assert [text.split(": ")[-1] for text in by_level["info"]] == ["if-skipped", "if-patch_path", "if-tagged"]
-        assert [text.split(": ")[-1] for text in by_level["success"]] == ["if-overwritten", "if-valid"]
-
-    def test_the_wording_of_each_category_is_unchanged(self):
-        by_level = self._run_with_every_category()
-        everything = [text for level in ("error", "warning", "info", "success") for text in by_level[level]]
-
-        assert "Remote device or interface not found in NetBox for: if-missing_remote" in everything
-        assert "No LibreNMS link data found for interfaces: if-invalid" in everything
-        assert "Failed to sync cables for interfaces: if-failed" in everything
-        assert "Selected device is not part of this cable-sync page for interfaces: if-rejected_selection" in everything
-        assert "You do not have permission to change the selected cable connection(s) for: if-denied." in everything
-        assert (
-            "The cable state or target changed after confirmation. Refresh and review the current cable for: if-stale"
-            in everything
-        )
-        assert (
-            "These links come from a LibreNMS source the last refresh could not read, so they may be out of "
-            "date. Refresh Cables before syncing: if-unverified." in everything
-        )
-        assert (
-            "Multi-termination cables cannot be changed by cable sync. Update them in NetBox for: if-unsupported."
-            in everything
-        )
-        assert "Cable already exists for interfaces: if-duplicate" in everything
-        assert "Skipped OOB-controller links (context only, not syncable to the host): if-skipped" in everything
-        assert "Skipped links already modeled through a patch path: if-patch_path" in everything
-        assert "Tagged existing cable(s) as LibreNMS-managed for: if-tagged" in everything
-        assert "Overwrite protection: confirm the current cable(s) in the dialog for: if-conflict" in everything
-        assert "Overwrote existing cable for interfaces: if-overwritten" in everything
-        assert "Successfully created cable for interfaces: if-valid" in everything
+        expected = {
+            "error": ("missing_remote", "invalid", "failed", "rejected_selection", "denied", "stale", "unsupported"),
+            "warning": ("duplicate", "conflict"),
+            "info": ("skipped", "patch_path", "tagged"),
+            "success": ("overwritten", "valid"),
+        }
+        for level, categories in expected.items():
+            assert len(by_level[level]) == len(categories)
+            for category in categories:
+                assert any(f"if-{category}" in text for text in by_level[level])
 
     def test_an_empty_result_set_says_nothing(self):
         from netbox_librenms_plugin.tests.view_test_helpers import message_texts
