@@ -87,6 +87,27 @@ def ports(device_id, *, with_vlans):
     return Endpoint(SourceRequest(f"devices/{device_id}/ports", params, key_params=False), _rows_contract("ports"))
 
 
+def _is_port_pair(row):
+    return isinstance(row, dict) and "high_port_id" in row and "low_port_id" in row
+
+
+def port_stack(device_id):
+    """Return the port_stack endpoint: only an absent or "ok" status with a list of port pairs is an answer."""
+
+    def decode(status, body):
+        if not _is_success(status) or not isinstance(body, dict):
+            return _failed_status(status, body)
+        reported = body.get("status")
+        if reported is not None and (not isinstance(reported, str) or reported.lower() != "ok"):
+            return _failed_status(status, body)
+        mappings = body.get("mappings")
+        if not isinstance(mappings, list) or not all(_is_port_pair(row) for row in mappings):
+            return Decoded(Outcome.FAILED, reason="LibreNMS returned port_stack mappings that are not port pairs.")
+        return Decoded(Outcome.OBTAINED, value=mappings)
+
+    return Endpoint(SourceRequest(f"devices/{device_id}/port_stack"), decode)
+
+
 def _is_usable_ip_row(row):
     """Return whether an IP row names its port by a plain id and holds an address that parses."""
     port_id = row.get("port_id")
