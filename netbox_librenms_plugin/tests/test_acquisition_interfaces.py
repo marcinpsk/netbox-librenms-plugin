@@ -361,3 +361,43 @@ def test_a_virtual_machine_acquires_its_interfaces(live_librenms):
 
     assert snapshot.value(Resource.INTERFACES, "ports") == HOST_PORTS
     assert _blocked(snapshot) == {}
+
+
+@pytest.mark.django_db
+def test_an_oob_only_owner_has_no_interfaces_to_acquire(live_librenms):
+    from netbox_librenms_plugin.acquisition.coordinator import SubjectNotMapped
+    from netbox_librenms_plugin.tests.conftest import make_device, map_device_to_librenms
+
+    device = map_device_to_librenms(
+        make_device("acq-iface-oob-only"), server_key=SERVER_KEY, oob={"id": OOB_ID, "type": "idrac"}
+    )
+    live_librenms.server.register(OOB_PORTS_PATH, {"status": "ok", "ports": OOB_PORTS})
+
+    # Interfaces need a host mapping; the OOB controller alone is not one.
+    with pytest.raises(SubjectNotMapped):
+        _acquire(device)
+    assert live_librenms.server.requests == []
+
+
+@pytest.mark.django_db
+def test_an_oob_link_change_drops_only_the_interfaces_snapshot():
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import (
+        seed_interfaces_snapshot,
+        seed_ip_snapshot,
+        seed_source_snapshot,
+    )
+
+    device = _device("acq-iface-oob-scope")
+    seed_interfaces_snapshot(device, HOST_PORTS)
+    seed_ip_snapshot(device, [])
+    seed_source_snapshot(device, Resource.VLANS, SERVER_KEY, vlans=[])
+
+    # The mapping changes without a save, so no write signal clears a snapshot; only the bindings decide.
+    seed_stored_mapping(device, {SERVER_KEY: {"id": HOST_ID, "oob": {"id": OOB_ID, "type": "idrac"}}})
+
+    assert source_cache.read(device, Resource.INTERFACES, SERVER_KEY) is None
+    assert source_cache.read(device, Resource.IP_ADDRESSES, SERVER_KEY) is not None
+    assert source_cache.read(device, Resource.VLANS, SERVER_KEY) is not None
