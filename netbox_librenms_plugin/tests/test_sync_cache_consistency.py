@@ -43,7 +43,12 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change, seed_mapping, seed_stored_mapping
-from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot, stored_source_value
+from netbox_librenms_plugin.tests.source_snapshot_helpers import (
+    ip_address_row,
+    seed_ip_snapshot,
+    seed_source_snapshot,
+    stored_source_value,
+)
 from netbox_librenms_plugin.tests.view_test_helpers import render_module_tab, rendered_module_form
 from netbox_librenms_plugin.server_mappings import mark_migrated
 from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
@@ -119,6 +124,7 @@ def _vlan_overrides_key(obj, server_key):
 
 
 def _seed_snapshot(data_type, obj, server_key, payload=None):
+    assert data_type != "ip_addresses", "seed the IP tab with seed_ip_snapshot"
     cache.set(_cache_key(data_type, obj, server_key), payload or {"snapshot": data_type}, timeout=300)
 
 
@@ -624,22 +630,24 @@ def test_committed_interface_sync_invalidates_only_mapped_page_and_shared_snapsh
     _seed_snapshot("ports", page_device, "primary", source_payload)
     cache.set(_last_fetched_key("ports", page_device, "primary"), "source-time", timeout=300)
     cache.set(_vlan_overrides_key(page_device, "primary"), {"100": "1"}, timeout=300)
-    for data_type in ("links", "ip_addresses", "inventory", "vlans"):
+    for data_type in ("links", "inventory", "vlans"):
         _seed_snapshot(data_type, page_device, "primary")
+    seed_ip_snapshot(page_device, [], server_key="primary")
     cache.set(_last_fetched_key("vlans", page_device, "primary"), "vlan-time", timeout=300)
 
     for data_type in ("ports", "links", "inventory"):
         _seed_snapshot(data_type, secondary_owner, "secondary")
         _seed_snapshot(data_type, page_device, "secondary")
-    for data_type in ("ip_addresses", "vlans"):
-        _seed_snapshot(data_type, page_device, "secondary")
-        _seed_snapshot(data_type, sibling, "secondary")
+    for subject in (page_device, sibling):
+        _seed_snapshot("vlans", subject, "secondary")
+        seed_ip_snapshot(subject, [], server_key="secondary")
     cache.set(_last_fetched_key("ports", secondary_owner, "secondary"), "secondary-time", timeout=300)
     cache.set(_vlan_overrides_key(secondary_owner, "secondary"), {"200": "2"}, timeout=300)
     cache.set(_last_fetched_key("vlans", page_device, "secondary"), "secondary-vlan-time", timeout=300)
 
-    for data_type in ("ports", "links", "ip_addresses", "inventory", "vlans"):
+    for data_type in ("ports", "links", "inventory", "vlans"):
         _seed_snapshot(data_type, page_device, "unmapped")
+    seed_ip_snapshot(page_device, [], server_key="unmapped")
 
     client.force_login(make_superuser("cache-scope-user"))
     sync_url = reverse(
@@ -814,9 +822,8 @@ def test_fully_skipped_interface_request_preserves_all_snapshots(client, setting
     _chassis, (device, _sibling) = make_virtual_chassis_members("cache-noop", count=2)
     seed_stored_mapping(device, {"primary": {"id": 51}}, save=True)
     source_payload = {"ports": [], "port_stack_relationships": {}}
-    ip_payload = {"ip_addresses": [{"ip_with_mask": "198.18.20.10/24"}]}
     _seed_snapshot("ports", device, "primary", source_payload)
-    _seed_snapshot("ip_addresses", device, "primary", ip_payload)
+    ip_snapshot = seed_ip_snapshot(device, [ip_address_row("198.18.20.10", 7010)], server_key="primary")
 
     client.force_login(make_superuser("cache-noop-user"))
     sync_url = reverse(
@@ -834,7 +841,7 @@ def test_fully_skipped_interface_request_preserves_all_snapshots(client, setting
 
     assert response.status_code == 302
     assert cache.get(_cache_key("ports", device, "primary")) == source_payload
-    assert cache.get(_cache_key("ip_addresses", device, "primary")) == ip_payload
+    assert cache.get(_cache_key("ip_addresses", device, "primary")) == ip_snapshot.to_payload()
     coordinator = SyncCacheConsistency(device)
     assert cache.get(coordinator.state_key(SyncTab.INTERFACES, "primary")) is None
 
@@ -852,9 +859,13 @@ def test_selected_interface_that_already_matches_preserves_other_snapshots(
         "ports": [{"port_id": 7002, "ifName": interface.name}],
         "port_stack_relationships": {},
     }
-    ip_payload = {"ip_addresses": [{"ip_with_mask": "198.18.20.11/24"}]}
     _seed_snapshot("ports", device, "primary", source_payload)
-    _seed_snapshot("ip_addresses", device, "primary", ip_payload)
+    ip_snapshot = seed_ip_snapshot(
+        device,
+        [ip_address_row("198.18.20.11", 7002)],
+        [{"port_id": 7002, "ifName": interface.name, "ifDescr": interface.name}],
+        server_key="primary",
+    )
 
     client.force_login(make_superuser("cache-interface-unchanged-user"))
     sync_url = reverse(
@@ -873,7 +884,7 @@ def test_selected_interface_that_already_matches_preserves_other_snapshots(
         )
 
     assert response.status_code == 302
-    assert cache.get(_cache_key("ip_addresses", device, "primary")) == ip_payload
+    assert cache.get(_cache_key("ip_addresses", device, "primary")) == ip_snapshot.to_payload()
     coordinator = SyncCacheConsistency(device)
     assert cache.get(coordinator.state_key(SyncTab.INTERFACES, "primary")) is None
 
@@ -891,16 +902,12 @@ def test_ip_sync_invalidates_other_tabs_after_creating_an_address(
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(interface, "primary", own=7101)
     address = "198.18.61.10/24"
-    ip_payload = {
-        "ip_addresses": [
-            {
-                "ip_with_mask": address,
-                "port_id": 7101,
-                "interface_name": interface.name,
-            }
-        ]
-    }
-    _seed_snapshot("ip_addresses", device, "primary", ip_payload)
+    ip_snapshot = seed_ip_snapshot(
+        device,
+        [ip_address_row("198.18.61.10", 7101)],
+        [{"port_id": 7101, "ifName": interface.name, "ifDescr": interface.name}],
+        server_key="primary",
+    )
     _seed_snapshot("ports", device, "primary")
 
     client.force_login(make_superuser("cache-ip-writer-user"))
@@ -916,7 +923,7 @@ def test_ip_sync_invalidates_other_tabs_after_creating_an_address(
 
     assert response.status_code == 302
     assert IPAddress.objects.filter(address=address, assigned_object_id=interface.pk).exists()
-    assert cache.get(_cache_key("ip_addresses", device, "primary")) == ip_payload
+    assert cache.get(_cache_key("ip_addresses", device, "primary")) == ip_snapshot.to_payload()
     assert cache.get(_cache_key("ports", device, "primary")) is None
     state_key = SyncCacheConsistency(device).state_key(SyncTab.IP_ADDRESSES, "primary")
     assert 0 < cache.ttl(state_key) <= 60
@@ -939,31 +946,15 @@ def test_partial_ip_commit_invalidates_other_tabs_before_conflict_confirmation(
     conflict_address = "198.18.62.10/24"
     safe_address = "198.18.62.11/24"
     IPAddress.objects.create(address=conflict_address, assigned_object=current)
-    ip_payload = {
-        "ip_addresses": [
-            {
-                "ip_with_mask": conflict_address,
-                "ip_address": "198.18.62.10",
-                "prefix_length": 24,
-                "port_id": 7121,
-                "interface": conflict_target.name,
-            },
-            {
-                "ip_with_mask": safe_address,
-                "ip_address": "198.18.62.11",
-                "prefix_length": 24,
-                "port_id": 7122,
-                "interface": safe_target.name,
-            },
+    ip_snapshot = seed_ip_snapshot(
+        device,
+        [ip_address_row("198.18.62.10", 7121), ip_address_row("198.18.62.11", 7122)],
+        [
+            {"port_id": 7121, "ifName": conflict_target.name, "ifDescr": conflict_target.name},
+            {"port_id": 7122, "ifName": safe_target.name, "ifDescr": safe_target.name},
         ],
-        "ports_by_id": {
-            7121: {"port_id": 7121, "ifName": conflict_target.name, "ifDescr": conflict_target.name},
-            7122: {"port_id": 7122, "ifName": safe_target.name, "ifDescr": safe_target.name},
-        },
-        "interface_name_field": "ifName",
-        "mgmt_ip": None,
-    }
-    _seed_snapshot("ip_addresses", device, "primary", ip_payload)
+        server_key="primary",
+    )
     _seed_snapshot("ports", device, "primary")
     client.force_login(make_superuser("cache-ip-partial-conflict-user"))
     url = reverse(
@@ -987,7 +978,7 @@ def test_partial_ip_commit_invalidates_other_tabs_before_conflict_confirmation(
     assert b"Confirm IP address changes" in response.content
     assert IPAddress.objects.get(address=safe_address).assigned_object == safe_target
     assert IPAddress.objects.get(address=conflict_address).assigned_object == current
-    assert cache.get(_cache_key("ip_addresses", device, "primary")) == ip_payload
+    assert cache.get(_cache_key("ip_addresses", device, "primary")) == ip_snapshot.to_payload()
     assert cache.get(_cache_key("ports", device, "primary")) is None
 
 
@@ -1016,7 +1007,7 @@ def test_htmx_mutation_does_not_repeat_cache_notice_on_next_navigation(client, s
         },
     }
     _seed_snapshot("ports", device, "primary", ports_payload)
-    _seed_snapshot("ip_addresses", device, "primary")
+    seed_ip_snapshot(device, [], server_key="primary")
     client.force_login(make_superuser("cache-parent-single-notice-user"))
     sync_url = reverse(
         "plugins:netbox_librenms_plugin:sync_interface_parent",
@@ -1231,7 +1222,7 @@ def test_module_install_invalidates_other_tabs_after_creating_a_module(
         ]
     }
     _seed_snapshot("inventory", device, "primary", inventory_payload)
-    _seed_snapshot("ip_addresses", device, "primary")
+    seed_ip_snapshot(device, [], server_key="primary")
 
     client.force_login(make_superuser("cache-module-writer-user"))
     url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": device.pk})
@@ -1354,7 +1345,7 @@ def test_interface_delete_without_posted_server_uses_active_namespace(
     device = make_device("cache-delete-missing-server", librenms_cf={"primary": {"id": 643}})
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     _seed_snapshot("ports", device, "primary")
-    _seed_snapshot("ip_addresses", device, "primary")
+    seed_ip_snapshot(device, [], server_key="primary")
     client.force_login(make_superuser("cache-delete-missing-server-user"))
     url = reverse(
         "plugins:netbox_librenms_plugin:delete_netbox_interfaces",
@@ -1421,8 +1412,10 @@ def test_configured_unmapped_server_action_invalidates_mapped_snapshots_without_
         SyncTab.MODULES: "inventory",
         SyncTab.VLANS: "vlans",
     }
-    for data_type in snapshots.values():
-        _seed_snapshot(data_type, device, mapped_server_key)
+    for tab, data_type in snapshots.items():
+        if tab is not SyncTab.IP_ADDRESSES:
+            _seed_snapshot(data_type, device, mapped_server_key)
+    seed_ip_snapshot(device, [], server_key=mapped_server_key)
     client.force_login(make_superuser("cache-configured-unmapped-action-user"))
     url = reverse(
         "plugins:netbox_librenms_plugin:delete_netbox_interfaces",
@@ -1528,7 +1521,7 @@ def test_a_response_built_inside_the_transaction_reports_the_committed_cleanup(s
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     # Seed a DEPENDENT tab: schedule_mutation discards the source tab from cleanup_tabs when
     # the device is mapped to the active server, so seeding "ports" would clean nothing.
-    _seed_snapshot("ip_addresses", device, server_key, {"snapshot": "pre-commit"})
+    seed_ip_snapshot(device, [], server_key=server_key)
     request = RequestFactory().post("/sync", HTTP_HX_REQUEST="true")
     request.htmx = HtmxDetails(request)
     request.user = make_superuser("cache-deferred-response-user")
@@ -1643,7 +1636,7 @@ def test_interface_move_invalidates_winner_dependent_snapshots(
     winner = make_device("cache-move-interface-winner", librenms_cf={"primary": {"id": 6411}})
     _mark_migrated_donor(donor, winner)
     interface = make_interface(donor, "Ethernet1", iface_type="1000base-t")
-    _seed_snapshot("ip_addresses", winner, "primary")
+    seed_ip_snapshot(winner, [], server_key="primary")
     client.force_login(make_superuser("cache-move-interface-user"))
     url = reverse("plugins:netbox_librenms_plugin:interface_move_to_winner", args=[interface.pk])
 
@@ -1683,8 +1676,8 @@ def test_interface_move_clears_winner_snapshots_when_active_server_is_unmapped(
     donor.save(update_fields=["custom_field_data"])
     interface = make_interface(donor, "Ethernet1", iface_type="1000base-t")
     winner_snapshot_keys = {_cache_key(data_type, winner, winner_server_key) for data_type in ("ports", "ip_addresses")}
-    for snapshot_key in winner_snapshot_keys:
-        cache.set(snapshot_key, {"snapshot": snapshot_key}, timeout=300)
+    _seed_snapshot("ports", winner, winner_server_key)
+    seed_ip_snapshot(winner, [], server_key=winner_server_key)
     client.force_login(make_superuser("cache-move-interface-unmapped-user"))
     url = reverse("plugins:netbox_librenms_plugin:interface_move_to_winner", args=[interface.pk])
 
@@ -1808,7 +1801,7 @@ def test_inline_relationship_noop_preserves_other_snapshots(
         "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {7442: 7441}},
     }
     _seed_snapshot("ports", device, "primary", ports_payload)
-    _seed_snapshot("ip_addresses", device, "primary")
+    seed_ip_snapshot(device, [], server_key="primary")
     client.force_login(make_superuser("cache-parent-noop-user"))
     url = reverse(
         "plugins:netbox_librenms_plugin:sync_interface_parent",
@@ -2191,6 +2184,7 @@ def test_ip_address_refresh_without_a_cached_snapshot_reports_failure_not_succes
     user = make_superuser("cache-ip-nosnap-user")
     client.force_login(user)
     primary_librenms.register("/api/v0/devices/664/ip", {"status": "ok", "addresses": []})
+    primary_librenms.register("/api/v0/devices/664/ports", {"status": "ok", "ports": []})
     primary_librenms.register("/api/v0/devices/664", {"status": "ok", "devices": [{"device_id": 664}]})
     skipped = _drop_snapshot_write(monkeypatch, device, SyncTab.IP_ADDRESSES)
 
@@ -2305,8 +2299,9 @@ def test_cleanup_failure_invalidates_every_dependent_tab(
     _configure_servers(settings)
     device = make_device("cache-cleanup-failure", librenms_cf={"primary": {"id": 650}})
     coordinator = SyncCacheConsistency(device)
-    for data_type in ("ports", "links", "ip_addresses", "inventory", "vlans"):
+    for data_type in ("ports", "links", "inventory", "vlans"):
         _seed_snapshot(data_type, device, "primary")
+    seed_ip_snapshot(device, [], server_key="primary")
     cache.set(f"{_cache_key('links', device, 'primary')}:manual-remote:test-row", 1, timeout=300)
 
     def fail_delete_pattern(*_args, **_kwargs):
@@ -2365,8 +2360,10 @@ def test_cleanup_failure_on_unmapped_active_server_invalidates_surviving_mapped_
         SyncTab.MODULES: "inventory",
         SyncTab.VLANS: "vlans",
     }
-    for data_type in snapshots.values():
-        _seed_snapshot(data_type, device, mapped_server_key)
+    for tab, data_type in snapshots.items():
+        if tab is not SyncTab.IP_ADDRESSES:
+            _seed_snapshot(data_type, device, mapped_server_key)
+    seed_ip_snapshot(device, [], server_key=mapped_server_key)
     cache.set(f"{_cache_key('links', device, mapped_server_key)}:manual-remote:test-row", 1, timeout=300)
 
     def fail_delete_pattern(*_args, **_kwargs):
@@ -2454,13 +2451,13 @@ def test_cleanup_failure_before_affected_tabs_are_known_invalidates_all_tabs(
 
 @pytest.mark.django_db
 def test_legacy_ip_fragment_never_backfills_from_librenms(client, settings, primary_librenms):
-    """A cache-only fragment must not upgrade an old IP snapshot through live HTTP."""
+    """An old-shape IP payload reads as no snapshot, and the cache-only fragment does not fetch one."""
     _configure_servers(settings)
     device = make_device("cache-ip-fragment-legacy", librenms_cf={"primary": {"id": 652}})
-    _seed_snapshot(
-        "ip_addresses",
-        device,
-        "primary",
+    # The enriched payload that the IP tab stored before it stored source snapshots.
+    legacy_key = _cache_key("ip_addresses", device, "primary")
+    cache.set(
+        legacy_key,
         {
             "ip_addresses": [
                 {
@@ -2471,6 +2468,7 @@ def test_legacy_ip_fragment_never_backfills_from_librenms(client, settings, prim
                 }
             ]
         },
+        timeout=300,
     )
     client.force_login(make_superuser("cache-ip-fragment-legacy-user"))
     fragment_url = reverse(
@@ -2481,9 +2479,10 @@ def test_legacy_ip_fragment_never_backfills_from_librenms(client, settings, prim
     request_count = len(primary_librenms.requests)
     response = client.get(fragment_url, {"server_key": "primary"})
 
+    # The old payload reads as no snapshot and is deleted, so the fragment has nothing to restore.
     assert len(primary_librenms.requests) == request_count
-    assert response.status_code == 200
-    assert b"No IP address data loaded" in response.content
+    assert response.status_code == 404
+    assert cache.get(legacy_key) is None
 
 
 @pytest.mark.django_db
@@ -2555,7 +2554,7 @@ def test_opening_unavailable_tab_acknowledges_only_its_current_revision(client, 
     acknowledged_status = client.get(status_url, {"server_key": "primary"}).json()["tabs"]
     assert acknowledged_status[SyncTab.IP_ADDRESSES.value]["attention_required"] is False
 
-    _seed_snapshot("ip_addresses", device, "primary", {"ip_addresses": []})
+    seed_ip_snapshot(device, [], server_key="primary")
     coordinator.mark_refresh_success(SyncTab.IP_ADDRESSES, "primary", actor_id=user.pk)
     coordinator.mark_refresh_failure(SyncTab.IP_ADDRESSES, "primary", actor_id=user.pk)
 
@@ -2696,7 +2695,7 @@ def test_status_fragment_and_invalidated_tab_navigation_never_call_librenms(
         "port_stack_relationships": {},
     }
     _seed_snapshot("ports", device, "primary", ports_payload)
-    _seed_snapshot("ip_addresses", device, "primary")
+    seed_ip_snapshot(device, [], server_key="primary")
     coordinator = SyncCacheConsistency(device)
     with django_capture_on_commit_callbacks(execute=True):
         coordinator.schedule_mutation(SyncTab.INTERFACES, "primary", actor_id=1)
@@ -2746,7 +2745,7 @@ def test_rolled_back_mutation_keeps_snapshots_and_publishes_no_state(
     _configure_servers(settings)
     device = make_device("cache-rollback", librenms_cf={"primary": {"id": 66}})
     _seed_snapshot("ports", device, "primary")
-    _seed_snapshot("ip_addresses", device, "primary")
+    seed_ip_snapshot(device, [], server_key="primary")
     coordinator = SyncCacheConsistency(device)
 
     with django_capture_on_commit_callbacks(execute=True):
@@ -2821,7 +2820,7 @@ def test_failed_refresh_retains_an_existing_invalidation_reason(
     device = make_device("cache-failed-refresh", librenms_cf={"primary": {"id": 67}})
     coordinator = SyncCacheConsistency(device)
     _seed_snapshot("ports", device, "primary")
-    _seed_snapshot("ip_addresses", device, "primary")
+    seed_ip_snapshot(device, [], server_key="primary")
     with django_capture_on_commit_callbacks(execute=True):
         coordinator.schedule_mutation(SyncTab.INTERFACES, "primary", actor_id=1)
     state_key = coordinator.state_key(SyncTab.IP_ADDRESSES, "primary")
@@ -2913,8 +2912,9 @@ def test_cache_mutation_resolves_the_shared_owner_once_per_server(
         "port_stack_relationships": {},
     }
     _seed_snapshot("ports", page_device, "primary", source_payload)
-    for data_type in ("links", "ip_addresses", "inventory", "vlans"):
+    for data_type in ("links", "inventory", "vlans"):
         _seed_snapshot(data_type, page_device, "primary")
+    seed_ip_snapshot(page_device, [], server_key="primary")
 
     client.force_login(make_superuser("cache-owner-resolution-user"))
     sync_url = reverse(
@@ -3005,7 +3005,7 @@ def test_blocked_active_tab_still_reads_the_device_header(
     _configure_servers(settings)
     device = make_device(f"cache-blocked-{blocked_state.value}", librenms_cf={"primary": {"id": 7801}})
     _serve_device_info(primary_librenms, 7801, device.name, "Header Hardware 7801")
-    _seed_snapshot("ip_addresses", device, "primary")
+    seed_ip_snapshot(device, [], server_key="primary")
     coordinator = SyncCacheConsistency(device)
     if blocked_state is SyncTabState.INVALIDATED:
         with django_capture_on_commit_callbacks(execute=True):
@@ -3064,16 +3064,12 @@ def test_failed_duplicate_selection_keeps_the_committed_rows_invalidation(
     seed_mapping(interface, "primary", own=7801)
     address = "2001:db8:68::10/64"
     verbose_address = "2001:0DB8:0068:0000:0000:0000:0000:0010/64"
-    ip_payload = {
-        "ip_addresses": [
-            {
-                "ip_with_mask": address,
-                "port_id": 7801,
-                "interface_name": interface.name,
-            }
-        ]
-    }
-    _seed_snapshot("ip_addresses", device, "primary", ip_payload)
+    ip_snapshot = seed_ip_snapshot(
+        device,
+        [{"ipv6_compressed": "2001:db8:68::10", "ipv6_prefixlen": 64, "port_id": 7801}],
+        [{"port_id": 7801, "ifName": interface.name, "ifDescr": interface.name}],
+        server_key="primary",
+    )
     _seed_snapshot("ports", device, "primary")
     client.force_login(make_superuser("cache-ip-duplicate-rows-user"))
     url = reverse(
@@ -3105,5 +3101,5 @@ def test_failed_duplicate_selection_keeps_the_committed_rows_invalidation(
     # Both selections must reach the same canonical row, or the failure cannot reach another row.
     assert classified_rows == [address, address]
     assert IPAddress.objects.filter(address=address, assigned_object_id=interface.pk).exists()
-    assert cache.get(_cache_key("ip_addresses", device, "primary")) == ip_payload
+    assert cache.get(_cache_key("ip_addresses", device, "primary")) == ip_snapshot.to_payload()
     assert cache.get(_cache_key("ports", device, "primary")) is None

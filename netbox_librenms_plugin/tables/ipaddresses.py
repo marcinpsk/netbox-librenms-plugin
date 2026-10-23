@@ -36,7 +36,7 @@ class IPAddressTable(tables.Table):
         Initialize IP address table.
 
         Args:
-            data (list[dict]): The rows, which ``enrich_ip_data`` identified over the whole snapshot.
+            data (list[dict]): The rows, which ``assess_snapshot`` identified over the whole snapshot.
             mgmt_row_ids (list[str]): The row IDs of the management address in the whole snapshot.
             **kwargs: Other ``tables.Table`` options.
 

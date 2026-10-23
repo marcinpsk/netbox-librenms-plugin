@@ -345,18 +345,6 @@ READ_ENDPOINTS = [
         id="list_devices",
     ),
     pytest.param(
-        "/api/v0/devices/1/ip",
-        lambda api: api.get_device_ips(1),
-        {"status": "ok", "addresses": [{"ipv4_address": "192.0.2.10"}]},
-        [{"ipv4_address": "192.0.2.10"}],
-        {},
-        {
-            404: ("404", "/api/v0/devices/1/ip"),
-            500: ("500", "/api/v0/devices/1/ip"),
-        },
-        id="get_device_ips",
-    ),
-    pytest.param(
         "/api/v0/ports/1",
         lambda api: api.get_port_vlan_details(1),
         {"status": "ok", "port": [{"port_id": 1, "ifName": "Gi0/1"}]},
@@ -1772,11 +1760,3 @@ class TestMalformedPayloads:
         result = api_for(settings, librenms_server.url).list_devices()
 
         assert result == (False, "Unexpected response format: missing 'devices' list")
-
-    def test_get_device_ips_none_addresses(self, settings, librenms_server):
-        """A null addresses field is rejected."""
-        librenms_server.register("/api/v0/devices/1/ip", {"addresses": None}, method="GET")
-
-        result = api_for(settings, librenms_server.url).get_device_ips(1)
-
-        assert result == (False, "Unexpected response format: 'addresses' must be a list")

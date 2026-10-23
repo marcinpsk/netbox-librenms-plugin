@@ -1177,30 +1177,6 @@ class TestLibreNMSAPIPortsAndInventory:
 
         assert success is False
 
-    def test_get_device_ips_success(self, local_librenms_api, librenms_server):
-        """Verify retrieving device IP addresses."""
-        path = "/api/v0/devices/123/ip"
-        librenms_server.register(
-            path,
-            {"status": "ok", "addresses": [{"ipv4_address": "192.0.2.1"}]},
-            method="GET",
-        )
-
-        success, ips = local_librenms_api.get_device_ips(device_id=123)
-
-        assert success is True
-        assert len(ips) == 1
-
-    def test_get_device_ips_empty(self, local_librenms_api, librenms_server):
-        """Verify handling device with no IPs."""
-        path = "/api/v0/devices/123/ip"
-        librenms_server.register(path, {"status": "ok", "addresses": []}, method="GET")
-
-        success, ips = local_librenms_api.get_device_ips(device_id=123)
-
-        assert success is True
-        assert len(ips) == 0
-
     def test_get_inventory_filtered_404_is_empty_not_failure(self, local_librenms_api, librenms_server):
         """LibreNMS 404s /inventory/{id} for a device with no inventory rows, which is not a stack."""
         librenms_server.register("/api/v0/inventory/123", {"status": "error"}, status=404, method="GET")
@@ -1227,52 +1203,43 @@ class TestLibreNMSAPIPortsAndInventory:
 
         assert success is False
 
-    def test_get_device_ips_404_is_empty_not_failure(self, local_librenms_api, librenms_server):
-        """LibreNMS 404s /devices/{id}/ip for a device with no IPs — a successful empty result, not a fetch failure."""
-        path = "/api/v0/devices/123/ip"
-        librenms_server.register(
-            path,
-            {"status": "error", "message": "The device does not have any IP addresses"},
-            status=404,
-            method="GET",
+
+@pytest.mark.django_db
+class TestIPAddressAcquisitionAnswers:
+    """The IP address answers that test_acquisition_ip_addresses.py does not serve, read through acquire()."""
+
+    DEVICE_ID = 123
+
+    def _acquire(self, live_librenms, addresses_status, addresses_body):
+        from netbox_librenms_plugin.acquisition.coordinator import acquire
+        from netbox_librenms_plugin.acquisition.registry import Resource
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        server = live_librenms.server
+        server.register(f"/api/v0/devices/{self.DEVICE_ID}/ip", addresses_body, status=addresses_status)
+        server.register(f"/api/v0/devices/{self.DEVICE_ID}/ports", {"status": "ok", "ports": []})
+        server.register(f"/api/v0/devices/{self.DEVICE_ID}", {"status": "ok", "devices": [{"ip": ""}]})
+        device = make_device("api-ip-answers", librenms_cf={"default": {"id": self.DEVICE_ID}})
+        return acquire(device, server_key="default", resources=[Resource.IP_ADDRESSES]).record(
+            Resource.IP_ADDRESSES, "addresses"
         )
 
-        success, ips = local_librenms_api.get_device_ips(device_id=123)
+    def test_an_ok_empty_address_list_is_obtained(self, live_librenms):
+        from netbox_librenms_plugin.acquisition.snapshot import Outcome
 
-        # A device with no IPs must surface as an empty success so the IP tab shows an empty
-        # table, not a red "Failed to fetch IP addresses" error (mirrors get_device_links).
-        assert success is True
-        assert ips == []
+        record = self._acquire(live_librenms, 200, {"status": "ok", "addresses": []})
 
-    def test_get_device_ips_404_empty_message_is_case_insensitive(self, local_librenms_api, librenms_server):
+        assert (record.outcome, record.value) == (Outcome.OBTAINED, [])
+
+    def test_the_no_address_404_message_matches_in_any_case(self, live_librenms):
         """LibreNMS capitalization changes do not turn its stable no-address response into a failure."""
-        path = "/api/v0/devices/123/ip"
-        librenms_server.register(
-            path,
-            {"status": "error", "message": "Device 123 Does Not Have Any IP Addresses"},
-            status=404,
-            method="GET",
+        from netbox_librenms_plugin.acquisition.snapshot import Outcome
+
+        record = self._acquire(
+            live_librenms, 404, {"status": "error", "message": "Device 123 Does Not Have Any IP Addresses"}
         )
 
-        success, ips = local_librenms_api.get_device_ips(device_id=123)
-
-        assert success is True
-        assert ips == []
-
-    def test_get_device_ips_404_for_missing_device_remains_a_failure(self, local_librenms_api, librenms_server):
-        """Only LibreNMS's explicit empty-IP response is an empty success; a stale device id stays visible."""
-        path = "/api/v0/devices/123/ip"
-        librenms_server.register(
-            path,
-            {"status": "error", "message": "Device 123 does not exist"},
-            status=404,
-            method="GET",
-        )
-
-        success, message = local_librenms_api.get_device_ips(device_id=123)
-
-        assert success is False
-        assert message == "Device 123 does not exist"
+        assert (record.outcome, record.value) == (Outcome.OBTAINED, [])
 
 
 # =============================================================================

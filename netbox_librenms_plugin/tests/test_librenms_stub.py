@@ -20,6 +20,7 @@ from netbox_librenms_plugin.tests.mock_librenms_server import (
     LibreNMSStubServer,
     build_stub_server,
 )
+from netbox_librenms_plugin.tests.test_recordings import read_ip_addresses_as_acquisition
 
 TOKEN = "dev-stub-token"
 RECORDING_NAMES = DEFAULT_STUB_RECORDINGS
@@ -219,8 +220,8 @@ def test_stub_serves_recordings_and_derived_instance_endpoints_over_real_http():
         assert [port["port_id"] for port in ports["ports"]] == [port["port_id"] for port in recorded_ports["ports"]]
         assert any(port.get("vlans") for port in ports["ports"])
 
-        ok, addresses = api.get_device_ips(device_id)
-        assert ok is True
+        ok, addresses = read_ip_addresses_as_acquisition(api, device_id)
+        assert ok is True, addresses
         assert addresses
         recorded_device = recording["responses"][f"GET /api/v0/devices/{device_id}"]["devices"][0]
         assert addresses[0]["ipv4_address"] == recorded_device["ip"]

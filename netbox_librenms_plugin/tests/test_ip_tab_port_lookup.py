@@ -1,5 +1,5 @@
 """
-How the IP tab resolves each row's LibreNMS interface name.
+How the IP tab resolves each row's LibreNMS interface name and VRF suggestion from the source snapshot.
 
 Its own file rather than an append to ``test_ip_address_render_boundaries.py``: that file sits on a
 lower branch of the PR stack, so adding to it conflicts on every restack.
@@ -8,14 +8,18 @@ lower branch of the PR stack, so adding to it conflicts on every restack.
 from copy import deepcopy
 
 import pytest
-from django.core.cache import cache
+from django.urls import reverse
 from ipam.models import VRF, IPAddress
 from tenancy.models import Tenant
 
+from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin.acquisition.coordinator import acquire
+from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_ip_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view
 
 SERVER_KEY = "default"
@@ -23,7 +27,10 @@ DEVICE_ID = 6100
 
 _IOSXE_RECORDING = load_recording("iosxe-subinterfaces")
 _IOSXE_DEVICE_ID = _IOSXE_RECORDING["device_id"]
-_IOSXE_PORTS = _IOSXE_RECORDING["responses"][f"GET /api/v0/devices/{_IOSXE_DEVICE_ID}/ports"]["ports"]
+_IOSXE_PORTS_PATH = f"/api/v0/devices/{_IOSXE_DEVICE_ID}/ports"
+_IOSXE_ADDRESSES_PATH = f"/api/v0/devices/{_IOSXE_DEVICE_ID}/ip"
+_IOSXE_PORTS = _IOSXE_RECORDING["responses"][f"GET {_IOSXE_PORTS_PATH}"]["ports"]
+_IOSXE_ADDRESSES = _IOSXE_RECORDING["responses"][f"GET {_IOSXE_ADDRESSES_PATH}"]["addresses"]
 _RD_PORT = next(port for port in _IOSXE_PORTS if port["ifName"] == "Po1.801")
 _NAME_PORT = next(port for port in _IOSXE_PORTS if port["ifName"] == "Gi0")
 _UNTAGGED_PORT_ID = next(port["port_id"] for port in _IOSXE_PORTS if port["ifName"] == "Lo10")
@@ -35,11 +42,7 @@ _NAME_VRF = next(vrf for vrf in _IOSXE_VRFS if vrf["vrf_id"] == _NAME_PORT["ifVr
 _RD_VRF_NAME = _RD_VRF["vrf_name"]
 _RD_VRF_RD = _RD_VRF["mplsVpnVrfRouteDistinguisher"]
 _NAME_VRF_NAME = _NAME_VRF["vrf_name"]
-_RD_ADDRESS = next(
-    row
-    for row in _IOSXE_RECORDING["responses"][f"GET /api/v0/devices/{_IOSXE_DEVICE_ID}/ip"]["addresses"]
-    if row["port_id"] == _RD_PORT_ID
-)
+_RD_ADDRESS = next(row for row in _IOSXE_ADDRESSES if row["port_id"] == _RD_PORT_ID)
 _RD_CIDR = f"{_RD_ADDRESS['ipv4_address']}/{_RD_ADDRESS['ipv4_prefixlen']}"
 
 
@@ -47,92 +50,110 @@ def _set_librenms_id(obj, value):
     seed_mapping(obj, SERVER_KEY, own=value)
 
 
-def _request():
-    return make_request("get")
+def _request(**query):
+    return make_request("get", query)
 
 
-def _ip_view(live_librenms):
+def _ip_view(request):
     from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
 
-    return make_view(DeviceIPAddressTableView, None, librenms_api=live_librenms.api)
+    return make_view(DeviceIPAddressTableView, request, librenms_api=False)
 
 
-def _recorded_ip_view(recording_server, recording_name):
-    """
-    Return a real view, device, IP rows, and server backed by one recording.
+def _assess(device, request=None):
+    """Assess the stored snapshot of *device* as a superuser, through the IP table's own entry point."""
+    from netbox_librenms_plugin.views.base.ip_addresses_view import assess_ip_snapshot
 
-    Args:
-        recording_server: Loader for the recording-backed HTTP server.
-        recording_name: Bundled data-shape recording name.
-
-    Returns:
-        tuple: The view, NetBox device, LibreNMS IP rows, and recording server.
-
-    """
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
-
-    recording = load_recording(recording_name)
-    server, api = recording_server(recording)
-    device = make_device(
-        f"ip-vrf-{recording_name}",
-        librenms_cf={api.server_key: {"id": recording["device_id"]}},
-    )
-    view = make_view(DeviceIPAddressTableView, None, librenms_api=api)
-    success, rows = view.get_ip_addresses(device)
-    assert success is True
-    return view, device, rows, server
+    snapshot = source_cache.read(device, Resource.IP_ADDRESSES, SERVER_KEY)
+    assert snapshot is not None
+    return assess_ip_snapshot(request or _request(), device, snapshot, SERVER_KEY)
 
 
-def _seed(live_librenms, port_count):
-    """Serve a device whose ports each carry one IP address."""
-    ports = [
+def _render(device, request=None):
+    """Render the IP tab context from the stored snapshot and return its table rows."""
+    request = request or _request()
+    context = _ip_view(request)._prepare_context(request, device, SERVER_KEY)
+    assert context is not None
+    return list(context["table"].data)
+
+
+def _ports(port_count):
+    return [
         {"port_id": 9000 + index, "ifName": f"Ethernet{index}", "ifDescr": f"Ethernet{index}"}
         for index in range(port_count)
     ]
-    live_librenms.server.register(
-        f"/api/v0/devices/{DEVICE_ID}/ports",
-        {"status": "ok", "ports": ports},
-    )
-    live_librenms.server.register(
-        f"/api/v0/devices/{DEVICE_ID}/ip",
-        {
-            "status": "ok",
-            "addresses": [
-                {"ipv4_address": f"198.18.{index}.10", "ipv4_prefixlen": 24, "port_id": port["port_id"]}
-                for index, port in enumerate(ports)
-            ],
-        },
-    )
-    # The per-port route still answers, so a regression re-introducing the fan-out passes its
-    # assertions and is caught only by the request count below.
-    for port in ports:
-        live_librenms.server.register(f"/api/v0/ports/{port['port_id']}", {"status": "ok", "port": [port]})
+
+
+def _addresses(ports):
+    return [
+        {"ipv4_address": f"198.18.{index}.10", "ipv4_prefixlen": 24, "port_id": port["port_id"]}
+        for index, port in enumerate(ports)
+    ]
+
+
+def _seed(device, port_count):
+    """Store a snapshot whose ports each carry one IP address."""
+    ports = _ports(port_count)
+    seed_ip_snapshot(device, _addresses(ports), ports)
     return ports
+
+
+def _serve(live_librenms, port_count):
+    """Serve a device whose ports each carry one IP address, for a real refresh."""
+    ports = _ports(port_count)
+    server = live_librenms.server
+    server.register(f"/api/v0/devices/{DEVICE_ID}/ports", {"status": "ok", "ports": ports})
+    server.register(f"/api/v0/devices/{DEVICE_ID}/ip", {"status": "ok", "addresses": _addresses(ports)})
+    server.register(f"/api/v0/devices/{DEVICE_ID}", {"status": "ok", "devices": [{"device_id": DEVICE_ID, "ip": ""}]})
+    # The per-port route still answers, so a regression re-introducing the fan-out is caught by the request count only.
+    for port in ports:
+        server.register(f"/api/v0/ports/{port['port_id']}", {"status": "ok", "port": [port]})
+    return ports
+
+
+def _acquired(live_librenms, recording_name, *, ports=None, addresses=None, vrfs=None):
+    """
+    Acquire one recorded device's IP snapshot from the loopback LibreNMS and store it.
+
+    A given part replaces the recorded response, as LibreNMS would serve it.
+    """
+    recording = load_recording(recording_name)
+    device_id = recording["device_id"]
+    server = live_librenms.server
+    server.load_recording(recording)
+    replacements = {
+        f"/api/v0/devices/{device_id}/ports": ("ports", ports),
+        f"/api/v0/devices/{device_id}/ip": ("addresses", addresses),
+        "/api/v0/routing/vrf": ("vrfs", vrfs),
+    }
+    for path, (field, rows) in replacements.items():
+        if rows is not None:
+            server.register(path, {"status": "ok", field: rows}, method="GET")
+    device = make_device(f"ip-vrf-{recording_name}", librenms_cf={SERVER_KEY: {"id": device_id}})
+    server.requests.clear()
+    snapshot = acquire(device, server_key=SERVER_KEY, resources=[Resource.IP_ADDRESSES])
+    assert source_cache.store(device, Resource.IP_ADDRESSES, snapshot)
+    return device
+
+
+def _vrf_requests(live_librenms):
+    return [request for request in live_librenms.server.requests if request["path"] == "/api/v0/routing/vrf"]
+
+
+def _row_on(rows, port_id):
+    return next(row for row in rows if row["port_id"] == port_id)
 
 
 @pytest.mark.django_db
 class TestIpRowInterfaceNames:
-    """The device ports payload already carries every name the IP rows need."""
+    """The snapshot's device ports already carry every name the IP rows need."""
 
-    def test_cache_coverage_normalization_grows_with_ports_and_rows(self, live_librenms, monkeypatch):
-        """A cached render must not normalize all port keys again for each IP row."""
+    def test_render_port_key_work_grows_with_ports_and_rows(self, monkeypatch):
+        """A render must not normalize all port keys again for each IP row."""
         from netbox_librenms_plugin.views.base import ip_addresses_view
 
         device = make_device("ip-linear-cache", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
-        ports = _seed(live_librenms, 20)
-        view = _ip_view(live_librenms)
-        success, raw = view.get_ip_addresses(device)
-        assert success
-        cache.set(
-            view.get_cache_key(device, "ip_addresses", SERVER_KEY),
-            {
-                "ip_addresses": raw,
-                "mgmt_ip": "198.18.0.1",
-                "ports_by_id": {str(port["port_id"]): port for port in ports},
-                "interface_name_field": "ifName",
-            },
-            timeout=300,
-        )
+        ports = _seed(device, 20)
         original = ip_addresses_view._port_key
         conversions = []
 
@@ -141,25 +162,21 @@ class TestIpRowInterfaceNames:
             return original(value)
 
         monkeypatch.setattr(ip_addresses_view, "_port_key", record_conversion)
-        view.cache_only = True
-        context = view._prepare_context(_request(), device, "ifName", fetch_fresh=False, server_key=SERVER_KEY)
+        rows = _render(device)
 
-        assert context is not None
-        assert len(conversions) <= 4 * (len(ports) + len(raw))
+        assert len(rows) == len(ports)
+        assert len(conversions) <= 4 * (len(ports) + len(rows))
 
     @pytest.mark.parametrize("port_count", [4, 16])
-    def test_assignment_port_lookup_work_grows_with_ports_and_rows(self, live_librenms, monkeypatch, port_count):
+    def test_assignment_port_lookup_work_grows_with_ports_and_rows(self, monkeypatch, port_count):
         from netbox_librenms_plugin import utils
         from netbox_librenms_plugin.views.base import ip_addresses_view
 
         device = make_device("ip-linear-assignments", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
-        ports = _seed(live_librenms, port_count)
+        ports = _seed(device, port_count)
         for port in ports:
             interface = make_interface(device, port["ifName"])
             _set_librenms_id(interface, port["port_id"])
-        view = _ip_view(live_librenms)
-        success, rows = view.get_ip_addresses(device)
-        assert success
         conversions = []
         original = utils.normalize_librenms_port_id
 
@@ -170,130 +187,127 @@ class TestIpRowInterfaceNames:
         monkeypatch.setattr(utils, "normalize_librenms_port_id", record_conversion)
         # ip_assignment_ports() calls the view module's own imported binding.
         monkeypatch.setattr(ip_addresses_view, "normalize_librenms_port_id", record_conversion)
-        enriched = view.enrich_ip_data(rows, device, "ifName", server_key=SERVER_KEY)
+        rows = _assess(device).rows
 
-        assert len(enriched) == port_count
-        assert all(row.get("interface_url") for row in enriched)
+        assert len(rows) == port_count
+        assert all(row.get("interface_url") for row in rows)
         assert len(conversions) <= 4 * (len(ports) + len(rows)), len(conversions)
 
-    def test_enrichment_does_not_fetch_each_port_individually(self, live_librenms):
-        """One /devices/{id}/ports read replaces one /ports/{port_id} call per row."""
+    def test_a_refresh_reads_the_ports_once_and_a_render_reads_nothing(self, client, live_librenms):
+        """One /devices/{id}/ports read replaces one /ports/{port_id} call per row; the render calls no LibreNMS."""
         device = make_device("ip-fanout", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
-        ports = _seed(live_librenms, 6)
-        view = _ip_view(live_librenms)
-        success, raw = view.get_ip_addresses(device)
-        assert success is True
+        ports = _serve(live_librenms, 6)
+        client.force_login(make_superuser("ip-fanout-user"))
+
+        refreshed = client.post(
+            reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk]),
+            {"server_key": SERVER_KEY},
+            HTTP_HX_REQUEST="true",
+        )
+        refresh_paths = [request["path"] for request in live_librenms.server.requests]
         live_librenms.server.requests.clear()
+        rendered = client.get(
+            reverse(
+                "plugins:netbox_librenms_plugin:sync_cache_fragment",
+                kwargs={"object_type": "device", "pk": device.pk, "tab": "ipaddresses"},
+            ),
+            {"server_key": SERVER_KEY},
+        )
 
-        view.enrich_ip_data(raw, device, "ifName", server_key=SERVER_KEY)
-
-        per_port = [r for r in live_librenms.server.requests if r["path"].startswith("/api/v0/ports/")]
+        assert refreshed.status_code == 200
+        assert rendered.status_code == 200
+        per_port = [path for path in refresh_paths if path.startswith("/api/v0/ports/")]
         assert per_port == [], f"{len(per_port)} per-port fetches for {len(ports)} rows"
+        assert refresh_paths.count(f"/api/v0/devices/{DEVICE_ID}/ports") == 1
+        assert all(f'data-name="{row["ipv4_address"]}/24"' in rendered.content.decode() for row in _addresses(ports))
+        assert live_librenms.server.requests == []
 
-    def test_rows_still_carry_the_librenms_interface_name(self, live_librenms):
+    def test_rows_still_carry_the_librenms_interface_name(self):
         """Dropping the fan-out must not drop the name it was fetched for."""
         device = make_device("ip-fanout-names", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
         interface = make_interface(device, "Ethernet0", iface_type="1000base-t")
         _set_librenms_id(interface, 9000)
-        _seed(live_librenms, 3)
-        view = _ip_view(live_librenms)
-        _success, raw = view.get_ip_addresses(device)
+        _seed(device, 3)
 
-        enriched = view.enrich_ip_data(raw, device, "ifName", server_key=SERVER_KEY)
+        rows = _assess(device).rows
 
-        assert [row["interface_name"] for row in enriched] == ["Ethernet0", "Ethernet1", "Ethernet2"]
+        assert [row["interface_name"] for row in rows] == ["Ethernet0", "Ethernet1", "Ethernet2"]
 
-    def test_the_alternate_name_field_is_honoured(self, live_librenms):
-        """ifDescr-mode devices read their name from the same one ports payload."""
+    @pytest.mark.parametrize(
+        ("field", "expected"), [("ifName", ["Ethernet0", "Ethernet1"]), ("ifDescr", ["uplink-0", "uplink-1"])]
+    )
+    def test_the_requested_name_field_is_honoured(self, field, expected):
+        """ifDescr-mode devices read their name from the same one ports snapshot."""
         device = make_device("ip-fanout-ifdescr", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
-        _seed(live_librenms, 2)
-        view = _ip_view(live_librenms)
-        _success, raw = view.get_ip_addresses(device)
+        ports = [{**port, "ifDescr": f"uplink-{index}"} for index, port in enumerate(_ports(2))]
+        seed_ip_snapshot(device, _addresses(ports), ports)
 
-        enriched = view.enrich_ip_data(raw, device, "ifDescr", server_key=SERVER_KEY)
+        assessment = _assess(device, _request(interface_name_field=field))
 
-        assert [row["interface_name"] for row in enriched] == ["Ethernet0", "Ethernet1"]
+        assert assessment.interface_name_field == field
+        assert [row["interface_name"] for row in assessment.rows] == expected
 
-    def test_a_row_naming_an_unknown_port_keeps_its_address(self, live_librenms):
+    def test_a_row_naming_an_unknown_port_keeps_its_address(self):
         """An IP row pointing at a port the device does not report still renders, without a name."""
         device = make_device("ip-fanout-unknown", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
-        _seed(live_librenms, 1)
-        live_librenms.server.register(
-            f"/api/v0/devices/{DEVICE_ID}/ip",
-            {
-                "status": "ok",
-                "addresses": [{"ipv4_address": "198.18.9.9", "ipv4_prefixlen": 24, "port_id": 4242}],
-            },
+        seed_ip_snapshot(device, [{"ipv4_address": "198.18.9.9", "ipv4_prefixlen": 24, "port_id": 4242}], _ports(1))
+
+        assessment = _assess(device)
+
+        assert len(assessment.rows) == 1
+        assert assessment.rows[0]["ip_address"] == "198.18.9.9"
+        assert assessment.rows[0].get("interface_name") is None
+        # Only the ports the rows name are in the row map; a named port the snapshot lacks maps to None.
+        assert assessment.ports_by_id == {"4242": None}
+
+    def test_a_port_bound_in_netbox_is_rule_evidence_and_not_a_row_port(self):
+        """A port no row names stays out of the row map; a bound one is kept as evidence for the rules."""
+        device = make_device("ip-bound-evidence", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
+        ports = _ports(3)
+        _set_librenms_id(make_interface(device, "renamed"), ports[1]["port_id"])
+        seed_ip_snapshot(device, _addresses(ports[:1]), ports)
+
+        assessment = _assess(device)
+
+        assert assessment.ports_by_id == {"9000": ports[0]}
+        assert assessment.bound_ports_by_id == {"9001": ports[1]}
+
+    def test_a_failed_port_read_fails_the_refresh_and_a_render_does_not_retry_it(self, client, live_librenms):
+        """Without the ports the rows cannot be named, so no snapshot is stored and the render stays off LibreNMS."""
+        device = make_device("ip-ports-fail", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
+        _serve(live_librenms, 2)
+        ports_path = f"/api/v0/devices/{DEVICE_ID}/ports"
+        live_librenms.server.register(ports_path, {"status": "error", "message": "ports unavailable"}, status=500)
+        client.force_login(make_superuser("ip-ports-fail-user"))
+
+        refreshed = client.post(
+            reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk]),
+            {"server_key": SERVER_KEY},
+            HTTP_HX_REQUEST="true",
         )
-        view = _ip_view(live_librenms)
-        _success, raw = view.get_ip_addresses(device)
+        live_librenms.server.requests.clear()
+        context = _ip_view(_request())._prepare_context(_request(), device, SERVER_KEY)
 
-        enriched = view.enrich_ip_data(raw, device, "ifName", server_key=SERVER_KEY)
-
-        assert len(enriched) == 1
-        assert enriched[0]["ip_address"] == "198.18.9.9"
-        assert enriched[0].get("interface_name") is None
-
-    def test_a_failed_port_read_is_not_retried_by_warm_renders(self, recording_server):
-        """A failed fresh ports read caches the rows as unnamed; warm renders reach cache and NetBox only."""
-        view, device, _rows, server = _recorded_ip_view(recording_server, "iosxe-subinterfaces")
-        ports_path = f"/api/v0/devices/{load_recording('iosxe-subinterfaces')['device_id']}/ports"
-        server.register(ports_path, {"status": "error", "message": "ports unavailable"}, status=500, method="GET")
-        view.librenms_api.cache_timeout = 300
-        server.requests.clear()
-
-        fresh = view._prepare_context(_request(), device, "ifName", fetch_fresh=True, server_key="test")
-        assert any(request["path"] == ports_path for request in server.requests)
-        server.requests.clear()
-        warm = view._prepare_context(_request(), device, "ifName", fetch_fresh=False, server_key="test")
-        view.cache_only = True
-        cache_only = view._prepare_context(_request(), device, "ifName", fetch_fresh=False, server_key="test")
-
-        assert all(request["path"] != ports_path for request in server.requests)
-        for context in (warm, cache_only):
-            assert context is not None
-            assert [row.get("interface_name") for row in context["table"].data] == [
-                row.get("interface_name") for row in fresh["table"].data
-            ]
-
-    def test_an_empty_port_map_from_an_older_failed_read_is_repaired_once(self, recording_server):
-        """An entry cached with ``ports_by_id: {}`` backfills on one warm render, then stays off LibreNMS."""
-        view, device, _rows, server = _recorded_ip_view(recording_server, "iosxe-subinterfaces")
-        ports_path = f"/api/v0/devices/{load_recording('iosxe-subinterfaces')['device_id']}/ports"
-        view.librenms_api.cache_timeout = 300
-        fresh = view._prepare_context(_request(), device, "ifName", fetch_fresh=True, server_key="test")
-        cache_key = view.get_cache_key(device, "ip_addresses", "test")
-        cache.set(cache_key, {**cache.get(cache_key), "ports_by_id": {}}, timeout=300)
-        server.requests.clear()
-
-        view._prepare_context(_request(), device, "ifName", fetch_fresh=False, server_key="test")
-        assert sum(request["path"] == ports_path for request in server.requests) == 1
-        server.requests.clear()
-        warm = view._prepare_context(_request(), device, "ifName", fetch_fresh=False, server_key="test")
-
-        assert all(request["path"] != ports_path for request in server.requests)
-        assert [row.get("interface_name") for row in warm["table"].data] == [
-            row.get("interface_name") for row in fresh["table"].data
-        ]
+        assert refreshed.status_code == 200
+        assert f"devices/{DEVICE_ID}/ports was not obtained" in refreshed.content.decode()
+        assert source_cache.read(device, Resource.IP_ADDRESSES, SERVER_KEY) is None
+        assert context is None
+        assert live_librenms.server.requests == []
 
 
 @pytest.mark.django_db
 class TestIpRowVrfSuggestions:
-    """LibreNMS VRF evidence can preselect an unset NetBox VRF choice."""
+    """LibreNMS VRF evidence in the snapshot can preselect an unset NetBox VRF choice."""
 
-    def test_warm_render_keeps_suggestion_without_reading_librenms_vrfs(self, recording_server):
-        """A cached source identity supplies the suggestion without another LibreNMS read."""
+    def test_a_render_keeps_the_suggestion_without_reading_librenms(self, live_librenms):
+        """The snapshot's VRF rows supply the suggestion without another LibreNMS read."""
         target = VRF.objects.create(name="NetBox RD target", rd=_RD_VRF_RD)
-        view, device, _rows, server = _recorded_ip_view(recording_server, "iosxe-subinterfaces")
-        view.librenms_api.cache_timeout = 300
-        fresh = view._prepare_context(_request(), device, "ifName", fetch_fresh=True, server_key="test")
-        assert fresh is not None
-        server.requests.clear()
+        device = _acquired(live_librenms, "iosxe-subinterfaces")
+        live_librenms.server.requests.clear()
 
-        warm = view._prepare_context(_request(), device, "ifName", fetch_fresh=False, server_key="test")
+        tagged = _row_on(_render(device), _RD_PORT_ID)
 
-        assert all(request["path"] != "/api/v0/routing/vrf" for request in server.requests)
-        tagged = next(row for row in warm["table"].data if row["port_id"] == _RD_PORT_ID)
+        assert live_librenms.server.requests == []
         assert tagged["vrf_id"] is None
         assert tagged["suggested_vrf_id"] == target.pk
         assert tagged["vrf_suggested_from"] == {
@@ -301,36 +315,30 @@ class TestIpRowVrfSuggestions:
             "matched_by": "route distinguisher",
         }
 
-    def test_warm_render_removes_suggestion_after_netbox_vrf_is_deleted(self, recording_server):
-        """A warm render drops a cached suggestion whose current NetBox VRF is gone."""
+    def test_a_render_removes_the_suggestion_after_the_netbox_vrf_is_deleted(self, live_librenms):
+        """The render assesses the snapshot against current NetBox, so a deleted VRF is no longer suggested."""
         target = VRF.objects.create(name="NetBox RD target", rd=_RD_VRF_RD)
-        view, device, _rows, server = _recorded_ip_view(recording_server, "iosxe-subinterfaces")
-        view.librenms_api.cache_timeout = 300
-        fresh = view._prepare_context(_request(), device, "ifName", fetch_fresh=True, server_key="test")
-        assert fresh is not None
+        device = _acquired(live_librenms, "iosxe-subinterfaces")
+        assert _row_on(_render(device), _RD_PORT_ID)["suggested_vrf_id"] == target.pk
         target.delete()
-        server.requests.clear()
+        live_librenms.server.requests.clear()
 
-        warm = view._prepare_context(_request(), device, "ifName", fetch_fresh=False, server_key="test")
+        tagged = _row_on(_render(device), _RD_PORT_ID)
 
-        assert all(request["path"] != "/api/v0/routing/vrf" for request in server.requests)
-        tagged = next(row for row in warm["table"].data if row["port_id"] == _RD_PORT_ID)
+        assert live_librenms.server.requests == []
         assert tagged.get("suggested_vrf_id") is None
         assert "vrf_suggested_from" not in tagged
 
-    def test_warm_render_adds_suggestion_after_netbox_vrf_is_created(self, recording_server):
-        """A warm render binds cached source identity to a newly created NetBox VRF."""
-        view, device, _rows, server = _recorded_ip_view(recording_server, "iosxe-subinterfaces")
-        view.librenms_api.cache_timeout = 300
-        fresh = view._prepare_context(_request(), device, "ifName", fetch_fresh=True, server_key="test")
-        assert fresh is not None
+    def test_a_render_adds_the_suggestion_after_the_netbox_vrf_is_created(self, live_librenms):
+        """The snapshot's source identity binds to a NetBox VRF created after the refresh."""
+        device = _acquired(live_librenms, "iosxe-subinterfaces")
+        assert "suggested_vrf_id" not in _row_on(_render(device), _RD_PORT_ID)
         target = VRF.objects.create(name="NetBox RD target", rd=_RD_VRF_RD)
-        server.requests.clear()
+        live_librenms.server.requests.clear()
 
-        warm = view._prepare_context(_request(), device, "ifName", fetch_fresh=False, server_key="test")
+        tagged = _row_on(_render(device), _RD_PORT_ID)
 
-        assert all(request["path"] != "/api/v0/routing/vrf" for request in server.requests)
-        tagged = next(row for row in warm["table"].data if row["port_id"] == _RD_PORT_ID)
+        assert live_librenms.server.requests == []
         assert tagged["vrf_id"] is None
         assert tagged["suggested_vrf_id"] == target.pk
         assert tagged["vrf_suggested_from"] == {
@@ -338,85 +346,55 @@ class TestIpRowVrfSuggestions:
             "matched_by": "route distinguisher",
         }
 
-    def test_poisoned_cached_vrf_identity_does_not_suggest(self, recording_server):
-        """A malformed cached source identity is ignored without a LibreNMS read."""
+    def test_a_malformed_source_vrf_row_does_not_suggest(self, live_librenms):
+        """A LibreNMS VRF row without a usable name gives no identity, so it never suggests."""
         VRF.objects.create(name=_NAME_VRF_NAME)
-        view, device, _rows, server = _recorded_ip_view(recording_server, "iosxe-subinterfaces")
-        view.librenms_api.cache_timeout = 300
-        fresh = view._prepare_context(_request(), device, "ifName", fetch_fresh=True, server_key="test")
-        assert fresh is not None
-        cache_key = view.get_cache_key(device, "ip_addresses", "test")
-        snapshot = cache.get(cache_key)
-        tagged = next(row for row in snapshot["ip_addresses"] if row["port_id"] == _NAME_PORT_ID)
-        tagged["librenms_vrf"] = {"name": [], "rd": None}
-        cache.set(cache_key, snapshot)
-        server.requests.clear()
+        vrfs = deepcopy(_IOSXE_VRFS)
+        next(vrf for vrf in vrfs if vrf["vrf_id"] == _NAME_PORT["ifVrf"])["vrf_name"] = []
+        device = _acquired(live_librenms, "iosxe-subinterfaces", vrfs=vrfs)
 
-        warm = view._prepare_context(_request(), device, "ifName", fetch_fresh=False, server_key="test")
+        tagged = _row_on(_assess(device).rows, _NAME_PORT_ID)
 
-        assert all(request["path"] != "/api/v0/routing/vrf" for request in server.requests)
-        tagged = next(row for row in warm["table"].data if row["port_id"] == _NAME_PORT_ID)
         assert tagged.get("suggested_vrf_id") is None
         assert "vrf_suggested_from" not in tagged
 
-    def test_a_suggestion_never_reaches_the_verify_path_as_a_netbox_vrf(self, recording_server):
+    def test_a_suggestion_never_reaches_the_verify_path_as_a_netbox_vrf(self, live_librenms):
         """A suggestion preselects a dropdown. Read as the row's VRF it would report "Synced"."""
         from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
 
         target = VRF.objects.create(name="Suggested only", rd=_RD_VRF_RD)
-        view, device, rows, _server = _recorded_ip_view(recording_server, "iosxe-subinterfaces")
+        device = _acquired(live_librenms, "iosxe-subinterfaces")
+        rows = _assess(device).rows
 
-        enriched = view.enrich_ip_data(rows, device, "ifName", server_key="test")
-
-        tagged = next(row for row in enriched if row["port_id"] == _RD_PORT_ID)
-        assert tagged["suggested_vrf_id"] == target.pk
+        assert _row_on(rows, _RD_PORT_ID)["suggested_vrf_id"] == target.pk
         # NetBox holds no IPAddress for this row, so the verify path must still offer to create it.
         verify = SingleIPAddressVerifyView()
-        _row, original_vrf_id, _port_id = verify._find_in_cache(
-            {"ip_addresses": [tagged]}, _RD_ADDRESS["ipv4_address"], _RD_ADDRESS["ipv4_prefixlen"]
+        _row, original_vrf_id, _port_id = verify._find_row(
+            rows, _RD_ADDRESS["ipv4_address"], _RD_ADDRESS["ipv4_prefixlen"]
         )
         assert original_vrf_id is None
         assert verify._determine_status(False, False, original_vrf_id, target.pk) == "sync"
 
-    def test_cache_only_render_does_not_read_librenms_vrfs(self, recording_server):
-        """The cache-status view can render a tagged snapshot without touching LibreNMS."""
-        target = VRF.objects.create(name="NetBox RD target", rd=_RD_VRF_RD)
-        view, device, _rows, server = _recorded_ip_view(recording_server, "iosxe-subinterfaces")
-        view.librenms_api.cache_timeout = 300
-        fresh = view._prepare_context(_request(), device, "ifName", fetch_fresh=True, server_key="test")
-        assert fresh is not None
-        view.cache_only = True
-        server.requests.clear()
-
-        cached = view._prepare_context(_request(), device, "ifName", fetch_fresh=False, server_key="test")
-
-        assert all(request["path"] != "/api/v0/routing/vrf" for request in server.requests)
-        tagged = next(row for row in cached["table"].data if row["port_id"] == _RD_PORT_ID)
-        assert tagged["suggested_vrf_id"] == target.pk
-
-    def test_unique_route_distinguisher_suggests_a_vrf(self, recording_server):
+    def test_unique_route_distinguisher_suggests_a_vrf(self, live_librenms):
         """A unique RD match takes precedence over the different VRF names."""
         target = VRF.objects.create(name="NetBox RD target", rd=_RD_VRF_RD)
-        view, device, rows, server = _recorded_ip_view(recording_server, "iosxe-subinterfaces")
+        device = _acquired(live_librenms, "iosxe-subinterfaces")
+        assert len(_vrf_requests(live_librenms)) == 1
 
-        enriched = view.enrich_ip_data(rows, device, "ifName", server_key="test")
+        tagged = _row_on(_assess(device).rows, _RD_PORT_ID)
 
-        tagged = next(row for row in enriched if row["port_id"] == _RD_PORT_ID)
         assert tagged["vrf_id"] is None
         assert tagged["suggested_vrf_id"] == target.pk
         assert tagged["vrf_suggested_from"] == {
             "name": _RD_VRF_NAME,
             "matched_by": "route distinguisher",
         }
-        vrf_requests = [request for request in server.requests if request["path"] == "/api/v0/routing/vrf"]
-        assert len(vrf_requests) == 1
 
-    def test_suggested_vrf_renders_an_accessible_source_mark(self, recording_server):
+    def test_suggested_vrf_renders_an_accessible_source_mark(self, live_librenms):
         """The preselected dropdown identifies why LibreNMS suggested the VRF."""
         VRF.objects.create(name="NetBox RD target", rd=_RD_VRF_RD)
-        view, device, rows, _server = _recorded_ip_view(recording_server, "iosxe-subinterfaces")
-        enriched = view.enrich_ip_data(rows, device, "ifName", server_key="test")
-        tagged = next(row for row in enriched if row["port_id"] == _RD_PORT_ID)
+        device = _acquired(live_librenms, "iosxe-subinterfaces")
+        tagged = _row_on(_assess(device).rows, _RD_PORT_ID)
 
         html = IPAddressTable([tagged], mgmt_row_ids=[]).as_html(_request())
 
@@ -425,14 +403,13 @@ class TestIpRowVrfSuggestions:
         assert f'aria-label="{label}"' in html
         assert "mdi-lightbulb-on-outline text-muted" in html
 
-    def test_unique_name_suggests_a_vrf_when_no_rd_matches(self, recording_server):
+    def test_unique_name_suggests_a_vrf_when_no_rd_matches(self, live_librenms):
         """A unique name supplies the suggestion when the source has no RD."""
         target = VRF.objects.create(name=_NAME_VRF_NAME)
-        view, device, rows, _server = _recorded_ip_view(recording_server, "iosxe-subinterfaces")
+        device = _acquired(live_librenms, "iosxe-subinterfaces")
 
-        enriched = view.enrich_ip_data(rows, device, "ifName", server_key="test")
+        tagged = _row_on(_assess(device).rows, _NAME_PORT_ID)
 
-        tagged = next(row for row in enriched if row["port_id"] == _NAME_PORT_ID)
         assert tagged["vrf_id"] is None
         assert tagged["suggested_vrf_id"] == target.pk
         assert tagged["vrf_suggested_from"] == {
@@ -441,35 +418,32 @@ class TestIpRowVrfSuggestions:
         }
 
     @pytest.mark.parametrize("netbox_rd, suggests", [("203.0.113.82:1", False), (None, True)])
-    def test_a_name_match_never_crosses_a_conflicting_rd(self, recording_server, netbox_rd, suggests):
+    def test_a_name_match_never_crosses_a_conflicting_rd(self, live_librenms, netbox_rd, suggests):
         """A source RD allows a name match only when the NetBox namesake has no RD."""
         namesake = VRF.objects.create(name=_RD_VRF_NAME, rd=netbox_rd)
-        view, device, rows, _server = _recorded_ip_view(recording_server, "iosxe-subinterfaces")
+        device = _acquired(live_librenms, "iosxe-subinterfaces")
 
-        enriched = view.enrich_ip_data(rows, device, "ifName", server_key="test")
+        tagged = _row_on(_assess(device).rows, _RD_PORT_ID)
 
-        tagged = next(row for row in enriched if row["port_id"] == _RD_PORT_ID)
         assert tagged.get("suggested_vrf_id") == (namesake.pk if suggests else None)
 
-    def test_untagged_port_neither_suggests_nor_fetches_vrfs(self, recording_server):
-        """The common ifVrf=0 path has no VRF request or suggestion."""
+    def test_an_untagged_port_does_not_suggest(self, live_librenms):
+        """The common ifVrf=0 row gets no suggestion, even when other ports of the device name a VRF."""
         VRF.objects.create(name="Unrelated VRF", rd=_RD_VRF_RD)
-        view, device, rows, server = _recorded_ip_view(recording_server, "iosxe-subinterfaces")
-        untagged_rows = [row for row in rows if row["port_id"] == _UNTAGGED_PORT_ID]
-        server.requests.clear()
+        device = _acquired(live_librenms, "iosxe-subinterfaces")
 
-        enriched = view.enrich_ip_data(untagged_rows, device, "ifName", server_key="test")
+        untagged = _row_on(_assess(device).rows, _UNTAGGED_PORT_ID)
 
-        assert enriched[0].get("suggested_vrf_id") is None
-        assert "vrf_suggested_from" not in enriched[0]
-        assert all(request["path"] != "/api/v0/routing/vrf" for request in server.requests)
+        assert untagged.get("suggested_vrf_id") is None
+        assert "vrf_suggested_from" not in untagged
+        assert "librenms_vrf" not in untagged
 
-    def test_nokia_base_instance_is_not_a_vrf_suggestion(self, recording_server):
+    def test_nokia_base_instance_is_not_a_vrf_suggestion(self, live_librenms):
         """Nokia Base identifies the global table, not a VRF named Base."""
         VRF.objects.create(name="Base")
-        view, device, rows, _server = _recorded_ip_view(recording_server, "nokia-timos-transceivers")
+        device = _acquired(live_librenms, "nokia-timos-transceivers")
 
-        enriched = view.enrich_ip_data(rows, device, "ifName", server_key="test")
+        rows = _assess(device).rows
 
         recording = load_recording("nokia-timos-transceivers")
         base_vrf = next(
@@ -477,132 +451,110 @@ class TestIpRowVrfSuggestions:
         )
         ports = recording["responses"][f"GET /api/v0/devices/{recording['device_id']}/ports"]["ports"]
         base_ports = {port["port_id"] for port in ports if port["ifVrf"] == base_vrf["vrf_id"]}
-        base_row = next(row for row in enriched if row["port_id"] in base_ports)
+        base_row = next(row for row in rows if row["port_id"] in base_ports)
         assert base_row.get("suggested_vrf_id") is None
         assert "vrf_suggested_from" not in base_row
 
-    def test_ambiguous_route_distinguisher_does_not_suggest_a_vrf(self, recording_server):
+    def test_ambiguous_route_distinguisher_does_not_suggest_a_vrf(self, live_librenms):
         """An RD claimed by two NetBox VRFs binds neither one."""
+        from netbox_librenms_plugin.views.base.ip_addresses_view import (
+            BaseIPAddressTableView,
+            _index_snapshot_ports,
+            _vrf_identities,
+        )
+
         first = VRF.objects.create(name="First RD claimant", rd=_RD_VRF_RD)
         # NetBox enforces RD uniqueness, so keep the second candidate unsaved.
         second = VRF(name="Second RD claimant", rd=_RD_VRF_RD)
-        view, _device, rows, _server = _recorded_ip_view(recording_server, "iosxe-subinterfaces")
-        port_data = {}
-        view._load_port_names(port_data, rows)
-        vrf_identities = view._load_vrf_identities(port_data, rows)
+        device = _acquired(live_librenms, "iosxe-subinterfaces")
+        snapshot = source_cache.read(device, Resource.IP_ADDRESSES, SERVER_KEY)
+        rows = snapshot.value(Resource.IP_ADDRESSES, "addresses")
+        ports_by_id, _bound = _index_snapshot_ports(snapshot.value(Resource.IP_ADDRESSES, "ports"), rows, set())
+        vrf_identities = _vrf_identities(ports_by_id, rows, snapshot.value(Resource.IP_ADDRESSES, "vrfs"))
 
         assert str(_RD_PORT_ID) in vrf_identities
-        suggestions = view._load_vrf_suggestions(vrf_identities, [first, second])
+        suggestions = BaseIPAddressTableView()._load_vrf_suggestions(vrf_identities, [first, second])
 
         assert str(_RD_PORT_ID) not in suggestions
 
-    def test_ambiguous_name_does_not_suggest_a_vrf(self, recording_server):
+    def test_ambiguous_name_does_not_suggest_a_vrf(self, live_librenms):
         """A name claimed by two NetBox VRFs binds neither one."""
         first_tenant = Tenant.objects.create(name="First VRF tenant", slug="first-vrf-tenant")
         second_tenant = Tenant.objects.create(name="Second VRF tenant", slug="second-vrf-tenant")
         VRF.objects.create(name=_NAME_VRF_NAME, tenant=first_tenant)
         VRF.objects.create(name=_NAME_VRF_NAME, tenant=second_tenant)
-        view, device, rows, _server = _recorded_ip_view(recording_server, "iosxe-subinterfaces")
+        device = _acquired(live_librenms, "iosxe-subinterfaces")
 
-        enriched = view.enrich_ip_data(rows, device, "ifName", server_key="test")
+        tagged = _row_on(_assess(device).rows, _NAME_PORT_ID)
 
-        tagged = next(row for row in enriched if row["port_id"] == _NAME_PORT_ID)
         assert tagged.get("suggested_vrf_id") is None
         assert "vrf_suggested_from" not in tagged
 
-    def test_stale_port_id_does_not_suggest_a_vrf(self, recording_server):
+    def test_stale_port_id_does_not_suggest_a_vrf(self, live_librenms):
         """An IP row cannot inherit VRF evidence from an unrelated port."""
         VRF.objects.create(name="NetBox RD target", rd=_RD_VRF_RD)
-        view, device, rows, _server = _recorded_ip_view(recording_server, "iosxe-subinterfaces")
-        stale_row = {**next(row for row in rows if row["port_id"] == _RD_PORT_ID), "port_id": 999999}
+        device = _acquired(live_librenms, "iosxe-subinterfaces", addresses=[{**_RD_ADDRESS, "port_id": 999999}])
 
-        enriched = view.enrich_ip_data([stale_row], device, "ifName", server_key="test")
+        (row,) = _assess(device).rows
 
-        assert enriched[0].get("suggested_vrf_id") is None
-        assert "vrf_suggested_from" not in enriched[0]
+        assert row.get("suggested_vrf_id") is None
+        assert "vrf_suggested_from" not in row
 
     @pytest.mark.parametrize("if_vrf", [None, 0, "0", "not-a-number", True, "missing"])
-    def test_unusable_if_vrf_does_not_suggest_or_fetch(self, recording_server, if_vrf):
+    def test_unusable_if_vrf_does_not_suggest(self, live_librenms, if_vrf):
         """Missing, null, zero, boolean and non-numeric port values are not VRF tags."""
         VRF.objects.create(name="NetBox RD target", rd=_RD_VRF_RD)
-        view, device, rows, server = _recorded_ip_view(recording_server, "iosxe-subinterfaces")
-        recording = load_recording("iosxe-subinterfaces")
-        ports_response = deepcopy(recording["responses"][f"GET /api/v0/devices/{recording['device_id']}/ports"])
-        port = next(port for port in ports_response["ports"] if port["port_id"] == _RD_PORT_ID)
+        port = deepcopy(_RD_PORT)
         if if_vrf == "missing":
             port.pop("ifVrf")
         else:
             port["ifVrf"] = if_vrf
-        server.register(f"/api/v0/devices/{recording['device_id']}/ports", ports_response, method="GET")
-        tagged_rows = [row for row in rows if row["port_id"] == _RD_PORT_ID]
-        server.requests.clear()
+        device = _acquired(live_librenms, "iosxe-subinterfaces", ports=[port], addresses=[_RD_ADDRESS])
 
-        enriched = view.enrich_ip_data(tagged_rows, device, "ifName", server_key="test")
+        rows = _assess(device).rows
 
-        assert all(row.get("suggested_vrf_id") is None for row in enriched)
-        assert all("vrf_suggested_from" not in row for row in enriched)
-        assert all(request["path"] != "/api/v0/routing/vrf" for request in server.requests)
+        assert all(row.get("suggested_vrf_id") is None for row in rows)
+        assert all("vrf_suggested_from" not in row for row in rows)
+        # Acquisition reads the VRFs by the same port rule, so an unusable tag reads no VRFs.
+        assert _vrf_requests(live_librenms) == []
 
-    def test_existing_ip_vrf_is_kept_without_a_suggestion_mark(self, recording_server):
+    def test_existing_ip_vrf_is_kept_without_a_suggestion_mark(self, live_librenms):
         """Source evidence never replaces an existing NetBox IP VRF."""
         VRF.objects.create(name="Suggested target", rd=_RD_VRF_RD)
         existing_vrf = VRF.objects.create(name="Existing assignment")
         IPAddress.objects.create(address=_RD_CIDR, vrf=existing_vrf, status="active")
-        view, device, rows, _server = _recorded_ip_view(recording_server, "iosxe-subinterfaces")
+        device = _acquired(live_librenms, "iosxe-subinterfaces")
 
-        enriched = view.enrich_ip_data(rows, device, "ifName", server_key="test")
+        existing = next(row for row in _assess(device).rows if row["ip_address"] == _RD_ADDRESS["ipv4_address"])
 
-        existing = next(row for row in enriched if row["ip_address"] == _RD_ADDRESS["ipv4_address"])
         assert existing["vrf_id"] == existing_vrf.pk
         assert "vrf_suggested_from" not in existing
 
-    def test_an_existing_global_address_gets_no_suggestion(self, recording_server):
+    def test_an_existing_global_address_gets_no_suggestion(self, live_librenms):
         """An address NetBox already holds globally is not a candidate: the row reads "Synced"."""
         VRF.objects.create(name="Suggested target", rd=_RD_VRF_RD)
         # No VRF: the row's vrf_id stays None, which must not be read as "free to suggest into".
         IPAddress.objects.create(address=_RD_CIDR, status="active")
-        view, device, rows, _server = _recorded_ip_view(recording_server, "iosxe-subinterfaces")
+        device = _acquired(live_librenms, "iosxe-subinterfaces")
 
-        enriched = view.enrich_ip_data(rows, device, "ifName", server_key="test")
+        existing = next(row for row in _assess(device).rows if row["ip_address"] == _RD_ADDRESS["ipv4_address"])
 
-        existing = next(row for row in enriched if row["ip_address"] == _RD_ADDRESS["ipv4_address"])
         assert existing["exists"] is True
         assert existing.get("suggested_vrf_id") is None
         assert "vrf_suggested_from" not in existing
 
-    def test_string_typed_librenms_ids_still_suggest(self, recording_server):
+    def test_string_typed_librenms_ids_still_suggest(self, live_librenms):
         """LibreNMS documents string ids for /routing/vrf; the join must not silently stop."""
         target = VRF.objects.create(name="NetBox RD target", rd=_RD_VRF_RD)
-        view, device, rows, server = _recorded_ip_view(recording_server, "iosxe-subinterfaces")
-        recording = load_recording("iosxe-subinterfaces")
-        vrf_response = deepcopy(recording["responses"]["GET /api/v0/routing/vrf"])
-        for vrf in vrf_response["vrfs"]:
+        vrfs = deepcopy(_IOSXE_VRFS)
+        for vrf in vrfs:
             vrf["vrf_id"] = str(vrf["vrf_id"])
             vrf["device_id"] = str(vrf["device_id"])
-        server.register("/api/v0/routing/vrf", vrf_response, method="GET")
+        device = _acquired(live_librenms, "iosxe-subinterfaces", vrfs=vrfs)
 
-        enriched = view.enrich_ip_data(rows, device, "ifName", server_key="test")
+        tagged = _row_on(_assess(device).rows, _RD_PORT_ID)
 
-        tagged = next(row for row in enriched if row["port_id"] == _RD_PORT_ID)
         assert tagged["suggested_vrf_id"] == target.pk
-
-    def test_failed_vrf_read_leaves_rows_working_without_suggestions(self, recording_server, caplog):
-        """A failed optional VRF read degrades to the ordinary manual dropdown."""
-        VRF.objects.create(name="NetBox RD target", rd=_RD_VRF_RD)
-        view, device, rows, server = _recorded_ip_view(recording_server, "iosxe-subinterfaces")
-        server.register(
-            "/api/v0/routing/vrf",
-            {"status": "error", "message": "VRF service unavailable"},
-            status=500,
-            method="GET",
-        )
-
-        with caplog.at_level("DEBUG", logger="netbox_librenms_plugin.views.base.ip_addresses_view"):
-            enriched = view.enrich_ip_data(rows, device, "ifName", server_key="test")
-
-        assert len(enriched) == len(rows)
-        assert all("vrf_suggested_from" not in row for row in enriched)
-        assert "Could not load LibreNMS VRFs" in caplog.text
 
 
 @pytest.mark.django_db
@@ -611,7 +563,6 @@ def test_port_disclosure_preload_binds_each_stored_form_with_one_regex_per_path(
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
 
-    from netbox_librenms_plugin.tests.conftest import make_superuser
     from netbox_librenms_plugin.utils import PortDisclosure
 
     device = make_device("disclosure-preload-device")
@@ -632,42 +583,6 @@ def test_port_disclosure_preload_binds_each_stored_form_with_one_regex_per_path(
     binding_sql = [query["sql"] for query in queries if 'FROM "dcim_interface"' in query["sql"]]
     assert [sql.count(" ~ ") for sql in binding_sql] == [4]
     assert [port_id for port_id in [*bound, 710, 9000] if disclose(port_id, None)] == bound
-
-
-@pytest.mark.django_db
-class TestWarmRenderWithoutACachedPortMap:
-    """A snapshot cached before ports_by_id existed still renders."""
-
-    def test_a_pre_upgrade_cache_entry_renders_and_names_its_rows(self, live_librenms):
-        """The names are rebuilt from LibreNMS; the view must not need an id a fresh fetch would have set."""
-
-        device = make_device("ip-warm-preupgrade", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
-        _seed(live_librenms, 2)
-        live_librenms.server.register(
-            f"/api/v0/devices/{DEVICE_ID}",
-            {"status": "ok", "devices": [{"device_id": DEVICE_ID, "ip": "198.18.0.1"}]},
-        )
-        view = _ip_view(live_librenms)
-        # A snapshot from before the port map was cached: it carries mgmt_ip, so nothing else on
-        # the warm path resolves the LibreNMS id.
-        cache.set(
-            view.get_cache_key(device, "ip_addresses", SERVER_KEY),
-            {
-                "ip_addresses": [
-                    {"ipv4_address": "198.18.0.10", "ipv4_prefixlen": 24, "port_id": 9000},
-                    {"ipv4_address": "198.18.1.10", "ipv4_prefixlen": 24, "port_id": 9001},
-                ],
-                "mgmt_ip": "198.18.0.1",
-                "interface_name_field": "ifName",
-            },
-            timeout=300,
-        )
-
-        context = view._prepare_context(_request(), device, "ifName", fetch_fresh=False, server_key=SERVER_KEY)
-
-        assert context is not None
-        rows = cache.get(view.get_cache_key(device, "ip_addresses", SERVER_KEY))["ports_by_id"]
-        assert sorted(rows) == ["9000", "9001"]
 
 
 @pytest.mark.parametrize(

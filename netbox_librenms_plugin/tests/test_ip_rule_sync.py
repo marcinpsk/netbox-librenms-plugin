@@ -1,8 +1,8 @@
 """
 IP mappings on the IP Addresses sync tab: the table previews the refusal, the writer enforces it.
 
-The tests drive real requests against real NetBox objects and real IP mappings. The snapshot is
-seeded in the cache the way a refresh leaves it; the server is a loopback LibreNMS.
+The tests drive real requests against real NetBox objects and real IP mappings. The source snapshot
+is seeded the way a refresh stores it; the server is a loopback LibreNMS.
 """
 
 import json
@@ -11,19 +11,19 @@ from html import unescape
 
 import pytest
 from django.contrib.messages import get_messages
-from django.core.cache import cache
 from django.urls import reverse
 from ipam.models import VRF, IPAddress
 
 from netbox_librenms_plugin.models import IPAddressMapping
-from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncTab, sync_snapshot_key
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot
 from netbox_librenms_plugin.tests.test_interface_rule_writes import _port
 
 pytestmark = pytest.mark.django_db
 
 SERVER_KEY = "default"
+LIBRENMS_ID = 4510
 PORT_ID = 7501
 LINK_LOCAL = "fe80::1/64"
 GLOBAL_V4 = "10.0.0.1/24"
@@ -31,27 +31,11 @@ GLOBAL_V4 = "10.0.0.1/24"
 
 def _row(ip_with_mask):
     address, _, length = ip_with_mask.partition("/")
-    return {
-        "ip_address": address,
-        "prefix_length": int(length),
-        "ip_with_mask": ip_with_mask,
-        "port_id": PORT_ID,
-        "interface_name": "eth0",
-    }
+    return ip_address_row(address, PORT_ID, int(length))
 
 
-def _seed(device, rows):
-    cache.set(
-        sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].source.data_type, SERVER_KEY),
-        {
-            "ip_addresses": rows,
-            "mgmt_ip": "",
-            "ports_by_id": {PORT_ID: _port(PORT_ID, "eth0")},
-            "bound_ports_by_id": {},
-            "interface_name_field": "ifName",
-        },
-        timeout=300,
-    )
+def _seed(device, rows, **snapshot):
+    seed_ip_snapshot(device, rows, snapshot.pop("ports", [_port(PORT_ID, "eth0")]), **snapshot)
 
 
 def _sync(client, device, vrfs):
@@ -114,7 +98,7 @@ def _verify(client, device, address, vrf):
 @pytest.fixture
 def device(client, live_librenms):
     """A device whose eth0 is bound to the LibreNMS port that carries both addresses."""
-    device = make_device("ip-rule-sync", librenms_cf={SERVER_KEY: {"id": 4510}})
+    device = make_device("ip-rule-sync", librenms_cf={SERVER_KEY: {"id": LIBRENMS_ID}})
     eth0 = make_interface(device, "eth0", iface_type="virtual")
     seed_mapping(eth0, SERVER_KEY, own=PORT_ID)
     client.force_login(make_superuser("ip-rule-sync-user"))
@@ -236,12 +220,14 @@ class TestTheWriterRefusesAnIgnoredAddress:
 class TestAVrfChangeRedecidesTheRow:
     def test_the_ignored_state_follows_the_chosen_vrf(self, client, device, blue, red):
         IPAddressMapping.objects.create(prefix="fe80::/10", vrf=blue)
-        # A refresh caches the enriched row, so the snapshot carries the pill of the VRF shown first.
-        row = _row(LINK_LOCAL) | {
-            "interface_url": device.interfaces.get(name="eth0").get_absolute_url(),
-            "ip_rule_block": {"kind": "ignore", "reason": "stale"},
-        }
-        _seed(device, [row])
+        # LibreNMS puts the port in a VRF named blue, so the row shows blue first and carries its pill.
+        _seed(
+            device,
+            [_row(LINK_LOCAL)],
+            ports=[{**_port(PORT_ID, "eth0"), "ifVrf": 3}],
+            vrfs=[{"vrf_id": 3, "device_id": LIBRENMS_ID, "vrf_name": blue.name}],
+        )
+        assert "Ignored" in _cell(_row_html(client, device, LINK_LOCAL), "status")
 
         into_blue = _verify(client, device, LINK_LOCAL, blue)
         into_red = _verify(client, device, LINK_LOCAL, red)
