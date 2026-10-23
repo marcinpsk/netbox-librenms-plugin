@@ -149,22 +149,18 @@ class TestResolvePostedServerKey:
 class TestGetLiveDeviceInfo:
     """get_live_device_info centralizes the write-path rule: always fetch uncached (use_cache=False)."""
 
-    def test_delegates_to_get_device_info_with_cache_bypassed(self):
+    def test_reads_the_device_from_librenms_past_the_render_cache(self, live_librenms):
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
-        calls = []
-
-        class _RecordingAPI:
-            # Default use_cache=True so a helper that forgot to pass the flag would record True.
-            def get_device_info(self, librenms_id, use_cache=True):
-                calls.append((librenms_id, use_cache))
-                return (True, {"sysName": "sw1", "device_id": librenms_id})
-
+        live_librenms.server.device_info_response(device_id=42, hostname="sw1-before")
+        assert live_librenms.api.get_device_info(42)[1]["hostname"] == "sw1-before"
+        live_librenms.server.device_info_response(device_id=42, hostname="sw1-now")
         view = DeviceInterfaceTableView()
-        view._librenms_api = _RecordingAPI()
+        view._librenms_api = live_librenms.api
 
-        result = view.get_live_device_info(42)
+        success, device_info = view.get_live_device_info(42)
 
-        # The whole point of the helper: every write path bypasses the possibly-stale render cache.
-        assert calls == [(42, False)]
-        assert result == (True, {"sysName": "sw1", "device_id": 42})
+        # A write path reads LibreNMS again instead of the cached render answer.
+        assert success is True
+        assert device_info["hostname"] == "sw1-now"
+        assert [request["path"] for request in live_librenms.server.requests] == ["/api/v0/devices/42"] * 2
