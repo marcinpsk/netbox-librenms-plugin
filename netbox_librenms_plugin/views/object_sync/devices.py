@@ -8,6 +8,8 @@ from ipam.models import VLAN, VLANGroup
 from utilities.permissions import get_permission_for_model
 from utilities.views import ViewTab, register_model_view
 
+from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.constants import PERM_VIEW_PLUGIN, is_supported_interface_name_field
 from netbox_librenms_plugin.interface_rules import interface_rules_for_request
 from netbox_librenms_plugin.interface_relationships import (
@@ -37,14 +39,13 @@ from netbox_librenms_plugin.utils import (
     get_tagged_vlan_css_class,
     get_untagged_vlan_css_class,
     get_vlan_sync_css_class,
-    is_valid_ports_payload,
     normalize_vlan_vid,
     render_vlan_sync_action,
     resolve_interface_row_device,
 )
 
 from ..base.cables_view import BaseCableTableView
-from ..base.interfaces_view import BaseInterfaceTableView
+from ..base.interfaces_view import BaseInterfaceTableView, read_interface_assessment
 from ..base.ip_addresses_view import BaseIPAddressTableView
 from ..base.librenms_sync_view import BaseLibreNMSSyncView
 from ..base.modules_view import BaseModuleTableView
@@ -55,7 +56,6 @@ from ..mixins import (
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
     VlanAssignmentMixin,
-    extract_cached_ports,
     parse_request_json,
     server_unavailable_json,
 )
@@ -227,16 +227,9 @@ class SingleInterfaceVerifyView(
         if primary_device is None:
             return JsonResponse({"status": "error", "message": "No sync device found for virtual chassis"}, status=404)
 
-        ports_cache_key = self.get_cache_key(primary_device, "ports", server_key)
-        # Shape-guard the cached entry: a truthy but malformed snapshot must degrade to the
-        # "Interface data not found" 404 below, not AttributeError-500 on .get("ports").
-        cached_data = extract_cached_ports(cache.get(ports_cache_key), ports_cache_key)
-
-        # Validate the shape before reading it: a truthy but malformed cache value (non-dict, or a
-        # dict without a list "ports") would otherwise raise on .get(...). Treat it as a cache miss
-        # and fall through to the controlled "not found" response, matching the base table view.
-        if is_valid_ports_payload(cached_data):
-            ports = cached_data.get("ports", [])
+        cached_data = read_interface_assessment(primary_device, server_key, interface_name_field)
+        if cached_data is not None:
+            ports = cached_data["ports"]
             unique_host_port_ids, unambiguous_name_port_ids = get_interface_port_identity_sets(
                 ports, interface_name_field
             )
@@ -339,7 +332,7 @@ class SingleInterfaceVerifyView(
                     posted_port_id,
                     interface_name_field,
                     server_key,
-                    snapshot_complete=not cached_data.get("oob_incomplete"),
+                    snapshot_complete=not cached_data["oob_incomplete"],
                 )
                 # The selected member owns the row now, so the rules read its platform.
                 port_data["rule_decision"] = interface_rules_for_request(request).check_interface_write(
@@ -827,9 +820,9 @@ class SaveVlanGroupOverridesView(
         if sync_device is None:
             sync_device = device
 
-        # Use the remaining TTL of the ports cache so both expire together; no snapshot answers "refresh first".
-        ports_ttl = cache.ttl(self.get_cache_key(sync_device, "ports", server_key))
-        if ports_ttl is None or ports_ttl <= 0:
+        # Use the remaining TTL of the interfaces snapshot so both expire together; no snapshot answers "refresh first".
+        ports_ttl = source_cache.remaining_ttl(sync_device, Resource.INTERFACES, server_key)
+        if ports_ttl is None:
             return JsonResponse(
                 {"status": "error", "message": "No cached port data; refresh interfaces first"},
                 status=400,

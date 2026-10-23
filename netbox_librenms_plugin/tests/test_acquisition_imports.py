@@ -1,8 +1,9 @@
 """
-Source acquisition runs without a request, session or user.
+Source acquisition and assessment run without a request, session or user.
 
-The check reads the direct imports of acquisition/ only. A module it imports, such as librenms_api,
-can still import django.core.cache. Acquisition reads cached identities through its shared reader.
+The check reads the direct imports of acquisition/ and assessment/ only. A module they import,
+such as librenms_api, can import django.core.cache. Acquisition reads cached identities through
+its shared reader.
 """
 
 import ast
@@ -10,7 +11,8 @@ from pathlib import Path
 
 import pytest
 
-ACQUISITION = Path(__file__).resolve().parents[1] / "acquisition"
+PACKAGE = Path(__file__).resolve().parents[1]
+CHECKED = sorted([*(PACKAGE / "acquisition").glob("*.py"), *(PACKAGE / "assessment").glob("*.py")])
 # The web adapter owns these: a background run has no request, no messages and no shared snapshot cache.
 FORBIDDEN = (
     "django.core.cache",
@@ -43,8 +45,8 @@ def _forbidden(source):
     )
 
 
-@pytest.mark.parametrize("path", sorted(ACQUISITION.glob("*.py")), ids=lambda path: path.name)
-def test_acquisition_imports_no_web_module(path):
+@pytest.mark.parametrize("path", CHECKED, ids=lambda path: f"{path.parent.name}/{path.name}")
+def test_acquisition_and_assessment_import_no_web_module(path):
     assert _forbidden(path.read_text()) == []
 
 

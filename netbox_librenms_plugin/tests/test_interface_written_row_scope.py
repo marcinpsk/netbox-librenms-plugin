@@ -38,7 +38,7 @@ from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
     synced_interface,
 )
 from netbox_librenms_plugin.models import InterfaceTypeMapping
-from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot
+from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, port_pair, port_vlans, seed_ip_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, messages_on
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
@@ -199,7 +199,7 @@ def test_the_relationship_pass_cannot_move_a_row_out_of_the_scope(client, attemp
     seed_ports(
         device,
         [sync_port(1, "eth1", mac="00:11:22:33:44:0c"), sync_port(100, "Po1", if_type="ieee8023adLag")],
-        lag_members={1: 100},
+        [port_pair(1, 100)],
     )
     client.force_login(_user(f"written-scope-lag-{member_exists}-user", Device, Interface, add=NO_LAG, change=NO_LAG))
 
@@ -226,7 +226,7 @@ def test_a_row_that_only_the_relationship_pass_wrote_is_checked_and_named(client
     seed_ports(
         device,
         [sync_port(1, "eth1"), sync_port(100, "Po1", if_type="ieee8023adLag")],
-        lag_members={1: 100},
+        [port_pair(1, 100)],
     )
     change = [IN_SCOPE, {"name": "Po1", "type": "other"}]
     client.force_login(_user("written-scope-aggregate-user", Device, Interface, change=change))
@@ -246,7 +246,7 @@ def test_the_relationship_pass_uses_the_selection_read_at_the_start_of_the_attem
     seed_ports(
         device,
         [sync_port(1, "eth1", alias="new"), sync_port(100, "Po1", if_type="ieee8023adLag")],
-        lag_members={1: 100},
+        [port_pair(1, 100)],
     )
     change = [
         {"description": "old", "lag__isnull": True},
@@ -271,7 +271,7 @@ def test_the_relationship_pass_takes_the_owner_visibility_from_the_selection(cli
     seed_ports(
         device,
         [sync_port(1, "eth1", alias="new"), sync_port(100, "Po1", if_type="ieee8023adLag")],
-        lag_members={1: 100},
+        [port_pair(1, 100)],
     )
     user = make_user_with_perms(
         "written-scope-owner-view-user",
@@ -301,7 +301,7 @@ def test_a_relationship_pass_that_cannot_lock_its_owner_is_not_a_silent_success(
     seed_ports(
         device,
         [sync_port(1, "eth1", alias="new"), sync_port(100, "Po1", if_type="ieee8023adLag")],
-        lag_members={1: 100},
+        [port_pair(1, 100)],
     )
     client.force_login(_user("written-scope-no-relationship-owner-user", Device, Interface))
     monkeypatch.setattr(interfaces_view, "_lock_relationship_scope", lambda obj, owner_queryset=None: (None, set()))
@@ -388,11 +388,11 @@ def test_a_sync_whose_rows_are_all_in_scope_syncs_every_row(client, attempts, fl
     seed_ports(
         device,
         [
-            sync_port(10, "eth0", alias="uplink", mac="00:11:22:33:44:0d", untagged_vlan=100, tagged_vlans=[]),
+            sync_port(10, "eth0", alias="uplink", mac="00:11:22:33:44:0d", **port_vlans("access", 100, [])),
             sync_port(11, "eth1"),
             sync_port(100, "Po1", if_type="ieee8023adLag"),
         ],
-        lag_members={11: 100},
+        [port_pair(11, 100)],
     )
     client.force_login(_user("written-scope-inside-user", Device, Interface, add=IN_SCOPE, change=IN_SCOPE))
 
@@ -452,7 +452,7 @@ def test_the_add_scope_is_checked_after_the_vlan_write(client):
     """Only the VLAN write sets the mode, so a check before it would name ``eth0`` too."""
     device = make_device("written-scope-vlan")
     VLAN.objects.create(vid=100, name="written-scope-vlan")
-    seed_ports(device, [sync_port(10, "eth0", untagged_vlan=100, tagged_vlans=[]), sync_port(11, "eth1")])
+    seed_ports(device, [sync_port(10, "eth0", **port_vlans("access", 100, [])), sync_port(11, "eth1")])
     client.force_login(_user("written-scope-vlan-user", Device, Interface, add={"mode": "access"}))
 
     response = _post_sync(client, device, "device", [10, 11])
@@ -467,7 +467,7 @@ def test_a_change_of_only_the_tagged_vlans_is_checked(client):
     device = make_device("written-scope-tagged")
     interface = synced_interface(device, "eth0", 10, mode="tagged")
     VLAN.objects.create(vid=100, name="written-scope-tagged")
-    seed_ports(device, [sync_port(10, "eth0", tagged_vlans=[100])])
+    seed_ports(device, [sync_port(10, "eth0", **port_vlans(None, None, [100]))])
     client.force_login(_user("written-scope-tagged-user", Device, Interface, change={"tagged_vlans__isnull": True}))
 
     response = _post_sync(client, device, "device", [10], exclude_columns=("mac_address",))
@@ -498,7 +498,7 @@ def test_a_final_state_in_the_change_scope_is_saved_through_an_intermediate_stat
     device = make_device("written-scope-final-state")
     interface = synced_interface(device, "eth0", 1, description="old", mode="access")
     vlan = VLAN.objects.create(vid=100, name="written-scope-final-state")
-    seed_ports(device, [sync_port(1, "eth0", alias="new", tagged_vlans=[100])])
+    seed_ports(device, [sync_port(1, "eth0", alias="new", **port_vlans(None, None, [100]))])
     change = [{"description": "old", "mode": "access"}, {"description": "new", "mode": "tagged"}]
     client.force_login(_user("written-scope-final-state-user", Device, Interface, change=change))
 
@@ -538,7 +538,7 @@ def test_the_relationship_pass_names_a_refused_row_only_when_the_user_may_view_i
     seed_ports(
         device,
         [sync_port(1, "eth1"), sync_port(100, "Po1", if_type="ieee8023adLag")],
-        lag_members={1: 100},
+        [port_pair(1, 100)],
     )
     change = [IN_SCOPE, {"type": "other"}]
     client.force_login(_user("written-scope-hidden-aggregate-user", Device, Interface, view=IN_SCOPE, change=change))
@@ -561,7 +561,7 @@ def _ignored_hidden_aggregate(device):
     """An ignore rule blocks the LibreNMS aggregate ``Po1``, which the hidden row holds."""
     bound_interface(device, "eth1", 1)
     bound_interface(device, "private-current", 100)
-    seed_ports(device, [sync_port(1, "eth1"), sync_port(100, "Po1", if_type="ieee8023adLag")], lag_members={1: 100})
+    seed_ports(device, [sync_port(1, "eth1"), sync_port(100, "Po1", if_type="ieee8023adLag")], [port_pair(1, 100)])
     InterfaceTypeMapping.objects.create(action=InterfaceTypeMapping.ACTION_IGNORE, name_pattern="^Po1$")
     return [1], ("vlans",)
 
@@ -570,7 +570,7 @@ def _hidden_aggregate_that_a_rule_keeps_off_lag(device):
     """A Set type rule gives the hidden aggregate a type that is not ``lag``, so the pass cannot promote it."""
     bound_interface(device, "eth1", 1)
     bound_interface(device, "private-current", 100)
-    seed_ports(device, [sync_port(1, "eth1"), sync_port(100, "Po1", if_type="ieee8023adLag")], lag_members={1: 100})
+    seed_ports(device, [sync_port(1, "eth1"), sync_port(100, "Po1", if_type="ieee8023adLag")], [port_pair(1, 100)])
     InterfaceTypeMapping.objects.create(name_pattern="^Po1$", netbox_type="1000base-t")
     return [1], ("vlans",)
 
@@ -579,7 +579,7 @@ def _hidden_member_of_an_aggregate_whose_type_is_excluded(device):
     """The hidden member keeps its name (the name is excluded), and the aggregate needs a type the sync may not write."""
     bound_interface(device, "private-member", 1)
     bound_interface(device, "eth-agg", 100)
-    seed_ports(device, [sync_port(1, "eth1"), sync_port(100, "Po1", if_type="ieee8023adLag")], lag_members={1: 100})
+    seed_ports(device, [sync_port(1, "eth1"), sync_port(100, "Po1", if_type="ieee8023adLag")], [port_pair(1, 100)])
     return [1], ("vlans", "name", "type")
 
 
@@ -587,7 +587,7 @@ def _hidden_child_that_a_rule_keeps_physical(device):
     """A Set type rule keeps the hidden child physical, so the pass cannot promote it under its hidden parent."""
     bound_interface(device, "private-child", 1, iface_type="1000base-t")
     bound_interface(device, "private-parent", 2, iface_type="1000base-t")
-    seed_ports(device, [sync_port(1, "eth1.100"), sync_port(2, "eth1")], sub_interfaces={1: 2})
+    seed_ports(device, [sync_port(1, "eth1.100"), sync_port(2, "eth1")], [port_pair(1, 2)])
     InterfaceTypeMapping.objects.create(name_pattern="^eth1\\.100$", netbox_type="1000base-t")
     return [1], ("vlans", "name")
 
@@ -596,7 +596,7 @@ def _hidden_child_whose_type_is_excluded(device):
     """The hidden child is physical, and the sync may not write the type that a parent link needs."""
     bound_interface(device, "private-child", 1, iface_type="1000base-t")
     bound_interface(device, "eth-parent", 2, iface_type="1000base-t")
-    seed_ports(device, [sync_port(1, "eth1.100"), sync_port(2, "eth1")], sub_interfaces={1: 2})
+    seed_ports(device, [sync_port(1, "eth1.100"), sync_port(2, "eth1")], [port_pair(1, 2)])
     return [1], ("vlans", "name", "type")
 
 

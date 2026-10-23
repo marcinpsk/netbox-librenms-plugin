@@ -52,7 +52,7 @@ from netbox_librenms_plugin.tests.mapping_fixtures import (
     mapping_from_change_record,
     seed_stored_mapping,
 )
-from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot
+from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, port_vlans, seed_ip_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, messages_on
 from netbox_librenms_plugin.views.mixins import VlanAssignmentMixin
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
@@ -180,7 +180,7 @@ def test_a_concurrent_change_to_unowned_columns_survives_the_vlan_write(client, 
     interface = synced_interface(device, "eth10", 10)
     vlan = VLAN.objects.create(vid=100, name=f"late-write-vlan-{commit_point}")
     concurrent = _unowned_columns(device)
-    seed_ports(device, [sync_port(10, "eth10", untagged_vlan=100, tagged_vlans=[])])
+    seed_ports(device, [sync_port(10, "eth10", **port_vlans("access", 100, []))])
     client.force_login(make_superuser("late-write-vlan-user"))
 
     with second_connection() as other:
@@ -282,7 +282,7 @@ def test_a_tagged_vlan_only_change_records_the_before_state(client, monkeypatch)
     old_vlan = VLAN.objects.create(vid=100, name="late-write-old-vlan")
     new_vlan = VLAN.objects.create(vid=200, name="late-write-new-vlan")
     interface.tagged_vlans.set([old_vlan])
-    seed_ports(device, [sync_port(10, "eth10", ifTrunk="dot1Q", tagged_vlans=[100, 200])])
+    seed_ports(device, [sync_port(10, "eth10", **port_vlans("tagged", None, [100, 200]))])
     client.force_login(make_superuser("late-write-tagged-only-user"))
     event_prechanges = []
     get_snapshots = events.get_snapshots
@@ -542,7 +542,7 @@ def test_a_row_that_leaves_the_change_scope_during_the_vlan_write(
     device = make_device(f"late-write-scope-vlan-{commit_point}", librenms_cf={SERVER_KEY: {"id": 9}})
     interface = synced_interface(device, "eth10", 10)
     VLAN.objects.create(vid=100, name=f"late-write-scope-vlan-{commit_point}")
-    seed_ports(device, [sync_port(10, "eth10", untagged_vlan=100, tagged_vlans=[])])
+    seed_ports(device, [sync_port(10, "eth10", **port_vlans("access", 100, []))])
     client.force_login(
         _user_who_may_change_only_eth_interfaces(
             f"late-write-scope-vlan-{commit_point}-user", ("view", VLAN), ("view", VLANGroup)

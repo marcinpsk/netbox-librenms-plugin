@@ -963,8 +963,8 @@ def test_recording_replay_treats_unencodable_names_as_non_matches(kind):
             },
         },
     }
-    patterns = {f"compiled_{name}_patterns": [] for name in ("lag", "sap", "bridge")}
-    patterns[f"compiled_{kind}_patterns"] = compile_lag_patterns({"lag_patterns": {"example": r"^Po\d+$"}})
+    patterns = {f"{name}_patterns": [] for name in ("lag", "sap", "bridge")}
+    patterns[f"{kind}_patterns"] = compile_lag_patterns({"lag_patterns": {"example": r"^Po\d+$"}})
     server = MockLibreNMSServer()
     server.start()
     try:
