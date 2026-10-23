@@ -25,7 +25,6 @@ class LibreNMSSyncConfig(PluginConfig):
         "netbox_librenms_plugin.middleware.RuleConfigurationErrorMiddleware",
     ]
     default_settings = {
-        "enable_caching": True,
         "verify_ssl": True,
         "interface_name_field": DEFAULT_INTERFACE_NAME_FIELD,
         # Cable-sync provenance (tag name/color, cable description) and serial sensor
@@ -57,6 +56,7 @@ class LibreNMSSyncConfig(PluginConfig):
             self._validate_multi_server_config(plugin_config["servers"])
         else:
             self._validate_legacy_config(plugin_config)
+        self._validate_cache_backend()
 
         # Auto-create the librenms_id custom field after migrations complete
         post_migrate.connect(
@@ -93,6 +93,33 @@ class LibreNMSSyncConfig(PluginConfig):
                 record_tagged_vlan_change,
                 sender=model.tagged_vlans.through,
                 dispatch_uid=f"netbox_librenms_plugin_written_tagged_vlans_{model._meta.label_lower}",
+            )
+
+    def _validate_cache_backend(self):
+        """
+        Refuse a default cache that cannot carry the sync-tab snapshots.
+
+        The snapshots rely on django-redis key expiry and pattern deletes, and a failed write must not look
+        like a missing snapshot.
+
+        Raises:
+            ImproperlyConfigured: If the default cache is not django-redis, or ignores its Redis errors.
+
+        """
+        from django.conf import settings
+        from django.core.cache import caches
+        from django_redis.cache import RedisCache
+
+        if not isinstance(caches["default"], RedisCache):
+            raise ImproperlyConfigured(
+                f"Plugin {self.name} requires the default cache to be django-redis "
+                f"(django_redis.cache.RedisCache), not {settings.CACHES['default']['BACKEND']}."
+            )
+        options = settings.CACHES["default"].get("OPTIONS", {})
+        if options.get("IGNORE_EXCEPTIONS") or getattr(settings, "DJANGO_REDIS_IGNORE_EXCEPTIONS", False):
+            raise ImproperlyConfigured(
+                f"Plugin {self.name} requires a default cache that reports its Redis errors: "
+                "unset IGNORE_EXCEPTIONS and DJANGO_REDIS_IGNORE_EXCEPTIONS."
             )
 
     def _validate_multi_server_config(self, servers_config):
