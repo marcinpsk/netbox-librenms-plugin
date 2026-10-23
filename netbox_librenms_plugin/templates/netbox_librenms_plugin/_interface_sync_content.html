@@ -17,13 +17,6 @@
 </div>
 {% endif %}
 
-{% if interface_sync.relationship_data_incomplete %}
-<div class="alert alert-warning d-flex align-items-center noprint" role="alert">
-    <i class="mdi mdi-alert me-2"></i>
-    <div>Interface relationship data could not be fetched from LibreNMS on the last refresh, so the Relationships column may be incomplete. Refresh again to retry.</div>
-</div>
-{% endif %}
-
 {% include "netbox_librenms_plugin/inc/_relationship_diagnostics.html" with diagnostics=interface_sync.relationship_diagnostics %}
 
 {% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with owner=interface_sync.object content_id="interface-sync-content" server_key=interface_sync.server_key filters=interface_sync.filters prefix="interfaces_" tab="interfaces" section_id="interfaceFilterSection" label="Filter interfaces" %}

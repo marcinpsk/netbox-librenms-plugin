@@ -15,6 +15,7 @@ from django_htmx.middleware import HtmxDetails
 from django.urls import reverse
 from ipam.models import IPAddress, VLAN
 
+from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.sync_cache import _ACKNOWLEDGED_REVISIONS_SESSION_KEY as SYNC_CACHE_ACKNOWLEDGED_SESSION_KEY
 from netbox_librenms_plugin.sync_cache import (
@@ -45,6 +46,8 @@ from netbox_librenms_plugin.tests.conftest import (
 from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change, seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     ip_address_row,
+    port_pair,
+    seed_interfaces_snapshot,
     seed_ip_snapshot,
     seed_source_snapshot,
     stored_source_value,
@@ -109,12 +112,6 @@ def _cache_key(data_type, obj, server_key):
     from netbox_librenms_plugin.sync_cache import sync_snapshot_key
 
     return sync_snapshot_key(obj, data_type, server_key)
-
-
-def _last_fetched_key(data_type, obj, server_key):
-    from netbox_librenms_plugin.sync_cache import sync_last_fetched_key
-
-    return sync_last_fetched_key(obj, data_type, server_key)
 
 
 def _vlan_overrides_key(obj, server_key):
@@ -556,24 +553,20 @@ def test_an_attribute_only_interface_change_schedules_the_cache_transition(
     interface = Interface.objects.create(
         device=device, name="Ethernet1/9", type="1000base-t", description="stale description"
     )
-    _seed_snapshot(
-        "ports",
+    seed_interfaces_snapshot(
         device,
-        "primary",
-        {
-            "ports": [
-                {
-                    **_PORT_KEYS_UNSET,
-                    "port_id": 7009,
-                    "ifName": "Ethernet1/9",
-                    "ifDescr": "Ethernet1/9",
-                    "ifAlias": "fresh description",
-                    "ifType": "ethernetCsmacd",
-                    "ifAdminStatus": "up",
-                }
-            ],
-            "port_stack_relationships": {},
-        },
+        [
+            {
+                **_PORT_KEYS_UNSET,
+                "port_id": 7009,
+                "ifName": "Ethernet1/9",
+                "ifDescr": "Ethernet1/9",
+                "ifAlias": "fresh description",
+                "ifType": "ethernetCsmacd",
+                "ifAdminStatus": "up",
+            }
+        ],
+        server_key="primary",
     )
     client.force_login(make_superuser("cache-attr-only-user"))
 
@@ -614,8 +607,9 @@ def test_committed_interface_sync_invalidates_only_mapped_page_and_shared_snapsh
     seed_stored_mapping(page_device, {"primary": {"id": 41}}, save=True)
     seed_stored_mapping(secondary_owner, {"secondary": {"id": 42}}, save=True)
 
-    source_payload = {
-        "ports": [
+    source = seed_interfaces_snapshot(
+        page_device,
+        [
             {
                 **_PORT_KEYS_UNSET,
                 "port_id": 7001,
@@ -625,15 +619,12 @@ def test_committed_interface_sync_invalidates_only_mapped_page_and_shared_snapsh
                 "ifAdminStatus": "up",
             }
         ],
-        "port_stack_relationships": {},
-    }
-    _seed_snapshot("ports", page_device, "primary", source_payload)
-    cache.set(_last_fetched_key("ports", page_device, "primary"), "source-time", timeout=300)
+        server_key="primary",
+    )
     cache.set(_vlan_overrides_key(page_device, "primary"), {"100": "1"}, timeout=300)
     for data_type in ("links", "inventory", "vlans"):
         _seed_snapshot(data_type, page_device, "primary")
     seed_ip_snapshot(page_device, [], server_key="primary")
-    cache.set(_last_fetched_key("vlans", page_device, "primary"), "vlan-time", timeout=300)
 
     for data_type in ("ports", "links", "inventory"):
         _seed_snapshot(data_type, secondary_owner, "secondary")
@@ -641,9 +632,7 @@ def test_committed_interface_sync_invalidates_only_mapped_page_and_shared_snapsh
     for subject in (page_device, sibling):
         _seed_snapshot("vlans", subject, "secondary")
         seed_ip_snapshot(subject, [], server_key="secondary")
-    cache.set(_last_fetched_key("ports", secondary_owner, "secondary"), "secondary-time", timeout=300)
     cache.set(_vlan_overrides_key(secondary_owner, "secondary"), {"200": "2"}, timeout=300)
-    cache.set(_last_fetched_key("vlans", page_device, "secondary"), "secondary-vlan-time", timeout=300)
 
     for data_type in ("ports", "links", "inventory", "vlans"):
         _seed_snapshot(data_type, page_device, "unmapped")
@@ -666,8 +655,7 @@ def test_committed_interface_sync_invalidates_only_mapped_page_and_shared_snapsh
         )
 
     assert response.status_code == 302
-    assert cache.get(_cache_key("ports", page_device, "primary")) == source_payload
-    assert cache.get(_last_fetched_key("ports", page_device, "primary")) == "source-time"
+    assert source_cache.read(page_device, Resource.INTERFACES, "primary") == source
     assert cache.get(_vlan_overrides_key(page_device, "primary")) == {"100": "1"}
     for data_type in ("links", "ip_addresses", "inventory", "vlans"):
         assert cache.get(_cache_key(data_type, page_device, "primary")) is None
@@ -740,23 +728,20 @@ def test_a_sibling_refresh_clears_the_shared_tab_block_on_every_member(
     local.save(update_fields=["custom_field_data"])
     remote.save(update_fields=["custom_field_data"])
 
-    ports_payload = {
-        "ports": [
-            {
-                **_PORT_KEYS_UNSET,
-                "port_id": 7481,
-                "ifName": local.name,
-                "ifDescr": local.name,
-                "ifType": "ethernetCsmacd",
-                # Only a real field change makes the sync a mutation, and only a mutation
-                # invalidates the shared snapshot this test is about.
-                "ifAlias": "fresh description",
-                "ifAdminStatus": "up",
-            }
-        ],
-        "port_stack_relationships": {},
-    }
-    _seed_snapshot("ports", owner, "primary", ports_payload)
+    ports = [
+        {
+            **_PORT_KEYS_UNSET,
+            "port_id": 7481,
+            "ifName": local.name,
+            "ifDescr": local.name,
+            "ifType": "ethernetCsmacd",
+            # Only a real field change makes the sync a mutation, and only a mutation
+            # invalidates the shared snapshot this test is about.
+            "ifAlias": "fresh description",
+            "ifAdminStatus": "up",
+        }
+    ]
+    seed_interfaces_snapshot(sibling, ports, server_key="primary")
     _seed_snapshot("links", owner, "primary")
     client.force_login(make_superuser("cache-shared-state-user"))
 
@@ -803,7 +788,7 @@ def test_a_sibling_refresh_clears_the_shared_tab_block_on_every_member(
             ],
         },
     )
-    primary_librenms.register("/api/v0/devices/61/ports", {"status": "ok", "ports": ports_payload["ports"]})
+    primary_librenms.register("/api/v0/devices/61/ports", {"status": "ok", "ports": ports})
 
     # The owner refreshes the shared snapshot both members read.
     refresh_url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", kwargs={"pk": owner.pk})
@@ -821,8 +806,7 @@ def test_fully_skipped_interface_request_preserves_all_snapshots(client, setting
     _configure_servers(settings)
     _chassis, (device, _sibling) = make_virtual_chassis_members("cache-noop", count=2)
     seed_stored_mapping(device, {"primary": {"id": 51}}, save=True)
-    source_payload = {"ports": [], "port_stack_relationships": {}}
-    _seed_snapshot("ports", device, "primary", source_payload)
+    source = seed_interfaces_snapshot(device, [], server_key="primary")
     ip_snapshot = seed_ip_snapshot(device, [ip_address_row("198.18.20.10", 7010)], server_key="primary")
 
     client.force_login(make_superuser("cache-noop-user"))
@@ -840,7 +824,7 @@ def test_fully_skipped_interface_request_preserves_all_snapshots(client, setting
         )
 
     assert response.status_code == 302
-    assert cache.get(_cache_key("ports", device, "primary")) == source_payload
+    assert source_cache.read(device, Resource.INTERFACES, "primary") == source
     assert cache.get(_cache_key("ip_addresses", device, "primary")) == ip_snapshot.to_payload()
     coordinator = SyncCacheConsistency(device)
     assert cache.get(coordinator.state_key(SyncTab.INTERFACES, "primary")) is None
@@ -855,11 +839,7 @@ def test_selected_interface_that_already_matches_preserves_other_snapshots(
     device = make_device("cache-interface-unchanged", librenms_cf={"primary": {"id": 52}})
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(interface, "primary", own=7002)
-    source_payload = {
-        "ports": [{"port_id": 7002, "ifName": interface.name}],
-        "port_stack_relationships": {},
-    }
-    _seed_snapshot("ports", device, "primary", source_payload)
+    seed_interfaces_snapshot(device, [{"port_id": 7002, "ifName": interface.name}], server_key="primary")
     ip_snapshot = seed_ip_snapshot(
         device,
         [ip_address_row("198.18.20.11", 7002)],
@@ -996,17 +976,12 @@ def test_htmx_mutation_does_not_repeat_cache_notice_on_next_navigation(client, s
     seed_mapping(child, "primary", own=7112, save=False)
     parent.save(update_fields=["custom_field_data"])
     child.save(update_fields=["custom_field_data"])
-    ports_payload = {
-        "ports": [
-            {**_PORT_KEYS_UNSET, "port_id": 7111, "ifName": parent.name},
-            {**_PORT_KEYS_UNSET, "port_id": 7112, "ifName": child.name},
-        ],
-        "port_stack_relationships": {
-            "lag_members": {},
-            "sub_interfaces": {7112: 7111},
-        },
-    }
-    _seed_snapshot("ports", device, "primary", ports_payload)
+    # The child name is the parent name plus ".100", which makes it a sub-interface.
+    ports = [
+        {**_PORT_KEYS_UNSET, "port_id": 7111, "ifName": parent.name},
+        {**_PORT_KEYS_UNSET, "port_id": 7112, "ifName": child.name},
+    ]
+    seed_interfaces_snapshot(device, ports, [port_pair(7112, 7111)], server_key="primary")
     seed_ip_snapshot(device, [], server_key="primary")
     client.force_login(make_superuser("cache-parent-single-notice-user"))
     sync_url = reverse(
@@ -1793,14 +1768,11 @@ def test_inline_relationship_noop_preserves_other_snapshots(
     parent.save(update_fields=["custom_field_data"])
     child.parent = parent
     child.save(update_fields=["custom_field_data", "parent"])
-    ports_payload = {
-        "ports": [
-            {**_PORT_KEYS_UNSET, "port_id": 7441, "ifName": parent.name},
-            {**_PORT_KEYS_UNSET, "port_id": 7442, "ifName": child.name},
-        ],
-        "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {7442: 7441}},
-    }
-    _seed_snapshot("ports", device, "primary", ports_payload)
+    ports = [
+        {**_PORT_KEYS_UNSET, "port_id": 7441, "ifName": parent.name},
+        {**_PORT_KEYS_UNSET, "port_id": 7442, "ifName": child.name},
+    ]
+    seed_interfaces_snapshot(device, ports, [port_pair(7442, 7441)], server_key="primary")
     seed_ip_snapshot(device, [], server_key="primary")
     client.force_login(make_superuser("cache-parent-noop-user"))
     url = reverse(
@@ -2036,6 +2008,7 @@ def test_interface_refresh_without_a_cached_snapshot_reports_failure_not_success
     user = make_superuser("cache-interface-nosnap-user")
     client.force_login(user)
     primary_librenms.register("/api/v0/devices/663/ports", {"status": "ok", "ports": []})
+    primary_librenms.register("/api/v0/devices/663/port_stack", {"status": "ok", "mappings": []})
     skipped = _drop_snapshot_write(monkeypatch, device, SyncTab.INTERFACES)
 
     url = reverse("plugins:netbox_librenms_plugin:device_interface_sync", kwargs={"pk": device.pk})
@@ -2578,7 +2551,7 @@ def test_cache_get_endpoint_requires_plugin_and_object_view_permissions(client, 
 
     _configure_servers(settings)
     device = make_device("cache-read-permissions", librenms_cf={"primary": {"id": 657}})
-    _seed_snapshot("ports", device, "primary", {"ports": [], "port_stack_relationships": {}})
+    seed_interfaces_snapshot(device, [], server_key="primary")
     plugin_model = django_apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
     read_only_user = make_user_with_perms(
         f"cache-read-{route_name}",
@@ -2640,19 +2613,14 @@ def test_fragment_restores_from_cache_without_calling_librenms(client, settings,
     """The fragment endpoint must rebuild comparison HTML from cache and ORM only."""
     _configure_servers(settings)
     device = make_device("cache-fragment", librenms_cf={"primary": {"id": 65}})
-    payload = {
-        "ports": [
-            {
-                "port_id": 7301,
-                "ifName": "Ethernet1",
-                "ifDescr": "Access Ethernet1",
-                "ifType": "ethernetCsmacd",
-                "ifAdminStatus": "up",
-            }
-        ],
-        "port_stack_relationships": {},
+    port = {
+        "port_id": 7301,
+        "ifName": "Ethernet1",
+        "ifDescr": "Access Ethernet1",
+        "ifType": "ethernetCsmacd",
+        "ifAdminStatus": "up",
     }
-    _seed_snapshot("ports", device, "primary", payload)
+    seed_interfaces_snapshot(device, [port], server_key="primary")
     client.force_login(make_superuser("cache-fragment-user"))
     url = reverse(
         "plugins:netbox_librenms_plugin:sync_cache_fragment",
@@ -2681,19 +2649,16 @@ def test_status_fragment_and_invalidated_tab_navigation_never_call_librenms(
     _configure_servers(settings)
     device = make_device("cache-browser-flows", librenms_cf={"primary": {"id": 654}})
     _serve_device_info(primary_librenms, 654, device.name, "Flows Hardware 654")
-    ports_payload = {
-        "ports": [
-            {
-                "port_id": 7541,
-                "ifName": "Ethernet1",
-                "ifDescr": "Access Ethernet1",
-                "ifType": "ethernetCsmacd",
-                "ifAdminStatus": "up",
-            }
-        ],
-        "port_stack_relationships": {},
-    }
-    _seed_snapshot("ports", device, "primary", ports_payload)
+    ports = [
+        {
+            "port_id": 7541,
+            "ifName": "Ethernet1",
+            "ifDescr": "Access Ethernet1",
+            "ifType": "ethernetCsmacd",
+            "ifAdminStatus": "up",
+        }
+    ]
+    seed_interfaces_snapshot(device, ports, server_key="primary")
     seed_ip_snapshot(device, [], server_key="primary")
     coordinator = SyncCacheConsistency(device)
     with django_capture_on_commit_callbacks(execute=True):
@@ -2767,20 +2732,17 @@ def test_source_snapshot_expiry_before_commit_callback_is_not_reversed(
     """A successful mutation must not restore or extend a source snapshot that expires in flight."""
     _configure_servers(settings)
     device = make_device("cache-source-expiry", librenms_cf={"primary": {"id": 661}})
-    ports_payload = {
-        "ports": [
-            {
-                **_PORT_KEYS_UNSET,
-                "port_id": 7361,
-                "ifName": "Ethernet1",
-                "ifDescr": "Ethernet1",
-                "ifType": "ethernetCsmacd",
-                "ifAdminStatus": "up",
-            }
-        ],
-        "port_stack_relationships": {},
-    }
-    _seed_snapshot("ports", device, "primary", ports_payload)
+    ports = [
+        {
+            **_PORT_KEYS_UNSET,
+            "port_id": 7361,
+            "ifName": "Ethernet1",
+            "ifDescr": "Ethernet1",
+            "ifType": "ethernetCsmacd",
+            "ifAdminStatus": "up",
+        }
+    ]
+    seed_interfaces_snapshot(device, ports, server_key="primary")
     _seed_snapshot("links", device, "primary")
     source_key = _cache_key("ports", device, "primary")
     client.force_login(make_superuser("cache-source-expiry-user"))
@@ -2896,21 +2858,18 @@ def test_cache_mutation_resolves_the_shared_owner_once_per_server(
     seed_stored_mapping(page_device, {"primary": {"id": 61}}, save=True)
     interface = make_interface(page_device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(interface, "primary", own=7101)
-    source_payload = {
-        # ifAlias: only a real field change makes the sync a mutation, and only a mutation
-        # reaches the post-commit cleanup this test counts.
-        "ports": [
-            {
-                **_PORT_KEYS_UNSET,
-                "port_id": 7101,
-                "ifName": interface.name,
-                "ifDescr": interface.name,
-                "ifAlias": "fresh description",
-            }
-        ],
-        "port_stack_relationships": {},
-    }
-    _seed_snapshot("ports", page_device, "primary", source_payload)
+    # ifAlias: only a real field change makes the sync a mutation, and only a mutation
+    # reaches the post-commit cleanup this test counts.
+    ports = [
+        {
+            **_PORT_KEYS_UNSET,
+            "port_id": 7101,
+            "ifName": interface.name,
+            "ifDescr": interface.name,
+            "ifAlias": "fresh description",
+        }
+    ]
+    seed_interfaces_snapshot(page_device, ports, server_key="primary")
     for data_type in ("links", "inventory", "vlans"):
         _seed_snapshot(data_type, page_device, "primary")
     seed_ip_snapshot(page_device, [], server_key="primary")

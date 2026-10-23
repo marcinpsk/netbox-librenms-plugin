@@ -13,6 +13,7 @@ from django.conf import settings
 from django.test import override_settings
 
 from netbox_librenms_plugin.interface_relationships import resolve_port_relationships
+from netbox_librenms_plugin.tests.conftest import name_rules
 
 
 def _make_api(url, token="test-token"):
@@ -162,7 +163,7 @@ class TestLibreNMSAPIPortStack:
         assert ports_ok is True
         assert stack_ok is True
 
-        relationships = resolve_port_relationships(ports_data["ports"], port_stack, lag_patterns={})
+        relationships = resolve_port_relationships(ports_data["ports"], port_stack, **name_rules())
 
         assert relationships["lag_members"] == {101: 102}
 

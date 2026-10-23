@@ -8,7 +8,6 @@ import pytest
 from dcim.models import Device, Interface
 from django.contrib.auth import get_user_model
 from django.contrib.messages import get_messages
-from django.core.cache import cache
 from django.test import RequestFactory
 from django.urls import reverse
 from ipam.models import IPAddress
@@ -17,11 +16,11 @@ from netbox.config import get_config
 from netbox_librenms_plugin.tests._html_helpers import open_tags
 from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_device, make_interface
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_interfaces_snapshot
 from netbox_librenms_plugin.tests.test_ip_address_sync_safety import _configure_test_server, _serve_librenms_ip_rows
 from netbox_librenms_plugin.utils import resolve_create_missing_interfaces, resolve_set_primary_ip
 from netbox_librenms_plugin.views.imports.actions import SaveUserPrefView
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
-from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
 PREFERENCE = "plugins.netbox_librenms_plugin.interface_sync_options"
 SERVER_KEY = "default"
@@ -63,8 +62,7 @@ def _seed(device):
         "ifPhysAddress": "",
         "ifAlias": "",
     }
-    payload = {"ports": [port], "port_stack_relationships": {}}
-    cache.set(SyncInterfacesView().get_cache_key(device, "ports", SERVER_KEY), payload, timeout=300)
+    seed_interfaces_snapshot(device, [port], server_key=SERVER_KEY)
 
 
 def _tab(client, device):

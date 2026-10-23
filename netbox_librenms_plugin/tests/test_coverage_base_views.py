@@ -13,7 +13,13 @@ from netbox_librenms_plugin.tests.conftest import (
     map_device_to_librenms,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
-from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot, stored_source_value
+from netbox_librenms_plugin.tests.source_snapshot_helpers import (
+    interface_rows,
+    ip_address_row,
+    seed_interfaces_snapshot,
+    seed_ip_snapshot,
+    stored_source_value,
+)
 from netbox_librenms_plugin.tests.view_test_helpers import make_request
 from netbox_librenms_plugin.tests.view_test_helpers import post as view_post
 
@@ -175,7 +181,7 @@ class TestCableHTTPAndORM:
 
         view = _view(DeviceCableTableView, live_librenms)
 
-        assert view.get_ports_data(_mapped_device("cable-no-resolved-id")) == {"ports": []}
+        assert view.get_ports_data() == {"ports": []}
         assert live_librenms.server.requests == []
 
     def test_links_and_names_are_loaded_over_real_http(self, live_librenms):
@@ -303,17 +309,17 @@ class TestCableHTTPAndORM:
         assert rows[0]["cable_status"] == "Cable Found"
         assert rows[0]["cable_url"].endswith(f"/dcim/cables/{cable.pk}/")
 
-    def test_cached_ports_are_read_without_an_http_request(self, live_librenms):
+    def test_host_ports_are_fetched_and_the_interfaces_snapshot_is_not_read(self, live_librenms):
         from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
 
-        device = _mapped_device("cable-ports-cache")
+        device = _mapped_device("cable-ports-fetch")
+        seed_interfaces_snapshot(device, [{"port_id": 999, "ifName": "snapshot-only"}])
+        ports = _register_ports(live_librenms)
         view = _view(DeviceCableTableView, live_librenms)
         view.librenms_id = 42
-        cache_key = view.get_cache_key(device, "ports", "default")
-        cache.set(cache_key, {"status": "ok", "ports": [{"port_id": 101}]}, timeout=300)
 
-        assert view.get_ports_data(device, "default")["ports"] == [{"port_id": 101}]
-        assert live_librenms.server.requests == []
+        assert [port["port_id"] for port in view.get_ports_data()["ports"]] == [port["port_id"] for port in ports]
+        assert [item["path"] for item in live_librenms.server.requests] == ["/api/v0/devices/42/ports"]
 
     def test_exact_name_fallback_accepts_a_fqdn(self, live_librenms):
         from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
@@ -372,16 +378,16 @@ class TestInterfaceViewWithRealObjects:
 
         response = view_post(view, request, pk=device.pk)
 
-        cached = cache.get(view.get_cache_key(device, "ports", "default"))
+        snapshot = source_cache.read(device, Resource.INTERFACES, "default")
         assert response.status_code == 200
-        assert cached["ports"][0]["port_id"] == 101
-        assert cached["ports"][0]["_source"] == "main"
-        # The refresh reads the device OS and the port stack too: an unclassified stack pair has
+        assert snapshot.value(Resource.INTERFACES, "ports")[0]["port_id"] == 101
+        assert interface_rows(device)["ports"][0]["_source"] == "main"
+        # The refresh reads the port stack and the device OS too: an unclassified stack pair has
         # no name or ifType signal in the ports payload, so neither read can be gated on one.
         assert [item["path"] for item in live_librenms.server.requests] == [
             "/api/v0/devices/42/ports",
-            "/api/v0/devices/42",
             "/api/v0/devices/42/port_stack",
+            "/api/v0/devices/42",
         ]
 
     def test_cached_snapshot_builds_a_real_table_without_http(self, live_librenms):
@@ -393,7 +399,7 @@ class TestInterfaceViewWithRealObjects:
         ports = _register_ports(live_librenms)
         request = _request()
         view = _view(DeviceInterfaceTableView, live_librenms, request)
-        cache.set(view.get_cache_key(device, "ports", "default"), {"status": "ok", "ports": ports}, timeout=300)
+        seed_interfaces_snapshot(device, ports)
 
         context = view.get_context_data(request, device, "ifName", server_key="default")
 
@@ -418,7 +424,7 @@ class TestInterfaceViewWithRealObjects:
         cache.set(librenms_id_cache_key(renamed, "default"), 102, timeout=300)
         request = _request()
         view = _view(DeviceInterfaceTableView, live_librenms, request)
-        cache.set(view.get_cache_key(device, "ports", "default"), {"status": "ok", "ports": ports}, timeout=300)
+        seed_interfaces_snapshot(device, ports)
         id_reads = []
         real_get, real_get_many = librenms_api.cache.get, librenms_api.cache.get_many
 
@@ -509,12 +515,12 @@ class TestInterfaceViewWithRealObjects:
 
         visible_row = interface_row(visible)
         hidden_row = interface_row(hidden)
-        # The refresh reads the device OS and the port stack too: an unclassified stack pair has
+        # The refresh reads the port stack and the device OS too: an unclassified stack pair has
         # no name or ifType signal in the ports payload, so neither read can be gated on one.
         assert [item["path"] for item in live_librenms.server.requests] == [
             "/api/v0/devices/42/ports",
-            "/api/v0/devices/42",
             "/api/v0/devices/42/port_stack",
+            "/api/v0/devices/42",
         ]
         assert '<span class="text-success">Enabled</span>' in visible_row
         assert '<span class="text-success">Enabled</span>' not in hidden_row
@@ -791,12 +797,11 @@ class TestVlanGroupOverrideScope:
 def test_oob_name_collision_check_rejects_unhashable_names(live_librenms, name):
     from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
-    device = _mapped_device("oob-malformed-name")
+    device = seed_mapping(_mapped_device("oob-malformed-name"), "default", oob=43)
     request = _request()
     view = _view(DeviceInterfaceTableView, live_librenms, request)
     ports = _register_ports(live_librenms)
-    ports.append({**ports[0], "port_id": 102, "_source": "oob", "ifName": name})
-    cache.set(view.get_cache_key(device, "ports", "default"), {"status": "ok", "ports": ports}, timeout=300)
+    seed_interfaces_snapshot(device, ports, oob_ports=[{**ports[0], "port_id": 102, "ifName": name}])
     context = view.get_context_data(request, device, "ifName", server_key="default")
     assert context.get("table") is not None, context.get("error")
     assert len(context["table"].rows) == 2

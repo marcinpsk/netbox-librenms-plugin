@@ -1,7 +1,6 @@
 """
 Real tests for the shared mixin helpers consolidated during the develop-hardening pass.
 
-- ``extract_cached_ports`` now reuses ``is_list_of_dicts`` for its ports-shape check (B7).
 - ``LibreNMSAPIMixin.resolve_requested_server_key`` centralises the "configured-string-key-or
   -fallback" rule the device verify/render views each open-coded (B12).
 
@@ -22,42 +21,6 @@ def _configured_servers(*keys):
         key: {"librenms_url": f"https://{key}.example.test", "api_token": "token"} for key in keys
     }
     return override_settings(PLUGINS_CONFIG=plugin_config)
-
-
-class TestExtractCachedPortsShapeCheck:
-    """extract_cached_ports must accept a valid ports payload and treat any malformed shape as a miss."""
-
-    def _fn(self):
-        from netbox_librenms_plugin.views.mixins import extract_cached_ports
-
-        return extract_cached_ports
-
-    def test_valid_payload_returned_unchanged(self):
-        payload = {"ports": [{"port_id": 1, "ifName": "eth0"}]}
-        assert self._fn()(payload) is payload
-
-    def test_empty_ports_list_is_valid(self):
-        # An empty list is a device that legitimately has no ports — still a valid payload.
-        payload = {"ports": []}
-        assert self._fn()(payload) is payload
-
-    def test_non_dict_cached_value_is_miss(self):
-        assert self._fn()(["legacy", "bare", "list"]) is None
-
-    def test_non_list_ports_is_miss(self):
-        assert self._fn()({"ports": "not-a-list"}) is None
-
-    def test_non_dict_port_row_is_miss_and_purges_cache(self):
-        from django.core.cache import cache as real_cache
-
-        key = "test-b7-extract-cached-ports"
-        bad = {"ports": [{"port_id": 1}, "not-a-dict"]}
-        real_cache.set(key, bad, timeout=60)
-        try:
-            assert self._fn()(bad, cache_key=key) is None
-            assert real_cache.get(key) is None  # the corrupt entry is purged, not re-served
-        finally:
-            real_cache.delete(key)
 
 
 @pytest.mark.django_db
