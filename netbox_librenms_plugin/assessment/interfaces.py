@@ -124,14 +124,14 @@ def assess_interfaces(snapshot, interface_name_field):
 
     Host rows come first, then the OOB controller's rows. The relationships come from the host rows
     only, with the name rules stored now for the device's OS. A blocked OOB scope leaves the OOB rows
-    out and sets ``oob_incomplete``, so the shared-LOM state is unknown.
+    out and sets ``oob_incomplete``, so the shared-LOM state is unknown; ``oob_blockers`` names the failed sources.
 
     Args:
         snapshot (SourceSnapshot): A stored snapshot that holds the interfaces resource.
         interface_name_field (str): The port field that names an interface.
 
     Returns:
-        dict: ``ports``, ``port_stack_relationships`` and ``oob_incomplete``.
+        dict: ``ports``, ``port_stack_relationships``, ``oob_incomplete`` and ``oob_blockers``.
 
     Raises:
         ValueError: The snapshot's host scope is blocked, so it holds no host rows to assess.
@@ -143,8 +143,8 @@ def assess_interfaces(snapshot, interface_name_field):
         raise ValueError(f"The interfaces snapshot has no usable host scope: {blocked['host'][0].message}")
     host_ports = _rows(snapshot.value(resource, "ports"), interface_name_field, MAIN_INVENTORY_SOURCE)
     oob_ports = []
-    oob_incomplete = snapshot.resources[resource].oob is not None and "oob" in blocked
-    if snapshot.resources[resource].oob is not None and not oob_incomplete:
+    oob_blockers = tuple(blocker.message for blocker in blocked.get("oob", ()))
+    if snapshot.resources[resource].oob is not None and not oob_blockers:
         oob_ports = _rows(
             snapshot.value(resource, "ports", MappingRole.OOB), interface_name_field, OOB_INVENTORY_SOURCE
         )
@@ -164,5 +164,6 @@ def assess_interfaces(snapshot, interface_name_field):
     return {
         "ports": host_ports + oob_ports,
         "port_stack_relationships": relationships,
-        "oob_incomplete": oob_incomplete,
+        "oob_incomplete": bool(oob_blockers),
+        "oob_blockers": oob_blockers,
     }

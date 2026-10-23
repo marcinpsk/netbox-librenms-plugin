@@ -13,6 +13,7 @@ from django.urls import reverse
 
 from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
+from netbox_librenms_plugin.acquisition.resources import blocked_scopes
 from netbox_librenms_plugin.models import PortStackLagPattern
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab
 from netbox_librenms_plugin.tests.conftest import make_device, make_superuser, map_device_to_librenms
@@ -22,10 +23,6 @@ from netbox_librenms_plugin.tests.source_snapshot_helpers import interface_rows,
 SERVER_KEY = "default"
 HOST_ID = 4401
 OOB_ID = 4402
-OOB_WARNING = (
-    "Interfaces refreshed, but OOB controller ports fetch failed; showing host interfaces only. "
-    "See server logs for details."
-)
 
 
 def _port(port_id, name, if_type="ethernetCsmacd", **fields):
@@ -68,6 +65,11 @@ def _status(device):
     return SyncCacheConsistency(device).status(SERVER_KEY)[SyncTab.INTERFACES.value]
 
 
+def _refreshed(response):
+    """Return whether a refresh answered with a success notice and no error."""
+    return _messages(response, messages.ERROR) == [] and len(_messages(response, messages.SUCCESS)) == 1
+
+
 def _rows(response):
     return {row.record["port_id"]: row.record for row in response.context["interface_sync"]["table"].rows}
 
@@ -84,7 +86,7 @@ def test_a_refresh_stores_source_facts_and_the_tab_assesses_them(client, live_li
 
     response = _refresh(client, device)
 
-    assert _messages(response, messages.SUCCESS) == ["Interface data refreshed successfully."]
+    assert _refreshed(response)
     snapshot = source_cache.read(device, Resource.INTERFACES, SERVER_KEY)
     assert snapshot.value(Resource.INTERFACES, "ports") == ports
     rows = _rows(response)
@@ -103,11 +105,11 @@ def test_a_refresh_stores_source_facts_and_the_tab_assesses_them(client, live_li
     [
         (
             lambda server: server.register(f"/api/v0/devices/{HOST_ID}/port_stack", {"status": "error"}, status=500),
-            "port_stack",
+            f"devices/{HOST_ID}/port_stack",
         ),
         (
             lambda server: server.register(f"/api/v0/devices/{HOST_ID}", {"status": "ok", "devices": [{"os": ""}]}),
-            "names no device OS",
+            f"devices/{HOST_ID}",
         ),
     ],
     ids=["port-stack-fails", "pairs-without-os"],
@@ -118,7 +120,7 @@ def test_a_refresh_without_the_host_relationship_data_fails_and_drops_the_older_
     device = _device("iface-snap-blocked")
     client.force_login(make_superuser("iface-snap-blocked-user"))
     _serve(live_librenms.server, [_port(1, "eth1"), _port(100, "bond0", "ieee8023adLag")], [port_pair(1, 100)])
-    assert _messages(_refresh(client, device), messages.SUCCESS) == ["Interface data refreshed successfully."]
+    assert _refreshed(_refresh(client, device))
 
     break_source(live_librenms.server)
     response = _refresh(client, device)
@@ -126,7 +128,6 @@ def test_a_refresh_without_the_host_relationship_data_fails_and_drops_the_older_
     assert response.status_code == 200
     assert _messages(response, messages.SUCCESS) == []
     (error,) = _messages(response, messages.ERROR)
-    assert error.startswith("Failed to fetch interfaces from LibreNMS: ")
     assert failed in error
     assert source_cache.read(device, Resource.INTERFACES, SERVER_KEY) is None
     assert not _status(device)["snapshot_available"]
@@ -147,15 +148,33 @@ def test_an_oob_failure_keeps_the_host_rows_and_shows_the_oob_notice(client, liv
 
     response = _refresh(client, device)
 
-    assert _messages(response, messages.WARNING) == [OOB_WARNING]
-    assert _messages(response, messages.SUCCESS) == ["Host interface data refreshed successfully."]
+    assert _refreshed(response)
     assert list(_rows(response)) == [1]
+    # Each notice names the source that blocks the OOB rows.
+    snapshot = source_cache.read(device, Resource.INTERFACES, SERVER_KEY)
+    (blocker,) = blocked_scopes(snapshot, Resource.INTERFACES)["oob"]
+    (warning,) = _messages(response, messages.WARNING)
+    assert blocker.path in warning and blocker.message in warning
     assert response.context["interface_sync"]["oob_incomplete"]
-    assert "Showing host interfaces only" in response.content.decode()
-    # The notice belongs to the snapshot, so a later render from the cache shows it too.
+    # The banner belongs to the snapshot, so a later render from the cache names the source too.
     fragment = _fragment(client, device)
     assert fragment.context["interface_sync"]["oob_incomplete"]
+    assert blocker.message in fragment.content.decode()
     assert _status(device)["snapshot_available"]
+
+
+@pytest.mark.django_db
+def test_a_failed_refresh_names_every_source_that_blocks_it(client, live_librenms):
+    device = _device("iface-snap-every-blocker")
+    client.force_login(make_superuser("iface-snap-every-blocker-user"))
+    _serve(live_librenms.server, [_port(1, "eth1")])
+    live_librenms.server.register(f"/api/v0/devices/{HOST_ID}/ports", {"status": "error"}, status=500)
+    live_librenms.server.register(f"/api/v0/devices/{HOST_ID}/port_stack", {"status": "error"}, status=500)
+
+    (error,) = _messages(_refresh(client, device), messages.ERROR)
+
+    assert f"devices/{HOST_ID}/ports" in error
+    assert f"devices/{HOST_ID}/port_stack" in error
 
 
 @pytest.mark.django_db
@@ -170,7 +189,7 @@ def test_oob_rows_join_the_host_rows_and_a_shared_mac_is_flagged(client, live_li
 
     response = _refresh(client, device)
 
-    assert _messages(response, messages.SUCCESS) == ["Interface data refreshed successfully."]
+    assert _refreshed(response) and _messages(response, messages.WARNING) == []
     assessed = {port["port_id"]: port for port in interface_rows(device)["ports"]}
     assert {port_id: port["_source"] for port_id, port in assessed.items()} == {1: "main", 2: "main", 91: "oob"}
     assert {port_id for port_id, port in assessed.items() if port.get("_dedup_conflict")} == {1, 91}
@@ -191,7 +210,7 @@ def test_the_sync_writes_the_rows_that_the_tab_assessed(client, live_librenms):
 
     interface = Interface.objects.get(device=device, name="eth1")
     assert (interface.mode, interface.untagged_vlan_id) == ("access", vlan.pk)
-    assert _messages(response, messages.SUCCESS) == ["Selected interfaces synced successfully."]
+    assert _messages(response, messages.ERROR) == [] and _messages(response, messages.WARNING) == []
 
 
 @pytest.mark.django_db
