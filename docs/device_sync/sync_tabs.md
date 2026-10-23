@@ -52,9 +52,13 @@ that neighbour's rows. Each notice names the source that failed. The tab reads i
 not need an Interfaces tab refresh.
 
 The refresh reads serial sensors only when you can view a Console Server Port on the source device.
+Each read checks this permission again, including serial rows with no NetBox port.
 Serial rows need a valid sensor projection. A refresh with no sensor request removes old serial rows.
+It does not show a warning when sensors were not requested.
 The tab applies current serial naming rules each time it shows the snapshot. Remote-end picks belong to
 you and to that snapshot. If the snapshot expires, refresh Cables before you pick a remote end.
+Sync and remote-end creation use the same snapshot. Refresh Cables if an action needs port evidence
+that the snapshot does not contain.
 
 In the [filter](#filters), **Sync state** shows the rows whose cable NetBox has, directly or through a patch path; the rows whose cable goes to another port, or still needs the LibreNMS cable tag; and the rows whose cable NetBox does not have. A row whose cable state you cannot view, whose far end is not in NetBox, or that a rule or the breakout check refuses is in no state. A remote-end pick or a remote-end create also comes back to the same filters and page.
 

@@ -45,6 +45,14 @@ and `seed_cables_snapshot(subject, links, ports, neighbour_ports=..., sensors=..
 Seed raw LibreNMS facts (`port_pair`, `port_vlans`), never a derived field. Never write a snapshot
 payload into the cache by hand.
 
+For cable fixtures, use `link_row`, `port_row` and `sensor_row` from
+`tests/source_snapshot_helpers.py`. These builders return raw LibreNMS endpoint fields.
+The cable seed runs each endpoint contract before it stores the acquired responses.
+Set each device mapping with an explicit fixed LibreNMS ID before calling `seed_cables_snapshot`.
+Pass host links and ports, neighbour ports by device ID, and OOB or sensor responses as separate parts.
+Do not reconstruct source facts from an assessed cable row. Do not infer a mapping from a NetBox primary key.
+Get action row IDs from the source assessment. Read cable rows with the actual request and its user.
+
 `tests/view_test_helpers.py` builds the request and permission side:
 
 - `make_request(method, data, user=..., **factory_kwargs)` — a real request with a session and
