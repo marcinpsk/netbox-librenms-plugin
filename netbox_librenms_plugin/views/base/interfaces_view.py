@@ -27,6 +27,7 @@ from netbox_librenms_plugin.interface_relationships import (
     build_relationship_maps,
     filter_interface_index,
     relationship_diagnostics_report,
+    resolve_port_relationships,
     resolve_relationship_row,
 )
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
@@ -515,7 +516,7 @@ class BaseInterfaceTableView(
             )
             return
 
-        relationships = self.librenms_api.resolve_port_relationships(
+        relationships = resolve_port_relationships(
             host_ports,
             ps_data,
             device_os=device_os,
