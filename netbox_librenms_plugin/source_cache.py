@@ -100,8 +100,7 @@ def _binding_holds(snapshot, resource, owner):
         return False
     if resource not in OOB_ACQUIRERS:
         return True
-    acquired = (source.oob.state, source.oob.librenms_id) if source.oob is not None else None
-    return oob_link(mapping, snapshot.server_key) == acquired
+    return oob_link(mapping, snapshot.server_key) == (source.oob.link if source.oob is not None else None)
 
 
 def remaining_ttl(subject, resource, server_key):

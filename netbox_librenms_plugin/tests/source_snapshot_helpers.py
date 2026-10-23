@@ -5,8 +5,9 @@ from uuid import uuid4
 from django.utils import timezone
 
 from netbox_librenms_plugin import source_cache
-from netbox_librenms_plugin.acquisition.coordinator import INVALID_OOB_REASON, oob_link, resource_owner
+from netbox_librenms_plugin.acquisition.coordinator import oob_link, oob_source, resource_owner
 from netbox_librenms_plugin.acquisition.registry import Resource
+from netbox_librenms_plugin.acquisition.resources import ACQUIRERS, OOB_ACQUIRERS
 from netbox_librenms_plugin.acquisition.snapshot import (
     MappingSource,
     MappingState,
@@ -14,18 +15,9 @@ from netbox_librenms_plugin.acquisition.snapshot import (
     Outcome,
     ResourceSource,
     ResponseRecord,
-    SourceRequest,
     SourceSnapshot,
 )
 from netbox_librenms_plugin.server_mappings import MappingRole, read_mapping
-
-# The parts that acquisition records for each resource, so a seed cannot be silently incomplete.
-_PARTS = {
-    Resource.INTERFACES: {"ports", "port_stack", "device"},
-    Resource.IP_ADDRESSES: {"addresses", "ports", "device", "vrfs"},
-    Resource.VLANS: {"vlans"},
-}
-_OOB_PARTS = {Resource.INTERFACES: {"ports"}}
 
 
 class Failed:
@@ -39,8 +31,7 @@ class NotApplicable:
     """A part acquisition had no reason to request."""
 
 
-def _record(path, value):
-    request = SourceRequest(path)
+def _record(request, value):
     if isinstance(value, Failed):
         return ResponseRecord(request, Outcome.FAILED, http_status=500, reason=value.reason)
     if isinstance(value, NotApplicable):
@@ -48,48 +39,61 @@ def _record(path, value):
     return ResponseRecord(request, Outcome.OBTAINED, http_status=200, value=value, received_at=timezone.now())
 
 
-def _require(parts, expected, what):
-    if set(parts) != expected:
-        raise TypeError(f"A seed of {what} needs exactly the parts {sorted(expected)}, not {sorted(parts)}.")
+class _SeededFetch:
+    """Answer each request of a real acquirer with the seeded value of its part, and keep each record."""
+
+    def __init__(self, values=None):
+        # Request key -> seeded value; without values, every request answers an empty list.
+        self._values = values
+        self.responses = {}
+
+    def __call__(self, endpoint):
+        return self._keep(_record(endpoint.request, [] if self._values is None else self._values[endpoint.request.key]))
+
+    def skip(self, endpoint, outcome, reason):
+        return self._keep(ResponseRecord(endpoint.request, outcome, reason=reason))
+
+    def _keep(self, record):
+        return self.responses.setdefault(record.request.key, record)
 
 
-def _oob_mapping(resource, mapping, server_key, oob, records):
-    """Return the OOB mapping that the owner's current link gives, with its records added to *records*."""
-    link = oob_link(mapping, server_key) if resource in _OOB_PARTS else None
-    if link is None:
+def _seeded_fetch(acquirer, librenms_id, parts, what):
+    """Return a fetch that answers the requests of a real acquirer with *parts*, which must name each of its parts."""
+    requests = {name: record.request.key for name, record in acquirer(_SeededFetch(), librenms_id).items()}
+    if set(parts) != set(requests):
+        raise TypeError(f"A seed of {what} needs exactly the parts {sorted(requests)}, not {sorted(parts)}.")
+    return _SeededFetch({requests[name]: value for name, value in parts.items()})
+
+
+def _oob_mapping(resource, mapping, server_key, oob):
+    """Acquire the OOB mapping that the owner's current link gives, as the coordinator does; return it and its fetch."""
+    link = oob_link(mapping, server_key) if resource in OOB_ACQUIRERS else None
+    if link is None or link.state is MappingState.INVALID:
+        # The coordinator records the parts of a corrupt id as failed by itself.
         if oob is not None:
-            raise TypeError("The owner links no OOB controller, so the seed takes no OOB parts.")
-        return None
-    state, oob_id = link
-    if state is MappingState.INVALID:
-        # Acquisition makes no request for a corrupt id, and records each part as failed.
-        oob = dict.fromkeys(_OOB_PARTS[resource], Failed(INVALID_OOB_REASON))
+            raise TypeError("The owner links no usable OOB controller, so the seed takes no OOB parts.")
+        fetch = _SeededFetch({})
     elif oob is None:
         raise TypeError("The owner links an OOB controller, so the seed needs its parts.")
-    _require(oob, _OOB_PARTS[resource], f"the {resource} OOB controller")
-    oob_records = {name: _record(f"seeded/{resource}/oob/{name}", value) for name, value in oob.items()}
-    records.update({record.request.key: record for record in oob_records.values()})
-    return MappingSource(
-        role=MappingRole.OOB,
-        librenms_id=oob_id,
-        state=state,
-        parts=tuple((name, record.request.key) for name, record in oob_records.items()),
-    )
+    else:
+        fetch = _seeded_fetch(OOB_ACQUIRERS[resource], link.librenms_id, oob, f"the {resource} OOB controller")
+    return oob_source(fetch, resource, mapping, server_key), fetch
 
 
 def build_source_snapshot(subject, resource, server_key="default", *, oob=None, **parts):
     """
     Return a snapshot of *resource* whose parts hold *parts* (name -> value, Failed or NotApplicable).
 
-    The snapshot follows the owner's current mapping. *oob* gives the OOB controller's parts when the
-    owner links one; a link with a corrupt id gets failed parts, as acquisition records them.
+    The resource's real acquirer and the coordinator's OOB rule decide the parts and their records, so a
+    seed holds what an acquisition of these answers holds. The snapshot follows the owner's current mapping.
+    *oob* gives the OOB controller's parts when the owner links one with a valid id.
     """
-    _require(parts, _PARTS[resource], resource)
     owner = resource_owner(subject, resource, server_key)
     mapping = read_mapping(owner)
-    host_records = {name: _record(f"seeded/{resource}/{name}", value) for name, value in parts.items()}
-    records = {record.request.key: record for record in host_records.values()}
-    oob_mapping = _oob_mapping(resource, mapping, server_key, oob, records)
+    librenms_id = mapping.own_id(server_key)
+    fetch = _seeded_fetch(ACQUIRERS[resource], librenms_id, parts, resource)
+    host_parts = ACQUIRERS[resource](fetch, librenms_id)
+    oob_mapping, oob_fetch = _oob_mapping(resource, mapping, server_key, oob)
     now = timezone.now()
     return SourceSnapshot(
         snapshot_id=uuid4().hex,
@@ -103,14 +107,14 @@ def build_source_snapshot(subject, resource, server_key="default", *, oob=None, 
                 owner=ObjectRef.of(owner),
                 host=MappingSource(
                     role=MappingRole.OWN,
-                    librenms_id=mapping.own_id(server_key),
+                    librenms_id=librenms_id,
                     state=MappingState.RESOLVED,
-                    parts=tuple((name, record.request.key) for name, record in host_records.items()),
+                    parts=tuple((name, record.request.key) for name, record in host_parts.items()),
                 ),
                 oob=oob_mapping,
             )
         },
-        responses=records,
+        responses={**fetch.responses, **oob_fetch.responses},
     )
 
 
