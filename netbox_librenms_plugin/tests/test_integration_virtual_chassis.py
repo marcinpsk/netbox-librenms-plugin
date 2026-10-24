@@ -9,6 +9,8 @@ Run:
     python -m pytest netbox_librenms_plugin/tests/test_integration_virtual_chassis.py -v
 """
 
+from netbox_librenms_plugin.tests.source_snapshot_helpers import acquire_ports_record
+
 from copy import deepcopy
 
 import pytest
@@ -700,7 +702,8 @@ class TestVCPortFetch:
         ]
         librenms_server.ports_response(device_id=90, ports=vc_ports)
 
-        ok, data = api.get_ports(90)
+        port_record = acquire_ports_record(api, 90)
+        ok, data = port_record.obtained, port_record.body
 
         assert ok is True
         names = [p["ifName"] for p in data["ports"]]
@@ -729,7 +732,8 @@ class TestVCPortFetch:
         ]
         librenms_server.ports_response(device_id=91, ports=ports_data)
 
-        ok, data = api.get_ports(91)
+        port_record = acquire_ports_record(api, 91)
+        ok, data = port_record.obtained, port_record.body
 
         assert ok is True
         port = data["ports"][0]

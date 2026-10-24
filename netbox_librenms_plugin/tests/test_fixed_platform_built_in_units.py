@@ -5,6 +5,8 @@ The system board reports itself as "Slot 1" (ioModule), "MDA 1/1" (mdaModule, be
 (cpmModule), all with the chassis part number and serial. The transceiver in port 1/1/c1 sits below MDA 1/1.
 """
 
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_mapped_modules
+
 from html.parser import HTMLParser
 from urllib.parse import parse_qsl, urlsplit
 
@@ -46,13 +48,8 @@ def ixr_inventory():
 
 def seed_snapshot(device, inventory):
     """Cache *inventory* as the device's LibreNMS snapshot, as a Modules refresh stores it."""
-    from django.core.cache import cache
 
-    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
-    from netbox_librenms_plugin.views.mixins import CacheMixin
-
-    payload = trusted_module_inventory_payload(device, inventory, server_key=SERVER_KEY)
-    cache.set(CacheMixin().get_cache_key(device, "inventory", server_key=SERVER_KEY), payload)
+    seed_mapped_modules(device, inventory, server_key=SERVER_KEY)
 
 
 def ixr_device(name, *, part_number=PART_NUMBER):

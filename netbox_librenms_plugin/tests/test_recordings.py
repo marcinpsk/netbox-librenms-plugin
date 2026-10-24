@@ -12,6 +12,8 @@ the plugin-config lookup is stubbed. VC detection reads the serial normalization
 rules and the member-name pattern, so the outcome tests use the test database.
 """
 
+from netbox_librenms_plugin.tests.source_snapshot_helpers import acquire_ports_record
+
 from io import StringIO
 import json
 import re
@@ -418,13 +420,15 @@ def test_replay_matches_request_with_blank_valued_query_param(recording_server):
     assert b'"port_id"' in body
 
 
+@pytest.mark.django_db
 def test_get_ports_real_fetch_and_parse_via_recording(recording_server):
     """Replay a recording through the real client's request and response parser."""
     from netbox_librenms_plugin.tests.recordings import load_recording
 
     recording = load_recording("cisco-lag-and-subinterface")
     _server, api = recording_server(recording)
-    success, data = api.get_ports(device_id=recording["device_id"])
+    port_record = acquire_ports_record(api, recording["device_id"])
+    success, data = port_record.obtained, port_record.body
 
     assert success is True
     ports = data.get("ports")
@@ -732,7 +736,8 @@ def _assert_oob(api, recording, expected):
     # `(meta or {})` not `meta, {}`: an explicit "meta": null returns None and .get would crash.
     oob_id = (recording.get("meta") or {}).get("oob_id")
     assert oob_id is not None, f"{recording['name']} declares oob outcome but no meta.oob_id"
-    ok, oob_data = api.get_ports(oob_id)
+    port_record = acquire_ports_record(api, oob_id)
+    ok, oob_data = port_record.obtained, port_record.body
     assert ok, oob_data
     assert len(oob_data["ports"]) == expected["controller_ports"]
 

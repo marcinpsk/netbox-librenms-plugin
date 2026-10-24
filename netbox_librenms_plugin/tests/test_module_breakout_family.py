@@ -1,6 +1,9 @@
 """A module install leaves the channel rows of a predicted breakout family to the naming plugin."""
 
+from netbox_librenms_plugin.tests.source_snapshot_helpers import transceiver_row
+
 from contextlib import contextmanager
+
 
 import pytest
 
@@ -58,10 +61,18 @@ class TestInstallBind:
         seed_mapping(device, "default", own=81)
         module_type = _optic_type("BREAKOUT-OPTIC", PARENT)
         channels = [make_interface(device, name) for name in CHANNELS]
-        rows = [_item(10, module_type.model, "Slot 1", _librenms_port_id=6701, _librenms_ifname=CHANNELS[0])]
+        rows = [_item(10, module_type.model, "Slot 1")]
 
         with _predicts({PARENT: [PARENT, *CHANNELS]}):
-            request = _post_branch(device, _with_installable_child(rows, 10, "breakout-install"), 10, 81, live_librenms)
+            request = _post_branch(
+                device,
+                _with_installable_child(rows, 10, "breakout-install"),
+                10,
+                81,
+                live_librenms,
+                ports=[{"port_id": 6701, "ifName": CHANNELS[0]}],
+                transceivers=[transceiver_row(10, port_id=6701, model=module_type.model)],
+            )
             table_row = next(row for row in _table_rows(device) if row.get("ent_physical_index") == 10)
 
         module = Module.objects.get(device=device, module_type=module_type)
@@ -80,10 +91,18 @@ class TestInstallBind:
         seed_mapping(device, "default", own=82)
         module_type = _optic_type("RENAME-OPTIC", "Ethernet1/1")
         renamed = make_interface(device, "Eth1/1")
-        rows = [_item(10, module_type.model, "Slot 1", _librenms_port_id=6702, _librenms_ifname="Eth1/1")]
+        rows = [_item(10, module_type.model, "Slot 1")]
 
         with _predicts({"Ethernet1/1": ["Eth1/1"]}):
-            _post_branch(device, _with_installable_child(rows, 10, "rename-install"), 10, 82, live_librenms)
+            _post_branch(
+                device,
+                _with_installable_child(rows, 10, "rename-install"),
+                10,
+                82,
+                live_librenms,
+                ports=[{"port_id": 6702, "ifName": "Eth1/1"}],
+                transceivers=[transceiver_row(10, port_id=6702, model=module_type.model)],
+            )
 
         module = Module.objects.get(device=device, module_type=module_type)
         renamed = Interface.objects.get(pk=renamed.pk)
@@ -97,7 +116,6 @@ class TestUpdateInterfaceAdoption:
     def test_only_the_template_row_of_a_breakout_family_is_adopted(self, live_librenms):
         from dcim.models import InterfaceTemplate, Module
 
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
         device = make_device_with_module_bays("breakout-adopt", ["Slot 1"])
@@ -114,7 +132,7 @@ class TestUpdateInterfaceAdoption:
         user = make_superuser()
 
         with _predicts({PARENT: [PARENT, *CHANNELS]}):
-            seed_inventory(DeviceModuleTableView(), device, [row], librenms_id=83)
+            seed_inventory(device, [row], librenms_id=83)
             content = render_module_tab(device, user=user)
             table_row = next(row for row in _table_rows(device) if row.get("ent_physical_index") == 20)
             _action, data = rendered_module_form(content, "update-module-interface", 20)
@@ -140,7 +158,6 @@ class TestOneRender:
         from dcim.models import InterfaceTemplate, Module
 
         from netbox_librenms_plugin.views.base import modules_view
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         device = make_device_with_module_bays("adoptable-once", ["Slot 1"])
         seed_mapping(device, "default", own=84)
@@ -152,8 +169,14 @@ class TestOneRender:
         InterfaceTemplate.objects.create(module_type=module_type, name=PARENT, type="10gbase-x-sfpp")
         bound = make_interface(device, PARENT)
         seed_mapping(bound, "default", own=6704)
-        row = _item(30, module_type.model, "Slot 1", _librenms_port_id=6704, _librenms_ifname=PARENT)
-        seed_inventory(DeviceModuleTableView(), device, [row], librenms_id=84)
+        row = _item(30, module_type.model, "Slot 1")
+        seed_inventory(
+            device,
+            [row],
+            librenms_id=84,
+            ports=[{"port_id": 6704, "ifName": PARENT}],
+            transceivers=[transceiver_row(30, port_id=6704, model=module_type.model, serial="")],
+        )
         real = modules_view.get_module_adoptable_interface_names
 
         with patch.object(modules_view, "get_module_adoptable_interface_names", wraps=real) as predicted:
