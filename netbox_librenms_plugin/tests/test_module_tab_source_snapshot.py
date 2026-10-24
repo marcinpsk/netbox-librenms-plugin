@@ -237,7 +237,7 @@ def test_failed_refresh_of_another_version_preserves_this_versions_state(
 
 
 @pytest.mark.django_db
-def test_corrupt_oob_notice_names_the_inventory_source_without_a_null_id(client, live_librenms):
+def test_corrupt_oob_mapping_keeps_the_host_table_and_warns(client, live_librenms):
     subject = device("module-tab-invalid-oob-notice", oob={"id": "bad-id", "type": "idrac"})
     client.force_login(make_superuser("module-tab-invalid-oob-notice-user"))
     serve(live_librenms.server, inventory=INVENTORY, transceivers=[])
@@ -246,9 +246,16 @@ def test_corrupt_oob_notice_names_the_inventory_source_without_a_null_id(client,
 
     snapshot = source_cache.read(subject, Resource.MODULES, "default")
     (blocker,) = blocked_scopes(snapshot, Resource.MODULES)["oob"]
-    assert blocker.path == "inventory/oob/all"
-    assert any(blocker.path in str(message) for message in response.context["messages"])
-    assert not any("/None/" in str(message) for message in response.context["messages"])
+    assert blocker.path == "oob"
+    assert response.status_code == 200
+    assert response.context["module_sync"]["table"] is not None
+    warnings = [message for message in response.context["messages"] if message.level == messages.WARNING]
+    assert len(warnings) == 1
+    assert {request["path"] for request in live_librenms.server.requests} == {
+        f"/api/v0/inventory/{HOST_ID}/all",
+        f"/api/v0/devices/{HOST_ID}/ports",
+        f"/api/v0/devices/{HOST_ID}/transceivers",
+    }
 
 
 @pytest.mark.django_db
