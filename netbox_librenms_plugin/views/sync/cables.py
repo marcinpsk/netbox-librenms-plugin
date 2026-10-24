@@ -241,7 +241,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             return None
         self._cable_row_identity_error = assessed["identity_error"]
         self._snapshot_port_records = assessed["port_records"]
-        if assessed["blockers"]:
+        if assessed["blockers"] and not request.htmx:
             from netbox_librenms_plugin.source_cache import blocker_notice
 
             messages.warning(request, blocker_notice(assessed["blockers"]))
