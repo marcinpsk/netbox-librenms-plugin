@@ -2053,10 +2053,10 @@ def test_a_failed_ip_cache_write_does_not_claim_there_is_nothing_to_show(
 
 
 @pytest.mark.django_db
-def test_a_failed_module_cache_write_does_not_claim_there_is_nothing_to_show(
+def test_a_failed_module_cache_write_hides_unstored_rows_and_reports_an_error(
     client, settings, primary_librenms, monkeypatch
 ):
-    """A failed cache write must still render fresh module rows with an accurate warning."""
+    """A failed module cache write must hide unstored rows and report an error."""
     _configure_servers(settings)
     device = make_device("cache-module-rows", librenms_cf={"primary": {"id": 667}})
     client.force_login(make_superuser("cache-module-rows-user"))
@@ -2085,10 +2085,10 @@ def test_a_failed_module_cache_write_does_not_claim_there_is_nothing_to_show(
 
     assert response.status_code == 200
     assert skipped == [SyncCacheConsistency(device).snapshot_key(SyncTab.MODULES, "primary")]
-    from django.contrib.messages import get_messages
+    from django.contrib import messages
 
     assert response.context["module_sync"]["table"] is None
-    assert any(message.level == 40 for message in get_messages(response.wsgi_request))
+    assert any(message.level == messages.ERROR for message in messages.get_messages(response.wsgi_request))
 
 
 @pytest.mark.django_db
