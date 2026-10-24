@@ -80,6 +80,11 @@ The `sync-tab-attributes-through-parser` rule rejects a sync container regex tha
 immediately after `data-active-tab`. It checks direct `re.search` calls in tests. Other attribute
 orders and regex API aliases are outside this narrow check.
 
+The `snapshot-blocker-warning-needs-redirect` rule checks the interface and cable views that render
+snapshot blocker banners. It follows `blocker_notice` into a warning, including through a local variable.
+A warning inside `if not request.htmx` or `if condition and not request.htmx` is allowed for a redirect.
+Other banner renderers and equivalent conditions are outside this narrow check.
+
 ## Scope
 
 `import-disclosure` and its sanitizer-shadow guard exclude tests and migrations. Canonical helper
