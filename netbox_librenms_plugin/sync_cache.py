@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from uuid import uuid4
 
+from django.conf import settings
 from django.contrib import messages
 from django.core.cache import cache
 from django.db import transaction
@@ -17,10 +18,11 @@ from django.shortcuts import render
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
+import netbox_librenms_plugin
 from netbox_librenms_plugin.acquisition.registry import RESOURCE_SPECS, OwnerPolicy, Resource
-from netbox_librenms_plugin.librenms_api import configured_cache_timeout, stored_librenms_id
+from netbox_librenms_plugin.librenms_api import configured_cache_timeout
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
-from netbox_librenms_plugin.server_mappings import mapped_device_servers, read_mapping, require_server_key
+from netbox_librenms_plugin.server_mappings import mapped_device_servers, require_server_key
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
 logger = logging.getLogger(__name__)
@@ -29,115 +31,6 @@ _ACKNOWLEDGED_REVISIONS_SESSION_KEY = "librenms_sync_cache_acknowledged_revision
 # An entry is dropped when its tab becomes available again, which never happens for a deleted
 # object. Cap the map so the session payload cannot grow without limit.
 _MAX_ACKNOWLEDGED_REVISIONS = 200
-
-
-# Increase when cached inventory rows change meaning; a reader treats any other payload as a miss.
-MODULE_INVENTORY_CACHE_VERSION = 4
-
-
-def module_inventory_cache_payload(inventory, librenms_id, oob_librenms_id) -> dict:
-    """
-    Return the cached module inventory payload, stamped with the current schema version.
-
-    Args:
-        inventory (list[dict]): The merged inventory rows.
-        librenms_id (int): The LibreNMS device ID the rows came from.
-        oob_librenms_id (int | None): The linked OOB controller ID, or None.
-
-    Returns:
-        dict: The payload to cache.
-
-    """
-    return {
-        "version": MODULE_INVENTORY_CACHE_VERSION,
-        "inventory": inventory,
-        "librenms_id": librenms_id,
-        "oob_librenms_id": oob_librenms_id,
-    }
-
-
-def cached_module_inventory(payload):
-    """
-    Return the inventory rows of a cached payload, or None when the payload is unusable.
-
-    A refreshed device with an empty LibreNMS inventory caches ``[]``, which is data and not a
-    miss, so callers must test ``is None``.
-
-    Args:
-        payload (object): The cached value.
-
-    Returns:
-        list[dict] | None: The rows, or None for an older schema version or a malformed payload.
-
-    """
-    if not isinstance(payload, dict):
-        return None
-    version = payload.get("version")
-    if type(version) is not int or version != MODULE_INVENTORY_CACHE_VERSION:
-        return None
-    inventory = payload.get("inventory")
-    if not isinstance(inventory, list) or any(not isinstance(item, dict) for item in inventory):
-        return None
-    return inventory
-
-
-def module_inventory_oob_matches(payload, sync_device, server_key) -> bool:
-    """
-    Return whether a cached inventory payload was built for the OOB controller the device links now.
-
-    A re-link, a new link and an unlink all change the fingerprint. A linked controller whose stored
-    id is corrupt never matches: the refresh caches no snapshot in that state.
-
-    Args:
-        payload (dict): A payload that :func:`cached_module_inventory` accepts.
-        sync_device (Device): The device that owns the inventory.
-        server_key (str): The LibreNMS server key of the snapshot.
-
-    Returns:
-        bool: True when the snapshot matches the current OOB link.
-
-    """
-    mapping = read_mapping(sync_device)
-    current_oob_id = mapping.oob_id(server_key)
-    if mapping.has_oob(server_key) and current_oob_id is None:
-        return False
-    return payload.get("oob_librenms_id") == current_oob_id
-
-
-def module_snapshot_host_id(sync_device, server_key):
-    """
-    Return the host ID that a cache-only Modules read compares a cached snapshot with.
-
-    Args:
-        sync_device (Device): The device that owns the inventory.
-        server_key (str): The LibreNMS server key of the snapshot.
-
-    Returns:
-        int | None: The stored or cached host ID, or None when it is absent or corrupt.
-
-    """
-    return coerce_librenms_id(stored_librenms_id(sync_device, server_key))
-
-
-def module_inventory_snapshot_matches(payload, sync_device, server_key, librenms_id) -> bool:
-    """
-    Return whether a cached inventory payload was built for *librenms_id* and the current OOB link.
-
-    Args:
-        payload (dict): A payload that :func:`cached_module_inventory` accepts.
-        sync_device (Device): The device that owns the inventory.
-        server_key (str): The LibreNMS server key of the snapshot.
-        librenms_id (int | None): The device's current host ID; None never matches.
-
-    Returns:
-        bool: True when the Modules tab may render the snapshot.
-
-    """
-    return (
-        librenms_id is not None
-        and payload.get("librenms_id") == librenms_id
-        and module_inventory_oob_matches(payload, sync_device, server_key)
-    )
 
 
 class SyncTab(StrEnum):
@@ -216,8 +109,8 @@ _VLAN_OVERRIDE_TABS = frozenset({SyncTab.INTERFACES})
 _CABLE_PICK_TABS = frozenset({SyncTab.CABLES})
 
 
-# The resources whose snapshot source_cache stores; the other tabs still store their own payload.
-_ACQUIRED_RESOURCES = frozenset({Resource.INTERFACES, Resource.CABLES, Resource.IP_ADDRESSES, Resource.VLANS})
+# Every resource now uses the source snapshot transport.
+_ACQUIRED_RESOURCES = frozenset(Resource)
 
 
 def _shares_vc_owner(tab):
@@ -387,8 +280,11 @@ def request_actor_id(request):
 
 
 def sync_snapshot_key(obj, data_type, server_key):
-    """Return the shared snapshot key for one object, data type, and configured server."""
-    return f"librenms_{data_type}_{obj._meta.model_name}_{obj.pk}_{require_server_key(server_key)}"
+    """Scope the shared snapshot to the object, server, plugin version and NetBox release."""
+    return (
+        f"librenms_{data_type}_{obj._meta.model_name}_{obj.pk}_{require_server_key(server_key)}"
+        f"_{netbox_librenms_plugin.__version__}_{settings.RELEASE.version}"
+    )
 
 
 def sync_vlan_overrides_key(obj, server_key):
@@ -743,19 +639,9 @@ class SyncCacheConsistency:
 
     def _snapshot_readable(self, tab, server_key):
         """Return whether the tab's snapshot exists in a form its reader accepts."""
-        resource = TAB_SPECS[tab].resource
-        if resource in _ACQUIRED_RESOURCES:
-            from netbox_librenms_plugin import source_cache
+        from netbox_librenms_plugin import source_cache
 
-            return source_cache.read(self.subject, resource, server_key) is not None
-        key = self.snapshot_key(tab, server_key)
-        if tab == SyncTab.MODULES:
-            payload = cache.get(key)
-            owner = self._primary_owner(tab, server_key)
-            return cached_module_inventory(payload) is not None and module_inventory_snapshot_matches(
-                payload, owner, server_key, module_snapshot_host_id(owner, server_key)
-            )
-        return cache.has_key(key)
+        return source_cache.read(self.subject, TAB_SPECS[tab].resource, server_key) is not None
 
     def status(self, server_key, *, actor_id=None):
         """Inspect tab state and actual payload keys without contacting LibreNMS."""

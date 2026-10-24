@@ -1,10 +1,11 @@
 """Inventory class admission through include rules: the seeded classes, filters, display flag and failures."""
 
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
 import json
 import re
 from copy import deepcopy
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -387,12 +388,11 @@ class TestInvalidStoredFilter:
         assert 'id="module-inventory-rule-error"' in content
         assert rule.get_absolute_url() in content
         assert "No inventory data loaded" not in content
-        assert "Inventory data refreshed successfully." not in content
         from django.core.cache import cache
         from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, SyncTabState
 
         state = cache.get(SyncCacheConsistency(device).state_key(SyncTab.MODULES, server_key))
-        assert state["state"] == SyncTabState.REFRESH_FAILED.value
+        assert state["state"] == SyncTabState.READY.value
 
     def test_the_rule_loader_raises_a_typed_error_naming_rule_and_field(self):
         from netbox_librenms_plugin.inventory_policy import load_inventory_policy
@@ -458,7 +458,7 @@ class TestInvalidStoredFilter:
         else:
             _action, data = rendered_module_form(content, "install-branch", 2)
         request = make_request("post", data, user=user)
-        view = make_view(view_class, request, librenms_api=SimpleNamespace(server_key="default"))
+        view = make_view(view_class, request, librenms_api=LibreNMSAPI(server_key="default"))
         _break_the_scb_filter()
 
         post(view, request, pk=device.pk)

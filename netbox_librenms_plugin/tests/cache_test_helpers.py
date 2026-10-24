@@ -49,14 +49,25 @@ def seed_inventory(view, device, inventory, *, librenms_id, server_key="default"
     ``librenms_id`` is required: the reader rejects a payload whose id is missing, so a defaulted
     ``None`` would seed a cache entry that can never be read back and silently pass as a miss.
     """
-    from django.core.cache import cache
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import build_source_snapshot, module_endpoint_rows
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
-    from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
+    # Seed under the requested identity, then restore the live binding for stale-source tests.
+    from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test, seed_stored_mapping
 
-    key = view.get_cache_key(device, "inventory", server_key=server_key)
-    payload = module_inventory_cache_payload(inventory, librenms_id, None)
-    cache.set(key, payload, timeout=300)
-    return key
+    parts, oob_rows = module_endpoint_rows(inventory)
+    if oob_rows:
+        seed_mapping(device, server_key, oob=librenms_id + 1000000)
+    mapping = stored_mapping_for_test(device)
+    seed_mapping(device, server_key, own=librenms_id, save=False)
+    snapshot = build_source_snapshot(
+        device, Resource.MODULES, server_key, oob={"inventory": oob_rows} if oob_rows else None, **parts
+    )
+    assert source_cache.store(device, Resource.MODULES, snapshot)
+    seed_stored_mapping(device, mapping)
+    return source_cache.snapshot_key(device, Resource.MODULES, server_key)
 
 
 def clear_snapshots(keys):

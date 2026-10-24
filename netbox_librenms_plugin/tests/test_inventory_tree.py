@@ -77,13 +77,9 @@ def _row_html(content, index):
 
 
 def _cached_inventory(device, server_key):
-    from django.core.cache import cache
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import module_inventory
 
-    from netbox_librenms_plugin.sync_cache import cached_module_inventory
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-    key = DeviceModuleTableView().get_cache_key(device, "inventory", server_key=server_key)
-    return {row["entPhysicalIndex"]: row for row in cached_module_inventory(cache.get(key))}
+    return {row["entPhysicalIndex"]: row for row in module_inventory(device, server_key)}
 
 
 def _render(recording, librenms_server, server_key, tag):
@@ -110,7 +106,7 @@ class TestRepairOnTheRecording:
 
         assert _rows_with_parents(rows) == EXPECTED_ROWS
 
-    def test_the_snapshot_stores_the_repaired_parent_and_the_reported_one(self, librenms_server, server_key):
+    def test_the_assessment_reads_the_repaired_parent_and_the_reported_one(self, librenms_server, server_key):
         """AC3: the writers read the cached snapshot, so they see the parent the table shows."""
         device, content, _rows = _render(_recording(RECORDING), librenms_server, server_key, "snapshot")
 
@@ -678,14 +674,3 @@ class TestEvoPicNoMove:
         assert pic["entPhysicalContainedIn"] == reported
         assert "_reported_parent" not in pic
         assert "_dangling_parent" not in pic
-
-
-class TestCacheVersion:
-    def test_a_version_3_snapshot_is_refused(self):
-        """A version 3 snapshot holds EVO PIC rows that are not below their FPC, so the reader refuses it."""
-        from netbox_librenms_plugin.sync_cache import cached_module_inventory, module_inventory_cache_payload
-
-        current = module_inventory_cache_payload([{"entPhysicalIndex": 1}], 7, None)
-
-        assert cached_module_inventory({**current, "version": 3}) is None
-        assert cached_module_inventory(current) == [{"entPhysicalIndex": 1}]
