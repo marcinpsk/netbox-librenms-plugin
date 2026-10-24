@@ -13,7 +13,7 @@ All five sync resources (interfaces, cables, IP addresses, modules, VLANs) follo
    - `BaseInterfaceTableView`: acquire the interfaces snapshot → assess it (`assessment.interfaces.assess_interfaces`) → compare with NetBox interfaces → render table.
    - `BaseCableTableView`: acquire the cables snapshot → assess it (`assessment.cables.assess`) → match remote devices → check cable status → render table.
    - `BaseIPAddressTableView` — acquire the IP snapshot → assess it for the user (`assess_snapshot`) → render table.
-   - `BaseVLANTableView` — acquire the VLAN snapshot → compare with NetBox VLANs → auto-select groups → render table.
+   - `BaseVLANTableView`: acquire the VLAN snapshot → assess it (`assessment.vlans.assess`) → render table.
 
 2. **Object sync views** (`views/object_sync/`) — wire base views to NetBox models:
    - Use `@register_model_view(Device, name="librenms_sync", path="librenms-sync")` to inject as a tab on Device/VM detail pages.
@@ -106,3 +106,11 @@ class SyncSomeResourceView(
     `activeSyncTab()` reads it. There is no client-side tab initializer.
   - Cache countdowns: `initializeCountdown()`, `initializeCountdowns()`.
 - CSRF token extracted via `document.querySelector('[name=csrfmiddlewaretoken]').value`.
+
+IP rows are derived in `assessment/ip_addresses.py`. Pass the actor and the interface-name option.
+The tab, verify and sync readers use the same assessor. The web adapter adds URLs. A GET does not
+write an interface binding. VLAN source indexes and render comparisons are in `assessment/vlans.py`.
+The group verify endpoint uses the same VLAN name comparison for its posted values.
+
+Snapshot keys and tab-state keys use one versioned namespace. A failed refresh in another plugin
+version or NetBox release does not change the current version's tab state.
