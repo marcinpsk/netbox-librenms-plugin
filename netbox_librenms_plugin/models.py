@@ -1694,7 +1694,7 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
         return compile_rule_regex(self, "bridge_name_pattern")
 
     @classmethod
-    def _patterns_for_os_queryset(cls, device_os):
+    def patterns_for_os_queryset(cls, device_os):
         """
         Return the stored rows that apply to *device_os*, or None when none can.
 
@@ -1732,7 +1732,7 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
             RuleConfigurationError: When an applicable stored pattern does not compile.
 
         """
-        queryset = cls._patterns_for_os_queryset(device_os)
+        queryset = cls.patterns_for_os_queryset(device_os)
         if queryset is None:
             return []
         return [pattern._compiled_pattern for pattern in queryset]
@@ -1760,14 +1760,14 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
         """
         return [
             pattern._compiled_sap_pattern
-            for pattern in cls._sap_patterns_for_os_queryset(device_os)
+            for pattern in cls.sap_patterns_for_os_queryset(device_os)
             if pattern.sap_name_pattern
         ]
 
     @classmethod
-    def _sap_patterns_for_os_queryset(cls, device_os):
+    def sap_patterns_for_os_queryset(cls, device_os):
         """Return the SAP rule rows that production and recording export apply."""
-        queryset = cls._patterns_for_os_queryset(device_os)
+        queryset = cls.patterns_for_os_queryset(device_os)
         # "No row for this OS" is not the same answer as "this OS has a row saying it has no SAP
         # notation". Junos is seeded with a blank pattern, so its breakout names keep their
         # relationships; an OS nobody registered is simply unknown, and a Nokia device reporting
@@ -1786,7 +1786,7 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
     @classmethod
     def compiled_bridge_patterns_for_os(cls, device_os):
         """Return the compiled bridge-name regexes scoped to the LibreNMS OS; raise RuleConfigurationError when invalid."""
-        queryset = cls._patterns_for_os_queryset(device_os)
+        queryset = cls.patterns_for_os_queryset(device_os)
         if queryset is None:
             return []
         return [pattern._compiled_bridge_pattern for pattern in queryset if pattern.bridge_name_pattern]

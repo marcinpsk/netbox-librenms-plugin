@@ -1,5 +1,7 @@
 """Inventory class admission through include rules: the seeded classes, filters, display flag and failures."""
 
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_mapped_modules
+
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
 import json
@@ -297,8 +299,6 @@ class TestEmptyPolicy:
         from netbox_librenms_plugin.models import InventoryIgnoreRule
         from netbox_librenms_plugin.tests.conftest import make_superuser
         from netbox_librenms_plugin.tests.test_modules_view import _make_mixed_manufacturer_chassis, configure_servers
-        from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         configure_servers(
             settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
@@ -314,8 +314,7 @@ class TestEmptyPolicy:
             require_serial_match_parent=False,
             manufacturer=admitting.device_type.manufacturer,
         )
-        payload = trusted_module_inventory_payload(page, inventory, librenms_id=9304)
-        cache.set(DeviceModuleTableView().get_cache_key(page, "inventory", server_key="default"), payload, 300)
+        seed_mapped_modules(page, inventory, librenms_id=9304)
         cache.set("librenms_device_info_default_9304", (True, {"device_id": 9304, "hostname": page.name}), 300)
         client.force_login(make_superuser(f"{tag}-user"))
 
@@ -450,7 +449,7 @@ class TestInvalidStoredFilter:
             ],
         )
         view_class = InstallSelectedView if action == "install_selected" else InstallBranchView
-        seed_inventory(view_class(), device, inventory, librenms_id=7)
+        seed_inventory(device, inventory, librenms_id=7)
         content = render_module_tab(device, user=user)
         if action == "install_selected":
             _action, data = rendered_module_form(content, "install-selected")

@@ -378,7 +378,7 @@ def test_an_absent_host_and_invalid_oob_mapping_keep_distinct_response_outcomes(
     for part in ("links", "ports"):
         oob = snapshot.record(Resource.CABLES, part, MappingRole.OOB)
         assert oob.outcome is Outcome.FAILED
-        assert oob.request.path == f"devices/None/{part}"
+        assert oob.request.path == f"devices/oob/{part}"
     assert {blocker.path for blocker in blocked_scopes(snapshot, Resource.CABLES)["oob"]} == {"oob"}
     assert set(blocked_scopes(snapshot, Resource.CABLES)) == {"oob"}
     assert not is_ready(snapshot, Resource.CABLES)
@@ -396,3 +396,52 @@ def test_cable_ports_request_owner_and_deletion_evidence(live_librenms):
 
     request = next(r for r in live_librenms.server.requests if r["path"].endswith("/ports"))
     assert {"device_id", "deleted"} <= set(request["query"]["columns"][0].split(","))
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("answer", ["empty-table", "missing-route", "non-json"])
+def test_sensor_404_keeps_empty_table_and_missing_source_distinct(live_librenms, answer):
+    from netbox_librenms_plugin.constants import LIBRENMS_NO_SENSORS_MESSAGE
+
+    _serve(live_librenms.server)
+    if answer == "non-json":
+        live_librenms.server.register_raw(SENSORS_PATH, "missing", status=404)
+    else:
+        live_librenms.server.register(
+            SENSORS_PATH,
+            {"status": "error", "message": LIBRENMS_NO_SENSORS_MESSAGE if answer == "empty-table" else "missing route"},
+            status=404,
+        )
+
+    snapshot = _acquire(_device("acq-cable-sensors-404"), include_serial=True)
+
+    record = snapshot.record(Resource.CABLES, "sensors")
+    assert record.outcome is (Outcome.OBTAINED if answer == "empty-table" else Outcome.FAILED)
+    assert ("serial" in blocked_scopes(snapshot, Resource.CABLES)) is (answer != "empty-table")
+    if answer == "empty-table":
+        assert snapshot.value(Resource.CABLES, "sensors") == []
+
+
+@pytest.mark.django_db
+def test_malformed_serial_rows_of_another_device_are_filtered_before_projection(live_librenms):
+    _serve(live_librenms.server)
+    own = {
+        "device_id": str(HOST_ID),
+        "sensor_type": "acsSerialPortTable",
+        "sensor_id": 1,
+        "sensor_index": "acsSerialPortTableStatus.7",
+        "sensor_descr": "ttyS7 Status",
+    }
+    other = {
+        "device_id": str(HOST_ID + 1),
+        "sensor_type": "acsSerialPortTable",
+        "sensor_id": False,
+        "sensor_deleted": True,
+        "sensor_index": None,
+    }
+    live_librenms.server.register(SENSORS_PATH, {"status": "ok", "sensors": [other, own]})
+
+    snapshot = _acquire(_device("acq-cable-foreign-serial"), include_serial=True)
+
+    assert snapshot.value(Resource.CABLES, "sensors") == [own]
+    assert "serial" not in blocked_scopes(snapshot, Resource.CABLES)

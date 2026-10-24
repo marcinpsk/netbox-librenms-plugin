@@ -391,6 +391,9 @@ def seed_cables_snapshot(
 
 def seed_modules_snapshot(subject, inventory, ports=(), transceivers=(), *, oob_inventory=None, server_key="default"):
     """Store raw module source facts through the real acquirer and source transport."""
+    for rows in (inventory, () if oob_inventory is None or isinstance(oob_inventory, Failed) else oob_inventory):
+        if any(key.startswith("_") for row in rows for key in row):
+            raise TypeError("Module seeds require raw endpoint facts.")
     return seed_source_snapshot(
         subject,
         Resource.MODULES,
@@ -494,42 +497,48 @@ def recording_part(api, device_id, resource, part):
     return (True, record.value) if record.obtained else (False, record.reason)
 
 
-def module_endpoint_rows(inventory):
-    """Build endpoint fixtures for module rows, without storing assessment annotations."""
-    from copy import deepcopy
+def acquire_ports_record(api, device_id):
+    """Acquire a port response through the coordinator over the configured HTTP server."""
+    snapshot, _subject = acquire_recording(api, {"device_id": device_id}, [Resource.INTERFACES])
+    return snapshot.record(Resource.INTERFACES, "ports")
 
-    host, oob, ports, transceivers = [], [], {}, []
-    for item in deepcopy(inventory):
-        port_id = item.get("_librenms_port_id")
-        if_name = item.get("_librenms_ifname")
-        if_descr = item.get("_librenms_ifdescr")
-        synthetic = item.get("_from_transceiver_api")
-        confirmed = item.get("_transceiver_api_match")
-        source = item.get("_source", "main")
-        raw = {key: value for key, value in item.items() if not key.startswith("_")}
-        if "_reported_parent" in item:
-            raw["entPhysicalContainedIn"] = item["_reported_parent"]
-        if source == "oob":
-            oob.append(raw)
-            continue
-        if source != "main":
-            raise TypeError(f"No module endpoint fixture has source {source!r}.")
-        if port_id is not None:
-            ports[port_id] = {
-                "port_id": port_id,
-                "ifName": if_name or raw.get("entPhysicalName", ""),
-                "ifDescr": if_descr or "",
-            }
-        if synthetic or confirmed or port_id is not None:
-            transceivers.append(
-                {
-                    "entity_physical_index": raw.get("entPhysicalIndex"),
-                    "port_id": port_id,
-                    "model": raw.get("entPhysicalModelName"),
-                    "serial": raw.get("entPhysicalSerialNum"),
-                    "type": "SFP",
-                }
-            )
-        if not synthetic:
-            host.append(raw)
-    return {"inventory": host, "ports": list(ports.values()), "transceivers": transceivers}, oob
+
+def inventory_row(index, name, *, model="", serial="", physical_class="module", parent=0, **facts):
+    """Build one raw ENTITY-MIB inventory row."""
+    return {
+        "entPhysicalIndex": index,
+        "entPhysicalName": name,
+        "entPhysicalModelName": model,
+        "entPhysicalSerialNum": serial,
+        "entPhysicalClass": physical_class,
+        "entPhysicalContainedIn": parent,
+        **facts,
+    }
+
+
+def transceiver_row(index, *, port_id=None, model="", serial="", kind=""):
+    """Build one raw transceiver response row."""
+    return {"entity_physical_index": index, "port_id": port_id, "model": model, "serial": serial, "type": kind}
+
+
+def seed_mapped_modules(
+    subject,
+    inventory,
+    ports=(),
+    transceivers=(),
+    *,
+    librenms_id=1,
+    server_key="default",
+    oob_inventory=None,
+    oob_id=None,
+):
+    """Map the subject and seed explicit module endpoint facts."""
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
+    seed_mapping(subject, server_key, own=librenms_id)
+    if oob_id is not None:
+        seed_mapping(subject, server_key, oob=oob_id)
+    subject.__dict__.pop("cf", None)
+    return seed_modules_snapshot(
+        subject, inventory, ports, transceivers, server_key=server_key, oob_inventory=oob_inventory
+    )
