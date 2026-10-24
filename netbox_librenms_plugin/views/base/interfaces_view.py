@@ -316,7 +316,6 @@ class BaseInterfaceTableView(
         if oob_blocked:
             notice = source_cache.blocker_notice(result.blocked["oob"])
             logger.warning("Interfaces of %s refreshed without OOB rows: %s", sync_device, notice)
-            messages.warning(request, f"Interfaces refreshed without the OOB controller rows: {notice}")
         if SyncCacheConsistency(obj).mark_refresh_outcome(
             SyncTab.INTERFACES,
             server_key,
