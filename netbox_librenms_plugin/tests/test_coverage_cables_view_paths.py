@@ -302,7 +302,7 @@ class TestCableRefreshFetchFailure:
 class TestCableRefreshOobMerge:
     @pytest.mark.parametrize("port_device_id", [161, 162])
     def test_cable_port_names_are_fetched_without_vlan_expansion(self, librenms_server, settings, port_device_id):
-        from django.core.cache import cache
+        from netbox_librenms_plugin.views.base.cables_view import read_cable_assessment
 
         device = _map_device(make_device("cable-oob-port-names"), 161, oob={"id": 162, "type": "idrac"})
         librenms_server.ports_response(device_id=161, ports=[])
@@ -319,10 +319,11 @@ class TestCableRefreshOobMerge:
         response = _post(view, request, pk=device.pk)
 
         assert response.status_code == 200
-        cached = cache.get(view.get_cache_key(device, "links", SERVER_KEY))
-        assert len(cached["links"]) == 1
-        assert cached["links"][0]["local_port"] == "mgmt0"
-        assert cached["links"][0]["_source"] == "oob"
+        assessment = read_cable_assessment(request, device, SERVER_KEY)
+        assert len(assessment["links"]) == 1
+        assert assessment["links"][0]["local_port"] == "mgmt0"
+        assert assessment["links"][0]["_source"] == "oob"
+        assert not assessment["blockers"]
         assert message_texts(request, "warning") == []
         port_requests = [
             request
