@@ -87,3 +87,8 @@ In the [filter](#filters), **Sync state** shows the VLANs that NetBox has with t
 ## Modules
 
 Available for Devices. This tab compares LibreNMS physical inventory with NetBox module bays and installed modules. Module matching has additional mapping and inventory rules, so it is covered in the [Module Sync guide](module_sync.md).
+
+The Modules refresh needs host inventory, ports and transceivers. If a linked OOB controller's inventory
+fails, host module rows remain available. A notice names each failed source. A host source failure clears
+the table until a successful refresh. The tab and each module action apply current inventory rules to
+the same source snapshot. Parent repair and OOB index offsets do not change the stored source facts.
