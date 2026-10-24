@@ -159,3 +159,23 @@ def test_a_selected_allowed_vrf_is_verified_before_restoring_an_ignored_row(page
     posted = page.evaluate("[...new FormData(document.getElementById('sync-form'))]")
     assert (["select", "row-1"] in posted) == allowed_on_return
     assert ["vrf_row-1", ALLOWED] in posted
+
+
+def test_vrf_verification_posts_the_selected_interface_name_field(page):
+    _load(page, [_row("row-1")])
+    page.evaluate(
+        """() => document.body.insertAdjacentHTML('afterbegin',
+            '<input type="radio" name="interface_name_field" value="ifName">' +
+            '<input type="radio" name="interface_name_field" value="ifDescr" checked>')"""
+    )
+    requests = []
+
+    def verify(route):
+        requests.append(route.request.post_data_json)
+        route.fulfill(status=200, content_type="application/json", body=_verdict("", True))
+
+    page.route(VERIFY_ROUTE, verify)
+    page.evaluate("handleVRFChange(document.querySelector('.vrf-select'), '1')")
+    _wait_for(page, lambda: bool(requests))
+
+    assert requests[0]["interface_name_field"] == "ifDescr"
