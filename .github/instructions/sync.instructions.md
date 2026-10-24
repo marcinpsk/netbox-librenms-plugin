@@ -37,7 +37,9 @@ Every base table view follows: **fetch → cache → compare → render**.
 from django.http import HttpResponse
 
 
-class SyncSomeResourceView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
+class SyncSomeResourceView(
+    LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectPermissionMixin, CacheMixin, View
+):
     required_object_permissions = {"POST": [("add", Model), ("change", Model)]}
 
     def post(self, request, object_type, object_id):
