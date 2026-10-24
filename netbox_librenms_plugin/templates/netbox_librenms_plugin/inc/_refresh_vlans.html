@@ -1,0 +1,19 @@
+{% load helpers %}
+{% load librenms_sync_query %}
+{% comment %}
+The Refresh button of the vlans tab. Its URL carries the page query, so the sync page renders it and a
+filter response renders it again out of band.
+Takes: has_librenms_id, object, librenms_server_info.
+{% endcomment %}
+{% if has_librenms_id %}
+    {% with model_name=object|meta:"model_name" %}
+        {% if model_name == "device" %}
+            {% url 'plugins:netbox_librenms_plugin:device_vlan_sync' pk=object.pk as device_vlan_sync_path %}{% sync_tab_url device_vlan_sync_path as device_vlan_sync_url %}
+            <button hx-post="{{ device_vlan_sync_url }}"
+                    hx-target="#vlan-sync-content"
+                    class="btn btn-outline-primary">
+                Refresh VLANs
+            </button>
+        {% endif %}
+    {% endwith %}
+{% endif %}

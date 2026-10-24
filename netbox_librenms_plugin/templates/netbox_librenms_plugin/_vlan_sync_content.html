@@ -15,8 +15,6 @@
 {# An active or invalid filter keeps its form, so it can be cleared even when the snapshot is empty. #}
 {% elif not vlan_sync.vlan_table or not vlan_sync.vlan_table.rows and not vlan_sync.filters.in_use %}
 <!-- No VLAN Data -->
-{# A filter in the URL keeps its form with its errors and Clear link, also when no snapshot is cached. #}
-{% if vlan_sync.filters.in_use %}{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with filters=vlan_sync.filters prefix="vlans_" tab="vlans" section_id="vlanFilterSection" label="Filter VLANs" %}{% endif %}
 <div class="card">
     <div class="card-body text-center text-muted py-4">
         <i class="mdi mdi-sync-off mdi-48px"></i>
@@ -24,7 +22,7 @@
     </div>
 </div>
 {% else %}
-{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with filters=vlan_sync.filters prefix="vlans_" tab="vlans" section_id="vlanFilterSection" label="Filter VLANs" %}
+{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with owner=vlan_sync.object content_id="vlan-sync-content" server_key=vlan_sync.server_key filters=vlan_sync.filters prefix="vlans_" tab="vlans" section_id="vlanFilterSection" label="Filter VLANs" %}
 
 {# Migrated donors must not sync: hiding only the button leaves the POST form live (Enter in a filter still submits), so drop the form in migrated mode. #}
 {% if migrated_to_marker %}
@@ -51,16 +49,18 @@
     <input type="hidden" name="action" value="create_vlans">
     {% endif %}
 
-    {% if not migrated_to_marker %}
-    <div class="noprint d-flex align-items-center mt-0 mb-3 sync-tab-primary-toolbar">
+    <div class="noprint d-flex flex-wrap align-items-center gap-2 mt-0 mb-3 sync-tab-primary-toolbar">
         <div>
+            {% if not migrated_to_marker %}
             <button type="submit" class="btn btn-primary">
                 <span class="spinner spinner-border d-none" id="sync-spinner"></span>
                 <span>Sync Selected VLANs</span>
             </button>
+            {% endif %}
         </div>
+        {% include "netbox_librenms_plugin/inc/_sync_filter_controls.html" with filters=vlan_sync.filters prefix="vlans_" tab="vlans" section_id="vlanFilterSection" label="Filter VLANs" %}
     </div>
-    {% endif %}
+    {% include "netbox_librenms_plugin/inc/_sync_filter_panel.html" with filters=vlan_sync.filters prefix="vlans_" section_id="vlanFilterSection" %}
 
     <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
         <div>

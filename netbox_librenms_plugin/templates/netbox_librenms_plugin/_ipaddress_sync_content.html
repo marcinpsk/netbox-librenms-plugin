@@ -7,7 +7,7 @@
 
 <!-- IP Address Sync Table -->
 {% if ip_sync.table %}
-{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with filters=ip_sync.filters prefix="ipaddresses_" tab="ipaddresses" section_id="ipFilterSection" label="Filter IP addresses" %}
+{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with owner=ip_sync.object content_id="ipaddress-sync-content" server_key=ip_sync.server_key filters=ip_sync.filters prefix="ipaddresses_" tab="ipaddresses" section_id="ipFilterSection" label="Filter IP addresses" %}
 
 {# Migrated donors must not sync: hiding only the button leaves the POST form live (Enter in a filter still submits), so drop the form in migrated mode. #}
 {% with model_name=ip_sync.object|meta:"model_name" %}
@@ -24,7 +24,7 @@
 {% endwith %}
     {% csrf_token %}
     {% if ip_sync.server_key %}<input type="hidden" name="server_key" value="{{ ip_sync.server_key }}">{% endif %}
-    <div class="noprint d-flex align-items-center mt-0 mb-3 sync-tab-primary-toolbar">
+    <div class="noprint d-flex flex-wrap align-items-center gap-2 mt-0 mb-3 sync-tab-primary-toolbar">
         <div class="d-flex flex-wrap align-items-center gap-2">
             {% if not migrated_to_marker %}
             <button type="submit" class="btn btn-primary">
@@ -34,7 +34,9 @@
             {% include 'netbox_librenms_plugin/inc/_ip_sync_options.html' %}
             {% endif %}
         </div>
+        {% include "netbox_librenms_plugin/inc/_sync_filter_controls.html" with filters=ip_sync.filters prefix="ipaddresses_" tab="ipaddresses" section_id="ipFilterSection" label="Filter IP addresses" %}
     </div>
+    {% include "netbox_librenms_plugin/inc/_sync_filter_panel.html" with filters=ip_sync.filters prefix="ipaddresses_" section_id="ipFilterSection" %}
 
     <div class="row mb-3">
         <div class="col col-md-12">
@@ -73,8 +75,6 @@
 </form>
 {% endif %}
 {% else %}
-{# A filter in the URL keeps its form with its errors and Clear link, also when no snapshot is cached. #}
-{% if ip_sync.filters.in_use %}{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with filters=ip_sync.filters prefix="ipaddresses_" tab="ipaddresses" section_id="ipFilterSection" label="Filter IP addresses" %}{% endif %}
 <div class="card">
     <div class="card-body text-center text-muted py-4">
         <i class="mdi mdi-sync-off mdi-48px"></i>

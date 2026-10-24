@@ -1,0 +1,28 @@
+{% load helpers %}
+{% load librenms_sync_query %}
+{% comment %}
+The Refresh button of the ipaddresses tab. Its URL carries the page query, so the sync page renders it and a
+filter response renders it again out of band.
+Takes: has_librenms_id, object, librenms_server_info.
+{% endcomment %}
+{% if has_librenms_id %}
+    {% with model_name=object|meta:"model_name" %}
+        {% if model_name == "device" %}
+            {% url 'plugins:netbox_librenms_plugin:device_ipaddress_sync' pk=object.pk as device_ipaddress_sync_path %}{% sync_tab_url device_ipaddress_sync_path as device_ipaddress_sync_url %}
+            <button hx-post="{{ device_ipaddress_sync_url }}"
+                    hx-target="#ipaddress-sync-content"
+                    hx-include="[name='interface_name_field'], #ipaddress-sync-content [name='set-primary-ip-toggle'], #ipaddress-sync-content [name='create-missing-interfaces-toggle']"
+                    class="btn btn-outline-primary">
+                Refresh IP Addresses
+            </button>
+        {% elif model_name == "virtualmachine" %}
+            {% url 'plugins:netbox_librenms_plugin:vm_ipaddress_sync' pk=object.pk as vm_ipaddress_sync_path %}{% sync_tab_url vm_ipaddress_sync_path as vm_ipaddress_sync_url %}
+            <button hx-post="{{ vm_ipaddress_sync_url }}"
+                    hx-target="#ipaddress-sync-content"
+                    hx-include="[name='interface_name_field'], #ipaddress-sync-content [name='set-primary-ip-toggle'], #ipaddress-sync-content [name='create-missing-interfaces-toggle']"
+                    class="btn btn-outline-primary">
+                Refresh IP Addresses
+            </button>
+        {% endif %}
+    {% endwith %}
+{% endif %}
