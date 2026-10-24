@@ -209,21 +209,19 @@ class TestInterfaceRefreshFailureThroughTheUrl:
 
 @pytest.mark.django_db
 class TestInterfaceRefreshOobMerge:
-    def test_corrupt_oob_id_warns_and_marks_the_snapshot_incomplete(self, librenms_server, settings):
+    def test_corrupt_oob_id_marks_the_snapshot_incomplete_and_renders_one_banner(self, librenms_server, settings):
         """A linked OOB controller with an uncoercible id must not be silently skipped."""
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         device = _map_device(make_device("iface-oob-corrupt"), 21, oob={"id": "not-an-id", "type": "idrac"})
         librenms_server.ports_response(device_id=21, ports=[{"port_id": 1, "ifName": "eth0"}])
 
-        _response, _view, request = _refresh(DeviceInterfaceTableView, device, librenms_server, settings)
+        response, _view, request = _refresh(DeviceInterfaceTableView, device, librenms_server, settings)
 
         rows = _stored_rows(device)
-        (warning,) = message_texts(request, "warning")
-        assert rows["oob_blockers"] == (
-            "devices/None/ports was not obtained (The linked OOB controller has no valid LibreNMS id.)",
-        )
-        assert rows["oob_blockers"][0] in warning
+        assert message_texts(request, "warning") == []
+        assert len(rows["oob_blockers"]) == 1
+        assert response.content.count(b'class="alert alert-warning d-flex align-items-center noprint"') == 1
         assert len(message_texts(request, "success")) == 1
         assert rows["oob_incomplete"] is True
         # The corrupt id must never be turned into a request path. The refresh also reads the
@@ -270,7 +268,7 @@ class TestInterfaceRefreshOobMerge:
         conflicts = {pid for pid, port in by_port_id.items() if port.get("_dedup_conflict")}
         assert conflicts == {1, 91}
 
-    def test_oob_ports_fetch_failure_warns_and_keeps_the_host_snapshot(self, librenms_server, settings):
+    def test_oob_ports_fetch_failure_keeps_host_rows_and_renders_one_banner(self, librenms_server, settings):
         """A failed OOB ports fetch keeps host rows, warns, and the snapshot reads as oob_incomplete."""
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
@@ -278,11 +276,12 @@ class TestInterfaceRefreshOobMerge:
         librenms_server.ports_response(device_id=41, ports=[{"port_id": 1, "ifName": "eth0"}])
         # /api/v0/devices/42/ports stays unregistered, so the loopback answers 404.
 
-        _response, _view, request = _refresh(DeviceInterfaceTableView, device, librenms_server, settings)
+        response, _view, request = _refresh(DeviceInterfaceTableView, device, librenms_server, settings)
 
         rows = _stored_rows(device)
-        (warning,) = message_texts(request, "warning")
-        assert "devices/42/ports was not obtained" in warning
+        assert message_texts(request, "warning") == []
+        assert len(rows["oob_blockers"]) == 1
+        assert response.content.count(b'class="alert alert-warning d-flex align-items-center noprint"') == 1
         assert len(message_texts(request, "success")) == 1
         assert rows["oob_incomplete"] is True
         assert [port["port_id"] for port in rows["ports"]] == [1]
