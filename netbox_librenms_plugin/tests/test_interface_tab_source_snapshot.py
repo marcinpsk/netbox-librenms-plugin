@@ -153,8 +153,8 @@ def test_an_oob_failure_keeps_the_host_rows_and_shows_the_oob_notice(client, liv
     # Each notice names the source that blocks the OOB rows.
     snapshot = source_cache.read(device, Resource.INTERFACES, SERVER_KEY)
     (blocker,) = blocked_scopes(snapshot, Resource.INTERFACES)["oob"]
-    (warning,) = _messages(response, messages.WARNING)
-    assert blocker.path in warning and blocker.message in warning
+    assert _messages(response, messages.WARNING) == []
+    assert response.content.count(b'class="alert alert-warning d-flex align-items-center noprint"') == 1
     assert response.context["interface_sync"]["oob_incomplete"]
     # The banner belongs to the snapshot, so a later render from the cache names the source too.
     fragment = _fragment(client, device)
