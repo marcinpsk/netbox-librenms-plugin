@@ -10,6 +10,23 @@
 # The scan needs --taint-intrafile: taint must cross into a module-private helper, which is where a
 # per-function analysis loses the serial-match branch.
 rules:
+  - id: inventory-fallback-normalizes-indices
+    languages: [python]
+    severity: ERROR
+    message: Compare inventory containment through inventory_index. Keep physical class matching exact.
+    patterns:
+      - pattern-inside: |
+          def effective_inventory(...):
+              ...
+      - pattern-either:
+          - pattern: str($ROW.get($FIELD)) == str($VALUE)
+          - pattern: str($VALUE) == str($ROW.get($FIELD))
+      - metavariable-regex:
+          metavariable: $FIELD
+          regex: '^[A-Za-z_][A-Za-z0-9_]*$'
+    paths:
+      include:
+        - "**/acquisition/responses.py"
   - id: import-disclosure
     languages: [python]
     severity: ERROR

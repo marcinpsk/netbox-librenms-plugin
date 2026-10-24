@@ -301,7 +301,14 @@ def effective_inventory(filtered, full, *, params, http_status):
         return filtered.value
     if full is None or full.outcome is not Outcome.OBTAINED:
         return None
-    return [row for row in full.value if all(str(row.get(field)) == str(value) for field, value in params)]
+    rows = full.value
+    for field, value in params:
+        if field == "entPhysicalContainedIn":
+            parent = inventory_index(value)
+            rows = [row for row in rows if parent is not None and inventory_index(row.get(field)) == parent]
+        else:
+            rows = [row for row in rows if row.get(field) == value]
+    return rows
 
 
 def transceivers(device_id):
