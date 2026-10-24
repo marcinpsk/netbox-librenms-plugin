@@ -14,6 +14,15 @@ _SKIP_TRANSCEIVER_TYPES = {"Port Container", "Port", ""}
 TRANSCEIVER_API_MATCH = "_transceiver_api_match"
 
 
+def _normalize_inventory_indices(rows):
+    """Normalize validated ENTITY-MIB indices on assessment's copies of source rows."""
+    for item in rows:
+        for field in ("entPhysicalIndex", "entPhysicalContainedIn"):
+            value = item.get(field)
+            if isinstance(value, str):
+                item[field] = int(value)
+
+
 def assess(snapshot, *, subject):
     """Return the assessed inventory and its blocked scopes for the synchronization subject."""
     resource = Resource.MODULES
@@ -22,6 +31,7 @@ def assess(snapshot, *, subject):
         return {"inventory": [], "blocked": blocked}
     owner = Device.objects.select_related("device_type__manufacturer").get(pk=snapshot.resources[resource].owner.pk)
     inventory = snapshot.value(resource, "inventory")
+    _normalize_inventory_indices(inventory)
     repair_dangling_parents(inventory)
     ports = snapshot.value(resource, "ports")
     _merge_transceiver_data(
@@ -32,6 +42,7 @@ def assess(snapshot, *, subject):
     _enrich_inventory_port_identity(inventory, ports)
     if snapshot.resources[resource].oob is not None and "oob" not in blocked:
         oob = snapshot.value(resource, "inventory", MappingRole.OOB)
+        _normalize_inventory_indices(oob)
         maximum = max(
             (item["entPhysicalIndex"] for item in inventory if item.get("entPhysicalIndex") is not None), default=0
         )
