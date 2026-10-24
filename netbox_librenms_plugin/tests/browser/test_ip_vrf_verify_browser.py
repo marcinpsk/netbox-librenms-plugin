@@ -229,3 +229,23 @@ def test_a_failed_verify_of_a_superseded_vrf_neither_rolls_back_nor_hides_the_la
 
     assert select.input_value() == IGNORED
     assert page.locator('input[value="row-1"]').is_disabled()
+
+
+def test_vrf_verification_posts_the_selected_interface_name_field(page):
+    _load(page, [_row("row-1")])
+    page.evaluate(
+        """() => document.body.insertAdjacentHTML('afterbegin',
+            '<input type="radio" name="interface_name_field" value="ifName">' +
+            '<input type="radio" name="interface_name_field" value="ifDescr" checked>')"""
+    )
+    requests = []
+
+    def verify(route):
+        requests.append(route.request.post_data_json)
+        route.fulfill(status=200, content_type="application/json", body=_verdict("", True))
+
+    page.route(VERIFY_ROUTE, verify)
+    page.evaluate("handleVRFChange(document.querySelector('.vrf-select'), '1')")
+    _wait_for(page, lambda: bool(requests))
+
+    assert requests[0]["interface_name_field"] == "ifDescr"
