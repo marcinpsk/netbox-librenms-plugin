@@ -13,6 +13,7 @@ from netbox_librenms_plugin.constants import (
     LIBRENMS_PORTS_COLUMNS,
 )
 from netbox_librenms_plugin.ip_addressing import parse_librenms_ip_entry
+from netbox_librenms_plugin.inventory_identity import inventory_index
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.utils import is_list_of_dicts
 
@@ -246,16 +247,24 @@ def links(device_id):
     return Endpoint(SourceRequest(f"devices/{device_id}/links"), decode)
 
 
+def _is_non_negative_inventory_index(value):
+    if type(value) is int:
+        return value >= 0
+    return isinstance(value, str) and value.isascii() and value.isdigit() and inventory_index(value) is not None
+
+
 def _inventory_contract(status, body, *, missing_is_empty=False):
     if status == HTTP_NOT_FOUND and missing_is_empty:
         return Decoded(Outcome.OBTAINED, value=[])
     decoded = _rows_contract("inventory")(status, body)
     if decoded.outcome is Outcome.OBTAINED and any(
-        value is not None and (type(value) is not int or value < 0)
+        value is not None and not _is_non_negative_inventory_index(value)
         for row in decoded.value
         for value in (row.get("entPhysicalIndex"), row.get("entPhysicalContainedIn"))
     ):
-        return Decoded(Outcome.FAILED, reason="Inventory indices must be non-negative integers or absent.")
+        return Decoded(
+            Outcome.FAILED, reason="Inventory indices must be non-negative integers, ASCII digit strings, or absent."
+        )
     if decoded.outcome is Outcome.OBTAINED and not all(
         _optional_index(row.get("ifIndex"))
         and _optional_scalar(
