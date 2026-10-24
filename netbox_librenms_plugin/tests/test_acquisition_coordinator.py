@@ -156,7 +156,6 @@ def test_a_blocked_vlan_refresh_reports_the_failed_source_and_keeps_no_snapshot(
 
 @pytest.mark.django_db
 def test_resource_tabs_share_status_fragment_mutation_and_cleanup(client, settings, django_capture_on_commit_callbacks):
-    from django.core.cache import cache
     from django.urls import reverse
 
     from netbox_librenms_plugin import source_cache
@@ -164,8 +163,6 @@ def test_resource_tabs_share_status_fragment_mutation_and_cleanup(client, settin
     from netbox_librenms_plugin.sync_cache import (
         SyncCacheConsistency,
         SyncTab,
-        module_inventory_cache_payload,
-        sync_snapshot_key,
     )
     from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_device, make_superuser
     from netbox_librenms_plugin.tests.source_snapshot_helpers import (
@@ -173,6 +170,7 @@ def test_resource_tabs_share_status_fragment_mutation_and_cleanup(client, settin
         port_row,
         seed_cables_snapshot,
         seed_interfaces_snapshot,
+        seed_modules_snapshot,
         seed_source_snapshot,
     )
 
@@ -186,14 +184,7 @@ def test_resource_tabs_share_status_fragment_mutation_and_cleanup(client, settin
         [port_row(1, "eth1", device_id=506)],
         server_key=SERVER_KEY,
     )
-    inventory_key = sync_snapshot_key(device, "inventory", SERVER_KEY)
-    from netbox_librenms_plugin.serial_identity import SerialRules
-
-    cache.set(
-        inventory_key,
-        module_inventory_cache_payload([], 506, None, serial_context=SerialRules.load().for_device(device)),
-        timeout=300,
-    )
+    seed_modules_snapshot(device, [], server_key=SERVER_KEY)
     coordinator = SyncCacheConsistency(device)
 
     status = coordinator.status(SERVER_KEY)
@@ -228,7 +219,7 @@ def test_resource_tabs_share_status_fragment_mutation_and_cleanup(client, settin
     assert source_cache.read(device, Resource.INTERFACES, SERVER_KEY) == interfaces
     assert source_cache.read(device, Resource.VLANS, SERVER_KEY) is None
     assert source_cache.read(device, Resource.CABLES, SERVER_KEY) is None
-    assert cache.get(inventory_key) is None
+    assert source_cache.read(device, Resource.MODULES, SERVER_KEY) is None
 
     coordinator.invalidate_every_tab()
 

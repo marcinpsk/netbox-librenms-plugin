@@ -24,6 +24,7 @@ from netbox_librenms_plugin.tests.conftest import configure_default_librenms_ser
 from netbox_librenms_plugin.tests.test_interface_sync_filters import (
     SERVER_KEY,
     _chassis,
+    _fragment,
     _mixed_device,
     _port,
     _rows,
@@ -204,14 +205,23 @@ def test_a_refresh_computes_the_rows_again(tab, computations):
     assert len(computations) == 2
 
 
-def test_another_netbox_release_does_not_read_the_rows(tab, computations, settings):
-    _, rows = tab
-    rows()
+def test_another_netbox_release_requires_a_new_source_before_rendering_rows(tab, computations, settings, client):
+    device, rows = tab
+    original_rows = rows()
+    snapshot = source_cache.read(device, Resource.INTERFACES, SERVER_KEY)
 
-    # An upgrade can change the cached model classes, so rows another release wrote are never unpickled.
     settings.RELEASE = replace(settings.RELEASE, version="99.0.0")
-    rows()
 
+    assert _fragment(client, device).status_code == 404
+    assert len(computations) == 1
+    seed_interfaces_snapshot(
+        device,
+        snapshot.value(Resource.INTERFACES, "ports"),
+        snapshot.value(Resource.INTERFACES, "port_stack"),
+        device=snapshot.value(Resource.INTERFACES, "device"),
+        server_key=SERVER_KEY,
+    )
+    assert set(rows()) == set(original_rows)
     assert len(computations) == 2
 
 
