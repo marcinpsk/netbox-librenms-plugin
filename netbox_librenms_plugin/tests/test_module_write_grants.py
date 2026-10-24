@@ -100,13 +100,22 @@ def cache_key(device):
 
 def edit_cached_row(device, index, **fields):
     """Change one row of the cached snapshot, as the next refresh would after LibreNMS reported it."""
-    from django.core.cache import cache
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_modules_snapshot
 
-    payload = cache.get(cache_key(device))
-    for item in payload["inventory"]:
+    snapshot = source_cache.read(device, Resource.MODULES, SERVER_KEY)
+    inventory = snapshot.value(Resource.MODULES, "inventory")
+    for item in inventory:
         if item["entPhysicalIndex"] == index:
             item.update(fields)
-    cache.set(cache_key(device), payload)
+    seed_modules_snapshot(
+        device,
+        inventory,
+        ports=snapshot.value(Resource.MODULES, "ports"),
+        transceivers=snapshot.value(Resource.MODULES, "transceivers"),
+        server_key=SERVER_KEY,
+    )
 
 
 def _old_digest(value):
@@ -118,9 +127,10 @@ def _old_digest(value):
 def old_format_token(device, writer, fields):
     """Sign, for the current state, the payload a page rendered before this change carried."""
     from django.core import signing
-    from django.core.cache import cache
 
-    inventory = cache.get(cache_key(device))["inventory"]
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import module_inventory
+
+    inventory = module_inventory(device, SERVER_KEY)
     action, target_fields, row_bound = OLD_ACTIONS[writer]
     index = fields.get("ent_index") or fields.get("parent_index")
     ent_index = int(index) if index else None
@@ -363,7 +373,7 @@ def test_a_rule_that_does_not_work_renders_no_table_and_no_grant(ui, c8300, brea
     assert "inventory_binding" not in content
 
 
-def test_a_broken_optic_serial_rule_discards_the_old_snapshot_and_names_the_rule(ui, c8300):
+def test_a_broken_optic_serial_rule_keeps_the_source_and_blocks_the_table(ui, c8300):
     from django.core.cache import cache
 
     from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, SyncTabState
@@ -378,10 +388,9 @@ def test_a_broken_optic_serial_rule_discards_the_old_snapshot_and_names_the_rule
     assert 'id="module-inventory-rule-error"' in content
     assert rule.get_absolute_url() in content and f"<code>{field}</code>" in content
     assert "inventory_binding" not in content
-    assert "Inventory data refreshed successfully." not in content
-    assert cache.get(cache_key(device)) is None
+    assert cache.get(cache_key(device)) is not None
     state = cache.get(SyncCacheConsistency(device).state_key(SyncTab.MODULES, SERVER_KEY))
-    assert state["state"] == SyncTabState.REFRESH_FAILED.value
+    assert state["state"] == SyncTabState.READY.value
 
 
 @pytest.mark.parametrize("breakage", list(BREAKAGES))
@@ -656,7 +665,6 @@ def test_verify_refuses_a_grant_of_another_snapshot(ui, vc_grants):
 
 def test_a_verify_grant_checks_its_state_like_every_other_grant(ui, vc_grants):
     """A verify row carries an index and no target, so the state check must not read a target from it."""
-    from django.core.cache import cache
 
     from netbox_librenms_plugin.inventory_policy import load_inventory_policy
     from netbox_librenms_plugin.module_grants import ACTION_VERIFY_MODULE, read_module_grant
@@ -669,7 +677,9 @@ def test_a_verify_grant_checks_its_state_like_every_other_grant(ui, vc_grants):
     )
     assert grant.rows
 
-    assert grant.check_state(cache.get(cache_key(page))["inventory"], load_inventory_policy(page.pk)) is grant
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import module_inventory
+
+    assert grant.check_state(module_inventory(page, SERVER_KEY), load_inventory_policy(page.pk)) is grant
 
 
 def test_a_selected_install_onto_another_member_needs_the_verified_override(ui, vc_grants):

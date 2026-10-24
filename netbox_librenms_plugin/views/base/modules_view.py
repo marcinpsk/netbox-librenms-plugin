@@ -14,9 +14,9 @@ from netbox_librenms_plugin.constants import (
     OOB_INVENTORY_SOURCE,
     is_librenms_placeholder,
 )
-from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory, vc_serial_key
+from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory
 from netbox_librenms_plugin.inventory_policy import load_inventory_policy
-from netbox_librenms_plugin.inventory_tree import DANGLING_PARENT_KEY, REPORTED_PARENT_KEY, repair_dangling_parents
+from netbox_librenms_plugin.inventory_tree import DANGLING_PARENT_KEY, REPORTED_PARENT_KEY
 from netbox_librenms_plugin.librenms_ids import (
     normalize_librenms_port_id,
 )
@@ -37,17 +37,12 @@ from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import (
     SyncCacheConsistency,
     SyncTab,
-    cached_module_inventory,
-    module_inventory_cache_payload,
-    module_inventory_snapshot_matches,
-    module_snapshot_host_id,
     request_actor_id,
 )
 from netbox_librenms_plugin.utils import (
     coerce_positive_int,
     get_module_adoptable_interface_names,
     get_module_template_interface_specs,
-    is_valid_ports_payload,
     load_module_type_bay_types,
     is_vc_position,
     module_bay_fits,
@@ -63,16 +58,34 @@ from netbox_librenms_plugin.views.mixins import (
     NetBoxObjectPermissionMixin,
 )
 
+from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin.acquisition.registry import Resource
+from netbox_librenms_plugin.acquisition.resources import blocked_scopes
+from netbox_librenms_plugin.assessment.modules import (
+    assess,
+    _clean_librenms_value,
+    _interface_name_candidates,
+    _TRANSCEIVER_API_MATCH,
+)
+
 logger = logging.getLogger(__name__)
+
+
+def read_module_assessment(subject, server_key, *, request=None):
+    """Read the bound source and assess its inventory for every module reader."""
+    snapshot = source_cache.read(subject, Resource.MODULES, server_key)
+    if snapshot is None:
+        return None
+    if request is not None:
+        for blockers in blocked_scopes(snapshot, Resource.MODULES).values():
+            messages.warning(request, source_cache.blocker_notice(blockers))
+    return {**assess(snapshot, subject=subject), "last_fetched": snapshot.finished_at}
 
 
 # Card classes that can repeat an ancestor's serial and model as one physical card (Nokia TIMETRA-CHASSIS-MIB).
 _INTEGRATED_MODULE_CLASSES = frozenset(
     {"module", "port", "ioModule", "cpmModule", "mdaModule", "fabricModule", "xioModule"}
 )
-
-# Transceiver entry types that are containers, not real modules.
-_SKIP_TRANSCEIVER_TYPES = {"Port Container", "Port", ""}
 
 # Physical classes left out when counting hardware siblings under a parent bay.
 _POSITION_UNCOUNTED_CLASSES = {"sensor", "backplane", "stack"}
@@ -103,46 +116,8 @@ def _normalize_librenms_text(value) -> str:
     return normalize_serial(value)
 
 
-def _clean_librenms_value(value) -> str:
-    """
-    Return a LibreNMS model/serial/type value trimmed, with placeholders blanked.
-
-    Coerces through ``normalize_serial`` because all-digit values arrive as JSON
-    numbers, which a bare ``.strip()`` would crash on (and ``or ""`` would drop 0).
-
-    Args:
-        value: The raw value as returned by LibreNMS.
-
-    Returns:
-        The cleaned string, or "" for a missing/placeholder value.
-
-    """
-    text = _normalize_librenms_text(value)
-    return "" if is_librenms_placeholder(text) else text
-
-
-def _names_another_part(item: dict, transceiver: dict, serial_key) -> bool:
-    """Return whether an entity and a transceiver both have a real serial and the serials differ."""
-    item_serial = serial_key(item.get("entPhysicalSerialNum"))
-    transceiver_serial = serial_key(transceiver.get("serial"))
-    return bool(item_serial and transceiver_serial and item_serial != transceiver_serial)
-
-
-def _ifindex_entity_is_the_optic(item: dict, transceiver: dict, serial_key) -> bool:
-    """Return whether an entity matched only by port ifIndex has the optic's serial, or neither model nor serial."""
-    if _names_another_part(item, transceiver, serial_key):
-        return False
-    item_serial = serial_key(item.get("entPhysicalSerialNum"))
-    if item_serial:
-        return item_serial == serial_key(transceiver.get("serial"))
-    return not _clean_librenms_value(item.get("entPhysicalModelName"))
-
-
 # Physical classes whose entities only hold hardware when they report no serial.
 _SERIAL_HOLDER_CLASSES = frozenset({"container", "port"})
-
-# Marks an inventory entity that a transceivers API row confirms as an optic.
-_TRANSCEIVER_API_MATCH = "_transceiver_api_match"
 
 
 def _is_holder(item) -> bool:
@@ -219,28 +194,6 @@ def _own_ignore_action(item, index_map, ignore_contexts, default_rules, default_
         return None
     parent = index_map.get(item.get("entPhysicalContainedIn")) if index_map else None
     return _check_ignore_rules(item, parent, rules, index_map, identity)
-
-
-def _inventory_item_offsettable(item: dict) -> bool:
-    """
-    Return True if an inventory item's index fields support offset arithmetic.
-
-    Both fields must be non-negative integers or absent. The parent can also use zero for
-    the root. RFC 2737 defines entPhysicalIndex as 1..2147483647, so a negative value is
-    out of spec, and admitting one would let the OOB offset land on a main index.
-
-    Args:
-        item (dict): The inventory item to check.
-
-    Returns:
-        bool: True if both index fields support offset arithmetic.
-
-    """
-    idx = item.get("entPhysicalIndex")
-    parent = item.get("entPhysicalContainedIn")
-    idx_ok = idx is None or (isinstance(idx, int) and not isinstance(idx, bool) and idx >= 0)
-    parent_ok = parent is None or (isinstance(parent, int) and not isinstance(parent, bool) and parent >= 0)
-    return idx_ok and parent_ok
 
 
 def _inventory_item_key(item: dict):
@@ -820,313 +773,57 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             for item, (member, source) in zip(rows, owners, strict=True)
         }
 
-    def post(self, request, pk):  # noqa: C901
-        """Fetch inventory from LibreNMS, cache it, and render the module sync table."""
+    def post(self, request, pk):
+        """Acquire the module sources and render their current assessment."""
         obj = self.get_object(pk)
-        # Rebind the API to the POSTed server BEFORE resolving the sync device / librenms_id
-        # so the inventory fetch + cache scope all target the same server in a multi-server
-        # tab refresh. Resolve before _get_sync_device so VC resolution uses the same key.
         server_key = self.rebind_api_for_posted_server(request.POST)
+        empty = {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key}
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
-            # rebind_api_for_server() returned None to avoid building a missing/misconfigured
-            # default client; reading the lazy `librenms_api` property here would reconstruct it
-            # and can raise (a 500 on this HTMX error path). Use the already-cached client's key.
-            active_server_key = self.active_server_key
-            # render_sync_partial injects the donor-mode flags, resolved under the session/active
-            # key — NOT the POSTed key, which failed to rebind and would miss the marker and
-            # re-enable a donor's sync controls.
-            return self.render_sync_partial(
-                request,
-                obj,
-                active_server_key,
-                {"module_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": None}},
-            )
-        sync_device = self._get_sync_device(obj, server_key=server_key)
-
-        # coerce_librenms_id fails closed on a poisoned cached value (bool/zero/negative/garbage):
-        # get_librenms_id's device-id cache path returns its value verbatim, so a stray True would
-        # otherwise int() to 1 and fetch a stranger's inventory. Mirrors the cables/IP views.
-        self.librenms_id, lookup_error = self.resolve_librenms_id(sync_device)
+            return self.render_sync_partial(request, obj, self.active_server_key, {"module_sync": empty})
+        owner = self._get_sync_device(obj, server_key=server_key)
+        self.librenms_id, lookup_error = self.resolve_librenms_id(owner)
         if self.librenms_id is None:
-            cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
+            source_cache.delete(obj, Resource.MODULES, server_key)
             SyncCacheConsistency(obj).mark_refresh_failure(
-                SyncTab.MODULES,
-                server_key,
-                actor_id=request_actor_id(request),
+                SyncTab.MODULES, server_key, actor_id=request_actor_id(request)
             )
             messages.error(
-                request,
-                self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS.",
+                request, self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS."
             )
-            return self.render_sync_partial(
-                request,
-                obj,
-                server_key,
-                {"module_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key}},
-            )
-
-        success, inventory_data = self.librenms_api.get_device_inventory(self.librenms_id)
-
-        # get_device_inventory validates the container, not the index types. A non-int index
-        # would crash the OOB offset.
-        if success and not all(_inventory_item_offsettable(item) for item in inventory_data):
-            success, inventory_data = (
-                False,
-                "inventory payload has a negative or non-integer entPhysicalIndex or entPhysicalContainedIn",
-            )
-
-        # Treat transport errors, invalid containers, and invalid index types as fetch failures.
-        if not success:
-            cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
+            return self.render_sync_partial(request, obj, server_key, {"module_sync": empty})
+        result = source_cache.refresh(request, obj, Resource.MODULES, server_key)
+        if result.error is not None:
             SyncCacheConsistency(obj).mark_refresh_failure(
-                SyncTab.MODULES,
-                server_key,
-                actor_id=request_actor_id(request),
+                SyncTab.MODULES, server_key, actor_id=request_actor_id(request)
             )
-            logger.error("Failed to fetch inventory from LibreNMS for device %s: %s", self.librenms_id, inventory_data)
-            messages.error(request, "Failed to fetch inventory from LibreNMS; see server logs for details.")
-            return self.render_sync_partial(
-                request,
-                obj,
-                server_key,
-                {"module_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key}},
-            )
+            messages.error(request, result.error)
+            return self.render_sync_partial(request, obj, server_key, {"module_sync": empty})
+        context = self.get_context_data(request, obj, server_key=server_key)
+        if SyncCacheConsistency(obj).mark_refresh_outcome(
+            SyncTab.MODULES, server_key, actor_id=request_actor_id(request)
+        ):
+            messages.success(request, "Inventory data refreshed successfully.")
+        else:
+            messages.error(request, "Inventory data could not be cached. Refresh Modules before syncing.")
+        return self.render_sync_partial(request, obj, server_key, {"module_sync": context})
 
-        # Before the transceiver merge: a synthetic row index must not make a missing parent look valid.
-        repair_dangling_parents(inventory_data)
-        for item in inventory_data:
-            item["_source"] = MAIN_INVENTORY_SOURCE
-
-        # Fetch ports once and reuse in subsequent enrichment steps.
-        ports_success, ports_data = self.librenms_api.get_ports(self.librenms_id, with_vlans=False)
-        ports_error = None
-        # A success flag is not enough: a dict whose "ports" is missing/None or carries
-        # non-dict entries makes _enrich_inventory_port_identity()/_merge_transceiver_data()
-        # silently no-op, leaving port-id enrichment incomplete. Treat that as a fetch
-        # failure so the snapshot below is NOT cached as complete (and the user is warned),
-        # instead of silently serving a degraded module list until TTL/manual refresh.
-        ports_payload_ok = ports_success and is_valid_ports_payload(ports_data)
-        if not ports_payload_ok:
-            ports_error = str(ports_data) if ports_data else "unknown error"
-            ports_data = {}
-
-        # Merge main-device transceiver data BEFORE computing the OOB offset so
-        # that synthetic transceiver rows (whose entity_physical_index values come
-        # from the transceiver API and may exceed the ENTITY-MIB high-water mark)
-        # are counted in main_max_idx.  Vendors like Nokia expose SFPs in the
-        # transceiver API with indices that are absent from ENTITY-MIB; without
-        # this reordering those high indices could fall inside the OOB namespace.
+    def _read_render_inventory(self, request, obj, server_key=None):
+        """Read and assess the source without discovery or HTTP."""
+        scoped_server, unresolved = self.resolve_get_render_server_key(request, server_key)
+        empty = {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
+        if unresolved or self._render_server_key() is None:
+            return None, None, None, empty
         from netbox_librenms_plugin.models import RuleConfigurationError
 
         try:
-            inventory_data, txr_error = self._merge_transceiver_data(
-                inventory_data, ports_data=ports_data, manufacturer=sync_device.device_type.manufacturer
-            )
+            assessed = read_module_assessment(obj, scoped_server, request=request)
         except RuleConfigurationError as exc:
-            cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
-            SyncCacheConsistency(obj).mark_refresh_failure(
-                SyncTab.MODULES,
-                server_key,
-                actor_id=request_actor_id(request),
-            )
-            logger.error("Module table for %s not built: %s", obj, exc)
-            return self.render_sync_partial(
-                request,
-                obj,
-                server_key,
-                {
-                    "module_sync": {
-                        "object": obj,
-                        "table": None,
-                        "cache_expiry": None,
-                        "server_key": server_key,
-                        "inventory_rule_error": exc,
-                    }
-                },
-            )
-        for item in inventory_data:
-            item.setdefault("_source", MAIN_INVENTORY_SOURCE)
-        # Enrich port rows with stable LibreNMS port_id using ports data so
-        # interface matching works even when transceiver metadata is absent.
-        self._enrich_inventory_port_identity(inventory_data, ports_data=ports_data)
-
-        # If an OOB controller is linked, fetch its inventory and merge.
-        # Offset OOB entPhysicalIndex values by a dynamic amount to prevent
-        # collisions with the main device's real entPhysicalIndex values.
-        # RFC 2737 does not cap entPhysicalIndex, so a static 1_000_000 offset
-        # is not safe for high-density chassis. Instead we compute an offset
-        # that is always above the main device's highest observed index,
-        # including any synthetic transceiver rows added above.
-        sync_mapping = read_mapping(sync_device)
-        # A bool/negative/non-numeric stored OOB id reads as None, so it is never fired at
-        # get_device_inventory(). The int is also the OOB fingerprint cached below.
-        oob_id = sync_mapping.oob_id(server_key)
-        oob_failed = False
-        if sync_mapping.has_oob(server_key) and oob_id is None:
-            # An OOB controller IS linked but its stored id is corrupt (non-numeric / bool /
-            # zero / negative — e.g. after a manual custom-field edit). A bare falsy check
-            # would conflate this with "no OOB linked": the controller's inventory rows would
-            # silently vanish, the host-only snapshot would be cached as complete, and every
-            # cached render would keep omitting them with no banner — while the Interfaces and
-            # Cables tabs fail closed with an explicit warning for the very same state. Take
-            # the same partial-outcome path as a fetch failure.
-            oob_failed = True
-            logger.warning("Invalid OOB controller id for device %s", self.librenms_id)
-        elif oob_id:
-            oob_success, oob_inventory = self.librenms_api.get_device_inventory(oob_id)
-            # get_device_inventory guarantees a list of dicts on success, but not the TYPE of
-            # entPhysicalIndex/entPhysicalContainedIn: a numeric string would crash the offset
-            # loop below (TypeError on "5" + offset), so fail closed to a host-only snapshot.
-            if oob_success and all(_inventory_item_offsettable(item) for item in oob_inventory):
-                main_max_idx = max(
-                    (idx for item in inventory_data if (idx := item.get("entPhysicalIndex")) is not None),
-                    default=0,
-                )
-                # Round up to the next 1000-boundary for a clean namespace. Both ranges are
-                # non-negative, so the offset clears every main index.
-                _OOB_OFFSET = ((main_max_idx // 1000) + 1) * 1000
-                repair_dangling_parents(oob_inventory)
-                for item in oob_inventory:
-                    item["_source"] = OOB_INVENTORY_SOURCE
-                    if (idx := item.get("entPhysicalIndex")) is not None:
-                        item["entPhysicalIndex"] = idx + _OOB_OFFSET
-                    if (parent := item.get("entPhysicalContainedIn")) not in (None, 0):
-                        item["entPhysicalContainedIn"] = parent + _OOB_OFFSET
-                inventory_data = inventory_data + oob_inventory
-            else:
-                oob_failed = True
-                logger.warning(
-                    "OOB inventory fetch failed for device %s (OOB id %s): %s",
-                    self.librenms_id,
-                    oob_id,
-                    oob_inventory,
-                )
-
-        # Cache the merged inventory, fingerprinted by main + OOB librenms_id so a
-        # re-link to a different controller invalidates the stale merged inventory.
-        # Skip caching on any partial fetch — an OOB failure (main-only snapshot), a
-        # transceiver-enrichment failure (synthetic transceiver rows dropped), or a ports
-        # failure (port-id enrichment missing, so interface matching is degraded).
-        # Persisting any of these would let get_context_data() accept the incomplete
-        # snapshot as complete (it only fingerprints librenms_id/oob_librenms_id), silently
-        # serving a degraded module list and hiding the warning until TTL/manual refresh.
-        if oob_failed or txr_error or ports_error:
-            cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
-        else:
-            cache.set(
-                self.get_cache_key(sync_device, "inventory", server_key=server_key),
-                module_inventory_cache_payload(inventory_data, self.librenms_id, oob_id),
-                timeout=self.librenms_api.cache_timeout,
-            )
-
-        refresh_incomplete = bool(oob_failed or txr_error or ports_error)
-        context = (
-            {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key}
-            if refresh_incomplete
-            else self._build_context(request, obj, inventory_data, server_key=server_key, sync_device=sync_device)
-        )
-        refresh_incomplete = refresh_incomplete or context.get("table") is None
-        if ports_error:
-            logger.warning("Port metadata fetch failed for device %s: %s", self.librenms_id, ports_error)
-            messages.warning(
-                request,
-                "Inventory refresh was incomplete: port metadata fetch failed, so no module rows were"
-                " loaded. Refresh Modules to try again. See server logs for details.",
-            )
-        if txr_error:
-            logger.warning("Transceiver fetch failed for device %s: %s", self.librenms_id, txr_error)
-            messages.warning(
-                request,
-                "Inventory refresh was incomplete: transceiver fetch failed, so no module rows were loaded."
-                " Refresh Modules to try again. See server logs for details.",
-            )
-        if oob_failed:
-            # Keep the toast generic — the device/OOB ids are already in the logger.warning
-            # above (line ~418); surfacing internal LibreNMS ids in the UI is needless leakage
-            # and inconsistent with the ports/transceiver toasts.
-            messages.warning(
-                request,
-                "Inventory refresh was incomplete: OOB controller inventory fetch failed, so no module rows"
-                " were loaded. Refresh Modules to try again. See server logs for details.",
-            )
-        if not refresh_incomplete:
-            if SyncCacheConsistency(obj).mark_refresh_outcome(
-                SyncTab.MODULES,
-                server_key,
-                actor_id=request_actor_id(request),
-            ):
-                messages.success(request, "Inventory data refreshed successfully.")
-            else:
-                messages.error(
-                    request,
-                    "Inventory data could not be cached. The rows shown come from this refresh only "
-                    "and will not survive a reload. Refresh again before syncing; see server logs for details.",
-                )
-        else:
-            SyncCacheConsistency(obj).mark_refresh_failure(
-                SyncTab.MODULES,
-                server_key,
-                actor_id=request_actor_id(request),
-            )
-        return self.render_sync_partial(
-            request,
-            obj,
-            server_key,
-            {"module_sync": context},
-        )
-
-    def _read_render_inventory(self, request, obj, server_key=None):
-        """
-        Return ``(server key, sync device, cached inventory, None)``, or an empty context as the last item.
-
-        The read is scoped to the active server from the request (GET query), the server post() rebinds
-        to and caches under. A cached snapshot for another LibreNMS device or OOB link is discarded.
-        """
-        # The shared helper falls back to the session/default server when the query is blank, so
-        # single-server and default-server renders are unchanged.
-        scoped_server, unresolved = self.resolve_get_render_server_key(request, server_key)
-        if unresolved:
-            # The query named a server that no longer resolves (deleted/misconfigured). Render an
-            # empty table scoped to that key instead of silently falling back to the default
-            # server's cached inventory and attributing it to the requested server.
-            return None, None, None, {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
-        # No buildable client (missing/misconfigured default and no ?server_key rebind): there is no
-        # valid server scope, so degrade to the empty panel with server_key=None — mirrors the
-        # sibling tabs' _render_server_key() None fallback (develop hardening) instead of the
-        # "default" placeholder resolve_get_render_server_key falls back to.
-        if self._render_server_key() is None:
-            return None, None, None, {"table": None, "object": obj, "cache_expiry": None, "server_key": None}
-        empty = {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
-        # Scope the VC sync-device resolution to the RESOLVED server explicitly, rather than
-        # relying on resolve_get_render_server_key having rebound self.librenms_api as a side
-        # effect — otherwise a future ordering/rebind change would silently key VC resolution on
-        # the default server while the cache read (below) uses scoped_server.
-        sync_device = self._get_sync_device(obj, server_key=scoped_server)
-        cache_key = self.get_cache_key(sync_device, "inventory", server_key=scoped_server)
-        cached_payload = cache.get(cache_key)
-        cached_inventory = cached_module_inventory(cached_payload)
-        if cached_inventory is None:
-            cache.delete(cache_key)
+            return None, None, None, {**empty, "inventory_rule_error": exc}
+        if assessed is None or assessed["inventory"] is None:
             return None, None, None, empty
-        # Validate that the cached inventory was built for the same LibreNMS device.
-        # If the object has been remapped to a different device, discard stale inventory.
-        # Coerce like post() does: a raw compare both accepts a poisoned bool (True == 1 in
-        # Python, serving a snapshot post() would fail closed on) and rejects a string-backed
-        # id ("10" != 10, emptying the table until a manual refresh). None (unlinked or
-        # uncoercible) never matches — post() can't cache without a valid id.
-        if getattr(self, "cache_only", False):
-            # The tab status reads the same host ID, so both reach one verdict.
-            current_librenms_id = module_snapshot_host_id(sync_device, scoped_server)
-        else:
-            current_librenms_id, lookup_error = self.resolve_librenms_id(sync_device)
-            if lookup_error is not None:
-                messages.error(request, self.scoped_lookup_message(lookup_error))
-        # The linked OOB controller must match too: merged inventory built for another link is stale.
-        if not module_inventory_snapshot_matches(cached_payload, sync_device, scoped_server, current_librenms_id):
-            cache.delete(cache_key)
-            return None, None, None, empty
-        return scoped_server, sync_device, cached_inventory, None
+        owner = self._get_sync_device(obj, server_key=scoped_server)
+        return scoped_server, owner, assessed["inventory"], None
 
     def get_context_data(self, request, obj, server_key=None):
         """Get context from cache (used on initial page load and by the module actions' in-place re-render)."""
@@ -2161,357 +1858,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     child_item
                 )
 
-    def _merge_transceiver_data(self, inventory_data, ports_data=None, *, manufacturer=None):  # noqa: C901
-        """
-        Merge transceiver API data with entity inventory.
-
-        For vendors like Nokia that don't expose SFPs in ENTITY-MIB,
-        the transceiver API provides SFP model, serial, and type info.
-
-        Strategy:
-        - For transceivers matching existing inventory items: supplement
-          entPhysicalModelName if empty. An item matches by entity_physical_index when its
-          ifIndex agrees with the transceiver port's ifIndex and it has no other real serial,
-          else by that ifIndex when its serial is the transceiver's or it has neither model
-          nor serial.
-        - For transceivers NOT in inventory: create synthetic inventory items
-          so they appear in the modules table
-
-        Returns:
-            (inventory_data, error_message) — error_message is None on success
-            or a string when the transceiver API call failed.
-
-        """
-        success, transceivers = self.librenms_api.get_device_transceivers(self.librenms_id)
-        if not success:
-            return inventory_data, str(transceivers) if transceivers else "unknown error"
-        # get_device_transceivers only reports success for a list of dicts, so the payload shape
-        # is already settled here (see its Returns contract).
-        if not transceivers:
-            return inventory_data, None
-
-        # LibreNMS may return SNMP entity indices as ints on one endpoint and numeric strings on
-        # another (e.g. ENTITY-MIB "300" vs the transceiver API's 300). Coerce both sides to int
-        # so a matching ENTITY row is found instead of caching a duplicate synthetic transceiver.
-        # Local helper to avoid shadowing/duplicating the module-level _try_int the feature stack
-        # adds with the same semantics.
-        def _coerce_idx(value):
-            try:
-                return int(value)
-            except (TypeError, ValueError):
-                return None
-
-        # Build lookup of existing inventory items by index and serial
-        inv_by_index = {
-            idx: item for item in inventory_data if (idx := _coerce_idx(item.get("entPhysicalIndex"))) is not None
-        }
-        serial_key = vc_serial_key(manufacturer)
-        inv_serials = {s for item in inventory_data if (s := serial_key(item.get("entPhysicalSerialNum")))}
-        inv_by_ifindex = {}
-        for item in inventory_data:
-            if (if_index := _coerce_idx(item.get("ifIndex"))) is not None:
-                inv_by_ifindex[if_index] = None if if_index in inv_by_ifindex else item
-
-        # Build port_id → interface label lookup for better synthetic item naming
-        port_name_map = self._build_port_name_map(transceivers, ports_data=ports_data)
-
-        # Types that are containers, not real transceiver modules
-
-        for txr in transceivers:
-            ent_idx = _coerce_idx(txr.get("entity_physical_index"))
-            if ent_idx is None or ent_idx <= 0:
-                continue
-
-            port_id = txr.get("port_id")
-            try:
-                port_id = int(port_id) if port_id is not None else None
-            except (TypeError, ValueError):
-                port_id = None
-            port_meta = port_name_map.get(port_id, {}) if port_id else {}
-            ifname = (port_meta.get("ifName") or "").strip() or None
-            ifdescr = (port_meta.get("ifDescr") or "").strip() or None
-            port_ifindex = _coerce_idx(port_meta.get("ifIndex"))
-
-            # Junos reports the port's ifIndex as entity_physical_index, which can name an unrelated entity.
-            existing = inv_by_index.get(ent_idx)
-            index_taken = existing is not None
-            if existing is not None and (
-                _names_another_part(existing, txr, serial_key)
-                or (port_ifindex is not None and _coerce_idx(existing.get("ifIndex")) not in {None, port_ifindex})
-            ):
-                existing = None
-            if existing is None and port_ifindex is not None:
-                by_ifindex = inv_by_ifindex.get(port_ifindex)
-                if by_ifindex is not None and _ifindex_entity_is_the_optic(by_ifindex, txr, serial_key):
-                    existing = by_ifindex
-            if existing is None and index_taken:
-                # A synthetic row would duplicate the unrelated entity's index.
-                continue
-
-            model = _clean_librenms_value(txr.get("model"))
-            serial = _clean_librenms_value(txr.get("serial"))
-            serial_identity = serial_key(serial)
-            txr_type = _clean_librenms_value(txr.get("type"))
-
-            # Skip containers and entries with no useful data
-            if txr_type in _SKIP_TRANSCEIVER_TYPES and not model and not serial:
-                continue
-
-            # Use transceiver type as model fallback (e.g., "CFP2/QSFP28")
-            display_model = model or (txr_type if txr_type not in _SKIP_TRANSCEIVER_TYPES else "")
-
-            if existing is not None:
-                existing[_TRANSCEIVER_API_MATCH] = True
-                # Supplement existing inventory item if model/serial is missing or a placeholder
-                existing_model = _clean_librenms_value(existing.get("entPhysicalModelName"))
-                if not existing_model and display_model:
-                    existing["entPhysicalModelName"] = display_model
-                existing_serial = _clean_librenms_value(existing.get("entPhysicalSerialNum"))
-                if not existing_serial and serial:
-                    existing["entPhysicalSerialNum"] = serial
-                    if serial_identity:
-                        inv_serials.add(serial_identity)
-                if port_id:
-                    existing["_librenms_port_id"] = port_id
-                if ifname:
-                    existing["_librenms_ifname"] = ifname
-                if ifdescr:
-                    existing["_librenms_ifdescr"] = ifdescr
-            else:
-                # Skip if serial already exists in ENTITY-MIB data (avoid duplicates)
-                if serial_identity and serial_identity in inv_serials:
-                    continue
-                # Create synthetic inventory item for SFPs not in entity inventory
-                if ifname:
-                    name = ifname
-                elif ifdescr:
-                    name = ifdescr
-                elif port_id:
-                    name = f"Transceiver (port {port_id})"
-                else:
-                    name = f"Transceiver {ent_idx}"
-
-                synthetic = {
-                    "entPhysicalIndex": ent_idx,
-                    "entPhysicalName": name,
-                    "entPhysicalClass": "port",
-                    "entPhysicalModelName": display_model,
-                    "entPhysicalSerialNum": serial,
-                    "entPhysicalDescr": txr_type,
-                    "entPhysicalContainedIn": 0,
-                    "_from_transceiver_api": True,
-                    "_librenms_port_id": port_id,
-                    "_librenms_ifname": ifname,
-                    "_librenms_ifdescr": ifdescr,
-                }
-                inventory_data.append(synthetic)
-                # Update dedupe maps so subsequent iterations skip this entry
-                inv_by_index[ent_idx] = synthetic
-                if serial_identity:
-                    inv_serials.add(serial_identity)
-
-        # Nest synthetic transceivers under their parent inventory item by
-        # matching the leading slash-separated path components of the synthetic
-        # name (e.g. ``1/1/c1`` or ``2/x1/1/c2``) against existing item
-        # entPhysicalName values. Vendors that name slot/MDA items with the
-        # same path (Nokia: ``MDA 1/1`` / ``MDA 2/x1/1``; Juniper FPC ports;
-        # etc.) get correctly hierarchical rendering instead of a flat list of
-        # orphan transceivers at the top of the modules table.
-        self._nest_synthetic_transceivers(inventory_data)
-
-        return inventory_data, None
-
-    @staticmethod
-    def _nest_synthetic_transceivers(inventory_data):
-        """
-        Set ``entPhysicalContainedIn`` on synthetic transceiver items by matching path prefixes.
-
-        The match compares a path prefix in each transceiver name against an existing item's name.
-        This vendor-agnostic match only relies on the convention that ports are named like
-        ``a/b/c`` and their parent module is named in a way that ends with the path prefix
-        (e.g. ``MDA 1/1`` for ``1/1/c1``, or ``XIOM 2/x1`` for ``2/x1/1/c2``
-        if the MDA is missing). Items already nested by ENTITY-MIB
-        (``entPhysicalContainedIn != 0``) and non-synthetic items are left untouched.
-
-        Args:
-            inventory_data (list): The inventory items to update.
-
-        """
-        # Build name → index lookup once
-        name_to_index = {}
-        for it in inventory_data:
-            nm = (it.get("entPhysicalName") or "").strip()
-            if nm:
-                name_to_index.setdefault(nm, it.get("entPhysicalIndex"))
-
-        for it in inventory_data:
-            if not it.get("_from_transceiver_api"):
-                continue
-            if it.get("entPhysicalContainedIn"):
-                continue
-            name = (it.get("entPhysicalName") or "").strip()
-            if not name or "/" not in name:
-                continue
-            parts = name.split("/")
-            # Try the longest prefix first, shortening one component at a time
-            for i in range(len(parts) - 1, 0, -1):
-                prefix = "/".join(parts[:i])
-                parent_idx = None
-                for cand_name, cand_idx in name_to_index.items():
-                    if cand_name == prefix or cand_name.endswith(" " + prefix) or cand_name.endswith("/" + prefix):
-                        parent_idx = cand_idx
-                        break
-                if parent_idx and parent_idx != it.get("entPhysicalIndex"):
-                    it["entPhysicalContainedIn"] = parent_idx
-                    break
-
-    def _enrich_inventory_port_identity(self, inventory_data, ports_data=None):  # noqa: C901
-        """Backfill `_librenms_port_id` / labels for port-class inventory rows from LibreNMS ports data."""
-        if ports_data is None:
-            success, ports_data = self.librenms_api.get_ports(self.librenms_id, with_vlans=False)
-            if not success or not isinstance(ports_data, dict):
-                return
-        elif not isinstance(ports_data, dict):
-            return
-
-        ports = ports_data.get("ports")
-        if not isinstance(ports, list):
-            return
-
-        label_to_port_id = {}
-        ambiguous_labels = set()
-        port_meta_by_id = {}
-
-        for port in ports:
-            if not isinstance(port, dict):
-                continue
-            try:
-                port_id = int(port.get("port_id"))
-            except (TypeError, ValueError):
-                continue
-            if port_id <= 0:
-                continue
-
-            ifname = (port.get("ifName") or "").strip()
-            ifdescr = (port.get("ifDescr") or "").strip()
-            port_meta_by_id[port_id] = {"ifName": ifname, "ifDescr": ifdescr}
-
-            for label in [ifname, ifdescr]:
-                if not label:
-                    continue
-                existing = label_to_port_id.get(label)
-                if existing is None:
-                    label_to_port_id[label] = port_id
-                elif existing != port_id:
-                    ambiguous_labels.add(label)
-
-        for label in ambiguous_labels:
-            label_to_port_id.pop(label, None)
-
-        for item in inventory_data:
-            if _normalize_librenms_text(item.get("entPhysicalClass")).lower() != "port":
-                continue
-
-            port_id = item.get("_librenms_port_id")
-            try:
-                port_id = int(port_id) if port_id is not None else None
-            except (TypeError, ValueError):
-                port_id = None
-
-            if port_id is None or port_id <= 0:
-                candidates = BaseModuleTableView._interface_name_candidates(item)
-
-                matched_ids = [label_to_port_id[label] for label in candidates if label in label_to_port_id]
-                matched_ids = sorted(set(matched_ids))
-                if len(matched_ids) != 1:
-                    continue
-                port_id = matched_ids[0]
-                item["_librenms_port_id"] = port_id
-
-            meta = port_meta_by_id.get(port_id)
-            if not meta:
-                continue
-            if meta.get("ifName") and not item.get("_librenms_ifname"):
-                item["_librenms_ifname"] = meta["ifName"]
-            if meta.get("ifDescr") and not item.get("_librenms_ifdescr"):
-                item["_librenms_ifdescr"] = meta["ifDescr"]
-
-    def _build_port_name_map(self, transceivers, ports_data=None):
-        """
-        Build port_id → interface labels mapping for transceiver ports.
-
-        Fetches port data from LibreNMS to resolve port IDs to interface labels,
-        enabling better bay matching for synthetic transceiver items (e.g.,
-        Nokia 1/1/c1 instead of opaque port IDs).
-
-        Args:
-            transceivers (list): The transceiver records to map.
-            ports_data (dict | None): Optional pre-fetched LibreNMS port data.
-
-        Returns:
-            dict: Interface labels keyed by normalized port ID.
-
-        """
-        port_ids = {txr.get("port_id") for txr in transceivers if txr.get("port_id")}
-        if not port_ids:
-            return {}
-
-        if ports_data is None:
-            success, ports_data = self.librenms_api.get_ports(self.librenms_id, with_vlans=False)
-            if not success or not isinstance(ports_data, dict):
-                return {}
-        elif not isinstance(ports_data, dict):
-            return {}
-
-        ports = ports_data.get("ports")
-        if not isinstance(ports, list):
-            return {}
-
-        normalized_port_ids = set()
-        for raw_port_id in port_ids:
-            try:
-                port_id = int(raw_port_id)
-            except (TypeError, ValueError):
-                continue
-            if port_id > 0:
-                normalized_port_ids.add(port_id)
-
-        port_map = {}
-        for port in ports:
-            if not isinstance(port, dict):
-                continue
-            try:
-                port_id = int(port.get("port_id"))
-            except (TypeError, ValueError):
-                continue
-            if port_id not in normalized_port_ids:
-                continue
-            ifname = (port.get("ifName") or "").strip()
-            ifdescr = (port.get("ifDescr") or "").strip()
-            if not ifname and not ifdescr:
-                continue
-            port_map[port_id] = {
-                "ifName": ifname,
-                "ifDescr": ifdescr,
-                "ifIndex": port.get("ifIndex"),
-            }
-        return port_map
-
-    @staticmethod
-    def _interface_name_candidates(item):
-        """Return unique interface label candidates for bay matching."""
-        candidates = []
-        for value in [
-            item.get("_librenms_ifname"),
-            item.get("_librenms_ifdescr"),
-            item.get("entPhysicalName"),
-            item.get("entPhysicalDescr"),
-        ]:
-            label = _normalize_librenms_text(value)
-            if label and label not in candidates:
-                candidates.append(label)
-        return candidates
-
     @staticmethod
     def _extract_interface_port_indices(item):
         """
@@ -2528,7 +1874,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         """
         indices = []
-        for label in BaseModuleTableView._interface_name_candidates(item):
+        for label in _interface_name_candidates(item):
             coordinates = BaseModuleTableView._extract_interface_numeric_coordinates(label)
             if coordinates:
                 preferred = coordinates[-1]
@@ -2977,7 +2323,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         """
         parent_name = BaseModuleTableView._find_parent_container_name_static(item, index_map)
         candidate_names = [parent_name] if parent_name else []
-        for candidate in BaseModuleTableView._interface_name_candidates(item):
+        for candidate in _interface_name_candidates(item):
             if candidate not in candidate_names:
                 candidate_names.append(candidate)
 

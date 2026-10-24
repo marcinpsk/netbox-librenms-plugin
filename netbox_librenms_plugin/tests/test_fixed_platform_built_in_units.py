@@ -508,10 +508,10 @@ class TestMarkBuiltInBelowABuiltInUnit:
         assert controls(device) == {}
 
     def test_a_signed_mark_of_the_card_records_no_part_number(self):
-        device, inventory = self._device("ixr-below-built-in-signed")
+        device, _inventory = self._device("ixr-below-built-in-signed")
         before = written(device)
 
-        mark(device, signed_mark_query(device, MDA, inventory))
+        mark(device, signed_mark_query(device, MDA))
 
         assert written(device) == before
 
@@ -588,7 +588,7 @@ class TestMarkBuiltInWithAPartNumber:
         assert str(form["manufacturer"].value()) == str(device.device_type.manufacturer_id)
 
 
-def signed_mark_query(device, index, inventory=None):
+def signed_mark_query(device, index):
     """Return the query of a "Mark built-in" request for row *index* with a grant signed for the current state."""
     from netbox_librenms_plugin.inventory_policy import load_inventory_policy
     from netbox_librenms_plugin.module_grants import (
@@ -597,6 +597,7 @@ def signed_mark_query(device, index, inventory=None):
         module_inventory_snapshot_digest,
         sign_module_grant,
     )
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import module_inventory
 
     token = sign_module_grant(
         page_device_id=device.pk,
@@ -605,7 +606,7 @@ def signed_mark_query(device, index, inventory=None):
         action=ACTION_MARK_BUILT_IN,
         ent_index=index,
         action_target={"device_type_id": device.device_type_id},
-        inventory_digest=module_inventory_snapshot_digest(inventory or ixr_inventory()),
+        inventory_digest=module_inventory_snapshot_digest(module_inventory(device, SERVER_KEY)),
         policy_fingerprint=load_inventory_policy(device.pk).fingerprint,
         render_mode=RENDER_ATTRIBUTED,
     )

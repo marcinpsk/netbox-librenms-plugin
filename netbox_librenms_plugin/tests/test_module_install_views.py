@@ -106,11 +106,14 @@ def _post_selected(device, rows, indices, librenms_id, live_librenms):
 
 
 def _seed_pre_version_snapshot(view, device, rows, librenms_id):
-    """Cache *rows* exactly as the writer stored them before the payload carried a schema version."""
+    """Store an older source schema so a writer refuses it without deleting it."""
     from django.core.cache import cache
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_modules_snapshot
 
+    snapshot = seed_modules_snapshot(device, rows)
+    payload = {**snapshot.to_payload(), "schema": 0}
     key = view.get_cache_key(device, "inventory", server_key="default")
-    cache.set(key, {"inventory": rows, "librenms_id": librenms_id, "oob_librenms_id": None}, timeout=300)
+    cache.set(key, payload, timeout=300)
     return key
 
 
@@ -387,7 +390,7 @@ class TestInstallBranchView:
         assert response.status_code == 302
         assert message_texts(request, "error") == ["No cached inventory data. Please refresh modules first."]
         assert not Module.objects.filter(device=device).exists()
-        assert cache.get(key) is None
+        assert cache.get(key)["schema"] == 0
 
     @SKIPPED_HOLDER_SHAPES
     def test_a_row_below_a_skipped_holder_has_no_branch(self, live_librenms, holder_class, holder_model):
@@ -462,7 +465,7 @@ class TestInstallSelectedView:
 
         assert message_texts(request, "error") == ["No cached inventory data. Please refresh modules first."]
         assert not Module.objects.filter(device=device).exists()
-        assert cache.get(key) is None
+        assert cache.get(key)["schema"] == 0
 
     @SKIPPED_HOLDER_SHAPES
     def test_a_selected_row_below_a_skipped_holder_installs_nothing(self, live_librenms, holder_class, holder_model):

@@ -5,6 +5,8 @@ These tests never touch the database or network; they only inspect class
 hierarchies and attribute presence.
 """
 
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
 import json
 import os
 from pathlib import Path
@@ -1944,7 +1946,6 @@ class TestInstallRefusesADuplicateSerial:
 
     def test_bulk_install_is_refused_when_the_serial_is_already_on_the_device(self):
         """InstallSelectedView builds its work list from the cache, so the row's flags cannot guard it."""
-        from types import SimpleNamespace
 
         from dcim.models import Module
         from django.core.cache import cache
@@ -1985,7 +1986,7 @@ class TestInstallRefusesADuplicateSerial:
         # The table offers no install for a serial the device holds, so the serial lands after the render.
         Module.objects.filter(pk=installed.pk).update(serial="BULK-DUP")
         request = make_request("post", {**fields, "select": ["200"]}, user=user, path="/x/")
-        view = make_view(InstallSelectedView, request, librenms_api=SimpleNamespace(server_key="default"))
+        view = make_view(InstallSelectedView, request, librenms_api=LibreNMSAPI(server_key="default"))
         try:
             view.post(request, pk=device.pk)
         finally:
@@ -2018,7 +2019,6 @@ class TestIdentityIsNotGatedOnBayMapping:
     @staticmethod
     def _rows_for(prefix, inventory, extra_bay=None):
         """Build real table rows for `inventory` against a device holding one installed module."""
-        from types import SimpleNamespace
 
         from dcim.models import Module
 
@@ -2040,7 +2040,7 @@ class TestIdentityIsNotGatedOnBayMapping:
             make_module_bay(device, extra_bay)
 
         request = make_request("get", {}, user=make_superuser(f"{prefix}-user"), path="/x/")
-        view = make_view(DeviceModuleTableView, request, librenms_api=SimpleNamespace(server_key="session-default"))
+        view = make_view(DeviceModuleTableView, request, librenms_api=LibreNMSAPI(server_key="default"))
         context = view._build_context(request, device, inventory, server_key="default")
         assert context["table"].server_key == "default"
         digest = module_inventory_snapshot_digest(inventory)
