@@ -2,10 +2,9 @@
 Regression tests for SingleIPAddressVerifyView.post().
 
 Covers:
-- Cache key uses CacheMixin.get_cache_key() (server-aware) instead of
-  the old private _get_cache_key() that produced a different format.
-- server_key from POST body is threaded into the cache lookup so
-  non-default servers hit the correct cache entry.
+- server_key from POST body selects the stored IP snapshot of that server, so non-default
+  servers verify against their own source rows.
+- request validation and the row lookup over the assessed rows.
 """
 
 import json
@@ -13,6 +12,7 @@ import json
 import pytest
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
+from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot
 
 
 pytestmark = pytest.mark.django_db
@@ -36,41 +36,6 @@ def _make_request(body_dict):
     return request
 
 
-def _make_device(tag=1):
-    """Create a real Device for cache key generation."""
-    return make_device(f"ip-verify-cache-{tag}")
-
-
-class TestCacheKeyFormat:
-    """SingleIPAddressVerifyView must use CacheMixin.get_cache_key()."""
-
-    def test_no_private_get_cache_key_method(self):
-        """The old _get_cache_key method must not exist on SingleIPAddressVerifyView."""
-        from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
-
-        assert not hasattr(SingleIPAddressVerifyView, "_get_cache_key"), (
-            "SingleIPAddressVerifyView still has _get_cache_key; it should use CacheMixin.get_cache_key() instead"
-        )
-
-    def test_cache_key_matches_writer_format(self):
-        """The cache key used by post() must match the format used by _prepare_context()."""
-        view = _make_view()
-        device = _make_device(tag=42)
-
-        # CacheMixin.get_cache_key produces this format
-        expected_key = f"librenms_ip_addresses_device_{device.pk}_prod"
-
-        assert view.get_cache_key(device, "ip_addresses", "prod") == expected_key
-
-    def test_cache_key_default_server(self):
-        """Default server key produces the expected cache key format."""
-        view = _make_view()
-        device = _make_device(tag=7)
-
-        expected_key = f"librenms_ip_addresses_device_{device.pk}_default"
-        assert view.get_cache_key(device, "ip_addresses", "default") == expected_key
-
-
 class TestVerifyPostRejectsNonObjectBody:
     """A non-object JSON body must 400, not 500 on .get()."""
 
@@ -89,7 +54,7 @@ class TestVerifyPostServerCacheNamespace:
     """The endpoint reads the selected configured namespace or the default namespace."""
 
     @pytest.mark.parametrize(
-        ("server_key", "include_server_key", "selected_vrf"),
+        ("server_key", "include_server_key", "expected_port"),
         [("production", True, 20), (None, True, 10), (None, False, 10)],
     )
     def test_configured_missing_and_null_server_keys_select_the_expected_cache(
@@ -97,10 +62,8 @@ class TestVerifyPostServerCacheNamespace:
         configure_librenms,
         server_key,
         include_server_key,
-        selected_vrf,
+        expected_port,
     ):
-        from django.core.cache import cache
-
         configure_librenms(
             {
                 "default": {
@@ -113,21 +76,26 @@ class TestVerifyPostServerCacheNamespace:
                 },
             }
         )
-        device = make_device(f"ip-verify-namespace-{selected_vrf}-{include_server_key}")
-        view = _make_view()
-        address = "198.18.40.1/32"
-        for namespace, vrf_id in (("default", 10), ("production", 20)):
-            cache.set(
-                view.get_cache_key(device, "ip_addresses", namespace),
-                {"ip_addresses": [{"ip_with_mask": address, "vrf_id": vrf_id}]},
-                timeout=300,
+        device = make_device(
+            f"ip-verify-namespace-{expected_port}-{include_server_key}",
+            librenms_cf={"default": 40, "production": 41},
+        )
+        address = "198.18.40.1"
+        # The address is on two ports in each snapshot, so only the snapshot that holds the posted row id answers.
+        for namespace, first_port in (("default", 10), ("production", 20)):
+            port_ids = (first_port, first_port + 1)
+            seed_ip_snapshot(
+                device,
+                [ip_address_row(address, port_id, prefix_length=32) for port_id in port_ids],
+                [{"port_id": port_id, "ifName": f"eth{port_id}", "ifDescr": f"eth{port_id}"} for port_id in port_ids],
+                server_key=namespace,
             )
 
         body = {
             "device_id": device.pk,
             "object_type": "device",
-            "ip_address": address,
-            "vrf_id": selected_vrf,
+            "ip_address": f"{address}/32",
+            "row_id": f"{address}/32@{expected_port}",
         }
         if include_server_key:
             body["server_key"] = server_key
@@ -135,8 +103,8 @@ class TestVerifyPostServerCacheNamespace:
 
         response = _make_view(request).post(request)
 
-        assert response.status_code == 200
-        assert "Synced" in json.loads(response.content)["formatted_row"]["status"]
+        assert response.status_code == 200, response.content
+        assert json.loads(response.content)["status"] == "success"
 
 
 @pytest.mark.django_db
@@ -146,32 +114,20 @@ class TestVerifyPostRejectsMalformedVrfId:
 
     The `vrf__id` filter in `_find_existing_ip` is only reached when an IPAddress at the posted address
     already exists, so the real IP is created first — otherwise the guard is never exercised and the
-    pre-fix code wouldn't 500 either. Only the cache read is stubbed; `_find_existing_ip` runs for real.
+    pre-fix code wouldn't 500 either. The snapshot is empty; `_find_existing_ip` runs for real.
     """
 
-    def _real_device(self):
-        from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
-
-        mfr, _ = Manufacturer.objects.get_or_create(name="VRFSK-Mfr", slug="vrfsk-mfr")
-        dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="VRFSK-DT", slug="vrfsk-dt")
-        role, _ = DeviceRole.objects.get_or_create(name="VRFSK-Role", slug="vrfsk-role")
-        site, _ = Site.objects.get_or_create(name="VRFSK-Site", slug="vrfsk-site")
-        return Device.objects.create(name="vrfsk-dev", device_type=dt, role=role, site=site, status="active")
-
     def _post(self, vrf_id):
-        from django.core.cache import cache
         from ipam.models import IPAddress
 
-        device = self._real_device()
+        device = make_device("vrfsk-dev", librenms_cf={"default": 50})
         IPAddress.objects.get_or_create(address="10.0.0.1/24")  # make the vrf__id filter reachable
+        seed_ip_snapshot(device, [])
 
         request = _make_request(
             {"ip_address": "10.0.0.1/24", "vrf_id": vrf_id, "device_id": device.pk, "object_type": "device"}
         )
-        view = _make_view(request)
-        cache.set(view.get_cache_key(device, "ip_addresses", "default"), {"ip_addresses": []}, timeout=300)
-
-        return view.post(request)
+        return _make_view(request).post(request)
 
     def test_non_numeric_vrf_id_returns_400(self):
         response = self._post("abc")
@@ -190,59 +146,58 @@ class TestVerifyPostRejectsMalformedVrfId:
         assert self._post("999999").status_code == 200
 
 
-class TestFindInCacheFailsClosed:
-    """SingleIPAddressVerifyView._find_in_cache treats a truthy non-dict entry as a miss, not a crash."""
+class TestFindRowResolvesAssessedRows:
+    """SingleIPAddressVerifyView._find_row resolves one row of a real assessment and never guesses among equal addresses."""
 
-    def _make_view(self):
+    @staticmethod
+    def _rows():
+        from ipam.models import VRF, IPAddress
+
+        from netbox_librenms_plugin import source_cache
+        from netbox_librenms_plugin.acquisition.registry import Resource
+        from netbox_librenms_plugin.tests.conftest import make_interface
+        from netbox_librenms_plugin.views.base.ip_addresses_view import assess_ip_snapshot
+
+        device = make_device("ip-verify-find-row", librenms_cf={"default": 60})
+        vrf = VRF.objects.create(name="find-row-vrf")
+        IPAddress.objects.create(address="10.0.0.1/32", vrf=vrf, assigned_object=make_interface(device, "eth5"))
+        seed_ip_snapshot(
+            device,
+            [
+                ip_address_row("10.0.0.1", 5, prefix_length=32),
+                ip_address_row("10.0.0.2", 6, prefix_length=32),
+                ip_address_row("10.0.0.2", 7, prefix_length=32),
+            ],
+            [{"port_id": port_id, "ifName": f"eth{port_id}", "ifDescr": f"eth{port_id}"} for port_id in (5, 6, 7)],
+        )
+        request = _make_request({})
+        snapshot = source_cache.read(device, Resource.IP_ADDRESSES, "default")
+        return assess_ip_snapshot(request, device, snapshot, "default").rows, vrf
+
+    def test_a_unique_address_returns_its_netbox_vrf_and_source_port(self):
         from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
 
-        return object.__new__(SingleIPAddressVerifyView)
+        rows, vrf = self._rows()
 
-    def test_non_dict_cache_entry_returns_empty_triple(self):
-        """A list (legacy snapshot shape) must not raise AttributeError on .get()."""
-        view = self._make_view()
-        assert view._find_in_cache([{"ip_address": "10.0.0.1"}], "10.0.0.1", 32) == (None, None, None)
+        row, vrf_id, port_id = SingleIPAddressVerifyView._find_row(rows, "10.0.0.1", 32)
 
-    def test_dict_cache_entry_still_matches(self):
-        """Positive control: a well-formed dict entry still resolves normally."""
-        view = self._make_view()
-        cached = {
-            "ip_addresses": [
-                {
-                    "ip_address": "10.0.0.1",
-                    "ip_with_mask": "10.0.0.1/32",
-                    "prefix_length": 32,
-                    "vrf_id": 7,
-                    "port_id": 5,
-                }
-            ]
-        }
-        entry, vrf_id, port_id = view._find_in_cache(cached, "10.0.0.1", 32)
-        assert entry is not None and vrf_id == 7 and port_id == 5
+        assert (row["ip_with_mask"], vrf_id, port_id) == ("10.0.0.1/32", vrf.pk, 5)
 
-    def test_malformed_row_among_ip_addresses_is_skipped(self):
-        """A non-dict row inside ip_addresses must be skipped (not TypeError'd) so a later good row still matches."""
-        view = self._make_view()
-        cached = {
-            "ip_addresses": [
-                "not-a-dict",
-                ["also", "bad"],
-                {
-                    "ip_address": "10.0.0.1",
-                    "ip_with_mask": "10.0.0.1/32",
-                    "prefix_length": 32,
-                    "vrf_id": 7,
-                    "port_id": 5,
-                },
-            ]
-        }
-        entry, vrf_id, port_id = view._find_in_cache(cached, "10.0.0.1", 32)
-        assert entry is not None and vrf_id == 7 and port_id == 5
+    def test_an_address_on_two_ports_needs_the_row_id(self):
+        from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
 
-    def test_all_rows_malformed_returns_empty_triple(self):
-        """When every row is malformed, the lookup is a clean miss rather than a crash."""
-        view = self._make_view()
-        assert view._find_in_cache({"ip_addresses": ["x", 5, None]}, "10.0.0.1", 32) == (None, None, None)
+        rows, _vrf = self._rows()
+
+        assert SingleIPAddressVerifyView._find_row(rows, "10.0.0.2", 32) == (None, None, None)
+        row, _vrf_id, port_id = SingleIPAddressVerifyView._find_row(rows, "10.0.0.2", 32, "10.0.0.2/32@7")
+        assert (row["row_id"], port_id) == ("10.0.0.2/32@7", 7)
+
+    def test_a_row_id_of_another_address_is_a_miss(self):
+        from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
+
+        rows, _vrf = self._rows()
+
+        assert SingleIPAddressVerifyView._find_row(rows, "10.0.0.1", 32, "10.0.0.2/32@7") == (None, None, None)
 
 
 class TestNumericIDValidation:

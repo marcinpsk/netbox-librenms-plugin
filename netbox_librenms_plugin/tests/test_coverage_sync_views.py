@@ -17,15 +17,15 @@ from django.core.cache import cache
 from django.urls import reverse
 from ipam.models import IPAddress, VLAN
 
+from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot, seed_source_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts
 from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
-from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
 
 
 SERVER_KEY = "default"
@@ -247,28 +247,12 @@ class TestIPAddressSynchronization:
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
         _set_librenms_id(interface, 8201)
         row_id = "198.18.81.10/24"
-        payload = {
-            "ip_addresses": [
-                {
-                    "ip_address": "198.18.81.10",
-                    "prefix_length": 24,
-                    "ip_with_mask": row_id,
-                    "port_id": 8201,
-                    "interface_name": interface.name,
-                }
-            ],
-            "mgmt_ip": "",
-            "ports_by_id": {
-                8201: {
-                    "port_id": 8201,
-                    "ifName": interface.name,
-                    "ifDescr": interface.name,
-                    "ifType": "ethernetCsmacd",
-                }
-            },
-            "interface_name_field": "ifName",
-        }
-        _seed_snapshot(SyncIPAddressesView(), device, "ip_addresses", payload)
+        seed_ip_snapshot(
+            device,
+            [ip_address_row("198.18.81.10", 8201)],
+            [{"port_id": 8201, "ifName": interface.name, "ifDescr": interface.name, "ifType": "ethernetCsmacd"}],
+            server_key=SERVER_KEY,
+        )
         _login(client, "ip-create-user")
 
         response = client.post(
@@ -305,8 +289,9 @@ class TestIPAddressSynchronization:
 class TestVLANSynchronization:
     def test_cached_vlan_is_created(self, client, live_librenms):
         device = make_device("vlan-create", librenms_cf={SERVER_KEY: {"id": 91}})
-        view = SyncVLANsView()
-        _seed_snapshot(view, device, "vlans", [{"vlan_vlan": 3091, "vlan_name": "Application"}])
+        seed_source_snapshot(
+            device, Resource.VLANS, SERVER_KEY, vlans=[{"vlan_vlan": 3091, "vlan_name": "Application"}]
+        )
         _login(client, "vlan-create-user")
         url = reverse(
             "plugins:netbox_librenms_plugin:sync_selected_vlans",
@@ -326,13 +311,14 @@ class TestVLANSynchronization:
     def test_cached_vlan_updates_an_existing_global_vlan(self, client, live_librenms):
         device = make_device("vlan-update", librenms_cf={SERVER_KEY: {"id": 93}})
         vlan = VLAN.objects.create(vid=3093, name="Old Name", status="active")
-        view = SyncVLANsView()
         _login(client, "vlan-update-user")
         url = reverse(
             "plugins:netbox_librenms_plugin:sync_selected_vlans",
             kwargs={"object_type": "device", "object_id": device.pk},
         )
-        _seed_snapshot(view, device, "vlans", [{"vlan_vlan": 3093, "vlan_name": "Application Servers"}])
+        seed_source_snapshot(
+            device, Resource.VLANS, SERVER_KEY, vlans=[{"vlan_vlan": 3093, "vlan_name": "Application Servers"}]
+        )
         updated = client.post(
             url,
             {"server_key": SERVER_KEY, "action": "create_vlans", "select": "3093", "vlan_group_3093": ""},
@@ -493,24 +479,12 @@ def test_ambiguous_port_id_is_skipped_despite_matching_name(client, live_librenm
     for interface in (named, other):
         _set_librenms_id(interface, 8201)
     row_id = "198.18.81.10/24"
-    _seed_snapshot(
-        SyncIPAddressesView(),
+    # The port record names eth0, but the ambiguous port ID must not fall through to that name.
+    seed_ip_snapshot(
         device,
-        "ip_addresses",
-        {
-            "ip_addresses": [
-                {
-                    "ip_address": "198.18.81.10",
-                    "prefix_length": 24,
-                    "ip_with_mask": row_id,
-                    "port_id": 8201,
-                    "interface_name": named.name,
-                }
-            ],
-            "mgmt_ip": "",
-            "ports_by_id": {},
-            "interface_name_field": "ifName",
-        },
+        [ip_address_row("198.18.81.10", 8201)],
+        [{"port_id": 8201, "ifName": named.name, "ifDescr": named.name}],
+        server_key=SERVER_KEY,
     )
     _login(client, "ambiguous-port-sync-user")
     response = client.post(

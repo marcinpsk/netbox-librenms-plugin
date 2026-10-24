@@ -1,8 +1,9 @@
 from django.contrib import messages
-from django.core.cache import cache
 from django.utils import timezone
 from django.views import View
 
+from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.constants import LIBRENMS_VLAN_STATE_ACTIVE
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.sync_filters import filter_sync_table, parse_table_filters
@@ -10,7 +11,6 @@ from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
 from netbox_librenms_plugin.utils import (
     build_migrated_context,
     index_vlan_source_rows,
-    is_list_of_dicts,
     normalize_vlan_vid,
 )
 from netbox_librenms_plugin.views.mixins import (
@@ -74,25 +74,24 @@ class BaseVLANTableView(
                 },
             )
 
-        # Get librenms_id (now scoped to the POSTed server). coerce_librenms_id fails closed on a
-        # poisoned cached value (bool/zero/negative/garbage) — the device-id cache path of
-        # get_librenms_id returns its value verbatim, so a stray True would otherwise int() to 1
-        # and fetch a stranger's VLANs. Mirrors the cables/interfaces/IP views in this PR.
+        # Discovery may find the LibreNMS device by IP or hostname and store the mapping; acquisition
+        # then reads that mapping and never writes.
         self.librenms_id, lookup_error = self.resolve_librenms_id(obj)
-
         if self.librenms_id is None:
-            # Drop any prior snapshot for this server: a failed refresh on a previously-synced
-            # device must not leave a stale VLAN table the next GET can render and act on. The
-            # cache is scoped by server_key, so evict the same scoped keys.
-            cache.delete(self.get_cache_key(obj, "vlans", server_key))
-            cache.delete(self.get_last_fetched_key(obj, "vlans", server_key))
+            # A failed refresh on a previously-synced device must not leave a stale VLAN table to act on.
+            source_cache.delete(obj, Resource.VLANS, server_key)
+            error_message = (
+                self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS."
+            )
+        else:
+            error = source_cache.refresh(obj, Resource.VLANS, server_key).error
+            error_message = error and f"Failed to fetch VLANs: {error}"
+
+        if error_message is not None:
             SyncCacheConsistency(obj).mark_refresh_failure(
                 SyncTab.VLANS,
                 server_key,
                 actor_id=request_actor_id(request),
-            )
-            error_message = (
-                self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS."
             )
             messages.error(request, error_message)
             return self.render_sync_partial(
@@ -100,21 +99,6 @@ class BaseVLANTableView(
                 obj,
                 server_key,
                 {"vlan_sync": self._get_error_context(obj, error_message, server_key=server_key)},
-            )
-
-        # Fetch VLAN data from LibreNMS
-        success, error_msg = self._fetch_and_cache_vlan_data(obj, server_key)
-        if not success:
-            cache.delete(self.get_cache_key(obj, "vlans", server_key))
-            cache.delete(self.get_last_fetched_key(obj, "vlans", server_key))
-            SyncCacheConsistency(obj).mark_refresh_failure(
-                SyncTab.VLANS,
-                server_key,
-                actor_id=request_actor_id(request),
-            )
-            messages.error(request, error_msg)
-            return self.render_sync_partial(
-                request, obj, server_key, {"vlan_sync": self._get_error_context(obj, error_msg, server_key=server_key)}
             )
 
         if SyncCacheConsistency(obj).mark_refresh_outcome(
@@ -133,41 +117,6 @@ class BaseVLANTableView(
         return self.render_sync_partial(
             request, obj, server_key, {"vlan_sync": self.get_vlan_context(request, obj, server_key)}
         )
-
-    def _fetch_and_cache_vlan_data(self, obj, server_key=None):
-        """
-        Fetch VLAN data from LibreNMS and cache it.
-
-        Returns:
-            tuple: (success: bool, error_message: str or None)
-
-        """
-        # Fetch device VLANs
-        success, vlans_data = self.librenms_api.get_device_vlans(self.librenms_id)
-        if not success:
-            return False, f"Failed to fetch VLANs: {vlans_data}"
-
-        # A success=True response can still carry a malformed-but-truthy payload (string, list
-        # of scalars, etc.); caching it would later 500 in compare_vlans() on vlan.get(...).
-        # Reject anything that isn't a list of dict rows before caching (issue #100). An empty
-        # list is valid (a device with no VLANs).
-        if not is_list_of_dicts(vlans_data):
-            return False, "Unexpected response from LibreNMS (malformed VLAN payload)."
-
-        # Cache VLANs (scoped to the POST-resolved server when provided).
-        server_key = server_key or self.librenms_api.server_key
-        cache.set(
-            self.get_cache_key(obj, "vlans", server_key),
-            vlans_data,
-            timeout=self.librenms_api.cache_timeout,
-        )
-        cache.set(
-            self.get_last_fetched_key(obj, "vlans", server_key),
-            timezone.now(),
-            timeout=self.librenms_api.cache_timeout,
-        )
-
-        return True, None
 
     def get_vlan_context(self, request, obj, server_key=None):
         """
@@ -235,19 +184,9 @@ class BaseVLANTableView(
                     unscoped_groups=unscoped_groups,
                 ),
             }
-        cached_vlans = cache.get(self.get_cache_key(obj, "vlans", server_key))
-        last_fetched = cache.get(self.get_last_fetched_key(obj, "vlans", server_key))
-
-        # Fail closed on a stale/corrupt cached entry. compare_vlans() iterates the rows and
-        # calls vlan.get(...), so a malformed snapshot (string, list of scalars) would 500 the
-        # VLAN tab on render. _fetch_and_cache_vlan_data() guards the write side, but a pre-fix
-        # entry can still be in the cache — drop and purge it, then render empty (mirrors the
-        # interfaces read-path guard). An empty list is valid (device with no VLANs).
-        if cached_vlans is not None and not is_list_of_dicts(cached_vlans):
-            cache.delete(self.get_cache_key(obj, "vlans", server_key))
-            cache.delete(self.get_last_fetched_key(obj, "vlans", server_key))
-            cached_vlans = None
-            last_fetched = None
+        snapshot = source_cache.read(obj, Resource.VLANS, server_key)
+        cached_vlans = snapshot.value(Resource.VLANS, "vlans") if snapshot is not None else None
+        last_fetched = snapshot.finished_at if snapshot is not None else None
 
         # Get available VLAN groups for this device
         vlan_groups = self.get_vlan_groups_for_device(obj, user=vlan_scope_user)
@@ -281,8 +220,8 @@ class BaseVLANTableView(
             vlan_table.configure(request)
 
         # Calculate cache TTL
-        cache_ttl = cache.ttl(self.get_cache_key(obj, "vlans", server_key))
-        cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl and cache_ttl > 0 else None
+        cache_ttl = source_cache.remaining_ttl(obj, Resource.VLANS, server_key)
+        cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl else None
 
         return {
             "object": obj,

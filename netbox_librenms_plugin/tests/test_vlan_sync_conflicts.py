@@ -10,13 +10,11 @@ from netbox_librenms_plugin.tests.conftest import (
 
 
 def _seed_vlan_snapshot(device, rows, server_key="default"):
-    """Store VLAN source rows under the real synchronization cache key."""
-    from django.core.cache import cache
+    """Store a VLAN source snapshot holding *rows*."""
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
 
-    from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
-
-    view = SyncVLANsView()
-    cache.set(view.get_cache_key(device, "vlans", server_key), rows, timeout=60)
+    seed_source_snapshot(device, Resource.VLANS, server_key, vlans=rows)
 
 
 def _sync_url(device):
@@ -232,10 +230,10 @@ def test_bulk_vlan_sync_commits_safe_rows_before_confirmation(
     django_capture_on_commit_callbacks,
 ):
     """A safe row must commit while a conflicting rename remains pending."""
-    from django.core.cache import cache
     from ipam.models import VLAN, VLANGroup
 
-    from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import stored_source_value
 
     configure_default_librenms_server(settings)
     device = make_device("vlan-bulk-device", librenms_cf={"default": {"id": 42}})
@@ -266,7 +264,7 @@ def test_bulk_vlan_sync_commits_safe_rows_before_confirmation(
     assert VLAN.objects.filter(vid=106, group=group, name="Safe name").exists()
     existing.refresh_from_db()
     assert existing.name == "Current name"
-    assert cache.get(SyncVLANsView().get_cache_key(device, "vlans", "default")) == snapshot
+    assert stored_source_value(device, Resource.VLANS, "vlans") == snapshot
 
     conflict = response.context["conflicts"][0]
     confirm_response = client.post(

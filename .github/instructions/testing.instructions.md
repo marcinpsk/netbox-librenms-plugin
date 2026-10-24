@@ -38,6 +38,10 @@ assumed. Do not mock NetBox models, managers, querysets, requests, users or perm
 `tests/conftest.py` builds real rows: `make_device`, `make_vm`, `make_interface`, `make_ip`,
 `make_cluster`, `make_superuser`, `make_device_with_module_bays`.
 
+`tests/source_snapshot_helpers.py` seeds a source snapshot through the real types and the web
+transport: `seed_source_snapshot(subject, Resource.VLANS, server_key, vlans=rows)` and
+`seed_ip_snapshot(...)`. Never write a snapshot payload into the cache by hand.
+
 `tests/view_test_helpers.py` builds the request and permission side:
 
 - `make_request(method, data, user=..., **factory_kwargs)` — a real request with a session and
@@ -116,6 +120,7 @@ stack: appending to that file's tail conflicts on every restack, so a new file i
 large tail addition. Give the new file a docstring pointing at the primary home.
 
 - `librenms_api.py` → `test_librenms_api.py`, `test_librenms_api_helpers.py`
+- `acquisition/`, `source_cache.py` → `test_acquisition_vlans.py`, `test_acquisition_ip_addresses.py`, `test_acquisition_coordinator.py`, `test_acquisition_imports.py`
 - `import_utils/` package (`filters.py`, `device_operations.py`, `vm_operations.py`, `cache.py`, `permissions.py`, `virtual_chassis.py`), `import_validation_helpers.py`, `utils.py` → `test_import_utils.py`, `test_import_validation_helpers.py`, `test_utils.py`
 - `jobs.py`, `views/imports/list.py` → `test_background_jobs.py`
 - `import_utils/bulk_import.py` → `test_coverage_bulk_import.py`
