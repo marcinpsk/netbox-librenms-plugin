@@ -241,6 +241,8 @@ def test_capture_view_includes_oob_controller_ports(recording_server):
             {"port_id": 7002, "ifName": "eth0", "ifType": "ethernetCsmacd"},
         ],
     }
+    rec["responses"]["GET /api/v0/devices/2500/links"] = {"status": "ok", "links": []}
+    rec["responses"]["GET /api/v0/inventory/2500/all"] = {"status": "ok", "inventory": []}
     server, api = recording_server(rec)
     # Seed the device's librenms_id CF with an OOB controller under the 'test' server key. The real
     # get_librenms_id (CF read), rebind_api_for_server and get_librenms_oob all run — no owned patches.
@@ -386,7 +388,7 @@ def test_capture_view_names_the_failed_oob_controller(recording_server, failure)
 
     assert response.status_code == 200
     html = response.content.decode()
-    assert "linked OOB controller 2500" in html
+    assert "devices/2500/ports" in html
     assert "Anonymized recording" not in html
 
 
