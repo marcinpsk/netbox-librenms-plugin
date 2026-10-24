@@ -76,11 +76,11 @@ class CaptureDataShapeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             return self._error(request, device, "The linked OOB controller has an invalid LibreNMS id.")
         try:
             recording = capture_device_recording(
-                self.librenms_api,
-                librenms_id,
+                device,
+                server_key=server_key,
                 name=f"{device.name}-shape",
                 description=f"Captured from {device.name}.",
-                oob_id=oob_id,
+                include_serial=True,
             )
             # Trim redundant high-cardinality ports BEFORE anonymizing — on the raw port names,
             # which is exactly what relationship resolution reads — so the shape stays intact while

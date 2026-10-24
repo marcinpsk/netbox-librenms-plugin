@@ -259,8 +259,12 @@ class TestTheRefreshReadsThePortStack:
         from netbox_librenms_plugin.models import PortStackLagPattern
 
         patterns = [
-            *PortStackLagPattern.compiled_patterns_for_os(None),
-            *PortStackLagPattern.compiled_bridge_patterns_for_os(None),
+            pattern
+            for stored_os in PortStackLagPattern.objects.values_list("librenms_os", flat=True)
+            for pattern in (
+                *PortStackLagPattern.compiled_patterns_for_os(stored_os),
+                *PortStackLagPattern.compiled_bridge_patterns_for_os(stored_os),
+            )
         ]
         assert patterns, "the seeded rules must be present, or this proves nothing"
         for port in self.UNNAMED_PORTS:
