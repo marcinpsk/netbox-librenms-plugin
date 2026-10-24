@@ -43,29 +43,20 @@ def seed_every_tab(obj, server_key="default"):
     return keys
 
 
-def seed_inventory(view, device, inventory, *, librenms_id, server_key="default"):
-    """Write one inventory payload the way ``BaseModuleTableView.post`` writes it.
-
-    ``librenms_id`` is required: the reader rejects a payload whose id is missing, so a defaulted
-    ``None`` would seed a cache entry that can never be read back and silently pass as a miss.
-    """
+def seed_inventory(
+    device, inventory, *, librenms_id, server_key="default", ports=(), transceivers=(), oob_inventory=None, oob_id=None
+):
+    """Store explicit raw module facts under the requested source binding."""
     from netbox_librenms_plugin import source_cache
     from netbox_librenms_plugin.acquisition.registry import Resource
-    from netbox_librenms_plugin.tests.source_snapshot_helpers import build_source_snapshot, module_endpoint_rows
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_modules_snapshot
+    from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test, seed_stored_mapping, seed_mapping
 
-    # Seed under the requested identity, then restore the live binding for stale-source tests.
-    from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test, seed_stored_mapping
-
-    parts, oob_rows = module_endpoint_rows(inventory)
-    if oob_rows:
-        seed_mapping(device, server_key, oob=librenms_id + 1000000)
+    if oob_id is not None:
+        seed_mapping(device, server_key, oob=oob_id)
     mapping = stored_mapping_for_test(device)
     seed_mapping(device, server_key, own=librenms_id, save=False)
-    snapshot = build_source_snapshot(
-        device, Resource.MODULES, server_key, oob={"inventory": oob_rows} if oob_rows else None, **parts
-    )
-    assert source_cache.store(device, Resource.MODULES, snapshot)
+    seed_modules_snapshot(device, inventory, ports, transceivers, server_key=server_key, oob_inventory=oob_inventory)
     seed_stored_mapping(device, mapping)
     return source_cache.snapshot_key(device, Resource.MODULES, server_key)
 

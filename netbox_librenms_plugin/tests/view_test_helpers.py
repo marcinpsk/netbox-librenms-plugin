@@ -375,23 +375,6 @@ def missing_pk(model, offset=1000):
     return (highest_pk or 0) + offset
 
 
-def trusted_module_inventory_payload(device, inventory, *, server_key="default", librenms_id=1):
-    """Build a module inventory payload bound to the device's verified current LibreNMS mapping."""
-    from netbox_librenms_plugin.acquisition.registry import Resource
-    from netbox_librenms_plugin.tests.source_snapshot_helpers import build_source_snapshot, module_endpoint_rows
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
-
-    seed_mapping(device, server_key, own=librenms_id)
-    # cf is a cached_property over the applicable custom fields: drop it so the next read sees the write.
-    device.__dict__.pop("cf", None)
-    parts, oob_rows = module_endpoint_rows(inventory)
-    if oob_rows:
-        seed_mapping(device, server_key, oob=librenms_id + 1000000)
-    return build_source_snapshot(
-        device, Resource.MODULES, server_key, oob={"inventory": oob_rows} if oob_rows else None, **parts
-    ).to_payload()
-
-
 def assert_locked_before_update(captured, table):
     """Verify that exactly one ``SELECT ... FOR UPDATE`` locks *table* before its update."""
     statements = [q["sql"] for q in captured.captured_queries]

@@ -1,81 +1,88 @@
 """Export source acquisition responses as a replayable data-shape recording."""
 
 from netbox_librenms_plugin.acquisition.coordinator import SubjectNotMapped, acquire
+from netbox_librenms_plugin.acquisition import responses
 from netbox_librenms_plugin.acquisition.registry import Resource
-from netbox_librenms_plugin.acquisition.resources import device_os, effective_inventory
+from netbox_librenms_plugin.acquisition.resources import SCOPES, device_os
 from netbox_librenms_plugin.acquisition.snapshot import Outcome
 from netbox_librenms_plugin.data_shapes.envelope import MAX_HTTP_STATUS, MIN_HTTP_STATUS, wrap_response
 from netbox_librenms_plugin.data_shapes.recordings_store import SERIAL_SENSORS_META_KEY, SERIAL_SENSORS_UNAVAILABLE
 from netbox_librenms_plugin.models import PortStackLagPattern
 from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns, project_serial_sensors
-from netbox_librenms_plugin.server_mappings import MappingRole
 
 SCHEMA_VERSION = 1
 CAPTURE_RESOURCES = (Resource.INTERFACES, Resource.IP_ADDRESSES, Resource.CABLES, Resource.MODULES)
 
 
-def _require(record, *, allow_missing=False):
+def _require(record, *, allow_missing=False, optional_status=False):
     """Require one definitive recording source, with an optional unsupported endpoint answer."""
     if record.obtained:
-        if (
-            200 <= record.http_status < 300
-            and not record.request.path.endswith("/port_stack")
-            and record.body.get("status") != "ok"
-        ):
+        if 200 <= record.http_status < 300 and not optional_status and record.body.get("status") != "ok":
             raise RuntimeError(f"Capture failed for {record.request.path!r}: response was not a success object")
         return
-    if allow_missing and record.http_status == 404:
+    if allow_missing and record.http_status == responses.HTTP_NOT_FOUND:
         return
     detail = "no HTTP response" if record.http_status is None else f"HTTP {record.http_status}: {record.reason}"
     raise RuntimeError(f"Capture failed for {record.request.path!r}: {detail}")
 
 
 def _requirements(snapshot):
-    """Check the structural recording requirements independently of tab scope readiness."""
-    for resource, parts in (
-        (Resource.INTERFACES, ("ports", "port_stack", "device")),
-        (Resource.IP_ADDRESSES, ("addresses", "ports", "device", "vrfs")),
-        (Resource.CABLES, ("links", "ports")),
-        (Resource.MODULES, ("inventory", "ports", "transceivers", "inventory_root")),
+    """Check scope sources and the extra sources required by a recording."""
+    host_id = snapshot.resources[Resource.INTERFACES].host.librenms_id
+    stack_request = responses.port_stack(host_id).request
+    transceiver_request = responses.transceivers(host_id).request
+    for resource in CAPTURE_RESOURCES:
+        for scope, blockers in SCOPES[resource](snapshot).items():
+            if scope == "serial" or ":neighbour:" in scope:
+                continue
+            for blocker in blockers:
+                for record in snapshot.responses.values():
+                    if record.request.path == blocker.path:
+                        _require(
+                            record,
+                            allow_missing=record.request == transceiver_request,
+                            optional_status=record.request == stack_request,
+                        )
+    for resource, part in (
+        (Resource.INTERFACES, "device"),
+        (Resource.MODULES, "inventory_root"),
+        (Resource.MODULES, "inventory_children"),
     ):
-        for part in parts:
-            record = snapshot.record(resource, part)
-            if record.outcome is not Outcome.NOT_APPLICABLE:
-                _require(record, allow_missing=part == "transceivers")
-    modules = snapshot.resources[Resource.MODULES]
-    if "inventory_children" in dict(modules.host.parts):
-        _require(snapshot.record(Resource.MODULES, "inventory_children"))
-    for resource, parts in (
-        (Resource.INTERFACES, ("ports",)),
-        (Resource.CABLES, ("links", "ports")),
-        (Resource.MODULES, ("inventory",)),
-    ):
-        if snapshot.resources[resource].oob is not None:
-            for part in parts:
-                _require(snapshot.record(resource, part, MappingRole.OOB))
+        record = snapshot.record(resource, part)
+        if record.outcome is not Outcome.NOT_APPLICABLE:
+            _require(record)
 
 
 def _export_responses(snapshot):
     """Export real HTTP answers and keep the VLAN-bearing ports answer for each path."""
     exported = {}
+    host_id = snapshot.resources[Resource.INTERFACES].host.librenms_id
+    sensors_request = responses.sensors(host_id).request
+    stack_request = responses.port_stack(host_id).request
     for record in snapshot.responses.values():
-        if record.request.path == "resources/sensors":
+        if record.request == sensors_request:
             continue
         status = record.http_status
         if status is None or not MIN_HTTP_STATUS <= status <= MAX_HTTP_STATUS:
             continue
         if 200 <= status < 300 and record.body is None:
             raise RuntimeError(f"Capture failed for {record.request.path!r}: HTTP {status} did not contain JSON")
+        if record.obtained:
+            _require(record, optional_status=record.request == stack_request)
         key = record.request.route_key
         if key not in exported or dict(record.request.params).get("with") == "vlans":
             exported[key] = wrap_response(status, record.body)
     # A filtered query that answered [] uses obtained /all rows in production too.
     for part in ("inventory_root", "inventory_children"):
-        if part not in dict(snapshot.resources[Resource.MODULES].host.parts):
-            continue
         record = snapshot.record(Resource.MODULES, part)
-        contained_in = dict(record.request.params)["entPhysicalContainedIn"]
-        rows = effective_inventory(record, snapshot.record(Resource.MODULES, "inventory"), contained_in)
+        if not record.obtained:
+            continue
+        rows = responses.effective_inventory(
+            record,
+            snapshot.record(Resource.MODULES, "inventory"),
+            params=record.request.params,
+            http_status=record.http_status,
+        )
         if not record.value and rows:
             exported[record.request.route_key] = {"status": "ok", "inventory": rows}
     return exported
@@ -129,9 +136,9 @@ def capture_device_recording(subject, *, server_key, name=None, description="", 
         meta_out[SERIAL_SENSORS_META_KEY] = SERIAL_SENSORS_UNAVAILABLE
     elif projection.rows:
         responses[sensor_record.request.route_key] = {"status": "ok", "sensors": projection.rows}
-    patterns = PortStackLagPattern._patterns_for_os_queryset(device_os(device))
+    patterns = PortStackLagPattern.patterns_for_os_queryset(device_os(device))
     pattern_rows = list(patterns) if patterns is not None else []
-    sap_rows = PortStackLagPattern._sap_patterns_for_os_queryset(device_os(device))
+    sap_rows = PortStackLagPattern.sap_patterns_for_os_queryset(device_os(device))
     recording = {
         "schema_version": SCHEMA_VERSION,
         "name": name or f"device-{device_id}",

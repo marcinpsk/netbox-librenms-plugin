@@ -1,5 +1,7 @@
 """Tests for data-shape signatures + novelty classification."""
 
+from netbox_librenms_plugin.tests.source_snapshot_helpers import acquire_ports_record
+
 import pytest
 
 from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording, pseudonymize_os
@@ -980,7 +982,8 @@ def test_recording_replay_treats_unencodable_names_as_non_matches(kind):
     try:
         server.load_recording(recording)
         api = make_recording_api(server.url)
-        ok, payload = api.get_ports(1)
+        port_record = acquire_ports_record(api, 1)
+        ok, payload = port_record.obtained, port_record.body
         assert ok
         from netbox_librenms_plugin.tests.source_snapshot_helpers import acquire_recording
         from netbox_librenms_plugin.acquisition.registry import Resource

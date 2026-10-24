@@ -1,5 +1,9 @@
 """Real ORM, cache, and view tests for module synchronization."""
 
+from netbox_librenms_plugin.tests.source_snapshot_helpers import transceiver_row
+
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_mapped_modules
+
 import json
 import re
 
@@ -41,7 +45,6 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     rendered_module_form,
     rendered_preview_query,
     rendered_preview_url,
-    trusted_module_inventory_payload,
 )
 from netbox_librenms_plugin.module_grants import GrantRefusal, module_inventory_snapshot_digest
 from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE, classify_conflict
@@ -184,10 +187,13 @@ def _rendered_post(view_class, device, rows, librenms_id, live_librenms, path_pa
     """Seed *rows*, then return the bound view and the post of the *path_part* form the tab renders for *ent_index*."""
     user = options.pop("user", None) or make_superuser()
     extra = options.pop("extra", {})
+    source_facts = {
+        name: options.pop(name) for name in ("ports", "transceivers", "oob_inventory", "oob_id") if name in options
+    }
     assert not options, options
     view = view_class()
     view._librenms_api = live_librenms.api
-    seed_inventory(view, device, rows, librenms_id=librenms_id)
+    seed_inventory(device, rows, librenms_id=librenms_id, **source_facts)
     _action, fields = rendered_module_form(render_module_tab(device, user=user), path_part, ent_index)
     request = make_request("post", {**fields, **extra}, user=user, path="/modules/")
     view.setup(request)
@@ -266,9 +272,9 @@ class TestInventoryCacheContract:
         from netbox_librenms_plugin.tests.source_snapshot_helpers import module_inventory
 
         device = make_device("module-current-cache", librenms_cf={"default": 41})
-        view = _view(_cache_view_class(), _post_request({}), live_librenms)
+        _view(_cache_view_class(), _post_request({}), live_librenms)
         rows = [_inventory_item(1, "CARD", "Slot 1")]
-        key = seed_inventory(view, device, rows, librenms_id=41)
+        key = seed_inventory(device, rows, librenms_id=41)
 
         assert module_inventory(device) == [{**row, "_source": "main"} for row in rows]
         assert cache.get(key)["resources"][0]["host"]["librenms_id"] == 41
@@ -277,8 +283,8 @@ class TestInventoryCacheContract:
         from netbox_librenms_plugin.tests.source_snapshot_helpers import module_inventory
 
         device = make_device("module-stale-cache", librenms_cf={"default": 42})
-        view = _view(_cache_view_class(), _post_request({}), live_librenms)
-        seed_inventory(view, device, [_inventory_item(1, "CARD", "Slot 1")], librenms_id=99)
+        _view(_cache_view_class(), _post_request({}), live_librenms)
+        seed_inventory(device, [_inventory_item(1, "CARD", "Slot 1")], librenms_id=99)
 
         assert module_inventory(device) is None
 
@@ -288,13 +294,19 @@ class TestInventoryCacheContract:
         from netbox_librenms_plugin.views.sync.modules import _authorize_module_grant
 
         device = make_device("resolve-row-hit", librenms_cf={"default": 771})
-        view = _view(_cache_view_class(), _post_request({}), live_librenms)
+        _view(_cache_view_class(), _post_request({}), live_librenms)
         module = install_module(device, make_module_bay(device, "Slot 1").name, "CARD", serial="OLD")
-        item = _inventory_item(77, "CARD", "Slot 1", serial="NEW", _librenms_port_id=42, _librenms_ifname="Te1/1/1")
-        seed_inventory(view, device, [item], librenms_id=771)
+        item = _inventory_item(77, "CARD", "Slot 1", serial="NEW")
+        seed_inventory(
+            device,
+            [item],
+            librenms_id=771,
+            ports=[{"port_id": 42, "ifName": "Te1/1/1"}],
+            transceivers=[transceiver_row(77, port_id=42, model="CARD", serial="NEW")],
+        )
         token = _rendered_fields(device, "update-module-serial", 77)["inventory_binding"]
 
-        granted = _authorize_module_grant(view, device, "default", ACTION_UPDATE_SERIAL, token)
+        granted = _authorize_module_grant(device, "default", ACTION_UPDATE_SERIAL, token)
         row = granted.grant.require(
             device_id=device.pk, ent_index="77", action_target=installed_module_target(module.pk, module.module_bay_id)
         )
@@ -317,12 +329,12 @@ class TestInventoryCacheContract:
         from netbox_librenms_plugin.views.sync.modules import _authorize_module_grant
 
         device = make_device("resolve-row-no-index", librenms_cf={"default": 772})
-        view = _view(_cache_view_class(), _post_request({}), live_librenms)
+        _view(_cache_view_class(), _post_request({}), live_librenms)
         module = install_module(device, make_module_bay(device, "Slot 1").name, "CARD", serial="OLD")
         item = _inventory_item(77, "CARD", "Slot 1", serial="NEW")
-        seed_inventory(view, device, [item], librenms_id=772)
+        seed_inventory(device, [item], librenms_id=772)
         token = _rendered_fields(device, "update-module-serial", 77)["inventory_binding"]
-        granted = _authorize_module_grant(view, device, "default", ACTION_UPDATE_SERIAL, token)
+        granted = _authorize_module_grant(device, "default", ACTION_UPDATE_SERIAL, token)
 
         with pytest.raises(GrantRefused) as excinfo:
             granted.grant.require(
@@ -339,11 +351,11 @@ class TestInventoryCacheContract:
         from netbox_librenms_plugin.views.sync.modules import _authorize_module_grant
 
         device = make_device("resolve-row-stale", librenms_cf={"default": 999})
-        view = _view(_cache_view_class(), _post_request({}), live_librenms)
-        seed_inventory(view, device, [_inventory_item(77, "CARD", "Te1/1/1")], librenms_id=555)
+        _view(_cache_view_class(), _post_request({}), live_librenms)
+        seed_inventory(device, [_inventory_item(77, "CARD", "Te1/1/1")], librenms_id=555)
 
         with pytest.raises(GrantRefused) as excinfo:
-            _authorize_module_grant(view, device, "default", ACTION_UPDATE_SERIAL, "any-token")
+            _authorize_module_grant(device, "default", ACTION_UPDATE_SERIAL, "any-token")
 
         assert excinfo.value.refusal is GrantRefusal.CACHE_MISSING
 
@@ -903,10 +915,18 @@ class TestInstallAndUpdateViews:
         bay = make_module_bay(device, "Bind Error Bay")
         module_type = make_module_type("BIND-ERROR-CARD")
         interface = make_interface(device, "Ethernet68")
-        item = _inventory_item(
-            680, module_type.model, bay.name, _librenms_port_id=6680, _librenms_ifname=interface.name
+        item = _inventory_item(680, module_type.model, bay.name)
+        view, request = _rendered_post(
+            InstallModuleView,
+            device,
+            [item],
+            68,
+            live_librenms,
+            "install-module",
+            680,
+            ports=[{"port_id": 6680, "ifName": interface.name}],
+            transceivers=[transceiver_row(680, port_id=6680, model=module_type.model, serial="")],
         )
-        view, request = _rendered_post(InstallModuleView, device, [item], 68, live_librenms, "install-module", 680)
 
         with aborting_statement(lambda sql, params: sql.startswith('UPDATE "dcim_interface"')) as failed:
             response = view_post(view, request, pk=device.pk)
@@ -932,7 +952,7 @@ class TestInstallAndUpdateViews:
         view, request = _rendered_post(
             InstallModuleView, device, [rendered_item], 64, live_librenms, "install-module", 640
         )
-        seed_inventory(view, device, [replacement_item], librenms_id=64)
+        seed_inventory(device, [replacement_item], librenms_id=64)
 
         response = view_post(view, request, pk=device.pk)
 
@@ -976,14 +996,7 @@ class TestInstallAndUpdateViews:
         bay = make_module_bay(device, "Unresolved Install Bay")
         module_type = make_module_type("UNRESOLVED-INSTALL-CARD")
         interface = make_interface(device, "Ethernet55")
-        item = _inventory_item(
-            550,
-            module_type.model,
-            interface.name,
-            serial="LNMS-SN",
-            _librenms_port_id=5550,
-            _librenms_ifname=interface.name,
-        )
+        item = _inventory_item(550, module_type.model, interface.name, serial="LNMS-SN")
         # A crafted post: an index the snapshot does not carry, plus the identity and serial the
         # deleted form fallback used to read.
         request = _post_request(
@@ -998,7 +1011,13 @@ class TestInstallAndUpdateViews:
             }
         )
         view = _view(InstallModuleView, request, live_librenms)
-        seed_inventory(view, device, [item], librenms_id=55)
+        seed_inventory(
+            device,
+            [item],
+            librenms_id=55,
+            ports=[{"port_id": 5550, "ifName": interface.name}],
+            transceivers=[transceiver_row(550, port_id=5550, model=module_type.model, serial="LNMS-SN")],
+        )
 
         response = view_post(view, request, pk=device.pk)
 
@@ -1083,7 +1102,7 @@ class TestInstallAndUpdateViews:
         view, request = _rendered_post(
             UpdateModuleSerialView, device, [rendered_item], 65, live_librenms, "update-module-serial", 650
         )
-        seed_inventory(view, device, [replacement_item], librenms_id=65)
+        seed_inventory(device, [replacement_item], librenms_id=65)
 
         response = view_post(view, request, pk=device.pk)
 
@@ -1140,16 +1159,18 @@ class TestInstallAndUpdateViews:
         bay = make_module_bay(device, "OOB Serial Bay")
         module = install_module(device, bay.name, "OOB-SERIAL-CARD", serial="OLD-SN")
         host = _inventory_item(571, module.module_type.model, bay.name, serial="HOST-SN")
-        oob = _inventory_item(570, module.module_type.model, bay.name, serial="OOB-SN", _source="oob")
+        oob = _inventory_item(570, module.module_type.model, bay.name, serial="OOB-SN")
         view, request = _rendered_post(
             UpdateModuleSerialView,
             device,
-            [host, oob],
+            [host],
             57,
             live_librenms,
             "update-module-serial",
             571,
             extra={"ent_index": "570"},
+            oob_inventory=[oob],
+            oob_id=10001,
         )
 
         response = view_post(view, request, pk=device.pk)
@@ -1169,7 +1190,7 @@ class TestInstallAndUpdateViews:
         item = _inventory_item(580, module.module_type.model, bay.name, serial="LNMS-SN")
         request = _post_request({"module_id": module.pk, "ent_index": 581, "server_key": "default"})
         view = _view(UpdateModuleSerialView, request, live_librenms)
-        seed_inventory(view, device, [item], librenms_id=58)
+        seed_inventory(device, [item], librenms_id=58)
 
         response = view_post(view, request, pk=device.pk)
 
@@ -1185,15 +1206,17 @@ class TestInstallAndUpdateViews:
         bay = make_module_bay(device, "Interface Bay")
         module = install_module(device, bay.name, "INTERFACE-CARD")
         interface = make_interface(device, "Ethernet54")
-        item = _inventory_item(
-            540,
-            module.module_type.model,
-            bay.name,
-            _librenms_port_id=5540,
-            _librenms_ifname=interface.name,
-        )
+        item = _inventory_item(540, module.module_type.model, bay.name)
         view, request = _rendered_post(
-            UpdateModuleInterfaceView, device, [item], 54, live_librenms, "update-module-interface", 540
+            UpdateModuleInterfaceView,
+            device,
+            [item],
+            54,
+            live_librenms,
+            "update-module-interface",
+            540,
+            ports=[{"port_id": 5540, "ifName": interface.name}],
+            transceivers=[transceiver_row(540, port_id=5540, model=module.module_type.model, serial="")],
         )
 
         response = view_post(view, request, pk=device.pk)
@@ -1213,22 +1236,26 @@ class TestInstallAndUpdateViews:
         module = install_module(device, bay.name, "STALE-INTERFACE-CARD")
         original = make_interface(device, "Ethernet66")
         replacement = make_interface(device, "Ethernet67")
-        rendered_item = _inventory_item(
-            660,
-            module.module_type.model,
-            bay.name,
-            _librenms_port_id=5660,
-            _librenms_ifname=original.name,
-        )
-        replacement_item = {
-            **rendered_item,
-            "_librenms_port_id": 5670,
-            "_librenms_ifname": replacement.name,
-        }
+        rendered_item = _inventory_item(660, module.module_type.model, bay.name)
+        replacement_item = {**rendered_item}
         view, request = _rendered_post(
-            UpdateModuleInterfaceView, device, [rendered_item], 66, live_librenms, "update-module-interface", 660
+            UpdateModuleInterfaceView,
+            device,
+            [rendered_item],
+            66,
+            live_librenms,
+            "update-module-interface",
+            660,
+            ports=[{"port_id": 5660, "ifName": original.name}],
+            transceivers=[transceiver_row(660, port_id=5660, model=module.module_type.model, serial="")],
         )
-        seed_inventory(view, device, [replacement_item], librenms_id=66)
+        seed_inventory(
+            device,
+            [replacement_item],
+            librenms_id=66,
+            ports=[{"port_id": 5670, "ifName": replacement.name}],
+            transceivers=[transceiver_row(660, port_id=5670, model=module.module_type.model, serial="")],
+        )
 
         response = view_post(view, request, pk=device.pk)
 
@@ -1258,13 +1285,7 @@ class TestInstallAndUpdateViews:
             status="active",
         )
         interface = make_interface(device, "Ethernet63")
-        item = _inventory_item(
-            630,
-            expected.module_type.model,
-            expected_bay.name,
-            _librenms_port_id=5630,
-            _librenms_ifname=interface.name,
-        )
+        item = _inventory_item(630, expected.module_type.model, expected_bay.name)
         # The rendered form names the expected module; the tampered post names the other one.
         view, request = _rendered_post(
             UpdateModuleInterfaceView,
@@ -1275,6 +1296,8 @@ class TestInstallAndUpdateViews:
             "update-module-interface",
             630,
             extra={"module_id": str(forged.pk)},
+            ports=[{"port_id": 5630, "ifName": interface.name}],
+            transceivers=[transceiver_row(630, port_id=5630, model=expected.module_type.model, serial="")],
         )
 
         response = view_post(view, request, pk=device.pk)
@@ -1297,14 +1320,7 @@ class TestInstallAndUpdateViews:
         module = install_module(device, bay.name, "UNRESOLVED-INTERFACE-CARD")
         interface = make_interface(device, "Ethernet61")
         # The one cached row is OOB, so no index at all makes this identity bindable.
-        item = _inventory_item(
-            610,
-            module.module_type.model,
-            interface.name,
-            _librenms_port_id=5610,
-            _librenms_ifname=interface.name,
-            _source="oob",
-        )
+        item = _inventory_item(610, module.module_type.model, interface.name)
         request = _post_request(
             {
                 "module_id": module.pk,
@@ -1315,7 +1331,7 @@ class TestInstallAndUpdateViews:
             }
         )
         view = _view(UpdateModuleInterfaceView, request, live_librenms)
-        seed_inventory(view, device, [item], librenms_id=61)
+        seed_inventory(device, [], librenms_id=61, oob_inventory=[item], oob_id=10001)
 
         response = view_post(view, request, pk=device.pk)
 
@@ -1341,27 +1357,22 @@ class TestInstallAndUpdateViews:
             [("view", Device), ("view", Module), ("view", Interface), ("change", Interface)],
         )
         # The host row renders the update; the OOB row carries everything a successful bind needs.
-        host = _inventory_item(
-            591, module.module_type.model, bay.name, _librenms_port_id=5591, _librenms_ifname=interface.name
-        )
-        oob = _inventory_item(
-            590,
-            module.module_type.model,
-            interface.name,
-            _librenms_port_id=5590,
-            _librenms_ifname=interface.name,
-            _source="oob",
-        )
+        host = _inventory_item(591, module.module_type.model, bay.name)
+        oob = _inventory_item(590, module.module_type.model, interface.name)
         view, request = _rendered_post(
             UpdateModuleInterfaceView,
             device,
-            [host, oob],
+            [host],
             59,
             live_librenms,
             "update-module-interface",
             591,
             user=user,
             extra={"ent_index": "590"},
+            ports=[{"port_id": 5591, "ifName": interface.name}],
+            transceivers=[transceiver_row(591, port_id=5591, model=module.module_type.model, serial="")],
+            oob_inventory=[oob],
+            oob_id=10001,
         )
 
         response = view_post(view, request, pk=device.pk)
@@ -1540,7 +1551,7 @@ class TestInstallAndUpdateViews:
         view, request = _rendered_post(
             view_class, device, rendered_inventory, 66, live_librenms, form, ent_index, extra=extra
         )
-        seed_inventory(view, device, changed_inventory, librenms_id=66)
+        seed_inventory(device, changed_inventory, librenms_id=66)
 
         response = view_post(view, request, pk=device.pk)
 
@@ -1573,7 +1584,7 @@ class TestInstallAndUpdateViews:
         request = _post_request(request_data)
         view_class = InstallBranchView if action == "install_branch" else InstallSelectedView
         view = _view(view_class, request, live_librenms)
-        seed_inventory(view, device, inventory, librenms_id=67)
+        seed_inventory(device, inventory, librenms_id=67)
 
         response = view_post(view, request, pk=device.pk)
 
@@ -1672,16 +1683,19 @@ class TestInstallAndUpdateViews:
         user = make_user_with_perms("module-interface-scope", [("view", Device), ("view", Module), ("view", Interface)])
         user = grant(user, "change", Interface, constraints={"pk": allowed.pk})
         user = grant(user, "change", Interface, name="module-interface-scope-wide")
-        item = _inventory_item(
-            77,
-            module.module_type.model,
-            bay.name,
-            _librenms_port_id=42,
-            _librenms_ifname=hidden.name,
-        )
+        item = _inventory_item(77, module.module_type.model, bay.name)
         # The page renders while the wide grant reaches the holder; the grant then narrows before the click.
         _view_unused, rendered = _rendered_post(
-            UpdateModuleInterfaceView, device, [item], 2, live_librenms, "update-module-interface", 77, user=user
+            UpdateModuleInterfaceView,
+            device,
+            [item],
+            2,
+            live_librenms,
+            "update-module-interface",
+            77,
+            user=user,
+            ports=[{"port_id": 42, "ifName": hidden.name}],
+            transceivers=[transceiver_row(77, port_id=42, model=module.module_type.model, serial="")],
         )
         user = _without_grants(user, "module-interface-scope-wide")
         request = make_request("post", rendered.POST.dict(), user=user, path="/modules/update-interface/")
@@ -1704,12 +1718,6 @@ class TestModuleBindLockConflicts:
     The busy claim is real: a second connection holds the claim on the port in its open transaction.
     """
 
-    @staticmethod
-    def _bound_item(index, module_type, bay, interface, port_id):
-        return _inventory_item(
-            index, module_type.model, bay.name, _librenms_port_id=port_id, _librenms_ifname=interface.name
-        )
-
     def test_the_install_rolls_back_when_the_bind_meets_a_busy_port_claim(self, live_librenms):
         from dcim.models import Module
 
@@ -1719,8 +1727,18 @@ class TestModuleBindLockConflicts:
         bay = make_module_bay(device, "Busy Install Bay")
         module_type = make_module_type("BUSY-INSTALL-CARD")
         interface = make_interface(device, "Ethernet81")
-        item = self._bound_item(810, module_type, bay, interface, 8101)
-        view, request = _rendered_post(InstallModuleView, device, [item], 81, live_librenms, "install-module", 810)
+        item = _inventory_item(810, module_type.model, bay.name)
+        view, request = _rendered_post(
+            InstallModuleView,
+            device,
+            [item],
+            81,
+            live_librenms,
+            "install-module",
+            810,
+            ports=[{"port_id": 8101, "ifName": interface.name}],
+            transceivers=[transceiver_row(810, port_id=8101, model=module_type.model)],
+        )
 
         with second_connection() as other:
             hold_port_claim(other, 8101, "default")
@@ -1741,10 +1759,16 @@ class TestModuleBindLockConflicts:
         installed = install_module(device, bay.name, "BUSY-REPLACE-OLD")
         new_type = make_module_type("BUSY-REPLACE-NEW")
         interface = make_interface(device, "Ethernet82")
-        item = self._bound_item(820, new_type, bay, interface, 8201)
+        item = _inventory_item(820, new_type.model, bay.name)
         view = ReplaceModuleView()
         view._librenms_api = live_librenms.api
-        seed_inventory(view, device, [item], librenms_id=82)
+        seed_inventory(
+            device,
+            [item],
+            librenms_id=82,
+            ports=[{"port_id": 8201, "ifName": interface.name}],
+            transceivers=[transceiver_row(820, port_id=8201, model=new_type.model)],
+        )
         _action, fields = rendered_modal_form(device, 820, "replace-module")
         request = _post_request(fields)
         view.setup(request)
@@ -1765,9 +1789,17 @@ class TestModuleBindLockConflicts:
         bay = make_module_bay(device, "Busy Update Bay")
         module = install_module(device, bay.name, "BUSY-UPDATE-CARD")
         interface = make_interface(device, "Ethernet83")
-        item = self._bound_item(830, module.module_type, bay, interface, 8301)
+        item = _inventory_item(830, module.module_type.model, bay.name)
         view, request = _rendered_post(
-            UpdateModuleInterfaceView, device, [item], 83, live_librenms, "update-module-interface", 830
+            UpdateModuleInterfaceView,
+            device,
+            [item],
+            83,
+            live_librenms,
+            "update-module-interface",
+            830,
+            ports=[{"port_id": 8301, "ifName": interface.name}],
+            transceivers=[transceiver_row(830, port_id=8301, model=module.module_type.model)],
         )
 
         with second_connection() as other:
@@ -1792,9 +1824,17 @@ class TestModuleBindLockConflicts:
         InterfaceTemplate.objects.create(module_type=module.module_type, name="c2/1", type="other")
         primary = make_interface(device, "Ethernet84")
         standalone = make_interface(device, "c2/1")
-        item = self._bound_item(840, module.module_type, bay, primary, 8401)
+        item = _inventory_item(840, module.module_type.model, bay.name)
         view, request = _rendered_post(
-            UpdateModuleInterfaceView, device, [item], 84, live_librenms, "update-module-interface", 840
+            UpdateModuleInterfaceView,
+            device,
+            [item],
+            84,
+            live_librenms,
+            "update-module-interface",
+            840,
+            ports=[{"port_id": 8401, "ifName": primary.name}],
+            transceivers=[transceiver_row(840, port_id=8401, model=module.module_type.model)],
         )
 
         with second_connection() as other:
@@ -1875,13 +1915,12 @@ class TestModulesActionResponse:
             "entPhysicalName": bay.name,
             "entPhysicalSerialNum": serial,
         }
-        payload = trusted_module_inventory_payload(
+        seed_mapped_modules(
             device,
             [inventory_item],
             server_key=self.SERVER_KEY,
             librenms_id=librenms_id,
         )
-        cache.set(self._cache_key(device), payload, 300)
         return inventory_item
 
     def test_htmx_install_swaps_the_module_tab_in_place(self, client, settings, django_capture_on_commit_callbacks):
@@ -1917,61 +1956,6 @@ class TestModulesActionResponse:
         assert '<span class="badge bg-success text-white">Installed</span>' in body
         assert Module.objects.filter(device=device, module_bay=bay, module_type=module_type).exists()
 
-    def test_legacy_binding_source_metadata_does_not_render_a_warning(
-        self,
-        client,
-        settings,
-        django_capture_on_commit_callbacks,
-    ):
-        """Obsolete cached binding metadata must not add a warning to a successful install."""
-        from django.core.cache import cache
-        from django.urls import reverse
-
-        from netbox_librenms_plugin.tests.conftest import (
-            make_device,
-            make_module_bay,
-            make_module_type,
-            make_superuser,
-        )
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        self._configure_server(settings)
-        device = make_device("modules-action-legacy-binding-source")
-        bay = make_module_bay(device, "Legacy Bay")
-        module_type = make_module_type("LEGACY-CARD")
-        # Current producers cannot write this marker. A cache from an older process can still carry it
-        # during deployment, so the consumer must ignore it instead of reviving the removed warning.
-        inventory_item = {
-            "entPhysicalIndex": 8201,
-            "entPhysicalClass": "module",
-            "entPhysicalModelName": module_type.model,
-            "entPhysicalContainedIn": 0,
-            "entPhysicalName": bay.name,
-            "entPhysicalSerialNum": "LEGACY-ACTION-1",
-            "_binding_source": "post_fallback",
-        }
-        payload = trusted_module_inventory_payload(
-            device,
-            [inventory_item],
-            server_key=self.SERVER_KEY,
-            librenms_id=9205,
-        )
-        cache_key = DeviceModuleTableView().get_cache_key(device, "inventory", server_key=self.SERVER_KEY)
-        cache.set(cache_key, payload, 300)
-        user = make_superuser("modules-action-legacy-binding-source-user")
-        client.force_login(user)
-        fields = _rendered_fields(device, "install-module", 8201, user=user, server_key=self.SERVER_KEY)
-
-        with django_capture_on_commit_callbacks(execute=True):
-            response = client.post(
-                reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": device.pk}),
-                fields,
-                HTTP_HX_REQUEST="true",
-            )
-
-        assert response.status_code == 200
-        assert "Interface identity fallback used" not in response.content.decode()
-
     def test_htmx_action_keeps_the_page_and_sort_of_the_current_url(self, client, settings):
         """The re-rendered table honours the page's own query (page, per_page), not the action URL's empty one."""
         from django.urls import reverse
@@ -1981,7 +1965,7 @@ class TestModulesActionResponse:
         module_type = make_module_type("PAGED-CARD")
         # NetBox's EnhancedPaginator folds up to 5 orphans into the last page, so 7 rows make a real page 2.
         bays = [make_module_bay(device, f"Bay {number:02d}") for number in range(1, 8)]
-        payload = trusted_module_inventory_payload(
+        seed_mapped_modules(
             device,
             [
                 {
@@ -1997,7 +1981,6 @@ class TestModulesActionResponse:
             server_key=self.SERVER_KEY,
             librenms_id=9204,
         )
-        cache.set(self._cache_key(device), payload, 300)
         client.force_login(make_superuser())
         sync_page = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": device.pk})
         url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": device.pk})
@@ -2583,12 +2566,11 @@ def test_unmatched_inventory_offers_existing_bay_mapping_on_the_sync_page(client
     from django.urls import reverse
 
     from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type, make_superuser
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
     TestModulesActionResponse()._configure_server(settings)
     device = make_device_with_module_bays("unmatched-existing-bay", ["RE0", "RE1"])
     module_type = make_module_type("ROUTING-CARD", manufacturer=device.device_type.manufacturer)
-    payload = trusted_module_inventory_payload(
+    seed_mapped_modules(
         device,
         [
             {
@@ -2612,7 +2594,6 @@ def test_unmatched_inventory_offers_existing_bay_mapping_on_the_sync_page(client
         server_key="prod",
         librenms_id=9201,
     )
-    cache.set(DeviceModuleTableView().get_cache_key(device, "inventory", server_key="prod"), payload, 300)
     cache.set("librenms_device_info_prod_9201", (True, {"device_id": 9201, "hostname": device.name}), 300)
     client.force_login(make_superuser("unmatched-existing-bay-user"))
     response = client.get(
@@ -2803,7 +2784,7 @@ def test_the_map_existing_bay_button_needs_the_modals_view_permissions(client, s
     TestModulesActionResponse()._configure_server(settings)
     device = make_device_with_module_bays("map-existing-view-perms", ["RE0"])
     module_type = make_module_type("VIEWPERM-CARD", manufacturer=device.device_type.manufacturer)
-    payload = trusted_module_inventory_payload(
+    seed_mapped_modules(
         device,
         [
             {
@@ -2826,7 +2807,6 @@ def test_the_map_existing_bay_button_needs_the_modals_view_permissions(client, s
     modal_inputs = {"mode": "map_existing", "librenms_name": "Routing Engine 0", "librenms_class": "other"}
 
     try:
-        cache.set(snapshot_key, payload, 300)
         cache.set(device_info_key, (True, {"device_id": 9203, "hostname": device.name}), 300)
 
         # Positive control: with every permission _map_existing_bay requires, the modal opens and
@@ -2922,7 +2902,6 @@ def test_existing_bay_mapping_rejects_unavailable_targets(client, target):
 def test_preview_and_replace_compare_under_the_rules_and_store_the_librenms_text(client):
     """A legacy stored rule output names the hardware of the cached serial; the replacement stores the LibreNMS text."""
     from dcim.models import Module
-    from django.core.cache import cache
 
     from netbox_librenms_plugin.models import NormalizationRule
     from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type, make_superuser
@@ -2935,21 +2914,18 @@ def test_preview_and_replace_compare_under_the_rules_and_store_the_librenms_text
     module_type = make_module_type("serial-card", manufacturer=device.device_type.manufacturer)
     bay = make_module_bay(device, "Slot 1")
     installed = Module.objects.create(device=device, module_bay=bay, module_type=module_type, serial="OLD")
-    key = CacheMixin().get_cache_key(device, "inventory", server_key="default")
-    cache.set(
-        key,
-        trusted_module_inventory_payload(
-            device,
-            [
-                {
-                    "entPhysicalIndex": 100,
-                    "entPhysicalClass": "module",
-                    "entPhysicalName": "Slot 1",
-                    "entPhysicalModelName": module_type.model,
-                    "entPhysicalSerialNum": raw_serial,
-                }
-            ],
-        ),
+    CacheMixin().get_cache_key(device, "inventory", server_key="default")
+    seed_mapped_modules(
+        device,
+        [
+            {
+                "entPhysicalIndex": 100,
+                "entPhysicalClass": "module",
+                "entPhysicalName": "Slot 1",
+                "entPhysicalModelName": module_type.model,
+                "entPhysicalSerialNum": raw_serial,
+            }
+        ],
     )
     user = make_superuser()
     client.force_login(user)
@@ -2978,14 +2954,12 @@ def test_preview_and_replace_compare_under_the_rules_and_store_the_librenms_text
 def test_bulk_install_reads_serial_rules_once_per_manufacturer(client, endpoint, mixed_manufacturers):
     """A batch compares every serial without querying rules for every item, and stores the LibreNMS text."""
     from dcim.models import Manufacturer, Module, VirtualChassis
-    from django.core.cache import cache
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
     from django.urls import reverse
 
     from netbox_librenms_plugin.models import NormalizationRule
     from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type, make_superuser
-    from netbox_librenms_plugin.views.mixins import CacheMixin
 
     device = make_device_with_module_bays("serial-rule-batch", ["Slot 1", "Slot 2", "Slot 3"])
     module_type = make_module_type("Batch Card", manufacturer=device.device_type.manufacturer)
@@ -3040,9 +3014,7 @@ def test_bulk_install_reads_serial_rules_once_per_manufacturer(client, endpoint,
         )
         for row, chassis_index in zip(rows[1:4], (10, 11, 10), strict=True):
             row["entPhysicalContainedIn"] = chassis_index
-    cache.set(
-        CacheMixin().get_cache_key(device, "inventory", "default"), trusted_module_inventory_payload(device, rows)
-    )
+    seed_mapped_modules(device, rows)
     user = make_superuser("serial-rule-batch-user")
     if endpoint == "install_branch":
         data = _rendered_fields(device, "install-branch", 1, user=user)
@@ -3345,7 +3317,7 @@ def test_a_selected_install_uses_each_members_destination_and_ignore_policy(clie
     )
     assert contexts[("index", 2)]["selected_device"].pk == member.pk
     cache_key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(cache_key, trusted_module_inventory_payload(page, rows))
+    seed_mapped_modules(page, rows)
     if member_visible:
         user = make_superuser("branch-owner-user")
     else:
@@ -3420,7 +3392,7 @@ def test_branch_install_refreshes_page_serial_after_waiting_for_its_lock(client)
         },
     ]
     key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(key, trusted_module_inventory_payload(page, rows))
+    seed_mapped_modules(page, rows)
     user = make_superuser("branch-fresh-page-user")
     fields = _rendered_fields(page, "install-branch", 1, user=user)
     changed = []
@@ -3531,7 +3503,7 @@ def test_branch_install_cuts_parent_bay_lookup_at_a_member_boundary(client, tran
             require_serial_match_parent=False,
         )
     key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(key, trusted_module_inventory_payload(page, stack_inventory(rows, [page, member])))
+    seed_mapped_modules(page, stack_inventory(rows, [page, member]))
     user = make_superuser("branch-boundary-user")
     client.force_login(user)
     try:
@@ -3828,7 +3800,7 @@ def test_branch_install_runs_onto_the_signed_member_until_it_leaves_the_chassis(
         },
     ]
     key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(key, trusted_module_inventory_payload(page, stack_inventory(rows, [page, member])))
+    seed_mapped_modules(page, stack_inventory(rows, [page, member]))
     user = make_superuser("branch-moved-user")
     fields = _rendered_fields(page, "install-branch", 2, user=user)
     assert fields["selected_device_id"] == str(member.pk)
@@ -3879,7 +3851,7 @@ def test_branch_install_releases_its_lock_before_rendering(client, valid_binding
         },
     ]
     key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(key, trusted_module_inventory_payload(page, rows))
+    seed_mapped_modules(page, rows)
     user = make_superuser("branch-render-user")
     fields = _rendered_fields(page, "install-branch", 1, user=user)
     if not valid_binding:
@@ -3930,7 +3902,7 @@ def test_single_module_refusal_releases_its_lock_before_rendering(client, refusa
         "entPhysicalSerialNum": "RENDER-CARD",
     }
     key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(key, trusted_module_inventory_payload(page, [row]))
+    seed_mapped_modules(page, [row])
     user = make_superuser("single-render-user")
     fields = _rendered_fields(page, "install-module", 1, user=user)
     if refusal != "missing":
@@ -3942,7 +3914,7 @@ def test_single_module_refusal_releases_its_lock_before_rendering(client, refusa
             serial="RENDER-CARD",
         )
         # The install drops the snapshot; a refresh caches the same rows, so the rendered grant still holds.
-        cache.set(key, trusted_module_inventory_payload(page, [row]))
+        seed_mapped_modules(page, [row])
     observed = []
     acquired = []
 
@@ -4068,9 +4040,7 @@ def test_selected_install_refreshes_target_serial_after_waiting_for_its_lock(
         )
         selected_index = 2
     key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(
-        key, trusted_module_inventory_payload(page, stack_inventory(rows, [page, target]) if selected_member else rows)
-    )
+    seed_mapped_modules(page, stack_inventory(rows, [page, target]) if selected_member else rows)
     user = make_superuser("selected-fresh-page-user")
     fields = _rendered_fields(page, "install-selected", user=user)
     changed = []
@@ -4167,7 +4137,7 @@ def test_a_writer_waiting_for_the_page_lock_refuses_a_change_committed_during_th
         },
     ]
     key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(key, trusted_module_inventory_payload(page, rows))
+    seed_mapped_modules(page, rows)
     content = render_module_tab(page)
     if writer == "install":
         action, fields = rendered_module_form(content, "install-module", 2)
