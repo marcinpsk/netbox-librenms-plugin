@@ -42,6 +42,7 @@ unchecked until that review.
 
 | Rule id | Severity | Catches |
 | --- | --- | --- |
+| `capture-requires-source-identities` | error | A direct equality comparison between a response's request path and a blocker path in recording capture. |
 | `inventory-fallback-normalizes-indices` | error | String-coerced equality between a row's dynamic field and a filter value inside `effective_inventory`. Containment filters need numeric equality. |
 | `import-disclosure` | error | A `warnings`/`issues` message that names a NetBox object no `restrict()` call filtered. |
 | `import-disclosure-sanitizer-shadow` | error | A local definition that impersonates a permission API trusted by `import-disclosure`. |
@@ -370,3 +371,8 @@ in `_map_os_platform`. The creator must also recover uniqueness errors from
 comparison and its reverse inside `effective_inventory`. It allows numeric index comparison
 and exact physical class comparison. Comparisons through aliases, other functions, and literal
 field names are outside this narrow check.
+
+`capture-requires-source-identities` rejects direct comparisons between `record.request.path`
+and `blocker.path` in capture, in either order. Capture validates mapping states and response
+keys from `MappingSource.parts`. Comparisons through aliases or other functions are outside
+this narrow check.

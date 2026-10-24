@@ -859,6 +859,24 @@ def test_capture_fails_when_configured_oob_controller_ports_fail(capture_http):
         )
 
 
+@pytest.mark.parametrize("oob_id", ["invalid", True, -1])
+def test_capture_rejects_an_invalid_linked_controller(capture_http, oob_id):
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
+
+    server, api = capture_http({path: (200, body) for path, body in _all_ok_routes().items()})
+    subject = _subject(api, 1000)
+    seed_stored_mapping(
+        subject,
+        {api.server_key: {"id": 1000, "oob": {"id": oob_id, "type": "drac"}}},
+        save=True,
+    )
+
+    with pytest.raises(RuntimeError):
+        capture_device_recording(subject, server_key=api.server_key)
+
+    assert all("/oob/" not in request["path"] for request in server.requests)
+
+
 def test_capture_fails_when_successful_route_has_no_json_body(capture_http):
     """A 2xx HTML response must not be recorded as an absent structural payload."""
     server, api = capture_http({k: (200, v) for k, v in _all_ok_routes().items()})
