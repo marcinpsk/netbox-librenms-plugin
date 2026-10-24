@@ -6,19 +6,6 @@ with real NetBox rows and real permissions.
 """
 
 import pytest
-from dcim.models import Interface
-from django.contrib import messages
-from django.contrib.messages import get_messages
-from django.urls import reverse
-
-from netbox_librenms_plugin import source_cache
-from netbox_librenms_plugin.acquisition.registry import Resource
-from netbox_librenms_plugin.acquisition.resources import blocked_scopes
-from netbox_librenms_plugin.models import PortStackLagPattern
-from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab
-from netbox_librenms_plugin.tests.conftest import make_device, make_superuser, map_device_to_librenms
-from netbox_librenms_plugin.tests.interface_sync_post_helpers import bound_interface, post_interface_sync, sync_port
-from netbox_librenms_plugin.tests.source_snapshot_helpers import interface_rows, port_pair
 
 SERVER_KEY = "default"
 HOST_ID = 4401
@@ -26,6 +13,8 @@ OOB_ID = 4402
 
 
 def _port(port_id, name, if_type="ethernetCsmacd", **fields):
+    from netbox_librenms_plugin.tests.interface_sync_post_helpers import sync_port
+
     return sync_port(port_id, name, if_type=if_type, **fields)
 
 
@@ -38,10 +27,14 @@ def _serve(server, ports, mappings=(), *, os_name="linux", device_id=HOST_ID):
 
 
 def _device(name, **mapping):
+    from netbox_librenms_plugin.tests.conftest import make_device, map_device_to_librenms
+
     return map_device_to_librenms(make_device(name), HOST_ID, server_key=SERVER_KEY, **mapping)
 
 
 def _refresh(client, device):
+    from django.urls import reverse
+
     return client.post(
         reverse("plugins:netbox_librenms_plugin:device_interface_sync", args=[device.pk]),
         {"server_key": SERVER_KEY},
@@ -50,6 +43,10 @@ def _refresh(client, device):
 
 
 def _fragment(client, device):
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.sync_cache import SyncTab
+
     url = reverse(
         "plugins:netbox_librenms_plugin:sync_cache_fragment",
         kwargs={"object_type": "device", "pk": device.pk, "tab": SyncTab.INTERFACES.value},
@@ -58,15 +55,21 @@ def _fragment(client, device):
 
 
 def _messages(response, level):
+    from django.contrib.messages import get_messages
+
     return [str(message) for message in get_messages(response.wsgi_request) if message.level == level]
 
 
 def _status(device):
+    from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab
+
     return SyncCacheConsistency(device).status(SERVER_KEY)[SyncTab.INTERFACES.value]
 
 
 def _refreshed(response):
     """Return whether a refresh answered with a success notice and no error."""
+    from django.contrib import messages
+
     return _messages(response, messages.ERROR) == [] and len(_messages(response, messages.SUCCESS)) == 1
 
 
@@ -76,6 +79,11 @@ def _rows(response):
 
 @pytest.mark.django_db
 def test_a_refresh_stores_source_facts_and_the_tab_assesses_them(client, live_librenms):
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import port_pair
+
     device = _device("iface-snap-refresh")
     client.force_login(make_superuser("iface-snap-refresh-user"))
     ports = [
@@ -117,6 +125,13 @@ def test_a_refresh_stores_source_facts_and_the_tab_assesses_them(client, live_li
 def test_a_refresh_without_the_host_relationship_data_fails_and_drops_the_older_snapshot(
     client, live_librenms, break_source, failed
 ):
+    from django.contrib import messages
+
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import port_pair
+
     device = _device("iface-snap-blocked")
     client.force_login(make_superuser("iface-snap-blocked-user"))
     _serve(live_librenms.server, [_port(1, "eth1"), _port(100, "bond0", "ieee8023adLag")], [port_pair(1, 100)])
@@ -141,6 +156,13 @@ def test_a_refresh_without_the_host_relationship_data_fails_and_drops_the_older_
     ids=["oob-ports-fail", "oob-id-corrupt"],
 )
 def test_an_oob_failure_keeps_the_host_rows_and_shows_the_oob_notice(client, live_librenms, oob):
+    from django.contrib import messages
+
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.acquisition.resources import blocked_scopes
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+
     device = _device("iface-snap-oob-blocked", oob=oob)
     client.force_login(make_superuser("iface-snap-oob-blocked-user"))
     _serve(live_librenms.server, [_port(1, "eth1")])
@@ -165,6 +187,10 @@ def test_an_oob_failure_keeps_the_host_rows_and_shows_the_oob_notice(client, liv
 
 @pytest.mark.django_db
 def test_a_failed_refresh_names_every_source_that_blocks_it(client, live_librenms):
+    from django.contrib import messages
+
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+
     device = _device("iface-snap-every-blocker")
     client.force_login(make_superuser("iface-snap-every-blocker-user"))
     _serve(live_librenms.server, [_port(1, "eth1")])
@@ -179,6 +205,12 @@ def test_a_failed_refresh_names_every_source_that_blocks_it(client, live_librenm
 
 @pytest.mark.django_db
 def test_an_oob_only_device_fails_the_refresh_because_interfaces_need_a_host_mapping(client, live_librenms):
+    from django.contrib import messages
+
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.tests.conftest import make_device, make_superuser, map_device_to_librenms
+
     device = map_device_to_librenms(
         make_device("iface-snap-oob-only"), server_key=SERVER_KEY, oob={"id": OOB_ID, "type": "idrac"}
     )
@@ -195,6 +227,11 @@ def test_an_oob_only_device_fails_the_refresh_because_interfaces_need_a_host_map
 
 @pytest.mark.django_db
 def test_oob_rows_join_the_host_rows_and_a_shared_mac_is_flagged(client, live_librenms):
+    from django.contrib import messages
+
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import interface_rows
+
     device = _device("iface-snap-oob", oob={"id": OOB_ID, "type": "idrac"})
     client.force_login(make_superuser("iface-snap-oob-user"))
     _serve(live_librenms.server, [_port(1, "eth0", ifPhysAddress="AA-BB-CC-DD-EE-01"), _port(2, "eth1")])
@@ -214,7 +251,12 @@ def test_oob_rows_join_the_host_rows_and_a_shared_mac_is_flagged(client, live_li
 
 @pytest.mark.django_db
 def test_the_sync_writes_the_rows_that_the_tab_assessed(client, live_librenms):
+    from dcim.models import Interface
+    from django.contrib import messages
     from ipam.models import VLAN
+
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+    from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync
 
     device = _device("iface-snap-sync")
     client.force_login(make_superuser("iface-snap-sync-user"))
@@ -231,6 +273,11 @@ def test_the_sync_writes_the_rows_that_the_tab_assessed(client, live_librenms):
 
 @pytest.mark.django_db
 def test_a_pattern_edit_reaches_the_table_and_the_sync_without_a_refresh(client, live_librenms):
+    from netbox_librenms_plugin.models import PortStackLagPattern
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+    from netbox_librenms_plugin.tests.interface_sync_post_helpers import bound_interface, post_interface_sync
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import interface_rows, port_pair
+
     device = _device("iface-snap-pattern")
     client.force_login(make_superuser("iface-snap-pattern-user"))
     member = bound_interface(device, "Gi0/1", 1, iface_type="1000base-t")
@@ -257,6 +304,12 @@ def test_a_pattern_edit_reaches_the_table_and_the_sync_without_a_refresh(client,
 
 @pytest.mark.django_db
 def test_a_cables_refresh_leaves_the_interfaces_snapshot_as_it_was(client, live_librenms):
+    from django.urls import reverse
+
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+
     device = _device("iface-snap-cables")
     client.force_login(make_superuser("iface-snap-cables-user"))
     _serve(live_librenms.server, [_port(1, "eth1")])
