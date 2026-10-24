@@ -10,6 +10,16 @@
 # The scan needs --taint-intrafile: taint must cross into a module-private helper, which is where a
 # per-function analysis loses the serial-match branch.
 rules:
+  - id: capture-requires-source-identities
+    languages: [python]
+    severity: ERROR
+    message: Validate capture through mapping states and response keys. A blocker path is display data.
+    pattern-either:
+      - pattern: $RECORD.request.path == $BLOCKER.path
+      - pattern: $BLOCKER.path == $RECORD.request.path
+    paths:
+      include:
+        - "**/data_shapes/capture.py"
   - id: inventory-fallback-normalizes-indices
     languages: [python]
     severity: ERROR

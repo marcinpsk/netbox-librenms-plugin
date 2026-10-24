@@ -1,10 +1,10 @@
 """Export source acquisition responses as a replayable data-shape recording."""
 
-from netbox_librenms_plugin.acquisition.coordinator import SubjectNotMapped, acquire
+from netbox_librenms_plugin.acquisition.coordinator import INVALID_OOB_REASON, SubjectNotMapped, acquire
 from netbox_librenms_plugin.acquisition import responses
 from netbox_librenms_plugin.acquisition.registry import Resource
-from netbox_librenms_plugin.acquisition.resources import SCOPES, device_os
-from netbox_librenms_plugin.acquisition.snapshot import Outcome
+from netbox_librenms_plugin.acquisition.resources import NEIGHBOUR_PORTS_PREFIX, device_os
+from netbox_librenms_plugin.acquisition.snapshot import MappingState, Outcome
 from netbox_librenms_plugin.data_shapes.envelope import MAX_HTTP_STATUS, MIN_HTTP_STATUS, wrap_response
 from netbox_librenms_plugin.data_shapes.recordings_store import SERIAL_SENSORS_META_KEY, SERIAL_SENSORS_UNAVAILABLE
 from netbox_librenms_plugin.models import PortStackLagPattern
@@ -27,30 +27,27 @@ def _require(record, *, allow_missing=False, optional_status=False):
 
 
 def _requirements(snapshot):
-    """Check scope sources and the extra sources required by a recording."""
+    """Require the mapped source parts that a structural recording needs."""
     host_id = snapshot.resources[Resource.INTERFACES].host.librenms_id
     stack_request = responses.port_stack(host_id).request
     transceiver_request = responses.transceivers(host_id).request
     for resource in CAPTURE_RESOURCES:
-        for scope, blockers in SCOPES[resource](snapshot).items():
-            if scope == "serial" or ":neighbour:" in scope:
+        source = snapshot.resources[resource]
+        for mapping in (source.host, source.oob):
+            if mapping is None:
                 continue
-            for blocker in blockers:
-                for record in snapshot.responses.values():
-                    if record.request.path == blocker.path:
-                        _require(
-                            record,
-                            allow_missing=record.request == transceiver_request,
-                            optional_status=record.request == stack_request,
-                        )
-    for resource, part in (
-        (Resource.INTERFACES, "device"),
-        (Resource.MODULES, "inventory_root"),
-        (Resource.MODULES, "inventory_children"),
-    ):
-        record = snapshot.record(resource, part)
-        if record.outcome is not Outcome.NOT_APPLICABLE:
-            _require(record)
+            if mapping.state is MappingState.INVALID:
+                raise RuntimeError(INVALID_OOB_REASON)
+            for part, key in mapping.parts:
+                if resource is Resource.CABLES and (part == "sensors" or part.startswith(NEIGHBOUR_PORTS_PREFIX)):
+                    continue
+                record = snapshot.responses[key]
+                if record.outcome is not Outcome.NOT_APPLICABLE:
+                    _require(
+                        record,
+                        allow_missing=record.request == transceiver_request,
+                        optional_status=record.request == stack_request,
+                    )
 
 
 def _export_responses(snapshot):
