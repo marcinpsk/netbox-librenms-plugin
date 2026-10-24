@@ -113,13 +113,13 @@ class TestCacheMixinKeyGeneration:
 
     def test_get_cache_key_includes_server_key(self):
         device = make_device("cache-key-server")
-        assert self._mixin().get_cache_key(device, "ports", "srv1") == f"librenms_ports_device_{device.pk}_srv1"
+        key = self._mixin().get_cache_key(device, "ports", "srv1")
+        assert key.startswith(f"librenms_ports_device_{device.pk}_srv1_")
 
     def test_get_cache_key_includes_model_name(self):
         vm = make_vm("cache-key-vm")
-        assert (
-            self._mixin().get_cache_key(vm, "interfaces", "srv1") == f"librenms_interfaces_virtualmachine_{vm.pk}_srv1"
-        )
+        key = self._mixin().get_cache_key(vm, "interfaces", "srv1")
+        assert key.startswith(f"librenms_interfaces_virtualmachine_{vm.pk}_srv1_")
 
     def test_get_cache_key_different_data_types(self):
         device = make_device("cache-key-types")

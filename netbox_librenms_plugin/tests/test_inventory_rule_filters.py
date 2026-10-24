@@ -257,11 +257,10 @@ class TestC8500LSyntheticCopy:
 
 
 def cached_inventory(device, server_key):
-    from django.core.cache import cache
+    """Read the current inventory assessment from its bound source snapshot."""
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import module_inventory
 
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-    return cache.get(DeviceModuleTableView().get_cache_key(device, "inventory", server_key=server_key))["inventory"]
+    return module_inventory(device, server_key)
 
 
 def written_state(device):
