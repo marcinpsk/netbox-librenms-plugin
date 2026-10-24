@@ -242,3 +242,21 @@ def test_a_resource_name_string_is_rejected_before_any_request(live_librenms):
         acquire(subject, server_key=SERVER_KEY, resources=[Resource.MODULES.value])
 
     assert live_librenms.server.requests == []
+
+
+@pytest.mark.parametrize("module", ["acquisition/resources.py", "assessment/modules.py", "inventory_identity.py"])
+def test_inventory_helpers_import_no_discovery_or_transport_module(module):
+    import ast
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / module
+    imports = [
+        node.module
+        for node in ast.walk(ast.parse(path.read_text()))
+        if isinstance(node, ast.ImportFrom) and node.module
+    ]
+    assert not set(imports) & {
+        "netbox_librenms_plugin.import_utils.virtual_chassis",
+        "netbox_librenms_plugin.librenms_api",
+        "django.core.cache",
+    }

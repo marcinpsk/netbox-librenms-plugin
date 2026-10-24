@@ -5,6 +5,8 @@ These tests verify that LibreNMSAPI correctly parses responses from a real
 (but local) HTTP server, and that the full request/response cycle works.
 """
 
+from netbox_librenms_plugin.tests.source_snapshot_helpers import acquire_ports_record
+
 import json
 from copy import deepcopy
 
@@ -61,6 +63,7 @@ class TestMockServerSanity:
             pytest.fail("Expected 404 HTTPError")
 
 
+@pytest.mark.django_db
 class TestLibreNMSAPIPortsFetch:
     """LibreNMSAPI.get_ports() correctly parses mock server responses."""
 
@@ -94,7 +97,8 @@ class TestLibreNMSAPIPortsFetch:
         librenms_server.routes["/api/v0/devices/1/ports"] = _route
         api = _make_api(librenms_server.url)
 
-        success, data = api.get_ports(1)
+        port_record = acquire_ports_record(api, 1)
+        success, data = port_record.obtained, port_record.body
 
         assert success is True
         assert isinstance(data, dict)
@@ -107,7 +111,8 @@ class TestLibreNMSAPIPortsFetch:
         librenms_server.auth_error_response(path="/api/v0/devices/1/ports")
         api = _make_api(librenms_server.url)
 
-        success, _ = api.get_ports(1)
+        port_record = acquire_ports_record(api, 1)
+        success, _ = port_record.obtained, port_record.body
 
         assert success is False
 
@@ -115,7 +120,8 @@ class TestLibreNMSAPIPortsFetch:
         librenms_server.register("/api/v0/devices/99/ports", {"status": "ok", "ports": []})
         api = _make_api(librenms_server.url)
 
-        success, data = api.get_ports(99)
+        port_record = acquire_ports_record(api, 99)
+        success, data = port_record.obtained, port_record.body
 
         assert success is True
         assert data["ports"] == []

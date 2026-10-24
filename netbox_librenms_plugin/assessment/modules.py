@@ -5,13 +5,13 @@ from dcim.models import Device
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.acquisition.resources import blocked_scopes
 from netbox_librenms_plugin.constants import MAIN_INVENTORY_SOURCE, OOB_INVENTORY_SOURCE, is_librenms_placeholder
-from netbox_librenms_plugin.import_utils.virtual_chassis import vc_serial_key
+from netbox_librenms_plugin.inventory_identity import vc_serial_key
 from netbox_librenms_plugin.inventory_tree import repair_dangling_parents
 from netbox_librenms_plugin.server_mappings import MappingRole
 from netbox_librenms_plugin.utils import normalize_serial
 
 _SKIP_TRANSCEIVER_TYPES = {"Port Container", "Port", ""}
-_TRANSCEIVER_API_MATCH = "_transceiver_api_match"
+TRANSCEIVER_API_MATCH = "_transceiver_api_match"
 
 
 def assess(snapshot, *, subject):
@@ -19,18 +19,16 @@ def assess(snapshot, *, subject):
     resource = Resource.MODULES
     blocked = blocked_scopes(snapshot, resource)
     if "host" in blocked:
-        return {"inventory": None, "blocked": blocked}
+        return {"inventory": [], "blocked": blocked}
     owner = Device.objects.select_related("device_type__manufacturer").get(pk=snapshot.resources[resource].owner.pk)
     inventory = snapshot.value(resource, "inventory")
     repair_dangling_parents(inventory)
-    for item in inventory:
-        item["_source"] = MAIN_INVENTORY_SOURCE
     ports = snapshot.value(resource, "ports")
     _merge_transceiver_data(
         inventory, snapshot.value(resource, "transceivers"), ports, manufacturer=owner.device_type.manufacturer
     )
     for item in inventory:
-        item.setdefault("_source", MAIN_INVENTORY_SOURCE)
+        item["_source"] = MAIN_INVENTORY_SOURCE
     _enrich_inventory_port_identity(inventory, ports)
     if snapshot.resources[resource].oob is not None and "oob" not in blocked:
         oob = snapshot.value(resource, "inventory", MappingRole.OOB)
@@ -46,10 +44,14 @@ def assess(snapshot, *, subject):
             if item.get("entPhysicalContainedIn") not in (None, 0):
                 item["entPhysicalContainedIn"] += offset
         inventory.extend(oob)
+    for item in inventory:
+        name = item.get("entPhysicalName")
+        if name is not None and not isinstance(name, str):
+            item["entPhysicalName"] = normalize_serial(name)
     return {"inventory": inventory, "blocked": blocked}
 
 
-def _clean_librenms_value(value) -> str:
+def clean_librenms_value(value) -> str:
     """Return trimmed text with LibreNMS placeholders removed."""
     text = normalize_serial(value)
     return "" if is_librenms_placeholder(text) else text
@@ -69,7 +71,7 @@ def _ifindex_entity_is_the_optic(item: dict, transceiver: dict, serial_key) -> b
     item_serial = serial_key(item.get("entPhysicalSerialNum"))
     if item_serial:
         return item_serial == serial_key(transceiver.get("serial"))
-    return not _clean_librenms_value(item.get("entPhysicalModelName"))
+    return not clean_librenms_value(item.get("entPhysicalModelName"))
 
 
 def _merge_transceiver_data(inventory_data, transceivers, ports, *, manufacturer):  # noqa: C901
@@ -77,44 +79,33 @@ def _merge_transceiver_data(inventory_data, transceivers, ports, *, manufacturer
     if not transceivers:
         return inventory_data
 
-    def _coerce_idx(value):
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return None
-
-    inv_by_index = {
-        idx: item for item in inventory_data if (idx := _coerce_idx(item.get("entPhysicalIndex"))) is not None
-    }
+    inv_by_index = {idx: item for item in inventory_data if (idx := item.get("entPhysicalIndex")) is not None}
     serial_key = vc_serial_key(manufacturer)
     inv_serials = {s for item in inventory_data if (s := serial_key(item.get("entPhysicalSerialNum")))}
     inv_by_ifindex = {}
     for item in inventory_data:
-        if (if_index := _coerce_idx(item.get("ifIndex"))) is not None:
+        if (if_index := int(item["ifIndex"]) if item.get("ifIndex") is not None else None) is not None:
             inv_by_ifindex[if_index] = None if if_index in inv_by_ifindex else item
 
     port_name_map = _build_port_name_map(transceivers, ports)
 
     for txr in transceivers:
-        ent_idx = _coerce_idx(txr.get("entity_physical_index"))
-        if ent_idx is None or ent_idx <= 0:
-            continue
-
-        port_id = txr.get("port_id")
-        try:
-            port_id = int(port_id) if port_id is not None else None
-        except (TypeError, ValueError):
-            port_id = None
+        ent_idx = int(txr["entity_physical_index"])
+        port_id = int(txr["port_id"]) if txr.get("port_id") not in (None, 0, "0") else None
         port_meta = port_name_map.get(port_id, {}) if port_id else {}
         ifname = (port_meta.get("ifName") or "").strip() or None
         ifdescr = (port_meta.get("ifDescr") or "").strip() or None
-        port_ifindex = _coerce_idx(port_meta.get("ifIndex"))
+        port_ifindex = int(port_meta["ifIndex"]) if port_meta.get("ifIndex") is not None else None
 
         existing = inv_by_index.get(ent_idx)
         index_taken = existing is not None
         if existing is not None and (
             _names_another_part(existing, txr, serial_key)
-            or (port_ifindex is not None and _coerce_idx(existing.get("ifIndex")) not in {None, port_ifindex})
+            or (
+                port_ifindex is not None
+                and (int(existing["ifIndex"]) if existing.get("ifIndex") is not None else None)
+                not in {None, port_ifindex}
+            )
         ):
             existing = None
         if existing is None and port_ifindex is not None:
@@ -124,10 +115,10 @@ def _merge_transceiver_data(inventory_data, transceivers, ports, *, manufacturer
         if existing is None and index_taken:
             continue
 
-        model = _clean_librenms_value(txr.get("model"))
-        serial = _clean_librenms_value(txr.get("serial"))
+        model = clean_librenms_value(txr.get("model"))
+        serial = clean_librenms_value(txr.get("serial"))
         serial_identity = serial_key(serial)
-        txr_type = _clean_librenms_value(txr.get("type"))
+        txr_type = clean_librenms_value(txr.get("type"))
 
         if txr_type in _SKIP_TRANSCEIVER_TYPES and not model and not serial:
             continue
@@ -135,11 +126,11 @@ def _merge_transceiver_data(inventory_data, transceivers, ports, *, manufacturer
         display_model = model or (txr_type if txr_type not in _SKIP_TRANSCEIVER_TYPES else "")
 
         if existing is not None:
-            existing[_TRANSCEIVER_API_MATCH] = True
-            existing_model = _clean_librenms_value(existing.get("entPhysicalModelName"))
+            existing[TRANSCEIVER_API_MATCH] = True
+            existing_model = clean_librenms_value(existing.get("entPhysicalModelName"))
             if not existing_model and display_model:
                 existing["entPhysicalModelName"] = display_model
-            existing_serial = _clean_librenms_value(existing.get("entPhysicalSerialNum"))
+            existing_serial = clean_librenms_value(existing.get("entPhysicalSerialNum"))
             if not existing_serial and serial:
                 existing["entPhysicalSerialNum"] = serial
                 if serial_identity:
@@ -189,7 +180,7 @@ def _nest_synthetic_transceivers(inventory_data):
     """Set synthetic transceiver parents from their interface path."""
     name_to_index = {}
     for it in inventory_data:
-        nm = (it.get("entPhysicalName") or "").strip()
+        nm = normalize_serial(it.get("entPhysicalName"))
         if nm:
             name_to_index.setdefault(nm, it.get("entPhysicalIndex"))
 
@@ -198,7 +189,7 @@ def _nest_synthetic_transceivers(inventory_data):
             continue
         if it.get("entPhysicalContainedIn"):
             continue
-        name = (it.get("entPhysicalName") or "").strip()
+        name = normalize_serial(it.get("entPhysicalName"))
         if not name or "/" not in name:
             continue
         parts = name.split("/")
@@ -214,21 +205,14 @@ def _nest_synthetic_transceivers(inventory_data):
                 break
 
 
-def _enrich_inventory_port_identity(inventory_data, ports):  # noqa: C901
+def _enrich_inventory_port_identity(inventory_data, ports):
     """Fill port identities from the obtained ports."""
     label_to_port_id = {}
     ambiguous_labels = set()
     port_meta_by_id = {}
 
     for port in ports:
-        if not isinstance(port, dict):
-            continue
-        try:
-            port_id = int(port.get("port_id"))
-        except (TypeError, ValueError):
-            continue
-        if port_id <= 0:
-            continue
+        port_id = int(port["port_id"])
 
         ifname = (port.get("ifName") or "").strip()
         ifdescr = (port.get("ifDescr") or "").strip()
@@ -251,13 +235,9 @@ def _enrich_inventory_port_identity(inventory_data, ports):  # noqa: C901
             continue
 
         port_id = item.get("_librenms_port_id")
-        try:
-            port_id = int(port_id) if port_id is not None else None
-        except (TypeError, ValueError):
-            port_id = None
 
         if port_id is None or port_id <= 0:
-            candidates = _interface_name_candidates(item)
+            candidates = interface_name_candidates(item)
 
             matched_ids = [label_to_port_id[label] for label in candidates if label in label_to_port_id]
             matched_ids = sorted(set(matched_ids))
@@ -277,42 +257,19 @@ def _enrich_inventory_port_identity(inventory_data, ports):  # noqa: C901
 
 def _build_port_name_map(transceivers, ports):
     """Return interface labels of transceiver ports."""
-    port_ids = {txr.get("port_id") for txr in transceivers if txr.get("port_id")}
-    if not port_ids:
-        return {}
-
-    normalized_port_ids = set()
-    for raw_port_id in port_ids:
-        try:
-            port_id = int(raw_port_id)
-        except (TypeError, ValueError):
-            continue
-        if port_id > 0:
-            normalized_port_ids.add(port_id)
-
-    port_map = {}
-    for port in ports:
-        if not isinstance(port, dict):
-            continue
-        try:
-            port_id = int(port.get("port_id"))
-        except (TypeError, ValueError):
-            continue
-        if port_id not in normalized_port_ids:
-            continue
-        ifname = (port.get("ifName") or "").strip()
-        ifdescr = (port.get("ifDescr") or "").strip()
-        if not ifname and not ifdescr:
-            continue
-        port_map[port_id] = {
-            "ifName": ifname,
-            "ifDescr": ifdescr,
+    port_ids = {int(row["port_id"]) for row in transceivers if row.get("port_id") not in (None, 0, "0")}
+    return {
+        int(port["port_id"]): {
+            "ifName": port.get("ifName"),
+            "ifDescr": port.get("ifDescr"),
             "ifIndex": port.get("ifIndex"),
         }
-    return port_map
+        for port in ports
+        if int(port["port_id"]) in port_ids
+    }
 
 
-def _interface_name_candidates(item):
+def interface_name_candidates(item):
     """Return unique interface label candidates for bay matching."""
     candidates = []
     for value in [

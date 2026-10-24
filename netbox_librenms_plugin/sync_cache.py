@@ -109,10 +109,6 @@ _VLAN_OVERRIDE_TABS = frozenset({SyncTab.INTERFACES})
 _CABLE_PICK_TABS = frozenset({SyncTab.CABLES})
 
 
-# Every resource now uses the source snapshot transport.
-_ACQUIRED_RESOURCES = frozenset(Resource)
-
-
 def _shares_vc_owner(tab):
     return TAB_SPECS[tab].source.owner_policy is OwnerPolicy.VC_SYNC_OWNER
 
@@ -279,12 +275,17 @@ def request_actor_id(request):
     return actor_id if isinstance(actor_id, int) and not isinstance(actor_id, bool) else None
 
 
-def sync_snapshot_key(obj, data_type, server_key):
-    """Scope the shared snapshot to the object, server, plugin version and NetBox release."""
+def _cache_namespace(obj, server_key):
+    """Bind snapshot and tab state keys to one object, server and software version."""
     return (
-        f"librenms_{data_type}_{obj._meta.model_name}_{obj.pk}_{require_server_key(server_key)}"
+        f"{obj._meta.model_name}_{obj.pk}_{require_server_key(server_key)}"
         f"_{netbox_librenms_plugin.__version__}_{settings.RELEASE.version}"
     )
+
+
+def sync_snapshot_key(obj, data_type, server_key):
+    """Scope the shared snapshot to the object, server, plugin version and NetBox release."""
+    return f"librenms_{data_type}_{_cache_namespace(obj, server_key)}"
 
 
 def sync_vlan_overrides_key(obj, server_key):
@@ -293,8 +294,7 @@ def sync_vlan_overrides_key(obj, server_key):
 
 
 def _state_key(subject, server_key, tab):
-    server_key = require_server_key(server_key)
-    return f"librenms_sync_tab_state_{subject._meta.model_name}_{subject.pk}_{server_key}_{tab.value}"
+    return f"librenms_sync_tab_state_{_cache_namespace(subject, server_key)}_{tab.value}"
 
 
 class SyncCacheConsistency:

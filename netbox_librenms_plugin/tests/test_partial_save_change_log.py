@@ -5,15 +5,18 @@ A partial save runs ``pre_save()`` only for the fields in ``update_fields``. The
 a real view through the test client, so NetBox's change logging runs as in production.
 """
 
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_mapped_modules
+
 import uuid
 from contextlib import contextmanager
 
 import netaddr
+from netbox_librenms_plugin.tests.source_snapshot_helpers import transceiver_row
+
 import pytest
 from core.models import ObjectChange
 from dcim.models import Interface, InterfaceTemplate, Module
 from django.contrib.contenttypes.models import ContentType
-from django.core.cache import cache
 from django.urls import reverse
 from utilities.ordering import naturalize_interface
 
@@ -29,13 +32,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import mapping_from_change_record, stored_mapping_for_test
-from netbox_librenms_plugin.tests.view_test_helpers import (
-    make_request,
-    render_module_tab,
-    rendered_module_form,
-    trusted_module_inventory_payload,
-)
-from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+from netbox_librenms_plugin.tests.view_test_helpers import make_request, render_module_tab, rendered_module_form
 
 pytestmark = pytest.mark.django_db
 
@@ -129,10 +126,9 @@ def _inventory_row(module_type, bay_name, **extra):
     }
 
 
-def _seed_inventory(device, row, librenms_id):
+def _seed_inventory(device, row, librenms_id, **source_facts):
     """Put *row* in the module tab snapshot of *device*, as a refresh of the tab does."""
-    payload = trusted_module_inventory_payload(device, [row], server_key=SERVER_KEY, librenms_id=librenms_id)
-    cache.set(DeviceModuleTableView().get_cache_key(device, "inventory", server_key=SERVER_KEY), payload, 300)
+    seed_mapped_modules(device, [row], server_key=SERVER_KEY, librenms_id=librenms_id, **source_facts)
 
 
 def _post_module_action(client, url_name, device, row, action_target, **data):
@@ -174,8 +170,14 @@ def test_binding_a_port_to_a_module_interface_records_the_module_and_the_port(cl
     module = _installed_module(device, "PARTIAL-SAVE-BIND-CARD")
     interface = make_interface(device, "Ethernet1/1")
     before = _stored_last_updated(interface)
-    row = _inventory_row(module.module_type, "Slot 1", _librenms_port_id=8801, _librenms_ifname="Ethernet1/1")
-    _seed_inventory(device, row, librenms_id=72)
+    row = _inventory_row(module.module_type, "Slot 1")
+    _seed_inventory(
+        device,
+        row,
+        librenms_id=72,
+        ports=[{"port_id": 8801, "ifName": "Ethernet1/1"}],
+        transceivers=[transceiver_row(ENT_INDEX, port_id=8801, model=module.module_type.model)],
+    )
     client.force_login(make_superuser("partial-save-bind-user"))
 
     _post_module_action(client, "update_module_interface", device, row, {"module_id": module.pk}, module_id=module.pk)

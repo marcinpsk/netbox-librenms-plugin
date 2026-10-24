@@ -1,5 +1,7 @@
 """Filters on skip and transparent inventory rules: the matcher, the IOS XE recordings, the writers and failures."""
 
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_mapped_modules
+
 from copy import deepcopy
 from pathlib import Path
 
@@ -594,7 +596,7 @@ def vc_pair():
         make_module_type_with_bays,
         make_virtual_chassis,
     )
-    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+
     from netbox_librenms_plugin.views.mixins import CacheMixin
 
     page = make_device_with_module_bays("vc-filter-page", [], serial="VC-PAGE")
@@ -603,7 +605,7 @@ def vc_pair():
     make_module_type_with_bays("VC-OPTIC", manufacturer=_cisco())
     rows = _vc_rows(page, member)
     cache_key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(cache_key, trusted_module_inventory_payload(page, rows))
+    seed_mapped_modules(page, rows)
     yield page, member, {row["entPhysicalIndex"]: row for row in rows}
     cache.delete(cache_key)
 

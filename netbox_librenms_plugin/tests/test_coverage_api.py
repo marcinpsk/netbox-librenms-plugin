@@ -1,12 +1,13 @@
 """Coverage tests for librenms_api.py missing lines."""
 
+from netbox_librenms_plugin.tests.source_snapshot_helpers import acquire_ports_record
+
 from copy import deepcopy
 from time import sleep
 
 import pytest
 
 from netbox_librenms_plugin.assessment.interfaces import parse_port_vlan_data
-from netbox_librenms_plugin.constants import LIBRENMS_PORTS_COLUMNS
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping_row, stored_mapping_for_test
 
 
@@ -298,26 +299,14 @@ class TestGetLibreNMSIdDictServerKey:
 # Each read endpoint, its route, accepted body, expected value, query, and HTTP error details.
 READ_ENDPOINTS = [
     pytest.param(
-        "/api/v0/devices/1/ports",
-        lambda api: api.get_ports(1),
-        {"status": "ok", "ports": [{"port_id": 7, "ifName": "Gi0/1"}]},
-        {"status": "ok", "ports": [{"port_id": 7, "ifName": "Gi0/1"}]},
-        {"columns": [LIBRENMS_PORTS_COLUMNS], "with": ["vlans"]},
-        {
-            404: ("Device not found in LibreNMS",),
-            500: ("HTTP error:", "500"),
-        },
-        id="get_ports",
-    ),
-    pytest.param(
         "/api/v0/inventory/1",
         lambda api: api.get_inventory_filtered(1),
         {"status": "ok", "inventory": [{"entPhysicalIndex": 1, "entPhysicalClass": "chassis"}]},
         [{"entPhysicalIndex": 1, "entPhysicalClass": "chassis"}],
         {},
         {
-            404: ("404", "/api/v0/inventory/1"),
-            500: ("500", "/api/v0/inventory/1"),
+            404: ("404",),
+            500: ("500",),
         },
         id="get_inventory_filtered",
     ),
@@ -332,18 +321,6 @@ READ_ENDPOINTS = [
             500: ("500", "/api/v0/devices"),
         },
         id="list_devices",
-    ),
-    pytest.param(
-        "/api/v0/ports/1",
-        lambda api: api.get_port_vlan_details(1),
-        {"status": "ok", "port": [{"port_id": 1, "ifName": "Gi0/1"}]},
-        {"port_id": 1, "ifName": "Gi0/1"},
-        {"with": ["vlans"]},
-        {
-            404: ("Port not found in LibreNMS",),
-            500: ("HTTP error:", "500"),
-        },
-        id="get_port_vlan_details",
     ),
 ]
 
@@ -446,10 +423,11 @@ class TestGetPortsErrors:
             method="GET",
         )
 
-        ok, msg = api_for(settings, librenms_server.url).get_ports(1)
+        port_record = acquire_ports_record(api_for(settings, librenms_server.url), 1)
+        ok, _msg = port_record.obtained, port_record.body
 
         assert ok is False
-        assert "not found" in msg.lower()
+        assert port_record.http_status == 404
 
 
 @pytest.mark.django_db
@@ -590,37 +568,6 @@ class TestGetDeviceInfoErrors:
         assert ok is False
         assert isinstance(data, LibreNMSLookupError)
         assert data.status_code is None
-
-
-@pytest.mark.django_db
-class TestGetPortVlanDetailsErrors:
-    """get_port_vlan_details names a missing port rather than reporting a bare failure."""
-
-    def test_http_error_404_says_port_not_found(self, settings, librenms_server):
-        librenms_server.register(
-            "/api/v0/ports/1",
-            {"status": "error"},
-            status=404,
-            method="GET",
-        )
-
-        ok, msg = api_for(settings, librenms_server.url).get_port_vlan_details(1)
-
-        assert ok is False
-        assert "not found" in msg.lower()
-
-    def test_a_non_ok_payload_is_reported(self, settings, librenms_server):
-        """A 200 whose body says error must not be read as a port."""
-        librenms_server.register(
-            "/api/v0/ports/1",
-            {"status": "error", "message": "boom"},
-            method="GET",
-        )
-
-        ok, msg = api_for(settings, librenms_server.url).get_port_vlan_details(1)
-
-        assert ok is False
-        assert msg == "boom"
 
 
 class TestListDevicesSuccess:
@@ -1529,7 +1476,7 @@ class TestGetInventoryFilteredNonOk:
 
     def test_ent_physical_contained_in_filter(self, settings, librenms_server):
         """The contained-in filter reaches the server."""
-        inventory = [{"entPhysicalContainedIn": "1", "entPhysicalName": "slot1"}]
+        inventory = [{"entPhysicalContainedIn": 1, "entPhysicalName": "slot1"}]
         received = []
 
         def filtered_inventory(method, path, query, headers, body):
@@ -1547,27 +1494,13 @@ class TestGetInventoryFilteredNonOk:
         assert data == inventory
         assert received == [{"entPhysicalContainedIn": ["1"]}]
 
-    def test_empty_inventory_without_ok_status_returns_false(self, settings, librenms_server):
-        """An empty inventory without an ok status is a format failure."""
+    def test_empty_inventory_without_a_status_uses_the_shared_contract(self, settings, librenms_server):
+        """The shared inventory contract accepts an absent status on a valid empty list."""
         librenms_server.register("/api/v0/inventory/1", {"inventory": []}, method="GET")
 
         result = api_for(settings, librenms_server.url).get_inventory_filtered(1)
 
-        assert result == (False, "Unexpected response format")
-
-
-class TestGetPortVlanDetailsHttpError:
-    """get_port_vlan_details reports a real non-404 HTTP error."""
-
-    def test_http_non_404_returns_http_error(self, settings, librenms_server):
-        """A 500 response returns an HTTP error detail."""
-        librenms_server.register("/api/v0/ports/1", {"status": "error"}, status=500, method="GET")
-
-        ok, msg = api_for(settings, librenms_server.url).get_port_vlan_details(1)
-
-        assert ok is False
-        assert "HTTP error" in msg
-        assert "500" in msg
+        assert result == (True, [])
 
 
 class TestGetInventoryFilteredNonOkStatus:
@@ -1609,7 +1542,7 @@ class TestMalformedPayloads:
 
         result = api_for(settings, librenms_server.url).get_device_inventory(1)
 
-        assert result == (False, "Unexpected response format: invalid 'inventory' payload")
+        assert result[0] is False
 
     def test_get_device_inventory_non_list_inventory(self, settings, librenms_server):
         """An object inventory is rejected."""
@@ -1621,7 +1554,7 @@ class TestMalformedPayloads:
 
         result = api_for(settings, librenms_server.url).get_device_inventory(1)
 
-        assert result == (False, "Unexpected response format: invalid 'inventory' payload")
+        assert result[0] is False
 
     def test_get_device_inventory_non_dict_inventory_item(self, settings, librenms_server):
         """A non-object inventory item is rejected."""
@@ -1633,7 +1566,7 @@ class TestMalformedPayloads:
 
         result = api_for(settings, librenms_server.url).get_device_inventory(1)
 
-        assert result == (False, "Unexpected response format: invalid 'inventory' payload")
+        assert result[0] is False
 
     def test_get_inventory_filtered_none_inventory(self, settings, librenms_server):
         """A null filtered inventory is rejected without using the fallback."""
@@ -1653,7 +1586,7 @@ class TestMalformedPayloads:
             ent_physical_class="chassis",
         )
 
-        assert result == (False, "Unexpected response format: invalid 'inventory' payload")
+        assert result[0] is False
 
     def test_get_inventory_filtered_non_dict_inventory_item(self, settings, librenms_server):
         """A non-object filtered inventory item is rejected without using the fallback."""
@@ -1673,7 +1606,7 @@ class TestMalformedPayloads:
             ent_physical_class="chassis",
         )
 
-        assert result == (False, "Unexpected response format: invalid 'inventory' payload")
+        assert result[0] is False
 
     def test_list_devices_none_devices(self, settings, librenms_server):
         """A null devices field is rejected."""

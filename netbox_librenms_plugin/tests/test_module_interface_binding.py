@@ -1,5 +1,7 @@
 """Real-ORM tests for module interface binding, adoption, and VC name normalization scopes."""
 
+from netbox_librenms_plugin.tests.source_snapshot_helpers import transceiver_row
+
 import pytest
 
 from netbox_librenms_plugin.server_mappings import read_mapping
@@ -154,15 +156,23 @@ class TestModuleTableShowsTheWriterChoice:
 
     def _seed(self, tag, interface_names, identity):
         """Install a module with *interface_names* and seed its cached row with port 8811."""
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         device = make_device_with_module_bays(f"table-choice-{tag}", ["Slot 1"])
         module = _module_with_interfaces(device, "Slot 1", f"TABLE-CHOICE-{tag.upper()}", interface_names)
         seed_mapping(device, own=ADOPTION_LIBRENMS_ID)
         device.__dict__.pop("cf", None)
-        row = {**_adoption_inventory_row(module.module_type.model, "Slot 1"), "_librenms_port_id": 8811, **identity}
-        cache_key = seed_inventory(DeviceModuleTableView(), device, [row], librenms_id=ADOPTION_LIBRENMS_ID)
-        return device, module, row, cache_key
+        row = _adoption_inventory_row(module.module_type.model, "Slot 1")
+        cache_key = seed_inventory(
+            device,
+            [row],
+            librenms_id=ADOPTION_LIBRENMS_ID,
+            ports=[{"port_id": 8811, **identity}],
+            transceivers=[transceiver_row(ADOPTION_ENT_INDEX, port_id=8811, model=module.module_type.model)],
+        )
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import module_inventory
+
+        (assessed_row,) = module_inventory(device)
+        return device, module, assessed_row, cache_key
 
     def _post_update(self, device, user, live_librenms, content):
         """POST the Update Interface form that *content* renders for the seeded row."""
@@ -177,10 +187,10 @@ class TestModuleTableShowsTheWriterChoice:
     @pytest.mark.parametrize(
         ("interface_names", "identity", "expected", "source"),
         [
-            (["Ethernet1/17", "Ethernet1/18"], {"_librenms_ifname": "port 1/17"}, "Ethernet1/17", "coordinates"),
-            (["Ethernet2/17"], {"_librenms_ifname": "port 1/17"}, "Ethernet2/17", "coordinates"),
-            (["Uplink"], {"_librenms_ifdescr": "Unmatched Label"}, "Uplink", "lone module interface"),
-            (["Uplink"], {"_librenms_ifname": "Te1/1/5"}, "Uplink", "lone module interface"),
+            (["Ethernet1/17", "Ethernet1/18"], {"ifName": "port 1/17"}, "Ethernet1/17", "coordinates"),
+            (["Ethernet2/17"], {"ifName": "port 1/17"}, "Ethernet2/17", "coordinates"),
+            (["Uplink"], {"ifDescr": "Unmatched Label"}, "Uplink", "lone module interface"),
+            (["Uplink"], {"ifName": "Te1/1/5"}, "Uplink", "lone module interface"),
         ],
         ids=["coordinates", "lone-port-number-agrees", "lone-interface", "lone-interface-without-coordinates"],
     )
@@ -215,7 +225,7 @@ class TestModuleTableShowsTheWriterChoice:
 
         from dcim.models import Interface
 
-        device, module, row, cache_key = self._seed("contra", [lone_name], {"_librenms_ifname": "Te1/1/5"})
+        device, module, row, cache_key = self._seed("contra", [lone_name], {"ifName": "Te1/1/5"})
         lone = module.interfaces.get(name=lone_name)
         user = make_superuser()
         try:
@@ -238,7 +248,7 @@ class TestModuleTableShowsTheWriterChoice:
         """The writer binds the one interface that holds the port, an OOB holder included, so the table shows it."""
         from django.core.cache import cache
 
-        device, module, row, cache_key = self._seed("oob", ["Uplink"], {"_librenms_ifdescr": "Unmatched Label"})
+        device, module, row, cache_key = self._seed("oob", ["Uplink"], {"ifDescr": "Unmatched Label"})
         uplink = module.interfaces.get(name="Uplink")
         seed_stored_mapping(uplink, {"default": {"oob": {"id": 8811}}}, save=True)
         user = make_superuser()
@@ -263,7 +273,7 @@ class TestModuleTableShowsTheWriterChoice:
         """The table reads the holder's own ID: the same port needs no bind, and another port refuses it."""
         from django.core.cache import cache
 
-        device, module, _row, cache_key = self._seed("own", ["Uplink"], {"_librenms_ifdescr": "Unmatched Label"})
+        device, module, _row, cache_key = self._seed("own", ["Uplink"], {"ifDescr": "Unmatched Label"})
         uplink = module.interfaces.get(name="Uplink")
         seed_stored_mapping(uplink, stored, save=True)
         try:
@@ -280,7 +290,7 @@ class TestModuleTableShowsTheWriterChoice:
         """The writer refuses a port that another device's interface holds, so the table shows no match."""
         from django.core.cache import cache
 
-        device, module, _row, cache_key = self._seed("held", ["Uplink"], {"_librenms_ifdescr": "Unmatched Label"})
+        device, module, _row, cache_key = self._seed("held", ["Uplink"], {"ifDescr": "Unmatched Label"})
         holder = make_interface(make_device("table-choice-holder"), "Ethernet9")
         seed_mapping(holder, own=8811)
         try:
@@ -298,7 +308,7 @@ class TestModuleTableShowsTheWriterChoice:
 
         from netbox_librenms_plugin.views.sync.modules import _bind_interface_librenms_id
 
-        device, module, row, cache_key = self._seed("bound", ["Uplink"], {"_librenms_ifdescr": "Unmatched Label"})
+        device, module, row, cache_key = self._seed("bound", ["Uplink"], {"ifDescr": "Unmatched Label"})
         uplink = module.interfaces.get(name="Uplink")
         seed_mapping(uplink, own=8999)
         try:
@@ -318,7 +328,7 @@ class TestModuleTableShowsTheWriterChoice:
         from dcim.models import InterfaceTemplate
         from django.core.cache import cache
 
-        device, module, _row, cache_key = self._seed(f"adopt-{refusal[:4]}", [], {"_librenms_ifname": "Ethernet1/1"})
+        device, module, _row, cache_key = self._seed(f"adopt-{refusal[:4]}", [], {"ifName": "Ethernet1/1"})
         InterfaceTemplate.objects.create(module_type=module.module_type, name="Uplink", type="other")
         make_interface(device, "Uplink")
         if refusal == "held-elsewhere":
@@ -339,7 +349,7 @@ class TestModuleTableShowsTheWriterChoice:
         """The writer refuses a port held twice, so the table does not show the local holder as a match."""
         from django.core.cache import cache
 
-        device, _module, _row, cache_key = self._seed("twice", ["Uplink"], {"_librenms_ifdescr": "Unmatched Label"})
+        device, _module, _row, cache_key = self._seed("twice", ["Uplink"], {"ifDescr": "Unmatched Label"})
         local = make_interface(device, "Ethernet9")
         for holder in (local, make_interface(make_device("table-choice-twice-other"), "Ethernet9")):
             # A duplicate binding: no writer can store it, so seed the raw state.
@@ -359,7 +369,7 @@ class TestModuleTableShowsTheWriterChoice:
 
         from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
-        device, module, _row, cache_key = self._seed("nochange", ["Uplink"], {"_librenms_ifdescr": "Unmatched Label"})
+        device, module, _row, cache_key = self._seed("nochange", ["Uplink"], {"ifDescr": "Unmatched Label"})
         user = make_user_with_perms(
             "table-choice-nochange-user", [("view", Device), ("view", Module), ("view", Interface)]
         )
@@ -379,7 +389,7 @@ class TestModuleTableShowsTheWriterChoice:
 
         from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
-        device, module, _row, cache_key = self._seed("hidden", ["Uplink"], {"_librenms_ifdescr": "Unmatched Label"})
+        device, module, _row, cache_key = self._seed("hidden", ["Uplink"], {"ifDescr": "Unmatched Label"})
         user = make_user_with_perms("table-choice-hidden-user", [("view", Device), ("view", Module)])
         user = grant(user, "view", Interface, constraints={"name": "Management1"})
         try:
@@ -503,7 +513,6 @@ class TestUpdateModuleInterfaceAdoption:
     def _seed(self, view, device, module, inventory_item=None):
         inventory_item = inventory_item or _adoption_inventory_row(module.module_type.model, module.module_bay.name)
         seed_inventory(
-            view,
             device,
             [inventory_item],
             librenms_id=ADOPTION_LIBRENMS_ID,

@@ -206,3 +206,98 @@ def test_a_version_change_requires_a_new_source_snapshot(client, live_librenms, 
     assert fragment(client, subject).status_code == 404
     assert cache.get(previous_key) == previous_snapshot
     assert live_librenms.server.requests == requests
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("changed_version", ["plugin", "netbox"])
+def test_failed_refresh_of_another_version_preserves_this_versions_state(
+    client, live_librenms, monkeypatch, settings, changed_version
+):
+    from dataclasses import replace
+    import netbox_librenms_plugin
+
+    subject = device("module-tab-isolated-state")
+    client.force_login(make_superuser("module-tab-isolated-state-user"))
+    serve(live_librenms.server, inventory=INVENTORY, transceivers=[])
+    assert refresh(client, subject).status_code == 200
+    original = source_cache.read(subject, Resource.MODULES, "default")
+    assert original is not None
+    with monkeypatch.context() as version:
+        if changed_version == "plugin":
+            version.setattr(netbox_librenms_plugin, "__version__", "0.0.0-other")
+        else:
+            version.setattr(settings, "RELEASE", replace(settings.RELEASE, version="0.0.0-other"))
+        live_librenms.server.register(f"/api/v0/inventory/{HOST_ID}/all", {"status": "error"}, status=500)
+        assert refresh(client, subject).status_code == 200
+        assert not SyncCacheConsistency(subject).status("default")["modules"]["snapshot_available"]
+
+    assert source_cache.read(subject, Resource.MODULES, "default").snapshot_id == original.snapshot_id
+    assert SyncCacheConsistency(subject).status("default")["modules"]["snapshot_available"]
+    assert fragment(client, subject).status_code == 200
+
+
+@pytest.mark.django_db
+def test_corrupt_oob_notice_names_the_inventory_source_without_a_null_id(client, live_librenms):
+    subject = device("module-tab-invalid-oob-notice", oob={"id": "bad-id", "type": "idrac"})
+    client.force_login(make_superuser("module-tab-invalid-oob-notice-user"))
+    serve(live_librenms.server, inventory=INVENTORY, transceivers=[])
+
+    response = refresh(client, subject)
+
+    snapshot = source_cache.read(subject, Resource.MODULES, "default")
+    (blocker,) = blocked_scopes(snapshot, Resource.MODULES)["oob"]
+    assert blocker.path == "inventory/oob/all"
+    assert any(blocker.path in str(message) for message in response.context["messages"])
+    assert not any("/None/" in str(message) for message in response.context["messages"])
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("failure", ["missing-owner", "blocked-host"])
+def test_module_grant_reports_an_unusable_source_as_a_snapshot_refusal(live_librenms, failure):
+    from dcim.models import Device
+    from django.core.cache import cache
+    from netbox_librenms_plugin.acquisition.coordinator import acquire
+    from netbox_librenms_plugin.module_grants import ACTION_INSTALL_SELECTED, GrantRefused, GrantRefusal
+    from netbox_librenms_plugin.views.sync.modules import _authorize_module_grant
+
+    subject = device("module-grant-source-refusal")
+    serve(live_librenms.server, inventory=INVENTORY, transceivers=[])
+    snapshot = acquire(subject, server_key="default", resources=[Resource.MODULES])
+    assert source_cache.store(subject, Resource.MODULES, snapshot)
+    if failure == "missing-owner":
+        Device.objects.filter(pk=subject.pk).delete()
+    else:
+        live_librenms.server.register(f"/api/v0/inventory/{HOST_ID}/all", {"status": "error"}, status=500)
+        snapshot = acquire(subject, server_key="default", resources=[Resource.MODULES])
+        # Inject a stored source with no ready host at the cache transport boundary.
+        cache.set(source_cache.snapshot_key(subject, Resource.MODULES, "default"), snapshot.to_payload(), 300)
+
+    with pytest.raises(GrantRefused) as refusal:
+        _authorize_module_grant(subject, "default", ACTION_INSTALL_SELECTED, None)
+
+    assert refusal.value.refusal is GrantRefusal.SNAPSHOT
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("name", [0, 4410])
+def test_numeric_inventory_names_render_through_refresh_and_cached_get(client, live_librenms, name):
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+    from netbox_librenms_plugin.views.base.modules_view import read_module_assessment
+
+    subject = device("module-tab-numeric-name")
+    client.force_login(make_superuser("module-tab-numeric-name-user"))
+    InventoryIgnoreRule.objects.create(
+        name="Numeric name read", match_type="regex", pattern="^different-name$", require_serial_match_parent=False
+    )
+    serve(live_librenms.server, inventory=[INVENTORY[0], {**INVENTORY[1], "entPhysicalName": name}], transceivers=[])
+
+    response = refresh(client, subject)
+
+    assert response.status_code == 200
+    assert response.context["module_sync"]["table"] is not None
+    snapshot = source_cache.read(subject, Resource.MODULES, "default")
+    assert snapshot.value(Resource.MODULES, "inventory")[1]["entPhysicalName"] == name
+    assert read_module_assessment(subject, "default")["inventory"][1]["entPhysicalName"] == str(name)
+    requests = list(live_librenms.server.requests)
+    assert fragment(client, subject).context["module_sync"]["table"] is not None
+    assert live_librenms.server.requests == requests
