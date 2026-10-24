@@ -1,8 +1,12 @@
 """Two writers on one device that bind the same LibreNMS port at the same time leave one holder."""
 
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_mapped_modules
+
 import time
 from concurrent.futures import wait
 from threading import Event
+
+from netbox_librenms_plugin.tests.source_snapshot_helpers import transceiver_row
 
 import pytest
 from django.apps import apps
@@ -38,8 +42,6 @@ _INVENTORY_ITEM = {
     "entPhysicalClass": "module",
     "entPhysicalName": "port-claim-bay",
     "entPhysicalModelName": "port-claim-mt",
-    "_librenms_port_id": PORT,
-    "_librenms_ifname": SHORT_NAME,
 }
 _SNAPSHOT_FIELDS = ("name", "mtu", "description", "enabled", "custom_field_data", "last_updated", "module_id")
 
@@ -76,17 +78,14 @@ def _seed():
 
 def _seed_inventory(device):
     """Cache the module inventory row that names ``PORT`` by ifName; the helper saves the device row."""
-    from django.core.cache import cache
 
-    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
-    from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
-
-    cache.set(
-        UpdateModuleInterfaceView().get_cache_key(device, "inventory", server_key=SERVER_KEY),
-        trusted_module_inventory_payload(
-            device, [_INVENTORY_ITEM], server_key=SERVER_KEY, librenms_id=LIBRENMS_DEVICE_ID
-        ),
-        timeout=300,
+    seed_mapped_modules(
+        device,
+        [_INVENTORY_ITEM],
+        server_key=SERVER_KEY,
+        librenms_id=LIBRENMS_DEVICE_ID,
+        ports=[{"port_id": PORT, "ifName": SHORT_NAME}],
+        transceivers=[transceiver_row(ENT_INDEX, port_id=PORT, model="port-claim-mt")],
     )
 
 

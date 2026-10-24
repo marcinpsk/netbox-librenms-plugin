@@ -43,20 +43,22 @@ def seed_every_tab(obj, server_key="default"):
     return keys
 
 
-def seed_inventory(view, device, inventory, *, librenms_id, server_key="default"):
-    """Write one inventory payload the way ``BaseModuleTableView.post`` writes it.
+def seed_inventory(
+    device, inventory, *, librenms_id, server_key="default", ports=(), transceivers=(), oob_inventory=None, oob_id=None
+):
+    """Store explicit raw module facts under the requested source binding."""
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_modules_snapshot
+    from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test, seed_stored_mapping, seed_mapping
 
-    ``librenms_id`` is required: the reader rejects a payload whose id is missing, so a defaulted
-    ``None`` would seed a cache entry that can never be read back and silently pass as a miss.
-    """
-    from django.core.cache import cache
-
-    from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
-
-    key = view.get_cache_key(device, "inventory", server_key=server_key)
-    payload = module_inventory_cache_payload(inventory, librenms_id, None)
-    cache.set(key, payload, timeout=300)
-    return key
+    if oob_id is not None:
+        seed_mapping(device, server_key, oob=oob_id)
+    mapping = stored_mapping_for_test(device)
+    seed_mapping(device, server_key, own=librenms_id, save=False)
+    seed_modules_snapshot(device, inventory, ports, transceivers, server_key=server_key, oob_inventory=oob_inventory)
+    seed_stored_mapping(device, mapping)
+    return source_cache.snapshot_key(device, Resource.MODULES, server_key)
 
 
 def clear_snapshots(keys):

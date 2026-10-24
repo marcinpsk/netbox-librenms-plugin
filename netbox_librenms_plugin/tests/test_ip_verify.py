@@ -156,7 +156,7 @@ class TestFindRowResolvesAssessedRows:
         from netbox_librenms_plugin import source_cache
         from netbox_librenms_plugin.acquisition.registry import Resource
         from netbox_librenms_plugin.tests.conftest import make_interface
-        from netbox_librenms_plugin.views.base.ip_addresses_view import assess_ip_snapshot
+        from netbox_librenms_plugin.views.base.ip_addresses_view import read_ip_assessment
 
         device = make_device("ip-verify-find-row", librenms_cf={"default": 60})
         vrf = VRF.objects.create(name="find-row-vrf")
@@ -172,7 +172,7 @@ class TestFindRowResolvesAssessedRows:
         )
         request = _make_request({})
         snapshot = source_cache.read(device, Resource.IP_ADDRESSES, "default")
-        return assess_ip_snapshot(request, device, snapshot, "default").rows, vrf
+        return read_ip_assessment(request, device, snapshot, "default").rows, vrf
 
     def test_a_unique_address_returns_its_netbox_vrf_and_source_port(self):
         from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView

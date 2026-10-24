@@ -1,6 +1,7 @@
 """One request builder and one contract per LibreNMS endpoint that acquisition reads."""
 
 from dataclasses import dataclass
+from functools import partial
 from typing import Callable
 
 from netbox_librenms_plugin.acquisition.snapshot import Outcome, SourceRequest
@@ -12,6 +13,7 @@ from netbox_librenms_plugin.constants import (
     LIBRENMS_PORTS_COLUMNS,
 )
 from netbox_librenms_plugin.ip_addressing import parse_librenms_ip_entry
+from netbox_librenms_plugin.inventory_identity import inventory_index
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.utils import is_list_of_dicts
 
@@ -111,9 +113,19 @@ def _optional_text(row, fields):
     return all(row.get(field) is None or isinstance(row[field], str) for field in fields)
 
 
+def _optional_index(value):
+    return value is None or (type(value) in (int, str) and (value in (0, "0") or coerce_librenms_id(value) is not None))
+
+
+def _optional_scalar(row, fields):
+    return all(row.get(field) is None or type(row[field]) in (str, int, float) for field in fields)
+
+
 def _is_usable_port_row(port):
-    return coerce_librenms_id(port.get("port_id")) is not None and _optional_text(
-        port, ("ifName", "ifDescr", "ifAlias")
+    return (
+        coerce_librenms_id(port.get("port_id")) is not None
+        and _optional_text(port, ("ifName", "ifDescr", "ifAlias"))
+        and _optional_index(port.get("ifIndex"))
     )
 
 
@@ -224,6 +236,99 @@ def links(device_id):
         return decoded
 
     return Endpoint(SourceRequest(f"devices/{device_id}/links"), decode)
+
+
+def _is_non_negative_inventory_index(value):
+    if type(value) is int:
+        return value >= 0
+    return isinstance(value, str) and value.isascii() and value.isdigit() and inventory_index(value) is not None
+
+
+def _inventory_contract(status, body, *, missing_is_empty=False):
+    if status == HTTP_NOT_FOUND and missing_is_empty:
+        return Decoded(Outcome.OBTAINED, value=[])
+    decoded = _rows_contract("inventory")(status, body)
+    if decoded.outcome is Outcome.OBTAINED and any(
+        value is not None and not _is_non_negative_inventory_index(value)
+        for row in decoded.value
+        for value in (row.get("entPhysicalIndex"), row.get("entPhysicalContainedIn"))
+    ):
+        return Decoded(
+            Outcome.FAILED, reason="Inventory indices must be non-negative integers, ASCII digit strings, or absent."
+        )
+    if decoded.outcome is Outcome.OBTAINED and not all(
+        _optional_index(row.get("ifIndex"))
+        and _optional_scalar(
+            row,
+            ("entPhysicalName", "entPhysicalModelName", "entPhysicalSerialNum", "entPhysicalDescr", "entPhysicalClass"),
+        )
+        for row in decoded.value
+    ):
+        return Decoded(Outcome.FAILED, reason="Inventory rows contain an invalid index or text field.")
+    return decoded
+
+
+def inventory(device_id, *, missing_is_empty=False):
+    """Return physical inventory; a known device can opt into an empty 404 answer."""
+    return Endpoint(
+        SourceRequest(f"inventory/{device_id}/all"), partial(_inventory_contract, missing_is_empty=missing_is_empty)
+    )
+
+
+def inventory_filtered(device_id, contained_in=None, *, physical_class=None, missing_is_empty=False):
+    """Return one inventory query without deriving its fallback rows."""
+    params = []
+    if physical_class is not None:
+        params.append(("entPhysicalClass", physical_class))
+    if contained_in is not None:
+        params.append(("entPhysicalContainedIn", str(contained_in)))
+    return Endpoint(
+        SourceRequest(f"inventory/{device_id}", tuple(params)),
+        partial(_inventory_contract, missing_is_empty=missing_is_empty),
+    )
+
+
+def inventory_fallback_required(filtered, params, http_status):
+    """Use full inventory only after a valid empty filtered success response."""
+    return _is_success(http_status) and filtered.outcome is Outcome.OBTAINED and not filtered.value and bool(params)
+
+
+def effective_inventory(filtered, full, *, params, http_status):
+    """Return query rows or apply the same filters to an obtained full-inventory fallback."""
+    if filtered.outcome is not Outcome.OBTAINED:
+        return None
+    if not inventory_fallback_required(filtered, params, http_status):
+        return filtered.value
+    if full is None or full.outcome is not Outcome.OBTAINED:
+        return None
+    rows = full.value
+    for field, value in params:
+        if field == "entPhysicalContainedIn":
+            parent = inventory_index(value)
+            rows = [row for row in rows if parent is not None and inventory_index(row.get(field)) == parent]
+        else:
+            rows = [row for row in rows if row.get(field) == value]
+    return rows
+
+
+def transceivers(device_id):
+    """Return the transceiver endpoint."""
+    contract = _rows_contract("transceivers")
+
+    def decode(status, body):
+        if not isinstance(body, dict) or body.get("status") != "ok":
+            return _failed_status(status, body)
+        decoded = contract(status, body)
+        if decoded.outcome is Outcome.OBTAINED and not all(
+            coerce_librenms_id(row.get("entity_physical_index")) is not None
+            and _optional_index(row.get("port_id"))
+            and _optional_scalar(row, ("model", "serial", "type"))
+            for row in decoded.value
+        ):
+            return Decoded(Outcome.FAILED, reason="Transceiver rows contain an invalid identity or text field.")
+        return decoded
+
+    return Endpoint(SourceRequest(f"devices/{device_id}/transceivers"), decode)
 
 
 def _optional_link_id(value):

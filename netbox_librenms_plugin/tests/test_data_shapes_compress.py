@@ -10,8 +10,6 @@ import pytest
 
 from netbox_librenms_plugin.data_shapes.compress import compress_recording
 from netbox_librenms_plugin.data_shapes.signature import compute_shape_signature
-from netbox_librenms_plugin.interface_relationships import resolve_port_relationships
-from netbox_librenms_plugin.tests.conftest import name_rules
 
 
 def _port(port_id, name, iftype, **extra):
@@ -154,9 +152,9 @@ def _large_recording():
 
 def _resolve(recording, recording_server):
     server, api = recording_server(recording)
-    _ok, ports = api.get_ports(recording["device_id"])
-    _ok2, stack = api.get_port_stack(recording["device_id"])
-    rel = resolve_port_relationships(ports["ports"], stack, **name_rules())
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import recording_interface_assessment
+
+    rel = recording_interface_assessment(api, recording)["port_stack_relationships"]
     return (
         {str(k): str(v) for k, v in rel["lag_members"].items()},
         {str(k): str(v) for k, v in rel["sub_interfaces"].items()},
@@ -188,6 +186,7 @@ def test_compression_leaves_a_recording_without_a_count_alone():
     assert "count" not in compressed["responses"][ports_key]
 
 
+@pytest.mark.django_db
 def test_compression_preserves_relationship_outcome(recording_server):
     """resolve_port_relationships yields the same LAG/sub maps before and after compression."""
     rec = _large_recording()
@@ -202,6 +201,7 @@ def test_compression_preserves_relationship_outcome(recording_server):
     assert full_sub == {"206": "205", "301": "300", "303": "302"}
 
 
+@pytest.mark.django_db
 def test_compression_keeps_name_parent_of_a_fingerprint_representative(recording_server):
     """A retained sub-interface must keep the parent that only its name identifies."""
     rec = {
@@ -234,6 +234,7 @@ def test_compression_keeps_name_parent_of_a_fingerprint_representative(recording
     }
 
 
+@pytest.mark.django_db
 def test_compression_preserves_ambiguous_name_parent_outcome(recording_server):
     """Compression must not resolve a parent name that was ambiguous in the full port set."""
     rec = {
@@ -266,6 +267,7 @@ def test_compression_preserves_ambiguous_name_parent_outcome(recording_server):
     }
 
 
+@pytest.mark.django_db
 def test_compression_keeps_name_indexes_separate_by_field(recording_server):
     """An ifDescr collision must not hide the unambiguous ifName parent."""
     rec = {
@@ -292,6 +294,7 @@ def test_compression_keeps_name_indexes_separate_by_field(recording_server):
     assert full_sub == compressed_sub == {"3": "2"}
 
 
+@pytest.mark.django_db
 def test_compression_keeps_each_name_derived_child(recording_server):
     """Same-fingerprint sub-interfaces still carry distinct relationship edges."""
     rec = {
@@ -485,6 +488,7 @@ def _ifdescr_mode_recording():
     }
 
 
+@pytest.mark.django_db
 def test_compression_keeps_ifdescr_mode_base_ports(recording_server):
     """Base ports reached only via a ``.N`` name in ifDescr survive compression, so the resolver yields the same relationships before and after — an ifName-only base scan silently dropped them."""
     rec = _ifdescr_mode_recording()

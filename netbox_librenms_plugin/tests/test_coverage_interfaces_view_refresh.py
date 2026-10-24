@@ -222,6 +222,12 @@ class TestInterfaceRefreshOobMerge:
         assert message_texts(request, "warning") == []
         assert len(rows["oob_blockers"]) == 1
         assert response.content.count(b'class="alert alert-warning d-flex align-items-center noprint"') == 1
+        from netbox_librenms_plugin import source_cache
+        from netbox_librenms_plugin.acquisition.registry import Resource
+        from netbox_librenms_plugin.server_mappings import MappingRole
+
+        snapshot = source_cache.read(device, Resource.INTERFACES, SERVER_KEY)
+        assert snapshot.record(Resource.INTERFACES, "ports", MappingRole.OOB).request.path == "devices/oob/ports"
         assert len(message_texts(request, "success")) == 1
         assert rows["oob_incomplete"] is True
         # The corrupt id must never be turned into a request path. The refresh also reads the

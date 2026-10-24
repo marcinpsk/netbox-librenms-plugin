@@ -298,7 +298,7 @@ def test_a_corrupt_oob_id_is_an_invalid_mapping_that_makes_no_request(live_libre
     record = snapshot.record(Resource.INTERFACES, "ports", MappingRole.OOB)
     assert record.outcome is Outcome.FAILED
     assert record.http_status is None
-    assert record.request.path == "devices/None/ports"
+    assert record.request.path == "devices/oob/ports"
     assert set(_blocked(snapshot)) == {"oob"}
     assert _blocked(snapshot)["oob"][0].path == "oob"
     assert sorted(_paths(live_librenms.server)) == sorted([PORTS_PATH, STACK_PATH, DEVICE_PATH])

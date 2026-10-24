@@ -17,14 +17,12 @@ from ..constants import (
     JUNOS_VC_ROOT_DESCR_MARKER,
 )
 from ..librenms_api import LibreNMSAPI
+from ..inventory_identity import inventory_index, select_vc_parent_index, vc_serial_key
 from ..utils import (
     exception_text_for,
     find_devices_by_serial,
     is_vc_position,
-    normalize_inventory_serial,
     normalize_serial,
-    normalize_stack_serial,
-    preload_normalization_rules,
 )
 
 logger = logging.getLogger(__name__)
@@ -165,23 +163,12 @@ def prefetch_vc_data_for_devices(api: LibreNMSAPI, device_ids: List[int], *, for
     logger.debug(f"VC cache warming complete for {len(device_ids)} devices")
 
 
-def select_vc_parent_index(root_rows: list) -> int | None:
-    """Return the index of the root that holds the stack members: a stack root first, else a chassis root."""
-    for wanted in ("stack", "chassis"):
-        for row in root_rows:
-            if isinstance(row, dict) and row.get("entPhysicalClass") == wanted:
-                index = _as_int(row.get("entPhysicalIndex"))
-                if index is not None:
-                    return index
-    return None
-
-
 def _is_junos_vc_root(row: dict) -> bool:
     """Return whether *row* is a chassis root whose description names a Junos Virtual Chassis."""
     descr = row.get("entPhysicalDescr")
     return (
         row.get("entPhysicalClass") == "chassis"
-        and _as_int(row.get("entPhysicalContainedIn")) == 0
+        and inventory_index(row.get("entPhysicalContainedIn")) == 0
         and isinstance(descr, str)
         and JUNOS_VC_ROOT_DESCR_MARKER.casefold() in descr.casefold()
     )
@@ -218,32 +205,6 @@ def _junos_fpc_rows(root: dict, children: list, serial_keys) -> list:
     if any(_junos_fpc_serials_hold(root.get("entPhysicalSerialNum"), fpc_serials, key) for key in serial_keys):
         return fpcs
     return []
-
-
-def vc_serial_key(manufacturer=None, *, preloaded_rules=None):
-    """
-    Return the function that turns a serial into the form that stack member matching compares.
-
-    This is the one member-serial equality: the serial rules of *manufacturer* and the global
-    rules (Juniper's "S/N " mark, for example), then stack normalization, which blanks
-    placeholders. The master decision, module attribution and the serials modal all compare
-    serials through it.
-
-    Args:
-        manufacturer: The Manufacturer whose serial rules apply, or None for global rules only.
-        preloaded_rules (dict | None): Serial rules already loaded, as ``preload_normalization_rules`` returns them.
-
-    """
-    if preloaded_rules is None:
-        preloaded_rules = preload_normalization_rules("serial", manufacturer=manufacturer)
-    rules = preloaded_rules
-
-    def key(value) -> str:
-        return normalize_stack_serial(
-            normalize_inventory_serial(value, manufacturer=manufacturer, preloaded_rules=rules)
-        )
-
-    return key
 
 
 def chassis_serial_key(device):
@@ -379,12 +340,12 @@ def extract_vc_members(rows: list, serial_keys) -> list[dict]:
 def extract_vc_stack(rows: list, serial_keys) -> VcStack:
     """Return the stack that :func:`extract_vc_members` reads, with the member shape that matched."""
     rows = [row for row in rows if isinstance(row, dict)]
-    roots = [row for row in rows if _as_int(row.get("entPhysicalContainedIn")) == 0]
+    roots = [row for row in rows if inventory_index(row.get("entPhysicalContainedIn")) == 0]
     parent_index = select_vc_parent_index(roots)
     if parent_index is None:
         return VcStack(None, [], [], None)
-    root = next(row for row in roots if _as_int(row.get("entPhysicalIndex")) == parent_index)
-    children = [row for row in rows if _as_int(row.get("entPhysicalContainedIn")) == parent_index]
+    root = next(row for row in roots if inventory_index(row.get("entPhysicalIndex")) == parent_index)
+    children = [row for row in rows if inventory_index(row.get("entPhysicalContainedIn")) == parent_index]
 
     chassis = [row for row in children if row.get("entPhysicalClass") == "chassis"]
     if len(chassis) >= 2:
@@ -425,7 +386,7 @@ def _stack_rows(rows, serial_keys) -> _StackRows:
         return _StackRows(None, {}, {})
     fpc_slots = {}
     if stack.shape == VC_MEMBER_SHAPE_JUNOS_FPC:
-        slots = [_as_int(row.get("entPhysicalParentRelPos")) for row in stack.member_rows]
+        slots = [inventory_index(row.get("entPhysicalParentRelPos")) for row in stack.member_rows]
         fpc_slots = {
             slot: row.get("entPhysicalIndex")
             for row, slot in zip(stack.member_rows, slots, strict=True)
@@ -456,7 +417,7 @@ class _Attribution:
 
     def member_at(self, position):
         """Return the member at *position*, or None."""
-        position = _as_int(position)
+        position = inventory_index(position)
         if not is_vc_position(position):
             return None
         return next((member for member in self.vc_members if member.vc_position == position), None)
@@ -550,7 +511,7 @@ class _Attribution:
 
 def _from_one(value) -> int | None:
     """Return *value* as a position of 1 or more, or None."""
-    position = _as_int(value)
+    position = inventory_index(value)
     return position if position is not None and position >= 1 else None
 
 
@@ -749,19 +710,9 @@ def update_vc_member_suggested_names(vc_data: dict, master_name: str, serial_key
     return vc_data
 
 
-def _as_int(value) -> int | None:
-    """Return an ENTITY-MIB number (position, index, containment) as an int, or None."""
-    if isinstance(value, bool):
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
 def _member_positions(raw_positions: list) -> list[int]:
     """Return the reported member positions, or row order from 1 when any is missing, negative or shared."""
-    parsed = [_as_int(raw) for raw in raw_positions]
+    parsed = [inventory_index(raw) for raw in raw_positions]
     if all(is_vc_position(position) for position in parsed) and len(set(parsed)) == len(parsed):
         return parsed
     # Repairing one member at a time could reuse a slot that another member reports.

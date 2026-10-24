@@ -4,14 +4,12 @@ from django.views import View
 
 from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
-from netbox_librenms_plugin.constants import LIBRENMS_VLAN_STATE_ACTIVE
+from netbox_librenms_plugin.assessment.vlans import assess
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.sync_filters import filter_sync_table, parse_table_filters
 from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
 from netbox_librenms_plugin.utils import (
     build_migrated_context,
-    index_vlan_source_rows,
-    normalize_vlan_vid,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -205,7 +203,7 @@ class BaseVLANTableView(
         # construction and make a VLAN-less device look like it never loaded.
         if cached_vlans is not None:
             # Compare VLANs with NetBox (against all device-available VLANs)
-            compared_vlans = self.compare_vlans(cached_vlans, lookup_maps, device=obj)
+            compared_vlans = assess(snapshot, subject=obj, lookup_maps=lookup_maps).rows
             migrated = bool(build_migrated_context(obj, server_key).get("migrated_to_marker"))
 
             def build_table(rows):
@@ -290,101 +288,3 @@ class BaseVLANTableView(
                 unscoped_groups=unscoped_groups,
             ),
         }
-
-    def compare_vlans(self, librenms_vlans, lookup_maps=None, device=None):
-        """
-        Compare LibreNMS VLANs against NetBox VLANs available to the device.
-
-        Args:
-            librenms_vlans: List of VLAN dicts from LibreNMS
-            lookup_maps: Dict with vid_to_groups, vid_group_to_vlan, vid_to_vlans
-            device: NetBox Device object for scope-based prioritization
-
-        Adds comparison flags:
-        - exists_in_netbox: bool
-        - netbox_vlan: VLAN object or None
-        - netbox_vlan_group: VLANGroup name or None
-        - name_matches: bool
-        - auto_selected_group_id: ID of auto-selected group or None
-        - auto_selected_group_name: Name of auto-selected group or None
-        - is_ambiguous: bool - True if VID exists in multiple groups with no clear priority
-
-        """
-        lookup_maps = lookup_maps or {}
-        vid_to_groups = lookup_maps.get("vid_to_groups", {})
-        vid_to_vlans = lookup_maps.get("vid_to_vlans", {})
-
-        rows_by_vid, _invalid_rows = index_vlan_source_rows(librenms_vlans)
-        compared = []
-        for vlan in librenms_vlans:
-            raw_vid = vlan.get("vlan_vlan")
-            canonical_vid = normalize_vlan_vid(raw_vid)
-            if canonical_vid is None:
-                vid_error = "Invalid VID"
-            elif canonical_vid not in rows_by_vid:
-                vid_error = "Duplicate VID"
-            else:
-                vid_error = None
-            vid = canonical_vid if vid_error is None else None
-            name = vlan.get("vlan_name", "")
-
-            # Auto-selection logic for VLAN group dropdown
-            auto_selected_group_id = None
-            auto_selected_group_name = None
-            is_ambiguous = False
-            netbox_vlan = None
-
-            # Check if VID exists in groups for auto-selection
-            if vid in vid_to_groups:
-                groups = vid_to_groups[vid]
-                if len(groups) == 1:
-                    auto_selected_group_id = groups[0].pk
-                    auto_selected_group_name = groups[0].name
-                    # Get the VLAN from this single group
-                    vlans_for_vid = vid_to_vlans.get(vid, [])
-                    if vlans_for_vid:
-                        netbox_vlan = vlans_for_vid[0]
-                elif len(groups) > 1:
-                    # Try to select the most specific group based on device context
-                    most_specific = self._select_most_specific_group(groups, device)
-                    if most_specific:
-                        auto_selected_group_id = most_specific.pk
-                        auto_selected_group_name = most_specific.name
-                        # Get the VLAN from the most specific group
-                        vlans_for_vid = vid_to_vlans.get(vid, [])
-                        for v in vlans_for_vid:
-                            if v.group and v.group.pk == most_specific.pk:
-                                netbox_vlan = v
-                                break
-                    else:
-                        is_ambiguous = True
-            else:
-                # Check if it exists as a global VLAN (no group)
-                vlans_for_vid = vid_to_vlans.get(vid, [])
-                for v in vlans_for_vid:
-                    if v.group is None:
-                        netbox_vlan = v
-                        break
-
-            compared.append(
-                {
-                    "vlan_id": vid,
-                    "raw_vlan_id": raw_vid,
-                    "vid_error": vid_error,
-                    "name": name,
-                    "type": vlan.get("vlan_type", "ethernet"),
-                    "state": vlan.get("vlan_state", LIBRENMS_VLAN_STATE_ACTIVE),
-                    "exists_in_netbox": bool(netbox_vlan),
-                    "netbox_vlan_id": netbox_vlan.pk if netbox_vlan else None,
-                    "netbox_vlan_name": netbox_vlan.name if netbox_vlan else None,
-                    "netbox_vlan_group": netbox_vlan.group.name if netbox_vlan and netbox_vlan.group else None,
-                    "netbox_vlan_group_id": netbox_vlan.group.pk if netbox_vlan and netbox_vlan.group else None,
-                    "name_matches": netbox_vlan.name == name if netbox_vlan else False,
-                    # Fields for per-row VLAN group selection
-                    "auto_selected_group_id": auto_selected_group_id,
-                    "auto_selected_group_name": auto_selected_group_name,
-                    "is_ambiguous": is_ambiguous,
-                }
-            )
-
-        return compared

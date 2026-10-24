@@ -1,5 +1,7 @@
 """Real-HTTP contract tests for the development LibreNMS stub."""
 
+from netbox_librenms_plugin.tests.source_snapshot_helpers import acquire_ports_record
+
 import copy
 import json
 import runpy
@@ -20,7 +22,8 @@ from netbox_librenms_plugin.tests.mock_librenms_server import (
     LibreNMSStubServer,
     build_stub_server,
 )
-from netbox_librenms_plugin.tests.test_recordings import read_ip_addresses_as_acquisition, read_links_as_acquisition
+from netbox_librenms_plugin.tests.source_snapshot_helpers import recording_part
+from netbox_librenms_plugin.acquisition.registry import Resource
 
 TOKEN = "dev-stub-token"
 RECORDING_NAMES = DEFAULT_STUB_RECORDINGS
@@ -186,6 +189,8 @@ def test_stub_command_line_logs_each_request_unless_quiet(capfd, flags, logged):
     assert ('"GET /healthz' in capfd.readouterr().err) is logged
 
 
+@pytest.mark.django_db
+@pytest.mark.django_db
 def test_stub_serves_recordings_and_derived_instance_endpoints_over_real_http():
     server = _start_stub()
     try:
@@ -214,20 +219,25 @@ def test_stub_serves_recordings_and_derived_instance_endpoints_over_real_http():
 
         recording = load_recording("arcos-lag-transceivers")
         device_id = recording["device_id"]
-        ok, ports = api.get_ports(device_id)
+        port_record = acquire_ports_record(api, device_id)
+        ok, ports = port_record.obtained, port_record.body
         assert ok is True
         recorded_ports = recording["responses"][f"GET /api/v0/devices/{device_id}/ports"]
         assert [port["port_id"] for port in ports["ports"]] == [port["port_id"] for port in recorded_ports["ports"]]
         assert any(port.get("vlans") for port in ports["ports"])
 
-        ok, addresses = read_ip_addresses_as_acquisition(api, device_id)
+        ok, addresses = recording_part(api, device_id, Resource.IP_ADDRESSES, "addresses")
         assert ok is True, addresses
         assert addresses
         recorded_device = recording["responses"][f"GET /api/v0/devices/{device_id}"]["devices"][0]
         assert addresses[0]["ipv4_address"] == recorded_device["ip"]
         assert addresses[0]["port_id"] is not None
 
-        ok, links = read_links_as_acquisition(api, device_id)
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import acquire_recording
+
+        snapshot, _subject = acquire_recording(api, recording, [Resource.CABLES])
+        record = snapshot.record(Resource.CABLES, "links")
+        ok, links = record.obtained, {"status": "ok", "links": record.value}
         assert ok is True
         assert links
 
@@ -411,6 +421,7 @@ def test_stub_decodes_a_tagged_success_envelope_for_derived_routes():
         server.stop()
 
 
+@pytest.mark.django_db
 def test_stub_derives_the_oob_controller_device_from_the_recorded_host_pair():
     recording = load_recording("linux-host-oob")
     server = LibreNMSStubServer(recordings=[recording], api_token=TOKEN).start()
@@ -426,13 +437,15 @@ def test_stub_derives_the_oob_controller_device_from_the_recorded_host_pair():
         assert by_id[controller_id]["serial"] == by_id[host_id]["serial"]
         assert by_id[controller_id]["os"] == "idrac"
 
-        ok, ports = api.get_ports(controller_id)
+        port_record = acquire_ports_record(api, controller_id)
+        ok, ports = port_record.obtained, port_record.body
         assert ok is True
         assert len(ports["ports"]) == 10
     finally:
         server.stop()
 
 
+@pytest.mark.django_db
 def test_stub_replays_the_scaffolded_virtual_machine_recording():
     recording = load_recording("linux-virtual-machine")
     server = LibreNMSStubServer(recordings=[recording], api_token=TOKEN).start()
@@ -449,7 +462,8 @@ def test_stub_replays_the_scaffolded_virtual_machine_recording():
         )["devices"][0]
         assert devices[0]["hardware"] == recorded_device["hardware"]
 
-        ok, ports = api.get_ports(recording["device_id"])
+        port_record = acquire_ports_record(api, recording["device_id"])
+        ok, ports = port_record.obtained, port_record.body
         assert ok is True
         recorded_ports = recording["responses"][f"GET /api/v0/devices/{recording['device_id']}/ports"]["ports"]
         assert {port["ifName"] for port in ports["ports"]} == {port["ifName"] for port in recorded_ports}

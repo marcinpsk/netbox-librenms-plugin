@@ -3155,28 +3155,6 @@ def remote_port_html(value, record):
     return format_html("{}{}{}", display_value, manual_badge, protocol_badge)
 
 
-def is_valid_ports_payload(payload) -> bool:
-    """
-    Return True only for a well-formed LibreNMS ports payload.
-
-    ``LibreNMSAPI.get_ports`` is an external boundary: a truthy success does not guarantee the
-    expected shape, so every caller that indexes ``payload["ports"]`` or enriches the rows must
-    gate on this and fail closed on a malformed 200 rather than raising on ``.get()`` / iteration.
-
-    Args:
-        payload: The raw value returned for a ports fetch (host, OOB, or a cached snapshot).
-
-    Returns:
-        bool: True when *payload* is a dict whose ``"ports"`` is a list of dict rows.
-
-    """
-    return (
-        isinstance(payload, dict)
-        and isinstance(payload.get("ports"), list)
-        and all(isinstance(port, dict) for port in payload["ports"])
-    )
-
-
 def coerce_positive_int(value) -> int | None:
     """
     Coerce a value to a strictly-positive ``int``, or ``None`` when invalid.

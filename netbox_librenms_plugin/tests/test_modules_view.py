@@ -5,6 +5,10 @@ Focuses on the bay-scope tracking in _build_context and the serial
 comparison logic in _build_row.
 """
 
+from netbox_librenms_plugin.tests.source_snapshot_helpers import transceiver_row
+
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_mapped_modules
+
 import re
 from copy import deepcopy
 from types import SimpleNamespace
@@ -45,21 +49,31 @@ def _real_api_view(settings, server, *, librenms_id):
     )
     view = object.__new__(BaseModuleTableView)
     view._device_manufacturer = None
+    view._test_librenms_server = server
     view.librenms_id = librenms_id
     view._librenms_api = LibreNMSAPI(server_key="test-server")
     return view
 
 
-def _count_port_requests(server, librenms_id):
-    """Register a ports route that records every hit so a test can prove no fetch happened."""
-    hits = []
+def _assess_inventory(view, inventory):
+    """Acquire and assess the supplied inventory with the stub's ports and transceivers."""
+    from netbox_librenms_plugin.acquisition.coordinator import acquire
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.assessment.modules import assess
+    from netbox_librenms_plugin.tests.conftest import make_device
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
-    def route(**request):
-        hits.append(request)
-        return 404, {"status": "error", "message": "No ports response configured"}
-
-    server.register(f"/api/v0/devices/{librenms_id}/ports", route, method="GET")
-    return hits
+    server = view._test_librenms_server
+    device_id = view.librenms_id
+    server.register(f"/api/v0/inventory/{device_id}/all", {"status": "ok", "inventory": inventory})
+    for suffix, field in (("ports", "ports"), ("transceivers", "transceivers")):
+        key = f"GET /api/v0/devices/{device_id}/{suffix}"
+        if key not in server.routes:
+            server.register(f"/api/v0/devices/{device_id}/{suffix}", {"status": "ok", field: []})
+    subject = seed_mapping(make_device(f"assess-inventory-{device_id}"), "test-server", own=device_id)
+    snapshot = acquire(subject, server_key="test-server", resources=[Resource.MODULES])
+    result = assess(snapshot, subject=subject)
+    return result["inventory"], result["blocked"] or None
 
 
 def _make_view():
@@ -68,7 +82,10 @@ def _make_view():
 
     view = object.__new__(BaseModuleTableView)
     view._device_manufacturer = None
-    view._librenms_api = SimpleNamespace(server_key="test-server")
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+    from netbox_librenms_plugin.tests.conftest import configured_server_key
+
+    view._librenms_api = LibreNMSAPI(server_key=configured_server_key())
     view._exact_bay_mappings = []
     view._regex_bay_mappings = []
     view._norm_rules_bay = None
@@ -620,38 +637,6 @@ class TestFpcSlotMatchesOnSlashedPositions:
 class TestMergeTransceiverDataPortIdentity:
     """Transceiver merge should preserve stable port identity metadata."""
 
-    def test_invalid_transceiver_http_bodies_return_errors_without_mutating_inventory(self, settings, librenms_server):
-        """Surface a malformed transceiver body as an error string so the caller skips the cache and warns."""
-        view = _real_api_view(settings, librenms_server, librenms_id=100)
-        seed = [{"entPhysicalIndex": 1, "entPhysicalName": "Gi0/1"}]
-
-        def assert_malformed(body, expected_error):
-            # Deep-copy the seed so a mutation of the SHARED inner dict by _merge_transceiver_data
-            # can't also mutate `seed` and make the "untouched" assertion pass vacuously.
-            candidate = deepcopy(seed)
-            librenms_server.register(
-                "/api/v0/devices/100/transceivers",
-                body,
-                method="GET",
-            )
-            inventory, error = view._merge_transceiver_data(candidate)
-            assert inventory == seed
-            assert error == expected_error
-
-        unexpected_format = "Unexpected transceivers response format for device 100"
-        assert_malformed(
-            {"status": "ok", "transceivers": {"unexpected": "dict"}},
-            unexpected_format,
-        )
-        assert_malformed(
-            {
-                "status": "ok",
-                "transceivers": [{"entity_physical_index": 2}, "bad"],
-            },
-            "Malformed transceiver entry in response for device 100",
-        )
-        assert_malformed({"status": "ok"}, unexpected_format)
-
     def test_synthetic_item_includes_port_identity_metadata(self, settings, librenms_server):
         view = _real_api_view(settings, librenms_server, librenms_id=100)
         librenms_server.register(
@@ -676,7 +661,7 @@ class TestMergeTransceiverDataPortIdentity:
             method="GET",
         )
 
-        inventory, error = view._merge_transceiver_data([])
+        inventory, error = _assess_inventory(view, [])
 
         assert error is None
         assert len(inventory) == 1
@@ -723,7 +708,7 @@ class TestMergeTransceiverDataPortIdentity:
             }
         ]
 
-        inventory, error = view._merge_transceiver_data(inventory_seed)
+        inventory, error = _assess_inventory(view, inventory_seed)
 
         assert error is None
         assert len(inventory) == 1
@@ -756,7 +741,7 @@ class TestMergeTransceiverDataPortIdentity:
             method="GET",
         )
 
-        inventory, error = view._merge_transceiver_data([])
+        inventory, error = _assess_inventory(view, [])
 
         assert error is None
         assert len(inventory) == 1
@@ -787,7 +772,7 @@ class TestMergeTransceiverDataPortIdentity:
             method="GET",
         )
 
-        inventory, error = view._merge_transceiver_data([])
+        inventory, error = _assess_inventory(view, [])
 
         assert error is None
         assert len(inventory) == 1
@@ -818,7 +803,7 @@ class TestMergeTransceiverDataPortIdentity:
             method="GET",
         )
 
-        inventory, error = view._merge_transceiver_data([])
+        inventory, error = _assess_inventory(view, [])
 
         assert error is None
         assert len(inventory) == 1
@@ -860,7 +845,7 @@ class TestMergeTransceiverDataPortIdentity:
             }
         ]
 
-        inventory, error = view._merge_transceiver_data(inventory_seed)
+        inventory, error = _assess_inventory(view, inventory_seed)
 
         assert error is None
         assert len(inventory) == 1
@@ -868,7 +853,7 @@ class TestMergeTransceiverDataPortIdentity:
         assert inventory[0]["entPhysicalModelName"] == 1000
         assert inventory[0]["entPhysicalSerialNum"] == 4242
 
-    def test_string_index_matches_int_transceiver_index_no_duplicate(self, settings, librenms_server):
+    def test_integer_index_matches_string_transceiver_index_without_a_duplicate(self, settings, librenms_server):
         """LibreNMS may report the ENTITY index as a string while the transceiver API returns an int; coercing both sides matches the existing row instead of caching a duplicate."""
         view = _real_api_view(settings, librenms_server, librenms_id=103)
         librenms_server.register(
@@ -877,7 +862,7 @@ class TestMergeTransceiverDataPortIdentity:
                 "status": "ok",
                 "transceivers": [
                     {
-                        "entity_physical_index": 300,
+                        "entity_physical_index": "300",
                         "model": "SFP-10G-SR",
                         "serial": "TX-300",
                         "type": "SFP",
@@ -894,7 +879,7 @@ class TestMergeTransceiverDataPortIdentity:
         )
         inventory_seed = [
             {
-                "entPhysicalIndex": "300",  # string index from ENTITY-MIB
+                "entPhysicalIndex": 300,  # string index from ENTITY-MIB
                 "entPhysicalName": "Transceiver slot",
                 "entPhysicalModelName": "builtin",
                 "entPhysicalSerialNum": "-",
@@ -903,7 +888,7 @@ class TestMergeTransceiverDataPortIdentity:
             }
         ]
 
-        inventory, error = view._merge_transceiver_data(inventory_seed)
+        inventory, error = _assess_inventory(view, inventory_seed)
 
         assert error is None
         assert len(inventory) == 1  # supplemented in place, NOT duplicated
@@ -932,10 +917,10 @@ class TestMergeTransceiverDataPortIdentity:
             for index in (10, 11)
         ]
 
-        inventory, error = view._merge_transceiver_data(deepcopy(inventory_seed))
+        inventory, error = _assess_inventory(view, deepcopy(inventory_seed))
 
         assert error is None
-        assert inventory[:2] == inventory_seed
+        assert inventory[:2] == [{**row, "_source": "main"} for row in inventory_seed]
         assert [(item["entPhysicalIndex"], item["_librenms_port_id"]) for item in inventory[2:]] == [(50, 8)]
 
     def test_entity_index_of_an_unrelated_entity_adds_no_row(self, settings, librenms_server):
@@ -956,10 +941,10 @@ class TestMergeTransceiverDataPortIdentity:
         )
         inventory_seed = [{"entPhysicalIndex": 640, "entPhysicalName": "Optic 0/5/0", "ifIndex": 600}]
 
-        inventory, error = view._merge_transceiver_data(deepcopy(inventory_seed))
+        inventory, error = _assess_inventory(view, deepcopy(inventory_seed))
 
         assert error is None
-        assert inventory == inventory_seed
+        assert inventory == [{**row, "_source": "main"} for row in inventory_seed]
 
     @pytest.mark.parametrize("port_ifindex", [50, None])
     def test_entity_at_the_index_with_another_serial_is_not_the_optic(self, settings, librenms_server, port_ifindex):
@@ -987,11 +972,11 @@ class TestMergeTransceiverDataPortIdentity:
             }
         ]
 
-        inventory, error = view._merge_transceiver_data(deepcopy(inventory_seed))
+        inventory, error = _assess_inventory(view, deepcopy(inventory_seed))
 
         assert error is None
         # The index is the fan's, so a synthetic row would duplicate it.
-        assert inventory == inventory_seed
+        assert inventory == [{**row, "_source": "main"} for row in inventory_seed]
 
     @pytest.mark.parametrize(("entity_index", "added"), [(77, [(77, "TX-77", 9)]), (12, [])])
     def test_port_ifindex_alone_does_not_merge_another_serial(self, settings, librenms_server, entity_index, added):
@@ -1024,10 +1009,10 @@ class TestMergeTransceiverDataPortIdentity:
             {"entPhysicalIndex": 12, "entPhysicalName": "Fan 1", "entPhysicalClass": "fan", "ifIndex": 51},
         ]
 
-        inventory, error = view._merge_transceiver_data(deepcopy(inventory_seed))
+        inventory, error = _assess_inventory(view, deepcopy(inventory_seed))
 
         assert error is None
-        assert inventory[:2] == inventory_seed
+        assert inventory[:2] == [{**row, "_source": "main"} for row in inventory_seed]
         assert [
             (item["entPhysicalIndex"], item["entPhysicalSerialNum"], item["_librenms_port_id"])
             for item in inventory[2:]
@@ -1058,7 +1043,8 @@ class TestMergeTransceiverDataPortIdentity:
             }
         ]
 
-        view._enrich_inventory_port_identity(inventory)
+        inventory, error = _assess_inventory(view, inventory)
+        assert error is None
 
         assert inventory[0]["_librenms_port_id"] == 56284
         assert inventory[0]["_librenms_ifname"] == "TenGigabitEthernet1/1/1"
@@ -1083,55 +1069,10 @@ class TestMergeTransceiverDataPortIdentity:
 
         inventory = [{"entPhysicalClass": "port", "entPhysicalName": "Te1/1/1"}]
 
-        view._enrich_inventory_port_identity(inventory)
+        inventory, error = _assess_inventory(view, inventory)
+        assert error is None
 
         assert "_librenms_port_id" not in inventory[0]
-
-    def test_build_port_name_map_uses_provided_ports_payload_without_api_fetch(self, settings, librenms_server):
-        view = _real_api_view(settings, librenms_server, librenms_id=104)
-        port_requests = _count_port_requests(librenms_server, 104)
-
-        port_map = view._build_port_name_map(
-            [{"port_id": 42}],
-            ports_data={
-                "ports": [
-                    {
-                        "port_id": 42,
-                        "ifName": "Te1/0/1",
-                        "ifDescr": "TenGigabitEthernet1/0/1",
-                    }
-                ]
-            },
-        )
-
-        assert port_map[42]["ifName"] == "Te1/0/1"
-        assert port_map[42]["ifDescr"] == "TenGigabitEthernet1/0/1"
-        assert port_requests == []
-
-    def test_enrich_inventory_port_identity_uses_provided_ports_payload_without_api_fetch(
-        self, settings, librenms_server
-    ):
-        view = _real_api_view(settings, librenms_server, librenms_id=105)
-        port_requests = _count_port_requests(librenms_server, 105)
-
-        inventory = [{"entPhysicalClass": "port", "entPhysicalName": "Te1/1/1"}]
-        view._enrich_inventory_port_identity(
-            inventory,
-            ports_data={
-                "ports": [
-                    {
-                        "port_id": 56284,
-                        "ifName": "TenGigabitEthernet1/1/1",
-                        "ifDescr": "Te1/1/1",
-                    }
-                ]
-            },
-        )
-
-        assert inventory[0]["_librenms_port_id"] == 56284
-        assert inventory[0]["_librenms_ifname"] == "TenGigabitEthernet1/1/1"
-        assert inventory[0]["_librenms_ifdescr"] == "Te1/1/1"
-        assert port_requests == []
 
 
 def _two_server_keys(settings, server, prefix):
@@ -1178,926 +1119,15 @@ def _mapped_device(name, server_key, librenms_id=777):
 
 def _seed_snapshot(view, device, server_key, *, inventory=None, librenms_id=777, oob_librenms_id=None):
     """Store a real inventory snapshot in the real cache and return its key and payload."""
-    from django.core.cache import cache
 
-    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
-
-    payload = trusted_module_inventory_payload(
+    payload = seed_mapped_modules(
         device,
         [{"entPhysicalIndex": 12}] if inventory is None else inventory,
         server_key=server_key,
         librenms_id=librenms_id,
-    )
-    payload["oob_librenms_id"] = oob_librenms_id
+    ).to_payload()
     cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
-    cache.set(cache_key, payload)
     return cache_key, payload
-
-
-@pytest.mark.django_db
-class TestPostInventoryRefresh:
-    """Inventory refreshes must persist only complete snapshots for the active server."""
-
-    @pytest.fixture
-    def server_keys(self, settings, librenms_server):
-        return _two_server_keys(settings, librenms_server, "inventory")
-
-    @staticmethod
-    def _register_successful_refresh(librenms_server, inventory=None, transceivers=None, ports=None):
-        librenms_server.register(
-            "/api/v0/inventory/777/all",
-            {"status": "ok", "inventory": inventory if inventory is not None else []},
-            method="GET",
-        )
-        librenms_server.register(
-            "/api/v0/devices/777/transceivers",
-            {"status": "ok", "transceivers": transceivers if transceivers is not None else []},
-            method="GET",
-        )
-        librenms_server.register(
-            "/api/v0/devices/777/ports",
-            {"status": "ok", "ports": ports if ports is not None else []},
-            method="GET",
-        )
-
-    @pytest.mark.parametrize("entity_index", [300, 7], ids=["entity-index", "port-ifindex"])
-    def test_post_compares_optic_serials_with_the_device_manufacturer_rules(
-        self, librenms_server, server_keys, entity_index
-    ):
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.models import NormalizationRule
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        server_key, _ = server_keys
-        device = _mapped_device("normalized-optic", server_key)
-        NormalizationRule.objects.create(
-            scope="serial",
-            manufacturer=device.device_type.manufacturer,
-            match_pattern=r"^TAG (.+)$",
-            replacement=r"\1",
-        )
-        inventory = [
-            {
-                "entPhysicalIndex": 300,
-                "ifIndex": 7,
-                "entPhysicalClass": "port",
-                "entPhysicalName": "Unlabelled optic",
-                "entPhysicalModelName": "",
-                "entPhysicalSerialNum": "TAG OPTIC-7",
-                "entPhysicalContainedIn": 0,
-            }
-        ]
-        self._register_successful_refresh(
-            librenms_server,
-            inventory=inventory,
-            transceivers=[
-                {
-                    "entity_physical_index": entity_index,
-                    "port_id": 42,
-                    "model": "SFP-10G-LR",
-                    "serial": "OPTIC-7",
-                    "type": "SFP+",
-                }
-            ],
-            ports=[{"port_id": 42, "ifIndex": 7, "ifName": "xe-0/0/0", "ifDescr": "uplink"}],
-        )
-        view = DeviceModuleTableView()
-
-        response = post(view, make_request("post", {"server_key": server_key}), pk=device.pk)
-
-        assert response.status_code == 200
-        snapshot = cache.get(view.get_cache_key(device, "inventory", server_key=server_key))
-        optic = next(item for item in snapshot["inventory"] if item["entPhysicalIndex"] == 300)
-        assert optic.get("_librenms_port_id") == 42
-        assert optic["entPhysicalModelName"] == "SFP-10G-LR"
-        assert optic["entPhysicalSerialNum"] == "TAG OPTIC-7"
-
-    def test_post_deduplicates_an_optic_with_the_device_manufacturer_serial_rules(self, librenms_server, server_keys):
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.models import NormalizationRule
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        server_key, _ = server_keys
-        device = _mapped_device("deduplicated-optic", server_key)
-        NormalizationRule.objects.create(
-            scope="serial",
-            manufacturer=device.device_type.manufacturer,
-            match_pattern=r"^TAG (.+)$",
-            replacement=r"\1",
-        )
-        inventory = [
-            {
-                "entPhysicalIndex": 300,
-                "entPhysicalClass": "port",
-                "entPhysicalName": "Existing optic",
-                "entPhysicalModelName": "SFP-10G-LR",
-                "entPhysicalSerialNum": "TAG OPTIC-7",
-                "entPhysicalContainedIn": 0,
-            }
-        ]
-        self._register_successful_refresh(
-            librenms_server,
-            inventory=inventory,
-            transceivers=[
-                {
-                    "entity_physical_index": 400,
-                    "port_id": 42,
-                    "model": "SFP-10G-LR",
-                    "serial": "OPTIC-7",
-                    "type": "SFP+",
-                }
-            ],
-            ports=[{"port_id": 42, "ifName": "xe-0/0/0", "ifDescr": "uplink"}],
-        )
-        view = DeviceModuleTableView()
-
-        response = post(view, make_request("post", {"server_key": server_key}), pk=device.pk)
-
-        assert response.status_code == 200
-        snapshot = cache.get(view.get_cache_key(device, "inventory", server_key=server_key))
-        assert [item["entPhysicalIndex"] for item in snapshot["inventory"]] == [300]
-
-    @pytest.mark.parametrize("existing_entity", [False, True], ids=["synthetic", "existing-entity"])
-    def test_post_keeps_both_optics_when_the_serial_rules_remove_their_identities(
-        self, librenms_server, server_keys, existing_entity
-    ):
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.models import NormalizationRule
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        server_key, _ = server_keys
-        device = _mapped_device("unknown-optic-serials", server_key)
-        NormalizationRule.objects.create(
-            scope="serial",
-            manufacturer=device.device_type.manufacturer,
-            match_pattern=r"^TAG (.+)$",
-            replacement=r"\1",
-        )
-        inventory = (
-            [
-                {
-                    "entPhysicalIndex": 400,
-                    "entPhysicalClass": "port",
-                    "entPhysicalName": "Existing optic",
-                    "entPhysicalModelName": "",
-                    "entPhysicalSerialNum": "",
-                    "entPhysicalContainedIn": 0,
-                }
-            ]
-            if existing_entity
-            else []
-        )
-        self._register_successful_refresh(
-            librenms_server,
-            inventory=inventory,
-            transceivers=[
-                {
-                    "entity_physical_index": 400,
-                    "port_id": 42,
-                    "model": "SFP-10G-LR",
-                    "serial": "TAG unknown",
-                    "type": "SFP+",
-                },
-                {
-                    "entity_physical_index": 401,
-                    "port_id": 43,
-                    "model": "SFP-10G-LR",
-                    "serial": "TAG n/a",
-                    "type": "SFP+",
-                },
-            ],
-            ports=[{"port_id": 42, "ifName": "xe-0/0/0"}, {"port_id": 43, "ifName": "xe-0/0/1"}],
-        )
-        view = DeviceModuleTableView()
-
-        response = post(view, make_request("post", {"server_key": server_key}), pk=device.pk)
-
-        assert response.status_code == 200
-        snapshot = cache.get(view.get_cache_key(device, "inventory", server_key=server_key))
-        assert [item["entPhysicalIndex"] for item in snapshot["inventory"]] == [400, 401]
-
-    def test_post_fetches_ports_once_and_reuses_payload(self, librenms_server, server_keys):
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        server_key, _ = server_keys
-        device = _mapped_device("module-refresh-port-reuse", server_key)
-        inventory = [
-            {
-                "entPhysicalIndex": 1,
-                "entPhysicalName": "Gi0/1",
-                "entPhysicalDescr": "Host port",
-                "entPhysicalClass": "port",
-                "entPhysicalModelName": "HOST-PORT",
-                "entPhysicalSerialNum": "PORT-1",
-                "entPhysicalContainedIn": 0,
-            }
-        ]
-        transceivers = [
-            {
-                "entity_physical_index": 2,
-                "model": "SFP-10G-SR",
-                "serial": "TX-2",
-                "type": "SFP",
-                "port_id": 42,
-            }
-        ]
-        port_requests = []
-
-        def ports_route(**request_data):
-            port_requests.append(request_data)
-            return 200, {
-                "status": "ok",
-                "ports": [
-                    {"port_id": 10, "ifName": "Gi0/1", "ifDescr": "Host port"},
-                    {"port_id": 42, "ifName": "Gi0/2", "ifDescr": "Transceiver port"},
-                ],
-            }
-
-        librenms_server.register(
-            "/api/v0/inventory/777/all",
-            {"status": "ok", "inventory": inventory},
-            method="GET",
-        )
-        librenms_server.register(
-            "/api/v0/devices/777/transceivers",
-            {"status": "ok", "transceivers": transceivers},
-            method="GET",
-        )
-        librenms_server.register("/api/v0/devices/777/ports", ports_route, method="GET")
-
-        view = DeviceModuleTableView()
-        request = make_request("post", {"server_key": server_key})
-        response = post(view, request, pk=device.pk)
-
-        assert response.status_code == 200
-        assert len(port_requests) == 1
-        assert "with" not in port_requests[0]["query"]
-        cached = cache.get(view.get_cache_key(device, "inventory", server_key=server_key))
-        main_item = next(item for item in cached["inventory"] if item["entPhysicalIndex"] == 1)
-        transceiver_item = next(item for item in cached["inventory"] if item["entPhysicalIndex"] == 2)
-        assert main_item["_librenms_port_id"] == 10
-        assert transceiver_item["_librenms_port_id"] == 42
-        assert transceiver_item["_librenms_ifname"] == "Gi0/2"
-        assert message_texts(request, "success") == ["Inventory data refreshed successfully."]
-
-    def test_post_links_junos_optics_to_their_own_ports(self, librenms_server, server_keys):
-        """Junos reports a transceiver's ifIndex as its entity index; xe-0/0/3:2 has ifIndex 640, which is also the 0/5/0 optic's entity index."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        recording = load_recording("junos-subinterfaces")
-        librenms_id = recording["device_id"]
-        responses = recording["responses"]
-        librenms_server.load_recording(recording)
-        server_key, _ = server_keys
-        device = _mapped_device("module-refresh-junos-optics", server_key, librenms_id=librenms_id)
-        port_by_ifindex = {
-            port["ifIndex"]: port for port in responses[f"GET /api/v0/devices/{librenms_id}/ports"]["ports"]
-        }
-        entities = responses[f"GET /api/v0/inventory/{librenms_id}/all"]["inventory"]
-        optics = [entity for entity in entities if entity["entPhysicalIndex"] in (640, 642)]
-        assert [(entity["ifIndex"], port_by_ifindex[entity["entPhysicalIndex"]]["ifName"]) for entity in optics] == [
-            (600, "xe-0/0/3:2"),
-            (591, "xe-0/0/3:3"),
-        ]
-
-        view = DeviceModuleTableView()
-        response = post(view, make_request("post", {"server_key": server_key}), pk=device.pk)
-
-        assert response.status_code == 200
-        inventory = cache.get(view.get_cache_key(device, "inventory", server_key=server_key))["inventory"]
-        indexes = [item["entPhysicalIndex"] for item in inventory]
-        assert len(indexes) == len(set(indexes))
-        by_index = {item["entPhysicalIndex"]: item for item in inventory}
-        for entity in optics:
-            port = port_by_ifindex[entity["ifIndex"]]
-            item = by_index[entity["entPhysicalIndex"]]
-            assert item["entPhysicalName"] == entity["entPhysicalName"]
-            assert (item["_librenms_port_id"], item["_librenms_ifname"]) == (port["port_id"], port["ifName"])
-
-    @pytest.mark.parametrize(
-        "recording_name",
-        ["arcos-lag-transceivers", "iosxe-subinterfaces", "junos-subinterfaces", "nokia-timos-transceivers"],
-    )
-    def test_post_keeps_every_recorded_optic(self, librenms_server, server_keys, recording_name):
-        """Every recorded transceiver serial reaches the cached inventory, bound to its own port when it is unique."""
-        from collections import Counter
-
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
-        from netbox_librenms_plugin.views.base.modules_view import _clean_librenms_value
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        recording = load_recording(recording_name)
-        librenms_id = recording["device_id"]
-        librenms_server.load_recording(recording)
-        server_key, _ = server_keys
-        device = _mapped_device(f"module-refresh-{recording_name}", server_key, librenms_id=librenms_id)
-        transceivers = recording["responses"][f"GET /api/v0/devices/{librenms_id}/transceivers"]["transceivers"]
-        serials = Counter(_clean_librenms_value(transceiver.get("serial")) for transceiver in transceivers)
-
-        view = DeviceModuleTableView()
-        response = post(view, make_request("post", {"server_key": server_key}), pk=device.pk)
-
-        assert response.status_code == 200
-        inventory = cache.get(view.get_cache_key(device, "inventory", server_key=server_key))["inventory"]
-        bound = {
-            (_clean_librenms_value(item.get("entPhysicalSerialNum")), item.get("_librenms_port_id"))
-            for item in inventory
-        }
-        cached_serials = {serial for serial, _port_id in bound}
-        assert set(serials) - {""} <= cached_serials
-        unique = [
-            transceiver
-            for transceiver in transceivers
-            if serials[_clean_librenms_value(transceiver.get("serial"))] == 1
-        ]
-        assert unique
-        for transceiver in unique:
-            assert (_clean_librenms_value(transceiver["serial"]), transceiver["port_id"]) in bound
-
-    def test_post_treats_non_list_inventory_as_fetch_failure(self, librenms_server, server_keys):
-        """get_device_inventory is an external boundary. A non-list inventory body is a fetch failure."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        server_key, _ = server_keys
-        device = _mapped_device("module-refresh-non-list-inventory", server_key)
-        view = DeviceModuleTableView()
-        cache_key, _ = _seed_snapshot(view, device, server_key)
-        port_requests = _count_port_requests(librenms_server, 777)
-        librenms_server.register(
-            "/api/v0/inventory/777/all",
-            {"status": "ok", "inventory": {"error": "weird shape"}},
-            method="GET",
-        )
-
-        request = make_request("post", {"server_key": server_key})
-        response = post(view, request, pk=device.pk)
-
-        assert response.status_code == 200
-        assert message_texts(request, "error") == [
-            "Failed to fetch inventory from LibreNMS; see server logs for details."
-        ]
-        assert cache.get(cache_key) is None
-        assert port_requests == []
-
-    def test_post_stale_server_key_resolves_migrated_context_with_session_key(self, server_keys):
-        """When the POSTed server_key is stale, resolve migrated context under the active session key. Using the stale key would miss the marker and re-enable a donor's sync controls."""
-        from django.test.signals import template_rendered
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
-        from netbox_librenms_plugin.server_mappings import mark_migrated
-        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        active_key, _ = server_keys
-        donor = make_device("module-refresh-stale-server-donor")
-        winner = make_device("module-refresh-stale-server-winner")
-        apply_mapping_change(donor, mark_migrated(donor, winner.pk, active_key))
-        donor.save(update_fields=["custom_field_data"])
-        view = DeviceModuleTableView()
-        view._librenms_api = LibreNMSAPI(server_key=active_key)
-        request = make_request("post", {"server_key": "retired-inventory-server"})
-
-        rendered_contexts = []
-
-        def capture_context(sender, template, context, **kwargs):
-            if template.name == view.partial_template_name:
-                rendered_contexts.append(context.flatten())
-
-        template_rendered.connect(capture_context)
-        try:
-            response = post(view, request, pk=donor.pk)
-        finally:
-            template_rendered.disconnect(capture_context)
-
-        assert response.status_code == 200
-        assert view.active_server_key == active_key
-        assert message_texts(request, "error") == ["Selected LibreNMS server is no longer configured."]
-        assert len(rendered_contexts) == 1
-        assert rendered_contexts[0]["migrated_to_marker"].server_key == active_key
-        assert rendered_contexts[0]["migrated_to_marker"].device_id == winner.pk
-        assert rendered_contexts[0]["migrated_to_winner"] == winner
-
-    def test_post_treats_non_dict_inventory_entry_as_fetch_failure(self, librenms_server, server_keys):
-        """A list payload that carries non-dict entries, such as None, is a fetch failure."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        server_key, _ = server_keys
-        device = _mapped_device("module-refresh-non-dict-inventory", server_key)
-        view = DeviceModuleTableView()
-        cache_key, _ = _seed_snapshot(view, device, server_key)
-        port_requests = _count_port_requests(librenms_server, 777)
-        librenms_server.register(
-            "/api/v0/inventory/777/all",
-            {"status": "ok", "inventory": [{"entPhysicalIndex": 1}, None]},
-            method="GET",
-        )
-
-        request = make_request("post", {"server_key": server_key})
-        response = post(view, request, pk=device.pk)
-
-        assert response.status_code == 200
-        assert message_texts(request, "error") == [
-            "Failed to fetch inventory from LibreNMS; see server logs for details."
-        ]
-        assert cache.get(cache_key) is None
-        assert port_requests == []
-
-    def test_get_context_data_rejects_malformed_cached_inventory(self, server_keys):
-        """post() now fails closed on malformed inventory before caching, but a stale pre-fix cache entry like {"inventory": [None]} can still be read."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
-        from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        server_key, _ = server_keys
-        device = _mapped_device("module-cache-malformed-inventory", server_key, librenms_id=1)
-        view = DeviceModuleTableView()
-        cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
-        # Keep both identity fingerprints valid. This makes the malformed inventory guard the
-        # only reason the snapshot is removed.
-        cache.set(cache_key, module_inventory_cache_payload([None], 1, None))
-        request = make_request("get", {"server_key": server_key})
-
-        result = bind_and_call(view, request, "get_context_data", obj=device)
-
-        assert cache.get(cache_key) is None
-        assert result["table"] is None
-        assert result["object"].pk == device.pk
-        assert result["server_key"] == server_key
-
-    def test_get_context_data_keys_cache_on_resolved_scoped_server(self, server_keys):
-        """The cache read keys on the scoped server returned by the resolver, not the previously bound API server."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.tests.view_test_helpers import (
-            bind_and_call,
-            make_request,
-            trusted_module_inventory_payload,
-        )
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        bound_key, scoped_key = server_keys
-        device = _mapped_device("module-cache-scoped-server", scoped_key, librenms_id=1)
-        view = DeviceModuleTableView()
-        view._librenms_api = LibreNMSAPI(server_key=bound_key)
-        payload = trusted_module_inventory_payload(device, [], server_key=scoped_key, librenms_id=1)
-        scoped_cache_key = view.get_cache_key(device, "inventory", server_key=scoped_key)
-        cache.set(scoped_cache_key, payload)
-        request = make_request("get", {"server_key": scoped_key})
-
-        result = bind_and_call(view, request, "get_context_data", obj=device)
-
-        assert result["table"] is not None
-        assert result["server_key"] == scoped_key
-        assert view.librenms_api.server_key == scoped_key
-        assert cache.get(scoped_cache_key) == payload
-
-    def test_get_context_data_scopes_sync_device_to_resolved_server(self, server_keys):
-        """The VC sync-device resolution uses the resolved server explicitly. It must not rely on the prior API binding."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
-        from netbox_librenms_plugin.tests.view_test_helpers import (
-            bind_and_call,
-            make_request,
-            trusted_module_inventory_payload,
-        )
-        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        bound_key, scoped_key = server_keys
-        _, members = make_virtual_chassis_members("module-cache-scoped-vc", count=2)
-        bound_device, scoped_device = members
-        seed_mapping(bound_device, bound_key, own=701)
-        payload = trusted_module_inventory_payload(scoped_device, [], server_key=scoped_key, librenms_id=777)
-        view = DeviceModuleTableView()
-        view._librenms_api = LibreNMSAPI(server_key=bound_key)
-        scoped_cache_key = view.get_cache_key(scoped_device, "inventory", server_key=scoped_key)
-        cache.set(scoped_cache_key, payload)
-        request = make_request("get", {"server_key": scoped_key})
-
-        result = bind_and_call(view, request, "get_context_data", obj=bound_device)
-
-        assert result["table"] is not None
-        assert result["server_key"] == scoped_key
-        assert cache.get(scoped_cache_key) == payload
-        assert cache.get(view.get_cache_key(bound_device, "inventory", server_key=scoped_key)) is None
-
-    def test_post_warns_when_ports_fetch_fails(self, librenms_server, server_keys):
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        server_key, _ = server_keys
-        device = _mapped_device("module-refresh-ports-failure", server_key)
-        view = DeviceModuleTableView()
-        cache_key, _ = _seed_snapshot(view, device, server_key)
-        self._register_successful_refresh(librenms_server)
-        librenms_server.register(
-            "/api/v0/devices/777/ports",
-            {"status": "error", "message": "ports api unavailable"},
-            status=503,
-            method="GET",
-        )
-        request = make_request("post", {"server_key": server_key})
-
-        response = post(view, request, pk=device.pk)
-
-        assert response.status_code == 200
-        assert cache.get(cache_key) is None
-        assert message_texts(request, "warning") == [
-            "Inventory refresh was incomplete: port metadata fetch failed, so no module rows were"
-            " loaded. Refresh Modules to try again. See server logs for details."
-        ]
-        assert message_texts(request, "success") == []
-
-    def test_post_treats_malformed_ports_payload_as_fetch_failure(self, librenms_server, server_keys):
-        """get_ports() can return success with a dict whose "ports" is missing, None, or contains non-dict entries. Port-id enrichment would otherwise silently do nothing."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        server_key, _ = server_keys
-        device = _mapped_device("module-refresh-malformed-ports", server_key)
-        view = DeviceModuleTableView()
-        cache_key, _ = _seed_snapshot(view, device, server_key)
-        self._register_successful_refresh(librenms_server)
-        # get_ports() returns the decoded JSON body verbatim. This malformed payload reaches post().
-        librenms_server.register(
-            "/api/v0/devices/777/ports",
-            {"status": "ok", "ports": None},
-            method="GET",
-        )
-        request = make_request("post", {"server_key": server_key})
-
-        response = post(view, request, pk=device.pk)
-
-        assert response.status_code == 200
-        assert cache.get(cache_key) is None
-        assert message_texts(request, "warning") == [
-            "Inventory refresh was incomplete: port metadata fetch failed, so no module rows were"
-            " loaded. Refresh Modules to try again. See server logs for details."
-        ]
-        assert message_texts(request, "success") == []
-
-    def test_post_skips_cache_on_oob_inventory_failure(self, librenms_server, server_keys):
-        """When the OOB inventory fetch fails, do not cache the main-only snapshot under the current OOB fingerprint. Otherwise get_context_data() accepts it as complete, and the OOB rows and warning vanish until TTL or manual refresh."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
-        from netbox_librenms_plugin.server_mappings import attach_oob
-        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        server_key, _ = server_keys
-        device = _mapped_device("module-refresh-oob-failure", server_key)
-        apply_mapping_change(device, attach_oob(device, server_key, 999, oob_type="idrac9"))
-        device.save(update_fields=["custom_field_data"])
-        view = DeviceModuleTableView()
-        cache_key, _ = _seed_snapshot(view, device, server_key, oob_librenms_id=999)
-        self._register_successful_refresh(librenms_server)
-        librenms_server.register(
-            "/api/v0/inventory/999/all",
-            {"status": "error", "message": "oob inventory unavailable"},
-            status=503,
-            method="GET",
-        )
-        request = make_request("post", {"server_key": server_key})
-
-        response = post(view, request, pk=device.pk)
-
-        assert response.status_code == 200
-        assert cache.get(cache_key) is None
-        warnings = message_texts(request, "warning")
-        assert warnings == [
-            "Inventory refresh was incomplete: OOB controller inventory fetch failed, so no module rows"
-            " were loaded. Refresh Modules to try again. See server logs for details."
-        ]
-        # The toast must stay generic. Internal LibreNMS ids belong only in the server log.
-        warning = warnings[0]
-        assert "777" not in warning and "999" not in warning and "OOB id" not in warning
-        assert message_texts(request, "success") == []
-
-    def test_post_treats_non_dict_oob_inventory_entry_as_fetch_failure(self, librenms_server, server_keys):
-        """The OOB inventory merge offsets indices and sets item["_source"] on every entry. A response with non-dict elements, such as None, must fail before that merge."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
-        from netbox_librenms_plugin.server_mappings import attach_oob
-        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        server_key, _ = server_keys
-        device = _mapped_device("module-refresh-oob-non-dict", server_key)
-        apply_mapping_change(device, attach_oob(device, server_key, 999, oob_type="idrac9"))
-        device.save(update_fields=["custom_field_data"])
-        view = DeviceModuleTableView()
-        cache_key, _ = _seed_snapshot(view, device, server_key, oob_librenms_id=999)
-        self._register_successful_refresh(librenms_server)
-        librenms_server.register(
-            "/api/v0/inventory/999/all",
-            {"status": "ok", "inventory": [{"entPhysicalIndex": 1}, None]},
-            method="GET",
-        )
-        request = make_request("post", {"server_key": server_key})
-
-        response = post(view, request, pk=device.pk)
-
-        assert response.status_code == 200
-        assert cache.get(cache_key) is None
-        assert message_texts(request, "warning") == [
-            "Inventory refresh was incomplete: OOB controller inventory fetch failed, so no module rows"
-            " were loaded. Refresh Modules to try again. See server logs for details."
-        ]
-        assert message_texts(request, "success") == []
-
-    def test_post_corrupt_oob_id_fails_closed(self, librenms_server, server_keys):
-        """A linked OOB controller whose stored id is Boolean or non-numeric must fail closed like the interfaces and cables tabs. Do not fetch the garbage id or cache a host-only snapshot. Warn the user instead. A falsy check would conflate this state with no OOB link and silently drop the controller rows until TTL."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping, stored_mapping_for_test
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        server_key, _ = server_keys
-        device = _mapped_device("module-refresh-corrupt-oob", server_key)
-        view = DeviceModuleTableView()
-        cache_key, stale_payload = _seed_snapshot(view, device, server_key)
-        # The custom field is user-editable through the NetBox UI and API, so a corrupt value is real state.
-        seed_stored_mapping(
-            device,
-            {**stored_mapping_for_test(device), server_key: {"id": 777, "oob": {"id": "not-a-number", "type": "oob"}}},
-            save=True,
-        )
-        cache.set(cache_key, stale_payload)
-        self._register_successful_refresh(librenms_server)
-        corrupt_oob_requests = []
-
-        def corrupt_oob_route(**request_data):
-            corrupt_oob_requests.append(request_data)
-            return 200, {"status": "ok", "inventory": []}
-
-        librenms_server.register(
-            "/api/v0/inventory/not-a-number/all",
-            corrupt_oob_route,
-            method="GET",
-        )
-        request = make_request("post", {"server_key": server_key})
-
-        response = post(view, request, pk=device.pk)
-
-        assert response.status_code == 200
-        assert corrupt_oob_requests == []
-        assert cache.get(cache_key) is None
-        assert message_texts(request, "warning") == [
-            "Inventory refresh was incomplete: OOB controller inventory fetch failed, so no module rows"
-            " were loaded. Refresh Modules to try again. See server logs for details."
-        ]
-        assert message_texts(request, "success") == []
-
-    def test_post_poisoned_bool_librenms_id_fails_closed(self, librenms_server, server_keys):
-        """A poisoned Boolean device id must never be fired at LibreNMS. post() fails closed and drops the stale snapshot."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
-        from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        server_key, _ = server_keys
-        device = make_device("module-refresh-poisoned-bool")
-        api = LibreNMSAPI(server_key=server_key)
-        # The device-id cache path returns its value verbatim, which is why the Boolean guard exists.
-        cache.set(api._get_cache_key(device, server_key=server_key), True)
-        view = DeviceModuleTableView()
-        cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
-        cache.set(cache_key, module_inventory_cache_payload([], 1, None))
-        inventory_requests = []
-
-        def any_inventory_route(**request_data):
-            inventory_requests.append(request_data)
-            return 200, {"status": "ok", "inventory": []}
-
-        for poisoned_path in ("/api/v0/inventory/True/all", "/api/v0/inventory/1/all"):
-            librenms_server.register(poisoned_path, any_inventory_route, method="GET")
-        request = make_request("post", {"server_key": server_key})
-
-        response = post(view, request, pk=device.pk)
-
-        assert response.status_code == 200
-        assert inventory_requests == []
-        assert cache.get(cache_key) is None
-        assert message_texts(request) == ["Device not found in LibreNMS."]
-
-    def test_post_no_oob_linked_stays_clean_success(self, librenms_server, server_keys):
-        """No OOB link means get_librenms_oob returns None. This is not a failure. Show a clean success toast and cache the snapshot."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.sync_cache import MODULE_INVENTORY_CACHE_VERSION
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        server_key, _ = server_keys
-        device = _mapped_device("module-refresh-no-oob", server_key)
-        self._register_successful_refresh(librenms_server)
-        view = DeviceModuleTableView()
-        request = make_request("post", {"server_key": server_key})
-
-        response = post(view, request, pk=device.pk)
-
-        assert response.status_code == 200
-        assert message_texts(request, "success") == ["Inventory data refreshed successfully."]
-        assert message_texts(request, "warning") == []
-        assert cache.get(view.get_cache_key(device, "inventory", server_key=server_key)) == {
-            "version": MODULE_INVENTORY_CACHE_VERSION,
-            "inventory": [],
-            "librenms_id": 777,
-            "oob_librenms_id": None,
-        }
-
-    def test_post_treats_non_int_main_index_as_fetch_failure(self, librenms_server, server_keys):
-        """A main inventory row with a string index fails closed before the OOB offset."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, SyncTabState
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
-        from netbox_librenms_plugin.server_mappings import attach_oob
-        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        server_key, _ = server_keys
-        device = _mapped_device("module-refresh-main-string-index", server_key)
-        apply_mapping_change(device, attach_oob(device, server_key, 999, oob_type="idrac9"))
-        device.save(update_fields=["custom_field_data"])
-        view = DeviceModuleTableView()
-        cache_key, _ = _seed_snapshot(view, device, server_key, oob_librenms_id=999)
-        self._register_successful_refresh(
-            librenms_server,
-            inventory=[
-                {
-                    "entPhysicalIndex": "5",
-                    "entPhysicalName": "main-fan",
-                    "entPhysicalClass": "fan",
-                    "entPhysicalContainedIn": 0,
-                }
-            ],
-        )
-        librenms_server.register(
-            "/api/v0/inventory/999/all",
-            {
-                "status": "ok",
-                "inventory": [{"entPhysicalIndex": 1, "entPhysicalName": "oob-fan"}],
-            },
-            method="GET",
-        )
-        request = make_request("post", {"server_key": server_key})
-
-        response = post(view, request, pk=device.pk)
-
-        assert response.status_code == 200
-        assert message_texts(request, "error") == [
-            "Failed to fetch inventory from LibreNMS; see server logs for details."
-        ]
-        assert message_texts(request, "success") == []
-        status = SyncCacheConsistency(device).status(server_key)[SyncTab.MODULES.value]
-        assert status["state"] == SyncTabState.REFRESH_FAILED.value
-        assert cache.get(cache_key) is None
-
-    def test_post_treats_non_int_oob_index_as_fetch_failure(self, librenms_server, server_keys):
-        """An OOB inventory row with a non-int entPhysicalIndex fails closed. It must not raise an offset TypeError or cache a partial snapshot."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
-        from netbox_librenms_plugin.server_mappings import attach_oob
-        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        server_key, _ = server_keys
-        device = _mapped_device("module-refresh-oob-string-index", server_key)
-        apply_mapping_change(device, attach_oob(device, server_key, 999, oob_type="idrac9"))
-        device.save(update_fields=["custom_field_data"])
-        view = DeviceModuleTableView()
-        cache_key, _ = _seed_snapshot(view, device, server_key, oob_librenms_id=999)
-        self._register_successful_refresh(librenms_server)
-        # The offset arithmetic would evaluate "5" + offset and return HTTP 500 without the guard.
-        librenms_server.register(
-            "/api/v0/inventory/999/all",
-            {
-                "status": "ok",
-                "inventory": [{"entPhysicalIndex": "5", "entPhysicalName": "oob-fan"}],
-            },
-            method="GET",
-        )
-        request = make_request("post", {"server_key": server_key})
-
-        response = post(view, request, pk=device.pk)
-
-        assert response.status_code == 200
-        assert cache.get(cache_key) is None
-        assert message_texts(request, "warning") == [
-            "Inventory refresh was incomplete: OOB controller inventory fetch failed, so no module rows"
-            " were loaded. Refresh Modules to try again. See server logs for details."
-        ]
-        assert message_texts(request, "success") == []
-
-    def test_get_context_data_oob_fingerprint_equates_int_and_string(self, server_keys):
-        """A cached int OOB id and a current string id with the same value compare equal. Do not invalidate the snapshot."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.tests.view_test_helpers import (
-            bind_and_call,
-            make_request,
-            trusted_module_inventory_payload,
-        )
-        from netbox_librenms_plugin.server_mappings import attach_oob
-        from netbox_librenms_plugin.tests.mapping_fixtures import (
-            apply_mapping_change,
-            seed_stored_mapping,
-            stored_mapping_for_test,
-        )
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        server_key, _ = server_keys
-        device = _mapped_device("module-cache-oob-string-id", server_key, librenms_id=1)
-        apply_mapping_change(device, attach_oob(device, server_key, 5, oob_type="idrac9"))
-        device.save(update_fields=["custom_field_data"])
-        payload = trusted_module_inventory_payload(device, [], server_key=server_key, librenms_id=1)
-        payload["oob_librenms_id"] = 5
-        view = DeviceModuleTableView()
-        cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
-        cache.set(cache_key, payload)
-        # The custom field is user-editable, and the UI or API can store the numeric id as a string.
-        stored = stored_mapping_for_test(device)
-        stored[server_key]["oob"]["id"] = "5"
-        seed_stored_mapping(device, stored, save=True)
-        cache.set(cache_key, payload)
-        request = make_request("get", {"server_key": server_key})
-
-        result = bind_and_call(view, request, "get_context_data", obj=device)
-
-        assert result["table"] is not None
-        assert result["server_key"] == server_key
-        assert cache.get(cache_key) == payload
-
-    def test_post_skips_cache_on_transceiver_failure(self, librenms_server, server_keys):
-        """A transceiver-enrichment failure drops synthetic transceiver rows. Do not cache the truncated inventory, for the same reason as an OOB failure."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        server_key, _ = server_keys
-        device = _mapped_device("module-refresh-transceiver-failure", server_key)
-        view = DeviceModuleTableView()
-        cache_key, _ = _seed_snapshot(view, device, server_key)
-        self._register_successful_refresh(librenms_server)
-        librenms_server.register(
-            "/api/v0/devices/777/transceivers",
-            {"status": "error", "message": "transceiver fetch failed"},
-            status=503,
-            method="GET",
-        )
-        request = make_request("post", {"server_key": server_key})
-
-        response = post(view, request, pk=device.pk)
-
-        assert response.status_code == 200
-        assert cache.get(cache_key) is None
-        assert message_texts(request, "warning") == [
-            "Inventory refresh was incomplete: transceiver fetch failed, so no module rows were loaded."
-            " Refresh Modules to try again. See server logs for details."
-        ]
-        assert message_texts(request, "success") == []
 
 
 # ---------------------------------------------------------------------------
@@ -4148,43 +3178,6 @@ class TestHolderEntitiesAreNotRows:
         # The line card's branch list is what Install Branch runs.
         assert cage["entPhysicalIndex"] in {index for index, _target in rows[shape.line_card]["branch_rows"]}
 
-    def test_a_snapshot_cached_before_the_schema_version_is_refetched(self, librenms_server, server_key):
-        """An older writer cached the API-confirmed cage without its marker; the tab must not serve it."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
-        from netbox_librenms_plugin.views.base.modules_view import _TRANSCEIVER_API_MATCH
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        shape = self._shape()
-        recording = deepcopy(shape.recording)
-        inventory, transceivers, _ports = self._responses(recording)
-        transceiver = transceivers[0]
-        optic = next(e for e in inventory if e["entPhysicalIndex"] == transceiver["entity_physical_index"])
-        cage = next(e for e in inventory if e["entPhysicalIndex"] == optic["entPhysicalContainedIn"])
-        inventory.remove(optic)
-        cage["entPhysicalModelName"] = ""
-        transceiver["entity_physical_index"] = cage["entPhysicalIndex"]
-        transceiver["serial"] = None
-        librenms_server.load_recording(recording)
-        device = self._mapped_device("nxos-holders-pre-version", shape, server_key)
-        _refresh_module_rows(device, server_key)
-        view = DeviceModuleTableView()
-        key = view.get_cache_key(device, "inventory", server_key=server_key)
-        fresh = cache.get(key)
-        old_rows = [{k: v for k, v in row.items() if k != _TRANSCEIVER_API_MATCH} for row in fresh["inventory"]]
-        cache.set(
-            key,
-            {"inventory": old_rows, "librenms_id": fresh["librenms_id"], "oob_librenms_id": fresh["oob_librenms_id"]},
-        )
-
-        stale = bind_and_call(view, make_request("get", {"server_key": server_key}), "get_context_data", obj=device)
-
-        assert stale["table"] is None
-        assert cache.get(key) is None
-        rows = {row["ent_physical_index"]: row for row in _refresh_module_rows(device, server_key)}
-        assert rows[cage["entPhysicalIndex"]]["model"] == transceiver["model"]
-
     @pytest.mark.parametrize("cage_model", ["label", "placeholder"])
     def test_a_skipped_chassis_level_cage_hides_its_optic(self, librenms_server, server_key, cage_model):
         """A skip rule on a holder drops the holder's subtree, so the optic below it is no top-level row."""
@@ -5524,14 +4517,20 @@ class TestRenderStatusNoBayOnParent:
 class TestMatchedInterfaceLinking:
     """Rows should expose matched NetBox interface metadata and render as links."""
 
+    @pytest.fixture(autouse=True)
+    def real_client(self, settings, librenms_server):
+        configure_servers(
+            settings,
+            {"test-server": {"librenms_url": librenms_server.url, "api_token": "test-token"}},
+        )
+
     def _view(self):
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         view = object.__new__(BaseModuleTableView)
         view._device_manufacturer = None
-        view._librenms_api = object.__new__(LibreNMSAPI)
-        view._librenms_api.server_key = "test-server"
+        view._librenms_api = LibreNMSAPI(server_key="test-server")
         return view
 
     def _make_interface(self, device, name, *, port_id=None, module=None):
@@ -6649,87 +5648,6 @@ class TestBuildHolderInstallHintNarrowing:
         assert "'CMA'" in msg
 
 
-class TestNestSyntheticTransceivers:
-    def test_nests_under_parent_with_path_suffix(self):
-        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
-
-        inv = [
-            {"entPhysicalIndex": 100, "entPhysicalName": "MDA 1/1", "entPhysicalContainedIn": 50},
-            {"entPhysicalIndex": 200, "entPhysicalName": "MDA 2/x1/1", "entPhysicalContainedIn": 60},
-            {
-                "entPhysicalIndex": 1001,
-                "entPhysicalName": "1/1/c1",
-                "entPhysicalContainedIn": 0,
-                "_from_transceiver_api": True,
-            },
-            {
-                "entPhysicalIndex": 1002,
-                "entPhysicalName": "2/x1/1/c2",
-                "entPhysicalContainedIn": 0,
-                "_from_transceiver_api": True,
-            },
-        ]
-        BaseModuleTableView._nest_synthetic_transceivers(inv)
-        assert inv[2]["entPhysicalContainedIn"] == 100
-        assert inv[3]["entPhysicalContainedIn"] == 200
-
-    def test_leaves_top_level_when_no_parent_match(self):
-        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
-
-        inv = [
-            {
-                "entPhysicalIndex": 1001,
-                "entPhysicalName": "9/9/c1",
-                "entPhysicalContainedIn": 0,
-                "_from_transceiver_api": True,
-            },
-        ]
-        BaseModuleTableView._nest_synthetic_transceivers(inv)
-        assert inv[0]["entPhysicalContainedIn"] == 0
-
-    def test_skips_non_synthetic_items(self):
-        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
-
-        inv = [
-            {"entPhysicalIndex": 100, "entPhysicalName": "MDA 1/1", "entPhysicalContainedIn": 0},
-            {"entPhysicalIndex": 1001, "entPhysicalName": "1/1/c1", "entPhysicalContainedIn": 0},
-        ]
-        BaseModuleTableView._nest_synthetic_transceivers(inv)
-        assert inv[1]["entPhysicalContainedIn"] == 0
-
-    def test_skips_already_nested_synthetic(self):
-        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
-
-        inv = [
-            {"entPhysicalIndex": 100, "entPhysicalName": "MDA 1/1", "entPhysicalContainedIn": 50},
-            {
-                "entPhysicalIndex": 1001,
-                "entPhysicalName": "1/1/c1",
-                "entPhysicalContainedIn": 999,
-                "_from_transceiver_api": True,
-            },
-        ]
-        BaseModuleTableView._nest_synthetic_transceivers(inv)
-        assert inv[1]["entPhysicalContainedIn"] == 999
-
-    def test_falls_back_to_shorter_prefix(self):
-        """If MDA 1/1 doesn't exist, a 1/1/c1 transceiver should match Slot 1."""
-        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
-
-        inv = [
-            {"entPhysicalIndex": 50, "entPhysicalName": "Slot 1", "entPhysicalContainedIn": 1},
-            {
-                "entPhysicalIndex": 1001,
-                "entPhysicalName": "1/1/c1",
-                "entPhysicalContainedIn": 0,
-                "_from_transceiver_api": True,
-            },
-        ]
-        BaseModuleTableView._nest_synthetic_transceivers(inv)
-        # No parent name ends with '/1/1' or ' 1/1', but 'Slot 1' ends with ' 1'
-        assert inv[1]["entPhysicalContainedIn"] == 50
-
-
 @pytest.mark.django_db
 class TestRenderActionsPortIdentityFields:
     """Install action form should preserve distinct ifName/ifDescr hidden values."""
@@ -6808,178 +5726,6 @@ class TestRenderActionsPortIdentityFields:
 
 
 @pytest.mark.django_db
-class TestGetContextDataOOBCacheFingerprint:
-    """get_context_data must invalidate cached inventory when the linked OOB controller changes (re-link / unlink), not only when the main id changes."""
-
-    @pytest.fixture
-    def server_keys(self, settings, librenms_server):
-        return _two_server_keys(settings, librenms_server, "fingerprint")
-
-    def test_invalidates_when_oob_relinked(self, server_keys):
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
-        from netbox_librenms_plugin.server_mappings import attach_oob
-        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        server_key, _ = server_keys
-        device = _mapped_device("module-cache-oob-relinked", server_key)
-        apply_mapping_change(device, attach_oob(device, server_key, 999, oob_type="idrac9"))
-        device.save(update_fields=["custom_field_data"])
-        view = DeviceModuleTableView()
-        cache_key, _ = _seed_snapshot(view, device, server_key, oob_librenms_id=998)
-        request = make_request("get", {"server_key": server_key})
-
-        context = bind_and_call(view, request, "get_context_data", obj=device)
-
-        assert cache.get(cache_key) is None
-        assert context["table"] is None
-        assert context["server_key"] == server_key
-
-    def test_invalidates_when_oob_unlinked(self, server_keys):
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        server_key, _ = server_keys
-        device = _mapped_device("module-cache-oob-unlinked", server_key)
-        view = DeviceModuleTableView()
-        cache_key, _ = _seed_snapshot(view, device, server_key, oob_librenms_id=999)
-        request = make_request("get", {"server_key": server_key})
-
-        context = bind_and_call(view, request, "get_context_data", obj=device)
-
-        assert cache.get(cache_key) is None
-        assert context["table"] is None
-        assert context["server_key"] == server_key
-
-    def test_invalidates_when_main_id_poisoned_bool(self, server_keys):
-        """Verify a Boolean main device ID invalidates the cache instead of matching integer 1."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
-        from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        server_key, _ = server_keys
-        device = make_device("module-cache-poisoned-bool")
-        api = LibreNMSAPI(server_key=server_key)
-        # The device-id cache path returns its value verbatim, which is why the Boolean guard exists.
-        cache.set(api._get_cache_key(device, server_key=server_key), True)
-        view = DeviceModuleTableView()
-        cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
-        cache.set(cache_key, module_inventory_cache_payload([], 1, None))
-        request = make_request("get", {"server_key": server_key})
-
-        context = bind_and_call(view, request, "get_context_data", obj=device)
-
-        assert cache.get(cache_key) is None
-        assert context["table"] is None
-        assert context["server_key"] == server_key
-
-    def test_keeps_cache_when_main_id_stored_as_string(self, server_keys):
-        """Verify a string main device ID matches the equivalent cached integer ID."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping, stored_mapping_for_test
-        from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        server_key, _ = server_keys
-        device = _mapped_device("module-cache-string-main-id", server_key)
-        view = DeviceModuleTableView()
-        cache_key, payload = _seed_snapshot(view, device, server_key)
-        seed_stored_mapping(device, {**stored_mapping_for_test(device), server_key: "777"}, save=True)
-        cache.set(cache_key, payload)
-        request = make_request("get", {"server_key": server_key})
-
-        context = bind_and_call(view, request, "get_context_data", obj=device)
-
-        assert context["table"] is not None
-        assert context["server_key"] == server_key
-        assert cache.get(cache_key) == payload
-
-    def test_invalidates_when_oob_link_corrupt(self, server_keys):
-        """Verify a corrupt linked OOB ID invalidates the cache instead of matching a missing OOB link."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping, stored_mapping_for_test
-        from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        server_key, _ = server_keys
-        device = _mapped_device("module-cache-corrupt-oob", server_key)
-        view = DeviceModuleTableView()
-        cache_key, stale_payload = _seed_snapshot(view, device, server_key)
-        # The custom field is user-editable through the NetBox UI and API, so a corrupt value is real state.
-        seed_stored_mapping(
-            device,
-            {**stored_mapping_for_test(device), server_key: {"id": 777, "oob": {"id": "garbage", "type": "oob"}}},
-            save=True,
-        )
-        cache.set(cache_key, stale_payload)
-        request = make_request("get", {"server_key": server_key})
-
-        context = bind_and_call(view, request, "get_context_data", obj=device)
-
-        assert cache.get(cache_key) is None
-        assert context["table"] is None
-        assert context["server_key"] == server_key
-
-    def test_keeps_cache_when_oob_unchanged(self, server_keys):
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
-        from netbox_librenms_plugin.server_mappings import attach_oob
-        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        server_key, _ = server_keys
-        device = _mapped_device("module-cache-oob-unchanged", server_key)
-        apply_mapping_change(device, attach_oob(device, server_key, 999, oob_type="idrac9"))
-        device.save(update_fields=["custom_field_data"])
-        view = DeviceModuleTableView()
-        cache_key, payload = _seed_snapshot(view, device, server_key, oob_librenms_id=999)
-        request = make_request("get", {"server_key": server_key})
-
-        context = bind_and_call(view, request, "get_context_data", obj=device)
-
-        # The unchanged fingerprint path must rebuild from the cached inventory snapshot. It
-        # forwards the resolved sync device and server key, matching post()'s call shape.
-        assert context["table"] is not None
-        assert context["object"].pk == device.pk
-        assert context["server_key"] == server_key
-        # Preserve the cache when the OOB linkage is unchanged.
-        assert cache.get(cache_key) == payload
-
-    def test_get_context_data_rebinds_to_request_server_key(self, server_keys):
-        """The GET render must rebind to the active server from the request query so the cache read keys on the same server post() wrote under. Otherwise a non-default-server tab cache-misses and the OOB guard does nothing."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        bound_key, requested_key = server_keys
-        device = _mapped_device("module-cache-get-rebind", requested_key)
-        view = DeviceModuleTableView()
-        view._librenms_api = LibreNMSAPI(server_key=bound_key)
-        request = make_request("get", {"server_key": requested_key})
-        requested_cache_key = view.get_cache_key(device, "inventory", server_key=requested_key)
-        assert cache.get(requested_cache_key) is None
-
-        context = bind_and_call(view, request, "get_context_data", obj=device)
-
-        assert view.librenms_api.server_key == requested_key
-        assert context["table"] is None
-        assert context["server_key"] == requested_key
-
-
-@pytest.mark.django_db
 class TestInterfacePortIdActiveServerScope:
     """Verify interface port IDs use the active server key during module verification."""
 
@@ -7041,8 +5787,6 @@ def test_included_numeric_inventory_class_renders_on_the_sync_page(client, setti
 
     from netbox_librenms_plugin.models import InventoryIgnoreRule
     from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type, make_superuser
-    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
     configure_servers(
         settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
@@ -7052,7 +5796,7 @@ def test_included_numeric_inventory_class_renders_on_the_sync_page(client, setti
     InventoryIgnoreRule.objects.create(
         name="Numeric inventory modules", match_type="class_is", pattern="7", action="include"
     )
-    payload = trusted_module_inventory_payload(
+    seed_mapped_modules(
         device,
         [
             {
@@ -7067,7 +5811,6 @@ def test_included_numeric_inventory_class_renders_on_the_sync_page(client, setti
         ],
         librenms_id=9301,
     )
-    cache.set(DeviceModuleTableView().get_cache_key(device, "inventory", server_key="default"), payload, 300)
     cache.set("librenms_device_info_default_9301", (True, {"device_id": 9301, "hostname": device.name}), 300)
     client.force_login(make_superuser("numeric-inventory-class-user"))
     response = client.get(
@@ -7101,8 +5844,6 @@ def test_a_name_match_bound_to_another_port_is_not_shown(client, settings, ifnam
 
     from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
     from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
-    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
     configure_servers(
         settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
@@ -7119,12 +5860,14 @@ def test_a_name_match_bound_to_another_port_is_not_shown(client, settings, ifnam
         "entPhysicalName": "Line card",
         "entPhysicalContainedIn": 0,
         "entPhysicalModelName": "NAME-MATCH-CARD",
-        "_librenms_port_id": 8001,
-        "_librenms_ifname": "Ethernet1/1",
-        "_librenms_ifdescr": "Uplink1",
     }
-    payload = trusted_module_inventory_payload(device, [item], librenms_id=9303)
-    cache.set(DeviceModuleTableView().get_cache_key(device, "inventory", server_key="default"), payload, 300)
+    seed_mapped_modules(
+        device,
+        [item],
+        librenms_id=9303,
+        ports=[{"port_id": 8001, "ifName": "Ethernet1/1", "ifDescr": "Uplink1"}],
+        transceivers=[transceiver_row(82, port_id=8001, model="NAME-MATCH-CARD", serial="")],
+    )
     cache.set("librenms_device_info_default_9303", (True, {"device_id": 9303, "hostname": device.name}), 300)
     client.force_login(make_superuser("module-name-match-binding-user"))
 
@@ -7151,8 +5894,6 @@ def test_vc_inventory_ignore_rules_follow_each_attributed_member(client, setting
 
     from netbox_librenms_plugin.models import InventoryIgnoreRule
     from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_superuser
-    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
     configure_servers(
         settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
@@ -7237,8 +5978,12 @@ def test_vc_inventory_ignore_rules_follow_each_attributed_member(client, setting
             "_source": "oob",
         },
     ]
-    payload = trusted_module_inventory_payload(page, inventory, librenms_id=9302)
-    cache.set(DeviceModuleTableView().get_cache_key(page, "inventory", server_key="default"), payload, 300)
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_modules_snapshot
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
+    seed_mapping(page, "default", own=9302, oob=9304)
+    oob_inventory = [{key: value for key, value in inventory[-1].items() if key != "_source"}]
+    seed_modules_snapshot(page, inventory[:-1], oob_inventory=oob_inventory)
     cache.set("librenms_device_info_default_9302", (True, {"device_id": 9302, "hostname": page.name}), 300)
     client.force_login(make_superuser("vc-ignore-rules-user"))
 
@@ -7262,8 +6007,6 @@ def test_vc_model_matches_device_type_follows_the_attributed_member(client, sett
 
     from netbox_librenms_plugin.models import InventoryIgnoreRule
     from netbox_librenms_plugin.tests.conftest import make_superuser
-    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
     configure_servers(
         settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
@@ -7300,8 +6043,7 @@ def test_vc_model_matches_device_type_follows_the_attributed_member(client, sett
             "entPhysicalContainedIn": 0,
         },
     ]
-    payload = trusted_module_inventory_payload(page, inventory, librenms_id=9303)
-    cache.set(DeviceModuleTableView().get_cache_key(page, "inventory", server_key="default"), payload, 300)
+    seed_mapped_modules(page, inventory, librenms_id=9303)
     cache.set("librenms_device_info_default_9303", (True, {"device_id": 9303, "hostname": page.name}), 300)
     client.force_login(make_superuser("vc-model-rule-user"))
 
@@ -7507,8 +6249,6 @@ def test_vc_default_hardware_parent_keeps_child_on_page_device(client, settings,
     from django.urls import reverse
 
     from netbox_librenms_plugin.tests.conftest import make_superuser
-    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
     configure_servers(
         settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
@@ -7531,8 +6271,7 @@ def test_vc_default_hardware_parent_keeps_child_on_page_device(client, settings,
             "entPhysicalContainedIn": 120,
         },
     ]
-    payload = trusted_module_inventory_payload(page, inventory, librenms_id=9302)
-    cache.set(DeviceModuleTableView().get_cache_key(page, "inventory", server_key="default"), payload, 300)
+    seed_mapped_modules(page, inventory, librenms_id=9302)
     cache.set("librenms_device_info_default_9302", (True, {"device_id": 9302, "hostname": page.name}), 300)
     client.force_login(make_superuser("default-parent-user"))
 
@@ -7555,8 +6294,6 @@ def test_junos_vc_rows_on_the_page_belong_to_the_member_they_name(client, settin
     from django.urls import reverse
 
     from netbox_librenms_plugin.tests.conftest import make_superuser
-    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
     from netbox_librenms_plugin.tests.conftest import bind_librenms_server
 
@@ -7564,8 +6301,7 @@ def test_junos_vc_rows_on_the_page_belong_to_the_member_they_name(client, settin
     master, member = make_junos_vc_members("junos-modules")
     inventory = junos_vc_inventory()
     librenms_server.inventory_response(9355, inventory)
-    payload = trusted_module_inventory_payload(master, inventory, librenms_id=9355)
-    cache.set(DeviceModuleTableView().get_cache_key(master, "inventory", server_key="default"), payload, 300)
+    seed_mapped_modules(master, inventory, librenms_id=9355)
     cache.set("librenms_device_info_default_9355", (True, {"device_id": 9355, "hostname": master.name}), 300)
     client.force_login(make_superuser("junos-modules-user"))
 
@@ -7592,8 +6328,6 @@ def test_a_standalone_device_with_a_junos_vc_inventory_keeps_every_row(client, s
     from django.urls import reverse
 
     from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
-    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
     from netbox_librenms_plugin.tests.conftest import bind_librenms_server
 
@@ -7601,8 +6335,7 @@ def test_a_standalone_device_with_a_junos_vc_inventory_keeps_every_row(client, s
     device = make_device("junos-standalone-modules")
     inventory = junos_vc_inventory()
     librenms_server.inventory_response(9357, inventory)
-    payload = trusted_module_inventory_payload(device, inventory, librenms_id=9357)
-    cache.set(DeviceModuleTableView().get_cache_key(device, "inventory", server_key="default"), payload, 300)
+    seed_mapped_modules(device, inventory, librenms_id=9357)
     cache.set("librenms_device_info_default_9357", (True, {"device_id": 9357, "hostname": device.name}), 300)
     client.force_login(make_superuser("junos-standalone-modules-user"))
 
@@ -7625,8 +6358,6 @@ def test_a_decorated_junos_fpc_serial_is_serial_evidence_on_the_page(client, set
 
     from netbox_librenms_plugin.models import NormalizationRule
     from netbox_librenms_plugin.tests.conftest import make_superuser
-    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
     from netbox_librenms_plugin.tests.conftest import bind_librenms_server
 
@@ -7644,8 +6375,7 @@ def test_a_decorated_junos_fpc_serial_is_serial_evidence_on_the_page(client, set
         for row in junos_vc_inventory()
     ]
     librenms_server.inventory_response(9356, inventory)
-    payload = trusted_module_inventory_payload(master, inventory, librenms_id=9356)
-    cache.set(DeviceModuleTableView().get_cache_key(master, "inventory", server_key="default"), payload, 300)
+    seed_mapped_modules(master, inventory, librenms_id=9356)
     cache.set("librenms_device_info_default_9356", (True, {"device_id": 9356, "hostname": master.name}), 300)
     client.force_login(make_superuser("junos-decorated-user"))
 

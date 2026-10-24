@@ -491,7 +491,9 @@ class TestIPAddressHTTPAndORM:
     def _assessed(self, view, device):
         snapshot = source_cache.read(device, Resource.IP_ADDRESSES, "default")
         assert snapshot is not None
-        return view.assess_snapshot(device, snapshot, "default")
+        from netbox_librenms_plugin.views.base.ip_addresses_view import read_ip_assessment
+
+        return read_ip_assessment(view.request, device, snapshot, "default")
 
     def test_real_http_rows_match_real_interface_and_ip(self, live_librenms):
         device, interface = self._device()
@@ -536,16 +538,21 @@ class TestIPAddressHTTPAndORM:
         device, _interface = self._device()
         view = _view(DeviceIPAddressTableView, live_librenms)
 
-        assert view._create_base_ip_entry(entry, device, [])["ip_with_mask"] == expected
+        self._register(live_librenms, [entry])
+        view, response = self._refresh(live_librenms, device)
+        assert response.status_code == 200
+        assert self._assessed(view, device).rows[0]["ip_with_mask"] == expected
 
     def test_invalid_external_address_shape_is_rejected(self, live_librenms):
         from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
 
         device, _interface = self._device()
-        view = _view(DeviceIPAddressTableView, live_librenms)
+        _view(DeviceIPAddressTableView, live_librenms)
 
-        with pytest.raises(ValueError, match="no supported address fields"):
-            view._create_base_ip_entry({"port_id": 1}, device, [])
+        self._register(live_librenms, [{"port_id": 1}])
+        failed_view, response = self._refresh(live_librenms, device)
+        assert response.status_code == 200
+        assert source_cache.read(device, Resource.IP_ADDRESSES, "default") is None
 
     def test_prefetch_scans_only_reported_addresses_and_marks_duplicate_port_ids(self, live_librenms):
         from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
@@ -557,11 +564,13 @@ class TestIPAddressHTTPAndORM:
         unreported = make_ip("198.18.40.2/24")
         view = _view(DeviceIPAddressTableView, live_librenms)
 
-        prefetched = view._prefetch_netbox_data(device, {"198.18.40.1/24"}, "default")
-
-        assert prefetched["interfaces_by_librenms_id"]["101"] is None
-        assert str(reported.address) in prefetched["ip_addresses_map"]
-        assert str(unreported.address) not in prefetched["ip_addresses_map"]
+        self._register(live_librenms, [{"ip_address": "198.18.40.1", "prefix_length": 24, "port_id": 101}])
+        view, response = self._refresh(live_librenms, device)
+        assert response.status_code == 200
+        rows = self._assessed(view, device).rows
+        assert [row["netbox_ip_id"] for row in rows] == [reported.pk]
+        assert unreported.pk not in [row.get("netbox_ip_id") for row in rows]
+        assert "interface_url" not in rows[0]
 
     def test_a_refresh_uses_http_then_the_render_uses_the_snapshot(self, live_librenms):
         device, _interface = self._device()

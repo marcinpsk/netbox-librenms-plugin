@@ -2,10 +2,11 @@
 
 from uuid import uuid4
 
+from dcim.models import Device
 from django.utils import timezone
 from virtualization.models import VirtualMachine
 
-from netbox_librenms_plugin.acquisition.registry import RESOURCE_SPECS, OwnerPolicy
+from netbox_librenms_plugin.acquisition.registry import RESOURCE_SPECS, OwnerPolicy, Resource
 from netbox_librenms_plugin.acquisition.resources import ACQUIRERS, OOB_ACQUIRERS
 from netbox_librenms_plugin.acquisition.snapshot import (
     MappingLink,
@@ -117,11 +118,13 @@ def oob_source(fetch, resource, mapping, server_key):
         role=MappingRole.OOB,
         librenms_id=link.librenms_id,
         state=link.state,
-        parts=_part_keys(OOB_ACQUIRERS[resource](oob_fetch, link.librenms_id)),
+        parts=_part_keys(
+            OOB_ACQUIRERS[resource](oob_fetch, link.librenms_id if link.state is MappingState.RESOLVED else "oob")
+        ),
     )
 
 
-def _resource_source(fetch, resource, owner, server_key, *, include_serial=False):
+def _resource_source(fetch, resource, owner, server_key, *, include_serial=False, inventory_probes=False):
     """Acquire one resource from the owner's own mapping and, when it links one, its OOB controller."""
     mapping = read_mapping(owner)
     librenms_id = mapping.own_id(server_key)
@@ -131,7 +134,11 @@ def _resource_source(fetch, resource, owner, server_key, *, include_serial=False
         raise SubjectNotMapped(owner, server_key)
     host = None
     if librenms_id is not None:
-        parts = ACQUIRERS[resource](fetch, librenms_id, **spec.acquisition_options(include_serial=include_serial))
+        parts = ACQUIRERS[resource](
+            fetch,
+            librenms_id,
+            **spec.acquisition_options(include_serial=include_serial, inventory_probes=inventory_probes),
+        )
         host = MappingSource(
             role=MappingRole.OWN,
             librenms_id=librenms_id,
@@ -153,7 +160,7 @@ def resource_owner(subject, resource, server_key):
     return get_librenms_sync_device(subject, server_key=server_key) or subject
 
 
-def acquire(subject, *, server_key, resources, include_serial=False):
+def acquire(subject, *, server_key, resources, include_serial=False, inventory_probes=False):
     """
     Acquire the source snapshot of each resource from one configured LibreNMS server.
 
@@ -164,6 +171,7 @@ def acquire(subject, *, server_key, resources, include_serial=False):
         server_key (str): A configured LibreNMS server key.
         resources (Iterable[Resource]): The resources to acquire.
         include_serial (bool): Whether cables acquisition requests serial sensors.
+        inventory_probes (bool): Whether modules acquisition requests the VC root and its children.
 
     Returns:
         SourceSnapshot: Every response obtained, with the outcome of each request.
@@ -175,11 +183,15 @@ def acquire(subject, *, server_key, resources, include_serial=False):
 
     """
     require_server_key(server_key)
+    if not isinstance(subject, (Device, VirtualMachine)):
+        raise ValueError("Source acquisition supports only devices and virtual machines.")
     resources = tuple(resources)
     api = build_librenms_api(server_key)
     if api is None or api.server_key != server_key:
         raise ValueError(f"LibreNMS server {server_key!r} is not configured.")
     for resource in resources:
+        if not isinstance(resource, Resource):
+            raise ValueError("Resources must be Resource values.")
         if resource not in ACQUIRERS:
             raise ValueError(f"No acquisition exists for the {resource} resource.")
         if isinstance(subject, VirtualMachine) and not RESOURCE_SPECS[resource].supports_virtual_machine:
@@ -189,7 +201,12 @@ def acquire(subject, *, server_key, resources, include_serial=False):
     fetch = _Fetch(api)
     sources = {
         resource: _resource_source(
-            fetch, resource, resource_owner(subject, resource, server_key), server_key, include_serial=include_serial
+            fetch,
+            resource,
+            resource_owner(subject, resource, server_key),
+            server_key,
+            include_serial=include_serial,
+            inventory_probes=inventory_probes,
         )
         for resource in resources
     }

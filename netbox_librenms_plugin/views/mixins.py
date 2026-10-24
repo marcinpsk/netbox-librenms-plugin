@@ -1483,97 +1483,10 @@ class VlanAssignmentMixin:
         port["missing_vlans"] = missing_vlans
 
     def _select_most_specific_group(self, groups, device):
-        """
-        Select the most specific VLAN group based on device context.
+        """Return the VLAN assessment's preferred group."""
+        from netbox_librenms_plugin.assessment.vlans import select_most_specific_group
 
-        Priority order (most specific to least specific):
-        1. Rack-scoped (device's rack)
-        2. Location-scoped (device's location, closer ancestors win)
-        3. Site-scoped (device's site)
-        4. Site Group-scoped (device's site's group, closer ancestors win)
-        5. Region-scoped (device's site's region, closer ancestors win)
-        6. Global (no scope)
-
-        Args:
-            groups: List of VLANGroup objects that all contain the same VID
-            device: NetBox Device object
-
-        Returns:
-            VLANGroup or None if no clear winner (e.g., multiple groups at same priority level)
-
-        """
-        from dcim.models import Location, Rack, Region, Site, SiteGroup
-        from django.contrib.contenttypes.models import ContentType
-
-        if not device or not groups:
-            return None
-
-        # Build scope priority lookup for this device
-        # Lower number = higher priority (more specific)
-        scope_priority = {}
-        priority = 0
-
-        # Priority 1: Rack (most specific)
-        if hasattr(device, "rack") and device.rack:
-            rack_ct = ContentType.objects.get_for_model(Rack)
-            scope_priority[(rack_ct.pk, device.rack.pk)] = priority
-            priority += 1
-
-        # Priority 2: Location hierarchy (device's location first, then ancestors)
-        if hasattr(device, "location") and device.location:
-            location_ct = ContentType.objects.get_for_model(Location)
-            for loc in self._get_ancestors(device.location):
-                scope_priority[(location_ct.pk, loc.pk)] = priority
-                priority += 1
-
-        # Priority 3: Site
-        if hasattr(device, "site") and device.site:
-            site_ct = ContentType.objects.get_for_model(Site)
-            scope_priority[(site_ct.pk, device.site.pk)] = priority
-            priority += 1
-
-            # Priority 4: Site Group hierarchy
-            if device.site.group:
-                site_group_ct = ContentType.objects.get_for_model(SiteGroup)
-                for sg in self._get_ancestors(device.site.group):
-                    scope_priority[(site_group_ct.pk, sg.pk)] = priority
-                    priority += 1
-
-            # Priority 5: Region hierarchy
-            if device.site.region:
-                region_ct = ContentType.objects.get_for_model(Region)
-                for reg in self._get_ancestors(device.site.region):
-                    scope_priority[(region_ct.pk, reg.pk)] = priority
-                    priority += 1
-
-        # Priority 6: Global (no scope) - lowest priority
-        global_priority = priority
-
-        # Find the group with the highest priority (lowest number)
-        best_group = None
-        best_priority = float("inf")
-        same_priority_count = 0
-
-        for group in groups:
-            if group.scope_type is None:
-                # Global scope
-                group_priority = global_priority
-            else:
-                scope_key = (group.scope_type.pk, group.scope_id)
-                group_priority = scope_priority.get(scope_key, float("inf"))
-
-            if group_priority < best_priority:
-                best_priority = group_priority
-                best_group = group
-                same_priority_count = 1
-            elif group_priority == best_priority:
-                same_priority_count += 1
-
-        # Only return a group if there's a single winner at the best priority level
-        if same_priority_count == 1 and best_group is not None:
-            return best_group
-
-        return None
+        return select_most_specific_group(groups, device)
 
     def _get_ancestors(self, obj):
         """

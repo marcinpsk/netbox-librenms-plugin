@@ -1,7 +1,8 @@
 """A module action must drop the snapshots of every device it changes, and only those."""
 
-from types import SimpleNamespace
 from unittest.mock import patch
+
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
 import pytest
 
@@ -19,10 +20,10 @@ def _rendered_replace(page_device, inventory, user):
     """Cache *inventory*, then build the post of the Replace form in the modal that row 100 opens."""
     from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
 
-    key = seed_inventory(ReplaceModuleView(), page_device, inventory, librenms_id=7)
+    key = seed_inventory(page_device, inventory, librenms_id=7)
     _action, fields = rendered_modal_form(page_device, 100, "replace-module", user=user)
     request = make_request("post", fields, user=user)
-    return request, make_view(ReplaceModuleView, request, librenms_api=SimpleNamespace(server_key="default")), key
+    return request, make_view(ReplaceModuleView, request, librenms_api=LibreNMSAPI(server_key="default")), key
 
 
 @pytest.mark.django_db
@@ -121,7 +122,7 @@ class TestModuleActionsInvalidateEveryChangedDevice:
             },
             user=user,
         )
-        view = make_view(MoveModuleView, request, librenms_api=SimpleNamespace(server_key="default"))
+        view = make_view(MoveModuleView, request, librenms_api=LibreNMSAPI(server_key="default"))
         seeded = seed_every_tab(source_device)
 
         try:

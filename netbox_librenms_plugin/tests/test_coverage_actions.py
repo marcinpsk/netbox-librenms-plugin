@@ -8064,8 +8064,6 @@ class TestConflictActionsObjectScope:
 
         from virtualization.models import VirtualMachine
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
         target = make_device("conflict-scope-target")
         conflict = VirtualMachine.objects.create(
             pk=9000001, name="private-conflict-owner", cluster=make_cluster("conflict-scope"), status="active"
@@ -8075,14 +8073,17 @@ class TestConflictActionsObjectScope:
             user = grant_view_permission(user, "view", VirtualMachine, constraints={"pk": conflict.pk})
         assert VirtualMachine.objects.restrict(user, "view").filter(pk=conflict.pk).exists() is visible
 
-        get_inventory = LibreNMSAPI.get_device_inventory
+        from netbox_librenms_plugin.librenms_api import _session
 
-        def claim_during_inventory_fetch(api, *args, **kwargs):
-            result = get_inventory(api, *args, **kwargs)
-            seed_mapping(conflict, "default", own=4242)
+        http_get = _session.get
+
+        def claim_during_inventory_fetch(url, *args, **kwargs):
+            result = http_get(url, *args, **kwargs)
+            if url.endswith("/inventory/4242/all"):
+                seed_mapping(conflict, "default", own=4242)
             return result
 
-        with patch.object(LibreNMSAPI, "get_device_inventory", claim_during_inventory_fetch):
+        with patch.object(_session, "get", claim_during_inventory_fetch):
             response = self._post_conflict(user, target)
 
         body = response.content.decode()
@@ -8129,8 +8130,6 @@ class TestConflictActionsObjectScope:
         from django.utils.html import escape
         from virtualization.models import VirtualMachine
 
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
         target = make_device("oob-conflict-scope-target")
         conflict = VirtualMachine.objects.create(
             pk=9000001, name="private-oob-conflict-owner", cluster=make_cluster("oob-conflict-scope"), status="active"
@@ -8141,14 +8140,17 @@ class TestConflictActionsObjectScope:
             user = grant_view_permission(user, "view", VirtualMachine, constraints={"pk": conflict.pk})
         assert VirtualMachine.objects.restrict(user, "view").filter(pk=conflict.pk).exists() is visible
 
-        get_inventory = LibreNMSAPI.get_device_inventory
+        from netbox_librenms_plugin.librenms_api import _session
 
-        def claim_during_inventory_fetch(api, *args, **kwargs):
-            result = get_inventory(api, *args, **kwargs)
-            seed_mapping(conflict, "default", own=4343)
+        http_get = _session.get
+
+        def claim_during_inventory_fetch(url, *args, **kwargs):
+            result = http_get(url, *args, **kwargs)
+            if url.endswith("/inventory/4343/all"):
+                seed_mapping(conflict, "default", own=4343)
             return result
 
-        with patch.object(LibreNMSAPI, "get_device_inventory", claim_during_inventory_fetch):
+        with patch.object(_session, "get", claim_during_inventory_fetch):
             response = self._post_add_as_oob(user, target)
 
         body = response.content.decode()

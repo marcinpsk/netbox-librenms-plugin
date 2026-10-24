@@ -1665,24 +1665,19 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
         return compile_rule_regex(self, "bridge_name_pattern")
 
     @classmethod
-    def _patterns_for_os_queryset(cls, device_os):
+    def patterns_for_os_queryset(cls, device_os):
         """
         Return the stored rows that apply to *device_os*, or None when none can.
 
-        One home for the OS scoping both pattern readers use, so they cannot disagree on which
-        rows apply. ``device_os=None`` loads every stored row (legacy unscoped behaviour); a
-        present-but-blank or non-string OS returns None, because an unknown OS must not
-        re-globalize every vendor's regex.
+        The LAG and bridge readers share this selector. A blank or non-string OS selects no row.
 
         Args:
-            device_os (str | None): The LibreNMS OS to scope to, or None for every stored row.
+            device_os (str): The LibreNMS OS to scope to.
 
         Returns:
             QuerySet | None: The rows to read, or None when the OS admits none.
 
         """
-        if device_os is None:
-            return cls.objects.all()
         os_filter = device_os.strip() if isinstance(device_os, str) else ""
         if not os_filter:
             return None
@@ -1695,15 +1690,11 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
         """
         Return the compiled lag_name_pattern regexes scoped to *device_os*.
 
-        Single home for the OS-scoping + compile-with-skip used by both the relationship
-        resolver and the lazy port_stack-fetch trigger, so the two can't
-        disagree on which patterns apply. ``device_os=None`` loads every stored pattern (legacy
-        unscoped behaviour); a present-but-blank/non-string OS returns none (an unknown OS must
-        not re-globalize every vendor's regex); otherwise the patterns whose ``librenms_os``
-        matches after the same trim/lower normalization as the database constraint.
+        A blank or non-string OS selects no pattern. The selector trims and lowercases the OS
+        with the same normalization as the database constraint.
 
         Args:
-            device_os (str | None): The LibreNMS OS name, or None to load every stored pattern.
+            device_os (str): The LibreNMS OS name. A blank or unknown OS selects no pattern.
 
         Returns:
             list[re.Pattern]: The compiled patterns that apply to the specified OS.
@@ -1712,7 +1703,7 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
             RuleConfigurationError: When an applicable stored pattern does not compile.
 
         """
-        queryset = cls._patterns_for_os_queryset(device_os)
+        queryset = cls.patterns_for_os_queryset(device_os)
         if queryset is None:
             return []
         return [pattern._compiled_pattern for pattern in queryset]
@@ -1738,7 +1729,16 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
             RuleConfigurationError: When an applicable stored pattern does not compile.
 
         """
-        queryset = cls._patterns_for_os_queryset(device_os)
+        return [
+            pattern._compiled_sap_pattern
+            for pattern in cls.sap_patterns_for_os_queryset(device_os)
+            if pattern.sap_name_pattern
+        ]
+
+    @classmethod
+    def sap_patterns_for_os_queryset(cls, device_os):
+        """Return the SAP rule rows that production and recording export apply."""
+        queryset = cls.patterns_for_os_queryset(device_os)
         # "No row for this OS" is not the same answer as "this OS has a row saying it has no SAP
         # notation". Junos is seeded with a blank pattern, so its breakout names keep their
         # relationships; an OS nobody registered is simply unknown, and a Nokia device reporting
@@ -1752,12 +1752,12 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
             # under-skipping writes a service access point into NetBox as a LAG member. This also
             # keeps the unconditional colon skip this replaced, for a device whose OS is unknown.
             queryset = cls.objects.all()
-        return [pattern._compiled_sap_pattern for pattern in queryset if pattern.sap_name_pattern]
+        return queryset
 
     @classmethod
     def compiled_bridge_patterns_for_os(cls, device_os):
         """Return the compiled bridge-name regexes scoped to the LibreNMS OS; raise RuleConfigurationError when invalid."""
-        queryset = cls._patterns_for_os_queryset(device_os)
+        queryset = cls.patterns_for_os_queryset(device_os)
         if queryset is None:
             return []
         return [pattern._compiled_bridge_pattern for pattern in queryset if pattern.bridge_name_pattern]
