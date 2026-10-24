@@ -1,6 +1,6 @@
 """Real database and cache tests for module preview, replacement, and movement."""
 
-from types import SimpleNamespace
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
 from unittest.mock import patch
 
@@ -54,7 +54,7 @@ def _view(view_class, request):
     return make_view(
         view_class,
         request,
-        librenms_api=SimpleNamespace(server_key="default"),
+        librenms_api=LibreNMSAPI(server_key="default"),
     )
 
 

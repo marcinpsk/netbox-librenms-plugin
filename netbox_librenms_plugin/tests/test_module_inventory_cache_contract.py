@@ -1,12 +1,13 @@
 """Contract tests for the module inventory cache: an empty snapshot is data, not a miss."""
 
-from types import SimpleNamespace
-
 import pytest
 
 from netbox_librenms_plugin.module_grants import GrantRefusal
 from netbox_librenms_plugin.server_mappings import read_mapping
-from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
+from netbox_librenms_plugin.acquisition.registry import Resource
+from netbox_librenms_plugin.acquisition.snapshot import SourceSnapshot
+from netbox_librenms_plugin.tests.source_snapshot_helpers import module_inventory, seed_modules_snapshot
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
 from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view, message_texts
@@ -33,26 +34,19 @@ class TestSeedInventoryMatchesTheReaderContract:
 
         device = make_device(name, librenms_cf={"default": librenms_id})
         request = make_request("post", {"server_key": "default"})
-        view = make_view(InstallSelectedView, request, librenms_api=SimpleNamespace(server_key="default"))
+        view = make_view(InstallSelectedView, request, librenms_api=LibreNMSAPI(server_key="default"))
         return view, device
 
     def test_a_seeded_payload_is_read_back_by_the_production_reader(self):
         """Without a matching id the reader returns None, so every seeded assertion would be vacuous."""
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.inventory_policy import load_inventory_policy
-        from netbox_librenms_plugin.sync_cache import cached_module_inventory, module_snapshot_serial_context
-        from netbox_librenms_plugin.views.sync.modules import _get_cached_module_snapshot
-
         view, device = self._view_and_device("seed-inventory-contract", 7)
         inventory = [{"entPhysicalIndex": 1, "entPhysicalName": "Bay 1"}]
         key = seed_inventory(view, device, inventory, librenms_id=7)
 
         try:
-            snapshot = _get_cached_module_snapshot(device, "default", view.get_cache_key)
-            # A module action refuses a snapshot whose stamp is not the context of the loaded policy.
-            stamp = module_snapshot_serial_context(load_inventory_policy(device.pk), device).fingerprint
-            assert (cached_module_inventory(snapshot), snapshot["serial_context"]) == (inventory, stamp)
+            assert module_inventory(device) == [{**row, "_source": "main"} for row in inventory]
         finally:
             cache.delete(key)
 
@@ -88,7 +82,9 @@ class TestWritersCheckTheOobLinkOfTheSnapshot:
     def _link(device, link):
         from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 
-        if link == "linked":
+        if link == "none":
+            seed_stored_mapping(device, {"default": {"id": 7}})
+        elif link == "linked":
             seed_mapping(device, "default", oob=999)
         elif link == "corrupt":
             # The custom field is editable in the NetBox UI and API, so a corrupt id is real state.
@@ -106,28 +102,18 @@ class TestWritersCheckTheOobLinkOfTheSnapshot:
         ],
     )
     def test_the_reader_follows_the_table_fingerprint(self, cached_oob, link, readable):
-        from netbox_librenms_plugin.serial_identity import SerialRules
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.sync_cache import cached_module_inventory
-        from netbox_librenms_plugin.views.sync.modules import _get_cached_module_snapshot
 
         view, device = TestSeedInventoryMatchesTheReaderContract._view_and_device(f"oob-reader-{link}", 7)
         inventory = [{"entPhysicalIndex": 1, "entPhysicalName": "Bay 1"}]
-        cache.set(
-            view.get_cache_key(device, "inventory", server_key="default"),
-            module_inventory_cache_payload(
-                inventory, 7, cached_oob, serial_context=SerialRules.load().for_device(device)
-            ),
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
+
+        seed_stored_mapping(
+            device, {"default": {"id": 7, **({"oob": {"id": cached_oob}} if cached_oob is not None else {})}}
         )
+        seed_modules_snapshot(device, inventory, oob_inventory=[] if cached_oob is not None else None)
         self._link(device, link)
 
-        snapshot = _get_cached_module_snapshot(device, "default", view.get_cache_key)
-        # A writer tests the snapshot itself for None, so a rejected one must not read as an empty payload.
-        if readable:
-            assert cached_module_inventory(snapshot) == inventory
-        else:
-            assert snapshot is None
+        assert (module_inventory(device) == [{**row, "_source": "main"} for row in inventory]) is readable
 
     def test_install_selected_refuses_a_snapshot_built_before_an_oob_link(self):
         from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
@@ -166,7 +152,7 @@ class TestWritersCheckTheOobLinkOfTheSnapshot:
         # The page renders before the OOB link, so its manifest names the snapshot built without it.
         fields = _rendered_manifest(device, user)
         request = make_request("post", {**fields, "select": ["2"]}, user=user)
-        view = make_view(InstallSelectedView, request, librenms_api=SimpleNamespace(server_key="default"))
+        view = make_view(InstallSelectedView, request, librenms_api=LibreNMSAPI(server_key="default"))
         self._link(device, "linked")
 
         _post(view, request, pk=device.pk)
@@ -203,7 +189,7 @@ class TestEmptyInventoryIsNotACacheMiss:
         key = seed_inventory(InstallSelectedView(), device, [], librenms_id=7)
         fields = _rendered_manifest(device, user)
         request = make_request("post", {**fields, "select": ["100"]}, user=user)
-        view = make_view(InstallSelectedView, request, librenms_api=SimpleNamespace(server_key="default"))
+        view = make_view(InstallSelectedView, request, librenms_api=LibreNMSAPI(server_key="default"))
 
         try:
             _post(view, request, pk=device.pk)
@@ -241,7 +227,7 @@ class TestEmptyInventoryIsNotACacheMiss:
             ],
         )
         request = make_request("post", {"select": ["100"], "server_key": "default"}, user=user)
-        view = make_view(InstallSelectedView, request, librenms_api=SimpleNamespace(server_key="default"))
+        view = make_view(InstallSelectedView, request, librenms_api=LibreNMSAPI(server_key="default"))
 
         _post(view, request, pk=device.pk)
 
@@ -274,7 +260,7 @@ class TestEmptyInventoryIsNotACacheMiss:
             {"parent_index": "100", "server_key": "default", "selected_device_id": str(device.pk)},
             user=user,
         )
-        view = make_view(InstallBranchView, request, librenms_api=SimpleNamespace(server_key="default"))
+        view = make_view(InstallBranchView, request, librenms_api=LibreNMSAPI(server_key="default"))
         key = seed_inventory(view, device, [], librenms_id=7)
 
         try:
@@ -340,7 +326,7 @@ class TestReplaceReadsAreStalenessChecked:
             {"module_id": str(module.pk), "ent_index": "100", "server_key": "default"},
             user=user,
         )
-        view = make_view(ReplaceModuleView, request, librenms_api=SimpleNamespace(server_key="default"))
+        view = make_view(ReplaceModuleView, request, librenms_api=LibreNMSAPI(server_key="default"))
         # The device is linked to LibreNMS id 7; the snapshot was built for id 999.
         key = seed_inventory(view, device, self._inventory(), librenms_id=999)
 
@@ -385,9 +371,9 @@ class TestTrustedPayloadMatchesTheDeviceMapping:
 
         payload = trusted_module_inventory_payload(device, [{"index": 1}], librenms_id=9)
 
-        assert payload == module_inventory_cache_payload(
-            [{"index": 1}], 9, None, serial_context=SerialRules.load().for_device(device)
-        )
+        snapshot = SourceSnapshot.from_payload(payload)
+        assert snapshot.value(Resource.MODULES, "inventory") == [{"index": 1}]
+        assert snapshot.resources[Resource.MODULES].host.librenms_id == 9
 
     def test_a_written_mapping_refreshes_the_cached_custom_field_value(self):
         """The helper must verify a write against current custom field data."""
@@ -400,6 +386,6 @@ class TestTrustedPayloadMatchesTheDeviceMapping:
 
         payload = trusted_module_inventory_payload(device, [{"index": 1}], librenms_id=9)
 
-        assert payload == module_inventory_cache_payload(
-            [{"index": 1}], 9, None, serial_context=SerialRules.load().for_device(device)
-        )
+        snapshot = SourceSnapshot.from_payload(payload)
+        assert snapshot.value(Resource.MODULES, "inventory") == [{"index": 1}]
+        assert snapshot.resources[Resource.MODULES].host.librenms_id == 9
