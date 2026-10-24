@@ -235,6 +235,42 @@ def links(device_id):
     return Endpoint(SourceRequest(f"devices/{device_id}/links"), decode)
 
 
+def _inventory_contract(status, body):
+    decoded = _rows_contract("inventory")(status, body)
+    if decoded.outcome is Outcome.OBTAINED and any(
+        value is not None and (type(value) is not int or value < 0)
+        for row in decoded.value
+        for value in (row.get("entPhysicalIndex"), row.get("entPhysicalContainedIn"))
+    ):
+        return Decoded(Outcome.FAILED, reason="Inventory indices must be non-negative integers or absent.")
+    return decoded
+
+
+def inventory(device_id):
+    """Return the full physical inventory endpoint."""
+    return Endpoint(SourceRequest(f"inventory/{device_id}/all"), _inventory_contract)
+
+
+def inventory_filtered(device_id, contained_in):
+    """Return one physical inventory query, without deriving its fallback rows."""
+    return Endpoint(
+        SourceRequest(f"inventory/{device_id}", (("entPhysicalContainedIn", str(contained_in)),)),
+        _inventory_contract,
+    )
+
+
+def transceivers(device_id):
+    """Return the transceiver endpoint."""
+    contract = _rows_contract("transceivers")
+
+    def decode(status, body):
+        if not isinstance(body, dict) or body.get("status") != "ok":
+            return _failed_status(status, body)
+        return contract(status, body)
+
+    return Endpoint(SourceRequest(f"devices/{device_id}/transceivers"), decode)
+
+
 def _optional_link_id(value):
     if value is None:
         return True

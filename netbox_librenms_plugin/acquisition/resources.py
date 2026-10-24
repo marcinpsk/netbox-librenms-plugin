@@ -11,6 +11,7 @@ from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.acquisition.snapshot import MappingState, Outcome
 from netbox_librenms_plugin.cable_scope import cable_port_owner_ids, resolve_remote_device
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
+from netbox_librenms_plugin.import_utils.virtual_chassis import select_vc_parent_index
 from netbox_librenms_plugin.serial_utils import (
     SerialSensorProjection,
     get_serial_sensor_type_patterns,
@@ -130,6 +131,37 @@ def fetch_cable_ports(fetch, owner_ids):
     return parts
 
 
+def effective_inventory(filtered, full, contained_in):
+    """Return obtained query rows, or their full-inventory fallback after a valid empty answer."""
+    if not filtered.obtained:
+        return None
+    if filtered.value:
+        return filtered.value
+    if not full.obtained:
+        return None
+    return [row for row in full.value if str(row.get("entPhysicalContainedIn")) == str(contained_in)]
+
+
+def _modules(fetch, librenms_id, *, inventory_probes=False):
+    parts = {
+        "inventory": fetch(responses.inventory(librenms_id)),
+        "ports": fetch(responses.ports(librenms_id, with_vlans=False)),
+        "transceivers": fetch(responses.transceivers(librenms_id)),
+    }
+    if inventory_probes:
+        root = fetch(responses.inventory_filtered(librenms_id, 0))
+        parts["inventory_root"] = root
+        roots = effective_inventory(root, parts["inventory"], 0)
+        parent = select_vc_parent_index(roots) if roots is not None else None
+        if parent is not None:
+            parts["inventory_children"] = fetch(responses.inventory_filtered(librenms_id, parent))
+    return parts
+
+
+def _oob_modules(fetch, librenms_id):
+    return {"inventory": fetch(responses.inventory(librenms_id))}
+
+
 def _cable_parts(fetch, librenms_id):
     parts = {
         "links": fetch(responses.links(librenms_id)),
@@ -180,6 +212,7 @@ def _cables(fetch, librenms_id, *, include_serial=False):
 
 
 ACQUIRERS = {
+    Resource.MODULES: _modules,
     Resource.INTERFACES: _interfaces,
     Resource.CABLES: _cables,
     Resource.IP_ADDRESSES: _ip_addresses,
@@ -188,6 +221,7 @@ ACQUIRERS = {
 
 # The parts acquired from the owner's out-of-band controller, for a resource that shows its rows.
 OOB_ACQUIRERS = {
+    Resource.MODULES: _oob_modules,
     Resource.INTERFACES: _oob_interfaces,
     Resource.CABLES: _cable_parts,
 }
@@ -211,6 +245,15 @@ def _ip_address_scopes(snapshot):
 
 def _vlan_scopes(snapshot):
     return {"vlans": _blockers(snapshot, Resource.VLANS, ("vlans",))}
+
+
+def _module_scopes(snapshot):
+    resource = Resource.MODULES
+    host = _blockers(snapshot, resource, ("inventory", "ports", "transceivers"))
+    scopes = {"host": host}
+    if snapshot.resources[resource].oob is not None:
+        scopes["oob"] = host + _blockers(snapshot, resource, ("inventory",), MappingRole.OOB)
+    return scopes
 
 
 def _interface_scopes(snapshot):
@@ -283,6 +326,7 @@ def _cable_scopes(snapshot):
 
 # Resource -> a function that returns each scope with its blockers; a scope without blockers is ready.
 SCOPES = {
+    Resource.MODULES: _module_scopes,
     Resource.INTERFACES: _interface_scopes,
     Resource.CABLES: _cable_scopes,
     Resource.IP_ADDRESSES: _ip_address_scopes,
