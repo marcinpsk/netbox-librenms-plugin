@@ -545,6 +545,11 @@ class NetBoxObjectPermissionMixin:
         return self.require_object_permissions_json(method)
 
 
+def server_unavailable_json():
+    """Answer a JSON request that needs a server-scoped snapshot when no LibreNMS server is usable."""
+    return JsonResponse({"status": "error", "message": "No usable LibreNMS server is configured."}, status=503)
+
+
 class LibreNMSAPIMixin:
     """
     A mixin class that provides access to the LibreNMS API.
@@ -617,8 +622,8 @@ class LibreNMSAPIMixin:
 
         The lazy ``librenms_api`` property builds ``LibreNMSAPI()``, whose constructor raises
         KeyError/ValueError on a missing/misconfigured default server. A cached GET render (any sync
-        tab) must not 500 on that: fall back to ``None`` (default scope) so cached rows still render
-        and per-server lookups degrade to their bare-key clause instead of crashing during render.
+        tab) must not 500 on that: ``None`` means no usable server, so the caller reads no snapshot
+        (the key builders refuse a blank key) and renders the tab empty.
 
         Shared by the cables and IP-address table views so the degradation lives in one place
         rather than being maintained per view.
@@ -640,7 +645,7 @@ class LibreNMSAPIMixin:
         ``data["server_key"]`` is untrusted. A non-string (e.g. a JSON list) is unhashable and would
         TypeError-500 a later ``cf_dict.get(server_key)``; a stale/forged string must not address
         another server's cache namespace. Only a string that names a configured server is honoured —
-        anything else falls back to :meth:`_render_server_key` (default scope). Shared by the device
+        anything else falls back to :meth:`_render_server_key` (None when no server is usable). Shared by the device
         verify/render views so this "configured-string-key-or-fallback" rule lives in one place.
 
         Args:
@@ -1061,27 +1066,27 @@ class CacheMixin(SyncSubjectClaimMixin):
     # Every routed cache view is a device sync page unless it declares its own model.
     SYNC_SUBJECT_MODEL_LABEL = "dcim.device"
 
-    def get_cache_key(self, obj, data_type="ports", server_key=None):
+    def get_cache_key(self, obj, data_type, server_key):
         """
         Get the cache key for the object.
 
         Args:
             obj: The object to cache data for
             data_type: Type of data being cached ('ports', 'links', 'inventory', etc.)
-            server_key: Optional LibreNMS server key for namespacing per-server data
+            server_key: The configured LibreNMS server key; a blank key raises ValueError
 
         """
         from netbox_librenms_plugin.sync_cache import sync_snapshot_key
 
         return sync_snapshot_key(obj, data_type, server_key)
 
-    def get_last_fetched_key(self, obj, data_type="ports", server_key=None):
+    def get_last_fetched_key(self, obj, data_type, server_key):
         """Get the cache key for the last fetched time of the object."""
         from netbox_librenms_plugin.sync_cache import sync_last_fetched_key
 
         return sync_last_fetched_key(obj, data_type, server_key)
 
-    def get_vlan_overrides_key(self, obj, server_key=None):
+    def get_vlan_overrides_key(self, obj, server_key):
         """
         Get the cache key for user VLAN group override selections.
 
@@ -1091,7 +1096,7 @@ class CacheMixin(SyncSubjectClaimMixin):
 
         Args:
             obj (Device): The device whose VLAN group override selections are cached.
-            server_key (str | None): The optional LibreNMS server key for the cache namespace.
+            server_key (str): The configured LibreNMS server key; a blank key raises ValueError.
 
         Returns:
             str: The cache key for the device and server.

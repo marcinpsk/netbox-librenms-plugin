@@ -27,7 +27,6 @@ from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, req
 from netbox_librenms_plugin.sync_filters import filter_sync_table, parse_table_filters
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
 from netbox_librenms_plugin.utils import (
-    cache_remaining_ttl,
     get_interface_name_field,
     get_virtual_chassis_members,
     identify_ip_sync_rows,
@@ -761,6 +760,9 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         cache_expiry = None
         # Scoped to the POST-resolved server when provided; else the degrading resolver.
         server_key = server_key or self._render_server_key()
+        if server_key is None:
+            # No usable server means no scoped snapshot to read.
+            return None
 
         if interface_name_field is None:
             interface_name_field = get_interface_name_field(request, obj)
@@ -915,10 +917,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             # were rebuilt above via live calls. Persist them under the
             # *remaining* TTL (don't extend the entry's lifetime) so subsequent cached
             # renders stop re-hitting LibreNMS until the entry would have expired anyway.
-            # cache.ttl() isn't part of Django's core cache API (only django-redis-style backends
-            # expose it). Guard it like base/modules_view does so a non-Redis backend degrades to
-            # "no backfill" rather than raising AttributeError while rendering.
-            remaining_ttl = cache_remaining_ttl(cache, cache_key)
+            remaining_ttl = cache.ttl(cache_key)
             if remaining_ttl and remaining_ttl > 0:
                 cache.set(
                     cache_key,
@@ -933,7 +932,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 )
 
         # Calculate cache expiry
-        cache_ttl = cache_remaining_ttl(cache, self.get_cache_key(obj, "ip_addresses", server_key))
+        cache_ttl = cache.ttl(self.get_cache_key(obj, "ip_addresses", server_key))
         if cache_ttl is not None and cache_ttl > 0:
             cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl)
 

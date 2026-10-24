@@ -60,7 +60,6 @@ from netbox_librenms_plugin.utils import (
     cable_manual_pick_cache_key,
     cable_path_reaches,
     cable_snapshot_token,
-    cache_remaining_ttl,
     get_interface_name_field,
     get_librenms_cable_tag,
     get_virtual_chassis_member,
@@ -76,6 +75,7 @@ from netbox_librenms_plugin.views.mixins import (
     NetBoxObjectPermissionMixin,
     extract_cached_ports,
     parse_request_json,
+    server_unavailable_json,
 )
 
 logger = logging.getLogger(__name__)
@@ -2898,6 +2898,9 @@ class BaseCableTableView(
         """Prepare the context data for cable sync views."""
         # Scoped to the POST-resolved server when provided; else the degrading resolver.
         server_key = server_key or self._render_server_key()
+        if server_key is None:
+            # No usable server means no scoped snapshot to read.
+            return None
         # For VC devices, cache under the sync device's key so SingleCableVerifyView reads the same entry.
         cache_device = self._viewable_sync_device(obj, server_key)
         if cache_device is None:
@@ -3072,7 +3075,7 @@ class BaseCableTableView(
     @staticmethod
     def _cable_cache_expiry(cache_key):
         """Return when the cached snapshot expires, or None when it carries no TTL."""
-        cache_ttl = cache_remaining_ttl(cache, cache_key)
+        cache_ttl = cache.ttl(cache_key)
         if cache_ttl is None or cache_ttl <= 0:
             return None
         return timezone.now() + timezone.timedelta(seconds=cache_ttl)
@@ -3245,26 +3248,11 @@ class SingleCableVerifyView(BaseCableTableView):
             return error
         selected_device_id = data.get("device_id")
         row_id = data.get("row_id")
-        # Read server_key from POST so we use the exact server the user was viewing, but only honour
-        # it when it names a configured server: the raw value scopes the links cache and the
-        # mapping lookups below, so a forged/unconfigured key must not address
-        # another server's namespace (mirrors the interfaces POST path, issues #108/#109). Fall back
-        # to the active server when the POSTed key isn't configured.
-        # get_available_servers() is a dict, so the membership test hashes requested_server_key;
-        # a forged JSON array/object would raise TypeError (unhashable). Require a str first so a
-        # malformed key falls back to the active server instead of crashing the endpoint.
-        # Resolve the configured-server set via the CLASSMETHOD, not self.librenms_api: the lazy
-        # ``librenms_api`` property builds ``LibreNMSAPI()``, whose constructor raises KeyError/
-        # ValueError on a missing/misconfigured default server — so probing membership through the
-        # instance would 500 this verify POST exactly where the sibling IP-verify path degrades.
-        # get_available_servers() needs no instance.
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        requested_server_key = data.get("server_key")
-        if isinstance(requested_server_key, str) and requested_server_key in LibreNMSAPI.get_available_servers():
-            server_key = requested_server_key
-        else:
-            server_key = self._render_server_key()
+        # Honour only a posted key that names a configured server (mirrors the interfaces POST path,
+        # issues #108/#109); anything else falls back to the active server.
+        server_key = self.resolve_requested_server_key(data)
+        if server_key is None:
+            return server_unavailable_json()
 
         formatted_row = {
             "local_port": "",
@@ -3786,7 +3774,7 @@ class CableRemotePickerView(BaseCableTableView):
 
         # Keep unsaved UI state outside the shared LibreNMS snapshot. The key includes the
         # snapshot generation, user, and row, so users cannot see or overwrite each other's picks.
-        remaining_ttl = cache_remaining_ttl(cache, cache_key)
+        remaining_ttl = cache.ttl(cache_key)
         pick_key = cable_manual_pick_cache_key(
             cache_key,
             cable_snapshot_token(cached),

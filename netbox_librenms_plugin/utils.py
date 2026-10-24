@@ -205,38 +205,6 @@ def is_list_of_dicts(value) -> bool:
     return isinstance(value, list) and all(isinstance(item, dict) for item in value)
 
 
-def cache_remaining_ttl(cache, key):
-    """
-    Return the remaining TTL (seconds) for *key*, degrading to ``None`` off Redis.
-
-    django-redis exposes ``cache.ttl(key)``; other backends (Django's ``LocMemCache`` in tests,
-    or any non-Redis deployment) do not, so a bare ``cache.ttl(...)`` raises ``AttributeError``
-    and 500s the cache-expiry render. Route every TTL read through here so the behaviour is
-    uniform across backends and lives in one place instead of drifting per view.
-
-    Args:
-        cache: The Django cache backend instance.
-        key: The cache key to inspect.
-
-    Returns:
-        int | None: The remaining TTL in seconds, ``None`` when the backend can't report it
-            (no ``ttl`` method) or the key has no expiry.
-
-    """
-    ttl = getattr(cache, "ttl", None)
-    if ttl is None:
-        return None
-    try:
-        return ttl(key)
-    except Exception:
-        # A backend that HAS .ttl (django-redis) can still raise at call time — e.g. a transient
-        # Redis connection error. Guarding only the method's ABSENCE would let that propagate into
-        # the cache-expiry render (modules/cables/IP/VLAN/interfaces _build_context) and 500 the very
-        # page this helper exists to protect. Degrade the cosmetic TTL to "unknown" instead.
-        logger.warning("cache.ttl(%r) failed; treating remaining TTL as unknown", key, exc_info=True)
-        return None
-
-
 # The optional "-" admits Junos names such as xe-1/2/0, like get_virtual_chassis_member does.
 _VC_MEMBER_INTERFACE_PATTERN = re.compile(r"^(?P<prefix>[A-Za-z][A-Za-z0-9]*-?)(?P<member>\d+)(?P<suffix>[/:].+)$")
 

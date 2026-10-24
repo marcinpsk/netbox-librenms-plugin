@@ -42,7 +42,7 @@ def _row(ip_with_mask):
 
 def _seed(device, rows):
     cache.set(
-        sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].data_type, SERVER_KEY),
+        sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].source.data_type, SERVER_KEY),
         {
             "ip_addresses": rows,
             "mgmt_ip": "",

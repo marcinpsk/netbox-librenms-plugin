@@ -10,6 +10,7 @@ from netbox_librenms_plugin.data_shapes.signature import (
     compute_shape_signature,
     signature_schema_errors,
 )
+from netbox_librenms_plugin.interface_relationships import resolve_port_relationships
 from netbox_librenms_plugin.tests.recordings import iter_recordings, load_recording
 
 
@@ -862,7 +863,6 @@ else:
         server.load_recording(recording)
         settings.PLUGINS_CONFIG["netbox_librenms_plugin"] = {
             "servers": {"bounded-regex": {"librenms_url": server.url, "api_token": "token", "verify_ssl": False}},
-            "enable_caching": False,
         }
         api = LibreNMSAPI(server_key="bounded-regex")
         expected = {"lag_members": {1: 2} if map_name == "lag_patterns" and not name.endswith("!") else {}}
@@ -974,11 +974,11 @@ def test_recording_replay_treats_unencodable_names_as_non_matches(kind):
         assert ok
         ok, stack = api.get_port_stack(1)
         assert ok
-        result = api.resolve_port_relationships(payload["ports"], stack, **patterns)
+        result = resolve_port_relationships(payload["ports"], stack, **patterns)
         assert result["lag_members"] == ({10: 20} if kind == "sap" else {})
         assert result["bridge_members"] == {}
         payload["ports"][1].update(ifName="Po12", ifDescr="Po12")
-        result = api.resolve_port_relationships(payload["ports"], stack, **patterns)
+        result = resolve_port_relationships(payload["ports"], stack, **patterns)
         assert result["lag_members"] == ({10: 20} if kind == "lag" else {})
         assert result["bridge_members"] == ({10: 20} if kind == "bridge" else {})
     finally:

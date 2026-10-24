@@ -27,6 +27,7 @@ from netbox_librenms_plugin.interface_relationships import (
     build_relationship_maps,
     filter_interface_index,
     relationship_diagnostics_report,
+    resolve_port_relationships,
     resolve_relationship_row,
 )
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
@@ -37,7 +38,6 @@ from netbox_librenms_plugin.sync_filters import filter_sync_table, parse_table_f
 from netbox_librenms_plugin.utils import (
     apply_lag_vlan_fill,
     build_migrated_context,
-    cache_remaining_ttl,
     get_interface_name_field,
     get_interface_port_identity_sets,
     interface_sync_options_menu,
@@ -516,7 +516,7 @@ class BaseInterfaceTableView(
             )
             return
 
-        relationships = self.librenms_api.resolve_port_relationships(
+        relationships = resolve_port_relationships(
             host_ports,
             ps_data,
             device_os=device_os,
@@ -757,7 +757,9 @@ class BaseInterfaceTableView(
         # Read overrides under the same VC-scoped key SaveVlanGroupOverridesView writes
         # (the sync device, not the viewed member) — otherwise an "apply to all" made on a VC
         # member is lost on the next render/member switch. cache_device mirrors that writer.
-        vlan_group_overrides = cache.get(self.get_vlan_overrides_key(cache_device, server_key)) or {}
+        vlan_group_overrides = {}
+        if server_key is not None:
+            vlan_group_overrides = cache.get(self.get_vlan_overrides_key(cache_device, server_key)) or {}
 
         # isinstance(dict) guard (mirroring the IP/VLAN/Cables/Modules render paths and the
         # interfaces SYNC path): a truthy-but-malformed cache entry — a legacy/older-shape snapshot
@@ -1084,7 +1086,8 @@ class BaseInterfaceTableView(
         if fresh_data is not None:
             cached_data = fresh_data
             last_fetched = timezone.now()
-        elif unresolved:
+        elif unresolved or server_key is None:
+            # No usable server means no scoped snapshot to read, so the tab renders empty.
             # ?server_key named a server that no longer resolves (deleted/misconfigured). Its ports
             # snapshot may still be cached, but the failed rebind left self.librenms_api bound to the
             # DEFAULT server, so the per-interface librenms_id index (_get_object_librenms_ids) is
@@ -1181,7 +1184,9 @@ class BaseInterfaceTableView(
         # On an unresolved key the render is empty (above); don't surface the stale server's TTL as
         # a misleading "cached until" on an empty table.
         cache_ttl = (
-            None if unresolved else cache_remaining_ttl(cache, self.get_cache_key(cache_device, "ports", server_key))
+            None
+            if unresolved or server_key is None
+            else cache.ttl(self.get_cache_key(cache_device, "ports", server_key))
         )
         cache_expiry = (
             timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl is not None and cache_ttl > 0 else None
