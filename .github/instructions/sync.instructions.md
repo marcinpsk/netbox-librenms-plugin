@@ -34,6 +34,9 @@ Every base table view follows: **fetch → cache → compare → render**.
 
 ## Sync Action View Pattern
 ```python
+from django.http import HttpResponse
+
+
 class SyncSomeResourceView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
     required_object_permissions = {"POST": [("add", Model), ("change", Model)]}
 
@@ -42,7 +45,10 @@ class SyncSomeResourceView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             return error
         # 1. Resolve object (Device or VM)
         # 2. Read selected items from request.POST.getlist("select")
-        # 3. Load cached data from cache.get(self.get_cache_key(obj, "..."))
+        server_key = self.resolve_posted_server_key_or_none(request.POST)
+        if server_key is None:
+            return HttpResponse(status=400)
+        # 3. Load cached data from cache.get(self.get_cache_key(obj, "...", server_key))
         # 4. Apply changes inside transaction.atomic()
         # 5. Return the action's HTMX response, or redirect to ?tab=<resource>
 ```

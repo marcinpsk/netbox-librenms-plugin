@@ -221,7 +221,7 @@ PLUGINS_CONFIG = {
 
 The cable-sync provenance settings (tag name, tag/cable color, cable description) are managed in the UI — plugin **Settings → Cable Sync** — not in `PLUGINS_CONFIG`, so they can be changed without a NetBox restart. See the [Cable Sync Guide](device_sync/cable_sync.md) for details.
 
-The plugin keeps the sync-tab data in the NetBox cache, so the default cache must be the django-redis backend that NetBox configures. The plugin refuses to start when the default cache is another backend, or when it sets `IGNORE_EXCEPTIONS`.
+The plugin keeps the sync-tab data in the NetBox cache, so the default cache must be the django-redis backend that NetBox configures. The plugin refuses to start when the default cache is another backend, or when `IGNORE_EXCEPTIONS` or `DJANGO_REDIS_IGNORE_EXCEPTIONS` is enabled.
 
 ### 3. Apply Database Migrations
 
