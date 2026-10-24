@@ -26,7 +26,9 @@
 - Devices/VMs map to LibreNMS via the `librenms_id` custom field, then cached if absent. Always call `LibreNMSAPI.get_librenms_id` instead of touching the field directly.
 - Matching is intentionally **exact-only** for site, platform, device type, and role. See `utils.py` (`find_matching_site`, `match_librenms_hardware_to_device_type`, `find_matching_platform`). Do not add fuzzy matching.
 - Sync pipelines acquire LibreNMS data through `acquisition/` (no request, no writes), store the snapshot through `source_cache.py`, assess it against NetBox for the current user, build comparison tables (`tables/`), and render HTMX fragments (`templates/netbox_librenms_plugin/htmx/`). Every tab works this way (`assessment/` holds its derivation). Modules assessment repairs parents, merges transceivers, fills port identities and offsets OOB indices on each read. The snapshot keeps raw inventory indices. Follow the acquisition flow for new resources.
-- Data-shape capture calls `acquire` with inventory probes. It exports response records, projects serial sensors and records OS-scoped name patterns.
+- Data-shape capture calls `acquire` with inventory probes. It exports response records, projects serial sensors and records OS-scoped name patterns. Compression changes references only for the device whose ports it compresses.
+- IP assessment receives the actor and interface-name option. The web adapter adds URLs. IP GET requests do not store interface bindings. VLAN assessment owns source indexing and comparison.
+- Snapshots and tab state use the same object, server, plugin-version and NetBox-release namespace.
 - Source refresh requires the request. Cable reads check serial visibility for the current actor. Cable actions use stored port evidence and require a refresh when that evidence is absent.
 - Cable rows use stable port bindings to select a Virtual Chassis member, then `get_virtual_chassis_member()` when no binding exists. `get_librenms_sync_device()` selects the resource owner by VC priority.
 
