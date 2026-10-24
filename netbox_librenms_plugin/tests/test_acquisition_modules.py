@@ -106,6 +106,22 @@ def test_oob_inventory_is_a_separate_mapping_and_its_failure_leaves_host_ready(l
 
 
 @pytest.mark.django_db
+def test_corrupt_oob_mapping_blocks_modules_without_a_fake_endpoint(live_librenms):
+    subject = device("modules-corrupt-oob", oob={"id": "corrupt", "type": "idrac"})
+    serve(live_librenms.server)
+
+    snapshot = acquire_modules(subject)
+
+    (blocker,) = blocked_scopes(snapshot, Resource.MODULES)["oob"]
+    assert blocker.path == "oob"
+    assert {request["path"] for request in live_librenms.server.requests} == {
+        f"/api/v0/inventory/{HOST_ID}/all",
+        f"/api/v0/devices/{HOST_ID}/ports",
+        f"/api/v0/devices/{HOST_ID}/transceivers",
+    }
+
+
+@pytest.mark.django_db
 def test_host_failure_blocks_obtained_oob_inventory(live_librenms):
     subject = device("modules-host-failed", oob={"id": OOB_ID, "type": "idrac"})
     serve(live_librenms.server)
@@ -142,10 +158,15 @@ def test_vc_modules_use_the_sync_owner(live_librenms):
 @pytest.mark.parametrize(
     "field,value",
     [
-        ("entPhysicalIndex", "1"),
+        ("entPhysicalIndex", "-1"),
+        ("entPhysicalIndex", "١"),
+        ("entPhysicalIndex", " 1"),
+        ("entPhysicalIndex", "1.0"),
+        ("entPhysicalIndex", ""),
+        pytest.param("entPhysicalIndex", "1" * 5000, id="oversized-digit-string"),
         ("entPhysicalIndex", -1),
         ("entPhysicalIndex", True),
-        ("entPhysicalContainedIn", "0"),
+        ("entPhysicalContainedIn", "+0"),
         ("entPhysicalContainedIn", -1),
     ],
 )
@@ -154,6 +175,61 @@ def test_inventory_indices_must_support_assessed_oob_offsets(live_librenms, fiel
     snapshot = acquire_modules(device("modules-index-contract"))
     assert snapshot.record(Resource.MODULES, "inventory").outcome is Outcome.FAILED
     assert not is_ready(snapshot, Resource.MODULES)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("string_field", ["entPhysicalIndex", "entPhysicalContainedIn", "both"])
+def test_string_inventory_indices_assess_host_and_oob_without_changing_source(live_librenms, string_field):
+    from netbox_librenms_plugin.assessment.modules import assess
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import inventory_row, transceiver_row
+
+    def source_rows():
+        rows = [
+            inventory_row(1, "Chassis", physical_class="chassis"),
+            inventory_row(100, "FPC 1", physical_class="container", parent=1, entPhysicalDescr="FPC: Card @ 1/*/*"),
+            inventory_row(200, "PIC 1/0", parent=100, entPhysicalDescr="PIC: Card @ 1/0/*"),
+            inventory_row(300, "Optic", physical_class="port", parent=999, entPhysicalDescr="SFP @ 1/0/0"),
+        ]
+        for row in rows:
+            for field in ("entPhysicalIndex", "entPhysicalContainedIn"):
+                if string_field in (field, "both"):
+                    row[field] = str(row[field]).zfill(4)
+        return rows
+
+    host = source_rows()
+    oob = source_rows()
+    subject = device("modules-string-indices", oob={"id": OOB_ID, "type": "idrac"})
+    serve(
+        live_librenms.server,
+        inventory=host,
+        transceivers=[transceiver_row(300, port_id=7, model="SFP", serial="OPTIC")],
+    )
+    live_librenms.server.register(f"/api/v0/inventory/{OOB_ID}/all", {"status": "ok", "inventory": oob})
+    live_librenms.server.register(f"/api/v0/inventory/{HOST_ID}", {"status": "ok", "inventory": host[:1]})
+
+    snapshot = acquire_modules(subject, inventory_probes=True)
+
+    assert blocked_scopes(snapshot, Resource.MODULES) == {}
+    assert snapshot.value(Resource.MODULES, "inventory") == host
+    assert snapshot.value(Resource.MODULES, "inventory", MappingRole.OOB) == oob
+    assert snapshot.value(Resource.MODULES, "inventory_root") == host[:1]
+    assert snapshot.value(Resource.MODULES, "inventory_children") == host[:1]
+    original = snapshot.to_payload()
+    result = assess(snapshot, subject=subject)
+    assert result["blocked"] == {}
+    assert {row["entPhysicalIndex"]: row["entPhysicalContainedIn"] for row in result["inventory"]} == {
+        1: 0,
+        100: 1,
+        200: 100,
+        300: 200,
+        1001: 0,
+        1100: 1001,
+        1200: 1100,
+        1300: 1200,
+    }
+    assert next(row for row in result["inventory"] if row["entPhysicalIndex"] == 300)["entPhysicalModelName"] == "SFP"
+    assert snapshot.to_payload() == original
+    assert assess(snapshot, subject=subject) == result
 
 
 @pytest.mark.django_db
