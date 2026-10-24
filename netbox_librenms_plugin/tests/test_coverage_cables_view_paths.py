@@ -344,14 +344,15 @@ class TestCableRefreshOobMerge:
         view = _cable_view(settings, librenms_server)
         request = make_request("post", {"server_key": SERVER_KEY}, user=make_superuser())
 
-        _post(view, request, pk=device.pk)
+        response = _post(view, request, pk=device.pk)
 
         from netbox_librenms_plugin.views.base.cables_view import read_cable_assessment
 
         assessment = read_cable_assessment(request, device, SERVER_KEY)
         assert [row["_source"] for row in assessment["links"]] == ["main"]
         assert assessment["blockers"]
-        assert message_texts(request, "warning")
+        assert message_texts(request, "warning") == []
+        assert response.content.count(b'class="alert alert-warning" role="alert"') == 1
         # The corrupt id must never become a request path.
         assert not [r["path"] for r in librenms_server.requests if "not-an-id" in r["path"]]
 
@@ -368,14 +369,15 @@ class TestCableRefreshOobMerge:
         view = _cable_view(settings, librenms_server)
         request = make_request("post", {"server_key": SERVER_KEY}, user=make_superuser())
 
-        _post(view, request, pk=device.pk)
+        response = _post(view, request, pk=device.pk)
 
         from netbox_librenms_plugin.views.base.cables_view import read_cable_assessment
 
         assessment = read_cable_assessment(request, device, SERVER_KEY)
         assert [row["_source"] for row in assessment["links"]] == ["main"]
         assert assessment["blockers"]
-        assert message_texts(request, "warning")
+        assert message_texts(request, "warning") == []
+        assert response.content.count(b'class="alert alert-warning" role="alert"') == 1
         assert "/api/v0/devices/122/links" in [r["path"] for r in librenms_server.requests]
 
     def test_a_malformed_oob_links_payload_warns_and_keeps_the_host_rows(self, librenms_server, settings):
@@ -391,14 +393,15 @@ class TestCableRefreshOobMerge:
         view = _cable_view(settings, librenms_server)
         request = make_request("post", {"server_key": SERVER_KEY}, user=make_superuser())
 
-        _post(view, request, pk=device.pk)
+        response = _post(view, request, pk=device.pk)
 
         from netbox_librenms_plugin.views.base.cables_view import read_cable_assessment
 
         assessment = read_cable_assessment(request, device, SERVER_KEY)
         assert [row["_source"] for row in assessment["links"]] == ["main"]
         assert assessment["blockers"]
-        assert message_texts(request, "warning")
+        assert message_texts(request, "warning") == []
+        assert response.content.count(b'class="alert alert-warning" role="alert"') == 1
 
 
 @pytest.mark.django_db
