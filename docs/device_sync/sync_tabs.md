@@ -64,7 +64,7 @@ In the [filter](#filters), **Sync state** shows the rows whose cable NetBox has,
 
 ## IP Addresses
 
-Available for Devices and Virtual Machines. This tab creates IP addresses and assigns them to matching interfaces. It can also create a missing interface before assigning an address.
+Available for Devices and Virtual Machines. This tab creates IP addresses and assigns them to matching interfaces. It can also create a missing interface before assigning an address. A GET compares the stored source with the current visible NetBox state. It does not store interface bindings.
 
 A refresh reads the addresses, the ports and the device record from LibreNMS, and also the VRFs when a port is in a VRF. If one of these reads fails, the refresh fails and the tab shows no data. The table and the sync use the data of the last refresh, compared with NetBox as you can view it.
 
@@ -92,3 +92,7 @@ The Modules refresh needs host inventory, ports and transceivers. If a linked OO
 fails, host module rows remain available. A notice names each failed source. A host source failure clears
 the table until a successful refresh. The tab and each module action apply current inventory rules to
 the same source snapshot. Parent repair and OOB index offsets do not change the stored source facts.
+
+Data-shape capture keeps the selected device as its subject. In a Virtual Chassis, structural sources
+can belong to the sync owner while IP addresses belong to the selected member. Port compression
+prunes only references that belong to the compressed device. Member addresses remain in the recording.
