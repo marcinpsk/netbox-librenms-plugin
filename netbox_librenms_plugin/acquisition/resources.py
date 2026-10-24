@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from netbox_librenms_plugin.acquisition import responses
 from netbox_librenms_plugin.acquisition.registry import Resource
-from netbox_librenms_plugin.acquisition.snapshot import Outcome
+from netbox_librenms_plugin.acquisition.snapshot import MappingState, Outcome
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.server_mappings import MappingRole
 
@@ -80,6 +80,10 @@ OOB_ACQUIRERS = {
 
 def _blockers(snapshot, resource, parts, role=MappingRole.OWN):
     """Return a blocker for each part that was not obtained; a part that is not applicable blocks nothing."""
+    oob = snapshot.resources[resource].oob
+    if role is MappingRole.OOB and oob is not None and oob.state is MappingState.INVALID:
+        record = snapshot.record(resource, parts[0], role)
+        return (Blocker("oob", record.reason),)
     return tuple(
         Blocker.of(record)
         for record in (snapshot.record(resource, part, role) for part in parts)
