@@ -986,7 +986,6 @@ class TestCableOverwriteHtmxModal:
         seed_mapping(acs, SERVER_KEY, own=13)
         row = make_serial_row(csps[0], target_device.name, acs)
         cache_key = object.__new__(SyncCablesView).get_cache_key(acs, "links", SERVER_KEY)
-        seed_mapping(acs, SERVER_KEY, own=13)
         snapshot = seed_cables_snapshot(
             acs,
             [],

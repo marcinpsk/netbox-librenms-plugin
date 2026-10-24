@@ -40,7 +40,7 @@ The interfaces, cables, IP and VLAN tabs follow: **acquire → store → assess 
   is its own mapping: its failure blocks only the OOB rows.
 
 - **Cables:** host and OOB rows each need their own links and ports. A failed neighbour ports request
-  blocks only that neighbour's rows. The 15 second neighbour budget records omitted requests as failed.
+  blocks only that neighbour's rows. The 15-second neighbour budget records omitted requests as failed.
   `source_cache.refresh()` checks ConsoleServerPort visibility before it enables serial acquisition.
   Each read checks the actor's visibility again. Serial rows need obtained sensors and a valid
   projection. Unrequested sensors do not produce a warning. A refresh never carries old serial rows
