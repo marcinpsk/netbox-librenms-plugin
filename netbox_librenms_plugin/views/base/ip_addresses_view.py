@@ -18,7 +18,7 @@ from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.acquisition.resources import port_vrf_id
 from netbox_librenms_plugin.acquisition.snapshot import Outcome
-from netbox_librenms_plugin.constants import LIBRENMS_GLOBAL_ROUTING_INSTANCE
+from netbox_librenms_plugin.constants import LIBRENMS_GLOBAL_ROUTING_INSTANCE, is_supported_interface_name_field
 from netbox_librenms_plugin.interface_rules import interface_rules_for_request, row_rule_block
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_librenms_ip_entry
 from netbox_librenms_plugin.ip_rules import ip_rules_for_request, row_ip_rule_block
@@ -210,11 +210,11 @@ class IPAssessment:
     interface_name_field: str
 
 
-def assess_ip_snapshot(request, obj, snapshot, server_key):
+def assess_ip_snapshot(request, obj, snapshot, server_key, interface_name_field=None):
     """Assess *snapshot* as the request user, through the IP table's own view."""
     view = BaseIPAddressTableView()
     view.setup(request)
-    return view.assess_snapshot(obj, snapshot, server_key)
+    return view.assess_snapshot(obj, snapshot, server_key, interface_name_field)
 
 
 class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
@@ -225,7 +225,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
     def get_object(self, pk):
         return self.restrict_object_or_404(self.model, pk=pk)
 
-    def assess_snapshot(self, obj, snapshot, server_key):
+    def assess_snapshot(self, obj, snapshot, server_key, interface_name_field=None):
         """
         Assess the snapshot's IP rows against current NetBox state, as the request user may see it.
 
@@ -236,6 +236,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             obj (Device | VirtualMachine): The object the rows belong to.
             snapshot (SourceSnapshot): A stored snapshot that holds the IP address resource.
             server_key (str): The LibreNMS server key that scopes interface matching.
+            interface_name_field (str | None): An optional name field from the verify request.
 
         Returns:
             IPAssessment: The enriched rows, the port evidence and the management IP.
@@ -245,7 +246,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         ip_data = snapshot.value(resource, "addresses")
         vrfs_record = snapshot.record(resource, "vrfs")
         vrf_rows = None if vrfs_record.outcome is Outcome.NOT_APPLICABLE else snapshot.value(resource, "vrfs")
-        interface_name_field = get_interface_name_field(self.request, obj)
+        if not is_supported_interface_name_field(interface_name_field):
+            interface_name_field = get_interface_name_field(self.request, obj)
         mgmt_ip = _management_ip(snapshot.value(resource, "device"))
 
         source_address_counts = defaultdict(int)
@@ -1032,7 +1034,11 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
                 )
 
             snapshot = source_cache.read(obj, Resource.IP_ADDRESSES, server_key)
-            rows = assess_ip_snapshot(request, obj, snapshot, server_key).rows if snapshot is not None else []
+            rows = (
+                assess_ip_snapshot(request, obj, snapshot, server_key, data.get("interface_name_field")).rows
+                if snapshot is not None
+                else []
+            )
 
             # Basic record with default values
             updated_record = {

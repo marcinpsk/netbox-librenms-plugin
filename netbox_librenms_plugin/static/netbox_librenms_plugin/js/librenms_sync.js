@@ -3146,6 +3146,7 @@ function handleVRFChange(select, value) {
             ip_address: fullIpAddress,  // Use full IP address with prefix
             row_id: select.dataset.rowId,
             vrf_id: value,
+            interface_name_field: document.querySelector('input[name="interface_name_field"]:checked')?.value || null,
             server_key: syncServerKey() || null
         })
     })
