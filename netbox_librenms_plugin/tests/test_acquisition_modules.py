@@ -253,6 +253,73 @@ def test_inventory_probes_select_children_after_the_effective_root(live_librenms
     assert len([request for request in live_librenms.server.requests if request["path"].endswith("/all")]) == 1
 
 
+@pytest.fixture
+def padded_inventory():
+    return [
+        {"entPhysicalIndex": "0010", "entPhysicalContainedIn": "0000", "entPhysicalClass": "stack"},
+        {"entPhysicalIndex": "0011", "entPhysicalContainedIn": "0010", "entPhysicalClass": "chassis"},
+        {"entPhysicalIndex": "0012", "entPhysicalContainedIn": "0010", "entPhysicalClass": "0010"},
+        {"entPhysicalIndex": "0021", "entPhysicalContainedIn": "0020", "entPhysicalClass": "chassis"},
+    ]
+
+
+@pytest.mark.django_db
+def test_empty_filtered_inventory_uses_padded_root_for_child_probe(live_librenms, padded_inventory):
+    from netbox_librenms_plugin.acquisition import responses
+
+    serve(live_librenms.server, inventory=padded_inventory, ports=[], transceivers=[])
+    live_librenms.server.register(f"/api/v0/inventory/{HOST_ID}", {"status": "ok", "inventory": []})
+
+    snapshot = acquire_modules(device("modules-padded-root-fallback"), inventory_probes=True)
+
+    assert snapshot.record(Resource.MODULES, "inventory_children").outcome is Outcome.OBTAINED
+    requests = [
+        request for request in live_librenms.server.requests if request["path"] == f"/api/v0/inventory/{HOST_ID}"
+    ]
+    assert [request["query"] for request in requests] == [
+        {"entPhysicalContainedIn": ["0"]},
+        {"entPhysicalContainedIn": ["10"]},
+    ]
+    original = snapshot.to_payload()
+    for part, expected in (("inventory_root", padded_inventory[:1]), ("inventory_children", padded_inventory[1:3])):
+        record = snapshot.record(Resource.MODULES, part)
+        assert record.value == []
+        assert (
+            responses.effective_inventory(
+                record,
+                snapshot.record(Resource.MODULES, "inventory"),
+                params=record.request.params,
+                http_status=record.http_status,
+            )
+            == expected
+        )
+    assert snapshot.value(Resource.MODULES, "inventory") == padded_inventory
+    assert snapshot.to_payload() == original
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "query,expected_rows",
+    [
+        ({"ent_physical_contained_in": 0}, [0]),
+        ({"ent_physical_contained_in": 10}, [1, 2]),
+        ({"ent_physical_contained_in": "0010", "ent_physical_class": "chassis"}, [1]),
+        ({"ent_physical_contained_in": 10, "ent_physical_class": "0010"}, [2]),
+        ({"ent_physical_contained_in": 10, "ent_physical_class": "10"}, []),
+    ],
+)
+def test_filtered_inventory_fallback_compares_indices_and_class_by_their_types(
+    live_librenms, padded_inventory, query, expected_rows
+):
+    serve(live_librenms.server, inventory=padded_inventory)
+    live_librenms.server.register(f"/api/v0/inventory/{HOST_ID}", {"status": "ok", "inventory": []})
+
+    assert live_librenms.api.get_inventory_filtered(HOST_ID, **query) == (
+        True,
+        [padded_inventory[index] for index in expected_rows],
+    )
+
+
 @pytest.mark.django_db
 def test_failed_root_inventory_does_not_request_children(live_librenms):
     serve(live_librenms.server)
