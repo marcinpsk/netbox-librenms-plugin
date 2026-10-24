@@ -42,6 +42,7 @@ unchecked until that review.
 
 | Rule id | Severity | Catches |
 | --- | --- | --- |
+| `inventory-fallback-normalizes-indices` | error | String-coerced equality between a row's dynamic field and a filter value inside `effective_inventory`. Containment filters need numeric equality. |
 | `import-disclosure` | error | A `warnings`/`issues` message that names a NetBox object no `restrict()` call filtered. |
 | `import-disclosure-sanitizer-shadow` | error | A local definition that impersonates a permission API trusted by `import-disclosure`. |
 | `caught-error-text` | error | A read of a caught error that can be a ValidationError, a database error or an `AbortRequest`, other than through `exception_text_for` or `write_failure_message`, the module logger or a `raise`. |
@@ -387,3 +388,8 @@ arbitrary write set needs. Real PostgreSQL concurrency tests cover the writer pr
 The `recording-export-needs-response-keys` rule requires recording export helpers to keep
 response keys while selecting captured source responses. This lets an export exclude responses
 acquired only for neighbour matching. Other snapshot readers can still read response values.
+
+`inventory-fallback-normalizes-indices` covers the direct `str(row.get(field)) == str(value)`
+comparison and its reverse inside `effective_inventory`. It allows numeric index comparison
+and exact physical class comparison. Comparisons through aliases, other functions, and literal
+field names are outside this narrow check.
