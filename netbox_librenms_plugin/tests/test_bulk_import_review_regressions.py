@@ -28,34 +28,17 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
 
 
 @pytest.fixture(autouse=True)
-def _configured_default_server(monkeypatch):
-    """Give these import regressions one explicit usable server."""
-    from netbox_librenms_plugin.server_selection import LibreNMSAPI
-
-    monkeypatch.setattr(
-        LibreNMSAPI,
-        "get_available_servers",
-        classmethod(lambda _cls: {"default": "Default"}),
-    )
+def _configured_default_server(live_librenms):
+    """Configure the real loopback client for each import regression."""
 
 
-class _LibreNMSBoundary:
-    """Real-shape stand-in for the external LibreNMS HTTP boundary."""
-
-    server_key = "default"
-    cache_timeout = 300
-
-    def __init__(self, rows):
-        self.rows = rows
-        self.calls = []
-
-    def get_device_info(self, device_id, **kwargs):
-        self.calls.append((device_id, kwargs))
-        row = self.rows.get(device_id)
-        return (row is not None, row)
-
-    def get_inventory_filtered(self, _device_id, **_kwargs):
-        return True, []
+def _serve_rows(live_librenms, rows):
+    """Serve real LibreNMS device and inventory responses for these import rows."""
+    for device_id, row in rows.items():
+        live_librenms.server.register(f"/api/v0/devices/{device_id}", {"status": "ok", "devices": [row]})
+        live_librenms.server.register(f"/api/v0/inventory/{device_id}", {"status": "ok", "inventory": []})
+        live_librenms.server.register(f"/api/v0/inventory/{device_id}/all", {"status": "ok", "inventory": []})
+    return live_librenms.api
 
 
 def _cache_rows(rows):
@@ -118,7 +101,7 @@ def _scoped_import_user(visible_device, username):
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("view_name", ["confirm", "direct"])
-def test_collision_response_redacts_target_outside_view_scope(view_name):
+def test_collision_response_redacts_target_outside_view_scope(view_name, live_librenms):
     """Collision responses must block without exposing a hidden target's name, PK, or URL."""
     from netbox_librenms_plugin.views.imports.actions import BulkImportConfirmView, BulkImportDevicesView
 
@@ -127,7 +110,7 @@ def test_collision_response_redacts_target_outside_view_scope(view_name):
     user = _scoped_import_user(visible, f"collision-scope-{view_name}")
     rows = _serial_collision_rows(96001, 96002, hidden.serial, view_name)
     _cache_rows(rows)
-    api = _LibreNMSBoundary(rows)
+    api = _serve_rows(live_librenms, rows)
     request = make_request(
         data={"select": ["96001", "96002"], "server_key": "default"},
         user=user,
@@ -189,13 +172,12 @@ def test_collision_scope_handles_virtual_machines_with_real_permissions():
 
 
 @pytest.mark.django_db
-def test_background_collision_gate_uses_job_user_scope(monkeypatch):
+def test_background_collision_gate_uses_job_user_scope(monkeypatch, live_librenms):
     """Verify the real job runner blocks device and VM imports without exposing targets outside the user's view scope."""
     from core.models import Job
     from dcim.models import Device
     from virtualization.models import VirtualMachine
 
-    from netbox_librenms_plugin import librenms_api as librenms_api_module
     from netbox_librenms_plugin.jobs import ImportDevicesJob
 
     target = make_device("visible-job-collision-target")
@@ -216,8 +198,7 @@ def test_background_collision_gate_uses_job_user_scope(monkeypatch):
         "location": "Review location",
         "os": "review-os",
     }
-    api = _LibreNMSBoundary(rows)
-    monkeypatch.setattr(librenms_api_module, "LibreNMSAPI", lambda server_key=None: api)
+    _serve_rows(live_librenms, rows)
     job_row = Job.objects.create(
         name="Bulk collision scope regression",
         user=user,
@@ -266,19 +247,17 @@ def test_background_collision_gate_uses_job_user_scope(monkeypatch):
 
 
 @pytest.mark.django_db
-def test_unresolved_warning_does_not_claim_an_existing_row_imported(monkeypatch):
+def test_unresolved_warning_does_not_claim_an_existing_row_imported(monkeypatch, live_librenms):
     """The precheck warning must not report success before the real importer finishes."""
     from dcim.models import Device
 
-    from netbox_librenms_plugin.import_utils import bulk_import as bulk_import_module
     from netbox_librenms_plugin.views.imports.actions import BulkImportDevicesView
 
     existing = make_device("existing-row-is-skipped")
     rows = _collision_rows(96101, 96102, existing.name)
     rows.pop(96102)
     _cache_rows(rows)
-    api = _LibreNMSBoundary(rows)
-    monkeypatch.setattr(bulk_import_module, "LibreNMSAPI", lambda server_key=None: api)
+    api = _serve_rows(live_librenms, rows)
     request = make_request(
         data={"select": ["96101", "96102"], "server_key": "default"},
         user=make_superuser("bulk-result-superuser"),
@@ -617,7 +596,7 @@ def test_a_failed_module_bay_count_write_fails_the_chassis_create():
 
 
 @pytest.mark.django_db
-def test_collision_precheck_skips_import_prerequisite_queries():
+def test_collision_precheck_skips_import_prerequisite_queries(live_librenms):
     """Collision matching must not query site, type, role, or platform import prerequisites."""
     from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
 
@@ -637,7 +616,7 @@ def test_collision_precheck_skips_import_prerequisite_queries():
         },
     }
     rows[96201]["location"] = target_a.site.name
-    api = _LibreNMSBoundary(rows)
+    api = _serve_rows(live_librenms, rows)
 
     with CaptureQueriesContext(connection) as captured:
         collisions, unresolved = detect_collisions_for_device_ids(
