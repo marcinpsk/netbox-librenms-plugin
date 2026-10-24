@@ -262,44 +262,25 @@ def _run_install_single(device, item, index_map, module_types):
 class TestInventoryCacheContract:
     """Module actions accept only current, per-device inventory snapshots."""
 
-    @pytest.mark.parametrize(
-        ("payload", "expected"),
-        [
-            ({"inventory": []}, []),
-            ({"inventory": [{"entPhysicalIndex": 1}]}, [{"entPhysicalIndex": 1}]),
-            (None, None),
-            ([], None),
-            ({"inventory": "bad"}, None),
-            ({"inventory": ["bad"]}, None),
-            ({"version": True, "inventory": []}, None),
-        ],
-    )
-    def test_inventory_container_validation(self, payload, expected):
-        from netbox_librenms_plugin.sync_cache import MODULE_INVENTORY_CACHE_VERSION, cached_module_inventory
-
-        if isinstance(payload, dict) and "version" not in payload:
-            payload = {"version": MODULE_INVENTORY_CACHE_VERSION, **payload}
-        assert cached_module_inventory(payload) == expected
-
     def test_current_fingerprint_returns_the_real_cached_rows(self, live_librenms):
-        from netbox_librenms_plugin.views.sync.modules import _get_cached_inventory_for_device
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import module_inventory
 
         device = make_device("module-current-cache", librenms_cf={"default": 41})
         view = _view(_cache_view_class(), _post_request({}), live_librenms)
         rows = [_inventory_item(1, "CARD", "Slot 1")]
         key = seed_inventory(view, device, rows, librenms_id=41)
 
-        assert _get_cached_inventory_for_device(device, "default", view.get_cache_key) == rows
-        assert cache.get(key)["librenms_id"] == 41
+        assert module_inventory(device) == [{**row, "_source": "main"} for row in rows]
+        assert cache.get(key)["resources"][0]["host"]["librenms_id"] == 41
 
     def test_stale_fingerprint_is_rejected(self, live_librenms):
-        from netbox_librenms_plugin.views.sync.modules import _get_cached_inventory_for_device
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import module_inventory
 
         device = make_device("module-stale-cache", librenms_cf={"default": 42})
         view = _view(_cache_view_class(), _post_request({}), live_librenms)
         seed_inventory(view, device, [_inventory_item(1, "CARD", "Slot 1")], librenms_id=99)
 
-        assert _get_cached_inventory_for_device(device, "default", view.get_cache_key) is None
+        assert module_inventory(device) is None
 
     def test_an_authorized_grant_hands_back_the_cached_row_itself(self, live_librenms):
         """The writer reads the row from the authenticated snapshot it checked the grant against."""
@@ -319,7 +300,8 @@ class TestInventoryCacheContract:
 
         assert row["_librenms_port_id"] == 42
         assert row["_librenms_ifname"] == "Te1/1/1"
-        assert granted.inventory == [item]
+        assert len(granted.inventory) == 1
+        assert granted.inventory[0]["entPhysicalSerialNum"] == "NEW"
         assert any(entry is row for entry in granted.inventory)
 
     def test_a_grant_posted_without_its_index_is_stale(self, live_librenms):
@@ -2939,7 +2921,10 @@ def test_preview_and_replace_normalize_cached_serial_once(client, raw_serial, ex
     response = client.post(replace_url, replace_fields)
     assert response.status_code == 302
     assert Module.objects.get(module_bay=bay).serial == expected
-    assert cache.get(key)["inventory"][0]["entPhysicalSerialNum"] == raw_serial
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import stored_source_value
+    from netbox_librenms_plugin.acquisition.registry import Resource
+
+    assert stored_source_value(device, Resource.MODULES, "inventory")[0]["entPhysicalSerialNum"] == raw_serial
 
 
 @pytest.mark.django_db
@@ -3078,7 +3063,6 @@ def test_integrated_module_badge_tracks_the_active_theme():
 @pytest.mark.parametrize("oob_index,oob_parent", [(-500, 0), (1, -500)])
 def test_refresh_drops_out_of_spec_oob_inventory(live_librenms, oob_index, oob_parent):
     """Negative OOB index fields prevent the refresh from caching an inventory snapshot."""
-    from django.core.cache import cache
 
     from netbox_librenms_plugin.server_mappings import attach_oob
 
@@ -3114,9 +3098,14 @@ def test_refresh_drops_out_of_spec_oob_inventory(live_librenms, oob_index, oob_p
     response = view_post(view, request, pk=device.pk)
 
     assert response.status_code == 200
-    # The refused OOB payload makes the refresh incomplete, so it must cache no snapshot.
-    assert cache.get(view.get_cache_key(device, "inventory", server_key="default")) is None
-    assert b"OOB controller inventory fetch failed" in response.content
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.acquisition.resources import blocked_scopes
+
+    snapshot = source_cache.read(device, Resource.MODULES, "default")
+    assert snapshot is not None
+    assert set(blocked_scopes(snapshot, Resource.MODULES)) == {"oob"}
+    assert b"inventory/999/all" in response.content
 
 
 @pytest.mark.django_db
@@ -3151,7 +3140,7 @@ def test_refresh_rejects_a_negative_main_inventory_index(live_librenms):
 
     assert response.status_code == 200
     assert cache.get(view.get_cache_key(device, "inventory", server_key="default")) is None
-    assert b"Failed to fetch inventory from LibreNMS" in response.content
+    assert b"inventory/778/all" in response.content
 
 
 @pytest.mark.django_db

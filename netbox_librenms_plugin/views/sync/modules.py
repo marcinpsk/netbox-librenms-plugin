@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from urllib.parse import quote_plus, urlsplit
 
 from django.contrib import messages
-from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, models, transaction
 from django.http import HttpResponse, QueryDict
@@ -49,8 +48,6 @@ from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
-    cached_module_inventory,
-    module_inventory_oob_matches,
     schedule_request_cache_mutation,
 )
 from netbox_librenms_plugin.transactions import classify_conflict, saved_in_scope, update_existing_row
@@ -74,6 +71,7 @@ from netbox_librenms_plugin.utils import (
 from netbox_librenms_plugin.utils import coerce_positive_int as _coerce_positive_int
 from netbox_librenms_plugin.views.base.modules_view import (
     BaseModuleTableView,
+    read_module_assessment,
     DeviceIdentity,
     _get_item_port_identity,
     _inventory_item_key,
@@ -240,42 +238,6 @@ def _module_already_on_device(device, serial, *, exclude_pk=None):
     return conflicts.first()
 
 
-def _get_cached_inventory_for_device(sync_device, server_key, get_cache_key):
-    """
-    Return cached inventory for ``sync_device``, or ``None`` when it is absent or stale.
-
-    Cache entries are namespaced by server key and include ``librenms_id``.
-    When both current and cached IDs are valid positive integers, they must
-    match; otherwise cached data is treated as stale. The OOB controller link must
-    match too, the same check the module table makes. A malformed payload or one
-    from an older schema version is deleted and read as absent.
-
-    Args:
-        sync_device (object): The NetBox device whose inventory is requested.
-        server_key (str): The LibreNMS server key for the cache namespace.
-        get_cache_key (Callable): The function that builds the inventory cache key.
-
-    Returns:
-        list[dict] | None: The cached inventory, or ``None`` when it is absent or stale.
-
-    """
-    cache_key = get_cache_key(sync_device, "inventory", server_key=server_key)
-    cached_payload = cache.get(cache_key)
-    inventory = cached_module_inventory(cached_payload)
-    if inventory is None:
-        cache.delete(cache_key)
-        return None
-
-    current_librenms_id = _coerce_positive_int(read_mapping(sync_device).own_id(server_key))
-    cached_librenms_id = _coerce_positive_int(cached_payload.get("librenms_id"))
-    if current_librenms_id is None or cached_librenms_id is None or current_librenms_id != cached_librenms_id:
-        return None
-    if not module_inventory_oob_matches(cached_payload, sync_device, server_key):
-        return None
-
-    return inventory
-
-
 def _module_write_failure(exc, model, user):
     """
     Return the text of a failed module write that a page may show *user*.
@@ -383,10 +345,13 @@ def _authorize_module_grant(view, page_device, server_key, action, token):
     from netbox_librenms_plugin.models import RuleConfigurationError
 
     sync_device = _get_sync_device_for_inventory(page_device, server_key)
-    inventory = _get_cached_inventory_for_device(sync_device, server_key, view.get_cache_key)
-    if inventory is None:
-        raise GrantRefused(GrantRefusal.CACHE_MISSING)
     try:
+        assessed = read_module_assessment(sync_device, server_key)
+        if assessed is None:
+            raise GrantRefused(GrantRefusal.CACHE_MISSING)
+        inventory = assessed["inventory"]
+        if inventory is None:
+            raise GrantRefused(GrantRefusal.CACHE_MISSING)
         policy = load_inventory_policy(page_device.pk)
     except Device.DoesNotExist as exc:
         raise GrantRefused(GrantRefusal.DESTINATION) from exc
