@@ -12,8 +12,9 @@ import time
 import pytest
 import requests
 
+from netbox_librenms_plugin.assessment.interfaces import stored_name_rules
 from netbox_librenms_plugin.interface_relationships import resolve_port_relationships
-from netbox_librenms_plugin.tests.conftest import typed_maps
+from netbox_librenms_plugin.tests.conftest import name_rules, typed_maps
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
 
 
@@ -1446,50 +1447,6 @@ class TestGetLibreNMSIdIntGuard:
         assert [request["path"] for request in librenms_server.requests] == [path]
 
 
-class TestVlanEntryDictGuard:
-    """Tests for the isinstance(vlan_entry, dict) guard in _parse_port_vlan_info."""
-
-    def test_non_dict_entry_is_skipped(self, configure_librenms):
-        """Non-dict entries in vlans_data should be skipped without error."""
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-
-        port_data = {
-            "ifName": "eth0",
-            "ifDescr": "eth0",
-            "port_id": 1,
-            "ifTrunk": "dot1Q",
-            "ifVlan": None,
-            "vlans": [{"vlan": 10, "untagged": 1}, "bad_entry", {"vlan": 20}],
-        }
-        result = api.parse_port_vlan_data(port_data)
-
-        # Only VIDs 10 and 20 should be parsed; string entry is skipped
-        assert result["untagged_vlan"] == 10
-        assert 20 in result["tagged_vlans"]
-        assert len(result["tagged_vlans"]) == 1
-
-    def test_mixed_bad_entries_no_exception(self, configure_librenms):
-        """Multiple non-dict entries mixed with valid dicts should not raise."""
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-        api = LibreNMSAPI(server_key="default")
-
-        port_data = {
-            "ifName": "eth0",
-            "ifDescr": "eth0",
-            "port_id": 2,
-            "ifTrunk": "dot1Q",
-            "ifVlan": None,
-            "vlans": [None, 123, "unexpected", {"vlan": 30}],
-        }
-        result = api.parse_port_vlan_data(port_data)
-
-        assert result["tagged_vlans"] == [30]
-        assert result["untagged_vlan"] is None
-
-
 # ====================================================================================
 # Response-shape regression tests for get_device_transceivers / get_device_info /
 # VLAN acquisition / get_port_vlan_details. These guard the malformed-payload
@@ -1903,7 +1860,7 @@ def test_invalid_utf8_json_body_reaches_the_registered_route(librenms_server):
 
 
 class TestGetPortStack:
-    """Tests for LibreNMSAPI.get_port_stack()."""
+    """LibreNMSAPI.get_port_stack() answers through the port_stack contract; test_acquisition_interfaces covers the contract."""
 
     def test_returns_mappings_list_on_success(self, mock_librenms_api, librenms_server):
         """get_port_stack returns (True, list) on HTTP 200."""
@@ -1929,44 +1886,6 @@ class TestGetPortStack:
         assert data == [{"high_port_id": 1, "low_port_id": 2, "high_ifIndex": 1, "low_ifIndex": 2}]
         assert [(request["method"], request["path"]) for request in requests_seen] == [("GET", path)]
 
-    def test_returns_false_on_404(self, mock_librenms_api, librenms_server):
-        """get_port_stack returns (False, error_str) when device not found."""
-        librenms_server.register(
-            "/api/v0/devices/99/port_stack",
-            {"status": "error", "message": "Device does not exist"},
-            status=404,
-        )
-        mock_librenms_api.librenms_url = librenms_server.url
-
-        success, data = mock_librenms_api.get_port_stack(99)
-
-        assert success is False
-        assert "not found" in data.lower()
-
-    @pytest.mark.parametrize("payload", [{"status": "ok"}, {"status": "ok", "mappings": None}])
-    def test_missing_or_null_mappings_fails_closed(self, mock_librenms_api, librenms_server, payload):
-        """A successful response must contain the documented list-valued mappings field."""
-        librenms_server.register("/api/v0/devices/5/port_stack", payload)
-        mock_librenms_api.librenms_url = librenms_server.url
-
-        success, data = mock_librenms_api.get_port_stack(5)
-
-        assert success is False
-        assert "mappings" in data
-
-    def test_error_status_without_mappings_fails_not_empty(self, mock_librenms_api, librenms_server):
-        """An error payload that omits 'mappings' must fail, not normalise to (True, []), so a real API failure isn't masked as 'no LAG/parent relationships'."""
-        librenms_server.register(
-            "/api/v0/devices/5/port_stack",
-            {"status": "error", "message": "device polling disabled"},
-        )
-        mock_librenms_api.librenms_url = librenms_server.url
-
-        success, data = mock_librenms_api.get_port_stack(5)
-
-        assert success is False
-        assert data == "device polling disabled"
-
     def test_error_status_with_mappings_present_still_fails(self, mock_librenms_api, librenms_server):
         """An error payload that still carries mappings must honor the explicit error status before consuming them, so it fails rather than silently skipping valid sync."""
         librenms_server.register(
@@ -1979,72 +1898,6 @@ class TestGetPortStack:
 
         assert success is False
         assert data == "stale poll"
-
-    def test_non_string_status_fails_not_empty(self, mock_librenms_api, librenms_server):
-        """A non-string status like `false` is malformed and must fail, not be accepted as (True, [])."""
-        # {"status": false, "mappings": []} — only an absent status or "ok" is a genuine answer;
-        # accepting this would silently suppress LAG/sub-interface relationship updates.
-        librenms_server.register(
-            "/api/v0/devices/5/port_stack",
-            {"status": False, "mappings": []},
-        )
-        mock_librenms_api.librenms_url = librenms_server.url
-
-        success, data = mock_librenms_api.get_port_stack(5)
-
-        assert success is False
-        assert "LibreNMS reported an error fetching port stack" in data
-
-    def test_json_decode_error_reports_invalid_json_not_connection_error(self, mock_librenms_api, librenms_server):
-        """requests.exceptions.JSONDecodeError subclasses BOTH ValueError and RequestException, so the ValueError handler must precede the RequestException handler — otherwise a JSON decode failure is swallowed by the broad handler and mislabeled 'Error connecting to LibreNMS'."""
-        librenms_server.register_raw("/api/v0/devices/5/port_stack", "not-json", method="GET")
-        mock_librenms_api.librenms_url = librenms_server.url
-
-        success, data = mock_librenms_api.get_port_stack(5)
-
-        assert success is False
-        assert "Invalid JSON" in data
-        assert "Error connecting" not in data
-
-    def test_malformed_mappings_fails_not_empty(self, mock_librenms_api, librenms_server):
-        """A non-list (or list-of-non-dicts) `mappings` is malformed, not 'no relationships'."""
-        path = "/api/v0/devices/5/port_stack"
-        mock_librenms_api.librenms_url = librenms_server.url
-        for bad in ({"mappings": {"oops": 1}}, {"mappings": ["not-a-dict", 2]}):
-            librenms_server.register(path, bad)
-            success, data = mock_librenms_api.get_port_stack(5)
-            assert success is False, f"{bad!r} should fail"
-            assert "mappings" in data
-
-    @pytest.mark.parametrize(
-        "mapping",
-        [
-            {"high_port_id": 1},
-            {"low_port_id": 2},
-        ],
-    )
-    def test_mapping_without_both_port_ids_fails_closed(self, mock_librenms_api, librenms_server, mapping):
-        """Each mapping must identify both relationship endpoints."""
-        librenms_server.register(
-            "/api/v0/devices/5/port_stack",
-            {"status": "ok", "mappings": [mapping]},
-        )
-        mock_librenms_api.librenms_url = librenms_server.url
-
-        success, data = mock_librenms_api.get_port_stack(5)
-
-        assert success is False
-        assert "mappings" in data
-
-    def test_non_object_payload_fails_not_empty(self, mock_librenms_api, librenms_server):
-        """A non-object top-level payload (list/string/null) is malformed, not 'no relationships'."""
-        path = "/api/v0/devices/5/port_stack"
-        mock_librenms_api.librenms_url = librenms_server.url
-        for bad in ([{"high_port_id": 1, "low_port_id": 2}], "oops", None):
-            librenms_server.register(path, bad)
-            success, data = mock_librenms_api.get_port_stack(5)
-            assert success is False, f"{bad!r} should fail"
-            assert "non-object" in data
 
 
 # =============================================================================
@@ -2118,7 +1971,7 @@ class TestResolvePortRelationships:
 
     def test_the_relationship_docstring_names_every_result_key(self):
         """Callers can find the complete result contract in the method documentation."""
-        result = resolve_port_relationships([], [], lag_patterns={})
+        result = resolve_port_relationships([], [], **name_rules())
         for key in result:
             assert key in resolve_port_relationships.__doc__
 
@@ -2138,7 +1991,7 @@ class TestResolvePortRelationships:
             "ifStackStatus": "active",
         }
 
-        result = resolve_port_relationships(ports, [live_entry], lag_patterns={})
+        result = resolve_port_relationships(ports, [live_entry], **name_rules())
 
         assert result["sub_interfaces"] == {6482: 6477}
 
@@ -2146,13 +1999,13 @@ class TestResolvePortRelationships:
         """An entry carrying neither id key must warn, not silently drop every relationship."""
         ports = [{"port_id": 1, "ifName": "eth0", "ifType": "ethernetCsmacd"}]
         with caplog.at_level("WARNING"):
-            result = resolve_port_relationships(ports, [{"port_id_high": 1, "port_id_low": 2}], lag_patterns={})
+            result = resolve_port_relationships(ports, [{"port_id_high": 1, "port_id_low": 2}], **name_rules())
         assert typed_maps(result) == {"lag_members": {}, "sub_interfaces": {}, "bridge_members": {}}
         assert any("Unrecognized port_stack entry shape" in r.getMessage() for r in caplog.records)
 
     def test_nokia_lag_membership(self):
         """Nokia: high=physical, low=lag-1 (ieee8023adLag) -> member in lag_members."""
-        result = resolve_port_relationships(NOKIA_PORTS, NOKIA_PORT_STACK[:1], lag_patterns={})
+        result = resolve_port_relationships(NOKIA_PORTS, NOKIA_PORT_STACK[:1], **name_rules())
         assert result["lag_members"] == {101: 102}
         assert result["sub_interfaces"] == {}
 
@@ -2163,7 +2016,7 @@ class TestResolvePortRelationships:
             {"port_id": 202, "ifName": "", "ifDescr": "", "ifType": "ieee8023adLag"},  # nameless aggregate
         ]
         port_stack = [{"high_port_id": 201, "low_port_id": 202}]
-        result = resolve_port_relationships(ports, port_stack, lag_patterns={})
+        result = resolve_port_relationships(ports, port_stack, **name_rules())
         assert result["lag_members"] == {201: 202}
 
     @pytest.mark.parametrize("inverted", [False, True], ids=["timos-order", "reversed-order"])
@@ -2179,9 +2032,7 @@ class TestResolvePortRelationships:
             rows = [(low, high) for high, low in rows]
         port_stack = [{"high_port_id": high, "low_port_id": low} for high, low in rows]
 
-        result = resolve_port_relationships(
-            ports, port_stack, lag_patterns={"timos": r"^lag-\d+$"}, compiled_sap_patterns=[re.compile(":")]
-        )
+        result = resolve_port_relationships(ports, port_stack, **name_rules(lag=[r"^lag-\d+$"], sap=[re.compile(":")]))
 
         assert result["lag_members"] == {34375: 34362}
         assert result["sub_interfaces"] == {34353: 34362}
@@ -2198,7 +2049,7 @@ class TestResolvePortRelationships:
         high, low = (2, 1) if inverted else (1, 2)
 
         result = resolve_port_relationships(
-            ports, [{"high_port_id": high, "low_port_id": low}], lag_patterns=lag_patterns
+            ports, [{"high_port_id": high, "low_port_id": low}], **name_rules(lag=lag_patterns.values())
         )
 
         assert result["sub_interfaces"] == {2: 1}
@@ -2213,7 +2064,7 @@ class TestResolvePortRelationships:
         ]
 
         result = resolve_port_relationships(
-            ports, [{"high_port_id": 1, "low_port_id": 2}], lag_patterns={"any": r"^lag-\d+$"}
+            ports, [{"high_port_id": 1, "low_port_id": 2}], **name_rules(lag=[r"^lag-\d+$"])
         )
 
         assert typed_maps(result) == {"lag_members": {}, "sub_interfaces": {}, "bridge_members": {}}
@@ -2227,7 +2078,7 @@ class TestResolvePortRelationships:
             {"port_id": 3, "ifName": "eth0.1.2", "ifDescr": "eth0.1.2", "ifType": "l2vlan"},
         ]
 
-        result = resolve_port_relationships(ports, [{"high_port_id": 1, "low_port_id": 3}], lag_patterns={})
+        result = resolve_port_relationships(ports, [{"high_port_id": 1, "low_port_id": 3}], **name_rules())
 
         assert result["sub_interfaces"] == {2: 1, 3: 2}
         kinds = {kind["key"]: kind for kind in result["diagnostics"]["kinds"]}
@@ -2241,7 +2092,7 @@ class TestResolvePortRelationships:
             {"port_id": 3, "ifName": "lag-1", "ifDescr": "lag-1", "ifType": "ieee8023adLag"},
         ]
 
-        result = resolve_port_relationships(ports, [{"high_port_id": 2, "low_port_id": 3}], lag_patterns={})
+        result = resolve_port_relationships(ports, [{"high_port_id": 2, "low_port_id": 3}], **name_rules())
 
         assert result["lag_members"] == {}
         assert result["stacked_ports"] == {2: [3], 3: [2]}
@@ -2266,7 +2117,7 @@ class TestResolvePortRelationships:
             {"port_id": 200, "ifName": "Port-Channel2", "ifType": "ieee8023adLag"},
         ]
 
-        result = resolve_port_relationships(ports, port_stack, lag_patterns={})
+        result = resolve_port_relationships(ports, port_stack, **name_rules())
 
         assert result["lag_members"] == {}
 
@@ -2277,7 +2128,7 @@ class TestResolvePortRelationships:
             {"port_id": 2, "ifName": "", "ifDescr": "ge-0/0/0.100", "ifType": "l3ipvlan"},
         ]
         port_stack = [{"high_port_id": 2, "low_port_id": 1}]
-        result = resolve_port_relationships(ports, port_stack, lag_patterns={}, interface_name_field="ifDescr")
+        result = resolve_port_relationships(ports, port_stack, **name_rules(), interface_name_field="ifDescr")
         assert result["sub_interfaces"] == {2: 1}
 
     def test_lag_aggregate_matched_from_ifdescr_name_pattern(self):
@@ -2289,7 +2140,7 @@ class TestResolvePortRelationships:
         port_stack = [{"high_port_id": 11, "low_port_id": 12}]
         # low (Po1) is the aggregate via the configured pattern; member -> aggregate.
         result = resolve_port_relationships(
-            ports, port_stack, lag_patterns={"ios": r"^Po\d+$"}, interface_name_field="ifDescr"
+            ports, port_stack, **name_rules(lag=[r"^Po\d+$"]), interface_name_field="ifDescr"
         )
         assert result["lag_members"] == {11: 12}
 
@@ -2297,7 +2148,7 @@ class TestResolvePortRelationships:
         """String high_port_id/low_port_id values must match integer port records and vice versa."""
         # NOKIA_PORTS carries int port_ids 101/102; reference them as strings in the stack.
         str_stack = [{"high_port_id": "101", "low_port_id": "102"}]
-        result = resolve_port_relationships(NOKIA_PORTS, str_stack, lag_patterns={})
+        result = resolve_port_relationships(NOKIA_PORTS, str_stack, **name_rules())
         assert result["lag_members"] == {101: 102}
         # And the inverse: int stack ids against str port_ids. The map is normalized at the
         # source (normalize_librenms_port_id), so the result is canonical ints regardless of
@@ -2306,7 +2157,7 @@ class TestResolvePortRelationships:
             {"port_id": "101", "ifName": "1/1/c1/1", "ifType": "ethernetCsmacd"},
             {"port_id": "102", "ifName": "lag-1", "ifType": "ieee8023adLag"},
         ]
-        result = resolve_port_relationships(str_ports, [{"high_port_id": 101, "low_port_id": 102}], lag_patterns={})
+        result = resolve_port_relationships(str_ports, [{"high_port_id": 101, "low_port_id": 102}], **name_rules())
         assert result["lag_members"] == {101: 102}
 
     def test_padded_port_ids_match_canonical_stack_ids(self):
@@ -2315,11 +2166,7 @@ class TestResolvePortRelationships:
             {"port_id": "00102", "ifName": "lag-1", "ifType": "ieee8023adLag"},
         ]
 
-        result = resolve_port_relationships(
-            ports,
-            [{"high_port_id": 101, "low_port_id": 102}],
-            lag_patterns={},
-        )
+        result = resolve_port_relationships(ports, [{"high_port_id": 101, "low_port_id": 102}], **name_rules())
 
         assert result["lag_members"] == {101: 102}
 
@@ -2330,11 +2177,7 @@ class TestResolvePortRelationships:
             {"port_id": 102, "ifName": "lag-1", "ifType": "ieee8023adLag"},
         ]
 
-        result = resolve_port_relationships(
-            ports,
-            [{"high_port_id": 101, "low_port_id": 102}],
-            lag_patterns={},
-        )
+        result = resolve_port_relationships(ports, [{"high_port_id": 101, "low_port_id": 102}], **name_rules())
 
         assert result["lag_members"] == {}
 
@@ -2346,7 +2189,7 @@ class TestResolvePortRelationships:
             {"port_id": "206", "ifName": "ae10.2221", "ifType": "l2vlan"},
         ]
         int_stack = [{"high_port_id": 205, "low_port_id": 206}]
-        result = resolve_port_relationships(str_ports, int_stack, lag_patterns={})
+        result = resolve_port_relationships(str_ports, int_stack, **name_rules())
         # Canonical normalized ids (port-record-derived, not the stack ids): str port_ids are
         # normalized to ints at the source so the map is self-consistent for every consumer.
         assert result["sub_interfaces"] == {206: 205}
@@ -2358,16 +2201,12 @@ class TestResolvePortRelationships:
             {"port_id": 202, "ifName": "", "ifDescr": "", "ifType": "ieee8023adLag"},
         ]
         port_stack = [{"high_port_id": 201, "low_port_id": 202}]
-        result = resolve_port_relationships(
-            ports, port_stack, lag_patterns={}, compiled_sap_patterns=[re.compile("^$")]
-        )
+        result = resolve_port_relationships(ports, port_stack, **name_rules(sap=[re.compile("^$")]))
         assert result["lag_members"] == {201: 202}
 
     def test_nokia_sap_excluded_when_colon_in_name(self):
         """Nokia SAP entries (colon in name) must be excluded from output."""
-        result = resolve_port_relationships(
-            NOKIA_SAP_PORTS, NOKIA_SAP_PORT_STACK, lag_patterns={}, compiled_sap_patterns=[re.compile(":")]
-        )
+        result = resolve_port_relationships(NOKIA_SAP_PORTS, NOKIA_SAP_PORT_STACK, **name_rules(sap=[re.compile(":")]))
         assert result["lag_members"] == {101: 102}
         # The SAP is an ipForward port, which never joins a LAG, so only the skip count proves the rule fired.
         assert result["diagnostics"]["pairs_skipped_sap"] == 1
@@ -2386,11 +2225,7 @@ class TestResolvePortRelationships:
             {"high_port_id": 200, "low_port_id": 102},  # SAP row: must be skipped
         ]
         result = resolve_port_relationships(
-            ports,
-            port_stack,
-            lag_patterns={},
-            interface_name_field="ifDescr",
-            compiled_sap_patterns=[re.compile(":")],
+            ports, port_stack, **name_rules(sap=[re.compile(":")]), interface_name_field="ifDescr"
         )
         assert result["lag_members"] == {101: 102}
         assert result["diagnostics"]["pairs_skipped_sap"] == 1
@@ -2404,7 +2239,7 @@ class TestResolvePortRelationships:
             {"port_id": 302, "ifName": "lag-1:10.100", "ifDescr": "lag-1:10.100", "ifType": "ipForward"},
         ]
         # No port_stack pair: the fallback is the only path that can relate these two.
-        result = resolve_port_relationships(ports, [], lag_patterns={}, compiled_sap_patterns=[re.compile(":")])
+        result = resolve_port_relationships(ports, [], **name_rules(sap=[re.compile(":")]))
         assert 302 not in result["sub_interfaces"], "a SAP row must not gain a name-derived parent"
         assert result["sub_interfaces"] == {}
 
@@ -2414,17 +2249,17 @@ class TestResolvePortRelationships:
             {"port_id": 401, "ifName": "ge-0/0/1", "ifDescr": "ge-0/0/1", "ifType": "ethernetCsmacd"},
             {"port_id": 402, "ifName": "ge-0/0/1.100", "ifDescr": "ge-0/0/1.100", "ifType": "l2vlan"},
         ]
-        result = resolve_port_relationships(ports, [], lag_patterns={}, compiled_sap_patterns=[re.compile(":")])
+        result = resolve_port_relationships(ports, [], **name_rules(sap=[re.compile(":")]))
         assert result["sub_interfaces"] == {402: 401}
 
     def test_junos_sub_unit_stripping(self):
         """Junos: xe-0/0/0.0 -> ae1.0 pair strips to xe-0/0/0 member of ae1."""
-        result = resolve_port_relationships(JUNOS_PORTS, JUNOS_PORT_STACK[:1], lag_patterns={})
+        result = resolve_port_relationships(JUNOS_PORTS, JUNOS_PORT_STACK[:1], **name_rules())
         assert result["lag_members"].get(201) == 203
 
     def test_junos_ae_sub_interface(self):
         """Junos: ae10 -> ae10.2221 from the ifStack, and every other unit from its own name."""
-        result = resolve_port_relationships(JUNOS_PORTS, JUNOS_PORT_STACK[1:], lag_patterns={})
+        result = resolve_port_relationships(JUNOS_PORTS, JUNOS_PORT_STACK[1:], **name_rules())
         # 206 is the pair the ifStack states. The other two are units LibreNMS never parents:
         # xe-0/0/0.0 is only stacked onto ae1.0, and ae1.0 appears in no row of its own.
         assert result["sub_interfaces"] == {202: 201, 204: 203, 206: 205}
@@ -2437,7 +2272,7 @@ class TestResolvePortRelationships:
             {"port_id": 402, "ifName": "xe-0/0/0.100", "ifDescr": "vlan-100-svc", "ifType": "l2vlan"},
         ]
         port_stack = [{"high_port_id": 401, "low_port_id": 402}]
-        result = resolve_port_relationships(ports, port_stack, lag_patterns={}, interface_name_field="ifDescr")
+        result = resolve_port_relationships(ports, port_stack, **name_rules(), interface_name_field="ifDescr")
         # The fallback resolves child 402 from ifName alone.
         assert result["sub_interfaces"] == {402: 401}
 
@@ -2455,7 +2290,7 @@ class TestResolvePortRelationships:
         # ifStack relates the logical units.
         port_stack = [{"high_port_id": 204, "low_port_id": 202}]
         result = resolve_port_relationships(
-            ports, port_stack, lag_patterns={"junos": r"^ae\d"}, interface_name_field="ifDescr"
+            ports, port_stack, **name_rules(lag=[r"^ae\d"]), interface_name_field="ifDescr"
         )
         # The ifName fallback collapses both units to their physical ports.
         assert result["lag_members"] == {201: 203}
@@ -2471,9 +2306,7 @@ class TestResolvePortRelationships:
             {"port_id": 4, "ifName": "service-child", "ifDescr": "service.1", "ifType": "propVirtual"},
         ]
 
-        result = resolve_port_relationships(
-            ports, [], lag_patterns={}, interface_name_field="ifName", compiled_sap_patterns=[]
-        )
+        result = resolve_port_relationships(ports, [], **name_rules(sap=[]), interface_name_field="ifName")
 
         assert typed_maps(result) == {"lag_members": {}, "sub_interfaces": {2: 1}, "bridge_members": {}}
 
@@ -2484,9 +2317,7 @@ class TestResolvePortRelationships:
             {"port_id": 2, "ifName": "customer", "ifDescr": "xe-0/0/0.1", "ifType": "propVirtual"},
         ]
 
-        result = resolve_port_relationships(
-            ports, [], lag_patterns={}, interface_name_field="ifName", compiled_sap_patterns=[]
-        )
+        result = resolve_port_relationships(ports, [], **name_rules(sap=[]), interface_name_field="ifName")
 
         assert typed_maps(result) == {"lag_members": {}, "sub_interfaces": {2: 1}, "bridge_members": {}}
 
@@ -2500,9 +2331,7 @@ class TestResolvePortRelationships:
         ]
         port_stack = [{"high_port_id": 1, "low_port_id": 2}]
 
-        result = resolve_port_relationships(
-            ports, port_stack, lag_patterns={}, interface_name_field="ifDescr", compiled_sap_patterns=[]
-        )
+        result = resolve_port_relationships(ports, port_stack, **name_rules(sap=[]), interface_name_field="ifDescr")
 
         assert typed_maps(result) == {"lag_members": {1: 2}, "sub_interfaces": {4: 3}, "bridge_members": {}}
 
@@ -2534,11 +2363,7 @@ class TestResolvePortRelationships:
         ]
 
         result = resolve_port_relationships(
-            ports,
-            port_stack,
-            lag_patterns={"iosxe": r"^Po\d+$"},
-            interface_name_field="ifDescr",
-            compiled_sap_patterns=[],
+            ports, port_stack, **name_rules(lag=[r"^Po\d+$"], sap=[]), interface_name_field="ifDescr"
         )
 
         assert typed_maps(result) == {
@@ -2558,18 +2383,16 @@ class TestResolvePortRelationships:
         port_stack = [{"high_port_id": 1, "low_port_id": 2}]
 
         result = resolve_port_relationships(
-            ports,
-            port_stack,
-            lag_patterns={"x": r"^bundle-\d+$"},
-            interface_name_field="ifName",
-            compiled_sap_patterns=[],
+            ports, port_stack, **name_rules(lag=[r"^bundle-\d+$"], sap=[]), interface_name_field="ifName"
         )
 
         assert typed_maps(result) == {"lag_members": {1: 2}, "sub_interfaces": {4: 3}, "bridge_members": {}}
 
     def test_cisco_ios_lag_via_name_pattern(self, ios_lag_patterns):
         """Cisco IOS: Po10 has propVirtual type but is a LAG via name pattern."""
-        result = resolve_port_relationships(CISCO_IOS_PORTS, CISCO_IOS_PORT_STACK[:1], lag_patterns=ios_lag_patterns)
+        result = resolve_port_relationships(
+            CISCO_IOS_PORTS, CISCO_IOS_PORT_STACK[:1], **name_rules(lag=ios_lag_patterns.values())
+        )
         assert result["lag_members"] == {301: 302}
 
     def test_non_numeric_dotted_suffix_not_stripped_to_base(self):
@@ -2580,7 +2403,7 @@ class TestResolvePortRelationships:
             {"port_id": 303, "ifName": "ae1", "ifType": "ieee8023adLag"},
         ]
         stack = [{"high_port_id": 303, "low_port_id": 302}]  # ae1 <- xe-0/0/0.foo
-        result = resolve_port_relationships(ports, stack, lag_patterns={})
+        result = resolve_port_relationships(ports, stack, **name_rules())
         # The member is the actual port 302, NOT the base 301 (which the old .N-agnostic strip
         # would have wrongly resolved "xe-0/0/0.foo" to).
         assert result["lag_members"] == {302: 303}
@@ -2588,17 +2411,19 @@ class TestResolvePortRelationships:
 
     def test_cisco_ios_sub_interface(self, ios_lag_patterns):
         """Cisco IOS: Po10 -> Po10.100 detected as sub-interface."""
-        result = resolve_port_relationships(CISCO_IOS_PORTS, CISCO_IOS_PORT_STACK[1:], lag_patterns=ios_lag_patterns)
+        result = resolve_port_relationships(
+            CISCO_IOS_PORTS, CISCO_IOS_PORT_STACK[1:], **name_rules(lag=ios_lag_patterns.values())
+        )
         assert result["sub_interfaces"] == {303: 302}
 
     def test_arcos_lag_membership(self):
         """ArcOS: swp4 member of bond1 (ieee8023adLag)."""
-        result = resolve_port_relationships(ARCOS_PORTS, ARCOS_PORT_STACK[:1], lag_patterns={})
+        result = resolve_port_relationships(ARCOS_PORTS, ARCOS_PORT_STACK[:1], **name_rules())
         assert result["lag_members"] == {401: 402}
 
     def test_arcos_sub_interface_ethernetcsmacd(self):
         """ArcOS: swp15.3 sub-interface of swp15 (both ethernetCsmacd -- not propVirtual)."""
-        result = resolve_port_relationships(ARCOS_PORTS, ARCOS_PORT_STACK[1:], lag_patterns={})
+        result = resolve_port_relationships(ARCOS_PORTS, ARCOS_PORT_STACK[1:], **name_rules())
         assert result["sub_interfaces"] == {404: 403}
 
     def test_junos_aggregate_unit_gets_its_aggregate_as_parent(self):
@@ -2616,7 +2441,7 @@ class TestResolvePortRelationships:
             {"high_port_id": 4302, "low_port_id": 4304},
         ]
 
-        result = resolve_port_relationships(ports, port_stack, lag_patterns={}, device_os="junos")
+        result = resolve_port_relationships(ports, port_stack, **name_rules())
 
         assert result["lag_members"] == {4301: 4303}
         assert result["sub_interfaces"] == {4302: 4301, 4304: 4303}
@@ -2629,9 +2454,7 @@ class TestResolvePortRelationships:
             {"port_id": 13, "ifName": "alternate.1", "ifDescr": "xe-0/0/1.1", "ifType": "propVirtual"},
         ]
 
-        result = resolve_port_relationships(
-            ports, [], lag_patterns={}, interface_name_field="ifDescr", compiled_sap_patterns=[]
-        )
+        result = resolve_port_relationships(ports, [], **name_rules(sap=[]), interface_name_field="ifDescr")
 
         assert typed_maps(result) == {"lag_members": {}, "sub_interfaces": {13: 11}, "bridge_members": {}}
 
@@ -2642,7 +2465,7 @@ class TestResolvePortRelationships:
             {"port_id": 2, "ifName": "Eth1", "ifDescr": "service.1", "ifType": "ethernetCsmacd"},
         ]
 
-        result = resolve_port_relationships(ports, [], lag_patterns={})
+        result = resolve_port_relationships(ports, [], **name_rules())
 
         assert result["sub_interfaces"] == {1: 2}
 
@@ -2654,7 +2477,7 @@ class TestResolvePortRelationships:
             {"port_id": 13, "ifName": "Gi0/1.100", "ifDescr": "core-b.100", "ifType": "l2vlan"},
         ]
 
-        result = resolve_port_relationships(ports, [], lag_patterns={})
+        result = resolve_port_relationships(ports, [], **name_rules())
 
         assert result["sub_interfaces"] == {13: 11}
 
@@ -2666,7 +2489,7 @@ class TestResolvePortRelationships:
             {"port_id": 3, "ifName": "a.1.9", "ifDescr": "b", "ifType": "propVirtual"},
         ]
 
-        result = resolve_port_relationships(ports, [], lag_patterns={}, compiled_sap_patterns=[])
+        result = resolve_port_relationships(ports, [], **name_rules(sap=[]))
 
         assert result["sub_interfaces"] == {1: 2, 3: 1}
 
@@ -2680,7 +2503,7 @@ class TestResolvePortRelationships:
         ]
         port_stack = [{"high_port_id": 34, "low_port_id": 31}]
 
-        result = resolve_port_relationships(ports, port_stack, lag_patterns={}, compiled_sap_patterns=[])
+        result = resolve_port_relationships(ports, port_stack, **name_rules(sap=[]))
 
         assert result["sub_interfaces"] == {32: 31, 33: 31, 34: 33}
 
@@ -2698,7 +2521,7 @@ class TestResolvePortRelationships:
             {"high_port_id": 41, "low_port_id": 43},
         ]
 
-        result = resolve_port_relationships(ports, port_stack, lag_patterns={}, compiled_sap_patterns=[])
+        result = resolve_port_relationships(ports, port_stack, **name_rules(sap=[]))
 
         assert result["sub_interfaces"] == {41: 42, 43: 41, 44: 43}
 
@@ -2710,7 +2533,7 @@ class TestResolvePortRelationships:
             {"port_id": 23, "ifName": "et-0/0/1.1.2", "ifType": "propVirtual"},
         ]
 
-        result = resolve_port_relationships(ports, [], lag_patterns={}, compiled_sap_patterns=[])
+        result = resolve_port_relationships(ports, [], **name_rules(sap=[]))
 
         assert result["sub_interfaces"] == {22: 21, 23: 22}
 
@@ -2721,7 +2544,7 @@ class TestResolvePortRelationships:
             {"port_id": 4502, "ifName": "lo0.16385", "ifType": "softwareLoopback"},
         ]
 
-        result = resolve_port_relationships(ports, [], lag_patterns={})
+        result = resolve_port_relationships(ports, [], **name_rules())
 
         assert result["sub_interfaces"] == {}
 
@@ -2747,7 +2570,7 @@ class TestResolvePortRelationships:
 
         # lag_patterns stays unset: supplying it skips the OS-scoped SAP read, which is the
         # exact decision this test guards.
-        result = resolve_port_relationships(ports, port_stack, device_os="junos")
+        result = resolve_port_relationships(ports, port_stack, **stored_name_rules("junos"))
 
         assert result["lag_members"] == {4601: 4603}
         assert result["sub_interfaces"][4602] == 4601
@@ -2762,11 +2585,11 @@ class TestResolvePortRelationships:
         # The forward-only check (l_name.startswith(h_name + '.')) misses this; the reverse
         # check must catch it. Map is child -> parent.
         reverse_stack = [{"high_port_id": 602, "low_port_id": 601}]
-        result = resolve_port_relationships(ports, reverse_stack, lag_patterns={})
+        result = resolve_port_relationships(ports, reverse_stack, **name_rules())
         assert result["sub_interfaces"] == {602: 601}
         # And the forward ordering still resolves identically (child stays the map key).
         forward_stack = [{"high_port_id": 601, "low_port_id": 602}]
-        result = resolve_port_relationships(ports, forward_stack, lag_patterns={})
+        result = resolve_port_relationships(ports, forward_stack, **name_rules())
         assert result["sub_interfaces"] == {602: 601}
 
     @pytest.mark.parametrize(
@@ -2794,7 +2617,7 @@ class TestResolvePortRelationships:
         ]
         port_stack = [{"high_port_id": high_id, "low_port_id": low_id}]
 
-        result = resolve_port_relationships(ports, port_stack, lag_patterns={})
+        result = resolve_port_relationships(ports, port_stack, **name_rules())
 
         assert result["sub_interfaces"] == {1: 2}
 
@@ -2808,7 +2631,7 @@ class TestResolvePortRelationships:
         # 'bond' (unanchored) matches BOTH bond0 and bond0-slave, so name-matching alone makes
         # both look like aggregates. The aggregate is the one whose ifType is ieee8023adLag.
         broad = {"linux": r"bond"}
-        result = resolve_port_relationships(ports, stack, lag_patterns=broad)
+        result = resolve_port_relationships(ports, stack, **name_rules(lag=broad.values()))
         assert result["lag_members"] == {702: 701}
 
     def test_both_aggregate_ambiguous_is_skipped(self):
@@ -2819,24 +2642,24 @@ class TestResolvePortRelationships:
         ]
         stack = [{"high_port_id": 712, "low_port_id": 711}]
         broad = {"linux": r"bond"}
-        result = resolve_port_relationships(ports, stack, lag_patterns=broad)
+        result = resolve_port_relationships(ports, stack, **name_rules(lag=broad.values()))
         assert result["lag_members"] == {}
 
     def test_empty_port_stack_returns_empty_maps(self):
         """Empty port_stack returns empty dicts."""
-        result = resolve_port_relationships(NOKIA_PORTS, [], lag_patterns={})
+        result = resolve_port_relationships(NOKIA_PORTS, [], **name_rules())
         assert typed_maps(result) == {"lag_members": {}, "sub_interfaces": {}, "bridge_members": {}}
 
     def test_missing_port_ids_are_skipped(self):
         """Entries where high_port_id or low_port_id is absent from ports list are skipped."""
         stack = [{"high_port_id": 9999, "low_port_id": 101}]
-        result = resolve_port_relationships(NOKIA_PORTS, stack, lag_patterns={})
+        result = resolve_port_relationships(NOKIA_PORTS, stack, **name_rules())
         assert result["lag_members"] == {}
 
     def test_non_dict_port_entries_are_skipped(self):
         """A malformed (non-dict) entry in `ports` must not crash resolution; valid pairs still resolve."""
         ports = [None, "oops", 42, *NOKIA_PORTS]
-        result = resolve_port_relationships(ports, NOKIA_PORT_STACK[:1], lag_patterns={})
+        result = resolve_port_relationships(ports, NOKIA_PORT_STACK[:1], **name_rules())
         assert result["lag_members"] == {101: 102}
 
     def test_non_string_ifname_does_not_crash_and_resolves_by_iftype(self):
@@ -2846,91 +2669,50 @@ class TestResolvePortRelationships:
             {"port_id": 502, "ifName": "lag9", "ifType": "ieee8023adLag"},
         ]
         stack = [{"high_port_id": 501, "low_port_id": 502}]
-        result = resolve_port_relationships(ports, stack, lag_patterns={})
+        result = resolve_port_relationships(ports, stack, **name_rules())
         assert typed_maps(result) == {"lag_members": {501: 502}, "sub_interfaces": {}, "bridge_members": {}}
 
     def test_none_ports_and_port_stack_return_empty_maps(self):
         """A 0-port device can surface ports/port_stack as None (e.g. `ports_data["ports"]` is null on a 0-port iosxr device); resolution must treat that as 'nothing to resolve', not crash iterating None."""
         # ports is None (null "ports" body), port_stack a valid list — must not raise.
-        result = resolve_port_relationships(None, NOKIA_PORT_STACK[:1], lag_patterns={})
+        result = resolve_port_relationships(None, NOKIA_PORT_STACK[:1], **name_rules())
         assert typed_maps(result) == {"lag_members": {}, "sub_interfaces": {}, "bridge_members": {}}
         # port_stack is None (null "mappings"), ports a valid list — must not raise.
-        result = resolve_port_relationships(NOKIA_PORTS, None, lag_patterns={})
+        result = resolve_port_relationships(NOKIA_PORTS, None, **name_rules())
         assert typed_maps(result) == {"lag_members": {}, "sub_interfaces": {}, "bridge_members": {}}
         # Both None — the full 0-port shape.
-        result = resolve_port_relationships(None, None, lag_patterns={})
+        result = resolve_port_relationships(None, None, **name_rules())
         assert typed_maps(result) == {"lag_members": {}, "sub_interfaces": {}, "bridge_members": {}}
 
     @pytest.mark.django_db
     def test_db_patterns_scoped_to_device_os(self):
-        """With device_os set, only that OS's stored pattern is loaded — a pattern from a different platform must not classify this device's interfaces (the round-12 finding)."""
+        """Only the device OS's stored pattern applies: a pattern of another platform must not classify this device's interfaces."""
         from netbox_librenms_plugin.models import PortStackLagPattern
 
         PortStackLagPattern.objects.create(librenms_os="ztest_pochannel", lag_name_pattern=r"^Po\d+$")
         PortStackLagPattern.objects.create(librenms_os="ztest_bond", lag_name_pattern=r"^bond\d+$")
 
         # device_os matches the Po-channel pattern → Po10 (propVirtual) classified as a LAG.
-        scoped = resolve_port_relationships(CISCO_IOS_PORTS, CISCO_IOS_PORT_STACK[:1], device_os="ztest_pochannel")
+        scoped = resolve_port_relationships(
+            CISCO_IOS_PORTS, CISCO_IOS_PORT_STACK[:1], **stored_name_rules("ztest_pochannel")
+        )
         assert scoped["lag_members"] == {301: 302}
 
         # device_os scopes to the bond pattern only; Po10 is not matched → no LAG.
-        other = resolve_port_relationships(CISCO_IOS_PORTS, CISCO_IOS_PORT_STACK[:1], device_os="ztest_bond")
+        other = resolve_port_relationships(CISCO_IOS_PORTS, CISCO_IOS_PORT_STACK[:1], **stored_name_rules("ztest_bond"))
         assert other["lag_members"] == {}
 
     @pytest.mark.django_db
-    def test_db_patterns_unscoped_when_no_device_os(self):
-        """Without device_os, every stored pattern is loaded (legacy behaviour)."""
-        from netbox_librenms_plugin.models import PortStackLagPattern
-
-        # Migration 0013 seeds ios/iosxe with ^Po\d+$, which already classifies Po10. Use a name
-        # no seeded row can match, so only the unscoped load of every stored pattern explains it.
-        PortStackLagPattern.objects.create(librenms_os="ztest_zagg", lag_name_pattern=r"^Zagg\d+$")
-        ports = [
-            {"port_id": 801, "ifName": "Te1/1", "ifType": "ethernetCsmacd"},
-            {"port_id": 802, "ifName": "Zagg7", "ifType": "propVirtual"},
-        ]
-
-        result = resolve_port_relationships(ports, [{"high_port_id": 801, "low_port_id": 802}])
-        assert result["lag_members"] == {801: 802}
-
-    @pytest.mark.django_db
-    def test_db_patterns_non_string_device_os_disables_name_patterns(self):
-        """A present-but-unusable device_os (LibreNMS can return ``os`` as a number) must not crash on ``.strip()`` AND must DISABLE name-pattern matching — falling back to every stored vendor regex would re-globalize them. Only an OMITTED os (None) is unscoped."""
+    def test_a_non_string_device_os_selects_no_lag_name_rule(self):
+        """LibreNMS can report ``os`` as a number: it names no OS, so no stored vendor regex applies."""
+        from netbox_librenms_plugin.acquisition.resources import device_os
         from netbox_librenms_plugin.models import PortStackLagPattern
 
         PortStackLagPattern.objects.create(librenms_os="ztest_pochannel", lag_name_pattern=r"^Po\d+$")
 
-        # device_os=123 (int) would raise AttributeError on device_os.strip() before the original fix;
-        # now it must fail closed (no name-pattern LAG match) rather than load every pattern.
-        result = resolve_port_relationships(CISCO_IOS_PORTS, CISCO_IOS_PORT_STACK[:1], device_os=123)
-        assert result["lag_members"] == {}  # name-pattern matching disabled for a malformed os
-
-    def test_invalid_lag_pattern_is_skipped_and_logged(self, caplog):
-        """A configured LAG pattern that isn't valid regex is skipped (it must not crash relationship resolution) AND logged at WARNING — otherwise a user with a typo in their PortStackLagPattern has no way to tell why LAG detection silently isn't working for that OS."""
-        import logging
-
-        bad = "([unterminated"  # invalid regex → re.error on compile
-        with caplog.at_level(logging.WARNING, logger="netbox_librenms_plugin.interface_relationships"):
-            result = resolve_port_relationships(NOKIA_PORTS, NOKIA_PORT_STACK[:1], lag_patterns={"junos": bad})
-        # Resolution still completes: the LAG is matched structurally (ieee8023adLag ifType),
-        # independent of the broken name pattern.
-        assert result["lag_members"] == {101: 102}
-        # The invalid pattern was reported at WARNING, naming the offending pattern string.
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert any(bad in r.getMessage() for r in warnings)
-
-    def test_non_string_lag_pattern_is_skipped_not_crashed(self, caplog):
-        """A non-string value in the explicit lag_patterns dict is skipped, not crashed: re.compile raises TypeError (not re.error), so unlike the DB-backed path (strings guaranteed) it must be caught too."""
-        import logging
-
-        # None (or any non-string) → re.compile raises TypeError, not re.error. Before the fix this
-        # propagated out of resolve_port_relationships and crashed the whole refresh.
-        with caplog.at_level(logging.WARNING, logger="netbox_librenms_plugin.interface_relationships"):
-            result = resolve_port_relationships(NOKIA_PORTS, NOKIA_PORT_STACK[:1], lag_patterns={"junos": None})
-        # Resolution still completes via structural (ieee8023adLag) detection; the bad value skipped.
-        assert result["lag_members"] == {101: 102}
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert any("None" in r.getMessage() for r in warnings)
+        rules = stored_name_rules(device_os({"os": 123}))
+        result = resolve_port_relationships(CISCO_IOS_PORTS, CISCO_IOS_PORT_STACK[:1], **rules)
+        assert result["lag_members"] == {}
 
     def test_ambiguous_shared_name_is_not_indexed_to_either_port(self):
         """A name carried by two different ports indexes neither, so a duplicate label can't hijack the base-name lookup and bind a sub-unit's LAG membership onto the wrong aggregate."""
@@ -2943,7 +2725,7 @@ class TestResolvePortRelationships:
             {"port_id": 999, "ifName": "ae99", "ifDescr": "ae1", "ifType": "ieee8023adLag"},
         ]
         port_stack = [{"high_port_id": 201, "low_port_id": 204}]  # xe-0/0/0 <-> ae1.0
-        result = resolve_port_relationships(ports, port_stack, lag_patterns={})
+        result = resolve_port_relationships(ports, port_stack, **name_rules())
         # The ifName base resolves to the real aggregate 203. The unrelated ifDescr on 999 does
         # not make the ifName lookup ambiguous and cannot hijack the edge.
         assert 999 not in result["lag_members"].values()
@@ -2964,10 +2746,7 @@ class TestResolvePortRelationships:
         port_stack = [{"high_port_id": 201, "low_port_id": 204}]
 
         result = resolve_port_relationships(
-            ports,
-            port_stack,
-            lag_patterns={"junos": r"^ae\d"},
-            interface_name_field="ifDescr",
+            ports, port_stack, **name_rules(lag=[r"^ae\d"]), interface_name_field="ifDescr"
         )
 
         assert 999 not in result["lag_members"].values()

@@ -1749,3 +1749,28 @@ rules:
     paths:
       include:
         - "**/tests/**"
+
+  - id: snapshot-blocker-warning-needs-redirect
+    languages: [python]
+    severity: ERROR
+    message: Let the snapshot banner show blockers in a partial. Queue a blocker warning only for a redirect.
+    mode: taint
+    pattern-sources:
+      - pattern-either:
+          - pattern: source_cache.blocker_notice(...)
+          - pattern: blocker_notice(...)
+    pattern-sinks:
+      - patterns:
+          - pattern: messages.warning($REQUEST, $NOTICE)
+          - focus-metavariable: $NOTICE
+          - pattern-not-inside: |
+              if not $REQUEST.htmx:
+                  ...
+          - pattern-not-inside: |
+              if $CONDITION and not $REQUEST.htmx:
+                  ...
+    paths:
+      include:
+        - "**/views/base/interfaces_view.py"
+        - "**/views/base/cables_view.py"
+        - "**/views/sync/cables.py"

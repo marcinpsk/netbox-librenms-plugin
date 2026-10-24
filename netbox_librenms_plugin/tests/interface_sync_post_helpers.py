@@ -3,12 +3,12 @@
 import json
 from types import SimpleNamespace
 
-from django.core.cache import cache
 from django.urls import reverse
 
 from netbox_librenms_plugin.middleware import REQUEST_FAILED_EVENT
 from netbox_librenms_plugin.tests.conftest import make_interface
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_interfaces_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import messages_on
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
@@ -32,15 +32,9 @@ def sync_port(port_id, name, *, alias="", mac="", if_type="ethernetCsmacd", **ex
     }
 
 
-def seed_ports(device, ports, *, lag_members=None, sub_interfaces=None, bridge_members=None):
-    """Put *ports* in the interface snapshot of *device*, as a refresh of the tab does."""
-    relationships = {
-        "lag_members": lag_members or {},
-        "sub_interfaces": sub_interfaces or {},
-        "bridge_members": bridge_members or {},
-    }
-    payload = {"ports": ports, "port_stack_relationships": relationships}
-    cache.set(SyncInterfacesView().get_cache_key(device, "ports", SERVER_KEY), payload, timeout=300)
+def seed_ports(owner, ports, port_stack=(), **kwargs):
+    """Store an interfaces snapshot of *owner* with *ports* and the *port_stack* pairs, as a refresh of the tab does."""
+    return seed_interfaces_snapshot(owner, ports, port_stack, server_key=SERVER_KEY, **kwargs)
 
 
 def bound_interface(device, name, port_id, *, iface_type="other"):

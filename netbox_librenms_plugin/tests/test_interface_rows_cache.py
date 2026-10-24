@@ -1,25 +1,25 @@
 """
 The interfaces tab reuses its computed rows until an input of them changes, and loads its NetBox-only list on demand.
 
-Every test renders the real tab fragment through a real request from a seeded snapshot with its
-fetch time, as a refresh leaves it. NetBox interfaces, MAC addresses, VLANs and rules are real
-rows. A spy counts the row computations; the real computation always runs.
+Every test renders the real tab fragment through a real request from a stored source snapshot, as a
+refresh leaves it. NetBox interfaces, MAC addresses, VLANs and rules are real rows. A spy counts the
+row computations; the real computation always runs.
 """
 
 import re
 from dataclasses import replace
+from uuid import uuid4
 
 import pytest
 from dcim.models import Device, Interface, MACAddress
 from django.contrib.auth import get_user_model
-from django.core.cache import cache
 from django.urls import reverse
-from django.utils import timezone
 from ipam.models import VLAN
 from users.models import ObjectPermission
 
-from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
-from netbox_librenms_plugin.models import InterfaceTypeMapping
+from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin.acquisition.registry import Resource
+from netbox_librenms_plugin.models import InterfaceTypeMapping, PortStackLagPattern
 from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server
 from netbox_librenms_plugin.tests.test_interface_sync_filters import (
     SERVER_KEY,
@@ -30,9 +30,10 @@ from netbox_librenms_plugin.tests.test_interface_sync_filters import (
     _superuser_client,
     _tab,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_interfaces_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
-from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
 pytestmark = pytest.mark.django_db
 
@@ -52,8 +53,9 @@ def computations(monkeypatch):
 
 
 def _refreshed(device):
-    """Give the seeded snapshot the fetch time that a refresh writes with it."""
-    cache.set(SyncInterfacesView().get_last_fetched_key(device, "ports", SERVER_KEY), timezone.now(), timeout=300)
+    """Store the same source facts again under a new snapshot id, as a refresh does."""
+    snapshot = source_cache.read(device, Resource.INTERFACES, SERVER_KEY)
+    assert source_cache.store(device, Resource.INTERFACES, replace(snapshot, snapshot_id=uuid4().hex))
     return device
 
 
@@ -61,7 +63,7 @@ def _refreshed(device):
 def tab(client, settings):
     """Return the device and a function that renders its tab for a query."""
     client = _superuser_client(client, settings, "rows-cache")
-    device = _refreshed(_mixed_device("rows-cache"))
+    device = _mixed_device("rows-cache")
     return device, lambda **params: _rows(_tab(client, device, **{"interfaces_show_ignored": "1", **params}))
 
 
@@ -181,6 +183,17 @@ def test_a_new_rule_computes_the_rows_again(tab, computations):
     assert len(computations) == 2
 
 
+def test_a_name_rule_edit_computes_the_rows_again(tab, computations):
+    """The relationships come from the stored name rules, so a rule edit is an input of the rows."""
+    _, rows = tab
+    rows()
+
+    PortStackLagPattern.objects.create(librenms_os="rows-cache-os", lag_name_pattern=r"^po\d+$")
+    rows()
+
+    assert len(computations) == 2
+
+
 def test_a_refresh_computes_the_rows_again(tab, computations):
     device, rows = tab
     rows()
@@ -216,11 +229,9 @@ def test_another_viewer_does_not_reuse_the_rows(tab, computations, client):
 def test_each_chassis_member_page_computes_its_own_rows(client, settings, computations):
     client = _superuser_client(client, settings, "rows-cache-vc")
     first, second = _chassis("rows-cache-vc")
-    key = SyncInterfacesView().get_cache_key(first, "ports", SERVER_KEY)
-    snapshot = cache.get(key)
-    snapshot["ports"].append(_port(2009, "iDRAC-NIC", _source=OOB_INVENTORY_SOURCE))
-    cache.set(key, snapshot, timeout=300)
-    _refreshed(first)
+    host_ports = source_cache.read(first, Resource.INTERFACES, SERVER_KEY).value(Resource.INTERFACES, "ports")
+    seed_mapping(first, SERVER_KEY, oob=2900)
+    seed_interfaces_snapshot(first, host_ports, oob_ports=[_port(2009, "iDRAC-NIC")], server_key=SERVER_KEY)
 
     first_rows = _rows(_tab(client, first))
     second_rows = _rows(_tab(client, second))
@@ -240,7 +251,7 @@ def _netbox_only(client, device):
 
 def test_the_tab_leaves_the_netbox_only_rows_to_the_dialog(client, settings):
     client = _superuser_client(client, settings, "netbox-only")
-    device = _refreshed(_mixed_device("netbox-only"))
+    device = _mixed_device("netbox-only")
 
     html = _tab(client, device)
     response = _netbox_only(client, device)
@@ -256,7 +267,7 @@ def test_the_tab_leaves_the_netbox_only_rows_to_the_dialog(client, settings):
 
 def test_the_netbox_only_rows_need_a_view_of_the_device(client, settings):
     _superuser_client(client, settings, "netbox-only-denied")
-    device = _refreshed(_mixed_device("netbox-only-denied"))
+    device = _mixed_device("netbox-only-denied")
     client.force_login(get_user_model().objects.create(username="netbox-only-no-grant"))
 
     response = _netbox_only(client, device)

@@ -211,13 +211,12 @@ TAB_SPECS = {
 }
 
 # Web-transport state that a tab keeps next to its snapshot, and that goes with the snapshot.
-_LAST_FETCHED_TABS = frozenset({SyncTab.INTERFACES})
 _VLAN_OVERRIDE_TABS = frozenset({SyncTab.INTERFACES})
 _CABLE_PICK_TABS = frozenset({SyncTab.CABLES})
 
 
 # The resources whose snapshot source_cache stores; the other tabs still store their own payload.
-_ACQUIRED_RESOURCES = frozenset({Resource.IP_ADDRESSES, Resource.VLANS})
+_ACQUIRED_RESOURCES = frozenset({Resource.INTERFACES, Resource.IP_ADDRESSES, Resource.VLANS})
 
 
 def _shares_vc_owner(tab):
@@ -389,11 +388,6 @@ def request_actor_id(request):
 def sync_snapshot_key(obj, data_type, server_key):
     """Return the shared snapshot key for one object, data type, and configured server."""
     return f"librenms_{data_type}_{obj._meta.model_name}_{obj.pk}_{require_server_key(server_key)}"
-
-
-def sync_last_fetched_key(obj, data_type, server_key):
-    """Return the shared last-fetched key for one object, data type, and configured server."""
-    return f"librenms_{data_type}_last_fetched_{obj._meta.model_name}_{obj.pk}_{require_server_key(server_key)}"
 
 
 def sync_vlan_overrides_key(obj, server_key):
@@ -642,8 +636,6 @@ class SyncCacheConsistency:
         for owner in self._candidate_owners(tab, server_key):
             snapshot_key = sync_snapshot_key(owner, spec.source.data_type, server_key)
             keys = {snapshot_key}
-            if tab in _LAST_FETCHED_TABS:
-                keys.add(sync_last_fetched_key(owner, spec.source.data_type, server_key))
             if tab in _VLAN_OVERRIDE_TABS:
                 keys.add(sync_vlan_overrides_key(owner, server_key))
             if any(cache.has_key(key) for key in keys):
@@ -660,8 +652,6 @@ class SyncCacheConsistency:
             snapshot_key = sync_snapshot_key(owner, spec.source.data_type, server_key)
             if snapshot_key != preserve_key:
                 keys.add(snapshot_key)
-                if tab in _LAST_FETCHED_TABS:
-                    keys.add(sync_last_fetched_key(owner, spec.source.data_type, server_key))
                 if tab in _VLAN_OVERRIDE_TABS:
                     keys.add(sync_vlan_overrides_key(owner, server_key))
                 if tab in _CABLE_PICK_TABS:

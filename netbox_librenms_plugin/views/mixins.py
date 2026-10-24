@@ -4,7 +4,6 @@ from urllib.parse import quote_plus
 
 from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
-from django.core.cache import cache
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import get_script_prefix
@@ -16,7 +15,7 @@ from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGI
 from netbox_librenms_plugin.interface_sync import ApplicationResult, write_interface_row
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSIDConflictError, LibreNMSLookupError
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
-from netbox_librenms_plugin.utils import coerce_model_pk, effective_vlan_mode, is_list_of_dicts
+from netbox_librenms_plugin.utils import coerce_model_pk, effective_vlan_mode
 
 logger = logging.getLogger(__name__)
 
@@ -47,33 +46,6 @@ def parse_request_json(request):
     if not isinstance(data, dict):
         return None, JsonResponse({"status": "error", "message": "JSON payload must be an object"}, status=400)
     return data, None
-
-
-def extract_cached_ports(cached, cache_key=None):
-    """
-    Return the validated dict payload of a cached "ports" entry, or None when malformed.
-
-    Mirrors the cables view's ``_extract_cached_links``: a stale/corrupt but truthy cache
-    value — a non-dict snapshot (e.g. a legacy bare list), a non-list ``ports``, or a
-    non-dict port row — would AttributeError-500 the consumer's ``.get()``/row reads.
-    Treat those as a cache miss; when ``cache_key`` is given, purge the bad entry so the
-    next read doesn't keep serving garbage.
-
-    Args:
-        cached: The raw value read from the ports cache key.
-        cache_key: Optional cache key to delete when the entry is malformed.
-
-    Returns:
-        dict | None: The cached payload with a list of dict port rows, or None.
-
-    """
-    # ``is_list_of_dicts`` is the same shape check the VLAN/interface read-paths use: ports must
-    # be a list whose every row is a dict (an empty list is valid — a device with no ports).
-    if not isinstance(cached, dict) or not is_list_of_dicts(cached.get("ports")):
-        if cache_key is not None:
-            cache.delete(cache_key)
-        return None
-    return cached
 
 
 def validated_referer(request):
@@ -1079,12 +1051,6 @@ class CacheMixin(SyncSubjectClaimMixin):
         from netbox_librenms_plugin.sync_cache import sync_snapshot_key
 
         return sync_snapshot_key(obj, data_type, server_key)
-
-    def get_last_fetched_key(self, obj, data_type, server_key):
-        """Get the cache key for the last fetched time of the object."""
-        from netbox_librenms_plugin.sync_cache import sync_last_fetched_key
-
-        return sync_last_fetched_key(obj, data_type, server_key)
 
     def get_vlan_overrides_key(self, obj, server_key):
         """

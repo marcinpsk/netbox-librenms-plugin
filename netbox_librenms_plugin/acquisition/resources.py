@@ -1,14 +1,36 @@
 """What each resource requests from LibreNMS, and which of its responses each scope needs."""
 
+from dataclasses import dataclass
+
 from netbox_librenms_plugin.acquisition import responses
 from netbox_librenms_plugin.acquisition.registry import Resource
-from netbox_librenms_plugin.acquisition.snapshot import Outcome
+from netbox_librenms_plugin.acquisition.snapshot import MappingState, Outcome
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
+from netbox_librenms_plugin.server_mappings import MappingRole
+
+
+@dataclass(frozen=True)
+class Blocker:
+    """One source that a scope cannot use, and the notice that names it."""
+
+    path: str
+    message: str
+
+    @classmethod
+    def of(cls, record):
+        """Return the blocker of a response that was not obtained."""
+        return cls(record.request.path, f"{record.request.path} was not obtained ({record.reason})")
 
 
 def port_vrf_id(port):
     """Return the LibreNMS VRF id a port row names, or None; LibreNMS reports 0 for no VRF."""
     return coerce_librenms_id(port.get("ifVrf"))
+
+
+def device_os(device_record):
+    """Return the LibreNMS OS that a device record names, stripped, or "" when it names none."""
+    os_name = device_record.get("os")
+    return os_name.strip() if isinstance(os_name, str) else ""
 
 
 def _vlans(fetch, librenms_id):
@@ -32,32 +54,83 @@ def _ip_addresses(fetch, librenms_id):
     return parts
 
 
+def _interfaces(fetch, librenms_id):
+    return {
+        "ports": fetch(responses.ports(librenms_id, with_vlans=True)),
+        "port_stack": fetch(responses.port_stack(librenms_id)),
+        "device": fetch(responses.device(librenms_id)),
+    }
+
+
+def _oob_interfaces(fetch, librenms_id):
+    return {"ports": fetch(responses.ports(librenms_id, with_vlans=True))}
+
+
 ACQUIRERS = {
+    Resource.INTERFACES: _interfaces,
     Resource.IP_ADDRESSES: _ip_addresses,
     Resource.VLANS: _vlans,
 }
 
-# Scope -> the parts it reads. A part that is not applicable does not block its scope.
+# The parts acquired from the owner's out-of-band controller, for a resource that shows its rows.
+OOB_ACQUIRERS = {
+    Resource.INTERFACES: _oob_interfaces,
+}
+
+
+def _blockers(snapshot, resource, parts, role=MappingRole.OWN):
+    """Return a blocker for each part that was not obtained; a part that is not applicable blocks nothing."""
+    oob = snapshot.resources[resource].oob
+    if role is MappingRole.OOB and oob is not None and oob.state is MappingState.INVALID:
+        record = snapshot.record(resource, parts[0], role)
+        return (Blocker("oob", record.reason),)
+    return tuple(
+        Blocker.of(record)
+        for record in (snapshot.record(resource, part, role) for part in parts)
+        if record.outcome not in (Outcome.OBTAINED, Outcome.NOT_APPLICABLE)
+    )
+
+
+def _ip_address_scopes(snapshot):
+    return {"addresses": _blockers(snapshot, Resource.IP_ADDRESSES, ("addresses", "ports", "device", "vrfs"))}
+
+
+def _vlan_scopes(snapshot):
+    return {"vlans": _blockers(snapshot, Resource.VLANS, ("vlans",))}
+
+
+def _interface_scopes(snapshot):
+    resource = Resource.INTERFACES
+    host = _blockers(snapshot, resource, ("ports", "port_stack"))
+    port_stack = snapshot.record(resource, "port_stack")
+    if port_stack.obtained and port_stack.value:
+        # The OS scopes the name rules that classify the pairs.
+        device = snapshot.record(resource, "device")
+        if not device.obtained:
+            host += (Blocker.of(device),)
+        elif not device_os(device.value):
+            path = device.request.path
+            host += (Blocker(path, f"{path} names no device OS, which the port_stack pairs need"),)
+    scopes = {"host": host}
+    if snapshot.resources[resource].oob is not None:
+        # The OOB rows are compared with the host rows, so they need the host scope too.
+        scopes["oob"] = _blockers(snapshot, resource, ("ports",), MappingRole.OOB) or host
+    return scopes
+
+
+# Resource -> a function that returns each scope with its blockers; a scope without blockers is ready.
 SCOPES = {
-    Resource.IP_ADDRESSES: {"addresses": ("addresses", "ports", "device", "vrfs")},
-    Resource.VLANS: {"vlans": ("vlans",)},
+    Resource.INTERFACES: _interface_scopes,
+    Resource.IP_ADDRESSES: _ip_address_scopes,
+    Resource.VLANS: _vlan_scopes,
 }
 
 
 def blocked_scopes(snapshot, resource):
-    """Return each blocked scope of a resource with the records that block it."""
-    blocked = {}
-    for scope, parts in SCOPES[resource].items():
-        records = tuple(
-            record
-            for record in (snapshot.record(resource, part) for part in parts)
-            if record.outcome not in (Outcome.OBTAINED, Outcome.NOT_APPLICABLE)
-        )
-        if records:
-            blocked[scope] = records
-    return blocked
+    """Return each blocked scope of a resource with the blockers that name its failed sources."""
+    return {scope: blockers for scope, blockers in SCOPES[resource](snapshot).items() if blockers}
 
 
 def is_ready(snapshot, resource):
     """Return whether at least one scope of the resource can be used."""
-    return len(blocked_scopes(snapshot, resource)) < len(SCOPES[resource])
+    return any(not blockers for blockers in SCOPES[resource](snapshot).values())

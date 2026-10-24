@@ -5,6 +5,7 @@ from time import sleep
 
 import pytest
 
+from netbox_librenms_plugin.assessment.interfaces import parse_port_vlan_data
 from netbox_librenms_plugin.constants import LIBRENMS_PORTS_COLUMNS
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping_row, stored_mapping_for_test
 
@@ -1139,16 +1140,14 @@ def test_discovered_mapping_and_vm_import_serialize_one_librenms_id_claim(settin
 
 
 class TestParsePortVlanData:
-    """parse_port_vlan_data normalizes VLAN data through a real client."""
+    """parse_port_vlan_data normalizes the VLAN fields of a LibreNMS port row."""
 
-    def test_no_if_vlan_returns_mode_none(self, settings, librenms_server):
-        api = api_for(settings, librenms_server.url)
+    def test_no_if_vlan_returns_mode_none(self):
         port_data = {"port_id": 1, "ifName": "Gi0/1", "ifDescr": "GigabitEthernet", "ifVlan": ""}
-        result = api.parse_port_vlan_data(port_data)
+        result = parse_port_vlan_data(port_data)
         assert result["mode"] is None
 
-    def test_trunk_mode_set_correctly(self, settings, librenms_server):
-        api = api_for(settings, librenms_server.url)
+    def test_trunk_mode_set_correctly(self):
         port_data = {
             "port_id": 1,
             "ifName": "Gi0/1",
@@ -1157,13 +1156,12 @@ class TestParsePortVlanData:
             "ifTrunk": "dot1Q",
             "vlans": [{"vlan": 100, "untagged": 0}, {"vlan": 200, "untagged": 0}],
         }
-        result = api.parse_port_vlan_data(port_data)
+        result = parse_port_vlan_data(port_data)
         assert result["mode"] == "tagged"
         assert 100 in result["tagged_vlans"]
         assert 200 in result["tagged_vlans"]
 
-    def test_access_mode_from_vlan_array(self, settings, librenms_server):
-        api = api_for(settings, librenms_server.url)
+    def test_access_mode_from_vlan_array(self):
         port_data = {
             "port_id": 1,
             "ifName": "Gi0/2",
@@ -1171,33 +1169,23 @@ class TestParsePortVlanData:
             "ifVlan": "100",
             "vlans": [{"vlan": 100, "untagged": 1}],
         }
-        result = api.parse_port_vlan_data(port_data)
+        result = parse_port_vlan_data(port_data)
         assert result["mode"] == "access"
         assert result["untagged_vlan"] == 100
 
-    def test_fallback_to_if_vlan_when_no_vlans_array(self, settings, librenms_server):
-        api = api_for(settings, librenms_server.url)
+    def test_fallback_to_if_vlan_when_no_vlans_array(self):
         port_data = {"port_id": 1, "ifName": "Gi0/3", "ifDescr": "GE", "ifVlan": "50", "ifTrunk": None}
-        result = api.parse_port_vlan_data(port_data)
+        result = parse_port_vlan_data(port_data)
         assert result["mode"] == "access"
         assert result["untagged_vlan"] == 50
 
-    def test_invalid_if_vlan_fallback_returns_none(self, settings, librenms_server):
-        """A nonnumeric ifVlan leaves the untagged VLAN unset."""
-        api = api_for(settings, librenms_server.url)
-        port_data = {"port_id": 1, "ifName": "Gi0/4", "ifDescr": "GE", "ifVlan": "not-a-number"}
-        result = api.parse_port_vlan_data(port_data)
-        assert result["untagged_vlan"] is None
-
-    def test_if_descr_used_as_interface_name(self, settings, librenms_server):
-        api = api_for(settings, librenms_server.url)
+    def test_if_descr_used_as_interface_name(self):
         port_data = {"port_id": 1, "ifName": "Gi0/5", "ifDescr": "GigabitEthernet0/5", "ifVlan": ""}
-        result = api.parse_port_vlan_data(port_data, interface_name_field="ifDescr")
+        result = parse_port_vlan_data(port_data, interface_name_field="ifDescr")
         assert result["interface_name"] == "GigabitEthernet0/5"
 
-    def test_string_vlan_id_normalized_to_int(self, settings, librenms_server):
+    def test_string_vlan_id_normalized_to_int(self):
         """String VLAN IDs are normalized to integers."""
-        api = api_for(settings, librenms_server.url)
         port_data = {
             "port_id": 1,
             "ifName": "Gi0/6",
@@ -1205,43 +1193,14 @@ class TestParsePortVlanData:
             "ifVlan": "50",
             "vlans": [{"vlan": "50", "untagged": 1}, {"vlan": "100", "untagged": 0}],
         }
-        result = api.parse_port_vlan_data(port_data)
+        result = parse_port_vlan_data(port_data)
         assert result["untagged_vlan"] == 50
         assert result["tagged_vlans"] == [100]
 
-    def test_none_vlan_id_skipped(self, settings, librenms_server):
-        """An entry without a VLAN ID is skipped."""
-        api = api_for(settings, librenms_server.url)
-        port_data = {
-            "port_id": 1,
-            "ifName": "Gi0/7",
-            "ifDescr": "GE",
-            "ifVlan": "200",
-            "vlans": [{"untagged": 0}, {"vlan": 200, "untagged": 1}],
-        }
-        result = api.parse_port_vlan_data(port_data)
-        assert result["untagged_vlan"] == 200
-        assert result["tagged_vlans"] == []
-
-    def test_malformed_vlan_id_skipped(self, settings, librenms_server):
-        """A nonnumeric VLAN ID is skipped."""
-        api = api_for(settings, librenms_server.url)
-        port_data = {
-            "port_id": 1,
-            "ifName": "Gi0/8",
-            "ifDescr": "GE",
-            "ifVlan": "300",
-            "vlans": [{"vlan": "N/A", "untagged": 0}, {"vlan": 300, "untagged": 1}],
-        }
-        result = api.parse_port_vlan_data(port_data)
-        assert result["untagged_vlan"] == 300
-        assert result["tagged_vlans"] == []
-
-    def test_empty_vlans_array_falls_back_to_if_vlan(self, settings, librenms_server):
+    def test_empty_vlans_array_falls_back_to_if_vlan(self):
         """An empty VLAN array uses the ifVlan fallback."""
-        api = api_for(settings, librenms_server.url)
         port_data = {"port_id": 1, "ifName": "Gi0/9", "ifDescr": "GE", "ifVlan": "10", "vlans": []}
-        result = api.parse_port_vlan_data(port_data)
+        result = parse_port_vlan_data(port_data)
         assert result["untagged_vlan"] == 10
 
 

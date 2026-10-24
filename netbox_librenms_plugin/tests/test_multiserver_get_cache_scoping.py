@@ -46,16 +46,16 @@ class TestConfiguredServerCacheScoping:
     """A configured requested server reads only that server's snapshot."""
 
     def test_interfaces_render_the_requested_servers_snapshot(self, configured_servers):
-        from django.core.cache import cache
-
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_interfaces_snapshot
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         device = make_device("multiserver-interface")
         make_interface(device, "Ethernet1")
         view = DeviceInterfaceTableView()
         request = _request("production")
-        key = view.get_cache_key(device, "ports", "production")
-        cache.set(key, {"ports": [{"port_id": 11, "ifName": "Ethernet1", "ifAdminStatus": "up"}]})
+        seed_interfaces_snapshot(
+            device, [{"port_id": 11, "ifName": "Ethernet1", "ifAdminStatus": "up"}], server_key="production"
+        )
 
         context = _bind(view, request).get_context_data(request, device, "ifName")
 
