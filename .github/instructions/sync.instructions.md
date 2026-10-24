@@ -6,7 +6,7 @@ description: Sync page architecture, base views, and sync action patterns
 # Sync Pages
 
 ## Three-Layer View Architecture
-All four sync resources (interfaces, cables, IP addresses, VLANs) follow the same pattern:
+All five sync resources (interfaces, cables, IP addresses, modules, VLANs) follow the same pattern:
 
 1. **Base views** (`views/base/`) — abstract classes that define the data pipeline:
    - `BaseLibreNMSSyncView` — tabbed sync page, orchestrates all tabs via abstract `get_*_context()` methods.
@@ -25,7 +25,7 @@ All four sync resources (interfaces, cables, IP addresses, VLANs) follow the sam
    - Cable sync returns `_cable_sync_content.html` for HTMX so the response matches `#cable-sync-content`. Other actions can use `HX-Redirect` when they require full navigation.
 
 ## Data Pipeline (Base Views)
-The interfaces, cables, IP and VLAN tabs follow: **acquire → store → assess → render**.
+Every sync tab follows: **acquire → store → assess → render**.
 
 - **Acquire:** `acquisition.coordinator.acquire(subject, server_key=..., resources=[...])` obtains the
   LibreNMS responses with no request or user, reads the mapping and writes nothing. It returns a
@@ -33,6 +33,7 @@ The interfaces, cables, IP and VLAN tabs follow: **acquire → store → assess 
   `IncompleteSource` for a part that was not obtained; never read a failed part as an empty list.
 - **Store:** `source_cache.refresh(request, subject, resource, server_key)` runs after discovery and stores the snapshot under the
   `CacheMixin` key; `source_cache.read()` is the one reader for the tab, the verify views and the sync.
+  The key includes the plugin version and NetBox release.
 - **Assess:** derive the rows at read time, for the current user. The snapshot holds source facts only.
   The snapshot's `finished_at` is the tab's "last updated" time.
 - **Scopes:** a refresh stores the snapshot when at least one scope is ready. The interfaces host scope
@@ -49,12 +50,11 @@ The interfaces, cables, IP and VLAN tabs follow: **acquire → store → assess 
   Sync and far-end creation use the stored port evidence. Missing evidence requires a refresh.
   Manual picks bind to `snapshot_id` and use the owner's snapshot key. An expired picker asks for a refresh.
 
-The modules tab still follows **fetch → cache → compare → render**:
-
-- **Fetch:** Call LibreNMS API (e.g., `get_ports()`).
-- **Cache:** Store results via `CacheMixin` keys: `librenms_{data_type}_{model_name}_{pk}_{server_key}`. Every key needs a configured server key; a blank key raises `ValueError`.
-- **Compare:** Match LibreNMS data against NetBox objects. Each resource implements its own comparison (interface matching by name, IP matching by address/mask, VLAN matching by VID+group).
-- **Render:** Build a django-tables2 table, return a partial template (`_*_sync_content.html`).
+- **Modules:** host rows need inventory, ports and transceivers. OOB rows need OOB inventory and a
+  ready host scope. An OOB failure leaves host rows usable. Every tab, verify, install, replace and
+  sync reader calls `source_cache.read()` and assesses the bound source on each read. Parent repair,
+  transceiver merge, port identity and OOB index offsets exist only in `assessment/modules.py`.
+  Notices name each failed source. The binding includes the owner, host id and OOB link.
 
 ## Sync Action View Pattern
 ```python
@@ -74,7 +74,7 @@ class SyncSomeResourceView(
         server_key = self.resolve_posted_server_key_or_none(request.POST)
         if server_key is None:
             return HttpResponse(status=400)
-        # 3. Load cached data from cache.get(self.get_cache_key(obj, "...", server_key))
+        # 3. Read the bound source with source_cache.read() and assess its rows
         # 4. Apply changes inside transaction.atomic()
         # 5. Return the action's HTMX response, or redirect to ?tab=<resource>
 ```
