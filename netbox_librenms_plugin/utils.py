@@ -27,9 +27,12 @@ from utilities.paginator import get_paginate_count as netbox_get_paginate_count
 from netbox_librenms_plugin.constants import (
     DEFAULT_INTERFACE_NAME_FIELD,
     HOST_NAME_COLLISION_REASON,
+    MATCHING,
+    MISMATCHED,
     NAME_OWNER_LIVE,
     NAME_OWNER_STALE,
     NAME_OWNER_UNKNOWN,
+    NOT_IN_NETBOX,
     OOB_BADGE_HTML,
     OOB_INVENTORY_SOURCE,
     OOB_NAME_SUFFIX,
@@ -2816,6 +2819,30 @@ def parse_location_for_import(location_string: str) -> dict:
     return parsed
 
 
+# The colour of each VLAN comparison on the VLAN sync tab.
+_VLAN_SYNC_CSS_CLASS = {MATCHING: "text-success", MISMATCHED: "text-warning", NOT_IN_NETBOX: "text-danger"}
+
+
+def vlan_sync_comparison(exists_in_netbox: bool, name_matches: bool = True) -> str:
+    """
+    Return how a LibreNMS VLAN compares to the NetBox VLAN it resolved to.
+
+    The row colours, the row action and the sync-state filter of the VLAN sync tab all read this
+    value, so they always agree.
+
+    Args:
+        exists_in_netbox: Whether the VLAN exists in NetBox (in the selected group or globally).
+        name_matches: Whether the VLAN name in NetBox matches the LibreNMS name.
+
+    Returns:
+        str: ``MATCHING``, ``MISMATCHED`` or ``NOT_IN_NETBOX`` from ``sync_filters``.
+
+    """
+    if not exists_in_netbox:
+        return NOT_IN_NETBOX
+    return MATCHING if name_matches else MISMATCHED
+
+
 def get_vlan_sync_css_class(exists_in_netbox: bool, name_matches: bool = True) -> str:
     """
     Determine CSS class for a VLAN row on the VLAN sync tab.
@@ -2832,11 +2859,37 @@ def get_vlan_sync_css_class(exists_in_netbox: bool, name_matches: bool = True) -
         CSS class string: 'text-success', 'text-warning', or 'text-danger'.
 
     """
-    if not exists_in_netbox:
-        return "text-danger"
-    if name_matches:
-        return "text-success"
-    return "text-warning"
+    return _VLAN_SYNC_CSS_CLASS[vlan_sync_comparison(exists_in_netbox, name_matches)]
+
+
+def _vlan_sync_action(vid, exists_in_netbox, name_matches, actions_enabled):
+    """Return the visible text and the markup of a VLAN row's status cell."""
+    comparison = vlan_sync_comparison(exists_in_netbox, name_matches)
+    canonical_vid = normalize_vlan_vid(vid)
+    can_submit = actions_enabled and canonical_vid is not None
+    css_class = _VLAN_SYNC_CSS_CLASS[comparison]
+    if comparison == NOT_IN_NETBOX:
+        if not can_submit:
+            return "Not in NetBox", format_html('<span class="{}">Not in NetBox</span>', css_class)
+        return "Create", format_html(
+            '<button type="submit" class="btn btn-sm btn-primary" name="sync_one" value="{}"'
+            ' title="Create this VLAN in NetBox"><i class="mdi mdi-plus-thick" aria-hidden="true"></i>'
+            " Create</button>",
+            canonical_vid,
+        )
+    if comparison == MISMATCHED:
+        if not can_submit:
+            return "Name differs", format_html('<span class="{}">Name differs</span>', css_class)
+        return "Update", format_html(
+            '<button type="submit" class="btn btn-sm btn-warning" name="sync_one" value="{}"'
+            ' title="Update this VLAN\'s name in NetBox"><i class="mdi mdi-pencil" aria-hidden="true"></i>'
+            " Update</button>",
+            canonical_vid,
+        )
+    return "Synced", format_html(
+        '<span class="{}"><i class="mdi mdi-check-circle"></i> Synced</span>',
+        css_class,
+    )
 
 
 def render_vlan_sync_action(vid, exists_in_netbox, name_matches, *, actions_enabled=True):
@@ -2846,31 +2899,12 @@ def render_vlan_sync_action(vid, exists_in_netbox, name_matches, *, actions_enab
     Shared by the table renderer and the verify endpoint so the row action always matches
     the current VLAN synchronization state.
     """
-    canonical_vid = normalize_vlan_vid(vid)
-    can_submit = actions_enabled and canonical_vid is not None
-    css_class = get_vlan_sync_css_class(exists_in_netbox, name_matches)
-    if not exists_in_netbox:
-        if not can_submit:
-            return format_html('<span class="{}">Not in NetBox</span>', css_class)
-        return format_html(
-            '<button type="submit" class="btn btn-sm btn-primary" name="sync_one" value="{}"'
-            ' title="Create this VLAN in NetBox"><i class="mdi mdi-plus-thick" aria-hidden="true"></i>'
-            " Create</button>",
-            canonical_vid,
-        )
-    if not name_matches:
-        if not can_submit:
-            return format_html('<span class="{}">Name differs</span>', css_class)
-        return format_html(
-            '<button type="submit" class="btn btn-sm btn-warning" name="sync_one" value="{}"'
-            ' title="Update this VLAN\'s name in NetBox"><i class="mdi mdi-pencil" aria-hidden="true"></i>'
-            " Update</button>",
-            canonical_vid,
-        )
-    return format_html(
-        '<span class="{}"><i class="mdi mdi-check-circle"></i> Synced</span>',
-        css_class,
-    )
+    return _vlan_sync_action(vid, exists_in_netbox, name_matches, actions_enabled)[1]
+
+
+def vlan_sync_action_label(vid, exists_in_netbox, name_matches, *, actions_enabled=True):
+    """Return the visible text of the status cell that ``render_vlan_sync_action`` renders."""
+    return _vlan_sync_action(vid, exists_in_netbox, name_matches, actions_enabled)[0]
 
 
 # ============================================
@@ -3166,6 +3200,20 @@ def oob_badge_html(record, leading_space=False):
     return mark_safe((" " if leading_space else "") + OOB_BADGE_HTML)
 
 
+def _rule_block_pill(rule_block):
+    """Return the colour, icon and label of the pill that ``rule_block_html`` renders."""
+    from netbox_librenms_plugin.interface_rules import RuleDecisionKind  # interface_rules imports utils
+
+    if rule_block["kind"] == RuleDecisionKind.IGNORE.value:
+        return "secondary", "mdi-eye-off", "Ignored"
+    return "warning", "mdi-refresh", "Refresh needed"
+
+
+def rule_block_label(rule_block):
+    """Return the visible text of the pill that ``rule_block_html`` renders for *rule_block*."""
+    return _rule_block_pill(rule_block)[2]
+
+
 def rule_block_html(rule_block):
     """
     Return the pill that says why the interface rules or an IP mapping refuse a row's write.
@@ -3181,12 +3229,7 @@ def rule_block_html(rule_block):
         SafeString: The pill markup.
 
     """
-    from netbox_librenms_plugin.interface_rules import RuleDecisionKind  # interface_rules imports utils
-
-    if rule_block["kind"] == RuleDecisionKind.IGNORE.value:
-        color, icon, label = "secondary", "mdi-eye-off", "Ignored"
-    else:
-        color, icon, label = "warning", "mdi-refresh", "Refresh needed"
+    color, icon, label = _rule_block_pill(rule_block)
     return format_html(
         '<span class="badge bg-{}-lt fw-normal d-inline-flex align-items-center gap-1" title="Not synced: {}">'
         '<i class="mdi {}"></i>{}</span>',

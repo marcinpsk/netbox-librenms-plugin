@@ -36,6 +36,7 @@ from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     sync_cache_browser_contract,
 )
+from netbox_librenms_plugin.sync_query import SyncQuery
 from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_user_pref,
@@ -186,7 +187,17 @@ class BaseLibreNMSSyncView(
 
         context = self.get_context_data(request, obj)
 
-        return render(request, self.template_name, context)
+        # A filter only decides what a table shows, so only a full page load answers an invalid one
+        # with 400. An htmx tab swap keeps its status, and every tab renders as usual.
+        tab_contexts = [(spec, context.get(spec.context_name)) for spec in TAB_SPECS.values()]
+        invalid_filter = any(
+            isinstance(tab_context, dict)
+            and tab_context.get("filters") is not None
+            and not tab_context["filters"].is_valid
+            for spec, tab_context in tab_contexts
+        )
+        status = 400 if invalid_filter and not request.htmx else 200
+        return render(request, self.template_name, context, status=status)
 
     def _can_manage_server_preference(self, selection):
         """Check plugin write and object change scope for the mapping owner."""
@@ -215,6 +226,7 @@ class BaseLibreNMSSyncView(
                 "object": obj,
                 "tab": self.tab,
                 "active_sync_tab": active_sync_tab,
+                "server_switch_query": SyncQuery.from_request(request).server_switch_query(active_sync_tab),
                 "server_key": selection.active_key,
                 "all_server_mappings": selection.mappings,
                 "server_selection_state": selection.state,
@@ -266,6 +278,7 @@ class BaseLibreNMSSyncView(
                 "object": obj,
                 "tab": self.tab,
                 "active_sync_tab": active_sync_tab,
+                "server_switch_query": SyncQuery.from_request(request).server_switch_query(active_sync_tab),
                 "sync_tab_urls": sync_tab_urls,
                 "interface_name_selector_visible": active_sync_tab in INTERFACE_NAME_SELECTOR_TABS,
                 # self.librenms_id is normalised to a positive int or None at assignment

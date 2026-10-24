@@ -2,7 +2,6 @@ import json
 import logging
 from collections import defaultdict
 from ipaddress import ip_interface
-from urllib.parse import quote_plus
 
 from dcim.models import Device, Interface
 from django.contrib import messages
@@ -25,6 +24,7 @@ from netbox_librenms_plugin.librenms_ids import (
 )
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
+from netbox_librenms_plugin.sync_filters import filter_sync_table, parse_table_filters
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
@@ -755,17 +755,6 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         """Return the pk of the Device or VirtualMachine that owns *interface*."""
         return interface.device_id if isinstance(interface, Interface) else interface.virtual_machine_id
 
-    def get_table(self, data, obj, request, server_key=None):
-        """Get the table instance for the view."""
-        table = IPAddressTable(data)
-        server_key = server_key or self._render_server_key()
-        # server_key is config data, not a guaranteed slug — URL-encode it so a key with
-        # &/=/space doesn't build a broken query string and silently change server scope.
-        table.htmx_url = f"{request.path}?tab=ipaddresses" + (
-            f"&server_key={quote_plus(server_key)}" if server_key else ""
-        )
-        return table
-
     def _prepare_context(self, request, obj, interface_name_field, fetch_fresh=False, server_key=None):  # noqa: C901
         """Helper method to prepare the context data for IP address sync views."""
         table = None
@@ -948,14 +937,19 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         if cache_ttl is not None and cache_ttl > 0:
             cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl)
 
-        # Generate the table
-        table = self.get_table(ip_data, obj, request, server_key=server_key)
-
+        # The management rows and the row identities describe the whole snapshot, so they come before the filter.
+        mgmt_row_ids = list(dict.fromkeys(row["row_id"] for row in ip_data if row.get("is_mgmt_ip") and row["row_id"]))
+        table, filters, filtered_from = filter_sync_table(
+            request, obj, ip_data, lambda rows: IPAddressTable(rows, mgmt_row_ids=mgmt_row_ids), server_key=server_key
+        )
         table.configure(request)
 
         # Prepare and return the context
         return {
             "table": table,
+            "filters": filters,
+            # The row count before the filter, shown only while a filter narrows the table.
+            "filtered_from": filtered_from,
             "object": obj,
             "cache_expiry": cache_expiry,
             "server_key": server_key,
@@ -1002,6 +996,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
     def get_context_data(self, request, obj):
         """Get the context data for the IP address sync view."""
         interface_name_field = get_interface_name_field(request, obj)
+        # The filters show their errors also when no snapshot is cached.
+        filters = parse_table_filters(request.GET, lambda rows: IPAddressTable(rows, mgmt_row_ids=[]))
         # GET render: scope the cache read to ?server_key (mirrors the interfaces/cables/VLAN/
         # module tabs) so a non-default-server tab reads that server's IP cache, not the
         # default's — without this the IP tab renders empty after a successful refresh on a
@@ -1015,6 +1011,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             # stale server's cached IPs (mirrors modules_view.get_context_data's unresolved guard).
             return {
                 "table": None,
+                "filters": filters,
                 "object": obj,
                 "cache_expiry": None,
                 "server_key": scoped,
@@ -1034,6 +1031,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 "create_missing_interfaces": resolve_create_missing_interfaces(request),
                 "movable_ips": self._movable_ips_for_migration(obj, scoped),
             }
+        context.setdefault("filters", filters)
         return context
 
     def post(self, request, pk):
@@ -1450,7 +1448,7 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
                 updated_record["ip_rule_block"] = row_ip_rule_block(ip_rule)
 
             # Render status HTML
-            table = IPAddressTable(data=[])
+            table = IPAddressTable([], mgmt_row_ids=[])
             status_html = table.render_status(updated_record["status"], updated_record)
 
             return JsonResponse(

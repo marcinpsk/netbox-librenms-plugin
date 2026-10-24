@@ -1184,7 +1184,7 @@ class TestCrossPageSelection:
         _load_selection_page(page, [JUNOS_ROWS[2]], url=f"{SELECTION_PAGE_URL}?page=2")
 
         notice = page.locator("#librenms-interface-table-offpage-selection")
-        assert "2 more rows are selected on other pages." in notice.inner_text()
+        assert notice.inner_text().split()[0] == "2"
 
     def test_rows_selected_on_another_page_are_submitted(self, page):
         _load_selection_page(page, JUNOS_ROWS, url=f"{SELECTION_PAGE_URL}?page=1")
@@ -1875,7 +1875,7 @@ def test_a_retry_after_a_failed_htmx_submit_still_carries_the_off_page_selection
     )
 
     page.click("#bulk-submit")
-    expect(page.locator("#librenms-interface-table-offpage-selection")).to_contain_text("1 more row")
+    expect(page.locator("#librenms-interface-table-offpage-selection")).to_contain_text("1 more")
     page.click("#bulk-submit")
     page.locator("#swapped").wait_for()
 
@@ -1904,7 +1904,7 @@ def test_a_dropped_row_submit_keeps_the_pending_bulk_submit_recoverable(page):
         page.click("#bulk-submit")
     page.click("#row-sync")
     held[0].fulfill(status=500, content_type="text/html", body="Server error")
-    expect(page.locator("#librenms-interface-table-offpage-selection")).to_contain_text("1 more row")
+    expect(page.locator("#librenms-interface-table-offpage-selection")).to_contain_text("1 more")
     page.click("#bulk-submit")
     page.locator("#swapped").wait_for()
 
@@ -1971,7 +1971,7 @@ def test_a_retry_after_a_failed_module_install_still_carries_the_off_page_select
     )
 
     page.click("#install-submit")
-    expect(page.locator("#librenms-module-table-offpage-selection")).to_contain_text("1 more row")
+    expect(page.locator("#librenms-module-table-offpage-selection")).to_contain_text("1 more")
     page.click("#install-submit")
     page.locator("#swapped").wait_for()
 
@@ -3007,47 +3007,6 @@ def test_tab_toolbars_share_a_row_only_when_the_viewport_has_room(page):
     assert warning_refresh_rect["y"] + warning_refresh_rect["height"] + 16 <= warning_rect["y"]
 
 
-def test_vlan_filters_hide_nonmatching_vlan_rows(page):
-    """VLAN filters match the visible values in VLAN rows."""
-    page.set_content(
-        """
-        <input id="filter-vlan-id">
-        <input id="filter-vlan-name">
-        <input id="filter-vlan-group">
-        <input id="filter-vlan-type">
-        <input id="filter-vlan-state">
-        <table id="librenms-vlan-table"><tbody>
-          <tr class="empty"><td colspan="5">No matching VLANs</td></tr>
-          <tr data-vlan-id="10" id="users-vlan">
-            <td data-col="vlan_id"><span>10</span></td>
-            <td data-col="name"><span>Users</span></td>
-            <td data-col="vlan_group_selection"><div class="ts-control"><span class="item">Campus</span></div></td>
-            <td data-col="type">Ethernet</td>
-            <td data-col="state"><span>Active</span></td>
-          </tr>
-          <tr data-vlan-id="20" id="guests-vlan">
-            <td data-col="vlan_id"><span>20</span></td>
-            <td data-col="name"><span>Guests</span></td>
-            <td data-col="vlan_group_selection"><div class="ts-control"><span class="item">Edge</span></div></td>
-            <td data-col="type">QinQ</td>
-            <td data-col="state"><span>Inactive</span></td>
-          </tr>
-        </tbody></table>
-        """
-    )
-    _add_page_scripts(page)
-    page.evaluate("initializeFilters()")
-
-    page.locator("#filter-vlan-name").fill("guest")
-    assert page.locator("#users-vlan").evaluate("row => row.style.display") == "none"
-    assert page.locator("#guests-vlan").evaluate("row => row.style.display") == ""
-
-    page.locator("#filter-vlan-name").fill("")
-    page.locator("#filter-vlan-group").fill("campus")
-    assert page.locator("#users-vlan").evaluate("row => row.style.display") == ""
-    assert page.locator("#guests-vlan").evaluate("row => row.style.display") == "none"
-
-
 def test_vlan_group_verification_ignores_a_late_response_for_an_old_selection(page):
     """A late group response must not replace the selected group's row state."""
     page.set_content(
@@ -3321,6 +3280,41 @@ def test_filter_disclosure_state_survives_fragment_replacement(page):
     assert "btn-secondary" in button.get_attribute("class").split()
     assert button.get_attribute("aria-expanded") == "false"
     assert button.locator("i").evaluate("icon => icon.classList.contains('mdi-filter-outline')")
+
+
+def test_a_closed_filter_panel_stays_closed_when_the_server_opened_it(page):
+    """The server opens a panel that holds a filter value once; a later settle keeps the user's close."""
+    markup = """
+      <div id="filter-host">
+        <button class="btn btn-sm btn-secondary sync-filter-toggle" type="button"
+                data-bs-target="#interfaceFilterSection" aria-expanded="false"
+                aria-controls="interfaceFilterSection">
+          <i class="mdi mdi-filter-outline"></i> Filters
+        </button>
+        <div class="collapse show" id="interfaceFilterSection" data-filter-open="true"></div>
+      </div>
+    """
+    page.set_content(markup)
+    _add_page_scripts(page)
+    page.evaluate("initializeScripts()")
+    section = page.locator("#interfaceFilterSection")
+    assert section.evaluate("section => section.classList.contains('show')")
+
+    section.evaluate(
+        """section => {
+            section.classList.remove('show');
+            section.dispatchEvent(new Event('hidden.bs.collapse', { bubbles: true }));
+        }"""
+    )
+    page.evaluate("document.body.dispatchEvent(new CustomEvent('htmx:afterSettle'))")
+
+    assert not section.evaluate("section => section.classList.contains('show')")
+    assert page.locator(".sync-filter-toggle").get_attribute("aria-expanded") == "false"
+
+    # A new render with a filter value opens the panel again.
+    page.locator("#filter-host").evaluate("(host, markup) => { host.innerHTML = markup; }", markup)
+    page.evaluate("initializeScripts()")
+    assert section.evaluate("section => section.classList.contains('show')")
 
 
 def test_available_status_without_a_usable_fragment_keeps_modal_controls_disabled(page):

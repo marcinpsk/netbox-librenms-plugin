@@ -5,7 +5,10 @@ SyncInterfacesView + DeleteNetBoxInterfacesView
 Target: 95%+ coverage
 """
 
+from urllib.parse import urlencode
+
 import pytest
+from django.http import QueryDict
 
 from netbox_librenms_plugin.interface_relationships import (
     build_interface_index,
@@ -48,7 +51,9 @@ def _make_request(post_data=None, get_data=None, user=None):
     if post_data is None and get_data:
         return make_request("get", get_data, user=user)
     request = make_request("post", post_data or {}, user=user)
-    request.GET = get_data or request.GET
+    if get_data:
+        # The action URL carries this query, so it is a QueryDict as on a real request.
+        request.GET = QueryDict(urlencode(get_data, doseq=True))
     return request
 
 
@@ -430,11 +435,14 @@ def test_interface_bulk_selection_ignores_disabled_rows():
     """Client bulk actions must match the browser form contract for disabled controls."""
     source = _js_source()
     table_handler = _js_block(source, "function initializeTableCheckboxes(tableId)", "function initializeCheckboxes()")
-    bulk_handler = _js_block(source, "function initializeBulkEditApply()", "// TABLE FILTERING")
+    bulk_handler = _js_block(source, "function initializeBulkEditApply()", "function initializeCheckboxListeners()")
+    listeners = _js_block(source, "function initializeCheckboxListeners()", "function updateBulkActionButton()")
+    button_state = _js_block(source, "function updateBulkActionButton()", "// FILTER STALE MARKS")
 
     assert 'td input[name="select"]:not(:disabled)' in table_handler
     assert 'input[name="select"]:checked:not(:disabled)' in bulk_handler
-    assert 'input[name="select"]:not(:disabled)' in bulk_handler
+    assert 'input[name="select"]:not(:disabled)' in listeners
+    assert 'input[name="select"]:checked:not(:disabled)' in button_state
 
 
 # ===========================================================================
