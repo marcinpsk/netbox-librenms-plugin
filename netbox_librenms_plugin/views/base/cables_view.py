@@ -2301,8 +2301,6 @@ class BaseCableTableView(
             coordinator.mark_refresh_failure(SyncTab.CABLES, server_key, actor_id=request_actor_id(request))
             context = {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key}
         else:
-            if context["blockers"]:
-                messages.warning(request, source_cache.blocker_notice(context["blockers"]))
             if coordinator.mark_refresh_outcome(SyncTab.CABLES, server_key, actor_id=request_actor_id(request)):
                 messages.success(request, "Cable data refreshed successfully.")
             else:

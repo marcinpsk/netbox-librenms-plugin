@@ -428,10 +428,10 @@ class TestCabledSerialRowFarEndDisplay:
         assert link["can_create_cable"] is False
 
     def test_far_end_display_does_not_leak_into_the_cached_label(self):
+        """Verify enrichment preserves the raw label across cache round-trips so cable status remains stable."""
         from netbox_librenms_plugin.tests.view_test_helpers import make_request
 
         request = make_request("get", user=make_superuser("serial-label-reader"))
-        """Verify enrichment preserves the raw label across cache round-trips so cable status remains stable."""
         acs, (csp,), _ = make_serial_device("leak-ser", csp_names=["ttyS1"])
         _panel_dev, fp, rp = _panel("leak-ser-pp")
         _end, _, (cp,) = make_serial_device("leak-ser-end", cp_names=["console"])
