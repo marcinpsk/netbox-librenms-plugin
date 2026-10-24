@@ -30,46 +30,6 @@ CHASSIS_MEMBERS = [
 ]
 
 
-class _StackBoundary:
-    """Real-shape stand-in for the LibreNMS HTTP boundary serving identical serial-less stacks."""
-
-    server_key = "default"
-    # 0 disables the VC cache, so each device runs the real detection instead of a warm clone.
-    cache_timeout = 0
-
-    def __init__(self, rows, members=None):
-        self.rows = rows
-        self.members = CHASSIS_MEMBERS if members is None else members
-
-    def get_device_info(self, device_id, **_kwargs):
-        row = self.rows.get(device_id)
-        return (row is not None, row)
-
-    def get_inventory_filtered(self, _device_id, **kwargs):
-        if kwargs.get("ent_physical_contained_in") == 0:
-            return True, [{"entPhysicalClass": "stack", "entPhysicalIndex": 1, "entPhysicalContainedIn": 0}]
-        return True, list(self.members)
-
-
-class _TransientFailureStackBoundary(_StackBoundary):
-    """Fail the first root-inventory read for one device, then serve its stack."""
-
-    cache_timeout = 300
-
-    def __init__(self, rows, failed_device_id):
-        super().__init__(rows)
-        self.failed_device_id = failed_device_id
-        self.root_attempts = {}
-
-    def get_inventory_filtered(self, device_id, **kwargs):
-        if kwargs.get("ent_physical_contained_in") == 0:
-            attempts = self.root_attempts.get(device_id, 0) + 1
-            self.root_attempts[device_id] = attempts
-            if device_id == self.failed_device_id and attempts == 1:
-                return False, []
-        return super().get_inventory_filtered(device_id, **kwargs)
-
-
 def _row(device_id, hostname):
     return {
         "device_id": device_id,
@@ -160,7 +120,7 @@ def test_two_look_alike_serialless_stacks_both_import_standalone(client, librenm
 
 
 @pytest.mark.django_db
-def test_transient_vc_detection_failure_fails_closed_without_poisoning_retry():
+def test_transient_vc_detection_failure_fails_closed_without_poisoning_retry(live_librenms, configure_librenms):
     """An unreadable stack is unresolved, and its next detection retries the inventory API."""
     from django.core.cache import cache
 
@@ -168,7 +128,38 @@ def test_transient_vc_detection_failure_fails_closed_without_poisoning_retry():
 
     failed_id = 97111
     rows = {failed_id: _row(failed_id, "stack-failed"), 97112: _row(97112, "stack-readable")}
-    api = _TransientFailureStackBoundary(rows, failed_id)
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+    configure_librenms(
+        {
+            "default": {
+                "librenms_url": live_librenms.server.url,
+                "api_token": "test-token",
+                "verify_ssl": False,
+                "cache_timeout": 300,
+            }
+        }
+    )
+    api = LibreNMSAPI(server_key="default")
+    for device_id, row in rows.items():
+        live_librenms.server.register(f"/api/v0/devices/{device_id}", {"status": "ok", "devices": [row]})
+        live_librenms.server.vc_inventory_callable(
+            device_id, [{"entPhysicalClass": "stack", "entPhysicalIndex": 1}], {1: CHASSIS_MEMBERS}
+        )
+    root_attempts = []
+
+    def inventory(**request):
+        if request["query"].get("entPhysicalContainedIn") == ["0"]:
+            root_attempts.append(request)
+            if len(root_attempts) == 1:
+                return 500, {"status": "error"}
+            return 200, {
+                "status": "ok",
+                "inventory": [{"entPhysicalClass": "stack", "entPhysicalIndex": 1, "entPhysicalContainedIn": 0}],
+            }
+        return 200, {"status": "ok", "inventory": CHASSIS_MEMBERS}
+
+    live_librenms.server.register(f"/api/v0/inventory/{failed_id}", inventory, method="GET")
     cache.delete(_vc_cache_key(api, failed_id))
 
     _collisions, unresolved = detect_collisions_for_device_ids(
@@ -181,7 +172,7 @@ def test_transient_vc_detection_failure_fails_closed_without_poisoning_retry():
 
     assert unresolved == [failed_id]
     assert retried["is_stack"] is True
-    assert api.root_attempts[failed_id] == 2
+    assert len(root_attempts) == 2
 
 
 @pytest.mark.django_db
