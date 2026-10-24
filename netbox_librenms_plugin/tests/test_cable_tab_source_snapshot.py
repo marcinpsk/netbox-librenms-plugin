@@ -130,8 +130,9 @@ def test_failed_oob_ports_block_oob_rows_and_keep_host_rows(client, live_librenm
     response = _refresh(client, device)
 
     assert [row["local_port_id"] for row in _rows(response)] == [1]
-    assert f"devices/{OOB_ID}/ports" in "; ".join(_messages(response, messages.WARNING))
-    assert f"devices/{OOB_ID}/ports" in _fragment(client, device).content.decode()
+    assert _messages(response, messages.WARNING) == []
+    assert response.context["cable_sync"]["blockers"]
+    assert _fragment(client, device).context["cable_sync"]["blockers"] == response.context["cable_sync"]["blockers"]
 
 
 @pytest.mark.django_db
@@ -144,8 +145,9 @@ def test_failed_neighbour_ports_block_only_that_neighbours_rows(client, live_lib
     response = _refresh(client, device)
 
     assert [row["local_port_id"] for row in _rows(response)] == [2]
-    assert f"devices/{NEIGHBOUR_ID}/ports" in "; ".join(_messages(response, messages.WARNING))
-    assert f"devices/{NEIGHBOUR_ID}/ports" in _fragment(client, device).content.decode()
+    assert _messages(response, messages.WARNING) == []
+    assert response.context["cable_sync"]["blockers"]
+    assert _fragment(client, device).context["cable_sync"]["blockers"] == response.context["cable_sync"]["blockers"]
 
 
 @pytest.mark.django_db
