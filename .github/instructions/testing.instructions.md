@@ -176,3 +176,14 @@ request:
   `sample_validation_state`, `sample_validation_state_vm`
 
 The `mock_netbox_*` fixtures remain for the unconverted legacy tests. Do not use them in new tests.
+
+Use `inventory_row`, `transceiver_row` and `port_row` for module endpoint facts.
+`seed_modules_snapshot` stores those facts through the source transport. `seed_mapped_modules` also
+sets the subject mapping. Pass OOB inventory separately. Do not seed assessment annotations.
+Keep schema corruption as explicit error injection at the cache transport.
+
+Optic tests must use the source owner's manufacturer rules. Keep row counts and serial-to-port
+assertions when you convert a replay test. Test snapshot and tab-state version isolation together.
+A rows-cache release test must retain the snapshot id across the release change.
+
+Keep numeric inventory names in source facts. Test their text projection through a refresh and a cached GET.
