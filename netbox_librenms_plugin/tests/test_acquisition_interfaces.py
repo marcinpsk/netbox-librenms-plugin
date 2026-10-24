@@ -2,8 +2,6 @@
 
 import pytest
 
-from netbox_librenms_plugin.tests.source_snapshot_helpers import port_pair
-
 SERVER_KEY = "default"
 HOST_ID = 4301
 OOB_ID = 4302
@@ -64,6 +62,7 @@ def test_the_snapshot_holds_the_raw_ports_pairs_and_device_record(live_librenms)
 
     from netbox_librenms_plugin.acquisition.registry import Resource
     from netbox_librenms_plugin.acquisition.snapshot import ObjectRef
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import port_pair
 
     device = _device("acq-iface-obtained")
     _serve(live_librenms.server, mappings=[port_pair(1, 100)])
@@ -148,7 +147,7 @@ def _ports_with(**vlan_fields):
         (_ports_with(vlans=["10"]), PORTS_PATH, "VLAN"),
         (_ports_with(vlans=[{"untagged": 1}]), PORTS_PATH, "VLAN"),
         (_ports_with(vlans=[{"vlan": "N/A", "untagged": 0}]), PORTS_PATH, "VLAN"),
-        (_break_stack([port_pair(1, 100)]), STACK_PATH, "malformed"),
+        (_break_stack([{"high_port_id": 1, "low_port_id": 100}]), STACK_PATH, "malformed"),
         (_break_stack({"status": "error", "message": "polling off", "mappings": []}), STACK_PATH, "polling off"),
         (_break_stack({"status": False, "mappings": []}), STACK_PATH, "malformed"),
         (_break_stack({"status": "ok"}), STACK_PATH, "not port pairs"),
@@ -210,6 +209,8 @@ def test_an_unusable_ports_or_port_stack_answer_blocks_the_host_scope(live_libre
     ids=["blank-os", "no-os", "non-string-os", "no-device-record"],
 )
 def test_port_stack_pairs_without_a_device_os_block_the_host_scope(live_librenms, device_record):
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import port_pair
+
     _serve(live_librenms.server, mappings=[port_pair(1, 100)])
     live_librenms.server.register(DEVICE_PATH, device_record)
 
@@ -297,6 +298,7 @@ def test_a_corrupt_oob_id_is_an_invalid_mapping_that_makes_no_request(live_libre
     record = snapshot.record(Resource.INTERFACES, "ports", MappingRole.OOB)
     assert (record.outcome, record.reason, record.http_status) == (Outcome.FAILED, INVALID_OOB_REASON, None)
     assert set(_blocked(snapshot)) == {"oob"}
+    assert _blocked(snapshot)["oob"][0].path == "oob"
     assert sorted(_paths(live_librenms.server)) == sorted([PORTS_PATH, STACK_PATH, DEVICE_PATH])
 
 
