@@ -41,7 +41,8 @@ assumed. Do not mock NetBox models, managers, querysets, requests, users or perm
 `tests/source_snapshot_helpers.py` seeds a source snapshot through the real types, the real acquirers
 and the web transport: `seed_source_snapshot(subject, Resource.VLANS, server_key, vlans=rows)`,
 `seed_ip_snapshot(...)`, `seed_interfaces_snapshot(subject, ports, port_stack, device=..., oob_ports=...)`
-and `seed_cables_snapshot(subject, links, ports, neighbour_ports=..., sensors=...)`.
+`seed_cables_snapshot(subject, links, ports, neighbour_ports=..., sensors=...)` and
+`seed_modules_snapshot(subject, inventory, ports=..., transceivers=..., oob_inventory=...)`.
 Seed raw LibreNMS facts (`port_pair`, `port_vlans`), never a derived field. Never write a snapshot
 payload into the cache by hand.
 
@@ -98,6 +99,9 @@ payloads: `add_device_response`, `device_info_response`, `ports_response`, `inve
 `vc_inventory_callable` and `auth_error_response`. `server.requests` holds every request the code
 under test sent, so a test can assert what it asked for.
 
+Capture and replay tests call `acquire` and assessment over the HTTP stub. Seed a real mapped
+subject, including the VC sync owner for member recordings. Do not replace the LibreNMS client.
+
 ## Verifying a test earns its keep
 
 Break the production line the test names and confirm the test turns red. A test that stays green
@@ -131,8 +135,8 @@ stack: appending to that file's tail conflicts on every restack, so a new file i
 large tail addition. Give the new file a docstring pointing at the primary home.
 
 - `librenms_api.py` → `test_librenms_api.py`, `test_librenms_api_helpers.py`
-- `acquisition/`, `source_cache.py` → `test_acquisition_cables.py`, `test_acquisition_interfaces.py`, `test_acquisition_vlans.py`, `test_acquisition_ip_addresses.py`, `test_acquisition_coordinator.py`, `test_acquisition_imports.py`
-- `assessment/` → `test_cable_tab_source_snapshot.py`, `test_interface_tab_source_snapshot.py`, `test_interface_rows_cache.py`, `test_acquisition_imports.py`
+- `acquisition/`, `source_cache.py` → `test_acquisition_modules.py`, `test_acquisition_cables.py`, `test_acquisition_interfaces.py`, `test_acquisition_vlans.py`, `test_acquisition_ip_addresses.py`, `test_acquisition_coordinator.py`, `test_acquisition_imports.py`
+- `assessment/` → `test_module_tab_source_snapshot.py`, `test_cable_tab_source_snapshot.py`, `test_interface_tab_source_snapshot.py`, `test_interface_rows_cache.py`, `test_acquisition_imports.py`
 - `import_utils/` package (`filters.py`, `device_operations.py`, `vm_operations.py`, `cache.py`, `permissions.py`, `virtual_chassis.py`), `import_validation_helpers.py`, `utils.py` → `test_import_utils.py`, `test_import_validation_helpers.py`, `test_utils.py`
 - `jobs.py`, `views/imports/list.py` → `test_background_jobs.py`
 - `import_utils/bulk_import.py` → `test_coverage_bulk_import.py`
