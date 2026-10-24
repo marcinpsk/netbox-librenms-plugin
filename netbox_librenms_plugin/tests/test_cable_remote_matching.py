@@ -19,6 +19,9 @@ import time
 import pytest
 
 from netbox_librenms_plugin.server_mappings import read_mapping
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_cables_snapshot, link_row, port_row, sensor_row
+from netbox_librenms_plugin.assessment.cables import assess as assess_cables
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.conftest import (
     _PORT_KEYS_UNSET,
     configured_server_key,
@@ -29,6 +32,16 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import mapping_from_change_record
 from netbox_librenms_plugin.tests.test_serial_cables_view import _make_view
+
+
+def _acquire_rows(subject, server_key):
+    """Acquire real HTTP source responses and assess them without a web request."""
+    from netbox_librenms_plugin.acquisition.coordinator import acquire
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.assessment.cables import assess
+
+    snapshot = acquire(subject, server_key=server_key, resources=[Resource.CABLES])
+    return assess(snapshot, subject=subject)["links"]
 
 
 def _ports_payload(*ports):
@@ -62,6 +75,46 @@ def _row(**overrides):
     }
     row.update(overrides)
     return row
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("part", ["links", "ports", "sensors"])
+def test_raw_cable_seeds_use_the_endpoint_contract_and_render_its_blocker(client, part):
+    """A malformed seeded response has the same failed scope as its HTTP response."""
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.acquisition.snapshot import Outcome
+    from netbox_librenms_plugin.tests.conftest import make_serial_device, make_superuser
+
+    subject, *_rest = make_serial_device("seed-contract-source", csp_names=["ttyS1"])
+    server_key = configured_server_key()
+    seed_mapping(subject, server_key, own=8, oob=18)
+    parts = {"links": [], "ports": []}
+    malformed = {
+        "links": [link_row(100, "Ethernet1", protocol=[])],
+        "ports": [port_row(100, [], device_id=8)],
+        "sensors": [None],
+    }[part]
+    parts[part] = malformed
+    snapshot = seed_cables_snapshot(subject, **parts, oob_links=[], oob_ports=[], server_key=server_key)
+    record = snapshot.record(Resource.CABLES, part)
+
+    assert record.outcome is Outcome.FAILED
+    assert record.http_status == 200
+    assert record.body[part] == malformed
+    client.force_login(make_superuser("seed-contract-reader"))
+    response = client.get(
+        reverse(
+            "plugins:netbox_librenms_plugin:sync_cache_fragment",
+            kwargs={"object_type": "device", "pk": subject.pk, "tab": "cables"},
+        ),
+        {"server_key": server_key},
+    )
+
+    assert response.status_code == 200
+    assert list(response.context["cable_sync"]["table"].rows) == []
+    assert record.request.path in response.content.decode()
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +192,7 @@ class TestRemotePortAliases:
 
 @pytest.mark.django_db
 class TestRemotePortAliasesAreFetched:
-    """get_links_data reads the neighbour's ports once and carries their names onto the rows."""
+    """Acquisition reads each neighbour once, and assessment carries its port names."""
 
     def _device_on_server(self, name, librenms_id, librenms_server, settings):
         """A NetBox device mapped to a loopback LibreNMS."""
@@ -166,13 +219,13 @@ class TestRemotePortAliasesAreFetched:
         }
         librenms_server.register("/api/v0/devices/31/links", {"status": "ok", "links": [link]})
         librenms_server.register("/api/v0/devices/9/ports", _ports_payload(_port(500, "Gi0/1", "Old name")))
-        first = _make_view().get_links_data(device, server_key=server_key)
+        first = _acquire_rows(device, server_key)
         assert first[0]["remote_port_key"] == 500
 
         link["remote_port_id"] = 501
         librenms_server.register("/api/v0/devices/31/links", {"status": "ok", "links": [link]})
         librenms_server.register("/api/v0/devices/9/ports", _ports_payload(_port(501, "Gi0/1", "New name")))
-        refreshed = _make_view().get_links_data(device, server_key=server_key)
+        refreshed = _acquire_rows(device, server_key)
 
         assert refreshed[0]["remote_port_key"] == 501
         assert refreshed[0]["remote_port_aliases"] == ["New name"]
@@ -204,7 +257,7 @@ class TestRemotePortAliasesAreFetched:
             _ports_payload(_port(500, "Gi0/1", "GigabitEthernet0/1")),
         )
 
-        rows = _make_view().get_links_data(device, server_key=server_key)
+        rows = _acquire_rows(device, server_key)
 
         assert rows[0]["remote_port_aliases"] == ["GigabitEthernet0/1"]
 
@@ -230,7 +283,7 @@ class TestRemotePortAliasesAreFetched:
         )
         librenms_server.register("/api/v0/devices/12/ports", _ports_payload(_port(100, "eth0", "eth0")))
 
-        rows = _make_view().get_links_data(device, server_key=server_key)
+        rows = _acquire_rows(device, server_key)
 
         assert not rows[0].get("remote_port_aliases")
         assert not any(path.endswith("/devices/0/ports") for path in _requested_paths(librenms_server))
@@ -265,7 +318,7 @@ class TestRemotePortAliasesAreFetched:
             _ports_payload(*(_port(500 + index, f"Gi0/{index}", f"GigabitEthernet0/{index}") for index in (1, 2, 3))),
         )
 
-        rows = _make_view().get_links_data(device, server_key=server_key)
+        rows = _acquire_rows(device, server_key)
 
         assert [row["remote_port_aliases"] for row in rows] == [
             ["GigabitEthernet0/1"],
@@ -300,7 +353,7 @@ class TestRemotePortAliasesAreFetched:
             _ports_payload(_port(500, "Gi0/1", "GigabitEthernet0/1")),
         )
 
-        rows = _make_view().get_links_data(device, server_key=server_key)
+        rows = _acquire_rows(device, server_key)
 
         assert sorted(rows[0]["remote_port_aliases"]) == ["Gi0/1", "GigabitEthernet0/1"]
 
@@ -333,7 +386,7 @@ class TestRemotePortAliasesAreFetched:
             _ports_payload(_port(500, "Gi0/1", "GigabitEthernet0/1")),
         )
 
-        rows = _make_view().get_links_data(device, server_key=server_key)
+        rows = _acquire_rows(device, server_key)
 
         assert sorted(rows[0]["remote_port_aliases"]) == ["Gi0/1", "GigabitEthernet0/1"]
 
@@ -366,7 +419,7 @@ class TestRemotePortAliasesAreFetched:
             ),
         )
 
-        rows = _make_view().get_links_data(device, server_key=server_key)
+        rows = _acquire_rows(device, server_key)
 
         assert not rows[0].get("remote_port_aliases")
         assert not rows[0].get("remote_port_key")
@@ -400,7 +453,7 @@ class TestRemotePortAliasesAreFetched:
             ),
         )
 
-        rows = _make_view().get_links_data(device, server_key=server_key)
+        rows = _acquire_rows(device, server_key)
 
         assert rows[0]["remote_port_aliases"] == ["eth1"]
         assert rows[0]["remote_port_key"] == 501
@@ -431,12 +484,12 @@ class TestRemotePortAliasesAreFetched:
             {"status": "ok", "ports": [None, {"port_id": 500, "ifName": None, "ifDescr": None}]},
         )
 
-        _make_view().get_links_data(device, server_key=server_key)
+        _acquire_rows(device, server_key)
         librenms_server.register(
             "/api/v0/devices/9/ports",
             _ports_payload(_port(500, "Gi0/1", "GigabitEthernet0/1")),
         )
-        rows = _make_view().get_links_data(device, server_key=server_key)
+        rows = _acquire_rows(device, server_key)
 
         assert rows[0]["remote_port_aliases"] == ["GigabitEthernet0/1"]
 
@@ -463,14 +516,14 @@ class TestRemotePortAliasesAreFetched:
         librenms_server.register("/api/v0/devices/22/ports", _ports_payload(_port(100, "eth0", "eth0")))
         librenms_server.register("/api/v0/devices/9/ports", _ports_payload())
 
-        _make_view().get_links_data(device, server_key=server_key)
-        _make_view().get_links_data(device, server_key=server_key)
+        _acquire_rows(device, server_key)
+        _acquire_rows(device, server_key)
 
         assert _requested_paths(librenms_server).count("/api/v0/devices/9/ports") == 2
 
     def test_the_neighbour_reads_stop_at_the_time_budget(self, librenms_server, settings, monkeypatch):
         """A refresh must not sit through one timeout per neighbour on a well-connected device."""
-        import netbox_librenms_plugin.views.base.cables_view as module
+        import netbox_librenms_plugin.acquisition.resources as module
 
         device, server_key = self._device_on_server("alias-fetch-m", 23, librenms_server, settings)
         librenms_server.register(
@@ -507,12 +560,12 @@ class TestRemotePortAliasesAreFetched:
         )
         monkeypatch.setattr(module, "REMOTE_ALIAS_FETCH_BUDGET_SECONDS", 0.2)
 
-        rows = _make_view().get_links_data(device, server_key=server_key)
+        rows = _acquire_rows(device, server_key)
 
         # The first neighbour spent the budget, so the second is not read at all.
         assert _requested_paths(librenms_server).count("/api/v0/devices/10/ports") == 0
         assert rows[0]["remote_port_aliases"] == ["GigabitEthernet0/1"]
-        assert not rows[1].get("remote_port_aliases")
+        assert len(rows) == 1
 
     def test_a_second_refresh_reads_the_neighbour_again(self, librenms_server, settings):
         """Each explicit refresh reads current names even when the previous read succeeded."""
@@ -540,8 +593,8 @@ class TestRemotePortAliasesAreFetched:
             _ports_payload(_port(500, "Gi0/1", "GigabitEthernet0/1")),
         )
 
-        _make_view().get_links_data(device, server_key=server_key)
-        rows = _make_view().get_links_data(device, server_key=server_key)
+        _acquire_rows(device, server_key)
+        rows = _acquire_rows(device, server_key)
 
         assert rows[0]["remote_port_aliases"] == ["GigabitEthernet0/1"]
         assert _requested_paths(librenms_server).count("/api/v0/devices/9/ports") == 2
@@ -569,16 +622,16 @@ class TestRemotePortAliasesAreFetched:
         librenms_server.register("/api/v0/devices/17/ports", _ports_payload(_port(100, "eth0", "eth0")))
         librenms_server.register("/api/v0/devices/9/ports", {"status": "error"}, status=500)
 
-        _make_view().get_links_data(device, server_key=server_key)
+        _acquire_rows(device, server_key)
         librenms_server.register(
             "/api/v0/devices/9/ports",
             _ports_payload(_port(500, "Gi0/1", "GigabitEthernet0/1")),
         )
-        rows = _make_view().get_links_data(device, server_key=server_key)
+        rows = _acquire_rows(device, server_key)
 
         assert rows[0]["remote_port_aliases"] == ["GigabitEthernet0/1"]
 
-    def test_a_failed_neighbour_fetch_leaves_the_row_alone(self, librenms_server, settings):
+    def test_a_failed_neighbour_fetch_blocks_its_rows(self, librenms_server, settings):
         """A neighbour LibreNMS cannot serve must not break the tab."""
         device, server_key = self._device_on_server("alias-fetch-e", 15, librenms_server, settings)
         librenms_server.register(
@@ -601,10 +654,9 @@ class TestRemotePortAliasesAreFetched:
         librenms_server.register("/api/v0/devices/15/ports", _ports_payload(_port(100, "eth0", "eth0")))
         librenms_server.register("/api/v0/devices/9/ports", {"status": "error"}, status=404)
 
-        rows = _make_view().get_links_data(device, server_key=server_key)
+        rows = _acquire_rows(device, server_key)
 
-        assert rows[0]["remote_port"] == "Gi0/1"
-        assert not rows[0].get("remote_port_aliases")
+        assert rows == []
 
 
 # ---------------------------------------------------------------------------
@@ -649,9 +701,9 @@ def test_the_link_context_reads_a_page_of_ids_with_one_regex_per_path():
 
 def _dedupe(rows):
     """Run the real protocol de-duplication over already-enriched rows."""
-    from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+    from netbox_librenms_plugin.assessment.cables import dedupe_protocol_duplicates
 
-    return BaseCableTableView._dedupe_protocol_duplicates(rows)
+    return dedupe_protocol_duplicates(rows)
 
 
 class TestProtocolDuplicates:
@@ -691,17 +743,30 @@ class TestProtocolDuplicates:
 
         assert sorted(row["netbox_remote_interface_id"] for row in rows) == [77, 78]
 
-    def test_a_malformed_survivor_protocol_does_not_break_the_collapse(self):
-        """LibreNMS `protocol` is copied unvalidated: an unhashable one must not 500 the table."""
-        rows = _dedupe(
-            [
-                _row(protocol=[], netbox_remote_interface_id=77),
-                _row(protocol="cdp", link_id=2, remote_port="GigabitEthernet0/1"),
-            ]
-        )
+    @pytest.mark.django_db
+    def test_a_malformed_survivor_protocol_does_not_break_the_collapse(self, live_librenms):
+        """A malformed protocol blocks its response before duplicate assessment."""
+        from netbox_librenms_plugin.acquisition.coordinator import acquire
+        from netbox_librenms_plugin.acquisition.registry import Resource
+        from netbox_librenms_plugin.acquisition.snapshot import Outcome
 
-        assert len(rows) == 1
-        assert rows[0]["also_reported_by"] == ["cdp"]
+        subject = make_device("duplicate-invalid-protocol")
+        seed_mapping(subject, "default", own=8)
+        live_librenms.server.register(
+            "/api/v0/devices/8/links",
+            {
+                "status": "ok",
+                "links": [link_row(100, "Ethernet1", protocol=[]), link_row(100, "Ethernet1", protocol="cdp")],
+            },
+        )
+        live_librenms.server.register("/api/v0/devices/8/ports", {"status": "ok", "ports": []})
+
+        snapshot = acquire(subject, server_key="default", resources=[Resource.CABLES])
+        assessed = assess_cables(snapshot, subject=subject)
+
+        assert snapshot.record(Resource.CABLES, "links").outcome is Outcome.FAILED
+        assert assessed["links"] == []
+        assert {blocker.path for blocker in assessed["blockers"]} == {"devices/8/links"}
 
     def test_an_unresolved_row_is_kept_beside_two_resolved_ones(self):
         """Two resolved remote interfaces: an unresolved row belongs to neither, so keep it."""
@@ -1093,27 +1158,6 @@ class TestTheCreateAffordance:
         assert row.get("remote_create_url") is None
 
 
-def _seed_cable_row(device, row, server_key):
-    """
-    Put one raw snapshot row in the cables cache, the way a refresh would, and return its row id.
-
-    The identity is derived from the row, not chosen by the caller, so the test submits exactly
-    what the rendered table would ([[assign_cable_row_ids]]).
-    """
-    from django.core.cache import cache
-
-    from netbox_librenms_plugin.utils import assign_cable_row_ids
-    from netbox_librenms_plugin.views.base.cables_view import _RAW_LINK_KEYS
-
-    raw = assign_cable_row_ids([{key: value for key, value in row.items() if key in _RAW_LINK_KEYS}])
-    cache.set(
-        _make_view().get_cache_key(device, "links", server_key),
-        {"links": raw, "snapshot_token": "remote-create"},
-        timeout=300,
-    )
-    return raw[0]["row_id"]
-
-
 def _remote_create_url(device):
     """The endpoint under test."""
     from django.urls import reverse
@@ -1142,7 +1186,16 @@ class TestCheckAndCreateTheRemoteEnd:
     """GET reports what would be created; POST creates it and the cable, or neither."""
 
     def _scenario(
-        self, name, librenms_server, settings, *, port=None, advertised="Gi0/1", aliases=None, advertised_id=500
+        self,
+        name,
+        librenms_server,
+        settings,
+        *,
+        port=None,
+        advertised="Gi0/1",
+        aliases=None,
+        advertised_id=500,
+        neighbour_ports=None,
     ):
         """A page device, a modelled neighbour with no matching port, and a seeded cable row."""
         from netbox_librenms_plugin.tests.conftest import bind_librenms_server
@@ -1155,28 +1208,28 @@ class TestCheckAndCreateTheRemoteEnd:
         # Fixed ids, never the device pk: a local pk of 9 made the neighbour's id 9 ambiguous.
         map_device_to_librenms(local_device, 8, server_key=server_key)
         map_device_to_librenms(remote_device, 9, server_key=server_key)
-        librenms_server.register(
-            "/api/v0/ports/500",
-            {
-                "status": "ok",
-                "port": [
-                    {
-                        "device_id": 9,
-                        "deleted": 0,
-                        **(port or {**_PORT_KEYS_UNSET, "port_id": 500, "ifName": "Gi0/1", "ifType": "ethernetCsmacd"}),
-                    }
-                ],
-            },
+        source_port = {
+            **port_row(500, "Gi0/1", device_id=9, if_descr=aliases[0] if aliases else "Gi0/1", if_speed=None),
+            **(port or {}),
+        }
+        librenms_server.register("/api/v0/ports/500", {"status": "ok", "port": [source_port]})
+        snapshot = seed_cables_snapshot(
+            local_device,
+            [
+                link_row(
+                    100,
+                    advertised,
+                    remote_hostname=remote_device.name,
+                    remote_device_id=9,
+                    remote_port_id=advertised_id,
+                    id=1,
+                )
+            ],
+            [port_row(100, "eth0", device_id=8)],
+            neighbour_ports={9: [source_port] if neighbour_ports is None else neighbour_ports},
+            server_key=server_key,
         )
-        row = _row(
-            local_port="eth0",
-            remote_device=remote_device.name,
-            remote_port=advertised,
-            remote_port_aliases=aliases,
-            remote_port_id=advertised_id,
-            remote_port_key=500,
-        )
-        row_id = _seed_cable_row(local_device, row, server_key)
+        row_id = assess_cables(snapshot, subject=local_device)["links"][0]["row_id"]
         return server_key, local_device, local_interface, remote_device, row_id
 
     @pytest.mark.parametrize("method", ["get", "post"])
@@ -1301,17 +1354,16 @@ class TestCheckAndCreateTheRemoteEnd:
         from netbox_librenms_plugin.tests.conftest import make_superuser
 
         server_key, local_device, local_interface, remote_device, row_id = self._scenario(
-            "chk-no-port", librenms_server, settings
+            "chk-no-port", librenms_server, settings, neighbour_ports=[]
         )
-        librenms_server.register("/api/v0/ports/500", {"status": "ok", "port": []})
         client = _logged_in(make_superuser("remote-create-chk-no-port"))
 
         data = {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key}
         check = client.get(_remote_create_url(local_device), data)
         create = client.post(_remote_create_url(local_device), data)
 
-        assert check.status_code == create.status_code == 409
-        assert "LibreNMS returned no record for the remote port" in check.content.decode()
+        assert check.status_code == create.status_code == 404
+        assert "/api/v0/ports/500" not in _requested_paths(librenms_server)
         assert not Interface.objects.filter(device=remote_device).exists()
 
     @pytest.mark.parametrize(
@@ -1327,14 +1379,13 @@ class TestCheckAndCreateTheRemoteEnd:
 
         from netbox_librenms_plugin.tests.conftest import make_superuser
 
-        server_key, local_device, local_interface, remote_device, row_id = self._scenario(
-            "chk-stale-port", librenms_server, settings
-        )
         port = {**_PORT_KEYS_UNSET, "device_id": 9, "deleted": 0, "port_id": 500, "ifName": "Gi0/1"}
         port.update(ifType="ethernetCsmacd", **record_override)
         if port["device_id"] is None:
             del port["device_id"]
-        librenms_server.register("/api/v0/ports/500", {"status": "ok", "port": [port]})
+        server_key, local_device, local_interface, remote_device, row_id = self._scenario(
+            "chk-stale-port", librenms_server, settings, neighbour_ports=[port]
+        )
         client = _logged_in(make_superuser("remote-create-chk-stale-port"))
 
         data = {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key}
@@ -1344,10 +1395,7 @@ class TestCheckAndCreateTheRemoteEnd:
         assert not Interface.objects.filter(device=remote_device).exists()
         assert not Cable.objects.exists()
         assert check.status_code == create.status_code == 409
-        assert (
-            f"The remote port no longer exists in LibreNMS on {remote_device.name}. "
-            "Refresh the cable data and try again." == check.content.decode() == create.content.decode()
-        )
+        assert "/api/v0/ports/500" not in _requested_paths(librenms_server)
 
     def test_the_check_creates_nothing(self, librenms_server, settings):
         """Step one is read-only."""
@@ -1497,7 +1545,9 @@ class TestCheckAndCreateTheRemoteEnd:
         )
 
         assert not Interface.objects.filter(device=remote_device).exists()
-        assert any("migrated and is read-only" in message for message in _messages(response))
+        assert response.status_code == 409
+        local_interface.refresh_from_db()
+        assert local_interface.cable_id is None
 
     def test_migrated_cache_owner_cannot_create_a_remote_interface(self, librenms_server, settings, monkeypatch):
         from dcim.models import Interface
@@ -1614,7 +1664,9 @@ class TestCheckAndCreateTheRemoteEnd:
         assert not Interface.objects.filter(device=remote_device).exists()
         local_interface.refresh_from_db()
         assert local_interface.cable_id is None
-        errors = _messages(response)
+        from django.contrib.messages import ERROR, get_messages
+
+        errors = [str(message) for message in get_messages(response.wsgi_request) if message.level == ERROR]
         assert errors == ["Failed to create cable: You may not add this cable."]
 
     def test_remote_creation_without_interface_change_permission_reports_the_permission(
@@ -1914,22 +1966,6 @@ class TestCheckAndCreateTheRemoteEnd:
 # ---------------------------------------------------------------------------
 
 
-def _seed_cable_rows(device, rows, server_key, snapshot_token="verify-render"):
-    """Put raw snapshot rows in the cables cache, the way a refresh would, and return their ids."""
-    from django.core.cache import cache
-
-    from netbox_librenms_plugin.utils import assign_cable_row_ids
-    from netbox_librenms_plugin.views.base.cables_view import _RAW_LINK_KEYS
-
-    raw = assign_cable_row_ids([{key: value for key, value in row.items() if key in _RAW_LINK_KEYS} for row in rows])
-    cache.set(
-        _make_view().get_cache_key(device, "links", server_key),
-        {"links": raw, "snapshot_token": snapshot_token},
-        timeout=300,
-    )
-    return [entry["row_id"] for entry in raw]
-
-
 def _verify(client, device, row_id, server_key):
     """POST one row to the inline verify endpoint and return its formatted row."""
     import json
@@ -1958,19 +1994,41 @@ class TestTheVerifiedRowRendersLikeTheTable:
         local_device = make_device("verify-badge-local")
         remote_device = make_device("verify-badge-remote")
         map_device_to_librenms(remote_device, 9, server_key=server_key)
-        lldp_id, _cdp_id = _seed_cable_rows(
+        seed_mapping(local_device, server_key, own=8)
+        snapshot = seed_cables_snapshot(
             local_device,
             [
-                _row(protocol="lldp", remote_device=remote_device.name),
-                _row(
+                link_row(
+                    100,
+                    "Gi0/1",
+                    local_port="eth0",
+                    remote_hostname=remote_device.name,
+                    remote_device_id=9,
+                    remote_port_id=500,
+                    protocol="lldp",
+                    id=1,
+                ),
+                link_row(
+                    100,
+                    "GigabitEthernet0/1",
+                    local_port="eth0",
+                    remote_hostname=remote_device.name,
+                    remote_device_id=9,
+                    remote_port_id=500,
                     protocol="cdp",
-                    link_id=2,
-                    remote_port="GigabitEthernet0/1",
-                    remote_device=remote_device.name,
+                    id=2,
                 ),
             ],
-            server_key,
+            [port_row(100, "eth0", device_id=8, if_descr=None)],
+            neighbour_ports={
+                9: [
+                    port_row(500, "Gi0/1", device_id=9, if_descr="Gi0/1"),
+                    port_row(500, "GigabitEthernet0/1", device_id=9, if_descr="GigabitEthernet0/1"),
+                ]
+            },
+            server_key=server_key,
         )
+        (lldp_id, _cdp_id) = [row["row_id"] for row in assess_cables(snapshot, subject=local_device)["links"]]
 
         formatted = _verify(_logged_in(make_superuser("verify-badge-a")), local_device, lldp_id, server_key)
 
@@ -1985,9 +2043,26 @@ class TestTheVerifiedRowRendersLikeTheTable:
         local_device = make_device("verify-solo-local")
         remote_device = make_device("verify-solo-remote")
         map_device_to_librenms(remote_device, 9, server_key=server_key)
-        (row_id,) = _seed_cable_rows(
-            local_device, [_row(protocol="lldp", remote_device=remote_device.name)], server_key
+        seed_mapping(local_device, server_key, own=8)
+        snapshot = seed_cables_snapshot(
+            local_device,
+            [
+                link_row(
+                    100,
+                    "Gi0/1",
+                    local_port="eth0",
+                    remote_hostname=remote_device.name,
+                    remote_device_id=9,
+                    remote_port_id=500,
+                    protocol="lldp",
+                    id=1,
+                )
+            ],
+            [port_row(100, "eth0", device_id=8, if_descr=None)],
+            neighbour_ports={9: [port_row(500, "Gi0/1", device_id=9, if_descr="Gi0/1")]},
+            server_key=server_key,
         )
+        (row_id,) = [row["row_id"] for row in assess_cables(snapshot, subject=local_device)["links"]]
 
         formatted = _verify(_logged_in(make_superuser("verify-solo")), local_device, row_id, server_key)
 
@@ -1996,7 +2071,7 @@ class TestTheVerifiedRowRendersLikeTheTable:
     def test_the_verified_row_keeps_the_manual_pick_badge(self):
         """The badge the verify path was already dropping before the protocol one existed."""
         from netbox_librenms_plugin.tests.conftest import make_superuser
-        from netbox_librenms_plugin.utils import cable_manual_pick_cache_key
+        from netbox_librenms_plugin.sync_cache import cable_manual_pick_cache_key
 
         server_key = configured_server_key()
         local_device = make_device("verify-manual-local")
@@ -2004,9 +2079,26 @@ class TestTheVerifiedRowRendersLikeTheTable:
         remote_device = make_device("verify-manual-remote")
         picked = make_interface(remote_device, "Gi0/9")
         map_device_to_librenms(remote_device, 9, server_key=server_key)
-        (row_id,) = _seed_cable_rows(
-            local_device, [_row(remote_device=remote_device.name)], server_key, snapshot_token="verify-manual"
+        seed_mapping(local_device, server_key, own=8)
+        snapshot = seed_cables_snapshot(
+            local_device,
+            [
+                link_row(
+                    100,
+                    "Gi0/1",
+                    local_port="eth0",
+                    remote_hostname=remote_device.name,
+                    remote_device_id=9,
+                    remote_port_id=500,
+                    protocol="lldp",
+                    id=1,
+                )
+            ],
+            [port_row(100, "eth0", device_id=8, if_descr=None)],
+            neighbour_ports={9: [port_row(500, "Gi0/1", device_id=9, if_descr="Gi0/1")]},
+            server_key=server_key,
         )
+        (row_id,) = [row["row_id"] for row in assess_cables(snapshot, subject=local_device)["links"]]
 
         from django.core.cache import cache
 
@@ -2014,7 +2106,7 @@ class TestTheVerifiedRowRendersLikeTheTable:
         cache.set(
             cable_manual_pick_cache_key(
                 _make_view().get_cache_key(local_device, "links", server_key),
-                "verify-manual",
+                snapshot.snapshot_id,
                 user.pk,
                 row_id,
             ),
@@ -2027,19 +2119,38 @@ class TestTheVerifiedRowRendersLikeTheTable:
         assert "mdi-gesture-tap-button" in formatted["remote_port"]
         assert "Gi0/9" in formatted["remote_port"]
 
-    def test_a_malformed_protocol_does_not_break_the_verified_row(self):
-        """LibreNMS `protocol` is copied unvalidated; an unhashable one must not 500 the verify."""
+    def test_a_malformed_protocol_does_not_break_the_verified_row(self, client, live_librenms):
+        """A malformed protocol blocks refresh and leaves no source row to verify."""
+        from django.urls import reverse
+
+        from netbox_librenms_plugin import source_cache
+        from netbox_librenms_plugin.acquisition.coordinator import acquire
+        from netbox_librenms_plugin.acquisition.registry import Resource
+        from netbox_librenms_plugin.acquisition.snapshot import Outcome
         from netbox_librenms_plugin.tests.conftest import make_superuser
 
-        server_key = configured_server_key()
-        local_device = make_device("verify-badproto-local")
-        remote_device = make_device("verify-badproto-remote")
-        map_device_to_librenms(remote_device, 9, server_key=server_key)
-        (row_id,) = _seed_cable_rows(local_device, [_row(protocol=[], remote_device=remote_device.name)], server_key)
+        subject = make_device("verify-invalid-protocol")
+        seed_mapping(subject, "default", own=8)
+        live_librenms.server.register(
+            "/api/v0/devices/8/links", {"status": "ok", "links": [link_row(100, "Ethernet1", protocol=[])]}
+        )
+        live_librenms.server.register("/api/v0/devices/8/ports", {"status": "ok", "ports": []})
+        snapshot = acquire(subject, server_key="default", resources=[Resource.CABLES])
+        assert snapshot.record(Resource.CABLES, "links").outcome is Outcome.FAILED
+        client.force_login(make_superuser("verify-invalid-protocol-user"))
 
-        formatted = _verify(_logged_in(make_superuser("verify-badproto")), local_device, row_id, server_key)
+        refreshed = client.post(
+            reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[subject.pk]),
+            {"server_key": "default"},
+            HTTP_HX_REQUEST="true",
+        )
+        verified = _verify(client, subject, "100", "default")
 
-        assert "mdi-lan-connect" not in formatted["remote_port"]
+        assert refreshed.status_code == 200
+        assert refreshed.context["cable_sync"]["table"] is None
+        assert "devices/8/links" in refreshed.content.decode()
+        assert source_cache.read(subject, Resource.CABLES, "default") is None
+        assert not verified["can_create_cable"]
 
     def test_the_remote_port_name_is_escaped_with_no_link_and_no_badge(self):
         """The bare cell is injected as HTML by the page, so it escapes like every other branch."""
@@ -2047,11 +2158,25 @@ class TestTheVerifiedRowRendersLikeTheTable:
 
         server_key = configured_server_key()
         local_device = make_device("verify-escape-local")
-        (row_id,) = _seed_cable_rows(
+        seed_mapping(local_device, server_key, own=8)
+        snapshot = seed_cables_snapshot(
             local_device,
-            [_row(remote_port="<img src=x onerror=alert(1)>", remote_device="not-in-netbox", remote_device_id=None)],
-            server_key,
+            [
+                link_row(
+                    100,
+                    "<img src=x onerror=alert(1)>",
+                    local_port="eth0",
+                    remote_hostname="not-in-netbox",
+                    remote_device_id=None,
+                    remote_port_id=500,
+                    protocol="lldp",
+                    id=1,
+                )
+            ],
+            [port_row(100, "eth0", device_id=8, if_descr=None)],
+            server_key=server_key,
         )
+        (row_id,) = [row["row_id"] for row in assess_cables(snapshot, subject=local_device)["links"]]
 
         formatted = _verify(_logged_in(make_superuser("verify-escape")), local_device, row_id, server_key)
 
@@ -2068,7 +2193,25 @@ class TestTheVerifiedRowRendersLikeTheTable:
         local_device = make_device(f"verify-nohost-{tag}")
         if local_resolves:
             make_interface(local_device, "eth0")
-        (row_id,) = _seed_cable_rows(local_device, [_row(remote_device=None, remote_device_id=None)], server_key)
+        seed_mapping(local_device, server_key, own=8)
+        snapshot = seed_cables_snapshot(
+            local_device,
+            [
+                link_row(
+                    100,
+                    "Gi0/1",
+                    local_port="eth0",
+                    remote_hostname=None,
+                    remote_device_id=None,
+                    remote_port_id=500,
+                    protocol="lldp",
+                    id=1,
+                )
+            ],
+            [port_row(100, "eth0", device_id=8, if_descr=None)],
+            server_key=server_key,
+        )
+        (row_id,) = [row["row_id"] for row in assess_cables(snapshot, subject=local_device)["links"]]
 
         formatted = _verify(_logged_in(make_superuser(f"verify-nohost-{tag}")), local_device, row_id, server_key)
 
@@ -2102,7 +2245,26 @@ def test_remote_port_identity_resolves_a_renamed_interface(client, advertised_id
         cable_together(near, front)
         cable_together(rear, far)
     row = _row(remote_device=remote.name, remote_port_id=advertised_id, remote_port_key=500)
-    row_id = _seed_cable_row(local, row, key)
+    seed_mapping(local, key, own=8)
+    snapshot = seed_cables_snapshot(
+        local,
+        [
+            link_row(
+                100,
+                "Gi0/1",
+                local_port="eth0",
+                remote_hostname=remote.name,
+                remote_device_id=9,
+                remote_port_id=advertised_id,
+                protocol="lldp",
+                id=1,
+            )
+        ],
+        [port_row(100, "eth0", device_id=8, if_descr=None)],
+        neighbour_ports={9: [port_row(500, "Gi0/1", device_id=9, if_descr="Gi0/1")]},
+        server_key=key,
+    )
+    row_id = assess_cables(snapshot, subject=local)["links"][0]["row_id"]
     user = make_superuser("port-identity-user")
     client.force_login(user)
 
@@ -2168,11 +2330,11 @@ class TestTheFarEndPortHasOneRule:
     ALLOWED_READERS = frozenset(
         {
             ("utils.py", "assign_cable_row_ids"),
-            ("views/base/cables_view.py", "_RAW_LINK_KEYS"),
-            ("views/base/cables_view.py", "remote_port_ref"),
-            ("views/base/cables_view.py", "BaseCableTableView._collect_cable_links"),
-            ("views/base/cables_view.py", "BaseCableTableView._attach_remote_port_aliases"),
-            ("views/base/cables_view.py", "BaseCableTableView._best_duplicate_row"),
+            ("acquisition/responses.py", "_is_usable_link_row"),
+            ("assessment/cables.py", "remote_port_ref"),
+            ("assessment/cables.py", "_collect_cable_links"),
+            ("assessment/cables.py", "_attach_remote_port_aliases"),
+            ("assessment/cables.py", "_best_duplicate_row"),
             ("views/base/cables_view.py", "BaseCableTableView._set_remote_create_affordance"),
             ("views/base/cables_view.py", "cable_row_ports"),
         }
@@ -2262,7 +2424,25 @@ def test_an_unmodelled_neighbour_keeps_the_local_cable_report(client, hostname, 
     peer = make_interface(make_device("unmodelled-cable-peer"), "eth1")
     cable = cable_together(local, peer) if cabled else None
     row = _row(remote_device=hostname, remote_device_id=None)
-    row_id = _seed_cable_row(local_device, row, server_key)
+    seed_mapping(local_device, server_key, own=8)
+    snapshot = seed_cables_snapshot(
+        local_device,
+        [
+            link_row(
+                100,
+                "Gi0/1",
+                local_port="eth0",
+                remote_hostname=hostname,
+                remote_device_id=None,
+                remote_port_id=500,
+                protocol="lldp",
+                id=1,
+            )
+        ],
+        [port_row(100, "eth0", device_id=8, if_descr=None)],
+        server_key=server_key,
+    )
+    row_id = assess_cables(snapshot, subject=local_device)["links"][0]["row_id"]
     enriched = _make_view().enrich_links_data([dict(row)], local_device, server_key=server_key)[0]
     if cabled:
         assert enriched["cable_url"] == cable.get_absolute_url()
@@ -2336,11 +2516,26 @@ def test_remote_creation_locks_all_owners_before_inserting_an_interface(librenms
     )
     if remote_chassis:
         make_virtual_chassis("create-owner-chassis", remote, evidence_owner)
-        row_id = _seed_cable_row(
+        seed_mapping(local, server_key, own=8)
+        snapshot = seed_cables_snapshot(
             local,
-            _row(remote_device=remote.name, remote_port="Gi2/0/1", remote_port_key=500),
-            server_key,
+            [
+                link_row(
+                    100,
+                    "Gi2/0/1",
+                    local_port="eth0",
+                    remote_hostname=remote.name,
+                    remote_device_id=9,
+                    remote_port_id=500,
+                    protocol="lldp",
+                    id=1,
+                )
+            ],
+            [port_row(100, "eth0", device_id=8, if_descr=None)],
+            neighbour_ports={9: [port_row(500, "Gi2/0/1", device_id=9, if_descr="Gi2/0/1")]},
+            server_key=server_key,
         )
+        row_id = assess_cables(snapshot, subject=local)["links"][0]["row_id"]
     owners = [local, evidence_owner] if remote_chassis else [local, remote]
     client = _logged_in(make_superuser("create-owner-lock-user"))
     observed = []
@@ -2374,7 +2569,7 @@ def test_remote_creation_locks_all_owners_before_inserting_an_interface(librenms
 @pytest.mark.parametrize("failure", ["manual", "ambiguous"])
 def test_specific_remote_failure_survives_a_visible_local_cable(failure):
     from django.core.cache import cache
-    from netbox_librenms_plugin.utils import cable_manual_pick_cache_key
+    from netbox_librenms_plugin.sync_cache import cable_manual_pick_cache_key
     from netbox_librenms_plugin.tests.conftest import cable_together, make_superuser
 
     key = configured_server_key()
@@ -2389,12 +2584,31 @@ def test_specific_remote_failure_survives_a_visible_local_cable(failure):
         expected = "Multiple devices found with the same LibreNMS ID"
     else:
         expected = "Selected remote port is no longer available"
-    row_id = _seed_cable_row(local, row, key)
+    seed_mapping(local, key, own=8)
+    snapshot = seed_cables_snapshot(
+        local,
+        [
+            link_row(
+                100,
+                "Gi0/1",
+                local_port="eth0",
+                remote_hostname="failure-status-remote",
+                remote_device_id=9,
+                remote_port_id=500,
+                protocol="lldp",
+                id=1,
+            )
+        ],
+        [port_row(100, "eth0", device_id=8, if_descr=None)],
+        neighbour_ports={9: [port_row(500, "Gi0/1", device_id=9, if_descr="Gi0/1")]},
+        server_key=key,
+    )
+    row_id = assess_cables(snapshot, subject=local)["links"][0]["row_id"]
     if failure == "manual":
         raw_key = _make_view().get_cache_key(local, "links", key)
         payload = cache.get(raw_key)
         cache.set(
-            cable_manual_pick_cache_key(raw_key, payload["snapshot_token"], user.pk, row_id),
+            cable_manual_pick_cache_key(raw_key, payload["snapshot_id"], user.pk, row_id),
             {"manual_remote_id": 999999999},
             timeout=300,
         )
@@ -2421,7 +2635,26 @@ def test_remote_create_uses_the_resolved_chassis_member(librenms_server, setting
     member.virtual_chassis, member.vc_position = chassis, 2
     member.save()
     row = _row(remote_device=advertised.name, remote_device_id=9, remote_port=port_name, remote_port_key=500)
-    row_id = _seed_cable_row(local, row, key)
+    seed_mapping(local, key, own=8)
+    snapshot = seed_cables_snapshot(
+        local,
+        [
+            link_row(
+                100,
+                port_name,
+                local_port="eth0",
+                remote_hostname=advertised.name,
+                remote_device_id=9,
+                remote_port_id=500,
+                protocol="lldp",
+                id=1,
+            )
+        ],
+        [port_row(100, "eth0", device_id=8, if_descr=None)],
+        neighbour_ports={9: [port_row(500, "Gi0/1", device_id=9, if_descr=port_name)]},
+        server_key=key,
+    )
+    row_id = assess_cables(snapshot, subject=local)["links"][0]["row_id"]
     enriched = _make_view().enrich_links_data([dict(row)], local, server_key=key)[0]
     client = _logged_in(make_superuser("create-resolved-member-user"))
     if port_name == "unresolved-port":
@@ -2458,7 +2691,26 @@ def test_remote_create_is_not_offered_for_a_chassis_member_out_of_view(librenms_
     member.virtual_chassis, member.vc_position = chassis, 2
     member.save()
     row = _row(remote_device=advertised.name, remote_device_id=9, remote_port="Gi2/0/1", remote_port_key=500)
-    row_id = _seed_cable_row(local, row, key)
+    seed_mapping(local, key, own=8)
+    snapshot = seed_cables_snapshot(
+        local,
+        [
+            link_row(
+                100,
+                "Gi2/0/1",
+                local_port="eth0",
+                remote_hostname=advertised.name,
+                remote_device_id=9,
+                remote_port_id=500,
+                protocol="lldp",
+                id=1,
+            )
+        ],
+        [port_row(100, "eth0", device_id=8, if_descr=None)],
+        neighbour_ports={9: [port_row(500, "Gi2/0/1", device_id=9, if_descr="Gi2/0/1")]},
+        server_key=key,
+    )
+    row_id = assess_cables(snapshot, subject=local)["links"][0]["row_id"]
     user = make_user_with_perms(
         "create-hidden-member",
         [("view", Interface), ("change", Interface), ("add", Interface), ("add", Cable), ("change", Cable)],
@@ -2519,7 +2771,26 @@ def test_remote_create_binds_the_verified_local_interface(librenms_server, setti
     member.virtual_chassis, member.vc_position = chassis, 2
     member.save()
     second = make_interface(member, first.name)
-    row_id = _seed_cable_row(page, _row(local_port=first.name, remote_device=remote.name, remote_port_key=500), key)
+    seed_mapping(page, key, own=8)
+    snapshot = seed_cables_snapshot(
+        page,
+        [
+            link_row(
+                100,
+                "Gi0/1",
+                local_port=first.name,
+                remote_hostname=remote.name,
+                remote_device_id=9,
+                remote_port_id=500,
+                protocol="lldp",
+                id=1,
+            )
+        ],
+        [port_row(100, first.name, device_id=8, if_descr=None)],
+        neighbour_ports={9: [port_row(500, "Gi0/1", device_id=9, if_descr="Gi0/1")]},
+        server_key=key,
+    )
+    row_id = assess_cables(snapshot, subject=page)["links"][0]["row_id"]
     client = _logged_in(make_superuser("verified-local-user"))
     selected = member if different_member else page
     formatted = _verify(client, selected, row_id, key)
@@ -2602,7 +2873,6 @@ def test_committed_cable_follow_up_failure_reports_saved_and_invalidates_cache(c
     from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, SyncTabState
     from netbox_librenms_plugin.tests.conftest import configured_server_key, make_serial_device, make_superuser
     from netbox_librenms_plugin.tests.test_cable_overwrite import _rendered_sync_data
-    from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
     key = configured_server_key()
     local, (csp,), _ = make_serial_device("saved-follow-up-local", csp_names=["ttyS5"])
@@ -2610,7 +2880,7 @@ def test_committed_cable_follow_up_failure_reports_saved_and_invalidates_cache(c
     row_id = f"serial:{csp.pk}-s"
     row = {
         "local_port": csp.name,
-        "local_port_id": row_id,
+        "local_port_id": f"serial:{1}",
         "_source": "serial",
         "device_id": local.pk,
         "remote_device": remote.name,
@@ -2621,13 +2891,19 @@ def test_committed_cable_follow_up_failure_reports_saved_and_invalidates_cache(c
         "sensor_id": 1,
         "sensor_index_int": 5,
     }
-    cache.set(SyncCablesView().get_cache_key(local, "links", key), {"links": [row]}, timeout=300)
+    seed_mapping(local, key, own=8)
+    seed_cables_snapshot(
+        local, [], [], sensors=[sensor_row(1, 5, device_id=8, sensor_descr=remote.name)], server_key=key
+    )
+    row_id = row["local_port_id"]
     client.force_login(make_superuser("saved-follow-up-user"))
     data = _rendered_sync_data(client, local, row_id, key)
     consistency = SyncCacheConsistency(local)
     before = cache.get(consistency.state_key(SyncTab.CABLES, key))
     interfaces_key = consistency.snapshot_key(SyncTab.INTERFACES, key)
-    cache.set(interfaces_key, {"ports": []}, timeout=300)
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_interfaces_snapshot
+
+    seed_interfaces_snapshot(local, [], server_key=key)
     callbacks = []
 
     def fail_follow_up():

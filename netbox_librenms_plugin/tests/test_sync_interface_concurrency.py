@@ -1071,7 +1071,8 @@ def test_direct_actions_refuse_a_concurrent_port_claim_without_leftovers(setting
                 assert TRY_AGAIN_MESSAGE in response.content.decode()
             else:
                 assert (response.status_code, response["Location"]) == (302, f"http://testserver{page}")
-                assert messages_on(response.wsgi_request) == [("error", TRY_AGAIN_MESSAGE)]
+                errors = [text for level, text in messages_on(response.wsgi_request) if level == "error"]
+                assert errors == [TRY_AGAIN_MESSAGE]
     if action == "rebind":
         assert _binding(existing) == STALE_PORT
     else:

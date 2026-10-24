@@ -7,6 +7,8 @@ from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.models import PortStackLagPattern
 from netbox_librenms_plugin.tests.source_snapshot_helpers import interface_rows
 
+from netbox_librenms_plugin.tests.view_test_helpers import make_request
+
 SERVER_KEY = "default"
 DEVICE_ID = 42
 DEVICE_PATH = f"/api/v0/devices/{DEVICE_ID}"
@@ -28,7 +30,7 @@ def _refresh(live_librenms, name, ports, *, device_os, port_stack):
     else:
         server.register(PORT_STACK_PATH, {"status": "ok", "mappings": port_stack})
     device = make_device(name, librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
-    return device, source_cache.refresh(device, Resource.INTERFACES, SERVER_KEY)
+    return device, source_cache.refresh(make_request(), device, Resource.INTERFACES, SERVER_KEY)
 
 
 def _relationships(device):

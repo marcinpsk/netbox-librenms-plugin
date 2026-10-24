@@ -46,6 +46,7 @@ class _SeededFetch:
         # Request key -> seeded value; without values, every request answers an empty list.
         self._values = values
         self.responses = {}
+        self.neighbour_deadline = None
 
     def __call__(self, endpoint):
         return self._keep(_record(endpoint.request, [] if self._values is None else self._values[endpoint.request.key]))
@@ -55,6 +56,32 @@ class _SeededFetch:
 
     def _keep(self, record):
         return self.responses.setdefault(record.request.key, record)
+
+
+class _CableSeededFetch(_SeededFetch):
+    """Decode each raw seeded envelope through the real cable endpoint contract."""
+
+    def __call__(self, endpoint):
+        value = self._values[endpoint.request.key]
+        if isinstance(value, Failed):
+            status = 500
+            body = {"status": "error", "message": value.reason}
+        else:
+            status = 200
+            field = endpoint.request.path.rsplit("/", 1)[-1]
+            body = {"status": "ok", field: value}
+        decoded = endpoint.decode(status, body)
+        return self._keep(
+            ResponseRecord(
+                request=endpoint.request,
+                outcome=decoded.outcome,
+                http_status=status,
+                body=body if decoded.body is None else decoded.body,
+                value=decoded.value,
+                reason=decoded.reason,
+                received_at=timezone.now(),
+            )
+        )
 
 
 def _seeded_fetch(acquirer, librenms_id, parts, what):
@@ -228,3 +255,130 @@ def interface_rows(subject, interface_name_field="ifName", server_key="default")
     from netbox_librenms_plugin.views.base.interfaces_view import read_interface_assessment
 
     return read_interface_assessment(subject, server_key, interface_name_field)
+
+
+def port_row(
+    port_id,
+    name,
+    *,
+    device_id,
+    if_descr=None,
+    if_type="ethernetCsmacd",
+    if_speed=1_000_000_000,
+    deleted=0,
+    **fields,
+):
+    """Return one raw LibreNMS port with complete interface rule inputs."""
+    return {
+        "port_id": port_id,
+        "device_id": device_id,
+        "ifName": name,
+        "ifDescr": name if if_descr is None else if_descr,
+        "ifType": if_type,
+        "ifSpeed": if_speed,
+        "deleted": deleted,
+        **fields,
+    }
+
+
+def link_row(
+    local_port_id,
+    remote_port,
+    *,
+    remote_device_id=None,
+    remote_hostname="",
+    remote_port_id=None,
+    protocol="lldp",
+    id=None,  # noqa: A002
+    local_port=None,
+):
+    """Return one raw LibreNMS link, with no assessed row fields."""
+    return {
+        "id": id,
+        "local_port_id": local_port_id,
+        "local_port": local_port,
+        "remote_port": remote_port,
+        "remote_device_id": remote_device_id,
+        "remote_hostname": remote_hostname,
+        "remote_port_id": remote_port_id,
+        "protocol": protocol,
+    }
+
+
+def sensor_row(
+    sensor_id,
+    index,
+    *,
+    device_id,
+    sensor_type="acsSerialPortTable",
+    sensor_descr="",
+    sensor_deleted=0,
+):
+    """Return one raw LibreNMS sensor with an explicit index and device identity."""
+    return {
+        "sensor_id": sensor_id,
+        "sensor_index": f"acsSerialPortTableStatus.{index}",
+        "device_id": device_id,
+        "sensor_type": sensor_type,
+        "sensor_descr": sensor_descr,
+        "sensor_deleted": sensor_deleted,
+    }
+
+
+def cable_rows(request, subject, server_key="default", interface_name_field="ifName"):
+    """Read assessed cable rows with the same actor as the view or mutation."""
+    from netbox_librenms_plugin.views.base.cables_view import read_cable_assessment
+
+    return read_cable_assessment(request, subject, server_key, interface_name_field)
+
+
+def seed_cables_snapshot(
+    subject,
+    links=(),
+    ports=(),
+    neighbour_ports=None,
+    *,
+    oob_links=None,
+    oob_ports=None,
+    sensors=None,
+    server_key="default",
+):
+    """Store raw cable endpoint facts through the coordinator's real resource acquirer."""
+    from netbox_librenms_plugin.acquisition import responses
+    from netbox_librenms_plugin.acquisition.coordinator import _resource_source
+
+    owner = resource_owner(subject, Resource.CABLES, server_key)
+    mapping = read_mapping(owner)
+    host_id = mapping.own_id(server_key)
+    values = {
+        responses.links(host_id).request.key: links if isinstance(links, Failed) else list(links),
+        responses.ports(host_id, with_vlans=False).request.key: ports if isinstance(ports, Failed) else list(ports),
+    }
+    if sensors is not None:
+        values[responses.sensors(host_id).request.key] = sensors if isinstance(sensors, Failed) else list(sensors)
+    for device_id, rows in (neighbour_ports or {}).items():
+        values[responses.ports(device_id, with_vlans=False).request.key] = (
+            rows if isinstance(rows, Failed) else list(rows)
+        )
+    oob_id = mapping.oob_id(server_key)
+    if oob_id is not None:
+        if oob_links is None or oob_ports is None:
+            raise TypeError("A linked OOB controller needs links and ports in the cable seed.")
+        values[responses.links(oob_id).request.key] = oob_links if isinstance(oob_links, Failed) else list(oob_links)
+        values[responses.ports(oob_id, with_vlans=False).request.key] = (
+            oob_ports if isinstance(oob_ports, Failed) else list(oob_ports)
+        )
+    fetch = _CableSeededFetch(values)
+    source = _resource_source(fetch, Resource.CABLES, owner, server_key, include_serial=sensors is not None)
+    now = timezone.now()
+    snapshot = SourceSnapshot(
+        snapshot_id=uuid4().hex,
+        server_key=server_key,
+        subject=ObjectRef.of(subject),
+        started_at=now,
+        finished_at=now,
+        resources={Resource.CABLES: source},
+        responses=fetch.responses,
+    )
+    assert source_cache.store(subject, Resource.CABLES, snapshot), "the cables seed has no usable scope"
+    return snapshot

@@ -306,7 +306,7 @@ class BaseInterfaceTableView(
             )
             return self._failure_response(request, obj, interface_name_field, server_key, sync_device)
 
-        result = source_cache.refresh(obj, Resource.INTERFACES, server_key)
+        result = source_cache.refresh(request, obj, Resource.INTERFACES, server_key)
         if result.error is not None:
             messages.error(request, f"Failed to fetch interfaces from LibreNMS: {result.error}")
             return self._failure_response(request, obj, interface_name_field, server_key, sync_device)

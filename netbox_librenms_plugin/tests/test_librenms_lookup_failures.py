@@ -9,6 +9,7 @@ reached are three different problems with three different fixes. Reporting all o
 from html import unescape
 
 import pytest
+from django.contrib import messages
 from django.contrib.messages import get_messages
 from django.core.cache import cache
 from django.urls import reverse
@@ -476,9 +477,10 @@ def test_cable_refresh_fails_closed_when_host_discovery_conflicts(
         {"server_key": server_key},
         headers={"HX-Request": "true"},
     )
-    rendered_messages = [str(message) for message in get_messages(response.wsgi_request)]
+    notices = list(get_messages(response.wsgi_request))
 
     assert response.status_code == 200
-    assert "Cable refresh was incomplete. No cable rows were loaded. Refresh Cables to try again." in rendered_messages
-    assert "Cable data refreshed successfully." not in rendered_messages
+    assert any(notice.level == messages.ERROR for notice in notices)
+    assert not any(notice.level == messages.SUCCESS for notice in notices)
+    assert response.context["cable_sync"]["table"] is None
     assert cache.get(sync_snapshot_key(target, TAB_SPECS[SyncTab.CABLES].source.data_type, server_key)) is None
