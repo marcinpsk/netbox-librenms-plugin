@@ -387,3 +387,149 @@ def seed_cables_snapshot(
     )
     assert source_cache.store(subject, Resource.CABLES, snapshot), "the cables seed has no usable scope"
     return snapshot
+
+
+def seed_modules_snapshot(subject, inventory, ports=(), transceivers=(), *, oob_inventory=None, server_key="default"):
+    """Store raw module source facts through the real acquirer and source transport."""
+    return seed_source_snapshot(
+        subject,
+        Resource.MODULES,
+        server_key,
+        inventory=list(inventory),
+        ports=list(ports),
+        transceivers=list(transceivers),
+        oob=None
+        if oob_inventory is None
+        else {"inventory": oob_inventory if isinstance(oob_inventory, Failed) else list(oob_inventory)},
+    )
+
+
+def module_inventory(subject, server_key="default"):
+    """Read the current module assessment through the bound source transport."""
+    from netbox_librenms_plugin.views.base.modules_view import read_module_assessment
+
+    assessed = read_module_assessment(subject, server_key)
+    return assessed["inventory"] if assessed is not None else None
+
+
+def acquire_recording(api, recording, resources, *, include_serial=False, inventory_probes=False):
+    """Replay real HTTP responses through acquisition for a mapped NetBox subject."""
+    from copy import deepcopy
+    from django.conf import settings
+    from django.test import override_settings
+    from netbox_librenms_plugin.acquisition.coordinator import acquire
+    from netbox_librenms_plugin.tests.conftest import make_device
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
+    subject = seed_mapping(
+        make_device(f"replay-{uuid4().hex}"),
+        api.server_key,
+        own=recording["device_id"],
+        oob=(recording.get("meta") or {}).get("oob_id"),
+    )
+    config = deepcopy(settings.PLUGINS_CONFIG)
+    config["netbox_librenms_plugin"]["servers"] = {
+        api.server_key: {
+            "librenms_url": api.librenms_url,
+            "api_token": api.headers["X-Auth-Token"],
+            "verify_ssl": False,
+        }
+    }
+    with override_settings(PLUGINS_CONFIG=config):
+        snapshot = acquire(
+            subject,
+            server_key=api.server_key,
+            resources=resources,
+            include_serial=include_serial,
+            inventory_probes=inventory_probes,
+        )
+    return snapshot, subject
+
+
+def recording_interface_assessment(api, recording):
+    """Acquire and assess a recording with its stored OS name patterns."""
+    from netbox_librenms_plugin.assessment.interfaces import assess_interfaces
+    from netbox_librenms_plugin.models import PortStackLagPattern
+
+    snapshot, _subject = acquire_recording(api, recording, [Resource.INTERFACES])
+    device = snapshot.record(Resource.INTERFACES, "device")
+    os_name = device.value.get("os") if device.obtained else None
+    lag_patterns = recording.get("lag_patterns") or {}
+    sap_patterns = recording.get("sap_patterns") or {}
+    names = set(lag_patterns) | set(sap_patterns)
+    if isinstance(os_name, str) and os_name.strip():
+        names.add(os_name)
+    for rule_os in names:
+        PortStackLagPattern.objects.update_or_create(
+            librenms_os=rule_os,
+            defaults={
+                "lag_name_pattern": lag_patterns.get(rule_os) or "^$",
+                "sap_name_pattern": sap_patterns.get(rule_os, ""),
+                "bridge_name_pattern": "",
+            },
+        )
+    return assess_interfaces(snapshot, "ifName")
+
+
+def recording_serial_projection(api, recording, sensor_types=None):
+    """Acquire raw sensors and apply the recording's serial recognition map."""
+    from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns, project_serial_sensors
+
+    snapshot, _subject = acquire_recording(api, recording, [Resource.CABLES], include_serial=True)
+    record = snapshot.record(Resource.CABLES, "sensors")
+    if not record.obtained:
+        return False, record.reason
+    projection = project_serial_sensors(
+        record.value, get_serial_sensor_type_patterns() if sensor_types is None else sensor_types
+    )
+    return (True, projection.rows) if projection.ready else (False, projection.reason)
+
+
+def recording_part(api, device_id, resource, part):
+    """Acquire a recording part and return its obtained value or failure reason."""
+    snapshot, _subject = acquire_recording(
+        api, {"device_id": device_id}, [resource], include_serial=resource is Resource.CABLES
+    )
+    record = snapshot.record(resource, part)
+    return (True, record.value) if record.obtained else (False, record.reason)
+
+
+def module_endpoint_rows(inventory):
+    """Build endpoint fixtures for module rows, without storing assessment annotations."""
+    from copy import deepcopy
+
+    host, oob, ports, transceivers = [], [], {}, []
+    for item in deepcopy(inventory):
+        port_id = item.get("_librenms_port_id")
+        if_name = item.get("_librenms_ifname")
+        if_descr = item.get("_librenms_ifdescr")
+        synthetic = item.get("_from_transceiver_api")
+        confirmed = item.get("_transceiver_api_match")
+        source = item.get("_source", "main")
+        raw = {key: value for key, value in item.items() if not key.startswith("_")}
+        if "_reported_parent" in item:
+            raw["entPhysicalContainedIn"] = item["_reported_parent"]
+        if source == "oob":
+            oob.append(raw)
+            continue
+        if source != "main":
+            raise TypeError(f"No module endpoint fixture has source {source!r}.")
+        if port_id is not None:
+            ports[port_id] = {
+                "port_id": port_id,
+                "ifName": if_name or raw.get("entPhysicalName", ""),
+                "ifDescr": if_descr or "",
+            }
+        if synthetic or confirmed or port_id is not None:
+            transceivers.append(
+                {
+                    "entity_physical_index": raw.get("entPhysicalIndex"),
+                    "port_id": port_id,
+                    "model": raw.get("entPhysicalModelName"),
+                    "serial": raw.get("entPhysicalSerialNum"),
+                    "type": "SFP",
+                }
+            )
+        if not synthetic:
+            host.append(raw)
+    return {"inventory": host, "ports": list(ports.values()), "transceivers": transceivers}, oob
