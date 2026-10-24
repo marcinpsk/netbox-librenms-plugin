@@ -375,6 +375,7 @@ def test_an_absent_host_and_invalid_oob_mapping_keep_distinct_response_outcomes(
         oob = snapshot.record(Resource.CABLES, part, MappingRole.OOB)
         assert oob.outcome is Outcome.FAILED
         assert oob.request.path == f"devices/None/{part}"
+    assert {blocker.path for blocker in blocked_scopes(snapshot, Resource.CABLES)["oob"]} == {"oob"}
     assert set(blocked_scopes(snapshot, Resource.CABLES)) == {"oob"}
     assert not is_ready(snapshot, Resource.CABLES)
     assert SourceSnapshot.from_payload(snapshot.to_payload()) == snapshot
