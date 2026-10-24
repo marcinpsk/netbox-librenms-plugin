@@ -20,7 +20,8 @@ from netbox_librenms_plugin.tests.mock_librenms_server import (
     LibreNMSStubServer,
     build_stub_server,
 )
-from netbox_librenms_plugin.tests.test_recordings import read_ip_addresses_as_acquisition, read_links_as_acquisition
+from netbox_librenms_plugin.tests.source_snapshot_helpers import recording_part
+from netbox_librenms_plugin.acquisition.registry import Resource
 
 TOKEN = "dev-stub-token"
 RECORDING_NAMES = DEFAULT_STUB_RECORDINGS
@@ -186,6 +187,8 @@ def test_stub_command_line_logs_each_request_unless_quiet(capfd, flags, logged):
     assert ('"GET /healthz' in capfd.readouterr().err) is logged
 
 
+@pytest.mark.django_db
+@pytest.mark.django_db
 def test_stub_serves_recordings_and_derived_instance_endpoints_over_real_http():
     server = _start_stub()
     try:
@@ -220,14 +223,18 @@ def test_stub_serves_recordings_and_derived_instance_endpoints_over_real_http():
         assert [port["port_id"] for port in ports["ports"]] == [port["port_id"] for port in recorded_ports["ports"]]
         assert any(port.get("vlans") for port in ports["ports"])
 
-        ok, addresses = read_ip_addresses_as_acquisition(api, device_id)
+        ok, addresses = recording_part(api, device_id, Resource.IP_ADDRESSES, "addresses")
         assert ok is True, addresses
         assert addresses
         recorded_device = recording["responses"][f"GET /api/v0/devices/{device_id}"]["devices"][0]
         assert addresses[0]["ipv4_address"] == recorded_device["ip"]
         assert addresses[0]["port_id"] is not None
 
-        ok, links = read_links_as_acquisition(api, device_id)
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import acquire_recording
+
+        snapshot, _subject = acquire_recording(api, recording, [Resource.CABLES])
+        record = snapshot.record(Resource.CABLES, "links")
+        ok, links = record.obtained, {"status": "ok", "links": record.value}
         assert ok is True
         assert links
 

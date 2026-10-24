@@ -837,7 +837,13 @@ from netbox_librenms_plugin.data_shapes.compress import compress_recording
 from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.tests.mock_librenms_server import MockLibreNMSServer
-from netbox_librenms_plugin.tests.test_recordings import _assert_port_relationships
+from dcim.models import Device
+from netbox_librenms_plugin.acquisition.coordinator import acquire
+from netbox_librenms_plugin.acquisition.registry import Resource
+from netbox_librenms_plugin.interface_relationships import resolve_port_relationships
+from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns, compile_sap_patterns
+from netbox_librenms_plugin.tests.conftest import name_rules
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 pattern, name, pipeline, map_name = json.loads(sys.argv[1])
 recording = {
     "schema_version": 1, "name": "bounded-regex", "device_id": 1,
@@ -866,7 +872,10 @@ else:
         }
         api = LibreNMSAPI(server_key="bounded-regex")
         expected = {"lag_members": {1: 2} if map_name == "lag_patterns" and not name.endswith("!") else {}}
-        _assert_port_relationships(api, 1, recording, expected)
+        subject = seed_mapping(Device(pk=1, name="regex-fixture"), "bounded-regex", own=1, save=False)
+        snapshot = acquire(subject, server_key="bounded-regex", resources=[Resource.INTERFACES])
+        relationships = resolve_port_relationships(snapshot.value(Resource.INTERFACES, "ports"), snapshot.value(Resource.INTERFACES, "port_stack"), **name_rules(lag=compile_lag_patterns(recording), sap=compile_sap_patterns(recording)))
+        assert relationships["lag_members"] == expected["lag_members"]
     finally:
         server.stop()
 """
@@ -933,6 +942,7 @@ def test_recording_regex_bounds_pattern_count_and_length():
 
 
 @pytest.mark.parametrize("kind", ["lag", "sap", "bridge"])
+@pytest.mark.django_db
 def test_recording_replay_treats_unencodable_names_as_non_matches(kind):
     from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns
     from netbox_librenms_plugin.tests.conftest import make_recording_api
@@ -972,8 +982,11 @@ def test_recording_replay_treats_unencodable_names_as_non_matches(kind):
         api = make_recording_api(server.url)
         ok, payload = api.get_ports(1)
         assert ok
-        ok, stack = api.get_port_stack(1)
-        assert ok
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import acquire_recording
+        from netbox_librenms_plugin.acquisition.registry import Resource
+
+        snapshot, _subject = acquire_recording(api, recording, [Resource.INTERFACES])
+        stack = snapshot.value(Resource.INTERFACES, "port_stack")
         result = resolve_port_relationships(payload["ports"], stack, **patterns)
         assert result["lag_members"] == ({10: 20} if kind == "sap" else {})
         assert result["bridge_members"] == {}

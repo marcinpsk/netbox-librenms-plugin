@@ -10,10 +10,7 @@ from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
 from netbox.plugins import get_plugin_config
 
-from netbox_librenms_plugin.acquisition import responses
-from netbox_librenms_plugin.acquisition.snapshot import Outcome
 from netbox_librenms_plugin.constants import (
-    LIBRENMS_NO_VRFS_MESSAGE,
     LIBRENMS_PORTS_COLUMNS,
 )
 from netbox_librenms_plugin.server_mappings import (
@@ -825,22 +822,6 @@ class LibreNMSAPI:
         except requests.exceptions.RequestException as e:
             return False, f"Error connecting to LibreNMS: {str(e)}"
 
-    def get_port_stack(self, device_id: int):
-        """
-        Fetch ifStackTable relationships from LibreNMS for a device, through the port_stack contract.
-
-        Args:
-            device_id: LibreNMS device ID
-
-        Returns:
-            tuple: ``(True, mappings)`` with each ``{high_port_id, low_port_id, ...}`` pair, or
-                ``(False, reason)`` when the contract refuses the answer.
-
-        """
-        endpoint = responses.port_stack(device_id)
-        decoded = endpoint.decode(*self.get_response(endpoint.request.path))
-        return (True, decoded.value) if decoded.outcome is Outcome.OBTAINED else (False, decoded.reason)
-
     def add_device(self, data):
         """
         Add a device to LibreNMS.
@@ -1054,65 +1035,28 @@ class LibreNMSAPI:
                 error_message = error_details.get("message", error_message)
             return False, error_message
 
-    def get_device_vrfs(self, device_id):
+    def get_port_by_id(self, port_id):
         """
-        Return the VRFs LibreNMS holds for one device.
-
-        ``/api/v0/routing/vrf`` serves the whole instance by default and documents a ``hostname``
-        filter that accepts a device id. The filter is asked for AND the returned rows are checked
-        against ``device_id``: a server that ignores the parameter would otherwise hand back every
-        other device's VRF names, which a data-shape recording then publishes.
+        Fetch specific port data from LibreNMS using port ID.
 
         Args:
-            device_id: LibreNMS device ID.
+            port_id: LibreNMS Port ID
 
         Returns:
-            tuple: (success: bool, data: list of VRF dicts or error string)
+            tuple: (success: bool, data: dict)
 
         """
         try:
             response = _session.get(
-                f"{self.librenms_url}/api/v0/routing/vrf",
+                f"{self.librenms_url}/api/v0/ports/{port_id}",
                 headers=self.headers,
-                params={"hostname": str(device_id)},
                 timeout=DEFAULT_API_TIMEOUT,
                 verify=self.verify_ssl,
             )
             response.raise_for_status()
-            result = response.json()
-        except requests.exceptions.HTTPError as e:
-            if e.response is not None and e.response.status_code == HTTP_NOT_FOUND:
-                return self._classify_missing_vrfs(e)
-            return False, str(e)
-        except ValueError as e:
-            # JSONDecodeError subclasses both ValueError and RequestException, so a parse failure
-            # must be classified here or it is mislabeled as a connection problem.
-            return False, f"Invalid JSON from LibreNMS: {str(e)}"
+            return True, response.json()
         except requests.exceptions.RequestException as e:
             return False, str(e)
-
-        if not isinstance(result, dict) or result.get("status") != "ok":
-            message = result.get("message") if isinstance(result, dict) else None
-            return False, message or "Unexpected response format"
-        rows = result.get("vrfs")
-        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
-            return False, "Unexpected response format: 'vrfs' must be a list of objects"
-        if any(row.get("device_id") is None for row in rows):
-            return False, "Unexpected response format: VRF rows must include 'device_id'"
-        wanted = str(device_id)
-        return True, [row for row in rows if str(row["device_id"]) == wanted]
-
-    @staticmethod
-    def _classify_missing_vrfs(error):
-        """Tell "this instance holds no VRF table" apart from a stale device id."""
-        try:
-            payload = error.response.json()
-        except (TypeError, ValueError):
-            payload = None
-        message = payload.get("message") if isinstance(payload, dict) else None
-        if isinstance(message, str) and LIBRENMS_NO_VRFS_MESSAGE in message.lower():
-            return True, []
-        return False, message or str(error)
 
     def get_device_inventory(self, device_id, missing_is_empty=False):
         """
@@ -1166,71 +1110,6 @@ class LibreNMSAPI:
                 return True, []
             return False, str(e)
         except (requests.exceptions.RequestException, ValueError) as e:
-            return False, str(e)
-
-    def get_device_transceivers(self, device_id):
-        """
-        Fetch all transceiver data for a device from LibreNMS.
-
-        Route: /api/v0/devices/{device_id}/transceivers
-
-        This is a separate data source from entity inventory. Some vendors
-        (e.g., Nokia/SROS) don't expose SFPs via ENTITY-MIB but do report
-        them through vendor-specific MIBs which LibreNMS surfaces here.
-
-        Args:
-            device_id: LibreNMS device ID
-
-        Returns:
-            tuple: (success: bool, data: list). On success ``data`` is always a list of dicts —
-                callers may rely on that and must not re-check the container/element types.
-
-        Example transceiver item:
-            {
-                "port_id": 519,
-                "entity_physical_index": 1610899520,
-                "type": "CFP2/QSFP28",
-                "model": "3HE10550AARA01",
-                "serial": "X42AU0D",
-                "channels": 4,
-                "connector": "LC",
-                "wavelength": 1301,
-                ...
-            }
-
-        """
-        try:
-            response = _session.get(
-                f"{self.librenms_url}/api/v0/devices/{device_id}/transceivers",
-                headers=self.headers,
-                timeout=DEFAULT_API_TIMEOUT,
-                verify=self.verify_ssl,
-            )
-            response.raise_for_status()
-
-            try:
-                data = response.json()
-            except ValueError:
-                return False, f"Invalid JSON in transceivers response for device {device_id}"
-
-            if not isinstance(data, dict) or "transceivers" not in data:
-                msg = data.get("message") if isinstance(data, dict) else None
-                return False, msg or f"Unexpected transceivers response format for device {device_id}"
-
-            if data.get("status") != "ok":
-                msg = data.get("message") or f"LibreNMS returned status={data.get('status')!r} for device {device_id}"
-                return False, msg
-
-            transceivers = data["transceivers"]
-            if not isinstance(transceivers, list):
-                msg = data.get("message")
-                return False, msg or f"Unexpected transceivers response format for device {device_id}"
-
-            if any(item is None or not isinstance(item, dict) for item in transceivers):
-                return False, f"Malformed transceiver entry in response for device {device_id}"
-
-            return True, transceivers
-        except requests.exceptions.RequestException as e:
             return False, str(e)
 
     def get_poller_groups(self):
@@ -1459,60 +1338,6 @@ class LibreNMSAPI:
     # =========================================================================
     # VLAN Methods
     # =========================================================================
-
-    def get_serial_port_sensors(self, device_id: int, sensor_types: dict | None = None) -> tuple[bool, list | str]:
-        """
-        Return serial-port sensor records for a single device from LibreNMS.
-
-        Why this fetches the *instance-wide* sensor table and filters it by device,
-        rather than using a per-device call: LibreNMS offers no usable per-device route
-        for these sensors.
-
-        * ``/api/v0/resources/sensors`` takes no parameters (it is documented as
-          "Input: None") — it always returns every sensor on the instance.
-        * ``/api/v0/devices/{id}/sensors`` is not a LibreNMS route: it falls through to the
-          ``{hostname}/{type}`` graph route and answers 500.
-        * ``/api/v0/devices/{id}/health/state`` (the per-device path) returns only
-          ``sensor_id`` + ``desc`` — it omits ``sensor_index``, which we need to derive
-          the physical port number. Recovering it would require an N+1 fan-out
-          (``/health/state/{sensor_id}`` per sensor — 49 calls for a 48-port Avocent).
-
-        So the instance-wide table is the cheapest correct source. Each user-initiated cable
-        refresh filters rows to ``device_id`` before validating their serial values. Cached cable
-        page renders use the stored cable snapshot and do not call this method.
-
-        Route: /api/v0/resources/sensors
-
-        Args:
-            device_id: LibreNMS device ID.
-            sensor_types: Optional explicit recognition map overriding the
-                ``SerialSensorTypePattern`` table — the data-shapes replay injection point (a
-                recording is replayed with the map captured alongside it, on a host whose table
-                may be empty or different).
-
-        Returns:
-            tuple: (success: bool, data: list of sensor dicts or error string)
-
-        """
-        from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns, project_serial_sensors
-
-        if sensor_types is None:
-            sensor_types = get_serial_sensor_type_patterns()
-        if not sensor_types:
-            return True, []
-        endpoint = responses.sensors(device_id)
-        decoded = endpoint.decode(*self.get_response(endpoint.request.path, timeout=EXTENDED_API_TIMEOUT))
-        if decoded.outcome is not Outcome.OBTAINED:
-            return False, decoded.reason
-        unreadable_types = sum(not isinstance(sensor.get("sensor_type"), str) for sensor in decoded.value)
-        if unreadable_types:
-            logger.warning(
-                "Skipped %s sensor(s) with a non-string sensor_type for %s",
-                unreadable_types,
-                self.server_key,
-            )
-        projection = project_serial_sensors(decoded.value, sensor_types)
-        return (True, projection.rows) if projection.ready else (False, projection.reason)
 
     def get_port_vlan_details(self, port_id: int) -> tuple[bool, dict | str]:
         """

@@ -12,9 +12,6 @@ import pytest
 from django.conf import settings
 from django.test import override_settings
 
-from netbox_librenms_plugin.interface_relationships import resolve_port_relationships
-from netbox_librenms_plugin.tests.conftest import name_rules
-
 
 def _make_api(url, token="test-token"):
     """Create a LibreNMSAPI instance pointed at the mock server."""
@@ -127,6 +124,7 @@ class TestLibreNMSAPIPortsFetch:
 class TestLibreNMSAPIPortStack:
     """LibreNMS port-stack responses resolve through the HTTP client."""
 
+    @pytest.mark.django_db
     def test_documented_port_stack_shape_resolves_lag_membership(self, librenms_server):
         librenms_server.register(
             "/api/v0/devices/42/ports",
@@ -156,14 +154,10 @@ class TestLibreNMSAPIPortStack:
         )
         api = _make_api(librenms_server.url)
 
-        ports_ok, ports_data = api.get_ports(42)
-        stack_ok, port_stack = api.get_port_stack(42)
-        # Assert the call outcomes before using the payloads: a failed call would otherwise raise
-        # an opaque TypeError/KeyError below instead of naming the API call that failed.
-        assert ports_ok is True
-        assert stack_ok is True
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import recording_interface_assessment
 
-        relationships = resolve_port_relationships(ports_data["ports"], port_stack, **name_rules())
+        librenms_server.register("/api/v0/devices/42", {"status": "ok", "devices": [{"device_id": 42, "os": "linux"}]})
+        relationships = recording_interface_assessment(api, {"device_id": 42})["port_stack_relationships"]
 
         assert relationships["lag_members"] == {101: 102}
 

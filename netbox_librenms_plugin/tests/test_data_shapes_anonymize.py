@@ -7,8 +7,6 @@ import re
 import pytest
 
 from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording, find_pii, pseudonymize_os
-from netbox_librenms_plugin.interface_relationships import resolve_port_relationships
-from netbox_librenms_plugin.tests.conftest import name_rules
 from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 from netbox_librenms_plugin.tests.recordings import load_recording
 
@@ -1078,7 +1076,7 @@ def test_entity_text_preserves_only_supported_terminal_locators():
 
 def test_entity_locator_anonymization_preserves_transceiver_nesting_and_is_idempotent():
     """Opaque entity labels must keep the hierarchy used by the real nesting consumer."""
-    from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+    from netbox_librenms_plugin.assessment.modules import _nest_synthetic_transceivers
 
     inventory = [
         {"entPhysicalIndex": 10, "entPhysicalName": "MDA 1/1 ", "entPhysicalContainedIn": 0},
@@ -1107,7 +1105,7 @@ def test_entity_locator_anonymization_preserves_transceiver_nesting_and_is_idemp
         item["entPhysicalName"] for item in anonymized_inventory
     ]
 
-    BaseModuleTableView._nest_synthetic_transceivers(anonymized_inventory)
+    _nest_synthetic_transceivers(anonymized_inventory)
 
     assert anonymized_inventory[2]["entPhysicalContainedIn"] == 10
     assert anonymized_inventory[3]["entPhysicalContainedIn"] == 20
@@ -1209,6 +1207,7 @@ def test_salt_changes_pseudonyms():
     assert s_a != s_b
 
 
+@pytest.mark.django_db
 def test_anonymized_recording_still_detects_vc(recording_server, db):
     """An anonymized recording replays to the same VC outcome (member count + position order)."""
     from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
@@ -1266,20 +1265,24 @@ def test_response_free_text_is_scrubbed(field):
 
 
 @pytest.mark.parametrize(
-    "route,method,message",
+    "route,resource,part,message",
     [
-        ("devices/1/links", "links", "Device does not have any links"),
-        ("devices/1/links", "links", "Links do not exist"),
+        ("devices/1/links", "cables", "links", "Device does not have any links"),
+        ("devices/1/links", "cables", "links", "Links do not exist"),
         # Acquisition reads this route; no client method does.
-        ("devices/1/ip", "acquisition", "Device does not have any ip addresses"),
-        ("routing/vrf", "get_device_vrfs", "VRFs do not exist"),
-        ("resources/sensors", "get_serial_port_sensors", "Sensors do not exist"),
+        ("devices/1/ip", "ipaddresses", "addresses", "Device does not have any ip addresses"),
+        ("routing/vrf", "ipaddresses", "vrfs", "VRFs do not exist"),
+        ("resources/sensors", "cables", "sensors", "Sensors do not exist"),
     ],
 )
 @pytest.mark.parametrize("include_device_name", [False, True])
-def test_anonymization_preserves_empty_response_replay(recording_server, route, method, message, include_device_name):
+@pytest.mark.django_db
+def test_anonymization_preserves_empty_response_replay(
+    recording_server, route, resource, part, message, include_device_name
+):
     from netbox_librenms_plugin.data_shapes.envelope import wrap_response
-    from netbox_librenms_plugin.tests.test_recordings import read_ip_addresses_as_acquisition, read_links_as_acquisition
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import recording_part
+    from netbox_librenms_plugin.acquisition.registry import Resource
 
     if include_device_name:
         message = f"device.example.invalid: {message.upper()}"
@@ -1289,13 +1292,9 @@ def test_anonymization_preserves_empty_response_replay(recording_server, route, 
     }
     for replay in (recording, anonymize_recording(recording)):
         _server, api = recording_server(replay)
-        kwargs = {"sensor_types": {"serial": "Port {N}"}} if method == "get_serial_port_sensors" else {}
-        if method == "links":
-            success, result = read_links_as_acquisition(api, replay["device_id"])
-        elif method == "acquisition":
-            success, result = read_ip_addresses_as_acquisition(api, replay["device_id"])
-        else:
-            success, result = getattr(api, method)(replay["device_id"], **kwargs)
+        if part == "vrfs":
+            _server.ports_response(device_id=replay["device_id"], ports=[{"port_id": 7, "ifVrf": 7}])
+        success, result = recording_part(api, replay["device_id"], Resource(resource), part)
         assert success, result
         assert result == []
     assert "device.example.invalid" not in str(replay)
@@ -1331,6 +1330,7 @@ def test_numeric_model_fields_share_the_string_token(field, value):
 @pytest.mark.parametrize("field", ["entPhysicalModelName", "entPhysicalSerialNum"])
 @pytest.mark.parametrize("value", [0, 123456, 123456.25])
 @pytest.mark.parametrize("numeric_parent", [True, False])
+@pytest.mark.django_db
 def test_anonymization_preserves_mixed_numeric_inventory_identity(recording_server, field, value, numeric_parent):
     from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
@@ -1666,17 +1666,16 @@ def test_find_pii_flags_residual_fqdn_but_not_icon_or_version():
     ("recording_name", "expect_lag"),
     [("cisco-lag-and-subinterface", True), ("junos-subinterfaces", False)],
 )
+@pytest.mark.django_db
 def test_anonymization_preserves_port_relationships(recording_server, recording_name, expect_lag):
     """The LAG/sub-interface maps resolve identically before and after anonymization (logic intact)."""
     rec = load_recording(recording_name)
 
     def _resolve(recording):
         _server, api = recording_server(recording)
-        _ok, ports = api.get_ports(recording["device_id"])
-        _ok2, stack = api.get_port_stack(recording["device_id"])
-        rel = resolve_port_relationships(
-            ports["ports"], stack, **name_rules(lag=recording.get("lag_patterns", {}).values())
-        )
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import recording_interface_assessment
+
+        rel = recording_interface_assessment(api, recording)["port_stack_relationships"]
         return (
             {str(k): str(v) for k, v in rel["lag_members"].items()},
             {str(k): str(v) for k, v in rel["sub_interfaces"].items()},
@@ -1700,6 +1699,7 @@ def test_anonymization_preserves_port_relationships(recording_server, recording_
         assert raw_lag  # LAG coverage when the fixture includes a LAG aggregate
 
 
+@pytest.mark.django_db
 def test_anonymization_preserves_a_custom_base_subinterface_relationship(recording_server):
     """A private custom base and its numeric sub-unit must receive correlated pseudonyms."""
     rec = _ports(
@@ -1709,10 +1709,16 @@ def test_anonymization_preserves_a_custom_base_subinterface_relationship(recordi
     rec["responses"]["GET /api/v0/devices/1/port_stack"] = {"status": "ok", "mappings": []}
 
     def resolve(recording):
+        recording = deepcopy(recording)
+        device_id = recording["device_id"]
+        recording["responses"][f"GET /api/v0/devices/{device_id}"] = {
+            "status": "ok",
+            "devices": [{"device_id": device_id, "os": "recording-test"}],
+        }
         _server, api = recording_server(recording)
-        _ports_ok, ports = api.get_ports(recording["device_id"])
-        _stack_ok, stack = api.get_port_stack(recording["device_id"])
-        return resolve_port_relationships(ports["ports"], stack, **name_rules())["sub_interfaces"]
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import recording_interface_assessment
+
+        return recording_interface_assessment(api, recording)["port_stack_relationships"]["sub_interfaces"]
 
     anonymized = anonymize_recording(rec)
     names = [port["ifName"] for port in _response(anonymized, "GET /api/v0/devices/1/ports")["ports"]]
