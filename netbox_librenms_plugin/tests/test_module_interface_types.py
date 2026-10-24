@@ -38,12 +38,10 @@ def _inventory_row(module, *, index=179):
 def _seed_module_tab(device, module, *, inventory_row=None, librenms_id=179):
     """Map the device and seed one real module-tab inventory snapshot."""
     from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
     seed_mapping(device, own=librenms_id)
     device.__dict__.pop("cf", None)
     return seed_inventory(
-        DeviceModuleTableView(),
         device,
         [inventory_row or _inventory_row(module)],
         librenms_id=librenms_id,

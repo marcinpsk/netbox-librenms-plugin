@@ -5,6 +5,8 @@ This module provides 100% test coverage for netbox_librenms_plugin/librenms_api.
 with particular focus on HTTP method correctness to prevent regression bugs.
 """
 
+from netbox_librenms_plugin.tests.source_snapshot_helpers import acquire_ports_record
+
 import inspect
 import re
 import time
@@ -987,6 +989,7 @@ class TestLibreNMSAPILocationOperations:
 # =============================================================================
 
 
+@pytest.mark.django_db
 class TestLibreNMSAPIPortsAndInventory:
     """Test ports and inventory operations."""
 
@@ -1001,7 +1004,8 @@ class TestLibreNMSAPIPortsAndInventory:
         librenms_server.register("/api/v0/devices/7/ports", respond, method="GET")
         mock_librenms_api.librenms_url = librenms_server.url
 
-        success, _data = mock_librenms_api.get_ports(7)
+        port_record = acquire_ports_record(mock_librenms_api, 7)
+        success, _data = port_record.obtained, port_record.body
 
         assert success is True
         assert "ifVrf" in seen["columns"].split(",")
@@ -1015,14 +1019,15 @@ class TestLibreNMSAPIPortsAndInventory:
             method="GET",
         )
 
-        success, data = local_librenms_api.get_ports(device_id=123)
+        port_record = acquire_ports_record(local_librenms_api, 123)
+        success, data = port_record.obtained, port_record.body
 
         assert success is True
         assert "ports" in data
         assert len(data["ports"]) == 2
-        assert librenms_server.requests[-1]["method"] == "GET"
-        assert librenms_server.requests[-1]["path"] == path
-        assert librenms_server.requests[-1]["query"]["with"] == ["vlans"]
+        (request,) = [request for request in librenms_server.requests if request["path"] == path]
+        assert request["method"] == "GET"
+        assert request["query"]["with"] == ["vlans"]
 
     def test_get_device_inventory_success(self, local_librenms_api, librenms_server):
         """Verify retrieving device inventory."""
@@ -1062,7 +1067,7 @@ class TestLibreNMSAPIPortsAndInventory:
         path = "/api/v0/inventory/123"
         librenms_server.register(
             path,
-            {"status": "ok", "inventory": [{"entPhysicalContainedIn": "0"}]},
+            {"status": "ok", "inventory": [{"entPhysicalContainedIn": 0}]},
             method="GET",
         )
 
@@ -1072,7 +1077,7 @@ class TestLibreNMSAPIPortsAndInventory:
         )
 
         assert success is True
-        assert inventory == [{"entPhysicalContainedIn": "0"}]
+        assert inventory == [{"entPhysicalContainedIn": 0}]
         assert librenms_server.requests[-1]["query"] == {"entPhysicalContainedIn": ["0"]}
 
     def test_get_inventory_filtered_404_is_empty_not_failure(self, local_librenms_api, librenms_server):
@@ -1436,87 +1441,6 @@ class TestVlanAcquisitionResponseShape:
         assert record.outcome is Outcome.FAILED
         assert record.value is None
         assert reason in record.reason
-
-
-class TestGetPortVlanDetailsResponseShape:
-    """Cover response-shape branches in get_port_vlan_details()."""
-
-    PATH = "/api/v0/ports/11"
-
-    def test_success_returns_port_dict(self, local_librenms_api, librenms_server):
-        librenms_server.register(
-            self.PATH,
-            {
-                "status": "ok",
-                "port": [{"port_id": 11, "ifName": "Te1/1/1", "vlans": [{"vlan": 10, "untagged": 1}]}],
-            },
-            method="GET",
-        )
-
-        success, port = local_librenms_api.get_port_vlan_details(port_id=11)
-
-        assert success is True
-        assert port["port_id"] == 11
-
-    def test_non_dict_response_returns_failure(self, local_librenms_api, librenms_server):
-        librenms_server.register(self.PATH, ["unexpected"], method="GET")
-
-        success, msg = local_librenms_api.get_port_vlan_details(port_id=11)
-
-        assert success is False
-        assert msg == "Unexpected response format"
-
-    def test_status_not_ok_uses_server_message(self, local_librenms_api, librenms_server):
-        librenms_server.register(
-            self.PATH,
-            {"status": "error", "message": "no port"},
-            method="GET",
-        )
-
-        success, msg = local_librenms_api.get_port_vlan_details(port_id=11)
-
-        assert success is False
-        assert msg == "no port"
-
-    def test_missing_port_list_returns_failure(self, local_librenms_api, librenms_server):
-        librenms_server.register(
-            self.PATH,
-            {"status": "ok", "port": {"port_id": 11}},
-            method="GET",
-        )
-
-        success, msg = local_librenms_api.get_port_vlan_details(port_id=11)
-
-        assert success is False
-        assert "missing 'port' list" in msg
-
-    def test_empty_port_list_returns_not_found(self, local_librenms_api, librenms_server):
-        librenms_server.register(self.PATH, {"status": "ok", "port": []}, method="GET")
-
-        success, msg = local_librenms_api.get_port_vlan_details(port_id=11)
-
-        assert success is False
-        assert msg == "Port not found"
-
-    def test_non_dict_port_entry_returns_failure(self, local_librenms_api, librenms_server):
-        librenms_server.register(
-            self.PATH,
-            {"status": "ok", "port": ["bad-entry"]},
-            method="GET",
-        )
-
-        success, msg = local_librenms_api.get_port_vlan_details(port_id=11)
-
-        assert success is False
-        assert "invalid 'port' entry" in msg
-
-    def test_request_exception_returns_failure(self, local_librenms_api, librenms_server):
-        librenms_server.register_disconnect(self.PATH, method="GET")
-
-        success, msg = local_librenms_api.get_port_vlan_details(port_id=11)
-
-        assert success is False
-        assert "Error connecting to LibreNMS" in msg
 
 
 # =============================================================================

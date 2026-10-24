@@ -7,7 +7,7 @@ from netbox_librenms_plugin.acquisition import responses
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.acquisition.snapshot import MappingState, Outcome
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
-from netbox_librenms_plugin.import_utils.virtual_chassis import select_vc_parent_index
+from netbox_librenms_plugin.inventory_identity import select_vc_parent_index
 from netbox_librenms_plugin.serial_utils import (
     SerialSensorProjection,
     get_serial_sensor_type_patterns,
@@ -94,17 +94,6 @@ def _oob_interfaces(fetch, librenms_id):
     return {"ports": fetch(responses.ports(librenms_id, with_vlans=True))}
 
 
-def effective_inventory(filtered, full, contained_in):
-    """Return obtained query rows, or their full-inventory fallback after a valid empty answer."""
-    if not filtered.obtained:
-        return None
-    if filtered.value:
-        return filtered.value
-    if not full.obtained:
-        return None
-    return [row for row in full.value if str(row.get("entPhysicalContainedIn")) == str(contained_in)]
-
-
 def _modules(fetch, librenms_id, *, inventory_probes=False):
     parts = {
         "inventory": fetch(responses.inventory(librenms_id)),
@@ -114,10 +103,19 @@ def _modules(fetch, librenms_id, *, inventory_probes=False):
     if inventory_probes:
         root = fetch(responses.inventory_filtered(librenms_id, 0))
         parts["inventory_root"] = root
-        roots = effective_inventory(root, parts["inventory"], 0)
+        roots = responses.effective_inventory(
+            root, parts["inventory"], params=root.request.params, http_status=root.http_status
+        )
         parent = select_vc_parent_index(roots) if roots is not None else None
-        if parent is not None:
-            parts["inventory_children"] = fetch(responses.inventory_filtered(librenms_id, parent))
+        children = responses.inventory_filtered(librenms_id, parent)
+        if roots is None:
+            parts["inventory_children"] = fetch.skip(
+                children, Outcome.NOT_REQUESTED, "The effective root was not obtained."
+            )
+        elif parent is None:
+            parts["inventory_children"] = fetch.skip(children, Outcome.NOT_APPLICABLE, "No root holds VC members.")
+        else:
+            parts["inventory_children"] = fetch(children)
     return parts
 
 

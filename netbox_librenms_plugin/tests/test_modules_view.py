@@ -5,6 +5,10 @@ Focuses on the bay-scope tracking in _build_context and the serial
 comparison logic in _build_row.
 """
 
+from netbox_librenms_plugin.tests.source_snapshot_helpers import transceiver_row
+
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_mapped_modules
+
 import re
 from copy import deepcopy
 from types import SimpleNamespace
@@ -1115,18 +1119,14 @@ def _mapped_device(name, server_key, librenms_id=777):
 
 def _seed_snapshot(view, device, server_key, *, inventory=None, librenms_id=777, oob_librenms_id=None):
     """Store a real inventory snapshot in the real cache and return its key and payload."""
-    from django.core.cache import cache
 
-    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
-
-    payload = trusted_module_inventory_payload(
+    payload = seed_mapped_modules(
         device,
         [{"entPhysicalIndex": 12}] if inventory is None else inventory,
         server_key=server_key,
         librenms_id=librenms_id,
-    )
+    ).to_payload()
     cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
-    cache.set(cache_key, payload)
     return cache_key, payload
 
 
@@ -5787,8 +5787,6 @@ def test_included_numeric_inventory_class_renders_on_the_sync_page(client, setti
 
     from netbox_librenms_plugin.models import InventoryIgnoreRule
     from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type, make_superuser
-    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
     configure_servers(
         settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
@@ -5798,7 +5796,7 @@ def test_included_numeric_inventory_class_renders_on_the_sync_page(client, setti
     InventoryIgnoreRule.objects.create(
         name="Numeric inventory modules", match_type="class_is", pattern="7", action="include"
     )
-    payload = trusted_module_inventory_payload(
+    seed_mapped_modules(
         device,
         [
             {
@@ -5813,7 +5811,6 @@ def test_included_numeric_inventory_class_renders_on_the_sync_page(client, setti
         ],
         librenms_id=9301,
     )
-    cache.set(DeviceModuleTableView().get_cache_key(device, "inventory", server_key="default"), payload, 300)
     cache.set("librenms_device_info_default_9301", (True, {"device_id": 9301, "hostname": device.name}), 300)
     client.force_login(make_superuser("numeric-inventory-class-user"))
     response = client.get(
@@ -5847,8 +5844,6 @@ def test_a_name_match_bound_to_another_port_is_not_shown(client, settings, ifnam
 
     from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
     from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
-    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
     configure_servers(
         settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
@@ -5865,12 +5860,14 @@ def test_a_name_match_bound_to_another_port_is_not_shown(client, settings, ifnam
         "entPhysicalName": "Line card",
         "entPhysicalContainedIn": 0,
         "entPhysicalModelName": "NAME-MATCH-CARD",
-        "_librenms_port_id": 8001,
-        "_librenms_ifname": "Ethernet1/1",
-        "_librenms_ifdescr": "Uplink1",
     }
-    payload = trusted_module_inventory_payload(device, [item], librenms_id=9303)
-    cache.set(DeviceModuleTableView().get_cache_key(device, "inventory", server_key="default"), payload, 300)
+    seed_mapped_modules(
+        device,
+        [item],
+        librenms_id=9303,
+        ports=[{"port_id": 8001, "ifName": "Ethernet1/1", "ifDescr": "Uplink1"}],
+        transceivers=[transceiver_row(82, port_id=8001, model="NAME-MATCH-CARD", serial="")],
+    )
     cache.set("librenms_device_info_default_9303", (True, {"device_id": 9303, "hostname": device.name}), 300)
     client.force_login(make_superuser("module-name-match-binding-user"))
 
@@ -6010,8 +6007,6 @@ def test_vc_model_matches_device_type_follows_the_attributed_member(client, sett
 
     from netbox_librenms_plugin.models import InventoryIgnoreRule
     from netbox_librenms_plugin.tests.conftest import make_superuser
-    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
     configure_servers(
         settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
@@ -6048,8 +6043,7 @@ def test_vc_model_matches_device_type_follows_the_attributed_member(client, sett
             "entPhysicalContainedIn": 0,
         },
     ]
-    payload = trusted_module_inventory_payload(page, inventory, librenms_id=9303)
-    cache.set(DeviceModuleTableView().get_cache_key(page, "inventory", server_key="default"), payload, 300)
+    seed_mapped_modules(page, inventory, librenms_id=9303)
     cache.set("librenms_device_info_default_9303", (True, {"device_id": 9303, "hostname": page.name}), 300)
     client.force_login(make_superuser("vc-model-rule-user"))
 
@@ -6255,8 +6249,6 @@ def test_vc_default_hardware_parent_keeps_child_on_page_device(client, settings,
     from django.urls import reverse
 
     from netbox_librenms_plugin.tests.conftest import make_superuser
-    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
     configure_servers(
         settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
@@ -6279,8 +6271,7 @@ def test_vc_default_hardware_parent_keeps_child_on_page_device(client, settings,
             "entPhysicalContainedIn": 120,
         },
     ]
-    payload = trusted_module_inventory_payload(page, inventory, librenms_id=9302)
-    cache.set(DeviceModuleTableView().get_cache_key(page, "inventory", server_key="default"), payload, 300)
+    seed_mapped_modules(page, inventory, librenms_id=9302)
     cache.set("librenms_device_info_default_9302", (True, {"device_id": 9302, "hostname": page.name}), 300)
     client.force_login(make_superuser("default-parent-user"))
 
@@ -6303,8 +6294,6 @@ def test_junos_vc_rows_on_the_page_belong_to_the_member_they_name(client, settin
     from django.urls import reverse
 
     from netbox_librenms_plugin.tests.conftest import make_superuser
-    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
     from netbox_librenms_plugin.tests.conftest import bind_librenms_server
 
@@ -6312,8 +6301,7 @@ def test_junos_vc_rows_on_the_page_belong_to_the_member_they_name(client, settin
     master, member = make_junos_vc_members("junos-modules")
     inventory = junos_vc_inventory()
     librenms_server.inventory_response(9355, inventory)
-    payload = trusted_module_inventory_payload(master, inventory, librenms_id=9355)
-    cache.set(DeviceModuleTableView().get_cache_key(master, "inventory", server_key="default"), payload, 300)
+    seed_mapped_modules(master, inventory, librenms_id=9355)
     cache.set("librenms_device_info_default_9355", (True, {"device_id": 9355, "hostname": master.name}), 300)
     client.force_login(make_superuser("junos-modules-user"))
 
@@ -6340,8 +6328,6 @@ def test_a_standalone_device_with_a_junos_vc_inventory_keeps_every_row(client, s
     from django.urls import reverse
 
     from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
-    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
     from netbox_librenms_plugin.tests.conftest import bind_librenms_server
 
@@ -6349,8 +6335,7 @@ def test_a_standalone_device_with_a_junos_vc_inventory_keeps_every_row(client, s
     device = make_device("junos-standalone-modules")
     inventory = junos_vc_inventory()
     librenms_server.inventory_response(9357, inventory)
-    payload = trusted_module_inventory_payload(device, inventory, librenms_id=9357)
-    cache.set(DeviceModuleTableView().get_cache_key(device, "inventory", server_key="default"), payload, 300)
+    seed_mapped_modules(device, inventory, librenms_id=9357)
     cache.set("librenms_device_info_default_9357", (True, {"device_id": 9357, "hostname": device.name}), 300)
     client.force_login(make_superuser("junos-standalone-modules-user"))
 
@@ -6373,8 +6358,6 @@ def test_a_decorated_junos_fpc_serial_is_serial_evidence_on_the_page(client, set
 
     from netbox_librenms_plugin.models import NormalizationRule
     from netbox_librenms_plugin.tests.conftest import make_superuser
-    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
     from netbox_librenms_plugin.tests.conftest import bind_librenms_server
 
@@ -6392,8 +6375,7 @@ def test_a_decorated_junos_fpc_serial_is_serial_evidence_on_the_page(client, set
         for row in junos_vc_inventory()
     ]
     librenms_server.inventory_response(9356, inventory)
-    payload = trusted_module_inventory_payload(master, inventory, librenms_id=9356)
-    cache.set(DeviceModuleTableView().get_cache_key(master, "inventory", server_key="default"), payload, 300)
+    seed_mapped_modules(master, inventory, librenms_id=9356)
     cache.set("librenms_device_info_default_9356", (True, {"device_id": 9356, "hostname": master.name}), 300)
     client.force_login(make_superuser("junos-decorated-user"))
 

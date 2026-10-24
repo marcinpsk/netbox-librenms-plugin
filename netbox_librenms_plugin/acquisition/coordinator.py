@@ -118,7 +118,9 @@ def oob_source(fetch, resource, mapping, server_key):
         role=MappingRole.OOB,
         librenms_id=link.librenms_id,
         state=link.state,
-        parts=_part_keys(OOB_ACQUIRERS[resource](oob_fetch, link.librenms_id)),
+        parts=_part_keys(
+            OOB_ACQUIRERS[resource](oob_fetch, link.librenms_id if link.state is MappingState.RESOLVED else "oob")
+        ),
     )
 
 

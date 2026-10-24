@@ -4,7 +4,6 @@ from collections import Counter
 from dataclasses import dataclass
 
 from django.contrib import messages
-from django.core.cache import cache
 from django.utils import timezone
 from django.views import View
 
@@ -60,26 +59,26 @@ from netbox_librenms_plugin.views.mixins import (
 
 from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
-from netbox_librenms_plugin.acquisition.resources import blocked_scopes
 from netbox_librenms_plugin.assessment.modules import (
     assess,
-    _clean_librenms_value,
-    _interface_name_candidates,
-    _TRANSCEIVER_API_MATCH,
+    clean_librenms_value,
+    interface_name_candidates,
+    TRANSCEIVER_API_MATCH,
 )
 
 logger = logging.getLogger(__name__)
 
 
-def read_module_assessment(subject, server_key, *, request=None):
-    """Read the bound source and assess its inventory for every module reader."""
+def read_module_assessment(subject, server_key):
+    """Return assessed rows and blockers from the currently bound source."""
     snapshot = source_cache.read(subject, Resource.MODULES, server_key)
     if snapshot is None:
         return None
-    if request is not None:
-        for blockers in blocked_scopes(snapshot, Resource.MODULES).values():
-            messages.warning(request, source_cache.blocker_notice(blockers))
-    return {**assess(snapshot, subject=subject), "last_fetched": snapshot.finished_at}
+    return {
+        **assess(snapshot, subject=subject),
+        "snapshot_id": snapshot.snapshot_id,
+        "last_fetched": snapshot.finished_at,
+    }
 
 
 # Card classes that can repeat an ancestor's serial and model as one physical card (Nokia TIMETRA-CHASSIS-MIB).
@@ -135,13 +134,13 @@ def _is_holder(item) -> bool:
 
     """
     model = _normalize_librenms_text(item.get("entPhysicalModelName")).lower()
-    has_serial = bool(_clean_librenms_value(item.get("entPhysicalSerialNum")))
+    has_serial = bool(clean_librenms_value(item.get("entPhysicalSerialNum")))
     if model in GENERIC_CONTAINER_MODELS and (model or not has_serial):
         return True
     return (
         _normalize_librenms_text(item.get("entPhysicalClass")) in _SERIAL_HOLDER_CLASSES
         and not item.get("_from_transceiver_api")
-        and not item.get(_TRANSCEIVER_API_MATCH)
+        and not item.get(TRANSCEIVER_API_MATCH)
         and not has_serial
     )
 
@@ -251,7 +250,7 @@ def _is_built_in_unit(item: dict, device_identity: DeviceIdentity) -> bool:
     """Return True when a non-chassis item reports the model or part number of the target device type."""
     if _normalize_librenms_text(item.get("entPhysicalClass")) == "chassis":
         return False
-    item_model = _clean_librenms_value(item.get("entPhysicalModelName")).casefold()
+    item_model = clean_librenms_value(item.get("entPhysicalModelName")).casefold()
     return bool(item_model) and item_model in device_identity.type_models
 
 
@@ -306,7 +305,7 @@ def _matches_target_device(
         # A line card that shares the device serial is a real FRU, so the serial rule takes direct chassis children.
         if not _sits_at_chassis_level(item, parent_item, index_map):
             return False
-        item_serial = _clean_librenms_value(item.get("entPhysicalSerialNum"))
+        item_serial = clean_librenms_value(item.get("entPhysicalSerialNum"))
         device_serial = "" if is_librenms_placeholder(device_identity.serial) else device_identity.serial
         return bool(item_serial and device_serial and item_serial == device_serial)
     if rule.match_type == rule.MATCH_MODEL_DEVICE_TYPE:
@@ -357,7 +356,7 @@ def built_in_candidate(item: dict, index_map: dict, device_identity: DeviceIdent
         return None
     if _normalize_librenms_text(item.get("entPhysicalClass")) not in _BUILT_IN_CANDIDATE_CLASSES:
         return None
-    model = _clean_librenms_value(item.get("entPhysicalModelName"))
+    model = clean_librenms_value(item.get("entPhysicalModelName"))
     parent = index_map.get(item.get("entPhysicalContainedIn"))
     records_part_number = model.casefold() not in device_identity.type_models
     # Below a built-in unit the device type already names the chassis, so another model is no chassis part number.
@@ -446,7 +445,7 @@ def _check_ignore_rules(
         str | None: The matched rule action, or None if no rule matches.
 
     """
-    item_serial = _clean_librenms_value(item.get("entPhysicalSerialNum"))
+    item_serial = clean_librenms_value(item.get("entPhysicalSerialNum"))
     name = (item.get("entPhysicalName") or "").strip()
 
     for rule in rules:
@@ -480,7 +479,7 @@ def _serial_matches_an_ancestor(item_serial: str, parent_item: dict | None, inde
             if current_idx in visited:
                 return False
             visited.add(current_idx)
-        ancestor_serial = _clean_librenms_value(current.get("entPhysicalSerialNum"))
+        ancestor_serial = clean_librenms_value(current.get("entPhysicalSerialNum"))
         if ancestor_serial:
             return ancestor_serial == item_serial
         if index_map is None:
@@ -817,10 +816,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         from netbox_librenms_plugin.models import RuleConfigurationError
 
         try:
-            assessed = read_module_assessment(obj, scoped_server, request=request)
+            assessed = read_module_assessment(obj, scoped_server)
         except RuleConfigurationError as exc:
             return None, None, None, {**empty, "inventory_rule_error": exc}
-        if assessed is None or assessed["inventory"] is None:
+        if assessed is None:
+            return None, None, None, empty
+        for blockers in assessed["blocked"].values():
+            messages.warning(request, source_cache.blocker_notice(blockers))
+        if "host" in assessed["blocked"]:
             return None, None, None, empty
         owner = self._get_sync_device(obj, server_key=scoped_server)
         return scoped_server, owner, assessed["inventory"], None
@@ -1036,7 +1039,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # Reuse the device the caller (post / get_context_data) already resolved to avoid a second
         # _get_sync_device() VC-members query per request; falls back to resolving here.
         sync_device = sync_device or self._get_sync_device(obj, server_key=self._active_server_key)
-        cache_ttl = cache.ttl(self.get_cache_key(sync_device, "inventory", server_key=self._active_server_key))
+        cache_ttl = source_cache.remaining_ttl(sync_device, Resource.MODULES, self._active_server_key)
         cache_expiry = (
             timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl is not None and cache_ttl > 0 else None
         )
@@ -1874,7 +1877,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         """
         indices = []
-        for label in _interface_name_candidates(item):
+        for label in interface_name_candidates(item):
             coordinates = BaseModuleTableView._extract_interface_numeric_coordinates(label)
             if coordinates:
                 preferred = coordinates[-1]
@@ -2323,7 +2326,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         """
         parent_name = BaseModuleTableView._find_parent_container_name_static(item, index_map)
         candidate_names = [parent_name] if parent_name else []
-        for candidate in _interface_name_candidates(item):
+        for candidate in interface_name_candidates(item):
             if candidate not in candidate_names:
                 candidate_names.append(candidate)
 
@@ -2830,7 +2833,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         model_name = _normalize_librenms_text(item.get("entPhysicalModelName"))
         raw_serial = item.get("entPhysicalSerialNum") if normalized_serial is None else normalized_serial
-        serial = _clean_librenms_value(raw_serial)
+        serial = clean_librenms_value(raw_serial)
         phys_class = _normalize_librenms_text(item.get("entPhysicalClass"))
         name = item.get("entPhysicalName", "") or "-"
         description = _normalize_librenms_text(item.get("entPhysicalDescr"))
@@ -3085,8 +3088,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             row["can_replace"] = True
         elif matched_type is not None:
             # Normalize both serials: treat None, empty, whitespace, and placeholder values as absent
-            nb_serial = _clean_librenms_value(installed.serial)
-            lnms_serial = _clean_librenms_value(serial)
+            nb_serial = clean_librenms_value(installed.serial)
+            lnms_serial = clean_librenms_value(serial)
             if lnms_serial and lnms_serial != nb_serial:
                 row["status"] = "Serial Mismatch"
                 row["can_update_serial"] = True
@@ -3759,10 +3762,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         item_class = _normalize_librenms_text(item.get("entPhysicalClass"))
         if item_class not in _INTEGRATED_MODULE_CLASSES:
             return None
-        item_serial = _clean_librenms_value(item.get("entPhysicalSerialNum"))
+        item_serial = clean_librenms_value(item.get("entPhysicalSerialNum"))
         if not item_serial:
             return None
-        item_model = _clean_librenms_value(item.get("entPhysicalModelName")).lower()
+        item_model = clean_librenms_value(item.get("entPhysicalModelName")).lower()
         if not item_model:
             return None
 
@@ -3778,8 +3781,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             if anc_class == "chassis":
                 return None
             if anc_class in _INTEGRATED_MODULE_CLASSES:
-                anc_serial = _clean_librenms_value(ancestor.get("entPhysicalSerialNum"))
-                anc_model = _clean_librenms_value(ancestor.get("entPhysicalModelName")).lower()
+                anc_serial = clean_librenms_value(ancestor.get("entPhysicalSerialNum"))
+                anc_model = clean_librenms_value(ancestor.get("entPhysicalModelName")).lower()
                 if anc_serial and anc_serial == item_serial and anc_model and anc_model == item_model:
                     return ancestor
             current_idx = ancestor.get("entPhysicalContainedIn", 0)
@@ -3801,7 +3804,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             return False
         # Compare raw inventory serials on both sides. The row's own serial is normalized, so a
         # rule that strips a vendor marker ("S/N ") would otherwise never match a parent's raw value.
-        serial = _clean_librenms_value(item.get("entPhysicalSerialNum")).strip().lower()
+        serial = clean_librenms_value(item.get("entPhysicalSerialNum")).strip().lower()
         if not serial:
             return False
         seen = set()
@@ -3813,7 +3816,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             item = index_map.get(parent_index)
             if item is None:
                 return False
-            if _clean_librenms_value(item.get("entPhysicalSerialNum")).strip().lower() == serial:
+            if clean_librenms_value(item.get("entPhysicalSerialNum")).strip().lower() == serial:
                 return True
         return False
 

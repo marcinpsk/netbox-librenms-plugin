@@ -284,3 +284,16 @@ def test_the_netbox_only_rows_need_a_view_of_the_device(client, settings):
 
     assert response.status_code in (403, 404)
     assert "orphan0" not in response.content.decode()
+
+
+def test_another_netbox_release_does_not_read_the_rows(tab, computations, settings):
+    device, rows = tab
+    original = rows()
+    snapshot = source_cache.read(device, Resource.INTERFACES, SERVER_KEY)
+    assert computations == [device.pk]
+    settings.RELEASE = replace(settings.RELEASE, version="0.0.0-other")
+    assert source_cache.store(device, Resource.INTERFACES, snapshot)
+
+    assert rows() == original
+    assert computations == [device.pk, device.pk]
+    assert source_cache.read(device, Resource.INTERFACES, SERVER_KEY).snapshot_id == snapshot.snapshot_id

@@ -92,6 +92,17 @@ def test_capture_modal_keeps_the_vc_member_as_the_acquisition_subject(client, li
     seed_mapping(subject, "default", own=5502)
     serve(live_librenms.server, 5501)
     serve(live_librenms.server, 5502)
+    live_librenms.server.ports_response(
+        5501,
+        [
+            {"port_id": 7, "ifName": "eth3", "ifType": "ethernetCsmacd"},
+            {"port_id": 8, "ifName": "eth4", "ifType": "ethernetCsmacd"},
+        ],
+    )
+    live_librenms.server.register(
+        "/api/v0/devices/5502/ip",
+        {"status": "ok", "addresses": [{"port_id": 17, "ipv4_address": "198.18.0.1", "ipv4_prefixlen": 24}]},
+    )
     live_librenms.server.ports_response(5502, [{"port_id": 17, "ifName": "eth4", "ifType": "ethernetCsmacd"}])
     client.force_login(make_superuser("capture-modal-vc-user"))
 
@@ -101,7 +112,18 @@ def test_capture_modal_keeps_the_vc_member_as_the_acquisition_subject(client, li
     )
 
     assert response.status_code == 200
-    assert response.context["recording_json"]
+    import json
+
+    recording = json.loads(response.context["recording_json"])
+    assert recording["meta"]["compressed_ports"] == {"from": 2, "to": 1}
+    addresses = next(body["addresses"] for key, body in recording["responses"].items() if key.endswith("/ip"))
+    member_ports = next(
+        body["ports"]
+        for key, body in recording["responses"].items()
+        if key.endswith("/ports") and key != f"GET /api/v0/devices/{recording['device_id']}/ports"
+    )
+    assert len(addresses) == 1
+    assert addresses[0]["port_id"] == member_ports[0]["port_id"]
     paths = {request["path"] for request in live_librenms.server.requests}
     assert "/api/v0/devices/5502/ip" in paths
     assert "/api/v0/devices/5501/ip" not in paths
@@ -165,3 +187,23 @@ def test_capture_requires_success_envelopes_for_its_structural_sources(live_libr
     live_librenms.server.register(f"/api/v0/{path}", body)
     with pytest.raises(RuntimeError, match=path):
         capture(subject)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("oob_id", [5501, "5501"])
+def test_capture_of_a_self_link_preserves_host_ports_without_an_oob_stamp(live_librenms, oob_id):
+    subject = seed_mapping(make_device("capture-self-oob"), "default", own=5501, oob=oob_id)
+    serve(live_librenms.server)
+
+    recording = capture(subject)
+
+    assert "oob_id" not in recording["meta"]
+    assert recording["responses"]["GET /api/v0/devices/5501/ports"]["ports"] == [
+        {"port_id": 7, "ifName": "eth3", "ifType": "ethernetCsmacd"}
+    ]
+    requests = [
+        request
+        for request in live_librenms.server.requests
+        if request["path"] == "/api/v0/devices/5501/ports" and request["query"].get("with") == ["vlans"]
+    ]
+    assert len(requests) == 1

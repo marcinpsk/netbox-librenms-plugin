@@ -1,5 +1,7 @@
 """Request-level tests for cross-tab cache consistency."""
 
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_mapped_modules, seed_modules_snapshot
+
 import json
 from unittest.mock import patch
 
@@ -55,7 +57,6 @@ from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     seed_interfaces_snapshot,
     seed_ip_snapshot,
     seed_source_snapshot,
-    seed_modules_snapshot,
     module_inventory,
     stored_source_value,
 )
@@ -128,11 +129,8 @@ def _vlan_overrides_key(obj, server_key):
 
 
 def _seed_snapshot(data_type, obj, server_key, payload=None):
+    assert data_type != "inventory" or payload is None, "seed module endpoint facts with seed_modules_snapshot"
     assert data_type != "ip_addresses", "seed the IP tab with seed_ip_snapshot"
-    if data_type == "inventory" and payload is not None and "inventory" in payload:
-        from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_modules_snapshot
-
-        return seed_modules_snapshot(obj, payload["inventory"], server_key=server_key)
     if data_type == "links":
         assert payload is None, "seed cable endpoint facts with seed_cables_snapshot"
         return seed_cables_snapshot(obj, server_key=server_key)
@@ -1019,32 +1017,26 @@ def test_htmx_mutation_does_not_repeat_cache_notice_on_next_navigation(client, s
 )
 def test_htmx_module_action_delivers_the_cache_notice_with_the_fragment(client, settings):
     """A module action swaps its tab in place, so the browser gets the cache notice from the trigger."""
-    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
 
     _configure_servers(settings)
     device = make_device("cache-modules-refresh-notice", librenms_cf={"primary": {"id": 612}})
     bay = make_module_bay(device, "Refresh Bay")
     module_type = make_module_type("REFRESH-CARD")
     _seed_snapshot("ports", device, "primary")
-    _seed_snapshot(
-        "inventory",
+    seed_mapped_modules(
         device,
-        "primary",
-        trusted_module_inventory_payload(
-            device,
-            [
-                {
-                    "entPhysicalIndex": 8301,
-                    "entPhysicalClass": "module",
-                    "entPhysicalModelName": module_type.model,
-                    "entPhysicalContainedIn": 0,
-                    "entPhysicalName": bay.name,
-                    "entPhysicalSerialNum": "REFRESH-1",
-                }
-            ],
-            server_key="primary",
-            librenms_id=612,
-        ),
+        [
+            {
+                "entPhysicalIndex": 8301,
+                "entPhysicalClass": "module",
+                "entPhysicalModelName": module_type.model,
+                "entPhysicalContainedIn": 0,
+                "entPhysicalName": bay.name,
+                "entPhysicalSerialNum": "REFRESH-1",
+            }
+        ],
+        server_key="primary",
+        librenms_id=612,
     )
     client.force_login(make_superuser("cache-modules-refresh-user"))
     sync_page = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": device.pk})
@@ -1193,7 +1185,7 @@ def test_module_install_invalidates_other_tabs_after_creating_a_module(
             }
         ]
     }
-    inventory_payload = _seed_snapshot("inventory", device, "primary", inventory_payload).to_payload()
+    inventory_payload = seed_modules_snapshot(device, inventory_payload["inventory"], server_key="primary").to_payload()
     seed_ip_snapshot(device, [], server_key="primary")
 
     client.force_login(make_superuser("cache-module-writer-user"))
@@ -2807,7 +2799,9 @@ def test_add_bay_template_preserves_server_scope_and_invalidates_other_tabs(
     _configure_servers(settings)
     device = make_device("cache-add-bay", librenms_cf={"secondary": {"id": 68}})
     inventory_payload = {"inventory": [{"entPhysicalIndex": 8201}]}
-    inventory_payload = _seed_snapshot("inventory", device, "secondary", inventory_payload).to_payload()
+    inventory_payload = seed_modules_snapshot(
+        device, inventory_payload["inventory"], server_key="secondary"
+    ).to_payload()
     _seed_snapshot("ports", device, "secondary")
     client.force_login(make_superuser("cache-add-bay-user"))
     url = reverse("plugins:netbox_librenms_plugin:add_bay_template", kwargs={"pk": device.pk})
