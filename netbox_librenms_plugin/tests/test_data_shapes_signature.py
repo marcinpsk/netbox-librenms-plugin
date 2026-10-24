@@ -940,6 +940,7 @@ def test_recording_regex_bounds_pattern_count_and_length():
 
 
 @pytest.mark.parametrize("kind", ["lag", "sap", "bridge"])
+@pytest.mark.django_db
 def test_recording_replay_treats_unencodable_names_as_non_matches(kind):
     from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns
     from netbox_librenms_plugin.tests.conftest import make_recording_api
@@ -979,8 +980,11 @@ def test_recording_replay_treats_unencodable_names_as_non_matches(kind):
         api = make_recording_api(server.url)
         ok, payload = api.get_ports(1)
         assert ok
-        ok, stack = api.get_port_stack(1)
-        assert ok
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import acquire_recording
+        from netbox_librenms_plugin.acquisition.registry import Resource
+
+        snapshot, _subject = acquire_recording(api, recording, [Resource.INTERFACES])
+        stack = snapshot.value(Resource.INTERFACES, "port_stack")
         result = resolve_port_relationships(payload["ports"], stack, **patterns)
         assert result["lag_members"] == ({10: 20} if kind == "sap" else {})
         assert result["bridge_members"] == {}
