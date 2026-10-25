@@ -175,6 +175,9 @@ def test_an_oob_failure_keeps_the_host_rows_and_shows_the_oob_notice(client, liv
     # Each notice names the source that blocks the OOB rows.
     snapshot = source_cache.read(device, Resource.INTERFACES, SERVER_KEY)
     (blocker,) = blocked_scopes(snapshot, Resource.INTERFACES)["oob"]
+    if oob["id"] == "not-an-id":
+        assert blocker.path == "oob"
+        assert f"/api/v0/devices/{OOB_ID}/ports" not in [entry["path"] for entry in live_librenms.server.requests]
     assert _messages(response, messages.WARNING) == []
     assert response.content.count(b'class="alert alert-warning d-flex align-items-center noprint"') == 1
     assert response.context["interface_sync"]["oob_incomplete"]
