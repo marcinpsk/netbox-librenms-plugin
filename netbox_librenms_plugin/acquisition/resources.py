@@ -222,19 +222,19 @@ def _interface_scopes(snapshot):
 
 
 def cable_port_source_ids(snapshot):
-    """Return identities whose ports were in scope, including failed acquisition attempts."""
+    """Return identities whose port tables the snapshot obtained."""
     identities = set()
     source = snapshot.resources[Resource.CABLES]
     for mapping in (source.host, source.oob):
         if mapping is None:
             continue
-        if mapping.librenms_id is not None:
-            identities.add(mapping.librenms_id)
-        identities.update(
-            int(part.removeprefix(NEIGHBOUR_PORTS_PREFIX))
-            for part, _key in mapping.parts
-            if part.startswith(NEIGHBOUR_PORTS_PREFIX)
-        )
+        for part, key in mapping.parts:
+            if not snapshot.responses[key].obtained:
+                continue
+            if part == "ports" and mapping.librenms_id is not None:
+                identities.add(mapping.librenms_id)
+            elif part.startswith(NEIGHBOUR_PORTS_PREFIX):
+                identities.add(int(part.removeprefix(NEIGHBOUR_PORTS_PREFIX)))
     return identities
 
 
