@@ -928,3 +928,52 @@ def test_displaced_source_failures_are_redacted_for_each_snapshot_reader(
         body = response.content.decode() + " ".join(_messages(response))
         for value in (secret, "devices/10/ports", hidden_owner.name, hidden_port.name):
             assert value not in body
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("hidden_source", ["chassis-master", "other-interface"])
+def test_manual_prefetch_failures_use_the_source_owner_disclosure_scope(client, link, hidden_source):
+    if hidden_source == "chassis-master":
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+
+        _vc, (hidden_master, far_owner) = make_virtual_chassis_members("manual-hidden-source")
+        map_device_to_librenms(hidden_master, 10, server_key=SERVER_KEY)
+    else:
+        far_owner = _Link._device("manual-hidden-source", None, 10)
+        _bound(far_owner, "private-source-interface", 778)
+    far_platform = _platform("manual-hidden-source")
+    far_owner.platform = far_platform
+    far_owner.save()
+    far = _bound(far_owner, "Xe0/1", 777)
+    picked_owner = _Link._device("manual-visible-destination", None, 11)
+    picked = _bound(picked_owner, "Eth1", 601)
+    old = cable_together(picked, far)
+    link.ignore(far_platform, "^no-such-port$")
+    row_id = _seed(link.local_device, _row(link.local, link.remote_device))
+    restricted = _restricted_client(
+        "manual-hidden-source-reader",
+        [link.local_device.pk, link.remote_device.pk, picked_owner.pk, far_owner.pk],
+        [link.local.pk, link.remote.pk, picked.pk, far.pk],
+    )
+    _pick(restricted, link.local_device, row_id, picked)
+    record, _html = _render(restricted, link.local_device)
+    link.server.ports_response(11, [port_row(601, picked.name, device_id=11)])
+    secret = "private-manual-source-error"
+    link.server.register("/api/v0/devices/10/ports", {"status": "error", "message": secret}, status=503)
+    response = _sync(
+        restricted,
+        link.local_device,
+        _sync_data(
+            record,
+            force="on",
+            **{f"expected_cable_intent_{row_id}": _confirmed_intent(link.local, picked, old)},
+        ),
+    )
+
+    assert response.status_code == 200
+    assert Cable.objects.filter(pk=old.pk).exists()
+    link.local.refresh_from_db()
+    assert link.local.cable_id is None
+    body = response.content.decode() + " ".join(_messages(response))
+    assert secret not in body
+    assert "devices/10/ports" not in body
