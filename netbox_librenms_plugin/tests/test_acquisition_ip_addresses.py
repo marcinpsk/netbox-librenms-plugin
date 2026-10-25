@@ -287,7 +287,8 @@ def test_a_virtual_machine_is_acquired_from_its_own_mapping(live_librenms):
 
 
 @pytest.mark.django_db
-def test_the_stored_device_source_excludes_unused_device_fields(live_librenms):
+@pytest.mark.parametrize("envelope_status", ["ok", "error", None])
+def test_the_stored_device_source_excludes_unused_device_fields(live_librenms, envelope_status):
     from django.core.cache import cache
 
     from netbox_librenms_plugin import source_cache
@@ -302,13 +303,19 @@ def test_the_stored_device_source_excludes_unused_device_fields(live_librenms):
         device={**kept, "snmp_community": "example-secret", "unneeded": "example-extra"},
     )
 
+    body = {"devices": [{**kept, "snmp_community": "example-secret", "unneeded": "example-extra"}]}
+    expected_body = {"devices": [kept]}
+    if envelope_status is not None:
+        body["status"] = envelope_status
+        expected_body["status"] = envelope_status
+    live_librenms.server.register(DEVICE_PATH, body)
     snapshot = _acquire(device)
     assert source_cache.store(device, Resource.IP_ADDRESSES, snapshot)
     stored = source_cache.read(device, Resource.IP_ADDRESSES, SERVER_KEY)
     record = stored.record(Resource.IP_ADDRESSES, "device")
 
     assert record.value == kept
-    assert record.body == {"status": "ok", "devices": [kept]}
+    assert record.body == expected_body
     payload = cache.get(source_cache.snapshot_key(device, Resource.IP_ADDRESSES, SERVER_KEY))
     assert "example-secret" not in repr(payload)
     assert "example-extra" not in repr(payload)
