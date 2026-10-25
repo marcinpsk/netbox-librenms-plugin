@@ -23,6 +23,7 @@ from netbox_librenms_plugin.breakout_cables import (
     holds_a_cable,
     is_channel,
 )
+from netbox_librenms_plugin.cable_scope import cable_port_owner_ids, cable_rule_interfaces, displaced_interfaces
 from netbox_librenms_plugin.constants import (
     INTERFACE_NAME_FIELDS,
     OOB_INVENTORY_SOURCE,
@@ -87,6 +88,9 @@ from netbox_librenms_plugin.views.mixins import (
 
 from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
+from netbox_librenms_plugin.acquisition.coordinator import acquire_cable_ports
+from netbox_librenms_plugin.acquisition.resources import Blocker
+from netbox_librenms_plugin.acquisition.snapshot import IncompleteSource
 
 logger = logging.getLogger(__name__)
 
@@ -229,6 +233,8 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         self._cable_row_identity_error = False
         self._cable_source_permission_error = False
         self._snapshot_port_records = {}
+        self._snapshot_port_source_ids = set()
+        self._prefetched_port_responses = {}
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
         cache_obj = get_librenms_sync_device(obj, server_key=server_key) or obj
         if not self.restricted_queryset(Device, "view").filter(pk=cache_obj.pk).exists():
@@ -241,6 +247,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             return None
         self._cable_row_identity_error = assessed["identity_error"]
         self._snapshot_port_records = assessed["port_records"]
+        self._snapshot_port_source_ids = assessed["port_source_ids"]
         if assessed["blockers"] and not request.htmx:
             from netbox_librenms_plugin.source_cache import blocker_notice
 
@@ -549,30 +556,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             expected_owner_by_key[(type(termination), termination.pk)] = termination.device_id
         return grouped, expected_owner_by_key
 
-    @staticmethod
-    def _displaced_interfaces(*terminations):
-        """
-        Return the interfaces at the far end of the cables on the endpoints, with their owners.
-
-        Candidate evidence read before the lock; the write removes these cables when it replaces one.
-
-        Returns:
-            dict: ``{(Interface, pk): device_id}``, without the endpoints themselves.
-
-        """
-        # A channel's cable is its parent's breakout cable, which a write never removes.
-        cable_ids = {term.cable_id for term in terminations if term.cable_id is not None and not is_channel(term)}
-        if not cable_ids:
-            return {}
-        endpoints = {(type(term), term.pk) for term in terminations}
-        far_ids = CableTermination.objects.filter(
-            cable_id__in=cable_ids, termination_type=ContentType.objects.get_for_model(Interface)
-        ).values_list("termination_id", flat=True)
-        return {
-            (Interface, pk): device_id
-            for pk, device_id in Interface.objects.filter(pk__in=far_ids).values_list("pk", "device_id")
-            if (Interface, pk) not in endpoints
-        }
+    _displaced_interfaces = staticmethod(displaced_interfaces)
 
     def _locked_touched_interfaces(self, local_term, remote_term, to_remove):
         """
@@ -641,24 +625,42 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         )
         return None if blocked is None else blocked[1]
 
-    def _snapshot_cable_port_records(self, link_data, terminations):
+    def _snapshot_cable_port_records(self, link_data, terminations, prefetched=None):
         """Read rule evidence for row endpoints and displaced ports from the bound snapshot."""
         if not interface_rules_for_request(self.request).ignores_any_port:
             return {}
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
         wanted = {port_id for _side, port_id, _record in cable_row_ports(link_data)}
-        interfaces = [term for term in terminations if isinstance(term, Interface)]
-        interfaces.extend(
-            Interface.objects.filter(pk__in=[pk for _model, pk in self._displaced_interfaces(*terminations)])
-        )
+        interfaces = cable_rule_interfaces(*terminations)
         for interface in interfaces:
             if (port_id := read_mapping(interface).own_id(server_key)) is not None:
                 wanted.add(port_id)
-        return {
-            port_id: self._snapshot_port_records[port_id]
-            for port_id in wanted
-            if port_id in self._snapshot_port_records
-        }
+        records = {**(prefetched or {}), **self._snapshot_port_records}
+        return {port_id: records[port_id] for port_id in wanted if port_id in records}
+
+    def _manual_port_records(self, terminations):
+        """Bind missing owner evidence to this request before the locked write."""
+        server_key = self._post_server_key
+        owner_ids = set(cable_port_owner_ids(*terminations, server_key=server_key)) - self._snapshot_port_source_ids
+        missing = owner_ids - self._prefetched_port_responses.keys()
+        if missing:
+            self._prefetched_port_responses.update(acquire_cable_ports(server_key, sorted(missing)))
+        records = {}
+        for owner_id in sorted(owner_ids):
+            response = self._prefetched_port_responses[owner_id]
+            if not response.obtained:
+                touched = cable_rule_interfaces(*terminations)
+                visible_ids = set(
+                    self.restricted_queryset(Interface, "view")
+                    .filter(pk__in=[term.pk for term in touched])
+                    .values_list("pk", flat=True)
+                )
+                self._prefetch_failure_visible = visible_ids == {
+                    term.pk for term in touched
+                } and self._owners_are_viewable({term.device_id for term in touched})
+                raise IncompleteSource(response)
+            records.update((coerce_librenms_id(port["port_id"]), dict(port)) for port in response.value)
+        return records
 
     def _selected_port_records(self, interface, cached_links):
         """Resolve one selected row and read its snapshot evidence before the transaction."""
@@ -668,7 +670,9 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         resolved = self._resolve_cable_terminations(link_data, interface)
         if "status" in resolved:
             return {}
-        return self._snapshot_cable_port_records(link_data, (resolved["local"], resolved["remote"]))
+        terminations = resolved["local"], resolved["remote"]
+        prefetched = self._manual_port_records(terminations) if link_data.get("manual_remote") else None
+        return self._snapshot_cable_port_records(link_data, terminations, prefetched)
 
     def _terminations_are_changeable(self, grouped):
         """Return whether the request may change every submitted termination."""
@@ -1230,6 +1234,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             "valid": [],
             "invalid": [],
             "failed": [],
+            "source_failed": [],
             "saved_follow_up_failed": [],
             "duplicate": [],
             "missing_remote": [],
@@ -1262,6 +1267,11 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                     # (device_selection_<row_id>) would silently revert to the page device.
                     result["device_id"] = interface.get("device_id")
                     self._pending_conflicts.append(result)
+            except IncompleteSource as exc:
+                reason = (
+                    Blocker.of(exc.record).message if self._prefetch_failure_visible else "Port acquisition failed."
+                )
+                results["source_failed"].append(f"{interface.get('row_id', '')} ({reason})")
             except TransactionConflict:
                 # Nothing of the row was committed; the other rows are independent.
                 logger.warning("Cable sync row %s met a lock conflict on every attempt", interface.get("row_id", ""))
@@ -1416,6 +1426,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         ("missing_remote", "error", "Remote device or interface not found in NetBox for: {items}"),
         ("invalid", "error", "No LibreNMS link data found for interfaces: {items}"),
         ("failed", "error", "Failed to sync cables for interfaces: {items}"),
+        ("source_failed", "error", "Cable port acquisition failed for: {items}"),
         ("saved_follow_up_failed", "warning", FOLLOW_UP_FAILED_MESSAGE + " Interfaces: {items}"),
         ("busy", "error", TRY_AGAIN_MESSAGE + " Not synced: {items}"),
         (

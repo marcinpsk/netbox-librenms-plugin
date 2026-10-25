@@ -8,6 +8,7 @@ from netbox_librenms_plugin.acquisition.resources import (
     Blocker,
     NEIGHBOUR_PORTS_PREFIX,
     cable_source_state,
+    cable_port_source_ids,
     neighbor_scope_key,
 )
 from netbox_librenms_plugin.constants import (
@@ -317,4 +318,5 @@ def assess(snapshot, *, subject, interface_name_field="ifName", include_serial=T
         "blocked_scopes": blocked,
         "identity_error": identity_error,
         "port_records": assessed_port_records(snapshot),
+        "port_source_ids": cable_port_source_ids(snapshot),
     }
