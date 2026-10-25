@@ -866,3 +866,65 @@ def test_manual_rows_share_one_ports_request_per_displaced_owner(client, link):
     paths = [entry["path"] for entry in link.server.requests]
     assert paths.count("/api/v0/devices/10/ports") == 1
     assert paths.count("/api/v0/devices/11/ports") == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("source_mapping", ["own", "vc-owner", "oob"])
+@pytest.mark.parametrize("host_obtained", [True, False])
+@pytest.mark.parametrize("hidden_part", ["device", "interface"])
+def test_displaced_source_failures_are_redacted_for_each_snapshot_reader(
+    client, link, source_mapping, host_obtained, hidden_part
+):
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.acquisition.registry import Resource
+
+    if source_mapping == "vc-owner":
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+
+        _vc, (master, hidden_owner) = make_virtual_chassis_members("hidden-source-owner")
+        map_device_to_librenms(master, 10, server_key=SERVER_KEY)
+    else:
+        hidden_owner = make_device("hidden-source-owner")
+        map_device_to_librenms(
+            hidden_owner,
+            10 if source_mapping == "own" else None,
+            server_key=SERVER_KEY,
+            oob={"id": 10, "type": "idrac"} if source_mapping == "oob" else None,
+        )
+    hidden_port = _bound(hidden_owner, "hidden-source-port", 777)
+    cable_together(link.remote, hidden_port)
+    link.server.register(
+        "/api/v0/devices/8/links",
+        {"status": "ok", "links": [_row(link.local, link.remote_device, remote_device_id=None)]},
+    )
+    link.server.ports_response(8, [port_row(100, link.local.name, device_id=8)])
+    link.server.ports_response(9, [port_row(500, link.remote.name, device_id=9)])
+    secret = "private-displaced-source-error"
+    link.server.register("/api/v0/devices/10/ports", {"status": "error", "message": secret}, status=503)
+    refresh_url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[link.local_device.pk])
+    privileged = client.post(refresh_url, {"server_key": SERVER_KEY}, HTTP_HX_REQUEST="true")
+    assert privileged.status_code == 200
+    before = source_cache.read(link.local_device, Resource.CABLES, SERVER_KEY).to_payload()
+    assert any(secret in blocker.message for blocker in privileged.context["cable_sync"]["blockers"])
+    assert secret in json.dumps(before, default=str)
+    visible_devices = [link.local_device.pk, link.remote_device.pk]
+    if source_mapping == "vc-owner":
+        visible_devices.append(master.pk)
+    if hidden_part == "interface":
+        visible_devices.append(hidden_owner.pk)
+    restricted = _restricted_client("hidden-source-reader", visible_devices, [link.local.pk, link.remote.pk])
+    cached = restricted.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[link.local_device.pk]),
+        {"tab": "cables", "server_key": SERVER_KEY},
+    )
+    assert cached.status_code == 200
+    assert cached.context["cable_sync"]["blockers"]
+    assert source_cache.read(link.local_device, Resource.CABLES, SERVER_KEY).to_payload() == before
+    if not host_obtained:
+        link.server.register("/api/v0/devices/8/ports", {"status": "error"}, status=503)
+    refreshed = restricted.post(refresh_url, {"server_key": SERVER_KEY}, HTTP_HX_REQUEST="true")
+    assert refreshed.status_code == 200
+    for response in (cached, refreshed):
+        body = response.content.decode() + " ".join(_messages(response))
+        for value in (secret, "devices/10/ports", hidden_owner.name, hidden_port.name):
+            assert value not in body
