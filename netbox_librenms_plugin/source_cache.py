@@ -49,7 +49,8 @@ def can_view_serial_ports(user, owner):
     )
 
 
-def _visible_port_sources(user, server_key, identities):
+def visible_cable_port_sources(user, server_key, identities):
+    """Return port sources whose device, chassis members and interfaces the actor can view."""
     sources = Device.objects.filter(
         identity_q(Device, server=server_key, identities=identities, roles=(MappingRole.OWN, MappingRole.OOB))
     )
@@ -94,7 +95,7 @@ def cable_blockers_for_user(snapshot, user, groups):
     needed = {paths[blocker.path] for blockers in groups.values() for blocker in blockers if blocker.path in paths}
     if not needed:
         return groups
-    visible = _visible_port_sources(user, snapshot.server_key, needed)
+    visible = visible_cable_port_sources(user, snapshot.server_key, needed)
     redacted = Blocker("", "Port acquisition failed for a device or interface you cannot view.")
     return {
         scope: tuple(
