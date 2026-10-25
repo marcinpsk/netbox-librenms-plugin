@@ -97,11 +97,11 @@ def _oob_interfaces(fetch, librenms_id):
     return {"ports": fetch(responses.ports(librenms_id, with_vlans=True))}
 
 
-def _displaced_owner_ids(server_key, source_ids, hostname_devices=()):
+def _displaced_owner_ids(server_key, source_ids, resolved_devices):
     """Return source identities for endpoints in the refresh scope and the cables they can replace."""
     sources = Device.objects.filter(
         identity_q(Device, server=server_key, identities=source_ids, roles=(MappingRole.OWN, MappingRole.OOB))
-        | Q(pk__in=[device.pk for device in hostname_devices])
+        | Q(pk__in=[device.pk for device in resolved_devices])
     )
     scope = Q(pk__in=sources.values("pk")) | Q(
         virtual_chassis_id__in=sources.exclude(virtual_chassis_id=None).values("virtual_chassis_id")
@@ -142,16 +142,16 @@ def _cable_parts(fetch, librenms_id):
         for link in links.value
         if (neighbour_id := coerce_librenms_id(link.get("remote_device_id"))) is not None
     )
-    hostname_devices = []
-    for link in links.value:
-        if coerce_librenms_id(link.get("remote_device_id")) is None:
-            device, found, _error = resolve_remote_device(
-                None, link.get("remote_hostname"), server_key=fetch.server_key
-            )
-            if found:
-                hostname_devices.append(device)
+    resolved_devices = []
+    identities = dict.fromkeys(
+        (coerce_librenms_id(link.get("remote_device_id")), link.get("remote_hostname")) for link in links.value
+    )
+    for device_id, hostname in identities:
+        device, found, _error = resolve_remote_device(device_id, hostname, server_key=fetch.server_key)
+        if found:
+            resolved_devices.append(device)
     neighbours.update(
-        dict.fromkeys(_displaced_owner_ids(fetch.server_key, (librenms_id, *neighbours), hostname_devices))
+        dict.fromkeys(_displaced_owner_ids(fetch.server_key, (librenms_id, *neighbours), resolved_devices))
     )
     parts.update(fetch_cable_ports(fetch, neighbours))
     return parts
