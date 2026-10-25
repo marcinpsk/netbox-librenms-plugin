@@ -64,6 +64,11 @@ def test_capture_replays_source_acquisition_including_a_vc_member(
     else:
         subject = seed_mapping(make_device("capture-source"), "default", own=5501)
     serve(live_librenms.server)
+    if vc_member:
+        live_librenms.server.register(
+            "/api/v0/devices/5501/links",
+            {"status": "ok", "links": [{"local_port_id": 7, "remote_device_id": 5502, "remote_port_id": 7}]},
+        )
     before = acquire(subject, server_key="default", resources=RESOURCES, include_serial=True, inventory_probes=True)
 
     recording = capture(subject)
@@ -207,3 +212,47 @@ def test_capture_of_a_self_link_preserves_host_ports_without_an_oob_stamp(live_l
         if request["path"] == "/api/v0/devices/5501/ports" and request["query"].get("with") == ["vlans"]
     ]
     assert len(requests) == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("status", [200, 503])
+def test_capture_excludes_neighbour_port_tables(live_librenms, status):
+    subject = seed_mapping(make_device("capture-neighbour-table"), "default", own=5501)
+    serve(live_librenms.server)
+    live_librenms.server.register(
+        "/api/v0/devices/5501/links",
+        {"status": "ok", "links": [{"local_port_id": 7, "remote_device_id": 5503, "remote_port_id": 17}]},
+    )
+    live_librenms.server.register(
+        "/api/v0/devices/5503/ports",
+        {"status": "ok" if status == 200 else "error", "ports": [{"port_id": 17, "ifName": "neighbour-only"}]},
+        status=status,
+    )
+
+    recording = capture(subject)
+
+    assert "/api/v0/devices/5503/ports" in [entry["path"] for entry in live_librenms.server.requests]
+    assert "GET /api/v0/devices/5503/ports" not in recording["responses"]
+    assert "GET /api/v0/devices/5501/ports" in recording["responses"]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("explicit_sap", [False, True])
+def test_recording_assessment_preserves_unnamed_os_patterns(live_librenms, recording_server, explicit_sap):
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import recording_interface_assessment
+
+    subject = seed_mapping(make_device("recording-os-patterns"), "default", own=5501)
+    serve(live_librenms.server, os_name="pattern-test")
+    pattern = PortStackLagPattern.objects.create(librenms_os="pattern-test", lag_name_pattern=r"^Bundle\d+$")
+    recording = capture(subject)
+    recording["lag_patterns"] = {}
+    recording["sap_patterns"] = {"pattern-test": ":"} if explicit_sap else {}
+    _server, api = recording_server(recording)
+
+    recording_interface_assessment(api, recording)
+
+    pattern.refresh_from_db()
+    if explicit_sap:
+        assert all(regex.search("") is None for regex in PortStackLagPattern.compiled_patterns_for_os("pattern-test"))
+    else:
+        assert pattern.lag_name_pattern == r"^Bundle\d+$"

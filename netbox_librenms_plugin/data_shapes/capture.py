@@ -26,11 +26,8 @@ def _require(record, *, allow_missing=False, optional_status=False):
     raise RuntimeError(f"Capture failed for {record.request.path!r}: {detail}")
 
 
-def _requirements(snapshot):
-    """Require the mapped source parts that a structural recording needs."""
-    host_id = snapshot.resources[Resource.INTERFACES].host.librenms_id
-    stack_request = responses.port_stack(host_id).request
-    transceiver_request = responses.transceivers(host_id).request
+def _recording_records(snapshot):
+    """Select recording sources by their resource roles, including a route shared with a neighbour."""
     for resource in CAPTURE_RESOURCES:
         source = snapshot.resources[resource]
         for mapping in (source.host, source.oob):
@@ -41,13 +38,21 @@ def _requirements(snapshot):
             for part, key in mapping.parts:
                 if resource is Resource.CABLES and (part == "sensors" or part.startswith(NEIGHBOUR_PORTS_PREFIX)):
                     continue
-                record = snapshot.responses[key]
-                if record.outcome is not Outcome.NOT_APPLICABLE:
-                    _require(
-                        record,
-                        allow_missing=record.request == transceiver_request,
-                        optional_status=record.request == stack_request,
-                    )
+                yield snapshot.responses[key]
+
+
+def _requirements(snapshot):
+    """Require the mapped source parts that a structural recording needs."""
+    host_id = snapshot.resources[Resource.INTERFACES].host.librenms_id
+    stack_request = responses.port_stack(host_id).request
+    transceiver_request = responses.transceivers(host_id).request
+    for record in _recording_records(snapshot):
+        if record.outcome is not Outcome.NOT_APPLICABLE:
+            _require(
+                record,
+                allow_missing=record.request == transceiver_request,
+                optional_status=record.request == stack_request,
+            )
 
 
 def _export_responses(snapshot):
@@ -56,7 +61,7 @@ def _export_responses(snapshot):
     host_id = snapshot.resources[Resource.INTERFACES].host.librenms_id
     sensors_request = responses.sensors(host_id).request
     stack_request = responses.port_stack(host_id).request
-    for record in snapshot.responses.values():
+    for record in _recording_records(snapshot):
         if record.request == sensors_request:
             continue
         status = record.http_status

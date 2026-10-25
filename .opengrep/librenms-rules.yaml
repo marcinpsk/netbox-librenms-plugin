@@ -1900,6 +1900,16 @@ rules:
               metavariable: $TARGET
               regex: ^.*\.(monotonic|perf_counter|time|time_ns|monotonic_ns)$
 
+  - id: recording-export-needs-response-keys
+    languages: [python]
+    severity: ERROR
+    message: Iterate recording responses with their keys to exclude neighbour-only sources.
+    patterns:
+      - pattern-inside: |
+          def _export_responses($SNAPSHOT):
+            ...
+      - pattern: $SNAPSHOT.responses.values()
+
   - id: batch-validation-needs-candidate-keys
     languages: [python]
     severity: ERROR

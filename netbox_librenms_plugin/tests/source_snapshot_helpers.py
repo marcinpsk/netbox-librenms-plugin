@@ -455,18 +455,14 @@ def recording_interface_assessment(api, recording):
     from netbox_librenms_plugin.models import PortStackLagPattern
 
     snapshot, _subject = acquire_recording(api, recording, [Resource.INTERFACES])
-    device = snapshot.record(Resource.INTERFACES, "device")
-    os_name = device.value.get("os") if device.obtained else None
     lag_patterns = recording.get("lag_patterns") or {}
     sap_patterns = recording.get("sap_patterns") or {}
     names = set(lag_patterns) | set(sap_patterns)
-    if isinstance(os_name, str) and os_name.strip():
-        names.add(os_name)
     for rule_os in names:
         PortStackLagPattern.objects.update_or_create(
             librenms_os=rule_os,
             defaults={
-                "lag_name_pattern": lag_patterns.get(rule_os) or "^$",
+                "lag_name_pattern": lag_patterns.get(rule_os) or "a^",
                 "sap_name_pattern": sap_patterns.get(rule_os, ""),
                 "bridge_name_pattern": "",
             },
