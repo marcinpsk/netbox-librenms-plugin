@@ -96,15 +96,21 @@ def read_cable_assessment(request, subject, server_key, interface_name_field="if
     snapshot = source_cache.read(subject, Resource.CABLES, server_key)
     if snapshot is None:
         return None
-    return {
-        **assess(
-            snapshot,
-            subject=subject,
-            interface_name_field=interface_name_field,
-            include_serial=source_cache.can_view_serial_ports(
-                request.user, resource_owner(subject, Resource.CABLES, server_key)
-            ),
+    assessed = assess(
+        snapshot,
+        subject=subject,
+        interface_name_field=interface_name_field,
+        include_serial=source_cache.can_view_serial_ports(
+            request.user, resource_owner(subject, Resource.CABLES, server_key)
         ),
+    )
+    disclosed = source_cache.cable_blockers_for_user(
+        snapshot, request.user, {"display": assessed["blockers"], **assessed["blocked_scopes"]}
+    )
+    return {
+        **assessed,
+        "blockers": disclosed.pop("display"),
+        "blocked_scopes": disclosed,
         "snapshot_id": snapshot.snapshot_id,
         "last_fetched": snapshot.finished_at,
     }
