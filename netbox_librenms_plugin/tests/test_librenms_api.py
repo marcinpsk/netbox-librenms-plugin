@@ -789,15 +789,17 @@ class TestLibreNMSAPIDeviceOperations:
         """Verify retrieving device info."""
         librenms_server.register(
             "/api/v0/devices/123",
-            {"status": "ok", "devices": [{"device_id": 123, "hostname": "test-device"}]},
+            {
+                "status": "ok",
+                "devices": [{"device_id": 123, "hostname": "test-device", "hardware": "example-platform"}],
+            },
             method="GET",
         )
 
         success, device_data = local_librenms_api.get_device_info(device_id=123)
 
         assert success is True
-        assert device_data is not None
-        assert device_data["device_id"] == 123
+        assert device_data == {"device_id": 123, "hostname": "test-device", "hardware": "example-platform"}
 
     def test_get_device_info_not_found(self, local_librenms_api, librenms_server):
         """Empty devices list returns (False, None) without raising."""
