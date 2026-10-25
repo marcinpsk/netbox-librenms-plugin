@@ -252,7 +252,7 @@ def test_a_manual_pick_bound_to_an_ignored_port_gets_no_cable(client, link):
 @pytest.mark.parametrize("displaced_end", ["local", "remote"])
 @pytest.mark.parametrize("obtained", [True, False])
 @pytest.mark.parametrize("source_mapping", ["own", "vc-owner", "oob"])
-@pytest.mark.parametrize("neighbour_identity", ["id", "hostname"])
+@pytest.mark.parametrize("neighbour_identity", ["id", "hostname", "unmapped-id"])
 def test_a_replacement_that_removes_a_cable_to_an_ignored_port_is_refused(
     client, link, ignored, displaced_end, obtained, source_mapping, neighbour_identity
 ):
@@ -278,6 +278,9 @@ def test_a_replacement_that_removes_a_cable_to_an_ignored_port_is_refused(
     row = _row(link.local, link.remote_device)
     if neighbour_identity == "hostname":
         row["remote_device_id"] = None
+    elif neighbour_identity == "unmapped-id":
+        row["remote_device_id"] = 19
+        link.server.ports_response(19, [port_row(500, link.remote.name, device_id=19)])
     link.server.register("/api/v0/devices/8/links", {"status": "ok", "links": [row]})
     link.server.ports_response(8, [port_row(100, link.local.name, device_id=8)])
     link.server.ports_response(9, [port_row(500, link.remote.name, device_id=9)])
@@ -750,11 +753,11 @@ def test_cable_render_skips_disclosure_queries_without_ignore_rules(client, sett
 
 
 @pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize("ignored", [False, True], ids=["allowed", "ignored"])
+@pytest.mark.parametrize("rule_state", ["allowed", "ignored", "no-rules"])
 @pytest.mark.parametrize("obtained", [True, False], ids=["obtained", "failed"])
 @pytest.mark.parametrize("source_mapping", ["own", "vc-owner", "oob"])
 def test_a_manual_destination_prefetches_displaced_rule_evidence_before_the_write(
-    client, link, monkeypatch, ignored, obtained, source_mapping
+    client, link, monkeypatch, rule_state, obtained, source_mapping
 ):
     from django.db import connection
     from requests.sessions import Session
@@ -783,7 +786,8 @@ def test_a_manual_destination_prefetches_displaced_rule_evidence_before_the_writ
     far_device.save()
     far = _bound(far_device, "Xe0/1", 777)
     old = cable_together(picked, far)
-    link.ignore(far_platform, "^Xe" if ignored else "^no-such-port$")
+    if rule_state != "no-rules":
+        link.ignore(far_platform, "^Xe" if rule_state == "ignored" else "^no-such-port$")
     row_id = _seed(link.local_device, _row(link.local, link.remote_device))
     before = source_cache.read(link.local_device, Resource.CABLES, SERVER_KEY).to_payload()
     _pick(client, link.local_device, row_id, picked)
@@ -810,7 +814,7 @@ def test_a_manual_destination_prefetches_displaced_rule_evidence_before_the_writ
     )
     assert response.status_code == 200
     link.local.refresh_from_db()
-    if ignored or not obtained:
+    if rule_state == "ignored" or not obtained:
         assert Cable.objects.filter(pk=old.pk).exists()
         assert link.local.cable_id is None
     else:

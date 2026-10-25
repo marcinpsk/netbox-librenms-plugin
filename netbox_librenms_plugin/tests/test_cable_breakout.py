@@ -352,7 +352,12 @@ def test_a_plain_port_whose_far_end_is_a_channel_is_refused_until_the_channel_si
         "remote_port": setup.channels[0].name,
         "remote_port_id": 301,
     }
-    setup.seed(peer_row, device=setup.peer, ports=[port_row(101, setup.far_ends[0].name, device_id=602)])
+    setup.seed(
+        peer_row,
+        device=setup.peer,
+        ports=[port_row(101, setup.far_ends[0].name, device_id=602)],
+        neighbour_ports={601: setup.source_ports},
+    )
     setup.seed(setup.row(1))
 
     before = setup.records(setup.peer)["101"]
