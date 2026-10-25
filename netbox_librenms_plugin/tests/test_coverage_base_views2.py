@@ -53,7 +53,9 @@ def _post_ip(payload):
     return view_post(SingleIPAddressVerifyView(), _request(payload))
 
 
-def _post_cable(device, links=(), *, ports=(), sensors=None, oob_links=None, oob_ports=None, row_id, **extra):
+def _post_cable(
+    device, links=(), *, ports=(), neighbour_ports=None, sensors=None, oob_links=None, oob_ports=None, row_id, **extra
+):
     """Warm a real cable snapshot and call the real cable verification endpoint."""
     from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
 
@@ -61,7 +63,14 @@ def _post_cable(device, links=(), *, ports=(), sensors=None, oob_links=None, oob
     server_key = view._render_server_key()
     assert server_key is not None
     seed_cables_snapshot(
-        device, links, ports, sensors=sensors, oob_links=oob_links, oob_ports=oob_ports, server_key=server_key
+        device,
+        links,
+        ports,
+        neighbour_ports=neighbour_ports,
+        sensors=sensors,
+        oob_links=oob_links,
+        oob_ports=oob_ports,
+        server_key=server_key,
     )
     payload = {"device_id": device.pk, "row_id": row_id, "server_key": server_key, **extra}
     return view_post(view, _request(payload))
@@ -366,6 +375,7 @@ class TestCableVerifyEndpoint:
             local,
             [link_row(1010, "stale-remote-name", remote_hostname=remote.name, remote_port_id=1111)],
             ports=[port_row(1010, "stale-local-name", device_id=406)],
+            neighbour_ports={408: [port_row(1111, "stale-remote-name", device_id=408)]},
             row_id="1010",
         )
         rendered = _json(response)["formatted_row"]
