@@ -1121,19 +1121,6 @@ def _mapped_device(name, server_key, librenms_id=777):
     return device
 
 
-def _seed_snapshot(view, device, server_key, *, inventory=None, librenms_id=777):
-    """Store a real inventory snapshot in the real cache and return its key and payload."""
-
-    payload = seed_mapped_modules(
-        device,
-        [{"entPhysicalIndex": 12}] if inventory is None else inventory,
-        server_key=server_key,
-        librenms_id=librenms_id,
-    ).to_payload()
-    cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
-    return cache_key, payload
-
-
 # ---------------------------------------------------------------------------
 # Inventory data factories
 # ---------------------------------------------------------------------------
