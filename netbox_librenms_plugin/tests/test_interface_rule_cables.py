@@ -756,8 +756,9 @@ def test_cable_render_skips_disclosure_queries_without_ignore_rules(client, sett
 @pytest.mark.parametrize("rule_state", ["allowed", "ignored", "no-rules"])
 @pytest.mark.parametrize("obtained", [True, False], ids=["obtained", "failed"])
 @pytest.mark.parametrize("source_mapping", ["own", "vc-owner", "oob"])
+@pytest.mark.parametrize("failed_scope", [False, True], ids=["outside-scope", "failed-scope"])
 def test_a_manual_destination_prefetches_displaced_rule_evidence_before_the_write(
-    client, link, monkeypatch, rule_state, obtained, source_mapping
+    client, link, monkeypatch, rule_state, obtained, source_mapping, failed_scope
 ):
     from django.db import connection
     from requests.sessions import Session
@@ -788,7 +789,19 @@ def test_a_manual_destination_prefetches_displaced_rule_evidence_before_the_writ
     old = cable_together(picked, far)
     if rule_state != "no-rules":
         link.ignore(far_platform, "^Xe" if rule_state == "ignored" else "^no-such-port$")
-    row_id = _seed(link.local_device, _row(link.local, link.remote_device))
+    seed_options = {}
+    if failed_scope:
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import Failed
+
+        seed_options = {
+            "extra_links": [link_row(101, far.name, remote_device_id=10, remote_hostname=far_device.name)],
+            "neighbour_ports": {
+                9: [port_row(500, link.remote.name, device_id=9)],
+                10: Failed(),
+                11: [port_row(601, picked.name, device_id=11)],
+            },
+        }
+    row_id = _seed(link.local_device, _row(link.local, link.remote_device), **seed_options)
     before = source_cache.read(link.local_device, Resource.CABLES, SERVER_KEY).to_payload()
     _pick(client, link.local_device, row_id, picked)
     record, _html = _render(client, link.local_device)
