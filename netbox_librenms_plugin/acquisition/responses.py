@@ -18,7 +18,7 @@ from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.utils import is_list_of_dicts
 
 HTTP_NOT_FOUND = 404
-_DEVICE_FIELDS = ("device_id", "ip", "os")
+_DEVICE_FIELDS = ("device_id", "ip", "os", "serial", "poller_group")
 
 
 @dataclass(frozen=True)
