@@ -3,6 +3,9 @@
 from dataclasses import dataclass
 from time import monotonic
 
+from dcim.models import Device, Interface
+from django.db.models import Q
+
 from netbox_librenms_plugin.acquisition import responses
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.acquisition.snapshot import MappingState, Outcome
@@ -12,7 +15,7 @@ from netbox_librenms_plugin.serial_utils import (
     get_serial_sensor_type_patterns,
     project_serial_sensors,
 )
-from netbox_librenms_plugin.server_mappings import MappingRole
+from netbox_librenms_plugin.server_mappings import MappingRole, identity_q, read_mapping
 
 REMOTE_ALIAS_FETCH_BUDGET_SECONDS = 15.0
 NEIGHBOUR_PORTS_PREFIX = "neighbour_ports:"
@@ -93,6 +96,21 @@ def _oob_interfaces(fetch, librenms_id):
     return {"ports": fetch(responses.ports(librenms_id, with_vlans=True))}
 
 
+def _displaced_owner_ids(server_key, source_ids):
+    """Return mapped owners of cable ends that a source or neighbour replacement can detach."""
+    sources = Device.objects.filter(
+        identity_q(Device, server=server_key, identities=source_ids, roles=(MappingRole.OWN, MappingRole.OOB))
+    )
+    scope = Q(pk__in=sources.values("pk")) | Q(
+        virtual_chassis_id__in=sources.exclude(virtual_chassis_id=None).values("virtual_chassis_id")
+    )
+    cable_ids = Interface.objects.filter(device__in=Device.objects.filter(scope), cable__isnull=False).values(
+        "cable_id"
+    )
+    owners = Device.objects.filter(interfaces__cable_id__in=cable_ids).distinct().order_by("pk")
+    return tuple(device_id for owner in owners if (device_id := read_mapping(owner).own_id(server_key)) is not None)
+
+
 def _cable_parts(fetch, librenms_id):
     parts = {
         "links": fetch(responses.links(librenms_id)),
@@ -106,6 +124,7 @@ def _cable_parts(fetch, librenms_id):
         for link in links.value
         if (neighbour_id := coerce_librenms_id(link.get("remote_device_id"))) is not None
     )
+    neighbours.update(dict.fromkeys(_displaced_owner_ids(fetch.server_key, (librenms_id, *neighbours))))
     for neighbour_id in neighbours:
         endpoint = responses.ports(neighbour_id, with_vlans=False)
         if endpoint.request.key in fetch.responses:

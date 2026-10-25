@@ -41,6 +41,7 @@ class _Fetch:
 
     def __init__(self, api):
         self._api = api
+        self.server_key = api.server_key
         self.responses = {}
         self.neighbour_deadline = None
 
