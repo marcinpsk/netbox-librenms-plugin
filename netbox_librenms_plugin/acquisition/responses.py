@@ -78,7 +78,10 @@ def device(device_id):
         if not isinstance(devices, list) or not devices or not isinstance(devices[0], dict):
             return _failed_status(status, body)
         kept = {key: devices[0][key] for key in _DEVICE_FIELDS if key in devices[0]}
-        return Decoded(Outcome.OBTAINED, value=kept, body={"status": "ok", "devices": [kept]})
+        envelope = {"devices": [kept]}
+        if "status" in body:
+            envelope["status"] = body["status"]
+        return Decoded(Outcome.OBTAINED, value=kept, body=envelope)
 
     return Endpoint(SourceRequest(f"devices/{device_id}"), decode)
 
