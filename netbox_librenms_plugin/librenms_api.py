@@ -736,7 +736,7 @@ class LibreNMSAPI:
         decoded = responses.device(device_id).decode(response.status_code, body)
         if decoded.outcome is not Outcome.OBTAINED:
             return False, None
-        device_data = dict(decoded.value)
+        device_data = dict(body["devices"][0])
         # LibreNMS 26.5.0 returns the full location relationship object
         # (keys: id, location, lat, lng, timestamp, fixed_coordinates)
         # instead of a flat location name string. Normalise to the name so
