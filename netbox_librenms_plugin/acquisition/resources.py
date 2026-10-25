@@ -82,8 +82,7 @@ def _blockers(snapshot, resource, parts, role=MappingRole.OWN):
     """Return a blocker for each part that was not obtained; a part that is not applicable blocks nothing."""
     oob = snapshot.resources[resource].oob
     if role is MappingRole.OOB and oob is not None and oob.state is MappingState.INVALID:
-        record = snapshot.record(resource, parts[0], role)
-        return (Blocker("oob", record.reason),)
+        return (Blocker("oob", "the linked OOB controller has no valid LibreNMS id"),)
     return tuple(
         Blocker.of(record)
         for record in (snapshot.record(resource, part, role) for part in parts)
