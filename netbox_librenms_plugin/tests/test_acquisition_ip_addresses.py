@@ -284,3 +284,31 @@ def test_a_virtual_machine_is_acquired_from_its_own_mapping(live_librenms):
 
     assert snapshot.value(Resource.IP_ADDRESSES, "addresses") == [_address("198.18.68.1")]
     assert _ready(snapshot)
+
+
+@pytest.mark.django_db
+def test_the_stored_device_source_excludes_unused_device_fields(live_librenms):
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.acquisition.registry import Resource
+
+    device = _device("acq-ip-projected-device")
+    kept = {"device_id": DEVICE_ID, "ip": "198.18.60.1", "os": "junos"}
+    _serve(
+        live_librenms.server,
+        addresses=[],
+        ports=[_port()],
+        device={**kept, "snmp_community": "example-secret", "unneeded": "example-extra"},
+    )
+
+    snapshot = _acquire(device)
+    assert source_cache.store(device, Resource.IP_ADDRESSES, snapshot)
+    stored = source_cache.read(device, Resource.IP_ADDRESSES, SERVER_KEY)
+    record = stored.record(Resource.IP_ADDRESSES, "device")
+
+    assert record.value == kept
+    assert record.body == {"status": "ok", "devices": [kept]}
+    payload = cache.get(source_cache.snapshot_key(device, Resource.IP_ADDRESSES, SERVER_KEY))
+    assert "example-secret" not in repr(payload)
+    assert "example-extra" not in repr(payload)
