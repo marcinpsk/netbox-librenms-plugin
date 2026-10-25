@@ -9,6 +9,7 @@ from netbox_librenms_plugin.ip_addressing import parse_librenms_ip_entry
 from netbox_librenms_plugin.utils import is_list_of_dicts
 
 HTTP_NOT_FOUND = 404
+_DEVICE_FIELDS = ("device_id", "ip", "os")
 
 
 @dataclass(frozen=True)
@@ -76,7 +77,8 @@ def device(device_id):
         devices = body.get("devices") if isinstance(body, dict) else None
         if not isinstance(devices, list) or not devices or not isinstance(devices[0], dict):
             return _failed_status(status, body)
-        return Decoded(Outcome.OBTAINED, value=devices[0])
+        kept = {key: devices[0][key] for key in _DEVICE_FIELDS if key in devices[0]}
+        return Decoded(Outcome.OBTAINED, value=kept, body={"status": "ok", "devices": [kept]})
 
     return Endpoint(SourceRequest(f"devices/{device_id}"), decode)
 
