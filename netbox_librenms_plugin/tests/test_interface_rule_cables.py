@@ -827,13 +827,18 @@ def test_a_manual_destination_prefetches_displaced_rule_evidence_before_the_writ
 
 
 @pytest.mark.django_db
-def test_manual_rows_share_one_ports_request_per_displaced_owner(client, link):
+@pytest.mark.parametrize("second_owner", ["shared", "distinct", "budget-exhausted"])
+def test_manual_rows_share_one_ports_request_per_displaced_owner(client, link, monkeypatch, second_owner):
     local_b = _bound(link.local_device, "Te1/2", 101)
     picked_device = _Link._device("manual-cable-batch-picked", None, 11)
     far_device = _Link._device("manual-cable-batch-displaced", _platform("manual-cable-batch"), 10)
     link.ignore(far_device.platform, "^no-such-port$")
-    chosen = [_bound(picked_device, "Eth1", 601), _bound(picked_device, "Eth2", 602)]
-    far = [_bound(far_device, "Xe0/1", 777), _bound(far_device, "Xe0/2", 778)]
+    picked_b = picked_device if second_owner == "shared" else _Link._device("manual-batch-picked-b", None, 12)
+    far_b = (
+        far_device if second_owner == "shared" else _Link._device("manual-batch-displaced-b", far_device.platform, 13)
+    )
+    chosen = [_bound(picked_device, "Eth1", 601), _bound(picked_b, "Eth2", 602)]
+    far = [_bound(far_device, "Xe0/1", 777), _bound(far_b, "Xe0/2", 778)]
     old = [cable_together(pick, displaced) for pick, displaced in zip(chosen, far, strict=True)]
     _seed(
         link.local_device,
@@ -848,8 +853,18 @@ def test_manual_rows_share_one_ports_request_per_displaced_owner(client, link):
         {"tab": "cables", "server_key": SERVER_KEY},
     )
     rows = {row.record["row_id"]: row.record for row in page.context["cable_sync"]["table"].rows}
-    link.server.ports_response(10, [port_row(777, "Xe0/1", device_id=10), port_row(778, "Xe0/2", device_id=10)])
-    link.server.ports_response(11, [port_row(601, "Eth1", device_id=11), port_row(602, "Eth2", device_id=11)])
+    tables = {10: [port_row(777, "Xe0/1", device_id=10)], 11: [port_row(601, "Eth1", device_id=11)]}
+    far_b_id = 10 if second_owner == "shared" else 13
+    picked_b_id = 11 if second_owner == "shared" else 12
+    tables.setdefault(far_b_id, []).append(port_row(778, "Xe0/2", device_id=far_b_id))
+    tables.setdefault(picked_b_id, []).append(port_row(602, "Eth2", device_id=picked_b_id))
+    for source_id, ports in tables.items():
+        link.server.ports_response(source_id, ports)
+    if second_owner == "budget-exhausted":
+        from netbox_librenms_plugin.acquisition import resources
+
+        ticks = iter([0.0, 0.0, 0.0, 16.0, 16.0, 16.0])
+        monkeypatch.setattr(resources, "monotonic", lambda: next(ticks))
     data = {"select": ["100", "101"], "server_key": SERVER_KEY, "force": "on"}
     for row_id, local, pick, cable in zip(("100", "101"), (link.local, local_b), chosen, old, strict=True):
         data.update({key: value for key, value in _sync_data(rows[row_id]).items() if key != "select"})
@@ -858,14 +873,23 @@ def test_manual_rows_share_one_ports_request_per_displaced_owner(client, link):
     response = _sync(client, link.local_device, data)
 
     assert response.status_code == 200
-    assert not Cable.objects.filter(pk__in=[cable.pk for cable in old]).exists()
-    for local, pick in zip((link.local, local_b), chosen, strict=True):
+    for index, (local, pick, cable) in enumerate(zip((link.local, local_b), chosen, old, strict=True)):
+        refused = second_owner == "budget-exhausted" and index == 1
+        assert Cable.objects.filter(pk=cable.pk).exists() is refused
         local.refresh_from_db()
         pick.refresh_from_db()
-        assert local.cable_id == pick.cable_id is not None
+        if refused:
+            assert local.cable_id is None
+            assert pick.cable_id == cable.pk
+        else:
+            assert local.cable_id == pick.cable_id is not None
     paths = [entry["path"] for entry in link.server.requests]
     assert paths.count("/api/v0/devices/10/ports") == 1
     assert paths.count("/api/v0/devices/11/ports") == 1
+    if second_owner != "shared":
+        expected = 0 if second_owner == "budget-exhausted" else 1
+        assert paths.count("/api/v0/devices/12/ports") == expected
+        assert paths.count("/api/v0/devices/13/ports") == expected
 
 
 @pytest.mark.django_db

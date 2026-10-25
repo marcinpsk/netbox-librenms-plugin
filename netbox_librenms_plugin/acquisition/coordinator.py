@@ -167,12 +167,17 @@ def _server_api(server_key):
     return api
 
 
-def acquire_cable_ports(server_key, owner_ids):
-    """Acquire request-scoped port evidence without changing an existing snapshot or the cache."""
-    fetch = _Fetch(_server_api(server_key))
-    owner_ids = tuple(dict.fromkeys(owner_ids))
-    parts = fetch_cable_ports(fetch, owner_ids)
-    return {owner_id: parts[f"{NEIGHBOUR_PORTS_PREFIX}{owner_id}"] for owner_id in owner_ids}
+class CablePortAcquisition:
+    """One manual action's port requests, response records and neighbour deadline."""
+
+    def __init__(self, server_key):
+        self._fetch = _Fetch(_server_api(server_key))
+
+    def acquire(self, owner_ids):
+        """Return each owner's port response, reusing all earlier outcomes and the action budget."""
+        owner_ids = tuple(dict.fromkeys(owner_ids))
+        parts = fetch_cable_ports(self._fetch, owner_ids)
+        return {owner_id: parts[f"{NEIGHBOUR_PORTS_PREFIX}{owner_id}"] for owner_id in owner_ids}
 
 
 def acquire(subject, *, server_key, resources, include_serial=False):
