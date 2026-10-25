@@ -16,6 +16,7 @@ from netbox_librenms_plugin.serial_utils import (
     project_serial_sensors,
 )
 from netbox_librenms_plugin.server_mappings import MappingRole, identity_q, read_mapping
+from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
 REMOTE_ALIAS_FETCH_BUDGET_SECONDS = 15.0
 NEIGHBOUR_PORTS_PREFIX = "neighbour_ports:"
@@ -108,7 +109,17 @@ def _displaced_owner_ids(server_key, source_ids):
         "cable_id"
     )
     owners = Device.objects.filter(interfaces__cable_id__in=cable_ids).distinct().order_by("pk")
-    return tuple(device_id for owner in owners if (device_id := read_mapping(owner).own_id(server_key)) is not None)
+    identities = set()
+    for owner in owners:
+        source_owner = get_librenms_sync_device(owner, server_key=server_key) or owner
+        for candidate in (owner, source_owner):
+            mapping = read_mapping(candidate)
+            identities.update(
+                device_id
+                for device_id in (mapping.own_id(server_key), mapping.oob_id(server_key))
+                if device_id is not None
+            )
+    return tuple(sorted(identities))
 
 
 def _cable_parts(fetch, librenms_id):

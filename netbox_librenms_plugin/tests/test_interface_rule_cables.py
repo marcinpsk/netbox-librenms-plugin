@@ -251,17 +251,28 @@ def test_a_manual_pick_bound_to_an_ignored_port_gets_no_cable(client, link):
 @pytest.mark.parametrize("ignored", [True, False], ids=["far-end-ignored", "control"])
 @pytest.mark.parametrize("displaced_end", ["local", "remote"])
 @pytest.mark.parametrize("obtained", [True, False])
+@pytest.mark.parametrize("source_mapping", ["own", "vc-owner", "oob"])
 def test_a_replacement_that_removes_a_cable_to_an_ignored_port_is_refused(
-    client, link, ignored, displaced_end, obtained
+    client, link, ignored, displaced_end, obtained, source_mapping
 ):
     """Te1/1 is cabled to Xe0/1 on a third device; replacing that cable detaches Xe0/1."""
     far_platform = _platform("cable-rule-far")
-    far_device = make_device("cable-rule-far")
+    if source_mapping == "vc-owner":
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+
+        _vc, (master, far_device) = make_virtual_chassis_members("cable-rule-far")
+    else:
+        far_device = make_device("cable-rule-far")
     far_device.platform = far_platform
     far_device.save()
     far = _bound(far_device, "Xe0/1", 777)
     old = cable_together(link.local if displaced_end == "local" else link.remote, far)
-    map_device_to_librenms(far_device, 10, server_key=SERVER_KEY)
+    if source_mapping == "vc-owner":
+        map_device_to_librenms(master, 10, server_key=SERVER_KEY)
+    elif source_mapping == "oob":
+        map_device_to_librenms(far_device, None, server_key=SERVER_KEY, oob={"id": 10, "type": "idrac"})
+    else:
+        map_device_to_librenms(far_device, 10, server_key=SERVER_KEY)
     link.ignore(far_platform, "^Xe" if ignored else "^no-such-port$")
     link.server.register("/api/v0/devices/8/links", {"status": "ok", "links": [_row(link.local, link.remote_device)]})
     link.server.ports_response(8, [port_row(100, link.local.name, device_id=8)])
