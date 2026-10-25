@@ -14,6 +14,8 @@ from django.utils import timezone
 from django.utils.html import escape
 from django.views import View
 
+from netbox_librenms_plugin.cable_scope import remote_name_candidates as _remote_name_candidates
+from netbox_librenms_plugin.cable_scope import resolve_remote_device
 from netbox_librenms_plugin.breakout_cables import (
     HIDDEN_REASONS,
     breakout_far_end,
@@ -106,13 +108,6 @@ def read_cable_assessment(request, subject, server_key, interface_name_field="if
         "snapshot_id": snapshot.snapshot_id,
         "last_fetched": snapshot.finished_at,
     }
-
-
-def _remote_name_candidates(hostname):
-    """Return the trimmed full name and its short-name fallback."""
-    if not isinstance(hostname, str) or not (hostname := hostname.strip()):
-        return ()
-    return hostname, hostname.split(".")[0]
 
 
 def _serial_remote_labels(links):
@@ -438,26 +433,16 @@ class BaseCableTableView(
 
     def _resolve_remote_devices(self, normal_links, devices_by_name, devices_by_librenms_id, visible_device_ids):
         """Resolve each row's remote device, LibreNMS id first, then exact name, then stripped name."""
-        remote_device_by_link = {}
-        for link in normal_links:
-            remote_device = None
-            blocked = False
-            remote_id = coerce_librenms_id(link.get("remote_device_id"))
-            if remote_id is not None:
-                remote_device, blocked = self._first_catalog_match(
-                    devices_by_librenms_id.get(remote_id, []), visible_device_ids
-                )
-            candidates = _remote_name_candidates(link.get("remote_device"))
-            if not blocked and candidates:
-                remote_device, blocked = self._first_catalog_match(
-                    devices_by_name.get(candidates[0].lower(), []), visible_device_ids
-                )
-                if not blocked:
-                    remote_device, _blocked = self._first_catalog_match(
-                        devices_by_name.get(candidates[1].lower(), []), visible_device_ids
-                    )
-            remote_device_by_link[id(link)] = remote_device
-        return remote_device_by_link
+        catalog = devices_by_name, devices_by_librenms_id, visible_device_ids
+        return {
+            id(link): resolve_remote_device(
+                link.get("remote_device_id"),
+                link.get("remote_device"),
+                server_key="",
+                catalog=catalog,
+            )[0]
+            for link in normal_links
+        }
 
     def _resolve_remote_owners(self, normal_links, remote_device_by_link):
         """Resolve which chassis member actually owns each row's remote port."""
@@ -683,50 +668,12 @@ class BaseCableTableView(
 
     def get_device_by_id_or_name(self, remote_device_id, hostname, server_key=None, queryset=None):
         """Try to find device in NetBox first by librenms_id custom field, then by name."""
-        if server_key is None:
-            server_key = self._render_server_key()
-        queryset = queryset if queryset is not None else Device.objects.all()
-
-        def resolve_catalog_match(catalog, ambiguous_message):
-            match_ids = list(catalog.order_by("pk").values_list("pk", flat=True)[:2])
-            if len(match_ids) > 1:
-                return None, False, ambiguous_message, True
-            if not match_ids:
-                return None, False, None, False
-            device = queryset.filter(pk=match_ids[0]).first()
-            if device is None:
-                # A stronger catalog match exists but is outside the requester's scope. Do not
-                # fall through to a weaker name match and bind a different visible device.
-                return None, False, None, True
-            return device, True, None, True
-
-        # First try matching by LibreNMS ID. The remote device_id is the remote device's OWN
-        # identity, so exclude the OOB-controller path: matching it would also select a different
-        # device that references this id as its controller, tripping MultipleObjectsReturned.
-        if remote_device_id is not None:
-            result = resolve_catalog_match(
-                Device.objects.filter(
-                    identity_q(Device, server=server_key, identities=(remote_device_id,), roles=(MappingRole.OWN,))
-                ),
-                f"Multiple devices found with the same LibreNMS ID: {remote_device_id}.",
-            )
-            if result[3]:
-                return result[:3]
-
-        candidates = _remote_name_candidates(hostname)
-        if not candidates:
-            return None, False, None
-
-        # Fall back to name matching if no device found by ID. LibreNMS reports the neighbour
-        # hostname as the device advertises it, which is commonly all lower case, while NetBox
-        # holds the operator's capitalisation. Match case insensitively or the remote end only
-        # ever resolves through librenms_id.
-        ambiguous_name = f"Multiple devices found with the same name: {hostname}."
-        exact_result = resolve_catalog_match(Device.objects.filter(name__iexact=candidates[0]), ambiguous_name)
-        if exact_result[3]:
-            return exact_result[:3]
-        simple_result = resolve_catalog_match(Device.objects.filter(name__iexact=candidates[1]), ambiguous_name)
-        return simple_result[:3]
+        return resolve_remote_device(
+            remote_device_id,
+            hostname,
+            server_key=server_key if server_key is not None else self._render_server_key(),
+            queryset=queryset,
+        )
 
     def enrich_local_port(
         self,
