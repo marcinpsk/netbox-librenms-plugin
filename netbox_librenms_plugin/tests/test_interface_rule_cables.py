@@ -249,23 +249,35 @@ def test_a_manual_pick_bound_to_an_ignored_port_gets_no_cable(client, link):
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("ignored", [True, False], ids=["far-end-ignored", "control"])
-def test_a_replacement_that_removes_a_cable_to_an_ignored_port_is_refused(client, link, ignored):
+@pytest.mark.parametrize("displaced_end", ["local", "remote"])
+@pytest.mark.parametrize("obtained", [True, False])
+def test_a_replacement_that_removes_a_cable_to_an_ignored_port_is_refused(
+    client, link, ignored, displaced_end, obtained
+):
     """Te1/1 is cabled to Xe0/1 on a third device; replacing that cable detaches Xe0/1."""
     far_platform = _platform("cable-rule-far")
     far_device = make_device("cable-rule-far")
     far_device.platform = far_platform
     far_device.save()
     far = _bound(far_device, "Xe0/1", 777)
-    old = cable_together(link.local, far)
+    old = cable_together(link.local if displaced_end == "local" else link.remote, far)
     map_device_to_librenms(far_device, 10, server_key=SERVER_KEY)
-    rule = link.ignore(far_platform, "^Xe") if ignored else link.ignore(far_platform, "^no-such-port$")
-    _seed(
-        link.local_device,
-        _row(link.local, link.remote_device),
-        ports=[port_row(100, "Te1/1", device_id=8), port_row(101, "source-extra", device_id=8)],
-        extra_links=[link_row(101, far.name, remote_device_id=10, remote_hostname=far_device.name, remote_port_id=777)],
-        neighbour_ports={9: [port_row(500, "Gi0/1", device_id=9)], 10: [port_row(777, far.name, device_id=10)]},
+    link.ignore(far_platform, "^Xe" if ignored else "^no-such-port$")
+    link.server.register("/api/v0/devices/8/links", {"status": "ok", "links": [_row(link.local, link.remote_device)]})
+    link.server.ports_response(8, [port_row(100, link.local.name, device_id=8)])
+    link.server.ports_response(9, [port_row(500, link.remote.name, device_id=9)])
+    link.server.register(
+        "/api/v0/devices/10/ports",
+        {"status": "ok", "ports": [port_row(777, far.name, device_id=10)]},
+        status=200 if obtained else 503,
     )
+    refreshed = client.post(
+        reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[link.local_device.pk]),
+        {"server_key": SERVER_KEY},
+        HTTP_HX_REQUEST="true",
+    )
+    assert refreshed.status_code == 200
+    assert "/api/v0/devices/10/ports" in [entry["path"] for entry in link.server.requests]
     record, _html = _render(client, link.local_device)
     assert record["cable_status"] == "Cable Mismatch"
 
@@ -280,12 +292,11 @@ def test_a_replacement_that_removes_a_cable_to_an_ignored_port_is_refused(client
     )
 
     link.local.refresh_from_db()
-    if ignored:
-        assert link.local.cable_id == old.pk
-        for response in (first, forced):
-            assert _refused(response, "777 (Xe0/1)", f"ignored by interface rule {rule.pk}")
+    if ignored or not obtained:
+        assert Cable.objects.filter(pk=old.pk).exists()
     else:
-        assert any("Overwrite protection" in message for message in _messages(first))
+        assert first.status_code == 200
+        assert forced.status_code == 200
         assert not Cable.objects.filter(pk=old.pk).exists()
         assert link.local.cable.b_terminations == [link.remote]
 

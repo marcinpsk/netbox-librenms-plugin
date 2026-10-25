@@ -42,9 +42,10 @@ def _record(request, value):
 class _SeededFetch:
     """Answer each request of a real acquirer with the seeded value of its part, and keep each record."""
 
-    def __init__(self, values=None):
+    def __init__(self, values=None, *, server_key):
         # Request key -> seeded value; without values, every request answers an empty list.
         self._values = values
+        self.server_key = server_key
         self.responses = {}
         self.neighbour_deadline = None
 
@@ -84,12 +85,14 @@ class _CableSeededFetch(_SeededFetch):
         )
 
 
-def _seeded_fetch(acquirer, librenms_id, parts, what):
+def _seeded_fetch(acquirer, librenms_id, parts, what, server_key):
     """Return a fetch that answers the requests of a real acquirer with *parts*, which must name each of its parts."""
-    requests = {name: record.request.key for name, record in acquirer(_SeededFetch(), librenms_id).items()}
+    requests = {
+        name: record.request.key for name, record in acquirer(_SeededFetch(server_key=server_key), librenms_id).items()
+    }
     if set(parts) != set(requests):
         raise TypeError(f"A seed of {what} needs exactly the parts {sorted(requests)}, not {sorted(parts)}.")
-    return _SeededFetch({requests[name]: value for name, value in parts.items()})
+    return _SeededFetch({requests[name]: value for name, value in parts.items()}, server_key=server_key)
 
 
 def _oob_mapping(resource, mapping, server_key, oob):
@@ -99,11 +102,13 @@ def _oob_mapping(resource, mapping, server_key, oob):
         # The coordinator records the parts of a corrupt id as failed by itself.
         if oob is not None:
             raise TypeError("The owner links no usable OOB controller, so the seed takes no OOB parts.")
-        fetch = _SeededFetch({})
+        fetch = _SeededFetch({}, server_key=server_key)
     elif oob is None:
         raise TypeError("The owner links an OOB controller, so the seed needs its parts.")
     else:
-        fetch = _seeded_fetch(OOB_ACQUIRERS[resource], link.librenms_id, oob, f"the {resource} OOB controller")
+        fetch = _seeded_fetch(
+            OOB_ACQUIRERS[resource], link.librenms_id, oob, f"the {resource} OOB controller", server_key
+        )
     return oob_source(fetch, resource, mapping, server_key), fetch
 
 
@@ -118,7 +123,7 @@ def build_source_snapshot(subject, resource, server_key="default", *, oob=None, 
     owner = resource_owner(subject, resource, server_key)
     mapping = read_mapping(owner)
     librenms_id = mapping.own_id(server_key)
-    fetch = _seeded_fetch(ACQUIRERS[resource], librenms_id, parts, resource)
+    fetch = _seeded_fetch(ACQUIRERS[resource], librenms_id, parts, resource, server_key)
     host_parts = ACQUIRERS[resource](fetch, librenms_id)
     oob_mapping, oob_fetch = _oob_mapping(resource, mapping, server_key, oob)
     now = timezone.now()
@@ -368,7 +373,7 @@ def seed_cables_snapshot(
         values[responses.ports(oob_id, with_vlans=False).request.key] = (
             oob_ports if isinstance(oob_ports, Failed) else list(oob_ports)
         )
-    fetch = _CableSeededFetch(values)
+    fetch = _CableSeededFetch(values, server_key=server_key)
     source = _resource_source(fetch, Resource.CABLES, owner, server_key, include_serial=sensors is not None)
     now = timezone.now()
     snapshot = SourceSnapshot(

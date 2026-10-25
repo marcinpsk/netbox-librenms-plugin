@@ -212,7 +212,7 @@ def test_refresh_requires_an_actor(live_librenms):
     live_librenms.server.register(f"/api/v0/devices/{HOST_ID}/ports", {"status": "ok", "ports": []})
 
     with pytest.raises(TypeError):
-        source_cache.refresh(subject, Resource.CABLES, SERVER_KEY)
+        source_cache.refresh(None, subject, Resource.CABLES, SERVER_KEY)
 
     assert live_librenms.server.requests == []
 
