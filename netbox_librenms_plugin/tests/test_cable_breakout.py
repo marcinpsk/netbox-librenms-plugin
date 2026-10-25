@@ -72,13 +72,13 @@ class _Breakout:
             remote_port_id=200 + channel_id,
         )
 
-    def seed(self, *rows, device=None, ports=None):
+    def seed(self, *rows, device=None, ports=None, neighbour_ports=None):
         device = device or self.device
         seed_cables_snapshot(
             device,
             list(rows),
             self.source_ports if ports is None else ports,
-            neighbour_ports=self.neighbour_ports,
+            neighbour_ports=self.neighbour_ports if neighbour_ports is None else neighbour_ports,
             server_key=SERVER_KEY,
         )
 
@@ -755,22 +755,23 @@ def test_a_confirmed_overwrite_from_a_far_end_never_removes_the_breakout_cable()
     setup.seed(
         {
             "protocol": "lldp",
-            "local_port_id": 101,
+            "local_port_id": 201,
             "local_port": setup.far_ends[0].name,
             "remote_hostname": other.device.name,
             "remote_port": other.name,
             "remote_port_id": 401,
         },
         device=setup.peer,
-        ports=[port_row(101, setup.far_ends[0].name, device_id=602)],
+        ports=[port_row(201, setup.far_ends[0].name, device_id=602)],
+        neighbour_ports={601: setup.source_ports},
     )
 
-    record = setup.records(setup.peer)["101"]
+    record = setup.records(setup.peer)["201"]
     far_end = Interface.objects.get(pk=setup.far_ends[0].pk)
     data = {
-        **_rendered_sync_data(setup.client, setup.peer, "101"),
+        **_rendered_sync_data(setup.client, setup.peer, "201"),
         "force": "on",
-        "expected_cable_intent_101": _confirmed_intent(far_end, other, cable),
+        "expected_cable_intent_201": _confirmed_intent(far_end, other, cable),
     }
     response = setup.client.post(
         reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[setup.peer.pk]), data
