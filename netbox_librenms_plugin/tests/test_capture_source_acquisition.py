@@ -256,3 +256,20 @@ def test_recording_assessment_preserves_unnamed_os_patterns(live_librenms, recor
         assert all(regex.search("") is None for regex in PortStackLagPattern.compiled_patterns_for_os("pattern-test"))
     else:
         assert pattern.lag_name_pattern == r"^Bundle\d+$"
+
+
+@pytest.mark.django_db
+def test_capture_preserves_device_facts_needed_by_replay(live_librenms, recording_server):
+    subject = seed_mapping(make_device("capture-device-replay-facts"), "default", own=5501)
+    serve(live_librenms.server)
+    kept = {"device_id": 5501, "os": "capture-test", "serial": "EXAMPLE-MASTER", "poller_group": 7}
+    live_librenms.server.register(
+        "/api/v0/devices/5501",
+        {"status": "ok", "devices": [{**kept, "snmp_community": "example-secret"}]},
+    )
+
+    recording = capture(subject)
+    _server, api = recording_server(recording)
+
+    assert recording["responses"]["GET /api/v0/devices/5501"]["devices"] == [kept]
+    assert api.get_device_info(5501, use_cache=False) == (True, kept)
