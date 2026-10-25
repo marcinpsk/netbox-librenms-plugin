@@ -1121,7 +1121,7 @@ def _mapped_device(name, server_key, librenms_id=777):
     return device
 
 
-def _seed_snapshot(view, device, server_key, *, inventory=None, librenms_id=777, oob_librenms_id=None):
+def _seed_snapshot(view, device, server_key, *, inventory=None, librenms_id=777):
     """Store a real inventory snapshot in the real cache and return its key and payload."""
 
     payload = seed_mapped_modules(

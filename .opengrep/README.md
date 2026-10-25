@@ -376,3 +376,7 @@ field names are outside this narrow check.
 and `blocker.path` in capture, in either order. Capture validates mapping states and response
 keys from `MappingSource.parts`. Comparisons through aliases or other functions are outside
 this narrow check.
+
+`recording-export-needs-response-keys` rejects unkeyed response iteration in
+`_export_responses`. The export uses part keys to omit neighbour-only responses.
+The rule does not prove which keys the export excludes or follow iteration aliases.
