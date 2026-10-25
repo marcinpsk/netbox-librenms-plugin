@@ -8,7 +8,12 @@ from django.utils import timezone
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.acquisition.registry import RESOURCE_SPECS, OwnerPolicy
-from netbox_librenms_plugin.acquisition.resources import ACQUIRERS, OOB_ACQUIRERS
+from netbox_librenms_plugin.acquisition.resources import (
+    ACQUIRERS,
+    OOB_ACQUIRERS,
+    NEIGHBOUR_PORTS_PREFIX,
+    fetch_cable_ports,
+)
 from netbox_librenms_plugin.acquisition.snapshot import (
     MappingLink,
     MappingSource,
@@ -162,6 +167,15 @@ def _server_api(server_key):
     if api is None or api.server_key != server_key:
         raise ValueError(f"LibreNMS server {server_key!r} is not configured.")
     return api
+
+
+def acquire_cable_ports(server_key, owner_ids):
+    """Acquire request-scoped port evidence without changing an existing snapshot or the cache."""
+    fetch = _Fetch(_server_api(server_key))
+    owner_ids = tuple(dict.fromkeys(owner_ids))
+    parts = fetch_cable_ports(fetch, owner_ids)
+    return {owner_id: parts[f"{NEIGHBOUR_PORTS_PREFIX}{owner_id}"] for owner_id in owner_ids}
+
 
 
 @dataclass(frozen=True)

@@ -9,14 +9,14 @@ from django.db.models import Q
 from netbox_librenms_plugin.acquisition import responses
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.acquisition.snapshot import MappingState, Outcome
+from netbox_librenms_plugin.cable_scope import cable_port_owner_ids, resolve_remote_device
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.serial_utils import (
     SerialSensorProjection,
     get_serial_sensor_type_patterns,
     project_serial_sensors,
 )
-from netbox_librenms_plugin.server_mappings import MappingRole, identity_q, read_mapping
-from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+from netbox_librenms_plugin.server_mappings import MappingRole, identity_q
 
 REMOTE_ALIAS_FETCH_BUDGET_SECONDS = 15.0
 NEIGHBOUR_PORTS_PREFIX = "neighbour_ports:"
@@ -97,29 +97,36 @@ def _oob_interfaces(fetch, librenms_id):
     return {"ports": fetch(responses.ports(librenms_id, with_vlans=True))}
 
 
-def _displaced_owner_ids(server_key, source_ids):
-    """Return mapped owners of cable ends that a source or neighbour replacement can detach."""
+def _displaced_owner_ids(server_key, source_ids, hostname_devices=()):
+    """Return source identities for endpoints in the refresh scope and the cables they can replace."""
     sources = Device.objects.filter(
         identity_q(Device, server=server_key, identities=source_ids, roles=(MappingRole.OWN, MappingRole.OOB))
+        | Q(pk__in=[device.pk for device in hostname_devices])
     )
     scope = Q(pk__in=sources.values("pk")) | Q(
         virtual_chassis_id__in=sources.exclude(virtual_chassis_id=None).values("virtual_chassis_id")
     )
-    cable_ids = Interface.objects.filter(device__in=Device.objects.filter(scope), cable__isnull=False).values(
-        "cable_id"
+    return cable_port_owner_ids(
+        *Interface.objects.filter(device__in=Device.objects.filter(scope)), server_key=server_key
     )
-    owners = Device.objects.filter(interfaces__cable_id__in=cable_ids).distinct().order_by("pk")
-    identities = set()
-    for owner in owners:
-        source_owner = get_librenms_sync_device(owner, server_key=server_key) or owner
-        for candidate in (owner, source_owner):
-            mapping = read_mapping(candidate)
-            identities.update(
-                device_id
-                for device_id in (mapping.own_id(server_key), mapping.oob_id(server_key))
-                if device_id is not None
-            )
-    return tuple(sorted(identities))
+
+
+def fetch_cable_ports(fetch, owner_ids):
+    """Acquire each owner's ports once under the shared neighbour budget."""
+    parts = {}
+    for owner_id in dict.fromkeys(owner_ids):
+        endpoint = responses.ports(owner_id, with_vlans=False)
+        if endpoint.request.key in fetch.responses:
+            record = fetch.responses[endpoint.request.key]
+        else:
+            if fetch.neighbour_deadline is None:
+                fetch.neighbour_deadline = monotonic() + REMOTE_ALIAS_FETCH_BUDGET_SECONDS
+            if monotonic() >= fetch.neighbour_deadline:
+                record = fetch.skip(endpoint, Outcome.FAILED, NEIGHBOUR_BUDGET_EXHAUSTED_REASON)
+            else:
+                record = fetch(endpoint)
+        parts[f"{NEIGHBOUR_PORTS_PREFIX}{owner_id}"] = record
+    return parts
 
 
 def _cable_parts(fetch, librenms_id):
@@ -135,19 +142,18 @@ def _cable_parts(fetch, librenms_id):
         for link in links.value
         if (neighbour_id := coerce_librenms_id(link.get("remote_device_id"))) is not None
     )
-    neighbours.update(dict.fromkeys(_displaced_owner_ids(fetch.server_key, (librenms_id, *neighbours))))
-    for neighbour_id in neighbours:
-        endpoint = responses.ports(neighbour_id, with_vlans=False)
-        if endpoint.request.key in fetch.responses:
-            record = fetch.responses[endpoint.request.key]
-        else:
-            if fetch.neighbour_deadline is None:
-                fetch.neighbour_deadline = monotonic() + REMOTE_ALIAS_FETCH_BUDGET_SECONDS
-            if monotonic() >= fetch.neighbour_deadline:
-                record = fetch.skip(endpoint, Outcome.FAILED, NEIGHBOUR_BUDGET_EXHAUSTED_REASON)
-            else:
-                record = fetch(endpoint)
-        parts[f"{NEIGHBOUR_PORTS_PREFIX}{neighbour_id}"] = record
+    hostname_devices = []
+    for link in links.value:
+        if coerce_librenms_id(link.get("remote_device_id")) is None:
+            device, found, _error = resolve_remote_device(
+                None, link.get("remote_hostname"), server_key=fetch.server_key
+            )
+            if found:
+                hostname_devices.append(device)
+    neighbours.update(
+        dict.fromkeys(_displaced_owner_ids(fetch.server_key, (librenms_id, *neighbours), hostname_devices))
+    )
+    parts.update(fetch_cable_ports(fetch, neighbours))
     return parts
 
 
@@ -213,6 +219,23 @@ def _interface_scopes(snapshot):
         # The OOB rows are compared with the host rows, so they need the host scope too.
         scopes["oob"] = _blockers(snapshot, resource, ("ports",), MappingRole.OOB) or host
     return scopes
+
+
+def cable_port_source_ids(snapshot):
+    """Return identities whose ports were in scope, including failed acquisition attempts."""
+    identities = set()
+    source = snapshot.resources[Resource.CABLES]
+    for mapping in (source.host, source.oob):
+        if mapping is None:
+            continue
+        if mapping.librenms_id is not None:
+            identities.add(mapping.librenms_id)
+        identities.update(
+            int(part.removeprefix(NEIGHBOUR_PORTS_PREFIX))
+            for part, _key in mapping.parts
+            if part.startswith(NEIGHBOUR_PORTS_PREFIX)
+        )
+    return identities
 
 
 def cable_source_state(snapshot):
