@@ -88,7 +88,7 @@ from netbox_librenms_plugin.views.mixins import (
 
 from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
-from netbox_librenms_plugin.acquisition.coordinator import acquire_cable_ports
+from netbox_librenms_plugin.acquisition.coordinator import CablePortAcquisition
 from netbox_librenms_plugin.acquisition.resources import Blocker
 from netbox_librenms_plugin.acquisition.snapshot import IncompleteSource
 
@@ -234,7 +234,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         self._cable_source_permission_error = False
         self._snapshot_port_records = {}
         self._snapshot_port_source_ids = set()
-        self._prefetched_port_responses = {}
+        self._cable_port_acquisition = None
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
         cache_obj = get_librenms_sync_device(obj, server_key=server_key) or obj
         if not self.restricted_queryset(Device, "view").filter(pk=cache_obj.pk).exists():
@@ -642,12 +642,14 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         """Bind missing owner evidence to this request before the locked write."""
         server_key = self._post_server_key
         owner_ids = set(cable_port_owner_ids(*terminations, server_key=server_key)) - self._snapshot_port_source_ids
-        missing = owner_ids - self._prefetched_port_responses.keys()
-        if missing:
-            self._prefetched_port_responses.update(acquire_cable_ports(server_key, sorted(missing)))
+        if not owner_ids:
+            return {}
+        if self._cable_port_acquisition is None:
+            self._cable_port_acquisition = CablePortAcquisition(server_key)
+        responses = self._cable_port_acquisition.acquire(sorted(owner_ids))
         records = {}
         for owner_id in sorted(owner_ids):
-            response = self._prefetched_port_responses[owner_id]
+            response = responses[owner_id]
             if not response.obtained:
                 self._prefetch_failure_visible = owner_id in source_cache.visible_cable_port_sources(
                     self.request.user, server_key, {owner_id}
