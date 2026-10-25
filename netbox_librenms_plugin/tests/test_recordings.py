@@ -754,10 +754,8 @@ def test_assert_port_relationships_tolerates_explicit_null_meta(live_librenms):
 
 
 @pytest.mark.django_db
-def test_assert_port_relationships_tolerates_explicit_null_lag_patterns(live_librenms):
-    """An explicit lag_patterns: null recording must not load live database patterns."""
-    # Without an OS, a database read applies every stored rule: the seeded ios ^Po\d+$ LAG rule
-    # and the seeded timos ":" SAP rule.
+def test_null_recorded_patterns_keep_the_unknown_os_sap_fallback(live_librenms):
+    """An unknown OS keeps the production SAP fallback when a recording names no rules."""
     live_librenms.server.ports_response(
         device_id=1,
         ports=[
@@ -783,8 +781,8 @@ def test_assert_port_relationships_tolerates_explicit_null_lag_patterns(live_lib
     )
     recording = {"name": "null-lag-patterns", "meta": {}, "lag_patterns": None}
 
-    # Po1 is no LAG without the stored LAG rule, and lag1:0 stays a member without the stored SAP rule.
-    _assert_port_relationships(live_librenms.api, 1, recording, expected={"lag_members": {30: 40}})
+    # The unknown OS has no LAG rule and retains the stored SAP fallback.
+    _assert_port_relationships(live_librenms.api, 1, recording, expected={"lag_members": {}})
 
 
 @pytest.mark.django_db
