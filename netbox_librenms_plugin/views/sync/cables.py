@@ -649,15 +649,9 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         for owner_id in sorted(owner_ids):
             response = self._prefetched_port_responses[owner_id]
             if not response.obtained:
-                touched = cable_rule_interfaces(*terminations)
-                visible_ids = set(
-                    self.restricted_queryset(Interface, "view")
-                    .filter(pk__in=[term.pk for term in touched])
-                    .values_list("pk", flat=True)
+                self._prefetch_failure_visible = owner_id in source_cache.visible_cable_port_sources(
+                    self.request.user, server_key, {owner_id}
                 )
-                self._prefetch_failure_visible = visible_ids == {
-                    term.pk for term in touched
-                } and self._owners_are_viewable({term.device_id for term in touched})
                 raise IncompleteSource(response)
             records.update((coerce_librenms_id(port["port_id"]), dict(port)) for port in response.value)
         return records
