@@ -968,6 +968,33 @@ def test_displaced_source_failures_are_redacted_for_each_snapshot_reader(
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("reader", ["superuser", "restricted"])
+def test_a_neighbour_failure_that_no_netbox_device_holds_names_its_source(client, link, reader):
+    link.server.register(
+        "/api/v0/devices/8/links",
+        {
+            "status": "ok",
+            "links": [_row(link.local, link.remote_device, remote_device_id=42, remote_hostname="absent")],
+        },
+    )
+    link.server.ports_response(8, [port_row(100, link.local.name, device_id=8)])
+    link.server.register("/api/v0/devices/42/ports", {"status": "error", "message": "neighbour-error"}, status=503)
+    if reader == "restricted":
+        client = _restricted_client("absent-neighbour-reader", [link.local_device.pk], [link.local.pk])
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[link.local_device.pk]),
+        {"server_key": SERVER_KEY},
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert response.status_code == 200
+    messages = [blocker.message for blocker in response.context["cable_sync"]["blockers"]]
+    assert any("devices/42/ports" in message and "neighbour-error" in message for message in messages)
+    assert not any("you cannot view" in message for message in messages)
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("hidden_source", ["chassis-master", "other-interface"])
 def test_manual_prefetch_failures_use_the_source_owner_disclosure_scope(client, link, hidden_source):
     if hidden_source == "chassis-master":

@@ -70,7 +70,8 @@ def visible_cable_port_sources(user, server_key, identities):
         .values_list("device_id", flat=True)
     )
     hidden_chassis = {owner.virtual_chassis_id for owner in owners if owner.pk in hidden_ids}
-    visibility = {}
+    # An identity that no NetBox device holds names no object the actor could be denied.
+    visibility = dict.fromkeys(identities, True)
     for owner in sources:
         visible = owner.pk not in hidden_ids and (
             owner.virtual_chassis_id is None or owner.virtual_chassis_id not in hidden_chassis
