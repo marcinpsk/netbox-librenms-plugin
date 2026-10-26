@@ -9,7 +9,7 @@ def validate(snapshot, blockers):
                 require(record)
 
 
-def validate(snapshot, mapping, transceiver_request):
+def validate(snapshot, mapping, stack_request):
     # ok: capture-requires-source-identities
     if mapping.state is MappingState.INVALID:
         raise RuntimeError(INVALID_OOB_REASON)
@@ -17,7 +17,7 @@ def validate(snapshot, mapping, transceiver_request):
         # ok: capture-requires-source-identities
         record = snapshot.responses[key]
         # ok: capture-requires-source-identities
-        require(record, allow_missing=record.request == transceiver_request)
+        require(record, optional_status=record.request == stack_request)
 
 
 def display(blocker):
