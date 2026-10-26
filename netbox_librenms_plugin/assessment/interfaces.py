@@ -37,6 +37,9 @@ def parse_port_vlan_data(port_data: dict, interface_name_field: str = "ifName") 
     """
     if_name = port_data.get("ifName", "")
     if_vlan = port_data.get("ifVlan", "")
+    # LibreNMS reports a port without a VLAN as ifVlan 0 or "0", as well as "" or null.
+    if if_vlan in (0, "0"):
+        if_vlan = ""
     # LibreNMS sets ifVlan for a port with a mode; only ifTrunk tells a trunk from an access port.
     if not if_vlan:
         mode = None

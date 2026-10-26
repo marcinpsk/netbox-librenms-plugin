@@ -108,6 +108,19 @@ def test_a_refresh_stores_source_facts_and_the_tab_assesses_them(client, live_li
 
 
 @pytest.mark.django_db
+def test_a_port_that_reports_vlan_zero_shows_no_vlan_whatever_the_json_type(client, live_librenms):
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+
+    device = _device("iface-snap-vlan-zero")
+    client.force_login(make_superuser("iface-snap-vlan-zero-user"))
+    _serve(live_librenms.server, [_port(1, "eth1", ifVlan=0), _port(2, "eth2", ifVlan="0")])
+
+    rows = _rows(_refresh(client, device))
+
+    assert [(rows[port]["mode"], rows[port]["untagged_vlan"]) for port in (1, 2)] == [(None, None), (None, None)]
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize(
     ("break_source", "failed"),
     [
