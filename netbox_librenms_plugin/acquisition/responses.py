@@ -325,6 +325,9 @@ def transceivers(device_id):
     contract = _rows_contract("transceivers")
 
     def decode(status, body):
+        # A LibreNMS release without this route answers 404; inventory and ports still build the rows.
+        if status == HTTP_NOT_FOUND:
+            return Decoded(Outcome.NOT_APPLICABLE, reason="LibreNMS has no transceiver route.")
         if not isinstance(body, dict) or body.get("status") != "ok":
             return _failed_status(status, body)
         decoded = contract(status, body)

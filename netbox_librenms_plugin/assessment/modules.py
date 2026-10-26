@@ -4,6 +4,7 @@ from dcim.models import Device
 
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.acquisition.resources import blocked_scopes
+from netbox_librenms_plugin.acquisition.snapshot import Outcome
 from netbox_librenms_plugin.constants import MAIN_INVENTORY_SOURCE, OOB_INVENTORY_SOURCE, is_librenms_placeholder
 from netbox_librenms_plugin.inventory_identity import vc_serial_key
 from netbox_librenms_plugin.inventory_tree import repair_dangling_parents
@@ -34,8 +35,12 @@ def assess(snapshot, *, subject):
     _normalize_inventory_indices(inventory)
     repair_dangling_parents(inventory)
     ports = snapshot.value(resource, "ports")
+    transceivers = snapshot.record(resource, "transceivers")
     _merge_transceiver_data(
-        inventory, snapshot.value(resource, "transceivers"), ports, manufacturer=owner.device_type.manufacturer
+        inventory,
+        snapshot.value(resource, "transceivers") if transceivers.outcome is not Outcome.NOT_APPLICABLE else [],
+        ports,
+        manufacturer=owner.device_type.manufacturer,
     )
     for item in inventory:
         item["_source"] = MAIN_INVENTORY_SOURCE

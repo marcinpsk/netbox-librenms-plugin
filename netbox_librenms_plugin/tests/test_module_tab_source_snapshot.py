@@ -308,3 +308,26 @@ def test_numeric_inventory_names_render_through_refresh_and_cached_get(client, l
     requests = list(live_librenms.server.requests)
     assert fragment(client, subject).context["module_sync"]["table"] is not None
     assert live_librenms.server.requests == requests
+
+
+@pytest.mark.django_db
+def test_a_librenms_without_the_transceiver_route_still_shows_the_module_rows(client, live_librenms):
+    from netbox_librenms_plugin.acquisition.snapshot import Outcome
+
+    subject = device("module-tab-no-transceiver-route")
+    client.force_login(make_superuser("module-tab-no-transceiver-route-user"))
+    serve(live_librenms.server, inventory=INVENTORY)
+    live_librenms.server.register(
+        f"/api/v0/devices/{HOST_ID}/transceivers", {"status": "error", "message": "Not Found"}, status=404
+    )
+
+    response = refresh(client, subject)
+
+    assert response.status_code == 200
+    table = response.context["module_sync"]["table"]
+    assert table is not None
+    assert "CARD-SERIAL" in table.as_html(response.wsgi_request)
+    snapshot = source_cache.read(subject, Resource.MODULES, "default")
+    assert snapshot.record(Resource.MODULES, "transceivers").outcome is Outcome.NOT_APPLICABLE
+    assert not any(f"devices/{HOST_ID}/transceivers" in str(message) for message in response.context["messages"])
+    assert fragment(client, subject).context["module_sync"]["table"] is not None
