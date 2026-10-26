@@ -273,3 +273,26 @@ def test_capture_preserves_device_facts_needed_by_replay(live_librenms, recordin
 
     assert recording["responses"]["GET /api/v0/devices/5501"]["devices"] == [kept]
     assert api.get_device_info(5501, use_cache=False) == (True, kept)
+
+
+@pytest.mark.django_db
+def test_a_missing_transceiver_route_is_captured_and_replays_the_same_modules(
+    live_librenms, configure_librenms, recording_server
+):
+    from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
+
+    subject = seed_mapping(make_device("capture-no-transceiver-route"), "default", own=5501)
+    serve(live_librenms.server)
+    missing = {"status": "error", "message": "Not Found"}
+    live_librenms.server.register("/api/v0/devices/5501/transceivers", missing, status=404)
+    before = assess_modules(acquire(subject, server_key="default", resources=RESOURCES), subject=subject)
+
+    recording = capture(subject)
+    replay, replay_api = recording_server(recording)
+    configure_librenms(
+        {"default": {"librenms_url": replay.url, "api_token": replay_api.headers["X-Auth-Token"], "verify_ssl": False}}
+    )
+
+    assert unwrap_response(recording["responses"]["GET /api/v0/devices/5501/transceivers"]) == (404, missing)
+    assert before["inventory"]
+    assert assess_modules(acquire(subject, server_key="default", resources=RESOURCES), subject=subject) == before

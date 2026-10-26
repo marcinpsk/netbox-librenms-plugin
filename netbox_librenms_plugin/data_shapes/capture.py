@@ -14,13 +14,11 @@ SCHEMA_VERSION = 1
 CAPTURE_RESOURCES = (Resource.INTERFACES, Resource.IP_ADDRESSES, Resource.CABLES, Resource.MODULES)
 
 
-def _require(record, *, allow_missing=False, optional_status=False):
-    """Require one definitive recording source, with an optional unsupported endpoint answer."""
+def _require(record, *, optional_status=False):
+    """Require one definitive recording source."""
     if record.obtained:
         if 200 <= record.http_status < 300 and not optional_status and record.body.get("status") != "ok":
             raise RuntimeError(f"Capture failed for {record.request.path!r}: response was not a success object")
-        return
-    if allow_missing and record.http_status == responses.HTTP_NOT_FOUND:
         return
     detail = "no HTTP response" if record.http_status is None else f"HTTP {record.http_status}: {record.reason}"
     raise RuntimeError(f"Capture failed for {record.request.path!r}: {detail}")
@@ -45,14 +43,9 @@ def _requirements(snapshot):
     """Require the mapped source parts that a structural recording needs."""
     host_id = snapshot.resources[Resource.INTERFACES].host.librenms_id
     stack_request = responses.port_stack(host_id).request
-    transceiver_request = responses.transceivers(host_id).request
     for record in _recording_records(snapshot):
         if record.outcome is not Outcome.NOT_APPLICABLE:
-            _require(
-                record,
-                allow_missing=record.request == transceiver_request,
-                optional_status=record.request == stack_request,
-            )
+            _require(record, optional_status=record.request == stack_request)
 
 
 def _export_responses(snapshot):
