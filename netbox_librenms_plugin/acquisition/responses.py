@@ -110,8 +110,12 @@ def ports(device_id, *, with_vlans):
 
     def decode(status, body):
         decoded = contract(status, body)
-        # One unusable row makes the answer malformed, so a reader never drops a VLAN silently.
-        if decoded.outcome is Outcome.OBTAINED and not all(_has_usable_vlans(port) for port in decoded.value):
+        # A VLAN reader never drops a VLAN silently: one unusable row makes its answer malformed.
+        if (
+            with_vlans
+            and decoded.outcome is Outcome.OBTAINED
+            and not all(_has_usable_vlans(port) for port in decoded.value)
+        ):
             return Decoded(Outcome.FAILED, reason="LibreNMS returned a port row whose VLAN fields name no VLAN id.")
         return decoded
 
