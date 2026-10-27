@@ -2096,7 +2096,7 @@ class TestResolvePortRelationships:
         # The loop is 1 -> 4 -> 3 -> 5 -> 2 -> 1; the edges 1 -> 4 and 3 -> 5 come from ipForward stack rows.
         port_stack = [{"high_port_id": 4, "low_port_id": 1}, {"high_port_id": 5, "low_port_id": 3}]
 
-        result = resolve_port_relationships(ports, port_stack, lag_patterns={})
+        result = resolve_port_relationships(ports, port_stack, **name_rules())
 
         assert result["sub_interfaces"] == {2: 1, 3: 2, 4: 3, 5: 2}
         kinds = {kind["key"]: kind for kind in result["diagnostics"]["kinds"]}
@@ -2122,7 +2122,7 @@ class TestResolvePortRelationships:
             port_stack.append({"high_port_id": first, "low_port_id": first + 2})
 
         started = time.monotonic()
-        result = resolve_port_relationships(ports, port_stack, lag_patterns={})
+        result = resolve_port_relationships(ports, port_stack, **name_rules())
         elapsed = time.monotonic() - started
 
         assert result["sub_interfaces"][1] == 2
