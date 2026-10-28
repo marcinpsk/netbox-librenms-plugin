@@ -8,7 +8,7 @@ from django.urls import reverse
 from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab
-from netbox_librenms_plugin.tests.conftest import make_device, make_superuser, map_device_to_librenms
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser, map_device_to_librenms
 
 HOST_ID = 5401
 OOB_ID = 5402
@@ -74,6 +74,34 @@ def _rows(response):
 
 def _messages(response, level):
     return [str(message) for message in get_messages(response.wsgi_request) if message.level == level]
+
+
+@pytest.mark.django_db
+def test_hostname_only_link_resolves_remote_interface_from_acquired_aliases(client, live_librenms):
+    device = _device("cable-hostname-source")
+    remote_device = map_device_to_librenms(make_device("cable-hostname-peer"), NEIGHBOUR_ID, server_key=SERVER_KEY)
+    make_interface(device, "eth1")
+    remote = make_interface(remote_device, "GigabitEthernet0/1")
+    client.force_login(make_superuser("cable-hostname-user"))
+    link = _link(remote_hostname=remote_device.name, remote_port="Gi0/1", remote_port_id=999)
+    _serve(
+        live_librenms.server,
+        links=[link],
+    )
+    remote_ports = [_port(8, "Gi0/1", ifDescr=remote.name)]
+    _serve(live_librenms.server, device_id=NEIGHBOUR_ID, ports=remote_ports, links=[])
+
+    response = _refresh(client, device)
+
+    assert response.status_code == 200
+    snapshot = source_cache.read(device, Resource.CABLES, SERVER_KEY)
+    assert snapshot.value(Resource.CABLES, f"neighbour_ports:{NEIGHBOUR_ID}") == remote_ports
+    assert snapshot.record(Resource.CABLES, "links").body["links"] == [link]
+    assert snapshot.value(Resource.CABLES, "links") == [{**link, "resolved_remote_device_id": NEIGHBOUR_ID}]
+    (row,) = _rows(response)
+    assert row.get("netbox_remote_interface_id") == remote.pk
+    assert row["remote_port_aliases"] == [remote.name]
+    assert row["remote_device_id"] is None
 
 
 @pytest.mark.django_db
