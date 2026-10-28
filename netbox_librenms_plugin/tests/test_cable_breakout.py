@@ -64,12 +64,14 @@ class _Breakout:
     def row(self, channel_id, far_end=None):
         """One LibreNMS LLDP row from channel *channel_id* to its peer port; the row id is the local port id."""
         far_end = far_end or self.far_ends[channel_id - 1]
+        # LibreNMS names the port ID of a seeded neighbour port only; another far end has none.
+        port_id = 201 + self.far_ends.index(far_end) if far_end in self.far_ends else None
         return link_row(
             100 + channel_id,
             far_end.name,
             local_port=self.channels[channel_id - 1].name,
             remote_hostname=far_end.device.name,
-            remote_port_id=200 + channel_id,
+            remote_port_id=port_id,
         )
 
     def seed(self, *rows, device=None, ports=None, neighbour_ports=None):
