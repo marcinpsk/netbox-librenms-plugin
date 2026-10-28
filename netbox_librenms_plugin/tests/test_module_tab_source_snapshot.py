@@ -213,7 +213,11 @@ def test_a_version_change_requires_a_new_source_snapshot(client, live_librenms, 
 def test_failed_refresh_of_another_version_preserves_this_versions_state(
     client, live_librenms, monkeypatch, settings, changed_version
 ):
+    from contextlib import ExitStack
     from dataclasses import replace
+
+    from django.test import override_settings
+
     import netbox_librenms_plugin
 
     subject = device("module-tab-isolated-state")
@@ -222,11 +226,11 @@ def test_failed_refresh_of_another_version_preserves_this_versions_state(
     assert refresh(client, subject).status_code == 200
     original = source_cache.read(subject, Resource.MODULES, "default")
     assert original is not None
-    with monkeypatch.context() as version:
+    with monkeypatch.context() as version, ExitStack() as other_release:
         if changed_version == "plugin":
             version.setattr(netbox_librenms_plugin, "__version__", "0.0.0-other")
         else:
-            version.setattr(settings, "RELEASE", replace(settings.RELEASE, version="0.0.0-other"))
+            other_release.enter_context(override_settings(RELEASE=replace(settings.RELEASE, version="0.0.0-other")))
         live_librenms.server.register(f"/api/v0/inventory/{HOST_ID}/all", {"status": "error"}, status=500)
         assert refresh(client, subject).status_code == 200
         assert not SyncCacheConsistency(subject).status("default")["modules"]["snapshot_available"]
