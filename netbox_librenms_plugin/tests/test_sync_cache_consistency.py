@@ -1900,9 +1900,10 @@ def test_partial_cable_refresh_keeps_rows_from_available_sources(client, setting
 
 
 @pytest.mark.django_db
-def test_cable_refresh_refuses_an_ambiguous_server_key(client, settings, primary_librenms):
+def test_cable_refresh_refuses_an_ambiguous_server_key(client, settings, primary_librenms, librenms_server):
     """QueryDict.get() keeps the LAST repeated value, so an ambiguous POST could refresh another server."""
     _configure_servers(settings)
+    settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]["secondary"]["librenms_url"] = librenms_server.url
     device = make_device(
         "cache-cable-ambiguous",
         librenms_cf={"primary": {"id": 671}, "secondary": {"id": 672}},
@@ -1913,6 +1914,7 @@ def test_cable_refresh_refuses_an_ambiguous_server_key(client, settings, primary
     response = client.post(url, {"server_key": ["primary", "secondary"]}, HTTP_HX_REQUEST="true")
 
     assert primary_librenms.requests == []
+    assert librenms_server.requests == []
 
     assert response.status_code == 200
     assert b"Select exactly one configured LibreNMS server." in response.content
