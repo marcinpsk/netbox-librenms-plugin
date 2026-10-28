@@ -1,6 +1,6 @@
 """What each resource requests from LibreNMS, and which of its responses each scope needs."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from time import monotonic
 
 from dcim.models import Device, Interface
@@ -16,7 +16,8 @@ from netbox_librenms_plugin.serial_utils import (
     get_serial_sensor_type_patterns,
     project_serial_sensors,
 )
-from netbox_librenms_plugin.server_mappings import MappingRole, identity_q
+from netbox_librenms_plugin.server_mappings import MappingRole, identity_q, read_mapping
+from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
 REMOTE_ALIAS_FETCH_BUDGET_SECONDS = 15.0
 NEIGHBOUR_PORTS_PREFIX = "neighbour_ports:"
@@ -143,13 +144,23 @@ def _cable_parts(fetch, librenms_id):
         if (neighbour_id := coerce_librenms_id(link.get("remote_device_id"))) is not None
     )
     resolved_devices = []
-    identities = dict.fromkeys(
-        (coerce_librenms_id(link.get("remote_device_id")), link.get("remote_hostname")) for link in links.value
-    )
-    for device_id, hostname in identities:
+    resolved_links = [dict(link) for link in links.value]
+    identities = {}
+    for link in resolved_links:
+        identity = (coerce_librenms_id(link.get("remote_device_id")), link.get("remote_hostname"))
+        identities.setdefault(identity, []).append(link)
+    for (device_id, hostname), device_links in identities.items():
         device, found, _error = resolve_remote_device(device_id, hostname, server_key=fetch.server_key)
         if found:
             resolved_devices.append(device)
+            if device_id is None:
+                owner = get_librenms_sync_device(device, server_key=fetch.server_key) or device
+                neighbour_id = read_mapping(owner).own_id(fetch.server_key)
+                if neighbour_id is not None:
+                    neighbours[neighbour_id] = None
+                    for link in device_links:
+                        link["resolved_remote_device_id"] = neighbour_id
+    parts["links"] = fetch.responses[links.request.key] = replace(links, value=resolved_links)
     neighbours.update(
         dict.fromkeys(_displaced_owner_ids(fetch.server_key, (librenms_id, *neighbours), resolved_devices))
     )

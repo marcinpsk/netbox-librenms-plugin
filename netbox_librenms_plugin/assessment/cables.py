@@ -128,6 +128,7 @@ def _collect_cable_links(links, name_map, alt_map, source):
                 "remote_device": link.get("remote_hostname"),
                 "remote_port_id": coerce_librenms_id(link.get("remote_port_id")),
                 "remote_device_id": coerce_librenms_id(link.get("remote_device_id")),
+                "_neighbour_ports_id": coerce_librenms_id(link.get("resolved_remote_device_id")),
                 "_source": source,
             }
         )
@@ -227,7 +228,10 @@ def _attach_remote_port_aliases(links, ports_by_neighbour):
     for link in links:
         device_id = coerce_librenms_id(link.get("remote_device_id"))
         if device_id is None:
-            continue
+            # A hostname-only link names the neighbour whose ports acquisition read for it, unless that scope is blocked.
+            device_id = link.get("_neighbour_ports_id")
+            if device_id not in indexes:
+                continue
         by_port_id, by_name = indexes[device_id]
         remote_port = link.get("remote_port")
         matched = by_port_id.get(coerce_librenms_id(link.get("remote_port_id")))
