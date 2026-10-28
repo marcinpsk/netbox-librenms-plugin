@@ -4,7 +4,7 @@ import pytest
 from dcim.models import Cable, ConsoleServerPort, Device, Interface
 from django.contrib import messages
 from django.contrib.messages import get_messages
-from django.core.cache import cache
+from django.core.cache import cache, caches
 from django.urls import reverse
 
 from netbox_librenms_plugin import source_cache
@@ -258,7 +258,7 @@ def test_an_uncached_refresh_shows_no_rows(client, live_librenms, monkeypatch):
         if cache_key != key:
             return real_set(cache_key, *args, **kwargs)
 
-    monkeypatch.setattr(cache, "set", drop_snapshot_write)
+    monkeypatch.setattr(caches["default"], "set", drop_snapshot_write)
 
     response = _refresh(client, subject)
 
