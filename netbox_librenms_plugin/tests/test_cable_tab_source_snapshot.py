@@ -179,6 +179,20 @@ def test_failed_neighbour_ports_block_only_that_neighbours_rows(client, live_lib
 
 
 @pytest.mark.django_db
+def test_failed_neighbour_ports_block_a_hostname_only_link_to_that_neighbour(client, live_librenms):
+    device = _device("cable-snapshot-hostname-neighbour")
+    neighbour = map_device_to_librenms(make_device("cable-snapshot-hostname-peer"), NEIGHBOUR_ID, server_key=SERVER_KEY)
+    client.force_login(make_superuser("cable-snapshot-hostname-neighbour-user"))
+    _serve(live_librenms.server, links=[_link(1, remote_hostname=neighbour.name), _link(2)], ports=[_port(), _port(2)])
+    live_librenms.server.register(f"/api/v0/devices/{NEIGHBOUR_ID}/ports", {"status": "error"}, status=500)
+
+    response = _refresh(client, device)
+
+    assert [row["local_port_id"] for row in _rows(response)] == [2]
+    assert response.context["cable_sync"]["blockers"]
+
+
+@pytest.mark.django_db
 def test_low_privilege_refresh_makes_no_sensor_request_and_removes_old_serial_rows(client, live_librenms):
     from dcim.models import ConsoleServerPort, Device
     from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
