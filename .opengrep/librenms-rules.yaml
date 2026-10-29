@@ -1849,6 +1849,26 @@ rules:
         - "**/views/base/cables_view.py"
         - "**/views/sync/cables.py"
 
+  - id: no-fixed-tick-list-for-a-clock
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This test replaces a clock with next() over a fixed list of ticks. The list fixes how often the
+      code reads the clock: one more read raises StopIteration inside the code under test, and one read
+      less moves the point where the time runs out. Keep a mutable clock that the test or the mock
+      server moves, or set the time budget itself.
+    metadata:
+      category: correctness
+    paths:
+      include: ["**/netbox_librenms_plugin/tests/**"]
+    patterns:
+      - pattern-either:
+          - pattern: '$MP.setattr($TARGET, "$CLOCK", lambda: next(...))'
+          - pattern: '$MP.setattr($TARGET, "$CLOCK", lambda $...ARGS: next(...))'
+      - metavariable-regex:
+          metavariable: $CLOCK
+          regex: ^(monotonic|perf_counter|time|time_ns|monotonic_ns)$
+
   - id: batch-validation-needs-candidate-keys
     languages: [python]
     severity: ERROR
