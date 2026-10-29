@@ -876,8 +876,20 @@ def test_manual_rows_share_one_ports_request_per_displaced_owner(client, link, m
     if second_owner == "budget-exhausted":
         from netbox_librenms_plugin.acquisition import resources
 
-        ticks = iter([0.0, 0.0, 0.0, 16.0, 16.0, 16.0])
-        monkeypatch.setattr(resources, "monotonic", lambda: next(ticks))
+        clock, served = [0.0], set()
+
+        def spend_the_budget_after_both_owners(owner_id):
+            def answer(method, path, query, headers, body):
+                served.add(owner_id)
+                if served == {10, 11}:
+                    clock[0] = resources.REMOTE_ALIAS_FETCH_BUDGET_SECONDS + 1
+                return 200, {"status": "ok", "ports": tables[owner_id]}
+
+            return answer
+
+        for owner_id in (10, 11):
+            link.server.register(f"/api/v0/devices/{owner_id}/ports", spend_the_budget_after_both_owners(owner_id))
+        monkeypatch.setattr(resources, "monotonic", lambda: clock[0])
     data = {"select": ["100", "101"], "server_key": SERVER_KEY, "force": "on"}
     for row_id, local, pick, cable in zip(("100", "101"), (link.local, local_b), chosen, old, strict=True):
         data.update({key: value for key, value in _sync_data(rows[row_id]).items() if key != "select"})
