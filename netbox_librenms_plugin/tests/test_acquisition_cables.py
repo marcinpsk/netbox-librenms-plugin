@@ -179,8 +179,7 @@ def test_the_neighbour_budget_records_omitted_requests_as_failed(live_librenms, 
     from netbox_librenms_plugin.acquisition import resources
 
     _serve(live_librenms.server, links=LINKS)
-    ticks = iter([0.0, 16.0])
-    monkeypatch.setattr(resources, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(resources, "REMOTE_ALIAS_FETCH_BUDGET_SECONDS", 0.0)
 
     snapshot = _acquire(_device("acq-cable-budget"))
 
@@ -261,8 +260,14 @@ def test_host_and_oob_neighbours_share_one_budget(live_librenms, monkeypatch):
     _serve(live_librenms.server, links=LINKS)
     _serve(live_librenms.server, OOB_ID, links=[{"local_port_id": 2, "remote_device_id": NEIGHBOUR_ID + 1}])
     _serve(live_librenms.server, NEIGHBOUR_ID)
-    ticks = iter([0.0, 0.0, 16.0])
-    monkeypatch.setattr(resources, "monotonic", lambda: next(ticks))
+    clock = [0.0]
+
+    def spend_the_budget(method, path, query, headers, body):
+        clock[0] = resources.REMOTE_ALIAS_FETCH_BUDGET_SECONDS + 1
+        return 200, {"status": "ok", "ports": PORTS}
+
+    live_librenms.server.register(f"/api/v0/devices/{NEIGHBOUR_ID}/ports", spend_the_budget)
+    monkeypatch.setattr(resources, "monotonic", lambda: clock[0])
 
     snapshot = _acquire(_device("acq-cable-shared-budget", oob={"id": OOB_ID, "type": "idrac"}))
 
@@ -270,6 +275,7 @@ def test_host_and_oob_neighbours_share_one_budget(live_librenms, monkeypatch):
     omitted = snapshot.record(Resource.CABLES, f"neighbour_ports:{NEIGHBOUR_ID + 1}", MappingRole.OOB)
     assert omitted.outcome is Outcome.FAILED
     assert omitted.request.path == f"devices/{NEIGHBOUR_ID + 1}/ports"
+    assert f"/api/v0/devices/{NEIGHBOUR_ID + 1}/ports" not in [r["path"] for r in live_librenms.server.requests]
 
 
 @pytest.mark.django_db
@@ -293,8 +299,7 @@ def test_neighbour_budget_cannot_skip_the_oob_mappings_own_ports(live_librenms, 
 
     _serve(live_librenms.server, links=[{"local_port_id": 1, "remote_device_id": OOB_ID}])
     _serve(live_librenms.server, OOB_ID)
-    ticks = iter([0.0, 16.0])
-    monkeypatch.setattr(resources, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(resources, "REMOTE_ALIAS_FETCH_BUDGET_SECONDS", 0.0)
 
     snapshot = _acquire(_device("acq-cable-oob-neighbour", oob={"id": OOB_ID, "type": "idrac"}))
 
@@ -319,8 +324,7 @@ def test_an_omitted_neighbour_is_still_requested_for_another_resources_owner(liv
     live_librenms.server.register(
         f"/api/v0/devices/{NEIGHBOUR_ID}", {"status": "ok", "devices": [{"device_id": NEIGHBOUR_ID}]}
     )
-    ticks = iter([0.0, 16.0])
-    monkeypatch.setattr(resources, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(resources, "REMOTE_ALIAS_FETCH_BUDGET_SECONDS", 0.0)
     requested = [Resource.CABLES, Resource.IP_ADDRESSES]
     if not cables_first:
         requested.reverse()
