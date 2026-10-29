@@ -4151,7 +4151,7 @@ class TestGenericModuleTypeFallback:
             "entPhysicalClass": "module",
             "entPhysicalSerialNum": "SN-GENERIC-REPLACE",
         }
-        seed_inventory(ReplaceModuleView(), device, [item], librenms_id=92)
+        seed_inventory(device, [item], librenms_id=92)
         _action, fields = rendered_modal_form(device, 920, "replace-module")
         request = _post_request(fields)
         view = _view(ReplaceModuleView, request, live_librenms)
@@ -4174,7 +4174,7 @@ class TestGenericModuleTypeFallback:
             "entPhysicalClass": "module",
             "entPhysicalSerialNum": "SN-GENERIC-PREVIEW",
         }
-        seed_inventory(ModuleMismatchPreviewView(), device, [item], librenms_id=93)
+        seed_inventory(device, [item], librenms_id=93)
         user = make_superuser()
         request = make_request("get", rendered_preview_query(device, 930, user=user), user=user)
         view = _view(ModuleMismatchPreviewView, request, live_librenms)
