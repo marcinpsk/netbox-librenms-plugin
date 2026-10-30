@@ -95,5 +95,8 @@ def _binding_holds(snapshot, resource, owner):
 
 def remaining_ttl(subject, resource, server_key):
     """Return the seconds the resource's snapshot has left, or None without a snapshot."""
+    # An entry that read() refuses, e.g. after a mapping change, still has its TTL.
+    if read(subject, resource, server_key) is None:
+        return None
     ttl = cache.ttl(snapshot_key(subject, resource, server_key))
     return ttl if ttl and ttl > 0 else None
