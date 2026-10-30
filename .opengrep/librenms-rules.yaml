@@ -29,11 +29,15 @@ rules:
           def effective_inventory(...):
               ...
       - pattern-either:
-          - pattern: str($ROW.get($FIELD)) == str($VALUE)
-          - pattern: str($VALUE) == str($ROW.get($FIELD))
-      - metavariable-regex:
-          metavariable: $FIELD
-          regex: '^[A-Za-z_][A-Za-z0-9_]*$'
+          - patterns:
+              - pattern-either:
+                  - pattern: str($ROW.get($FIELD)) == str($VALUE)
+                  - pattern: str($VALUE) == str($ROW.get($FIELD))
+              - metavariable-regex:
+                  metavariable: $FIELD
+                  regex: '^[A-Za-z_][A-Za-z0-9_]*$'
+          - pattern: str($ROW.get("entPhysicalContainedIn")) == str($VALUE)
+          - pattern: str($VALUE) == str($ROW.get("entPhysicalContainedIn"))
     paths:
       include:
         - "**/acquisition/responses.py"
