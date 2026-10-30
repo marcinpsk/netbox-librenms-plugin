@@ -122,7 +122,10 @@ def test_the_stored_snapshot_round_trips_and_follows_the_mapping(live_librenms):
 
     assert source_cache.store(device, Resource.VLANS, snapshot)
     assert source_cache.read(device, Resource.VLANS, SERVER_KEY) == snapshot
+    assert source_cache.remaining_ttl(device, Resource.VLANS, SERVER_KEY) > 0
 
     # The mapping changes without a save, so no write signal clears the snapshot; the binding check does.
     seed_mapping(device, SERVER_KEY, own=DEVICE_ID + 1, save=False)
     assert source_cache.read(device, Resource.VLANS, SERVER_KEY) is None
+    # The countdown follows the readable snapshot, not the raw entry that still holds its TTL.
+    assert source_cache.remaining_ttl(device, Resource.VLANS, SERVER_KEY) is None
