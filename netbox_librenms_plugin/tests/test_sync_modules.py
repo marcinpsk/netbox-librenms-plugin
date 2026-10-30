@@ -856,7 +856,8 @@ class TestInstallAndUpdateViews:
 
         from netbox_librenms_plugin.inventory_policy import load_inventory_policy
         from netbox_librenms_plugin.module_grants import ACTION_INSTALL_MODULE, RENDER_ATTRIBUTED, sign_module_grant
-        from netbox_librenms_plugin.views.sync.modules import InstallModuleView, _get_cached_inventory_for_device
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import module_inventory
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
         device = make_device(f"view-install-holder-{phys_class}", librenms_cf={"default": 52})
         bay = make_module_bay(device, "Holder Bay")
@@ -864,8 +865,8 @@ class TestInstallAndUpdateViews:
         holder = _inventory_item(520, model, bay.name, phys_class=phys_class)
         view = InstallModuleView()
         view._librenms_api = live_librenms.api
-        seed_inventory(view, device, [holder], librenms_id=52)
-        inventory = _get_cached_inventory_for_device(device, "default", view.get_cache_key)
+        seed_inventory(device, [holder], librenms_id=52)
+        inventory = module_inventory(device)
         grant = sign_module_grant(
             page_device_id=device.pk,
             device_id=device.pk,
