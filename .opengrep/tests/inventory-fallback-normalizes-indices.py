@@ -9,6 +9,16 @@ def effective_inventory(filtered, full, *, params, http_status):
 
 
 def effective_inventory(filtered, full, *, params, http_status):
+    # ruleid: inventory-fallback-normalizes-indices
+    return [row for row in full.value if str(row.get("entPhysicalContainedIn")) == str(params["parent"])]
+
+
+def effective_inventory(filtered, full, *, params, http_status):
+    # ruleid: inventory-fallback-normalizes-indices
+    return [row for row in full.value if str(params["parent"]) == str(row.get("entPhysicalContainedIn"))]
+
+
+def effective_inventory(filtered, full, *, params, http_status):
     # ok: inventory-fallback-normalizes-indices
     return [row for row in full.value if inventory_index(row.get("entPhysicalContainedIn")) == inventory_index(value)]
 
