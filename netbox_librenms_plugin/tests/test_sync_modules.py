@@ -3428,7 +3428,7 @@ def _member_card_under_page_carrier(*, card_on_member):
         },
     ]
     key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(key, trusted_module_inventory_payload(page, rows))
+    seed_mapped_modules(page, rows)
     return page, member, unrelated, card_type, key
 
 
