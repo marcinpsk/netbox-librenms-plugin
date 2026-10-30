@@ -23,6 +23,7 @@ from ..utils import (
     find_devices_by_serial,
     is_vc_position,
     normalize_serial,
+    normalize_stack_serial,
 )
 
 logger = logging.getLogger(__name__)
