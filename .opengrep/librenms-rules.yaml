@@ -1909,9 +1909,13 @@ rules:
     severity: ERROR
     message: Iterate recording responses with their keys to exclude neighbour-only sources.
     patterns:
-      - pattern-inside: |
-          def _export_responses($SNAPSHOT):
-            ...
+      - pattern-either:
+          - pattern-inside: |
+              def _export_responses($SNAPSHOT):
+                ...
+          - pattern-inside: |
+              def _recording_records($SNAPSHOT):
+                ...
       - pattern: $SNAPSHOT.responses.values()
 
   - id: batch-validation-needs-candidate-keys
