@@ -196,8 +196,8 @@ def compute_shape_signature(recording, *, serial_key=normalize_stack_serial):
         "member_shape": stack.shape,
     }
 
-    # LAG + sub-interface styles from ports. LAG detection mirrors the client's
-    # resolve_port_relationships._is_lag_aggregate: an ieee8023adLag ifType OR a name matching a
+    # LAG + sub-interface styles from ports. LAG detection mirrors _is_lag_aggregate in
+    # interface_relationships.resolve_port_relationships: an ieee8023adLag ifType OR a name matching a
     # configured per-OS LAG pattern (captured in the recording's lag_patterns). Reading ifType alone
     # would fingerprint a pattern-based LAG shape (e.g. Cisco "Po1") as lag.present=False, collapsing
     # a real LAG into a non-LAG novelty bucket.

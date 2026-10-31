@@ -12,6 +12,8 @@ import pytest
 from django.conf import settings
 from django.test import override_settings
 
+from netbox_librenms_plugin.interface_relationships import resolve_port_relationships
+
 
 def _make_api(url, token="test-token"):
     """Create a LibreNMSAPI instance pointed at the mock server."""
@@ -160,7 +162,7 @@ class TestLibreNMSAPIPortStack:
         assert ports_ok is True
         assert stack_ok is True
 
-        relationships = api.resolve_port_relationships(ports_data["ports"], port_stack, lag_patterns={})
+        relationships = resolve_port_relationships(ports_data["ports"], port_stack, lag_patterns={})
 
         assert relationships["lag_members"] == {101: 102}
 

@@ -2620,13 +2620,10 @@ class AddDeviceTypeMappingView(
         # Preserve the entry's REMAINING TTL rather than granting a fresh full window: the
         # snapshot may be minutes old, and re-arming it full-length would keep serving it to
         # the bulk-import seed long after the original expiry. When the entry has already
-        # expired mid-request, leave it expired (next read fetches live); when the backend
-        # can't report TTLs (non-Redis, e.g. tests' LocMemCache), keep the full-timeout
-        # repopulate — NetBox deployments are Redis-backed, so that branch is test-only.
-        from netbox_librenms_plugin.utils import cache_remaining_ttl
-
+        # expired mid-request, leave it expired (next read fetches live); an entry with no expiry keeps
+        # the full-timeout repopulate.
         cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
-        remaining_ttl = cache_remaining_ttl(cache, cache_key)
+        remaining_ttl = cache.ttl(cache_key)
         if remaining_ttl is None:
             cache.set(cache_key, libre_device, timeout=self.librenms_api.cache_timeout)
         elif remaining_ttl > 0:

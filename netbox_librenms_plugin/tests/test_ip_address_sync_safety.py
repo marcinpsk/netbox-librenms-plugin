@@ -277,7 +277,7 @@ def _receiver_parses_the_saved_ip_address():
 
 def _ip_snapshot_key(obj):
     """Return the production IP-addresses snapshot key, so a key-scheme change cannot pass silently."""
-    return sync_snapshot_key(obj, TAB_SPECS[SyncTab.IP_ADDRESSES].data_type, "default")
+    return sync_snapshot_key(obj, TAB_SPECS[SyncTab.IP_ADDRESSES].source.data_type, "default")
 
 
 def _serve_librenms_ip_response(server, address, prefix_length, *, device_name="ip-prefix-device", port_id=7001):
@@ -1634,8 +1634,8 @@ def test_interface_sync_keeps_its_source_snapshot_and_clears_the_ip_snapshot(
     client.force_login(make_superuser("ip-cache-cleared-user"))
     ip_refresh_url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk])
     interface_refresh_url = reverse("plugins:netbox_librenms_plugin:device_interface_sync", args=[device.pk])
-    ip_cache_key = sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].data_type, "default")
-    interface_cache_key = sync_snapshot_key(device, TAB_SPECS[SyncTab.INTERFACES].data_type, "default")
+    ip_cache_key = sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].source.data_type, "default")
+    interface_cache_key = sync_snapshot_key(device, TAB_SPECS[SyncTab.INTERFACES].source.data_type, "default")
     assert (
         client.post(
             ip_refresh_url,
