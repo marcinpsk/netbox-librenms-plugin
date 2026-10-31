@@ -290,6 +290,38 @@ def test_module_grant_reports_an_unusable_source_as_a_snapshot_refusal(live_libr
 
 
 @pytest.mark.django_db
+def test_cached_get_renders_no_inventory_when_the_owner_is_deleted_after_the_cache_read(
+    client, live_librenms, monkeypatch
+):
+    from dcim.models import Device
+
+    subject = device("module-tab-owner-deleted")
+    client.force_login(make_superuser("module-tab-owner-deleted-user"))
+    serve(live_librenms.server, inventory=INVENTORY, transceivers=[])
+    assert refresh(client, subject).status_code == 200
+    read = source_cache.read
+
+    def read_then_delete_owner(subject_, resource, server_key):
+        snapshot = read(subject_, resource, server_key)
+        # Delete the owner in the window between the cache read and the assessment.
+        if resource is Resource.MODULES and snapshot is not None:
+            Device.objects.filter(pk=snapshot.resources[resource].owner.pk).delete()
+        return snapshot
+
+    monkeypatch.setattr(source_cache, "read", read_then_delete_owner)
+
+    response = fragment(client, subject)
+
+    assert response.status_code == 200
+    assert response.context["module_sync"] == {
+        "table": None,
+        "object": subject,
+        "cache_expiry": None,
+        "server_key": "default",
+    }
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("name", [0, 4410])
 def test_numeric_inventory_names_render_through_refresh_and_cached_get(client, live_librenms, name):
     from netbox_librenms_plugin.models import InventoryIgnoreRule
