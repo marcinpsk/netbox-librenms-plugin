@@ -15,9 +15,11 @@ does not poll.
 
 import pytest
 
+from netbox_librenms_plugin.assessment.interfaces import stored_name_rules
 from netbox_librenms_plugin.interface_relationships import resolve_port_relationships
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, name_rules
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.source_snapshot_helpers import interface_rows, seed_interfaces_snapshot
 
 pytestmark = pytest.mark.django_db
 
@@ -37,7 +39,6 @@ def _port(port_id, name, if_type="ethernetCsmacd"):
         "ifMtu": 1500,
         "ifAdminStatus": "up",
         "ifPhysAddress": "",
-        "_source": "main",
     }
 
 
@@ -66,9 +67,7 @@ class TestAPairNoRuleClaims:
         return resolve_port_relationships(
             EVE_NG_PORTS,
             EVE_NG_STACK,
-            lag_patterns={"linux": r"^bond\d+$"},
-            bridge_patterns={"linux": bridge_pattern},
-            compiled_sap_patterns=[],
+            **name_rules(lag=[r"^bond\d+$"], sap=[], bridge=[bridge_pattern]),
             interface_name_field="ifName",
         )
 
@@ -107,9 +106,7 @@ class TestTheDiagnosticsCounters:
         return resolve_port_relationships(
             ports,
             stack,
-            lag_patterns={"linux": r"^bond\d+$"},
-            bridge_patterns={"linux": OLD_BRIDGE_PATTERN},
-            compiled_sap_patterns=[],
+            **name_rules(lag=[r"^bond\d+$"], bridge=[OLD_BRIDGE_PATTERN]),
             interface_name_field="ifName",
             **kwargs,
         )["diagnostics"]
@@ -137,9 +134,7 @@ class TestTheDiagnosticsCounters:
             relationships = resolve_port_relationships(
                 EVE_NG_PORTS,
                 stack,
-                lag_patterns={"linux": r"^bond\d+$"},
-                bridge_patterns={"linux": OLD_BRIDGE_PATTERN},
-                compiled_sap_patterns=[],
+                **name_rules(lag=[r"^bond\d+$"], sap=[], bridge=[OLD_BRIDGE_PATTERN]),
                 interface_name_field="ifName",
             )
             return relationship_diagnostics_report({"ports": EVE_NG_PORTS, "port_stack_relationships": relationships})
@@ -172,9 +167,7 @@ class TestTheDiagnosticsCounters:
         relationships = resolve_port_relationships(
             EVE_NG_PORTS,
             stack,
-            lag_patterns={"linux": r"^bond\d+$"},
-            bridge_patterns={"linux": OLD_BRIDGE_PATTERN},
-            compiled_sap_patterns=[],
+            **name_rules(lag=[r"^bond\d+$"], sap=[], bridge=[OLD_BRIDGE_PATTERN]),
             interface_name_field="ifName",
         )
         report = relationship_diagnostics_report({"ports": EVE_NG_PORTS, "port_stack_relationships": relationships})
@@ -193,9 +186,7 @@ def test_conflicted_lag_claims_survive_an_empty_name_field_fallback():
             {"high_port_id": 1, "low_port_id": 2},
             {"high_port_id": 1, "low_port_id": 3},
         ],
-        lag_patterns={"linux": r"^bond\d+$"},
-        bridge_patterns={},
-        compiled_sap_patterns=[],
+        **name_rules(lag=[r"^bond\d+$"], sap=[]),
         interface_name_field="ifName",
     )
 
@@ -223,10 +214,7 @@ class TestTheSeededLinuxPattern:
     def test_it_types_the_bridges_the_old_one_rejected(self):
         """Resolved through the seeded row, not a pattern the test supplies."""
         relationships = resolve_port_relationships(
-            EVE_NG_PORTS,
-            EVE_NG_STACK,
-            device_os="linux",
-            interface_name_field="ifName",
+            EVE_NG_PORTS, EVE_NG_STACK, **stored_name_rules("linux"), interface_name_field="ifName"
         )
 
         assert relationships["bridge_members"] == {7998: 8002, 8012: 8013}
@@ -281,8 +269,6 @@ class TestTheRefreshReadsThePortStack:
             assert "." not in port["ifName"]
 
     def test_a_device_with_no_relationship_names_still_gets_its_stack(self, live_librenms):
-        from django.core.cache import cache
-
         from netbox_librenms_plugin.tests.view_test_helpers import make_request
         from netbox_librenms_plugin.tests.view_test_helpers import post as view_post
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
@@ -303,8 +289,7 @@ class TestTheRefreshReadsThePortStack:
         response = view_post(view, request, pk=device.pk)
 
         assert response.status_code == 200
-        cached = cache.get(view.get_cache_key(device, "ports", SERVER_KEY))
-        relationships = cached["port_stack_relationships"]
+        relationships = interface_rows(device)["port_stack_relationships"]
         assert relationships["diagnostics"]["pairs_seen"] == 2
         assert relationships["diagnostics"]["pairs_unresolved_end"] == 1
         # No rule can type this pair, and the refresh carries it rather than dropping it.
@@ -312,40 +297,13 @@ class TestTheRefreshReadsThePortStack:
 
 
 class TestTheTabRendersIt:
-    """The interfaces tab, seeded only through the cache, asked for over HTTP."""
+    """The interfaces tab over a stored snapshot of the raw EVE-NG facts, asked for over HTTP."""
 
-    @staticmethod
-    def _cached(stacked_ports, diagnostics):
-        return {
-            "ports": [dict(port) for port in EVE_NG_PORTS],
-            "port_stack_relationships": {
-                "lag_members": {},
-                "sub_interfaces": {},
-                "bridge_members": {},
-                "stacked_ports": stacked_ports,
-                "diagnostics": diagnostics,
-            },
-        }
-
-    @staticmethod
-    def _diagnostics(**overrides):
-        diagnostics = {
-            "name_field": "ifName",
-            "ports_seen": 19,
-            "pairs_seen": 269,
-            "pairs_malformed": 0,
-            "pairs_unresolved_end": 264,
-            "pairs_skipped_sap": 0,
-            "pairs_usable": 5,
-            "pairs_unclassified": 5,
-            "kinds": [
-                {"key": key, "claimed": 0, "edges": 0, "conflicted": 0, "from_fallback": False}
-                for key in ("sub_interfaces", "bridge_members", "lag_members")
-            ],
-            "patterns": {"lag": [r"^bond\d+$"], "bridge": [OLD_BRIDGE_PATTERN], "sap": []},
-        }
-        diagnostics.update(overrides)
-        return diagnostics
+    # Three more unclassified pairs, so the report counts the five usable rows of the real host.
+    TAP_PORTS = [_port(8100 + index, f"vnet{index}") for index in range(6)]
+    TAP_STACK = [{"high_port_id": 8100 + index, "low_port_id": 8101 + index} for index in range(0, 6, 2)]
+    # The rows that name ports LibreNMS does not poll, as the 264 tap rows of the real host do.
+    UNPOLLED_STACK = [{"high_port_id": None, "low_port_id": None}] * 264
 
     def _get_tab(self, device):
         from django.test import Client
@@ -358,48 +316,30 @@ class TestTheTabRendersIt:
         assert response.status_code == 200
         return response.content.decode()
 
-    def _seed(self, name, cached):
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.mixins import CacheMixin
-
+    def _seed(self, name, port_stack):
         device = make_device(name)
         interface = make_interface(device, "pnet0")
         seed_mapping(interface, SERVER_KEY, own=8002, save=False)
         interface.save()
         seed_mapping(device, SERVER_KEY, own=42, save=False)
         device.save()
-        cache.set(CacheMixin().get_cache_key(device, "ports", SERVER_KEY), cached, 300)
+        # The device OS has no stored bridge rule, as the old pattern rejected these bridge names.
+        seed_interfaces_snapshot(device, [*EVE_NG_PORTS, *self.TAP_PORTS], port_stack, server_key=SERVER_KEY)
         return device
 
+    def _eve_ng_stack(self):
+        return [*EVE_NG_STACK[:2], *self.TAP_STACK, *self.UNPOLLED_STACK]
+
     def test_an_unclassified_pair_is_shown_on_the_row(self):
-        device = self._seed(
-            "stacked-pill",
-            self._cached({7998: [8002], 8002: [7998]}, self._diagnostics()),
-        )
+        device = self._seed("stacked-pill", self._eve_ng_stack())
 
         html = self._get_tab(device)
 
         assert "</i>1 stacked port</span>" in html
         assert "LibreNMS stacks these with this port, but no rule says how: eth0" in html
 
-    @pytest.mark.parametrize("kinds", [None, 7, "invalid", {"key": "lag_members"}])
-    def test_malformed_diagnostic_kinds_do_not_break_the_interfaces_tab(self, kinds):
-        device = self._seed(
-            "stacked-malformed-kinds",
-            self._cached({7998: [8002], 8002: [7998]}, self._diagnostics(kinds=kinds)),
-        )
-
-        html = self._get_tab(device)
-
-        assert "5 of 269 stack rows usable, 5 unclassified" in html
-        assert "<code>eth0</code> &harr; <code>pnet0</code>" in html
-
     def test_the_tab_says_why_the_column_is_empty(self):
-        device = self._seed(
-            "stacked-diagnostics",
-            self._cached({7998: [8002], 8002: [7998]}, self._diagnostics()),
-        )
+        device = self._seed("stacked-diagnostics", self._eve_ng_stack())
 
         html = self._get_tab(device)
 
@@ -409,28 +349,9 @@ class TestTheTabRendersIt:
         assert "<code>eth0</code> &harr; <code>pnet0</code>" in html
 
     def test_a_device_librenms_reports_nothing_for_reads_differently(self):
-        device = self._seed(
-            "stacked-no-rows",
-            self._cached(
-                {}, self._diagnostics(pairs_seen=0, pairs_unresolved_end=0, pairs_usable=0, pairs_unclassified=0)
-            ),
-        )
+        device = self._seed("stacked-no-rows", [])
 
         html = self._get_tab(device)
 
         assert "no port_stack rows for this device" in html
-        assert "stacked port</span>" not in html
-
-    def test_a_snapshot_cached_before_this_change_renders_without_it(self):
-        device = self._seed(
-            "stacked-legacy-cache",
-            {
-                "ports": [dict(port) for port in EVE_NG_PORTS],
-                "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {}, "bridge_members": {}},
-            },
-        )
-
-        html = self._get_tab(device)
-
-        assert "stack rows usable" not in html
         assert "stacked port</span>" not in html

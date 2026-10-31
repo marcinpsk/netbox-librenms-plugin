@@ -117,28 +117,21 @@ class TestCableViewableQuerysetFallback:
 
 @pytest.mark.django_db
 class TestCablePortsDataWithoutHostMapping:
-    def test_no_host_librenms_id_returns_empty_ports_without_reading_the_cache(self, librenms_server, settings):
-        """An OOB-only/unmapped device must not resurrect a stale host-ports snapshot or fetch."""
-        from django.core.cache import cache
-
-        device = make_device("cable-ports-unmapped")
+    def test_no_host_librenms_id_returns_empty_ports_without_a_request(self, librenms_server, settings):
+        """An OOB-only/unmapped device has no host ports to fetch."""
         view = _cable_view(settings, librenms_server)
-        ports_key = view.get_cache_key(device, "ports", SERVER_KEY)
-        cache.set(ports_key, {"ports": [{"port_id": 7, "ifName": "stale0"}]}, timeout=300)
 
-        ports_data = view.get_ports_data(device, server_key=SERVER_KEY)
+        ports_data = view.get_ports_data(None)
 
         assert ports_data == {"ports": []}
         assert librenms_server.requests == []
 
     def test_a_failed_ports_fetch_returns_an_empty_payload(self, librenms_server, settings):
         """A LibreNMS ports failure must degrade to an empty payload, not the error string."""
-        device = make_device("cable-ports-fetch-fail")
         view = _cable_view(settings, librenms_server)
-        view.librenms_id = 141
         # /api/v0/devices/141/ports stays unregistered, so the loopback answers 404.
 
-        ports_data = view.get_ports_data(device, server_key=SERVER_KEY)
+        ports_data = view.get_ports_data(141)
 
         assert ports_data == {"ports": []}
         assert "/api/v0/devices/141/ports" in [r["path"] for r in librenms_server.requests]

@@ -3001,7 +3001,7 @@ class TestCacheKeysAreServerScoped:
     """Production cache-key calls include server_key so every LibreNMS server uses its own namespace."""
 
     # helper name -> number of positional args needed to reach server_key
-    HELPERS = {"get_cache_key": 3, "get_last_fetched_key": 3, "get_vlan_overrides_key": 2}
+    HELPERS = {"get_cache_key": 3, "get_vlan_overrides_key": 2}
 
     @classmethod
     def _scan(cls):

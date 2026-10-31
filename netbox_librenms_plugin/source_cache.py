@@ -1,12 +1,12 @@
 """The web transport of source snapshots: the shared cache the sync page reads and refreshes."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from django.core.cache import cache
 
-from netbox_librenms_plugin.acquisition.coordinator import SubjectNotMapped, acquire, resource_owner
+from netbox_librenms_plugin.acquisition.coordinator import SubjectNotMapped, acquire, oob_link, resource_owner
 from netbox_librenms_plugin.acquisition.registry import RESOURCE_SPECS
-from netbox_librenms_plugin.acquisition.resources import blocked_scopes, is_ready
+from netbox_librenms_plugin.acquisition.resources import OOB_ACQUIRERS, blocked_scopes, is_ready
 from netbox_librenms_plugin.acquisition.snapshot import ObjectRef, SourceSnapshot
 from netbox_librenms_plugin.librenms_api import configured_cache_timeout
 from netbox_librenms_plugin.server_mappings import read_mapping
@@ -19,6 +19,8 @@ class Refresh:
 
     snapshot: SourceSnapshot | None
     error: str | None = None
+    # Each blocked scope of the acquired snapshot, with its blockers; a stored snapshot can have some.
+    blocked: dict = field(default_factory=dict)
 
 
 def _key(owner, resource, server_key):
@@ -43,10 +45,15 @@ def refresh(subject, resource, server_key):
     except SubjectNotMapped:
         # Discovery can keep an id in the cache only, when the mapping custom field is missing.
         return Refresh(None, "Device not found in LibreNMS.")
+    blocked = blocked_scopes(snapshot, resource)
     if store(subject, resource, snapshot):
-        return Refresh(snapshot)
-    record = next(iter(blocked_scopes(snapshot, resource).values()))[0]
-    return Refresh(snapshot, f"{record.request.path} was not obtained ({record.reason})")
+        return Refresh(snapshot, blocked=blocked)
+    return Refresh(snapshot, blocker_notice(blocker for blockers in blocked.values() for blocker in blockers), blocked)
+
+
+def blocker_notice(blockers):
+    """Return one notice that names each failed source once."""
+    return "; ".join(dict.fromkeys(blocker.message for blocker in blockers))
 
 
 def store(subject, resource, snapshot):
@@ -86,11 +93,14 @@ def read(subject, resource, server_key):
 
 
 def _binding_holds(snapshot, resource, owner):
-    """Return whether the snapshot was acquired for the owner's current mapping."""
+    """Return whether the snapshot was acquired for the owner's current mapping, its OOB link included."""
     source = snapshot.resources[resource]
-    return source.owner == ObjectRef.of(owner) and read_mapping(owner).own_id(snapshot.server_key) == (
-        source.host.librenms_id
-    )
+    mapping = read_mapping(owner)
+    if source.owner != ObjectRef.of(owner) or mapping.own_id(snapshot.server_key) != source.host.librenms_id:
+        return False
+    if resource not in OOB_ACQUIRERS:
+        return True
+    return oob_link(mapping, snapshot.server_key) == (source.oob.link if source.oob is not None else None)
 
 
 def remaining_ttl(subject, resource, server_key):
