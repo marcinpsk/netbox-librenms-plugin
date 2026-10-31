@@ -52,6 +52,16 @@ def read_ip_addresses_as_acquisition(api, device_id):
     return True, decoded.value
 
 
+def read_links_as_acquisition(api, device_id):
+    """Read links through the request and contract used by acquisition."""
+    from netbox_librenms_plugin.acquisition import responses
+    from netbox_librenms_plugin.acquisition.snapshot import Outcome
+
+    endpoint = responses.links(device_id)
+    decoded = endpoint.decode(*api.get_response(endpoint.request.path))
+    return (True, decoded.value) if decoded.outcome is Outcome.OBTAINED else (False, decoded.reason)
+
+
 def test_recordings_present():
     """The recordings directory must contain at least one scenario."""
     assert iter_recording_paths(), "no recording JSON files found in data_shapes/recordings/"
@@ -61,7 +71,7 @@ def test_recordings_present():
 def test_bundled_empty_responses_replay_as_success(recording_server, recording):
     _server, api = recording_server(recording)
     readers = {
-        f"GET /api/v0/devices/{recording['device_id']}/links": (api.get_device_links, "links"),
+        f"GET /api/v0/devices/{recording['device_id']}/links": (partial(read_links_as_acquisition, api), "links"),
         f"GET /api/v0/devices/{recording['device_id']}/ip": (
             partial(read_ip_addresses_as_acquisition, api),
             "addresses",
@@ -76,7 +86,7 @@ def test_bundled_empty_responses_replay_as_success(recording_server, recording):
         if status == 404 or (status == 200 and body.get(field) == []):
             success, result = reader(recording["device_id"])
             assert success, (route, result)
-            assert (result["links"] if field == "links" else result) == []
+            assert result == []
     route = "GET /api/v0/resources/sensors"
     if route in recording["responses"]:
         status, body = unwrap_response(recording["responses"][route])
@@ -85,6 +95,22 @@ def test_bundled_empty_responses_replay_as_success(recording_server, recording):
                 True,
                 [],
             )
+
+
+@pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
+def test_recorded_cable_sources_satisfy_the_acquisition_contract(recording_server, recording):
+    from netbox_librenms_plugin.acquisition import responses
+    from netbox_librenms_plugin.acquisition.snapshot import Outcome
+
+    _server, api = recording_server(recording)
+    for route in recording["responses"]:
+        match = re.fullmatch(r"GET /api/v0/devices/(\d+)/(ports|links)", route)
+        if match is None:
+            continue
+        device_id, part = match.groups()
+        endpoint = responses.ports(device_id, with_vlans=False) if part == "ports" else responses.links(device_id)
+        decoded = endpoint.decode(*api.get_response(endpoint.request.path, dict(endpoint.request.params)))
+        assert decoded.outcome is Outcome.OBTAINED, (recording["name"], endpoint.request.path)
 
 
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)

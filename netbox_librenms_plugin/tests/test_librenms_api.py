@@ -16,6 +16,7 @@ from netbox_librenms_plugin.assessment.interfaces import stored_name_rules
 from netbox_librenms_plugin.interface_relationships import resolve_port_relationships
 from netbox_librenms_plugin.tests.conftest import name_rules, typed_maps
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
+from netbox_librenms_plugin.tests.test_recordings import read_links_as_acquisition
 
 
 class TestApiTokenStaysOnItsHost:
@@ -1024,30 +1025,6 @@ class TestLibreNMSAPIPortsAndInventory:
         assert librenms_server.requests[-1]["path"] == path
         assert librenms_server.requests[-1]["query"]["with"] == ["vlans"]
 
-    def test_get_port_by_id_success(self, local_librenms_api, librenms_server):
-        """Verify retrieving port by ID."""
-        path = "/api/v0/ports/1"
-        librenms_server.register(
-            path,
-            {"status": "ok", "port": [{"port_id": 1, "ifName": "GigabitEthernet0/1"}]},
-            method="GET",
-        )
-
-        success, port_data = local_librenms_api.get_port_by_id(port_id=1)
-
-        assert success is True
-        assert port_data is not None
-        assert librenms_server.requests[-1]["method"] == "GET"
-
-    def test_get_port_by_id_error(self, local_librenms_api, librenms_server):
-        """Verify handling of port retrieval error."""
-        librenms_server.register_disconnect("/api/v0/ports/999", method="GET")
-
-        success, error_msg = local_librenms_api.get_port_by_id(port_id=999)
-
-        assert success is False
-        assert isinstance(error_msg, str)
-
     def test_get_device_inventory_success(self, local_librenms_api, librenms_server):
         """Verify retrieving device inventory."""
         path = "/api/v0/inventory/123/all"
@@ -1099,7 +1076,7 @@ class TestLibreNMSAPIPortsAndInventory:
         assert inventory == [{"entPhysicalContainedIn": "0"}]
         assert librenms_server.requests[-1]["query"] == {"entPhysicalContainedIn": ["0"]}
 
-    def test_get_device_links_success(self, local_librenms_api, librenms_server):
+    def test_links_acquisition_success(self, local_librenms_api, librenms_server):
         """Verify retrieving device links."""
         path = "/api/v0/devices/123/links"
         librenms_server.register(
@@ -1108,14 +1085,13 @@ class TestLibreNMSAPIPortsAndInventory:
             method="GET",
         )
 
-        success, links_dict = local_librenms_api.get_device_links(device_id=123)
+        success, links = read_links_as_acquisition(local_librenms_api, 123)
 
         assert success is True
-        assert "links" in links_dict
-        assert len(links_dict["links"]) == 1
+        assert len(links) == 1
         assert librenms_server.requests[-1]["method"] == "GET"
 
-    def test_get_device_links_no_links_404_is_empty_not_failure(self, local_librenms_api, librenms_server):
+    def test_links_acquisition_no_links_404_is_empty_not_failure(self, local_librenms_api, librenms_server):
         """Verify a no-links 404 returns an empty success so serial cable sync retains the cache snapshot."""
         path = "/api/v0/devices/13/links"
         librenms_server.register(
@@ -1125,12 +1101,12 @@ class TestLibreNMSAPIPortsAndInventory:
             method="GET",
         )
 
-        success, data = local_librenms_api.get_device_links(device_id=13)
+        success, data = read_links_as_acquisition(local_librenms_api, 13)
 
         assert success is True
-        assert data == {"status": "ok", "links": []}
+        assert data == []
 
-    def test_get_device_links_missing_device_404_is_a_failure(self, local_librenms_api, librenms_server):
+    def test_links_acquisition_missing_device_404_is_a_failure(self, local_librenms_api, librenms_server):
         """A 404 for an unknown device must not be converted to an empty link list."""
         path = "/api/v0/devices/13/links"
         librenms_server.register(
@@ -1140,12 +1116,12 @@ class TestLibreNMSAPIPortsAndInventory:
             method="GET",
         )
 
-        success, data = local_librenms_api.get_device_links(device_id=13)
+        success, data = read_links_as_acquisition(local_librenms_api, 13)
 
         assert success is False
         assert data == "Device not found"
 
-    def test_get_device_links_librenms_no_links_message_is_empty_success(
+    def test_links_acquisition_librenms_no_links_message_is_empty_success(
         self,
         local_librenms_api,
         librenms_server,
@@ -1159,12 +1135,12 @@ class TestLibreNMSAPIPortsAndInventory:
             method="GET",
         )
 
-        success, data = local_librenms_api.get_device_links(device_id=13)
+        success, data = read_links_as_acquisition(local_librenms_api, 13)
 
         assert success is True
-        assert data == {"status": "ok", "links": []}
+        assert data == []
 
-    def test_get_device_links_non_404_http_error_still_fails(self, local_librenms_api, librenms_server):
+    def test_links_acquisition_non_404_http_error_still_fails(self, local_librenms_api, librenms_server):
         """A genuine server error (500) must still surface as a failure — only a 404 means 'no links'."""
         path = "/api/v0/devices/13/links"
         librenms_server.register(
@@ -1174,7 +1150,7 @@ class TestLibreNMSAPIPortsAndInventory:
             method="GET",
         )
 
-        success, data = local_librenms_api.get_device_links(device_id=13)
+        success, data = read_links_as_acquisition(local_librenms_api, 13)
 
         assert success is False
 
@@ -2799,7 +2775,7 @@ class TestResolvePortRelationships:
         assert result["lag_members"] == {201: 204}
 
 
-@pytest.mark.django_db  # _fetch_serial_port_sensors reads the SerialSensorTypePattern rows
+@pytest.mark.django_db  # The serial getter reads the SerialSensorTypePattern rows.
 class TestGetSerialPortSensors:
     """Cover response-shape branches in get_serial_port_sensors()."""
 

@@ -1,12 +1,27 @@
 """What each resource requests from LibreNMS, and which of its responses each scope needs."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from time import monotonic
+
+from dcim.models import Device, Interface
+from django.db.models import Q
 
 from netbox_librenms_plugin.acquisition import responses
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.acquisition.snapshot import MappingState, Outcome
+from netbox_librenms_plugin.cable_scope import cable_port_owner_ids, resolve_remote_device
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
-from netbox_librenms_plugin.server_mappings import MappingRole
+from netbox_librenms_plugin.serial_utils import (
+    SerialSensorProjection,
+    get_serial_sensor_type_patterns,
+    project_serial_sensors,
+)
+from netbox_librenms_plugin.server_mappings import MappingRole, identity_q, read_mapping
+from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+
+REMOTE_ALIAS_FETCH_BUDGET_SECONDS = 15.0
+NEIGHBOUR_PORTS_PREFIX = "neighbour_ports:"
+NEIGHBOUR_BUDGET_EXHAUSTED_REASON = f"The {REMOTE_ALIAS_FETCH_BUDGET_SECONDS:g} s neighbour request budget was spent."
 
 
 @dataclass(frozen=True)
@@ -20,6 +35,23 @@ class Blocker:
     def of(cls, record):
         """Return the blocker of a response that was not obtained."""
         return cls(record.request.path, f"{record.request.path} was not obtained ({record.reason})")
+
+
+@dataclass(frozen=True)
+class CableSourceState:
+    """Cable scopes and the serial projection used to decide their readiness."""
+
+    scopes: dict
+    serial: SerialSensorProjection | None = None
+
+    @property
+    def blocked_scopes(self):
+        return {scope: blockers for scope, blockers in self.scopes.items() if blockers}
+
+
+def neighbor_scope_key(scope, device_id):
+    """Return the scope of rows that need one neighbour's ports."""
+    return f"{scope}:neighbour:{device_id}"
 
 
 def port_vrf_id(port):
@@ -66,8 +98,90 @@ def _oob_interfaces(fetch, librenms_id):
     return {"ports": fetch(responses.ports(librenms_id, with_vlans=True))}
 
 
+def _displaced_owner_ids(server_key, source_ids, resolved_devices):
+    """Return source identities for endpoints in the refresh scope and the cables they can replace."""
+    sources = Device.objects.filter(
+        identity_q(Device, server=server_key, identities=source_ids, roles=(MappingRole.OWN, MappingRole.OOB))
+        | Q(pk__in=[device.pk for device in resolved_devices])
+    )
+    scope = Q(pk__in=sources.values("pk")) | Q(
+        virtual_chassis_id__in=sources.exclude(virtual_chassis_id=None).values("virtual_chassis_id")
+    )
+    return cable_port_owner_ids(
+        *Interface.objects.filter(device__in=Device.objects.filter(scope)), server_key=server_key
+    )
+
+
+def fetch_cable_ports(fetch, owner_ids):
+    """Acquire each owner's ports once under the shared neighbour budget."""
+    parts = {}
+    for owner_id in dict.fromkeys(owner_ids):
+        endpoint = responses.ports(owner_id, with_vlans=False)
+        if endpoint.request.key in fetch.responses:
+            record = fetch.responses[endpoint.request.key]
+        else:
+            if fetch.neighbour_deadline is None:
+                fetch.neighbour_deadline = monotonic() + REMOTE_ALIAS_FETCH_BUDGET_SECONDS
+            if monotonic() >= fetch.neighbour_deadline:
+                record = fetch.skip(endpoint, Outcome.FAILED, NEIGHBOUR_BUDGET_EXHAUSTED_REASON)
+            else:
+                record = fetch(endpoint)
+        parts[f"{NEIGHBOUR_PORTS_PREFIX}{owner_id}"] = record
+    return parts
+
+
+def _cable_parts(fetch, librenms_id):
+    parts = {
+        "links": fetch(responses.links(librenms_id)),
+        "ports": fetch(responses.ports(librenms_id, with_vlans=False)),
+    }
+    links = parts["links"]
+    if not links.obtained:
+        return parts
+    neighbours = dict.fromkeys(
+        neighbour_id
+        for link in links.value
+        if (neighbour_id := coerce_librenms_id(link.get("remote_device_id"))) is not None
+    )
+    resolved_devices = []
+    resolved_links = [dict(link) for link in links.value]
+    identities = {}
+    for link in resolved_links:
+        identity = (coerce_librenms_id(link.get("remote_device_id")), link.get("remote_hostname"))
+        identities.setdefault(identity, []).append(link)
+    for (device_id, hostname), device_links in identities.items():
+        device, found, _error = resolve_remote_device(device_id, hostname, server_key=fetch.server_key)
+        if found:
+            resolved_devices.append(device)
+            if device_id is None:
+                owner = get_librenms_sync_device(device, server_key=fetch.server_key) or device
+                neighbour_id = read_mapping(owner).own_id(fetch.server_key)
+                if neighbour_id is not None:
+                    neighbours[neighbour_id] = None
+                    for link in device_links:
+                        link["resolved_remote_device_id"] = neighbour_id
+    parts["links"] = fetch.responses[links.request.key] = replace(links, value=resolved_links)
+    neighbours.update(
+        dict.fromkeys(_displaced_owner_ids(fetch.server_key, (librenms_id, *neighbours), resolved_devices))
+    )
+    parts.update(fetch_cable_ports(fetch, neighbours))
+    return parts
+
+
+def _cables(fetch, librenms_id, *, include_serial=False):
+    parts = _cable_parts(fetch, librenms_id)
+    endpoint = responses.sensors(librenms_id)
+    parts["sensors"] = (
+        fetch(endpoint)
+        if include_serial
+        else fetch.skip(endpoint, Outcome.NOT_REQUESTED, "Serial sensors were not requested.")
+    )
+    return parts
+
+
 ACQUIRERS = {
     Resource.INTERFACES: _interfaces,
+    Resource.CABLES: _cables,
     Resource.IP_ADDRESSES: _ip_addresses,
     Resource.VLANS: _vlans,
 }
@@ -75,6 +189,7 @@ ACQUIRERS = {
 # The parts acquired from the owner's out-of-band controller, for a resource that shows its rows.
 OOB_ACQUIRERS = {
     Resource.INTERFACES: _oob_interfaces,
+    Resource.CABLES: _cable_parts,
 }
 
 
@@ -117,9 +232,59 @@ def _interface_scopes(snapshot):
     return scopes
 
 
+def cable_port_source_ids(snapshot):
+    """Return identities whose port tables the snapshot obtained."""
+    identities = set()
+    source = snapshot.resources[Resource.CABLES]
+    for mapping in (source.host, source.oob):
+        if mapping is None:
+            continue
+        for part, key in mapping.parts:
+            if not snapshot.responses[key].obtained:
+                continue
+            if part == "ports" and mapping.librenms_id is not None:
+                identities.add(mapping.librenms_id)
+            elif part.startswith(NEIGHBOUR_PORTS_PREFIX):
+                identities.add(int(part.removeprefix(NEIGHBOUR_PORTS_PREFIX)))
+    return identities
+
+
+def cable_source_state(snapshot):
+    """Compute cable scope blockers and project serial sensors once."""
+    resource = Resource.CABLES
+    source = snapshot.resources[resource]
+    scopes = {}
+    for name, mapping in (("host", source.host), ("oob", source.oob)):
+        if mapping is None:
+            continue
+        scopes[name] = _blockers(snapshot, resource, ("links", "ports"), mapping.role)
+        for part, _key in mapping.parts:
+            if part.startswith(NEIGHBOUR_PORTS_PREFIX):
+                neighbour_id = part.removeprefix(NEIGHBOUR_PORTS_PREFIX)
+                scopes[neighbor_scope_key(name, neighbour_id)] = scopes[name] + _blockers(
+                    snapshot, resource, (part,), mapping.role
+                )
+    sensors = snapshot.record(resource, "sensors") if source.host is not None else None
+    projection = None
+    if sensors is not None and sensors.outcome not in (Outcome.NOT_APPLICABLE, Outcome.NOT_REQUESTED):
+        serial = _blockers(snapshot, resource, ("sensors",))
+        if sensors.obtained:
+            projection = project_serial_sensors(sensors.value, get_serial_sensor_type_patterns())
+            if not projection.ready:
+                path = sensors.request.path
+                serial = (Blocker(path, f"{path} was not usable ({projection.reason})"),)
+        scopes["serial"] = serial
+    return CableSourceState(scopes, projection)
+
+
+def _cable_scopes(snapshot):
+    return cable_source_state(snapshot).scopes
+
+
 # Resource -> a function that returns each scope with its blockers; a scope without blockers is ready.
 SCOPES = {
     Resource.INTERFACES: _interface_scopes,
+    Resource.CABLES: _cable_scopes,
     Resource.IP_ADDRESSES: _ip_address_scopes,
     Resource.VLANS: _vlan_scopes,
 }

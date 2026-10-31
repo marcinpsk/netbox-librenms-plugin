@@ -750,7 +750,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             source_cache.delete(obj, Resource.IP_ADDRESSES, server_key)
             error_message = self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS"
         else:
-            result = source_cache.refresh(obj, Resource.IP_ADDRESSES, server_key)
+            result = source_cache.refresh(request, obj, Resource.IP_ADDRESSES, server_key)
             snapshot = result.snapshot
             error_message = result.error and f"Failed to fetch IP addresses from LibreNMS: {result.error}"
 

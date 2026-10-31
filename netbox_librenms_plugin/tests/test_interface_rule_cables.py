@@ -15,13 +15,13 @@ from html import unescape
 import pytest
 from dcim.models import Cable
 from django.contrib.messages import get_messages
-from django.core.cache import cache
 from django.urls import reverse
 
 from netbox_librenms_plugin.interface_rules import HIDDEN_PORT_REASON
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.server_mappings import read_mapping
-from netbox_librenms_plugin.sync_cache import sync_snapshot_key
+from netbox_librenms_plugin.tests.source_snapshot_helpers import cable_rows, seed_cables_snapshot, link_row, port_row
+from netbox_librenms_plugin.assessment.cables import assess as assess_cables
 from netbox_librenms_plugin.tests.conftest import (
     bind_librenms_server,
     cable_together,
@@ -33,8 +33,7 @@ from netbox_librenms_plugin.tests.conftest import (
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.test_cable_overwrite import _confirmed_intent
 from netbox_librenms_plugin.tests.test_interface_rule_writes import _platform, _port
-from netbox_librenms_plugin.utils import assign_cable_row_ids
-from netbox_librenms_plugin.views.base.cables_view import _RAW_LINK_KEYS, port_record
+from netbox_librenms_plugin.assessment.cables import port_record
 from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
 SERVER_KEY = "default"
@@ -48,34 +47,32 @@ def _bound(device, name, port_id):
     return interface
 
 
-def _row(local, remote_device, *, records=True, **overrides):
-    """One snapshot row between local Te1/1 (port 100) and remote Gi0/1 (port 500)."""
-    row = {
-        "local_port": local.name,
-        "local_port_id": 100,
-        "local_port_alt": None,
-        "link_id": 1,
-        "protocol": "lldp",
-        "remote_port": "Gi0/1",
-        "remote_device": remote_device.name,
-        "remote_port_id": 500,
-        "remote_device_id": None,
-        "remote_port_key": 500,
-        "_source": "main",
+def _row(local, remote_device, **overrides):
+    """Return the raw LLDP report between the two mapped source devices."""
+    return {
+        **link_row(
+            100,
+            "Gi0/1",
+            local_port=local.name,
+            remote_hostname=remote_device.name,
+            remote_device_id=9,
+            remote_port_id=500,
+            id=1,
+        ),
+        **overrides,
     }
-    if records:
-        row["local_port_record"] = port_record(_port(100, local.name))
-        row["remote_port_record"] = port_record(_port(500, "Gi0/1"))
-    row.update(overrides)
-    return row
 
 
-def _seed(device, row):
-    raw = assign_cable_row_ids([{key: value for key, value in row.items() if key in _RAW_LINK_KEYS}])
-    cache.set(
-        sync_snapshot_key(device, "links", SERVER_KEY), {"links": raw, "snapshot_token": "rule-gate"}, timeout=300
+def _seed(device, source_link, *, ports=None, neighbour_ports=None, extra_links=()):
+    """Store explicit raw port facts for the two-device cable fixture."""
+    snapshot = seed_cables_snapshot(
+        device,
+        [source_link, *extra_links],
+        [port_row(100, "Te1/1", device_id=8)] if ports is None else ports,
+        neighbour_ports={9: [port_row(500, "Gi0/1", device_id=9)]} if neighbour_ports is None else neighbour_ports,
+        server_key=SERVER_KEY,
     )
-    return raw[0]["row_id"]
+    return assess_cables(snapshot, subject=device)["links"][0]["row_id"]
 
 
 def _render(client, device):
@@ -86,7 +83,7 @@ def _render(client, device):
     )
     assert response.status_code == 200
     table = response.context["cable_sync"]["table"]
-    (row,) = list(table.rows)
+    row = next(row for row in table.rows if row.record["row_id"] == "100")
     return row.record, unescape(table.as_html(response.wsgi_request))
 
 
@@ -193,7 +190,7 @@ def test_the_refresh_keeps_the_rule_inputs_and_an_ignored_remote_port_gets_no_ca
         HTTP_HX_REQUEST="true",
     )
     assert refreshed.status_code == 200
-    (raw,) = cache.get(sync_snapshot_key(link.local_device, "links", SERVER_KEY))["links"]
+    (raw,) = cable_rows(refreshed.wsgi_request, link.local_device, SERVER_KEY)["links"]
     assert raw["local_port_record"] == port_record(_port(100, "Te1/1"))
     assert raw["remote_port_record"] == port_record(_port(500, "Gi0/1"))
 
@@ -234,8 +231,11 @@ def test_a_manual_pick_bound_to_an_ignored_port_gets_no_cable(client, link):
     """The advertised port is allowed; the picked interface is bound to a port the rules ignore."""
     rule = link.ignore(link.remote_platform, "^Gi0/9$")
     picked = _bound(link.remote_device, "Gi0/9", 509)
-    link.server.register("/api/v0/ports/509", {"status": "ok", "port": [_port(509, "Gi0/9")]})
-    row_id = _seed(link.local_device, _row(link.local, link.remote_device))
+    row_id = _seed(
+        link.local_device,
+        _row(link.local, link.remote_device),
+        neighbour_ports={9: [port_row(500, "Gi0/1", device_id=9), port_row(509, "Gi0/9", device_id=9)]},
+    )
     _pick(client, link.local_device, row_id, picked)
 
     record, _html = _render(client, link.local_device)
@@ -244,22 +244,57 @@ def test_a_manual_pick_bound_to_an_ignored_port_gets_no_cable(client, link):
 
     assert link.cables() == set()
     assert _refused(response, "509 (Gi0/9)", f"ignored by interface rule {rule.pk}")
-    assert "/api/v0/ports/509" in [request["path"] for request in link.server.requests]
+    assert not any(request["path"].startswith("/api/v0/ports/") for request in link.server.requests)
 
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("ignored", [True, False], ids=["far-end-ignored", "control"])
-def test_a_replacement_that_removes_a_cable_to_an_ignored_port_is_refused(client, link, ignored):
+@pytest.mark.parametrize("displaced_end", ["local", "remote"])
+@pytest.mark.parametrize("obtained", [True, False])
+@pytest.mark.parametrize("source_mapping", ["own", "vc-owner", "oob"])
+@pytest.mark.parametrize("neighbour_identity", ["id", "hostname", "unmapped-id"])
+def test_a_replacement_that_removes_a_cable_to_an_ignored_port_is_refused(
+    client, link, ignored, displaced_end, obtained, source_mapping, neighbour_identity
+):
     """Te1/1 is cabled to Xe0/1 on a third device; replacing that cable detaches Xe0/1."""
     far_platform = _platform("cable-rule-far")
-    far_device = make_device("cable-rule-far")
+    if source_mapping == "vc-owner":
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+
+        _vc, (master, far_device) = make_virtual_chassis_members("cable-rule-far")
+    else:
+        far_device = make_device("cable-rule-far")
     far_device.platform = far_platform
     far_device.save()
     far = _bound(far_device, "Xe0/1", 777)
-    old = cable_together(link.local, far)
-    link.server.register("/api/v0/ports/777", {"status": "ok", "port": [_port(777, "Xe0/1")]})
-    rule = link.ignore(far_platform, "^Xe") if ignored else link.ignore(far_platform, "^no-such-port$")
-    _seed(link.local_device, _row(link.local, link.remote_device))
+    old = cable_together(link.local if displaced_end == "local" else link.remote, far)
+    if source_mapping == "vc-owner":
+        map_device_to_librenms(master, 10, server_key=SERVER_KEY)
+    elif source_mapping == "oob":
+        map_device_to_librenms(far_device, None, server_key=SERVER_KEY, oob={"id": 10, "type": "idrac"})
+    else:
+        map_device_to_librenms(far_device, 10, server_key=SERVER_KEY)
+    link.ignore(far_platform, "^Xe" if ignored else "^no-such-port$")
+    row = _row(link.local, link.remote_device)
+    if neighbour_identity == "hostname":
+        row["remote_device_id"] = None
+    elif neighbour_identity == "unmapped-id":
+        row["remote_device_id"] = 19
+        link.server.ports_response(19, [port_row(500, link.remote.name, device_id=19)])
+    link.server.register("/api/v0/devices/8/links", {"status": "ok", "links": [row]})
+    link.server.ports_response(8, [port_row(100, link.local.name, device_id=8)])
+    link.server.ports_response(9, [port_row(500, link.remote.name, device_id=9)])
+    link.server.register(
+        "/api/v0/devices/10/ports",
+        {"status": "ok", "ports": [port_row(777, far.name, device_id=10)]},
+        status=200 if obtained else 503,
+    )
+    refreshed = client.post(
+        reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[link.local_device.pk]),
+        {"server_key": SERVER_KEY},
+        HTTP_HX_REQUEST="true",
+    )
+    assert refreshed.status_code == 200
     record, _html = _render(client, link.local_device)
     assert record["cable_status"] == "Cable Mismatch"
 
@@ -274,14 +309,16 @@ def test_a_replacement_that_removes_a_cable_to_an_ignored_port_is_refused(client
     )
 
     link.local.refresh_from_db()
-    if ignored:
-        assert link.local.cable_id == old.pk
-        for response in (first, forced):
-            assert _refused(response, "777 (Xe0/1)", f"ignored by interface rule {rule.pk}")
+    if ignored or not obtained:
+        assert Cable.objects.filter(pk=old.pk).exists()
     else:
-        assert any("Overwrite protection" in message for message in _messages(first))
+        assert first.status_code == 200
+        assert forced.status_code == 200
         assert not Cable.objects.filter(pk=old.pk).exists()
         assert link.local.cable.b_terminations == [link.remote]
+    paths = [entry["path"] for entry in link.server.requests]
+    assert paths.count("/api/v0/devices/10/ports") == 1
+    assert all(paths.count(path) == 1 for path in paths if path.endswith("/ports"))
 
 
 def _restricted_client(username, device_ids, interface_ids):
@@ -318,11 +355,18 @@ def test_the_advertised_port_of_a_neighbour_the_caller_cannot_see_is_not_named(l
     hidden_neighbour = make_device("cable-rule-secret-neighbour")
     picked_device = make_device("cable-rule-picked-c")
     picked = _bound(picked_device, "Eth9", 509)
-    link.server.register("/api/v0/ports/509", {"status": "ok", "port": [_port(509, "Eth9")]})
+    map_device_to_librenms(picked_device, 10, server_key=SERVER_KEY)
     row = _row(link.local, link.remote_device, remote_port="secret-if")
-    row["remote_port_record"] = port_record(_port(500, "secret-if"))
-    row["remote_device"] = hidden_neighbour.name if neighbour == "hidden" else "not-in-netbox"
-    row_id = _seed(link.local_device, row)
+    row["remote_hostname"] = hidden_neighbour.name if neighbour == "hidden" else "not-in-netbox"
+    row_id = _seed(
+        link.local_device,
+        row,
+        ports=[port_row(100, "Te1/1", device_id=8), port_row(101, "source-extra", device_id=8)],
+        extra_links=[
+            link_row(101, picked.name, remote_device_id=10, remote_hostname=picked_device.name, remote_port_id=509)
+        ],
+        neighbour_ports={9: [port_row(500, "secret-if", device_id=9)], 10: [port_row(509, picked.name, device_id=10)]},
+    )
     client = _restricted_client(
         f"cable-rule-neighbour-{neighbour}", [link.local_device.pk, picked_device.pk], [link.local.pk, picked.pk]
     )
@@ -352,20 +396,26 @@ def _cable_render_queries(client, tag, count, first_port, *, blocked=True):
     from django.test.utils import CaptureQueriesContext
 
     local_device = map_device_to_librenms(make_device(f"{tag}-local"), first_port, server_key=SERVER_KEY)
-    remote_device = make_device(f"{tag}-remote")
-    rows = []
+    remote_device = map_device_to_librenms(make_device(f"{tag}-remote"), first_port + 70000, server_key=SERVER_KEY)
+    links = []
+    host_ports = []
+    remote_ports = []
     for index in range(count):
         local = _bound(local_device, f"Te1/{index}", first_port + index)
         _bound(remote_device, f"Gi0/{index}", first_port + 500 + index)
-        row = _row(local, remote_device, local_port_id=first_port + index, remote_port=f"Gi0/{index}")
-        # Each row contributes two identities to the catalog's batches of 32 IDs.
-        # The remote identity comes from the matched record, without an advertised ID.
-        row.update(remote_port_id=None, remote_port_key=first_port + 500 + index, link_id=index)
-        row["local_port_record"] = port_record(_port(first_port + index, local.name))
-        row["remote_port_record"] = port_record(_port(first_port + 500 + index, f"Gi0/{index}"))
-        rows.append(row)
-    raw = assign_cable_row_ids([{key: value for key, value in row.items() if key in _RAW_LINK_KEYS} for row in rows])
-    cache.set(sync_snapshot_key(local_device, "links", SERVER_KEY), {"links": raw, "snapshot_token": tag}, timeout=300)
+        links.append(
+            link_row(
+                first_port + index,
+                f"Gi0/{index}",
+                remote_hostname=remote_device.name,
+                remote_device_id=first_port + 70000,
+                remote_port_id=None,
+                id=index,
+            )
+        )
+        host_ports.append(port_row(first_port + index, local.name, device_id=first_port))
+        remote_ports.append(port_row(first_port + 500 + index, f"Gi0/{index}", device_id=first_port + 70000))
+    seed_cables_snapshot(local_device, links, host_ports, neighbour_ports={first_port + 70000: remote_ports})
     url = reverse(
         "plugins:netbox_librenms_plugin:sync_cache_fragment",
         kwargs={"object_type": "device", "pk": local_device.pk, "tab": "cables"},
@@ -470,9 +520,9 @@ class _ChangesBeforeTheLock(SyncCablesView):
         self.change = change
         self.steps = []
 
-    def _fetch_cable_port_records(self, link_data, terminations):
-        self.steps.append("prefetch")
-        return super()._fetch_cable_port_records(link_data, terminations)
+    def _snapshot_cable_port_records(self, link_data, terminations, prefetched=None):
+        self.steps.append("snapshot evidence")
+        return super()._snapshot_cable_port_records(link_data, terminations, prefetched)
 
     def _lock_cable_terminations(self, local_term, remote_term, **kwargs):
         # The endpoints and the far ends are already read; the lock re-reads them.
@@ -510,7 +560,7 @@ def test_the_gate_decides_with_the_binding_and_platform_read_under_the_lock(clie
 
     texts = [str(message) for message in get_messages(request)]
     # The pre-lock read saw the old binding: port 500 on the remote end.
-    assert view.steps == ["prefetch", ("pre-lock bindings", 100, 500)]
+    assert view.steps == ["snapshot evidence", ("pre-lock bindings", 100, 500)]
     if change == "platform-to-allowed":
         assert link.cables() != set()
         assert not any("refuse a port" in text for text in texts)
@@ -562,7 +612,7 @@ def test_a_manual_pick_for_a_neighbour_not_in_netbox(client, link, rule):
     other.platform = picked_platform
     other.save()
     picked = _bound(other, "Eth9", 509)
-    link.server.register("/api/v0/ports/509", {"status": "ok", "port": [_port(509, "Eth9")]})
+    map_device_to_librenms(other, 10, server_key=SERVER_KEY)
     ignore = {
         "global-advertised": (None, "^Gi0/1$"),
         "picked-platform-advertised": (picked_platform, "^Gi0/1$"),
@@ -570,8 +620,18 @@ def test_a_manual_pick_for_a_neighbour_not_in_netbox(client, link, rule):
     }[rule]
     ignore_rule = link.ignore(*ignore)
     row = _row(link.local, link.remote_device)
-    row["remote_device"] = "not-in-netbox"
-    row_id = _seed(link.local_device, row)
+    row["remote_hostname"] = "not-in-netbox"
+    row["remote_device_id"] = 70009
+    row_id = _seed(
+        link.local_device,
+        row,
+        ports=[port_row(100, "Te1/1", device_id=8), port_row(101, "source-extra", device_id=8)],
+        extra_links=[link_row(101, picked.name, remote_device_id=10, remote_hostname=other.name, remote_port_id=509)],
+        neighbour_ports={
+            70009: [port_row(500, "Gi0/1", device_id=70009)],
+            10: [port_row(509, picked.name, device_id=10)],
+        },
+    )
     _pick(client, link.local_device, row_id, picked)
 
     record, html = _render(client, link.local_device)
@@ -590,7 +650,7 @@ def test_a_manual_pick_for_a_neighbour_not_in_netbox(client, link, rule):
         assert "Sync Cable" in html
         assert picked.cable_id is not None
     else:
-        # The table has no record for 509; the sync fetches it and refuses.
+        # The bound port's obtained record uses the picked device's platform.
         assert picked.cable_id is None
         assert _refused(response, "509 (Eth9)", reason)
 
@@ -598,16 +658,15 @@ def test_a_manual_pick_for_a_neighbour_not_in_netbox(client, link, rule):
 @pytest.mark.django_db
 @pytest.mark.parametrize("may_ignore", [True, False], ids=["ignore-rule-on-platform", "ignore-rule-elsewhere"])
 def test_a_missing_port_record_refuses_only_when_an_ignore_rule_could_apply(client, link, may_ignore):
-    """The snapshot has no record for port 100, and LibreNMS returns none for it either."""
+    """A missing snapshot record blocks only when an Ignore rule can apply."""
     link.ignore(link.local_platform if may_ignore else _platform("cable-rule-elsewhere"), "^no-such-port$")
     row = _row(link.local, link.remote_device)
-    del row["local_port_record"]
-    _seed(link.local_device, row)
+    _seed(link.local_device, row, ports=[])
     record, _html = _render(client, link.local_device)
 
     response = _sync(client, link.local_device, _sync_data(record))
 
-    assert "/api/v0/ports/100" in [request["path"] for request in link.server.requests]
+    assert not any(request["path"].startswith("/api/v0/ports/") for request in link.server.requests)
     if may_ignore:
         assert link.cables() == set()
         assert _refused(response, "100", "no LibreNMS port record is cached for it; refresh the data")
@@ -691,3 +750,306 @@ def test_cable_render_skips_disclosure_queries_without_ignore_rules(client, sett
         if 'FROM "virtualization_vminterface"' in query["sql"] and " ~ " in query["sql"]
     ]
     assert scans == []
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("rule_state", ["allowed", "ignored", "no-rules"])
+@pytest.mark.parametrize("obtained", [True, False], ids=["obtained", "failed"])
+@pytest.mark.parametrize("source_mapping", ["own", "vc-owner", "oob"])
+@pytest.mark.parametrize("failed_scope", [False, True], ids=["outside-scope", "failed-scope"])
+def test_a_manual_destination_prefetches_displaced_rule_evidence_before_the_write(
+    client, link, monkeypatch, rule_state, obtained, source_mapping, failed_scope
+):
+    from django.db import connection
+    from requests.sessions import Session
+
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.acquisition.registry import Resource
+
+    picked_device = make_device("manual-cable-destination")
+    map_device_to_librenms(picked_device, 11, server_key=SERVER_KEY)
+    picked = _bound(picked_device, "Eth1", 601)
+    far_platform = _platform("manual-cable-displaced")
+    if source_mapping == "vc-owner":
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+
+        _vc, (master, far_device) = make_virtual_chassis_members("manual-cable-displaced")
+        map_device_to_librenms(master, 10, server_key=SERVER_KEY)
+    else:
+        far_device = make_device("manual-cable-displaced")
+        map_device_to_librenms(
+            far_device,
+            10 if source_mapping == "own" else None,
+            server_key=SERVER_KEY,
+            oob={"id": 10, "type": "idrac"} if source_mapping == "oob" else None,
+        )
+    far_device.platform = far_platform
+    far_device.save()
+    far = _bound(far_device, "Xe0/1", 777)
+    old = cable_together(picked, far)
+    if rule_state != "no-rules":
+        link.ignore(far_platform, "^Xe" if rule_state == "ignored" else "^no-such-port$")
+    seed_options = {}
+    if failed_scope:
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import Failed
+
+        seed_options = {
+            "extra_links": [link_row(101, far.name, remote_device_id=10, remote_hostname=far_device.name)],
+            "neighbour_ports": {
+                9: [port_row(500, link.remote.name, device_id=9)],
+                10: Failed(),
+                11: [port_row(601, picked.name, device_id=11)],
+            },
+        }
+    row_id = _seed(link.local_device, _row(link.local, link.remote_device), **seed_options)
+    before = source_cache.read(link.local_device, Resource.CABLES, SERVER_KEY).to_payload()
+    _pick(client, link.local_device, row_id, picked)
+    record, _html = _render(client, link.local_device)
+    assert record["netbox_remote_interface_id"] == picked.pk
+    link.server.ports_response(11, [port_row(601, picked.name, device_id=11)])
+    link.server.register(
+        "/api/v0/devices/10/ports",
+        {"status": "ok", "ports": [port_row(777, far.name, device_id=10)]},
+        status=200 if obtained else 503,
+    )
+    real_send = Session.send
+
+    def offline_write(session, request, **kwargs):
+        assert not connection.in_atomic_block
+        return real_send(session, request, **kwargs)
+
+    monkeypatch.setattr(Session, "send", offline_write)
+    intent = _confirmed_intent(link.local, picked, old)
+    response = _sync(
+        client,
+        link.local_device,
+        _sync_data(record, force="on", **{f"expected_cable_intent_{row_id}": intent}),
+    )
+    assert response.status_code == 200
+    link.local.refresh_from_db()
+    if rule_state == "ignored" or not obtained:
+        assert Cable.objects.filter(pk=old.pk).exists()
+        assert link.local.cable_id is None
+    else:
+        assert not Cable.objects.filter(pk=old.pk).exists()
+        assert link.local.cable.b_terminations == [picked]
+    paths = [entry["path"] for entry in link.server.requests]
+    assert paths.count("/api/v0/devices/10/ports") == 1
+    assert all(paths.count(path) == 1 for path in paths if path.endswith("/ports"))
+    assert source_cache.read(link.local_device, Resource.CABLES, SERVER_KEY).to_payload() == before
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("second_owner", ["shared", "distinct", "budget-exhausted"])
+def test_manual_rows_share_one_ports_request_per_displaced_owner(client, link, monkeypatch, second_owner):
+    local_b = _bound(link.local_device, "Te1/2", 101)
+    picked_device = _Link._device("manual-cable-batch-picked", None, 11)
+    far_device = _Link._device("manual-cable-batch-displaced", _platform("manual-cable-batch"), 10)
+    link.ignore(far_device.platform, "^no-such-port$")
+    picked_b = picked_device if second_owner == "shared" else _Link._device("manual-batch-picked-b", None, 12)
+    far_b = (
+        far_device if second_owner == "shared" else _Link._device("manual-batch-displaced-b", far_device.platform, 13)
+    )
+    chosen = [_bound(picked_device, "Eth1", 601), _bound(picked_b, "Eth2", 602)]
+    far = [_bound(far_device, "Xe0/1", 777), _bound(far_b, "Xe0/2", 778)]
+    old = [cable_together(pick, displaced) for pick, displaced in zip(chosen, far, strict=True)]
+    _seed(
+        link.local_device,
+        _row(link.local, link.remote_device),
+        ports=[port_row(100, link.local.name, device_id=8), port_row(101, local_b.name, device_id=8)],
+        extra_links=[_row(local_b, link.remote_device, local_port_id=101, remote_port_id=501, id=2)],
+    )
+    for row_id, pick in zip(("100", "101"), chosen, strict=True):
+        _pick(client, link.local_device, row_id, pick)
+    page = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[link.local_device.pk]),
+        {"tab": "cables", "server_key": SERVER_KEY},
+    )
+    rows = {row.record["row_id"]: row.record for row in page.context["cable_sync"]["table"].rows}
+    tables = {10: [port_row(777, "Xe0/1", device_id=10)], 11: [port_row(601, "Eth1", device_id=11)]}
+    far_b_id = 10 if second_owner == "shared" else 13
+    picked_b_id = 11 if second_owner == "shared" else 12
+    tables.setdefault(far_b_id, []).append(port_row(778, "Xe0/2", device_id=far_b_id))
+    tables.setdefault(picked_b_id, []).append(port_row(602, "Eth2", device_id=picked_b_id))
+    for source_id, ports in tables.items():
+        link.server.ports_response(source_id, ports)
+    if second_owner == "budget-exhausted":
+        from netbox_librenms_plugin.acquisition import resources
+
+        clock, served = [0.0], set()
+
+        def spend_the_budget_after_both_owners(owner_id):
+            def answer(method, path, query, headers, body):
+                served.add(owner_id)
+                if served == {10, 11}:
+                    clock[0] = resources.REMOTE_ALIAS_FETCH_BUDGET_SECONDS + 1
+                return 200, {"status": "ok", "ports": tables[owner_id]}
+
+            return answer
+
+        for owner_id in (10, 11):
+            link.server.register(f"/api/v0/devices/{owner_id}/ports", spend_the_budget_after_both_owners(owner_id))
+        monkeypatch.setattr(resources, "monotonic", lambda: clock[0])
+    data = {"select": ["100", "101"], "server_key": SERVER_KEY, "force": "on"}
+    for row_id, local, pick, cable in zip(("100", "101"), (link.local, local_b), chosen, old, strict=True):
+        data.update({key: value for key, value in _sync_data(rows[row_id]).items() if key != "select"})
+        data[f"expected_cable_intent_{row_id}"] = _confirmed_intent(local, pick, cable)
+
+    response = _sync(client, link.local_device, data)
+
+    assert response.status_code == 200
+    for index, (local, pick, cable) in enumerate(zip((link.local, local_b), chosen, old, strict=True)):
+        refused = second_owner == "budget-exhausted" and index == 1
+        assert Cable.objects.filter(pk=cable.pk).exists() is refused
+        local.refresh_from_db()
+        pick.refresh_from_db()
+        if refused:
+            assert local.cable_id is None
+            assert pick.cable_id == cable.pk
+        else:
+            assert local.cable_id == pick.cable_id is not None
+    paths = [entry["path"] for entry in link.server.requests]
+    assert paths.count("/api/v0/devices/10/ports") == 1
+    assert paths.count("/api/v0/devices/11/ports") == 1
+    if second_owner != "shared":
+        expected = 0 if second_owner == "budget-exhausted" else 1
+        assert paths.count("/api/v0/devices/12/ports") == expected
+        assert paths.count("/api/v0/devices/13/ports") == expected
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("source_mapping", ["own", "vc-owner", "oob"])
+@pytest.mark.parametrize("host_obtained", [True, False])
+@pytest.mark.parametrize("hidden_part", ["device", "interface"])
+def test_displaced_source_failures_are_redacted_for_each_snapshot_reader(
+    client, link, source_mapping, host_obtained, hidden_part
+):
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.acquisition.registry import Resource
+
+    if source_mapping == "vc-owner":
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+
+        _vc, (master, hidden_owner) = make_virtual_chassis_members("hidden-source-owner")
+        map_device_to_librenms(master, 10, server_key=SERVER_KEY)
+    else:
+        hidden_owner = make_device("hidden-source-owner")
+        map_device_to_librenms(
+            hidden_owner,
+            10 if source_mapping == "own" else None,
+            server_key=SERVER_KEY,
+            oob={"id": 10, "type": "idrac"} if source_mapping == "oob" else None,
+        )
+    hidden_port = _bound(hidden_owner, "hidden-source-port", 777)
+    cable_together(link.remote, hidden_port)
+    link.server.register(
+        "/api/v0/devices/8/links",
+        {"status": "ok", "links": [_row(link.local, link.remote_device, remote_device_id=None)]},
+    )
+    link.server.ports_response(8, [port_row(100, link.local.name, device_id=8)])
+    link.server.ports_response(9, [port_row(500, link.remote.name, device_id=9)])
+    secret = "private-displaced-source-error"
+    link.server.register("/api/v0/devices/10/ports", {"status": "error", "message": secret}, status=503)
+    refresh_url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[link.local_device.pk])
+    privileged = client.post(refresh_url, {"server_key": SERVER_KEY}, HTTP_HX_REQUEST="true")
+    assert privileged.status_code == 200
+    before = source_cache.read(link.local_device, Resource.CABLES, SERVER_KEY).to_payload()
+    assert any(secret in blocker.message for blocker in privileged.context["cable_sync"]["blockers"])
+    assert secret in json.dumps(before, default=str)
+    visible_devices = [link.local_device.pk, link.remote_device.pk]
+    if source_mapping == "vc-owner":
+        visible_devices.append(master.pk)
+    if hidden_part == "interface":
+        visible_devices.append(hidden_owner.pk)
+    restricted = _restricted_client("hidden-source-reader", visible_devices, [link.local.pk, link.remote.pk])
+    cached = restricted.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[link.local_device.pk]),
+        {"tab": "cables", "server_key": SERVER_KEY},
+    )
+    assert cached.status_code == 200
+    assert cached.context["cable_sync"]["blockers"]
+    assert source_cache.read(link.local_device, Resource.CABLES, SERVER_KEY).to_payload() == before
+    if not host_obtained:
+        link.server.register("/api/v0/devices/8/ports", {"status": "error"}, status=503)
+    refreshed = restricted.post(refresh_url, {"server_key": SERVER_KEY}, HTTP_HX_REQUEST="true")
+    assert refreshed.status_code == 200
+    for response in (cached, refreshed):
+        body = response.content.decode() + " ".join(_messages(response))
+        for value in (secret, "devices/10/ports", hidden_owner.name, hidden_port.name):
+            assert value not in body
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("reader", ["superuser", "restricted"])
+def test_a_neighbour_failure_that_no_netbox_device_holds_names_its_source(client, link, reader):
+    link.server.register(
+        "/api/v0/devices/8/links",
+        {
+            "status": "ok",
+            "links": [_row(link.local, link.remote_device, remote_device_id=42, remote_hostname="absent")],
+        },
+    )
+    link.server.ports_response(8, [port_row(100, link.local.name, device_id=8)])
+    link.server.register("/api/v0/devices/42/ports", {"status": "error", "message": "neighbour-error"}, status=503)
+    if reader == "restricted":
+        client = _restricted_client("absent-neighbour-reader", [link.local_device.pk], [link.local.pk])
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[link.local_device.pk]),
+        {"server_key": SERVER_KEY},
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert response.status_code == 200
+    messages = [blocker.message for blocker in response.context["cable_sync"]["blockers"]]
+    assert any("devices/42/ports" in message and "neighbour-error" in message for message in messages)
+    assert not any("you cannot view" in message for message in messages)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("hidden_source", ["chassis-master", "other-interface"])
+def test_manual_prefetch_failures_use_the_source_owner_disclosure_scope(client, link, hidden_source):
+    if hidden_source == "chassis-master":
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+
+        _vc, (hidden_master, far_owner) = make_virtual_chassis_members("manual-hidden-source")
+        map_device_to_librenms(hidden_master, 10, server_key=SERVER_KEY)
+    else:
+        far_owner = _Link._device("manual-hidden-source", None, 10)
+        _bound(far_owner, "private-source-interface", 778)
+    far_platform = _platform("manual-hidden-source")
+    far_owner.platform = far_platform
+    far_owner.save()
+    far = _bound(far_owner, "Xe0/1", 777)
+    picked_owner = _Link._device("manual-visible-destination", None, 11)
+    picked = _bound(picked_owner, "Eth1", 601)
+    old = cable_together(picked, far)
+    link.ignore(far_platform, "^no-such-port$")
+    row_id = _seed(link.local_device, _row(link.local, link.remote_device))
+    restricted = _restricted_client(
+        "manual-hidden-source-reader",
+        [link.local_device.pk, link.remote_device.pk, picked_owner.pk, far_owner.pk],
+        [link.local.pk, link.remote.pk, picked.pk, far.pk],
+    )
+    _pick(restricted, link.local_device, row_id, picked)
+    record, _html = _render(restricted, link.local_device)
+    link.server.ports_response(11, [port_row(601, picked.name, device_id=11)])
+    secret = "private-manual-source-error"
+    link.server.register("/api/v0/devices/10/ports", {"status": "error", "message": secret}, status=503)
+    response = _sync(
+        restricted,
+        link.local_device,
+        _sync_data(
+            record,
+            force="on",
+            **{f"expected_cable_intent_{row_id}": _confirmed_intent(link.local, picked, old)},
+        ),
+    )
+
+    assert response.status_code == 200
+    assert Cable.objects.filter(pk=old.pk).exists()
+    link.local.refresh_from_db()
+    assert link.local.cable_id is None
+    body = response.content.decode() + " ".join(_messages(response))
+    assert secret not in body
+    assert "devices/10/ports" not in body

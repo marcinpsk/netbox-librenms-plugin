@@ -1,6 +1,10 @@
 """Real multi-server cache-scoping tests for sync-tab GET renders."""
 
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
 import pytest
+
+from netbox_librenms_plugin.tests.source_snapshot_helpers import link_row, port_row, seed_cables_snapshot
 
 from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_superuser
@@ -64,15 +68,19 @@ class TestConfiguredServerCacheScoping:
         assert list(context["table"].data)[0]["port_id"] == 11
 
     def test_cables_render_the_requested_servers_snapshot(self, configured_servers):
-        from django.core.cache import cache
 
         from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
 
         device = make_device("multiserver-cable")
         view = DeviceCableTableView()
         request = _request("production")
-        key = view.get_cache_key(device, "links", "production")
-        cache.set(key, {"links": [{"local_port": "Ethernet2", "local_port_id": 12}]})
+        seed_mapping(device, "production", own=402)
+        seed_cables_snapshot(
+            device,
+            [link_row(12, "", local_port="Ethernet2")],
+            [port_row(12, "Ethernet2", device_id=402)],
+            server_key="production",
+        )
 
         context = _bind(view, request).get_context_data(request, device)
 
@@ -201,9 +209,7 @@ class TestRemovedServerFailsClosed:
         from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_ip_snapshot, seed_source_snapshot
 
         view_class = import_string(view_path)
-        device = make_device(
-            f"removed-{data_type}", librenms_cf={"removed": 22} if data_type == "ip_addresses" else None
-        )
+        device = make_device(f"removed-{data_type}", librenms_cf={"removed": 22})
         if data_type == "ports":
             make_interface(device, "Ethernet4")
         view = view_class()
@@ -212,6 +218,8 @@ class TestRemovedServerFailsClosed:
             seed_source_snapshot(device, Resource.VLANS, "removed", vlans=payload)
         elif data_type == "ip_addresses":
             seed_ip_snapshot(device, payload, server_key="removed")
+        elif data_type == "links":
+            seed_cables_snapshot(device, server_key="removed")
         else:
             cache.set(view.get_cache_key(device, data_type, "removed"), payload)
 

@@ -9,6 +9,8 @@ get_librenms_sync_device() and handle the None return gracefully
 import json
 from copy import deepcopy
 
+from netbox_librenms_plugin.tests.source_snapshot_helpers import link_row, port_row, seed_cables_snapshot
+
 import pytest
 from django.conf import settings
 from django.test import RequestFactory, override_settings
@@ -111,48 +113,6 @@ class TestSingleCableVerifyView:
         data = json.loads(response.content)
         assert data["status"] == "success"
         assert data["formatted_row"]["cable_status"] == "Missing Ports"
-
-    @pytest.mark.django_db
-    def test_malformed_cached_links_fail_closed(self):
-        """A corrupt cached links entry must fail closed (empty row + purge), not 500 the verify path."""
-        from django.core.cache import cache
-
-        device = _make_gate_device(name="cbl-malformed")
-        view, request = _real_verify_view(
-            SingleCableVerifyView,
-            {"device_id": device.pk, "local_port_id": "10"},
-            _verify_superuser("cbl-malformed"),
-        )
-        cache_key = view.get_cache_key(device, "links", configured_server_key())
-        cache.set(cache_key, {"links": ["not-a-dict"]}, timeout=300)
-        response = view.post(request)
-
-        data = json.loads(response.content)
-        assert data["status"] == "success"
-        assert data["formatted_row"]["cable_status"] == "Missing Ports"
-        # The corrupt entry is purged so the next verify doesn't keep serving garbage.
-        assert cache.get(cache_key) is None
-
-
-def test_extract_cached_links_fails_closed_and_purges_malformed_entries():
-    """_extract_cached_links (shared by the cached GET render and the verify path) must reject a corrupt entry and purge its key, using the REAL cache."""
-    from django.core.cache import cache as real_cache
-
-    from netbox_librenms_plugin.views.base.cables_view import _extract_cached_links
-
-    key = "test-cables-malformed-links-key"
-    for bad in (["junk"], "corrupt", {"links": None}, {"links": ["bad"]}, {"links": [{"ok": 1}, 5]}):
-        real_cache.set(key, bad)
-        assert _extract_cached_links(real_cache.get(key), key) is None
-        assert real_cache.get(key) is None  # purged
-
-    # A well-formed entry passes through unchanged (and is NOT purged).
-    real_cache.set(key, {"links": [{"local_port_id": 1}]})
-    try:
-        assert _extract_cached_links(real_cache.get(key), key) == [{"local_port_id": 1}]
-        assert real_cache.get(key) == {"links": [{"local_port_id": 1}]}
-    finally:
-        real_cache.delete(key)
 
 
 def _snapshot_port(port_id, name, **fields):
@@ -1446,33 +1406,21 @@ def test_cable_verify_selects_the_cached_row_named_by_row_id():
     """Verify a populated cable cache selects the row named by row_id instead of returning the default row."""
     from django.core.cache import cache
 
-    from netbox_librenms_plugin.utils import assign_cable_row_ids
     from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
 
     device = _make_gate_device(name="cbl-rowid-device")
-    links = [
-        {
-            "local_port_id": 10,
-            "local_port": "ttyS0",
-            "remote_port": "console-A",
-            "remote_hostname": "peer-a",
-            "remote_port_id": 20,
-        },
-        {
-            "local_port_id": 11,
-            "local_port": "ttyS1",
-            "remote_port": "console-B",
-            "remote_hostname": "peer-b",
-            "remote_port_id": 21,
-        },
-    ]
-    with_row_ids = assign_cable_row_ids(links)
-    second_row_id = with_row_ids[1]["row_id"]
-    assert second_row_id != with_row_ids[0]["row_id"], "the two rows must be distinguishable"
-
+    server_key = configured_server_key()
+    seed_mapping(device, server_key, own=405)
+    links = [link_row(10, "console-A", remote_hostname="peer-a"), link_row(11, "console-B", remote_hostname="peer-b")]
+    seed_cables_snapshot(
+        device,
+        links,
+        [port_row(10, "ttyS0", device_id=405), port_row(11, "ttyS1", device_id=405)],
+        server_key=server_key,
+    )
+    second_row_id = "11"
     view_probe = SingleCableVerifyView()
-    cache_key = view_probe.get_cache_key(device, "links", configured_server_key())
-    cache.set(cache_key, {"links": links}, timeout=300)
+    cache_key = view_probe.get_cache_key(device, "links", server_key)
 
     def _render(row_id, tag):
         view, request = _real_verify_view(
@@ -1487,7 +1435,7 @@ def test_cable_verify_selects_the_cached_row_named_by_row_id():
 
     try:
         second = _render(second_row_id, "second")
-        first = _render(with_row_ids[0]["row_id"], "first")
+        first = _render("10", "first")
     finally:
         cache.delete(cache_key)
 

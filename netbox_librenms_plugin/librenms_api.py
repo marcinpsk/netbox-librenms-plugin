@@ -13,8 +13,6 @@ from netbox.plugins import get_plugin_config
 from netbox_librenms_plugin.acquisition import responses
 from netbox_librenms_plugin.acquisition.snapshot import Outcome
 from netbox_librenms_plugin.constants import (
-    LIBRENMS_NO_LINKS_MESSAGES,
-    LIBRENMS_NO_SENSORS_MESSAGE,
     LIBRENMS_NO_VRFS_MESSAGE,
     LIBRENMS_PORTS_COLUMNS,
 )
@@ -752,7 +750,9 @@ class LibreNMSAPI:
             # A 2xx whose body carries no usable device is treated as absent, as before.
             return False, None
 
-    def get_response(self, path: str, params: dict | None = None) -> tuple[int | None, object]:
+    def get_response(
+        self, path: str, params: dict | None = None, *, timeout=DEFAULT_API_TIMEOUT
+    ) -> tuple[int | None, object]:
         """
         Issue a GET against the LibreNMS API and return ``(status_code, body)`` verbatim.
 
@@ -764,6 +764,7 @@ class LibreNMSAPI:
         Args:
             path (str): API path relative to ``/api/v0/`` (e.g. ``"devices/1000"``).
             params (dict | None): Optional query parameters.
+            timeout (int): The request timeout in seconds.
 
         Returns:
             tuple: ``(status_code, body)``; the status is None when no HTTP response arrived.
@@ -775,7 +776,7 @@ class LibreNMSAPI:
                 url,
                 headers=self.headers,
                 params=params or {},
-                timeout=DEFAULT_API_TIMEOUT,
+                timeout=timeout,
                 verify=self.verify_ssl,
             )
         except requests.exceptions.RequestException:
@@ -1053,41 +1054,6 @@ class LibreNMSAPI:
                 error_message = error_details.get("message", error_message)
             return False, error_message
 
-    def get_device_links(self, device_id):
-        """
-        Get links for a specific device from LibreNMS.
-
-        Args:
-            device_id: LibreNMS device ID.
-
-        Returns:
-            tuple: (success: bool, data: dict)
-
-        """
-        try:
-            response = _session.get(
-                f"{self.librenms_url}/api/v0/devices/{device_id}/links",
-                headers=self.headers,
-                timeout=DEFAULT_API_TIMEOUT,
-                verify=self.verify_ssl,
-            )
-            response.raise_for_status()
-            return True, response.json()
-        except requests.exceptions.HTTPError as e:
-            if e.response is not None and e.response.status_code == 404:
-                try:
-                    error_data = e.response.json()
-                except ValueError:
-                    error_data = {}
-                message = error_data.get("message") if isinstance(error_data, dict) else None
-                normalized_message = message.casefold() if isinstance(message, str) else ""
-                if any(text in normalized_message for text in LIBRENMS_NO_LINKS_MESSAGES):
-                    return True, {"status": "ok", "links": []}
-                return False, message if isinstance(message, str) and message else str(e)
-            return False, str(e)
-        except requests.exceptions.RequestException as e:
-            return False, str(e)
-
     def get_device_vrfs(self, device_id):
         """
         Return the VRFs LibreNMS holds for one device.
@@ -1147,29 +1113,6 @@ class LibreNMSAPI:
         if isinstance(message, str) and LIBRENMS_NO_VRFS_MESSAGE in message.lower():
             return True, []
         return False, message or str(error)
-
-    def get_port_by_id(self, port_id):
-        """
-        Fetch specific port data from LibreNMS using port ID.
-
-        Args:
-            port_id: LibreNMS Port ID
-
-        Returns:
-            tuple: (success: bool, data: dict)
-
-        """
-        try:
-            response = _session.get(
-                f"{self.librenms_url}/api/v0/ports/{port_id}",
-                headers=self.headers,
-                timeout=DEFAULT_API_TIMEOUT,
-                verify=self.verify_ssl,
-            )
-            response.raise_for_status()
-            return True, response.json()
-        except requests.exceptions.RequestException as e:
-            return False, str(e)
 
     def get_device_inventory(self, device_id, missing_is_empty=False):
         """
@@ -1551,148 +1494,25 @@ class LibreNMSAPI:
             tuple: (success: bool, data: list of sensor dicts or error string)
 
         """
+        from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns, project_serial_sensors
+
         if sensor_types is None:
-            from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns
-
             sensor_types = get_serial_sensor_type_patterns()
-        serial_types = sensor_types
-        if not serial_types:
+        if not sensor_types:
             return True, []
-        return self._fetch_serial_port_sensors(device_id, sensor_types=serial_types)
-
-    def _fetch_serial_port_sensors(self, device_id: int, sensor_types: dict | None = None) -> tuple[bool, list | str]:
-        """
-        Fetch the serial-port sensors of one device from the instance-wide sensor table.
-
-        Args:
-            device_id: LibreNMS device ID. Other devices' rows are skipped before their
-                serial values are validated.
-            sensor_types: Optional explicit recognition map; defaults to the
-                ``SerialSensorTypePattern`` table's map.
-
-        Returns:
-            tuple: (success: bool, data: list of serial sensor dicts or error string)
-
-        """
-        from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns
-
-        # Recognized serial sensor types are the keys of the {type: name pattern} map; the fetch
-        # filter only needs membership, so ``in`` against the dict keys is sufficient here.
-        serial_types = sensor_types if sensor_types is not None else get_serial_sensor_type_patterns()
-
-        try:
-            response = _session.get(
-                f"{self.librenms_url}/api/v0/resources/sensors",
-                headers=self.headers,
-                timeout=EXTENDED_API_TIMEOUT,
-                verify=self.verify_ssl,
-            )
-            response.raise_for_status()
-
-            result = response.json()
-            if not isinstance(result, dict):
-                return False, "Unexpected response format"
-            if result.get("status") != "ok":
-                return False, result.get("message") or "Unexpected response format"
-            all_sensors, list_error = self._extract_sensor_list(result)
-            if all_sensors is None:
-                return False, list_error
-            return self._select_device_serial_sensors(all_sensors, device_id, serial_types, result)
-
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == HTTP_NOT_FOUND:
-                return self._classify_missing_sensors(e)
-            return False, f"HTTP error: {str(e)}"
-        except ValueError as e:
-            # JSONDecodeError subclasses ValueError and RequestException, so this handler comes first.
-            return False, f"Invalid JSON from LibreNMS: {str(e)}"
-        except requests.exceptions.RequestException as e:
-            return False, f"Error connecting to LibreNMS: {str(e)}"
-
-    @staticmethod
-    def _classify_missing_sensors(error) -> tuple[bool, list | str]:
-        """Tell "this instance holds no sensors" apart from "this endpoint is missing"."""
-        try:
-            payload = error.response.json()
-        except (TypeError, ValueError):
-            payload = None
-        message = payload.get("message") if isinstance(payload, dict) else None
-        if isinstance(message, str) and LIBRENMS_NO_SENSORS_MESSAGE in message.lower():
-            return True, []
-        return False, "Sensors resource endpoint not found"
-
-    @staticmethod
-    def _extract_sensor_list(result: dict):
-        """Return the response's sensor list, or ``(None, message)`` when the payload is malformed."""
-        # Select by key presence first, then validate the selected value. The old
-        # `result.get("sensors") or result.get("resources", [])` turned a missing list
-        # ({"status": "ok"}) or a falsy-but-present one ({"sensors": ""}) into [], so a
-        # malformed response was reported as a successful zero-sensor result.
-        if "sensors" in result:
-            all_sensors = result["sensors"]
-        elif "resources" in result:
-            all_sensors = result["resources"]
-        else:
-            return None, result.get("message") or "Unexpected response format: missing sensor list"
-        if not isinstance(all_sensors, list):
-            return None, result.get("message") or "Unexpected response format: missing sensor list"
-        return all_sensors, None
-
-    @staticmethod
-    def _sensor_deleted_flag(sensor: dict) -> str | None:
-        """Return the row's deleted flag as "0"/"1", or None when it is out of contract."""
-        deleted = sensor.get("sensor_deleted", 0)
-        if isinstance(deleted, int) and not isinstance(deleted, bool) and deleted in (0, 1):
-            return str(deleted)
-        if isinstance(deleted, str) and deleted in ("0", "1"):
-            return deleted
-        return None
-
-    def _select_device_serial_sensors(
-        self, all_sensors: list, device_id: int, serial_types, result: dict
-    ) -> tuple[bool, list | str]:
-        """Narrow the instance-wide sensor table to one device's live serial rows."""
-        # This is an external boundary: a list payload doesn't guarantee every item is a dict.
-        # Fail closed on a malformed item instead of filtering it out — silently dropping rows
-        # would make a broken response indistinguishable from "no serial sensors" and skip
-        # serial sync without surfacing the error. Mirrors the per-item validation in
-        # get_device_inventory().
-        if any(not isinstance(s, dict) for s in all_sensors):
-            logger.warning("Unexpected sensors response for %s: non-dict sensor item", self.server_key)
-            return False, result.get("message") or "Unexpected response format: invalid sensor item"
-
-        serial_sensors = []
-        unreadable_sensor_types = 0
-        for sensor in all_sensors:
-            sensor_type = sensor.get("sensor_type")
-            # A non-string sensor_type names no serial type and would raise TypeError on the
-            # membership test; skip the row rather than fail every device's refresh.
-            if not isinstance(sensor_type, str):
-                unreadable_sensor_types += 1
-                continue
-            # Narrow to this device's serial subset BEFORE validating the rest of the row. This
-            # endpoint returns every sensor on the instance, so a temperature probe with an
-            # out-of-contract sensor_id would otherwise fail the whole serial refresh.
-            if sensor_type not in serial_types or str(sensor.get("device_id")) != str(device_id):
-                continue
-            deleted = self._sensor_deleted_flag(sensor)
-            if deleted is None:
-                logger.warning("Unexpected sensors response for %s: invalid sensor_deleted", self.server_key)
-                return False, result.get("message") or "Unexpected response format: invalid sensor_deleted"
-            if deleted == "1":
-                continue
-            sensor_id = self._normalize_librenms_id(sensor.get("sensor_id"))
-            if sensor_id is None:
-                logger.warning("Unexpected sensors response for %s: invalid sensor_id", self.server_key)
-                return False, result.get("message") or "Unexpected response format: invalid sensor_id"
-            serial_sensors.append({**sensor, "sensor_id": sensor_id})
-        if unreadable_sensor_types:
+        endpoint = responses.sensors(device_id)
+        decoded = endpoint.decode(*self.get_response(endpoint.request.path, timeout=EXTENDED_API_TIMEOUT))
+        if decoded.outcome is not Outcome.OBTAINED:
+            return False, decoded.reason
+        unreadable_types = sum(not isinstance(sensor.get("sensor_type"), str) for sensor in decoded.value)
+        if unreadable_types:
             logger.warning(
                 "Skipped %s sensor(s) with a non-string sensor_type for %s",
-                unreadable_sensor_types,
+                unreadable_types,
                 self.server_key,
             )
-        return True, serial_sensors
+        projection = project_serial_sensors(decoded.value, sensor_types)
+        return (True, projection.rows) if projection.ready else (False, projection.reason)
 
     def get_port_vlan_details(self, port_id: int) -> tuple[bool, dict | str]:
         """

@@ -1,5 +1,5 @@
 """
-Error and skip paths of ``LibreNMSAPI._fetch_serial_port_sensors``.
+Error and skip paths of ``LibreNMSAPI.get_serial_port_sensors``.
 
 ``test_librenms_api.py::TestGetSerialPortSensors`` covers the success and malformed-payload
 branches, the empty-table 404, and the non-JSON 200. These are the paths it does not reach: a
@@ -89,3 +89,50 @@ class TestUnreadableSensorType:
         assert success is True
         assert data == []
         assert any("Skipped 3 sensor(s)" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize("sensor_index", [None, 1.3, "not-an-index"])
+def test_a_recognized_active_sensor_needs_a_usable_index(live_librenms, sensor_index):
+    row = {**_sensor(12), "sensor_index": sensor_index}
+    live_librenms.server.register(SENSORS_PATH, {"status": "ok", "sensors": [row]})
+
+    success, reason = live_librenms.api.get_serial_port_sensors(12)
+
+    assert success is False
+    assert live_librenms.server.requests[-1]["path"] == SENSORS_PATH
+
+
+@pytest.mark.parametrize("deleted", [1, "1"])
+def test_deleted_sensors_need_no_live_identity_or_index(live_librenms, deleted):
+    active = _sensor(12)
+    removed = {**_sensor(12, port_num=8), "sensor_deleted": deleted, "sensor_id": False, "sensor_index": None}
+    live_librenms.server.register(SENSORS_PATH, {"status": "ok", "sensors": [removed, active]})
+
+    success, rows = live_librenms.api.get_serial_port_sensors(12)
+
+    assert success is True
+    assert rows == [active]
+
+
+def test_a_malformed_deletion_flag_refuses_the_serial_source(live_librenms):
+    row = {**_sensor(12), "sensor_deleted": True}
+    live_librenms.server.register(SENSORS_PATH, {"status": "ok", "sensors": [row]})
+
+    success, reason = live_librenms.api.get_serial_port_sensors(12)
+
+    assert success is False
+    assert live_librenms.server.requests[-1]["path"] == SENSORS_PATH
+
+
+@pytest.mark.parametrize("body", [{"status": "ok"}, {"status": "ok", "links": None}, {"status": "ok", "links": [7]}])
+def test_links_acquisition_rejects_an_unusable_envelope(live_librenms, body):
+    live_librenms.server.register("/api/v0/devices/12/links", body)
+
+    from netbox_librenms_plugin.acquisition import responses
+    from netbox_librenms_plugin.acquisition.snapshot import Outcome
+
+    endpoint = responses.links(12)
+    decoded = endpoint.decode(*live_librenms.api.get_response(endpoint.request.path))
+
+    assert decoded.outcome is Outcome.FAILED
+    assert live_librenms.server.requests[-1]["path"] == f"/api/v0/{endpoint.request.path}"
