@@ -1861,13 +1861,17 @@ rules:
       category: correctness
     paths:
       include: ["**/netbox_librenms_plugin/tests/**"]
-    patterns:
-      - pattern-either:
-          - pattern: '$MP.setattr($TARGET, "$CLOCK", lambda: next(...))'
-          - pattern: '$MP.setattr($TARGET, "$CLOCK", lambda $...ARGS: next(...))'
-      - metavariable-regex:
-          metavariable: $CLOCK
-          regex: ^(monotonic|perf_counter|time|time_ns|monotonic_ns)$
+    pattern-either:
+      - patterns:
+          - pattern: '$MP.setattr($TARGET, "$CLOCK", lambda $...ARGS: next(...), ...)'
+          - metavariable-regex:
+              metavariable: $CLOCK
+              regex: ^(monotonic|perf_counter|time|time_ns|monotonic_ns)$
+      - patterns:
+          - pattern: '$MP.setattr("$TARGET", lambda $...ARGS: next(...), ...)'
+          - metavariable-regex:
+              metavariable: $TARGET
+              regex: ^.*\.(monotonic|perf_counter|time|time_ns|monotonic_ns)$
 
   - id: batch-validation-needs-candidate-keys
     languages: [python]
