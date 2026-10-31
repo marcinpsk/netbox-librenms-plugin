@@ -1629,50 +1629,60 @@ class TestSingleIPAddressVerifyServerKeyCacheNamespace:
     def test_forged_server_key_falls_back_to_configured_namespace(self):
         from django.contrib.auth import get_user_model
 
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot
         from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
 
         device = _make_gate_device(name="ipgate-srvkey")
+        for own, namespace in enumerate(("default", "alpha", "evil-namespace"), start=4301):
+            seed_mapping(device, namespace, own=own, save=False)
+        device.save()
+        # The address is on two ports in each snapshot, so only the snapshot that holds the posted row id answers.
+        for first_port, namespace in ((1, "default"), (3, "alpha"), (5, "evil-namespace")):
+            port_ids = (first_port, first_port + 1)
+            seed_ip_snapshot(
+                device,
+                [ip_address_row("1.2.3.4", port_id) for port_id in port_ids],
+                [{"port_id": port_id, "ifName": f"eth{port_id}", "ifDescr": f"eth{port_id}"} for port_id in port_ids],
+                server_key=namespace,
+            )
         user = get_user_model().objects.create_user(username="ipgate-srvkey-su", password="x", is_superuser=True)
         user = get_user_model().objects.get(pk=user.pk)
 
-        request = RequestFactory().post(
-            "/plugins/librenms_plugin/verify-ipaddress/",
-            data=json.dumps(
-                {
-                    "device_id": device.pk,
-                    "ip_address": "1.2.3.4/24",
-                    "object_type": "device",
-                    "server_key": "evil-namespace",  # not a configured server
-                }
-            ),
-            content_type="application/json",
-        )
-        request.user = user
-        view = SingleIPAddressVerifyView()
-        view.request = request
-        view.kwargs = {}
-        view.args = ()
-
-        captured = {}
-        original_get_cache_key = view.get_cache_key
-
-        def spy(obj, data_type="ports", server_key=None):
-            captured["server_key"] = server_key
-            return original_get_cache_key(obj, data_type, server_key)
-
-        view.get_cache_key = spy
+        def verify(server_key, row_id):
+            request = RequestFactory().post(
+                "/plugins/librenms_plugin/verify-ipaddress/",
+                data=json.dumps(
+                    {
+                        "device_id": device.pk,
+                        "ip_address": "1.2.3.4/24",
+                        "object_type": "device",
+                        "row_id": row_id,
+                        "server_key": server_key,
+                    }
+                ),
+                content_type="application/json",
+            )
+            request.user = user
+            view = SingleIPAddressVerifyView()
+            view.request = request
+            view.kwargs = {}
+            view.args = ()
+            return view.post(request)
 
         servers = {
             "alpha": {"librenms_url": "https://a.example.com", "api_token": "t"},
             "beta": {"librenms_url": "https://b.example.com", "api_token": "t"},
         }
         with _servers_settings(servers):
-            view.post(request)
+            forged_default_row = verify("evil-namespace", "1.2.3.4/24@1")
+            forged_own_row = verify("evil-namespace", "1.2.3.4/24@5")
+            configured_row = verify("alpha", "1.2.3.4/24@3")
 
-        # The forged key never reaches the cache namespace: it falls back to the fixed "default"
-        # (the only non-configured namespace a caller can ever address), never "evil-namespace".
-        assert captured.get("server_key") == "default"
-        assert captured.get("server_key") != "evil-namespace"
+        # The forged key reads the fixed "default" snapshot, never its own namespace.
+        assert forged_default_row.status_code == 200, forged_default_row.content
+        assert forged_own_row.status_code == 400
+        # Positive control: a configured key reads its own snapshot.
+        assert configured_row.status_code == 200, configured_row.content
 
 
 # ---------------------------------------------------------------------------

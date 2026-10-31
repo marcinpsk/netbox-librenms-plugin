@@ -18,6 +18,7 @@ from django.template.loader import render_to_string
 from django.test import RequestFactory
 from django.urls import reverse
 
+from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.tests.conftest import (
@@ -42,9 +43,9 @@ from netbox_librenms_plugin.tests.test_interface_sync_filters import (
     serve_sync_page,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
 from netbox_librenms_plugin.tests.test_ip_address_sync_filters import _refresh
 from netbox_librenms_plugin.views.sync.cables import SyncCablesView
-from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
 
 URL_ATTRIBUTES = ("href", "action", "formaction", "hx-get", "hx-post", "hx-put", "hx-patch", "hx-delete")
 VOID_TAGS = frozenset({"input", "br", "img", "hr", "meta", "link", "source", "wbr"})
@@ -444,7 +445,7 @@ def _vlan_owner(client, settings, server):
         for n in range(12)
     ]
     rows.append({"vlan_vlan": 999, "vlan_name": "v99 a&b+c É", "vlan_type": "tokenring", "vlan_state": 1})
-    cache.set(SyncVLANsView().get_cache_key(device, "vlans", SERVER_KEY), rows, timeout=300)
+    seed_source_snapshot(device, Resource.VLANS, SERVER_KEY, vlans=rows)
     return serve_sync_page(client, settings, server, device)
 
 
@@ -556,10 +557,11 @@ def _four_tab_owner(client, settings, librenms_server):
     # The IP rows come from a refresh against the loopback LibreNMS, which serves the device as ID 42.
     owner = make_device("four-tab-device", librenms_cf={SERVER_KEY: {"id": 42}})
     _seed(owner, _contract_ports())
-    cache.set(
-        SyncVLANsView().get_cache_key(owner, "vlans", SERVER_KEY),
-        [{"vlan_vlan": 100, "vlan_name": "v100", "vlan_type": "ethernet", "vlan_state": 1}],
-        timeout=300,
+    seed_source_snapshot(
+        owner,
+        Resource.VLANS,
+        SERVER_KEY,
+        vlans=[{"vlan_vlan": 100, "vlan_name": "v100", "vlan_type": "ethernet", "vlan_state": 1}],
     )
     cache.set(
         object.__new__(SyncCablesView).get_cache_key(owner, "links", SERVER_KEY),

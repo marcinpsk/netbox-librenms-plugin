@@ -49,7 +49,7 @@ class IPAddressTable(tables.Table):
         Initialize IP address table.
 
         Args:
-            data (list[dict]): The rows, which ``enrich_ip_data`` identified over the whole snapshot.
+            data (list[dict]): The rows, which ``assess_snapshot`` identified over the whole snapshot.
             mgmt_row_vrfs (dict[str, str]): The VRF that each management row of the whole snapshot shows, by row ID.
             **kwargs: Other ``tables.Table`` options.
 

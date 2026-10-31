@@ -27,7 +27,6 @@ from ipam.models import IPAddress
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
-from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncTab, sync_snapshot_key
 from netbox_librenms_plugin.tests.conftest import (
     configure_default_librenms_server,
     make_device,
@@ -36,6 +35,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis_members,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
@@ -962,24 +962,7 @@ def test_the_ip_tab_does_not_create_an_interface_for_an_ignored_port(superuser_c
     platform = _platform("rule-ip-create")
     rule = InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform, name_pattern="^Ethernet")
     device = _device("rule-ip-create", platform)
-    cache.set(
-        sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].source.data_type, SERVER_KEY),
-        {
-            "ip_addresses": [
-                {
-                    "ip_address": "198.18.30.10",
-                    "prefix_length": 24,
-                    "ip_with_mask": "198.18.30.10/24",
-                    "port_id": 7030,
-                    "interface_name": "Ethernet1",
-                }
-            ],
-            "mgmt_ip": "",
-            "ports_by_id": {7030: _port(7030, "Ethernet1")},
-            "interface_name_field": "ifName",
-        },
-        timeout=300,
-    )
+    seed_ip_snapshot(device, [ip_address_row("198.18.30.10", 7030)], [_port(7030, "Ethernet1")], server_key=SERVER_KEY)
 
     response = superuser_client.post(
         reverse(

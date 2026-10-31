@@ -20,7 +20,8 @@ from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from ipam.models import IPAddress, VRF
 
-from netbox_librenms_plugin.constants import INTERFACE_NAME_FIELDS
+from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncCacheConsistency, SyncTab, sync_snapshot_key
 from netbox_librenms_plugin.tests.conftest import (
@@ -34,6 +35,7 @@ from netbox_librenms_plugin.tests.conftest import (
     run_in_threads,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import (
     assert_update_logged,
     grant,
@@ -41,166 +43,6 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     make_user_with_perms,
     make_view,
 )
-
-
-@pytest.mark.django_db
-class TestCachedInterfaceUrlFallback:
-    """
-    index_ip_source_interfaces builds a by_pk map for a rename-safe interface_url fallback.
-
-    resolve_ip_source_interface implements that fallback, but the view discarded by_pk and the
-    rebuilt entry dropped interface_url, so the last resort could never fire and a renamed
-    in-scope interface read as unmatched.
-    """
-
-    @staticmethod
-    def _view():
-        from netbox_librenms_plugin.views.base.ip_addresses_view import BaseIPAddressTableView
-
-        # The VRF dropdown is scoped to the request user, so the bare view needs a request.
-        return make_view(BaseIPAddressTableView, librenms_api=False)
-
-    def test_prefetch_returns_the_by_pk_index(self):
-        """The map is built either way; the bug was that the view never handed it on."""
-        device = make_device("ipurl-prefetch")
-        interface = make_interface(device, "Ethernet1")
-
-        prefetched = self._view()._prefetch_netbox_data(device, [], server_key="default")
-
-        assert prefetched["interfaces_by_pk"] == {str(interface.pk): interface}
-
-    def test_a_renamed_interface_still_resolves_through_its_cached_url(self):
-        """port_id is unusable and the cached name is stale, so only the PK-backed URL is left."""
-        device = make_device("ipurl-rename")
-        interface = make_interface(device, "Ethernet1")
-        cached_url = interface.get_absolute_url()
-        interface.name = "Ethernet1-renamed"
-        interface.save()
-
-        enriched = self._view().enrich_ip_data(
-            [
-                {
-                    "ipv4_address": "192.0.2.50",
-                    "ipv4_prefixlen": 24,
-                    "port_id": 9999,
-                    "interface_name": "Ethernet1",
-                    "interface_url": cached_url,
-                }
-            ],
-            device,
-            "ifName",
-            server_key="default",
-            port_data_cache={9999: None},
-        )
-
-        assert len(enriched) == 1
-        assert enriched[0]["interface_name"] == "Ethernet1-renamed"
-        assert enriched[0]["interface_url"] == cached_url
-
-    def test_a_deleted_interface_drops_its_cached_url(self):
-        """
-        The cached URL feeds resolution; it is not an answer.
-
-        When scoped resolution rejects it, the row kept the stale link and the table rendered a
-        URL for an interface that is gone or out of scope.
-        """
-        device = make_device("ipurl-deleted")
-        interface = make_interface(device, "Ethernet1")
-        cached_url = interface.get_absolute_url()
-        interface.delete()
-
-        enriched = self._view().enrich_ip_data(
-            [
-                {
-                    "ipv4_address": "192.0.2.51",
-                    "ipv4_prefixlen": 24,
-                    "port_id": 9999,
-                    "interface_name": "Ethernet1",
-                    "interface_url": cached_url,
-                }
-            ],
-            device,
-            "ifName",
-            server_key="default",
-            port_data_cache={9999: None},
-        )
-
-        assert len(enriched) == 1
-        assert "interface_url" not in enriched[0]
-
-    def test_a_cached_url_to_an_interface_bound_to_another_port_drops_it(self):
-        """The PK survives a rename, but a binding to a different port outranks it."""
-        device = make_device("ipurl-rebound")
-        interface = make_interface(device, "Ethernet1")
-        cached_url = interface.get_absolute_url()
-        interface.name = "Ethernet1-renamed"
-        seed_mapping(interface, "default", own=9000, save=False)
-        interface.save()
-
-        enriched = self._view().enrich_ip_data(
-            [
-                {
-                    "ipv4_address": "192.0.2.53",
-                    "ipv4_prefixlen": 24,
-                    "port_id": 9999,
-                    "interface_name": "Ethernet1",
-                    "interface_url": cached_url,
-                }
-            ],
-            device,
-            "ifName",
-            server_key="default",
-            port_data_cache={9999: None},
-        )
-
-        assert len(enriched) == 1
-        assert "interface_url" not in enriched[0]
-
-    def test_a_row_without_address_fields_is_skipped_not_raised(self):
-        """
-        enrich_ip_data guards only isinstance/port_id, so an unparseable row aborted the
-        whole call for a direct caller instead of being skipped like the first loop does.
-        """
-        device = make_device("ipurl-malformed")
-        make_interface(device, "Ethernet1")
-
-        enriched = self._view().enrich_ip_data(
-            [
-                {"port_id": 1},
-                {"ipv4_address": "192.0.2.52", "ipv4_prefixlen": 24, "port_id": 2, "interface_name": "Ethernet1"},
-            ],
-            device,
-            "ifName",
-            server_key="default",
-            port_data_cache={1: None, 2: None},
-        )
-
-        assert [row["ip_with_mask"] for row in enriched] == ["192.0.2.52/24"]
-
-    def test_an_unknown_cached_url_stays_fail_closed(self):
-        """by_pk is scoped to this object, so a URL naming another device resolves to nothing."""
-        device = make_device("ipurl-foreign")
-        make_interface(device, "Ethernet1")
-        other = make_interface(make_device("ipurl-other"), "Ethernet9")
-
-        enriched = self._view().enrich_ip_data(
-            [
-                {
-                    "ipv4_address": "192.0.2.51",
-                    "ipv4_prefixlen": 24,
-                    "port_id": 9998,
-                    "interface_name": "Nonexistent",
-                    "interface_url": other.get_absolute_url(),
-                }
-            ],
-            device,
-            "ifName",
-            server_key="default",
-            port_data_cache={9998: None},
-        )
-
-        assert len(enriched) == 1
-        assert enriched[0].get("interface_name") != other.name
 
 
 @pytest.mark.django_db
@@ -275,11 +117,6 @@ def _receiver_parses_the_saved_ip_address():
         post_save.disconnect(sender=IPAddress, dispatch_uid="test-parse-saved-ip-address")
 
 
-def _ip_snapshot_key(obj):
-    """Return the production IP-addresses snapshot key, so a key-scheme change cannot pass silently."""
-    return sync_snapshot_key(obj, TAB_SPECS[SyncTab.IP_ADDRESSES].source.data_type, "default")
-
-
 def _serve_librenms_ip_response(server, address, prefix_length, *, device_name="ip-prefix-device", port_id=7001):
     """Serve one LibreNMS device IP row over loopback HTTP."""
     _serve_librenms_ip_rows(
@@ -310,27 +147,52 @@ def _serve_librenms_ip_rows(server, rows, *, device_name, management_ip="198.18.
         },
     )
     server.register("/api/v0/poller_group", {"status": "ok", "get_poller_group": []})
-    registered_ports = set()
-    device_ports = []
-    for row in rows:
-        if row["port_id"] in registered_ports:
-            continue
-        registered_ports.add(row["port_id"])
-        port = {
-            **_PORT_KEYS_UNSET,
-            "port_id": row["port_id"],
-            "ifName": row["interface"],
-            "ifDescr": row["interface"],
-        }
-        port.update(row.get("port_fields", {}))
-        device_ports.append(port)
-        server.register(f"/api/v0/ports/{row['port_id']}", {"status": "ok", "port": [port]})
+    device_ports = _device_ports(rows)
+    for port in device_ports:
+        server.register(f"/api/v0/ports/{port['port_id']}", {"status": "ok", "port": [port]})
     # A real LibreNMS serves both: the per-port route above and the device's whole port list, which
     # is where the IP tab reads each row's interface name from.
     server.register("/api/v0/devices/42/ports", {"status": "ok", "ports": device_ports})
     server.register(
         "/api/v0/devices/42",
         {"status": "ok", "devices": [{"device_id": 42, "ip": management_ip}]},
+    )
+
+
+def _ip_row(address, port_id, interface, prefix_length=24, **port_fields):
+    """Return one source row in the shape ``_serve_librenms_ip_rows`` and ``_seed_ip_rows`` take."""
+    return {
+        "address": address,
+        "prefix_length": prefix_length,
+        "port_id": port_id,
+        "interface": interface,
+        "port_fields": port_fields,
+    }
+
+
+def _device_ports(rows):
+    """Return the LibreNMS port record of each port that *rows* name, as ``/devices/{id}/ports`` serves it."""
+    ports = {}
+    for row in rows:
+        ports.setdefault(
+            row["port_id"],
+            {
+                **_PORT_KEYS_UNSET,
+                "port_id": row["port_id"],
+                "ifName": row["interface"],
+                "ifDescr": row["interface"],
+                **row.get("port_fields", {}),
+            },
+        )
+    return list(ports.values())
+
+
+def _seed_ip_rows(device, rows):
+    """Store the IP snapshot that a refresh of *rows* stores; the device record holds no management IP."""
+    seed_ip_snapshot(
+        device,
+        [ip_address_row(row["address"], row["port_id"], row["prefix_length"]) for row in rows],
+        _device_ports(rows),
     )
 
 
@@ -374,40 +236,6 @@ def _refresh_ip_snapshot(client, device, address, prefix_length, live_librenms):
         {"server_key": "default", "interface_name_field": "ifName"},
         HTTP_HX_REQUEST="true",
     )
-
-
-class TestManagementIpLiveLookup:
-    """get_management_ip over a real HTTP LibreNMS, both outcomes its producer can return."""
-
-    @pytest.mark.django_db
-    def test_management_ip_reads_the_live_device_endpoint_and_degrades_on_a_fault(self, settings, librenms_server):
-        """A 200 yields the management IP; a faulting endpoint yields None so the sync is never blocked."""
-        from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
-        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
-
-        configure_librenms_servers(
-            settings,
-            {"default": {"librenms_url": librenms_server.url, "api_token": "token", "verify_ssl": False}},
-        )
-        device = make_device("mgmt-ip-live-lookup")
-        seed_mapping(device, own=9903, save=False)
-        device.save()
-        # A real instance: __init__ binds _librenms_api, and the lazy property builds the
-        # configured client from it.
-        view = SyncIPAddressesView()
-
-        librenms_server.register(
-            "/api/v0/devices/9903",
-            {"status": "ok", "devices": [{"device_id": 9903, "ip": "  198.18.7.9  "}]},
-        )
-        try:
-            assert view.get_management_ip(device) == "198.18.7.9"
-
-            # A faulting endpoint is a real (False, None) lookup: no management IP, no raise.
-            librenms_server.register("/api/v0/devices/9903", {"status": "error"}, status=500)
-            assert view.get_management_ip(device) is None
-        finally:
-            cache.delete("librenms_device_info_default_9903")
 
 
 class _IPHostLookupBarrier:
@@ -522,24 +350,7 @@ def test_concurrent_global_ip_sync_creates_one_address(settings):
     for port_id, device in enumerate(devices, start=7040):
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
         seed_mapping(interface, own=port_id)
-        cache.set(
-            _ip_snapshot_key(device),
-            {
-                "ip_addresses": [
-                    {
-                        "ip_address": "198.18.20.10",
-                        "prefix_length": 24,
-                        "ip_with_mask": row_id,
-                        "port_id": port_id,
-                        "interface_name": "Ethernet1",
-                    }
-                ],
-                "mgmt_ip": "",
-                "ports_by_id": {},
-                "interface_name_field": "ifName",
-            },
-            timeout=300,
-        )
+        _seed_ip_rows(device, [_ip_row("198.18.20.10", port_id, "Ethernet1")])
 
     lookup_barrier = Barrier(2, timeout=10)
     lookup_wrappers = [_IPHostLookupBarrier(lookup_barrier) for _device in devices]
@@ -574,36 +385,11 @@ def test_concurrent_bulk_ip_sync_orders_host_locks_before_interface_scope(settin
     for port_id, interface in zip((7041, 7042), interfaces, strict=True):
         seed_mapping(interface, own=port_id)
 
-    rows = [
-        {
-            "ip_address": "198.18.22.10",
-            "prefix_length": 24,
-            "ip_with_mask": "198.18.22.10/24",
-            "port_id": 7041,
-            "interface_name": "Ethernet1",
-        },
-        {
-            "ip_address": "198.18.22.11",
-            "prefix_length": 24,
-            "ip_with_mask": "198.18.22.11/24",
-            "port_id": 7042,
-            "interface_name": "Ethernet2",
-        },
-    ]
-    cache.set(
-        _ip_snapshot_key(device),
-        {
-            "ip_addresses": rows,
-            "mgmt_ip": "",
-            "ports_by_id": {},
-            "interface_name_field": "ifName",
-        },
-        timeout=300,
-    )
+    _seed_ip_rows(device, [_ip_row("198.18.22.10", 7041, "Ethernet1"), _ip_row("198.18.22.11", 7042, "Ethernet2")])
 
     barrier = Barrier(2, timeout=10)
     wrappers = [_FirstHostAdvisoryBarrier(barrier) for _ in range(2)]
-    row_ids = [row["ip_with_mask"] for row in rows]
+    row_ids = ["198.18.22.10/24", "198.18.22.11/24"]
     outcomes = run_in_threads(
         *(
             partial(_sync_cached_ips, device.pk, user.pk, selected, wrapper)
@@ -719,9 +505,9 @@ def test_refresh_and_sync_accepts_an_already_prefixed_address(
     refresh_response = _refresh_ip_snapshot(client, device, librenms_address, prefix_length, live_librenms)
 
     assert refresh_response.status_code == 200
-    cached = cache.get(_ip_snapshot_key(device))
-    assert cached is not None, refresh_response.content.decode()
-    assert cached["ip_addresses"][0]["ip_with_mask"] == expected_address
+    assert source_cache.read(device, Resource.IP_ADDRESSES, "default") is not None, refresh_response.content.decode()
+    (row,) = list(refresh_response.context["ip_sync"]["table"].data)
+    assert row["ip_with_mask"] == expected_address
     state = cache.get(SyncCacheConsistency(device).state_key(SyncTab.IP_ADDRESSES, "default"))
     assert state is not None
     assert state["state"] == "ready"
@@ -809,7 +595,7 @@ def test_refresh_rejects_conflicting_embedded_and_separate_prefixes(client, sett
 
     assert response.status_code == 200
     assert b"Failed to fetch IP addresses from LibreNMS" in response.content
-    assert cache.get(_ip_snapshot_key(device)) is None
+    assert source_cache.read(device, Resource.IP_ADDRESSES, "default") is None
     state = cache.get(SyncCacheConsistency(device).state_key(SyncTab.IP_ADDRESSES, "default"))
     assert state is not None
     assert state["state"] == "refresh_failed"
@@ -1165,14 +951,14 @@ def test_create_missing_interfaces_materializes_one_interface_for_bulk_ip_rows(c
 @pytest.mark.django_db
 def test_an_empty_snapshot_is_not_reported_as_an_expired_cache(client, settings):
     """
-    A refresh that finds no IPs writes a valid snapshot whose ip_addresses list is empty.
+    A refresh that finds no IPs writes a valid snapshot whose address list is empty.
 
     Treating that as a cache miss tells the user to refresh the data they just refreshed, and
     replaces the tab with the cache-miss prompt.
     """
     _configure_test_server(settings)
     device = make_device("ip-empty-snapshot", librenms_cf={"default": {"id": 43}})
-    cache.set(_ip_snapshot_key(device), {"ip_addresses": []}, timeout=300)
+    _seed_ip_rows(device, [])
     client.force_login(make_superuser("ip-empty-snapshot-user"))
 
     response = client.post(
@@ -1191,14 +977,16 @@ def test_an_empty_snapshot_is_not_reported_as_an_expired_cache(client, settings)
 
 @pytest.mark.django_db
 def test_create_missing_interfaces_rejects_legacy_snapshot_before_processing_rows(client, settings):
-    """Create-missing must reject a legacy snapshot once, before processing its rows."""
+    """A payload of the old enriched shape reads as no snapshot, so create-missing processes none of its rows."""
     from dcim.models import Interface
 
     _configure_test_server(settings)
     device = make_device("ip-create-missing-legacy", librenms_cf={"default": {"id": 42}})
     row_id = "198.18.12.20/24"
+    # An older release stored this shape under the same key; it is the input under test, not a seed.
+    snapshot_key = source_cache.snapshot_key(device, Resource.IP_ADDRESSES, "default")
     cache.set(
-        _ip_snapshot_key(device),
+        snapshot_key,
         {
             "ip_addresses": [
                 {
@@ -1300,7 +1088,7 @@ def test_create_missing_interfaces_reuses_interface_catalog_for_bulk_rows(client
     # Upper bound, not an exact count: the counter matches generated SQL text, and a NetBox
     # release that adds a select_related or prefetch would change it without changing behaviour.
     # The point of the assertion is that the catalog is reused, not rebuilt per row.
-    assert catalog_reads <= 2  # initial matching map plus one reusable creation catalog
+    assert catalog_reads <= 3  # the assessment's scope, the sync's matching map, one reusable creation catalog
     assert {interface.name for interface in Interface.objects.filter(device=device)} == {"Ethernet21", "Ethernet22"}
     assert IPAddress.objects.get(address="198.18.12.21/24").assigned_object.name == "Ethernet21"
     assert IPAddress.objects.get(address="198.18.12.22/24").assigned_object.name == "Ethernet22"
@@ -1315,31 +1103,13 @@ def test_failed_create_missing_row_does_not_leak_interface_catalog(settings):
     device = make_device("ip-create-missing-savepoint", librenms_cf={"default": {"id": 42}})
     first_row = "198.18.12.23/24"
     second_row = "198.18.12.24/24"
-    cached_ips = [
-        {
-            "ip_address": "198.18.12.23",
-            "prefix_length": 24,
-            "ip_with_mask": first_row,
-            "port_id": 7023,
-            "interface_name": "Ethernet23",
-        },
-        {
-            "ip_address": "198.18.12.24",
-            "prefix_length": 24,
-            "ip_with_mask": second_row,
-            "port_id": 7023,
-            "interface_name": "Ethernet23",
-        },
-    ]
-    cached_ports = {
-        "7023": {
-            **_PORT_KEYS_UNSET,
-            "port_id": 7023,
-            "ifName": "Ethernet23",
-            "ifDescr": "Ethernet23",
-            "ifType": "ethernetCsmacd",
-        },
-    }
+    _seed_ip_rows(
+        device,
+        [
+            _ip_row("198.18.12.23", 7023, "Ethernet23", ifType="ethernetCsmacd"),
+            _ip_row("198.18.12.24", 7023, "Ethernet23", ifType="ethernetCsmacd"),
+        ],
+    )
     request = make_request(
         "post",
         {
@@ -1355,7 +1125,7 @@ def test_failed_create_missing_row_does_not_leak_interface_catalog(settings):
     results = view.process_ip_sync(
         request,
         [first_row, second_row],
-        cached_ips,
+        view.assess_cached_snapshot(device),
         device,
         "device",
         force_intents={
@@ -1367,8 +1137,6 @@ def test_failed_create_missing_row_does_not_leak_interface_catalog(settings):
                 "kind": "reassign",
             }
         },
-        cached_ports_by_id=cached_ports,
-        interface_name_field="ifName",
     )
 
     from dcim.models import Interface
@@ -1634,7 +1402,6 @@ def test_interface_sync_keeps_its_source_snapshot_and_clears_the_ip_snapshot(
     client.force_login(make_superuser("ip-cache-cleared-user"))
     ip_refresh_url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk])
     interface_refresh_url = reverse("plugins:netbox_librenms_plugin:device_interface_sync", args=[device.pk])
-    ip_cache_key = sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].source.data_type, "default")
     interface_cache_key = sync_snapshot_key(device, TAB_SPECS[SyncTab.INTERFACES].source.data_type, "default")
     assert (
         client.post(
@@ -1644,7 +1411,7 @@ def test_interface_sync_keeps_its_source_snapshot_and_clears_the_ip_snapshot(
         ).status_code
         == 200
     )
-    assert cache.get(ip_cache_key) is not None
+    assert source_cache.read(device, Resource.IP_ADDRESSES, "default") is not None
     assert (
         client.post(
             interface_refresh_url,
@@ -1653,7 +1420,7 @@ def test_interface_sync_keeps_its_source_snapshot_and_clears_the_ip_snapshot(
         ).status_code
         == 200
     )
-    assert cache.get(ip_cache_key) is not None
+    assert source_cache.read(device, Resource.IP_ADDRESSES, "default") is not None
 
     interface_sync_url = reverse(
         "plugins:netbox_librenms_plugin:sync_selected_interfaces",
@@ -1672,7 +1439,7 @@ def test_interface_sync_keeps_its_source_snapshot_and_clears_the_ip_snapshot(
 
     assert response.status_code == 302
     assert cache.get(interface_cache_key) is not None
-    assert cache.get(ip_cache_key) is None
+    assert source_cache.read(device, Resource.IP_ADDRESSES, "default") is None
 
 
 @pytest.mark.django_db
@@ -1692,32 +1459,7 @@ def test_create_missing_interfaces_does_not_adopt_a_hidden_existing_interface(cl
     user = grant(user, "add", IPAddress)
     user = grant(user, "change", IPAddress)
     client.force_login(user)
-    cache.set(
-        _ip_snapshot_key(device),
-        {
-            "ip_addresses": [
-                {
-                    "ip_address": "198.18.18.10",
-                    "prefix_length": 24,
-                    "ip_with_mask": "198.18.18.10/24",
-                    "port_id": 7018,
-                    "interface_name": "Ethernet1",
-                }
-            ],
-            "mgmt_ip": "",
-            "ports_by_id": {
-                7018: {
-                    **_PORT_KEYS_UNSET,
-                    "port_id": 7018,
-                    "ifName": "Ethernet1",
-                    "ifDescr": "Ethernet1",
-                    "ifType": "ethernetCsmacd",
-                }
-            },
-            "interface_name_field": "ifName",
-        },
-        timeout=300,
-    )
+    _seed_ip_rows(device, [_ip_row("198.18.18.10", 7018, "Ethernet1", ifType="ethernetCsmacd")])
     sync_url = reverse(
         "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
         kwargs={"object_type": "device", "pk": device.pk},
@@ -1741,40 +1483,34 @@ def test_create_missing_interfaces_does_not_adopt_a_hidden_existing_interface(cl
 
 
 @pytest.mark.django_db
-def test_direct_ip_sync_post_does_not_mutate_a_migrated_donor(client, settings):
+@pytest.mark.parametrize(
+    ("migrated", "refusal"),
+    [
+        # The migration releases the page's LibreNMS ID, so its earlier snapshot no longer binds.
+        ("page", "Cache has expired. Please refresh the IP data."),
+        # The page keeps its snapshot; the writer refuses the migrated member that owns the interface.
+        ("member", "read-only because it was migrated"),
+    ],
+)
+def test_direct_ip_sync_post_does_not_mutate_a_migrated_donor(client, settings, migrated, refusal):
     """The writer must enforce the migrated read-only state behind the hidden form."""
     from netbox_librenms_plugin.server_mappings import mark_migrated
     from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
 
     _configure_test_server(settings)
-    donor = make_device("ip-migrated-donor", librenms_cf={"default": {"id": 42}})
-    winner = make_device("ip-migration-winner")
+    _chassis, (page, member) = make_virtual_chassis_members(f"ip-migrated-{migrated}")
+    seed_stored_mapping(page, {"default": {"id": 42}}, save=True)
+    donor = page if migrated == "page" else member
+    winner = make_device(f"ip-migration-winner-{migrated}")
     interface = make_interface(donor, "Ethernet1", iface_type="1000base-t")
     seed_mapping(interface, "default", own=7019)
-    cache.set(
-        _ip_snapshot_key(donor),
-        {
-            "ip_addresses": [
-                {
-                    "ip_address": "198.18.19.10",
-                    "prefix_length": 24,
-                    "ip_with_mask": "198.18.19.10/24",
-                    "port_id": 7019,
-                    "interface_name": "Ethernet1",
-                }
-            ],
-            "mgmt_ip": "",
-            "ports_by_id": {7019: {"port_id": 7019, "ifName": "Ethernet1", "ifDescr": "Ethernet1"}},
-            "interface_name_field": "ifName",
-        },
-        timeout=300,
-    )
+    _seed_ip_rows(page, [_ip_row("198.18.19.10", 7019, "Ethernet1")])
     apply_mapping_change(donor, mark_migrated(donor, winner.pk, "default"))
     donor.save(update_fields=["custom_field_data"])
-    client.force_login(make_superuser("ip-migrated-donor-user"))
+    client.force_login(make_superuser(f"ip-migrated-{migrated}-user"))
     sync_url = reverse(
         "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-        kwargs={"object_type": "device", "pk": donor.pk},
+        kwargs={"object_type": "device", "pk": page.pk},
     )
 
     response = client.post(
@@ -1787,7 +1523,7 @@ def test_direct_ip_sync_post_does_not_mutate_a_migrated_donor(client, settings):
     )
 
     assert response.status_code == 302
-    assert any("read-only because it was migrated" in message for message in _message_texts(response))
+    assert any(refusal in message for message in _message_texts(response))
     assert not IPAddress.objects.filter(address="198.18.19.10/24").exists()
 
 
@@ -1796,24 +1532,7 @@ def test_invalid_force_all_confirmation_reports_the_confirmation_error(client, s
     """An invalid force token must not be reported as an empty row selection."""
     _configure_test_server(settings)
     device = make_device("invalid-force-confirmation", librenms_cf={"default": {"id": 42}})
-    cache.set(
-        _ip_snapshot_key(device),
-        {
-            "ip_addresses": [
-                {
-                    "ip_address": "198.18.19.20",
-                    "prefix_length": 24,
-                    "ip_with_mask": "198.18.19.20/24",
-                    "port_id": 7020,
-                    "interface_name": "Ethernet1",
-                }
-            ],
-            "mgmt_ip": "",
-            "ports_by_id": {},
-            "interface_name_field": "ifName",
-        },
-        timeout=300,
-    )
+    _seed_ip_rows(device, [_ip_row("198.18.19.20", 7020, "Ethernet1")])
     client.force_login(make_superuser("invalid-force-confirmation-user"))
 
     response = client.post(
@@ -1842,24 +1561,7 @@ def test_invalid_confirmation_is_not_reported_as_an_ip_address(client, settings)
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(interface, own=7021)
     row_id = "198.18.19.21/24"
-    cache.set(
-        _ip_snapshot_key(device),
-        {
-            "ip_addresses": [
-                {
-                    "ip_address": "198.18.19.21",
-                    "prefix_length": 24,
-                    "ip_with_mask": row_id,
-                    "port_id": 7021,
-                    "interface_name": "Ethernet1",
-                }
-            ],
-            "mgmt_ip": "",
-            "ports_by_id": {},
-            "interface_name_field": "ifName",
-        },
-        timeout=300,
-    )
+    _seed_ip_rows(device, [_ip_row("198.18.19.21", 7021, "Ethernet1")])
     client.force_login(make_superuser("mixed-invalid-confirmation-user"))
 
     response = client.post(
@@ -1900,31 +1602,7 @@ def test_interface_scope_change_during_lock_is_reported_as_a_failure(client, set
     user = grant(user, "add", IPAddress)
     user = grant(user, "change", IPAddress)
     client.force_login(user)
-    cache.set(
-        _ip_snapshot_key(device),
-        {
-            "ip_addresses": [
-                {
-                    "ip_address": "198.18.19.30",
-                    "prefix_length": 24,
-                    "ip_with_mask": "198.18.19.30/24",
-                    "port_id": 7030,
-                    "interface_name": "Ethernet1",
-                }
-            ],
-            "mgmt_ip": "",
-            "ports_by_id": {
-                7030: {
-                    "port_id": 7030,
-                    "ifName": "Ethernet1",
-                    "ifDescr": "Ethernet1",
-                    "ifType": "ethernetCsmacd",
-                }
-            },
-            "interface_name_field": "ifName",
-        },
-        timeout=300,
-    )
+    _seed_ip_rows(device, [_ip_row("198.18.19.30", 7030, "Ethernet1", ifType="ethernetCsmacd")])
 
     class RestrictInterfaceBeforeLock:
         """Move the matched interface outside the grant before its locking read."""
@@ -1968,24 +1646,7 @@ def test_a_name_match_bound_to_another_port_before_the_lock_is_refused(client, s
     device = make_device("ip-name-rebound-before-lock", librenms_cf={"default": {"id": 42}})
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     client.force_login(make_superuser("ip-name-rebound-before-lock-user"))
-    cache.set(
-        _ip_snapshot_key(device),
-        {
-            "ip_addresses": [
-                {
-                    "ip_address": "198.18.19.31",
-                    "prefix_length": 24,
-                    "ip_with_mask": "198.18.19.31/24",
-                    "port_id": 7031,
-                    "interface_name": "Ethernet1",
-                }
-            ],
-            "mgmt_ip": "",
-            "ports_by_id": {},
-            "interface_name_field": "ifName",
-        },
-        timeout=300,
-    )
+    _seed_ip_rows(device, [_ip_row("198.18.19.31", 7031, "Ethernet1")])
 
     class BindInterfaceBeforeLock:
         """Bind the matched interface to another port before its locking read."""
@@ -2022,7 +1683,7 @@ def test_existing_ip_outside_change_scope_is_reported_without_mutation(client, s
     from dcim.models import Device, Interface
 
     _configure_test_server(settings)
-    device = make_device("ip-change-scope")
+    device = make_device("ip-change-scope", librenms_cf={"default": {"id": 42}})
     target = make_interface(device, "Ethernet1", iface_type="1000base-t")
     original = make_interface(device, "Ethernet2", iface_type="1000base-t")
     seed_mapping(target, own=7020, save=False)
@@ -2039,24 +1700,7 @@ def test_existing_ip_outside_change_scope_is_reported_without_mutation(client, s
     )
     user = grant(user, "change", IPAddress, constraints={"pk": changeable_ip.pk})
     client.force_login(user)
-    cache.set(
-        _ip_snapshot_key(device),
-        {
-            "ip_addresses": [
-                {
-                    "ip_address": "198.18.20.10",
-                    "prefix_length": 24,
-                    "ip_with_mask": "198.18.20.10/24",
-                    "port_id": 7020,
-                    "interface_name": "Ethernet1",
-                }
-            ],
-            "mgmt_ip": "",
-            "ports_by_id": {},
-            "interface_name_field": "ifName",
-        },
-        timeout=300,
-    )
+    _seed_ip_rows(device, [_ip_row("198.18.20.10", 7020, "Ethernet1")])
     sync_url = reverse(
         "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
         kwargs={"object_type": "device", "pk": device.pk},
@@ -2089,28 +1733,11 @@ def test_ip_sync_does_not_write_after_interface_owner_disappears(client, setting
     from django.db import connection
 
     _configure_test_server(settings)
-    device = make_device("ip-owner-disappears")
+    device = make_device("ip-owner-disappears", librenms_cf={"default": {"id": 42}})
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(interface, own=7021, save=False)
     interface.save()
-    cache.set(
-        _ip_snapshot_key(device),
-        {
-            "ip_addresses": [
-                {
-                    "ip_address": "198.18.21.10",
-                    "prefix_length": 24,
-                    "ip_with_mask": "198.18.21.10/24",
-                    "port_id": 7021,
-                    "interface_name": "Ethernet1",
-                }
-            ],
-            "mgmt_ip": "",
-            "ports_by_id": {},
-            "interface_name_field": "ifName",
-        },
-        timeout=300,
-    )
+    _seed_ip_rows(device, [_ip_row("198.18.21.10", 7021, "Ethernet1")])
     client.force_login(make_superuser("ip-owner-disappears-user"))
     sync_url = reverse(
         "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
@@ -2562,60 +2189,13 @@ def test_ip_table_render_reads_only_the_reported_addresses(client, settings, liv
 
 
 @pytest.mark.django_db
-def test_configured_interface_name_field_survives_the_cache_round_trip(client, settings, live_librenms):
-    """An unsupported configured field must not poison the snapshot the readers validate."""
-    _configure_test_server(settings)
-    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-    plugin_config["netbox_librenms_plugin"]["interface_name_field"] = "ifAlias"
-    settings.PLUGINS_CONFIG = plugin_config
-    device = make_device("ip-config-field", librenms_cf={"default": {"id": 42}})
-    interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
-    seed_mapping(interface, "default", own=7001)
-    client.force_login(make_superuser("ip-config-field-user"))
-
-    refresh_url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk])
-    _serve_librenms_ip_response(live_librenms.server, "198.18.31.10", 24, device_name=device.name)
-    refresh_response = client.post(refresh_url, {"server_key": "default"}, HTTP_HX_REQUEST="true")
-
-    assert refresh_response.status_code == 200
-    cache_key = _ip_snapshot_key(device)
-    assert cache.get(cache_key)["interface_name_field"] in INTERFACE_NAME_FIELDS
-
-    render_response = client.get(
-        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
-        {"server_key": "default", "tab": "ipaddresses"},
-    )
-
-    assert render_response.status_code == 200
-    # The reader accepted what the writer stored, so the snapshot survives the render.
-    assert cache.get(cache_key) is not None
-
-
-@pytest.mark.django_db
 def test_sync_without_a_selection_reports_the_empty_selection_error(client, settings):
     """A cached snapshot with no selected row must report the selection error, not a cache miss."""
     _configure_test_server(settings)
     device = make_device("ip-empty-selection", librenms_cf={"default": {"id": 42}})
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(interface, "default", own=7001)
-    cache.set(
-        _ip_snapshot_key(device),
-        {
-            "ip_addresses": [
-                {
-                    "ip_address": "198.18.32.10",
-                    "prefix_length": 24,
-                    "ip_with_mask": "198.18.32.10/24",
-                    "port_id": 7001,
-                    "interface_name": "Ethernet1",
-                }
-            ],
-            "mgmt_ip": "",
-            "ports_by_id": {},
-            "interface_name_field": "ifName",
-        },
-        timeout=300,
-    )
+    _seed_ip_rows(device, [_ip_row("198.18.32.10", 7001, "Ethernet1")])
     client.force_login(make_superuser("ip-empty-selection-user"))
 
     response = client.post(
@@ -2647,31 +2227,13 @@ def test_create_missing_interfaces_requires_change_scope_for_the_new_interface(c
     user = grant(user, "add", IPAddress)
     user = grant(user, "change", IPAddress)
     client.force_login(user)
-    cache.set(
-        _ip_snapshot_key(device),
-        {
-            "ip_addresses": [
-                {
-                    "ip_address": "198.18.30.10",
-                    "prefix_length": 24,
-                    "ip_with_mask": "198.18.30.10/24",
-                    "port_id": 7030,
-                    "interface_name": "Ethernet1",
-                }
-            ],
-            "mgmt_ip": "",
-            "ports_by_id": {
-                7030: {
-                    "port_id": 7030,
-                    "ifName": "Ethernet1",
-                    "ifDescr": "Ethernet1",
-                    "ifType": "ethernetCsmacd",
-                    "ifAlias": "Populated by the unscoped writer",
-                }
-            },
-            "interface_name_field": "ifName",
-        },
-        timeout=300,
+    _seed_ip_rows(
+        device,
+        [
+            _ip_row(
+                "198.18.30.10", 7030, "Ethernet1", ifType="ethernetCsmacd", ifAlias="Populated by the unscoped writer"
+            )
+        ],
     )
     sync_url = reverse(
         "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
@@ -2709,32 +2271,7 @@ def test_create_missing_interfaces_is_refused_without_add_and_change_grants(clie
     user = grant(user, "add", IPAddress)
     user = grant(user, "change", IPAddress)
     client.force_login(user)
-    cache.set(
-        _ip_snapshot_key(device),
-        {
-            "ip_addresses": [
-                {
-                    "ip_address": "198.18.32.10",
-                    "prefix_length": 24,
-                    "ip_with_mask": "198.18.32.10/24",
-                    "port_id": 7032,
-                    "interface_name": "Ethernet1",
-                }
-            ],
-            "mgmt_ip": "",
-            "ports_by_id": {
-                7032: {
-                    **_PORT_KEYS_UNSET,
-                    "port_id": 7032,
-                    "ifName": "Ethernet1",
-                    "ifDescr": "Ethernet1",
-                    "ifType": "ethernetCsmacd",
-                }
-            },
-            "interface_name_field": "ifName",
-        },
-        timeout=300,
-    )
+    _seed_ip_rows(device, [_ip_row("198.18.32.10", 7032, "Ethernet1", ifType="ethernetCsmacd")])
 
     response = client.post(
         reverse(
@@ -2821,23 +2358,7 @@ def test_ambiguous_port_identity_cannot_bind_an_unrelated_named_interface(
         interface = make_interface(device, name)
         seed_mapping(interface, own=port_id, save=False)
         interface.save()
-    cache.set(
-        f"librenms_ip_addresses_device_{device.pk}_default",
-        {
-            "ip_addresses": [
-                {
-                    "ip_address": "198.18.21.10",
-                    "ip_with_mask": "198.18.21.10/24",
-                    "prefix_length": 24,
-                    "port_id": cached_port_id,
-                    "interface_name": "eth0",
-                }
-            ],
-            "ports_by_id": {},
-            "mgmt_ip": "",
-            "interface_name_field": "ifName",
-        },
-    )
+    _seed_ip_rows(device, [_ip_row("198.18.21.10", cached_port_id, "eth0")])
     client.force_login(make_superuser("ambiguous-ip-port-user"))
     response = client.post(
         reverse(
@@ -2853,22 +2374,22 @@ def test_ambiguous_port_identity_cannot_bind_an_unrelated_named_interface(
 
 
 @pytest.mark.django_db
-def test_cached_naming_field_change_matches_the_interface_created_by_sync(client, settings, live_librenms):
-    """Creating an interface must use the name shown by the cached IP table."""
+@pytest.mark.parametrize(
+    ("name_field", "shown_name", "other_name"), [("ifDescr", "Ethernet1", "Eth1"), ("ifName", "Eth1", "Ethernet1")]
+)
+def test_the_sync_creates_the_interface_name_that_the_table_shows(
+    client, settings, live_librenms, name_field, shown_name, other_name
+):
+    """The tab form posts to a URL with the page's name field, so the sync uses the field of the table."""
+    import html
+    import re
+
     from dcim.models import Interface
 
     _configure_test_server(settings)
-    device = make_device("ip-naming-field-change", librenms_cf={"default": {"id": 42}})
-    client.force_login(make_superuser("ip-naming-field-user"))
-    rows = [
-        {
-            "address": "198.18.23.1",
-            "prefix_length": 24,
-            "port_id": 7023,
-            "interface": "Eth1",
-            "port_fields": {"ifDescr": "Ethernet1", "ifType": "ethernetCsmacd"},
-        }
-    ]
+    device = make_device(f"ip-naming-field-{name_field}", librenms_cf={"default": {"id": 42}})
+    client.force_login(make_superuser(f"ip-naming-field-{name_field}-user"))
+    rows = [_ip_row("198.18.23.1", 7023, "Eth1", ifDescr="Ethernet1", ifType="ethernetCsmacd")]
     _serve_librenms_ip_rows(live_librenms.server, rows, device_name=device.name)
     refreshed = client.post(
         reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk]),
@@ -2878,20 +2399,24 @@ def test_cached_naming_field_change_matches_the_interface_created_by_sync(client
     assert refreshed.status_code == 200
     page = client.get(
         reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
-        {"tab": "ipaddresses", "server_key": "default", "interface_name_field": "ifDescr"},
+        {"tab": "ipaddresses", "server_key": "default", "interface_name_field": name_field},
     )
     assert page.status_code == 200
-    assert list(page.context["ip_sync"]["table"].data)[0]["interface_name"] == "Ethernet1"
+    (row,) = list(page.context["ip_sync"]["table"].data)
+    assert row["interface_name"] == shown_name
+    sync_path = reverse(
+        "plugins:netbox_librenms_plugin:sync_device_ip_addresses", kwargs={"object_type": "device", "pk": device.pk}
+    )
+    # Post where the rendered form posts, as a browser does.
+    (action,) = set(re.findall(rf'action="({re.escape(sync_path)}[^"]*)"', page.content.decode()))
     response = client.post(
-        reverse(
-            "plugins:netbox_librenms_plugin:sync_device_ip_addresses", kwargs={"object_type": "device", "pk": device.pk}
-        ),
+        html.unescape(action),
         {"server_key": "default", "select": "198.18.23.1/24", "create-missing-interfaces-toggle": "on"},
     )
     assert response.status_code == 302
-    interface = Interface.objects.get(device=device, name="Ethernet1")
+    interface = Interface.objects.get(device=device, name=shown_name)
     assert IPAddress.objects.get(address="198.18.23.1/24").assigned_object == interface
-    assert not Interface.objects.filter(device=device, name="Eth1").exists()
+    assert not Interface.objects.filter(device=device, name=other_name).exists()
 
 
 @pytest.mark.django_db
@@ -2931,7 +2456,8 @@ def test_duplicate_source_addresses_have_independent_vrf_controls_and_writes(
     ]
     client.force_login(make_superuser("duplicate-source-addresses-user"))
     refresh_url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk])
-    _serve_librenms_ip_rows(live_librenms.server, source_rows, device_name=device.name)
+    # Both rows hold the management address, which the snapshot's device record carries.
+    _serve_librenms_ip_rows(live_librenms.server, source_rows, device_name=device.name, management_ip="198.18.22.1")
     refreshed = client.post(
         refresh_url, {"server_key": "default", "interface_name_field": "ifName"}, HTTP_HX_REQUEST="true"
     )
@@ -2966,7 +2492,6 @@ def test_duplicate_source_addresses_have_independent_vrf_controls_and_writes(
     sync_url = reverse(
         "plugins:netbox_librenms_plugin:sync_device_ip_addresses", kwargs={"object_type": "device", "pk": device.pk}
     )
-    _serve_librenms_ip_rows(live_librenms.server, source_rows, device_name=device.name, management_ip="198.18.22.1")
     response = client.post(
         sync_url,
         {
@@ -3045,12 +2570,9 @@ def test_unchanged_compatible_ipv6_address_has_no_prefix_conflict(client, settin
 def test_verify_rejects_malformed_source_row_identity(client, settings, row_id, live_librenms):
     """Invalid source selectors must return a client error, without a server crash."""
     _configure_test_server(settings)
-    device = make_device("invalid-source-selector")
+    device = make_device("invalid-source-selector", librenms_cf={"default": {"id": 42}})
     client.force_login(make_superuser("invalid-source-selector-user"))
-    cache.set(
-        f"librenms_ip_addresses_device_{device.pk}_default",
-        {"ip_addresses": [{"ip_with_mask": "198.18.22.1/24", "port_id": 7001}]},
-    )
+    _seed_ip_rows(device, [_ip_row("198.18.22.1", 7001, "Ethernet1")])
     response = client.post(
         reverse("plugins:netbox_librenms_plugin:verify_ipaddress"),
         data=json.dumps(

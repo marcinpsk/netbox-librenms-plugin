@@ -1452,16 +1452,20 @@ class TestCheckAndCreateTheRemoteEnd:
     def test_remote_create_applies_the_page_cache_transition(
         self, librenms_server, settings, django_capture_on_commit_callbacks
     ):
-        from django.core.cache import cache
-
+        from netbox_librenms_plugin import source_cache
+        from netbox_librenms_plugin.acquisition.registry import Resource
         from netbox_librenms_plugin.tests.conftest import make_superuser
-        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot
 
         server_key, local_device, local_interface, _, row_id = self._scenario(
             "mk-cache-transition", librenms_server, settings
         )
-        snapshot_key = BaseCableTableView().get_cache_key(local_device, "ip_addresses", server_key)
-        cache.set(snapshot_key, {"ip_addresses": []}, timeout=300)
+        seed_ip_snapshot(
+            local_device,
+            [ip_address_row("198.18.70.1", 700)],
+            [{"port_id": 700, "ifName": "eth0", "ifDescr": "eth0"}],
+            server_key=server_key,
+        )
 
         with django_capture_on_commit_callbacks(execute=True):
             response = _logged_in(make_superuser("remote-create-mk-cache-transition")).post(
@@ -1470,7 +1474,7 @@ class TestCheckAndCreateTheRemoteEnd:
                 HTTP_HX_REQUEST="true",
             )
 
-        assert cache.get(snapshot_key) is None
+        assert source_cache.read(local_device, Resource.IP_ADDRESSES, server_key) is None
         assert "librenmsCacheChanged" in response["HX-Trigger"]
 
     def test_migrated_cable_page_cannot_create_a_remote_interface(self, librenms_server, settings):
