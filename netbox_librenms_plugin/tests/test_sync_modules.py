@@ -3534,7 +3534,7 @@ def test_table_counts_a_bay_position_only_under_a_module_of_the_target_member(an
         },
     ]
     key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(key, trusted_module_inventory_payload(page, rows))
+    seed_mapped_modules(page, rows)
     request = make_request("get", {"server_key": "default"}, user=make_superuser("position-boundary-user"), path="/m/")
     view = DeviceModuleTableView()
     view.setup(request, pk=page.pk)
