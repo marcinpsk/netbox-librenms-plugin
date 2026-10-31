@@ -524,7 +524,8 @@ class TestUpdateModuleSerialView:
             module_inventory_snapshot_digest,
             sign_module_grant,
         )
-        from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView, _get_cached_inventory_for_device
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import module_inventory
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
 
         device = make_device_with_module_bays(f"serial-placeholder-{len(placeholder)}", ["Slot 1"])
         seed_mapping(device, "default", own=68)
@@ -532,8 +533,8 @@ class TestUpdateModuleSerialView:
         view = UpdateModuleSerialView()
         view._librenms_api = live_librenms.api
         rows = [_item(11, module.module_type.model, "Slot 1", entPhysicalSerialNum=placeholder)]
-        seed_inventory(view, device, rows, librenms_id=68)
-        inventory = _get_cached_inventory_for_device(device, "default", view.get_cache_key)
+        seed_inventory(device, rows, librenms_id=68)
+        inventory = module_inventory(device)
         grant = sign_module_grant(
             page_device_id=device.pk,
             device_id=device.pk,
