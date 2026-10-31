@@ -31,10 +31,14 @@ class ResourceSpec:
     supports_virtual_machine: bool
     permits_oob_only: bool = False
     serial_sensors: bool = False
+    inventory_probes: bool = False
 
-    def acquisition_options(self, *, include_serial):
+    def acquisition_options(self, *, include_serial, inventory_probes=False):
         """Return the options that this resource's acquirer accepts."""
-        return {"include_serial": include_serial} if self.serial_sensors else {}
+        options = {"include_serial": include_serial} if self.serial_sensors else {}
+        if self.inventory_probes:
+            options["inventory_probes"] = inventory_probes
+        return options
 
 
 RESOURCE_SPECS = {
@@ -43,6 +47,8 @@ RESOURCE_SPECS = {
         "links", OwnerPolicy.VC_SYNC_OWNER, supports_virtual_machine=False, permits_oob_only=True, serial_sensors=True
     ),
     Resource.IP_ADDRESSES: ResourceSpec("ip_addresses", OwnerPolicy.SUBJECT, supports_virtual_machine=True),
-    Resource.MODULES: ResourceSpec("inventory", OwnerPolicy.VC_SYNC_OWNER, supports_virtual_machine=False),
+    Resource.MODULES: ResourceSpec(
+        "inventory", OwnerPolicy.VC_SYNC_OWNER, supports_virtual_machine=False, inventory_probes=True
+    ),
     Resource.VLANS: ResourceSpec("vlans", OwnerPolicy.SUBJECT, supports_virtual_machine=False),
 }

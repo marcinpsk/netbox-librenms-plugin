@@ -10,6 +10,10 @@ real message framework. The LibreNMS HTTP boundary is never touched (server_key 
 module type carries no interface templates so adoption resolves to a real no-op).
 """
 
+from netbox_librenms_plugin.tests.source_snapshot_helpers import transceiver_row
+
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_mapped_modules
+
 import pytest
 from django.contrib.auth import get_user_model
 from django.contrib.messages.storage.fallback import FallbackStorage
@@ -83,11 +87,7 @@ def _drive(device, module, iface, *, port_id, ifname, bound_before_post=None):
     from netbox_librenms_plugin.tests.view_test_helpers import (
         post as post_view,
     )
-    from netbox_librenms_plugin.tests.view_test_helpers import (
-        render_module_tab,
-        rendered_module_form,
-        trusted_module_inventory_payload,
-    )
+    from netbox_librenms_plugin.tests.view_test_helpers import render_module_tab, rendered_module_form
     from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
     view = UpdateModuleInterfaceView()
@@ -96,20 +96,16 @@ def _drive(device, module, iface, *, port_id, ifname, bound_before_post=None):
         "entPhysicalClass": "module",
         "entPhysicalName": module.module_bay.name,
         "entPhysicalModelName": module.module_type.model,
-        "_librenms_port_id": port_id,
-        "_librenms_ifname": ifname,
     }
     # The view reads the port identity from the cached row for ent_index, never from the post.
     cache_key = view.get_cache_key(device, "inventory", server_key=SERVER_KEY)
-    cache.set(
-        cache_key,
-        trusted_module_inventory_payload(
-            device,
-            [inventory_item],
-            server_key=SERVER_KEY,
-            librenms_id=4077,
-        ),
-        timeout=300,
+    seed_mapped_modules(
+        device,
+        [inventory_item],
+        server_key=SERVER_KEY,
+        librenms_id=4077,
+        ports=[{"port_id": port_id, "ifName": ifname, "ifDescr": ""}],
+        transceivers=[transceiver_row(ENT_INDEX, port_id=port_id, model=module.module_type.model, serial="")],
     )
     try:
         _action, fields = rendered_module_form(render_module_tab(device), "update-module-interface", ENT_INDEX)

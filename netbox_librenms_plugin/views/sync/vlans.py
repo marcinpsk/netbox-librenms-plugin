@@ -14,6 +14,7 @@ from utilities.exceptions import PermissionsViolation
 
 from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
+from netbox_librenms_plugin.assessment.vlans import assess
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
@@ -23,7 +24,6 @@ from netbox_librenms_plugin.sync_query import page_query_url
 from netbox_librenms_plugin.transactions import saved_in_scope
 from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
-    index_vlan_source_rows,
     normalize_vlan_vid,
     vlan_source_namer,
 )
@@ -713,7 +713,8 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             messages.error(request, "No cached VLAN data. Please refresh VLANs first.")
             return self._redirect(object_type, object_id)
 
-        librenms_vlans, invalid_rows = index_vlan_source_rows(snapshot.value(Resource.VLANS, "vlans"))
+        assessment = assess(snapshot, subject=obj, lookup_maps={})
+        librenms_vlans, invalid_rows = assessment.source_by_vid, assessment.invalid_rows
         duplicate_source_vids = {
             vid for row in invalid_rows if (vid := normalize_vlan_vid(row.get("vlan_vlan"))) is not None
         }

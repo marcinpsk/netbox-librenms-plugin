@@ -1,8 +1,12 @@
 """Real database and cache tests for module preview, replacement, and movement."""
 
-from types import SimpleNamespace
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_mapped_modules
+
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
 from unittest.mock import patch
+
+from netbox_librenms_plugin.tests.source_snapshot_helpers import transceiver_row
 
 import pytest
 from django.core.cache import cache
@@ -27,7 +31,6 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     post as view_post,
     rendered_modal_form,
     rendered_preview_query,
-    trusted_module_inventory_payload,
 )
 
 
@@ -54,23 +57,19 @@ def _view(view_class, request):
     return make_view(
         view_class,
         request,
-        librenms_api=SimpleNamespace(server_key="default"),
+        librenms_api=LibreNMSAPI(server_key="default"),
     )
 
 
-def _cache_inventory(view, device, inventory):
+def _cache_inventory(view, device, inventory, **source_facts):
     cache_key = view.get_cache_key(device, "inventory", server_key="default")
-    cache.set(
-        cache_key,
-        trusted_module_inventory_payload(device, inventory),
-        timeout=300,
-    )
+    seed_mapped_modules(device, inventory, **source_facts)
     return cache_key
 
 
-def _cache_preview(view, device, inventory, request):
+def _cache_preview(view, device, inventory, request, **source_facts):
     """Cache *inventory* and add the preview grant that the rendered Replace button of the requested row carries."""
-    cache_key = _cache_inventory(view, device, inventory)
+    cache_key = _cache_inventory(view, device, inventory, **source_facts)
     query = rendered_preview_query(device, request.GET["ent_index"], user=request.user)
     assert query["module_id"] == request.GET["module_id"]
     request.GET = request.GET.copy()
@@ -148,9 +147,9 @@ class TestModuleMismatchPreviewView:
         from netbox_librenms_plugin.module_grants import GrantRefusal
 
         device, _installed, request, view, inventory = self._setup("oob")
-        inventory.append({**inventory[0], "entPhysicalIndex": 200, "_source": "oob"})
-        cache_key = _cache_preview(view, device, inventory, request)
-        request.GET["ent_index"] = "200"
+        oob = [{**inventory[0], "entPhysicalIndex": 200}]
+        cache_key = _cache_preview(view, device, inventory, request, oob_inventory=oob, oob_id=10001)
+        request.GET["ent_index"] = "1200"
         try:
             response = view_get(view, request, pk=device.pk)
         finally:
@@ -270,7 +269,7 @@ class TestModuleMismatchPreviewView:
 
 
 class TestReplaceModuleView:
-    def _setup(self, tag, *, new_serial="NEW-SERIAL", item_extra=None):
+    def _setup(self, tag, *, new_serial="NEW-SERIAL"):
         from dcim.models import Module
 
         device = make_device(f"replace-{tag}")
@@ -278,16 +277,16 @@ class TestReplaceModuleView:
         new_type = make_module_type(f"REPLACE-NEW-{tag}")
         bay = make_module_bay(device, f"Replace Bay {tag}")
         installed = _module(device, bay, old_type, f"OLD-SERIAL-{tag}")
-        inventory = [_row(100, bay, new_type.model, new_serial, **(item_extra or {}))]
+        inventory = [_row(100, bay, new_type.model, new_serial)]
         return Module, device, old_type, new_type, bay, installed, inventory
 
     @staticmethod
-    def _post(device, inventory, *, user=None, ent_index=100):
+    def _post(device, inventory, *, user=None, ent_index=100, **source_facts):
         """Cache *inventory*, then post the Replace form of the modal that the rendered row opens."""
         from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
 
         user = user or make_superuser()
-        cache_key = _cache_inventory(ReplaceModuleView(), device, inventory)
+        cache_key = _cache_inventory(ReplaceModuleView(), device, inventory, **source_facts)
         _action, fields = rendered_modal_form(device, ent_index, "replace-module", user=user)
         request = make_request("post", fields, user=user)
         return request, _view(ReplaceModuleView, request), cache_key
@@ -308,11 +307,14 @@ class TestReplaceModuleView:
         """The bind's own savepoint takes a real PostgreSQL error; the replacement still commits."""
         from netbox_librenms_plugin.tests.lock_conflict_helpers import aborting_statement
 
-        Module, device, _old_type, new_type, bay, installed, inventory = self._setup(
-            "bind-error", item_extra={"_librenms_port_id": 6690, "_librenms_ifname": "Ethernet69"}
-        )
+        Module, device, _old_type, new_type, bay, installed, inventory = self._setup("bind-error")
         interface = make_interface(device, "Ethernet69")
-        request, view, cache_key = self._post(device, inventory)
+        request, view, cache_key = self._post(
+            device,
+            inventory,
+            ports=[{"port_id": 6690, "ifName": "Ethernet69"}],
+            transceivers=[transceiver_row(100, port_id=6690, model=new_type.model, serial="NEW-SERIAL")],
+        )
         try:
             with aborting_statement(lambda sql, params: sql.startswith('UPDATE "dcim_interface"')) as failed:
                 response = view_post(view, request, pk=device.pk)
@@ -352,10 +354,10 @@ class TestReplaceModuleView:
         from netbox_librenms_plugin.module_grants import GrantRefusal
 
         Module, device, old_type, _new_type, bay, installed, inventory = self._setup("oob")
-        inventory.append({**inventory[0], "entPhysicalIndex": 200, "_source": "oob"})
-        request, view, cache_key = self._post(device, inventory)
+        oob = [{**inventory[0], "entPhysicalIndex": 200}]
+        request, view, cache_key = self._post(device, inventory, oob_inventory=oob, oob_id=10001)
         request.POST = request.POST.copy()
-        request.POST["ent_index"] = "200"
+        request.POST["ent_index"] = "1200"
         try:
             view_post(view, request, pk=device.pk)
         finally:

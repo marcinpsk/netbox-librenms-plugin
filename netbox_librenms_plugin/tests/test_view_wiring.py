@@ -5,6 +5,10 @@ These tests never touch the database or network; they only inspect class
 hierarchies and attribute presence.
 """
 
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_mapped_modules
+
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
 import json
 import os
 from pathlib import Path
@@ -16,7 +20,6 @@ from netbox_librenms_plugin.tests.source_snapshot_helpers import link_row, port_
 
 from netbox_librenms_plugin.tests.conftest import configured_server_key
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, stored_mapping_for_test
-from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
 
 
 class TestSlashlessRouteAliases:
@@ -1871,7 +1874,7 @@ class TestInstallRefusesADuplicateSerial:
             "entPhysicalSerialNum": serial,
         }
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
-        cache.set(cache_key, trusted_module_inventory_payload(device, [inventory_item]))
+        seed_mapped_modules(device, [inventory_item])
         # The table offers no install for a serial the device holds, so the serial lands after the render.
         Module.objects.filter(pk=installed.pk).update(serial="")
         _action, fields = rendered_module_form(render_module_tab(device, user=user), "install-module", 100)
@@ -1944,7 +1947,6 @@ class TestInstallRefusesADuplicateSerial:
 
     def test_bulk_install_is_refused_when_the_serial_is_already_on_the_device(self):
         """InstallSelectedView builds its work list from the cache, so the row's flags cannot guard it."""
-        from types import SimpleNamespace
 
         from dcim.models import Module
         from django.core.cache import cache
@@ -1980,12 +1982,12 @@ class TestInstallRefusesADuplicateSerial:
             }
         ]
         user = make_superuser("bulkdup-user")
-        key = seed_inventory(InstallSelectedView(), device, inventory, librenms_id=77)
+        key = seed_inventory(device, inventory, librenms_id=77)
         _action, fields = rendered_module_form(render_module_tab(device, user=user), "install-selected")
         # The table offers no install for a serial the device holds, so the serial lands after the render.
         Module.objects.filter(pk=installed.pk).update(serial="BULK-DUP")
         request = make_request("post", {**fields, "select": ["200"]}, user=user, path="/x/")
-        view = make_view(InstallSelectedView, request, librenms_api=SimpleNamespace(server_key="default"))
+        view = make_view(InstallSelectedView, request, librenms_api=LibreNMSAPI(server_key="default"))
         try:
             view.post(request, pk=device.pk)
         finally:
@@ -2018,7 +2020,6 @@ class TestIdentityIsNotGatedOnBayMapping:
     @staticmethod
     def _rows_for(prefix, inventory, extra_bay=None):
         """Build real table rows for `inventory` against a device holding one installed module."""
-        from types import SimpleNamespace
 
         from dcim.models import Module
 
@@ -2040,7 +2041,7 @@ class TestIdentityIsNotGatedOnBayMapping:
             make_module_bay(device, extra_bay)
 
         request = make_request("get", {}, user=make_superuser(f"{prefix}-user"), path="/x/")
-        view = make_view(DeviceModuleTableView, request, librenms_api=SimpleNamespace(server_key="session-default"))
+        view = make_view(DeviceModuleTableView, request, librenms_api=LibreNMSAPI(server_key="default"))
         context = view._build_context(request, device, inventory, server_key="default")
         assert context["table"].server_key == "default"
         digest = module_inventory_snapshot_digest(inventory)
@@ -2462,7 +2463,6 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             message_texts,
             render_module_tab,
             rendered_module_form,
-            trusted_module_inventory_payload,
         )
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
 
@@ -2501,15 +2501,11 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             "entPhysicalSerialNum": "HIJACKED",
         }
         cache_key = view.get_cache_key(page_device, "inventory", server_key=server_key)
-        cache.set(
-            cache_key,
-            trusted_module_inventory_payload(
-                page_device,
-                [inventory_item],
-                server_key=server_key,
-                librenms_id=901,
-            ),
-            timeout=300,
+        seed_mapped_modules(
+            page_device,
+            [inventory_item],
+            server_key=server_key,
+            librenms_id=901,
         )
         # A model-level change grant renders the update for every row; the writer then checks the object.
         _action, fields = rendered_module_form(
@@ -2574,19 +2570,16 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         )
         view.setup(request)
         cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
-        cache.set(
-            cache_key,
-            trusted_module_inventory_payload(
-                device,
-                [
-                    {
-                        "entPhysicalIndex": 100,
-                        "entPhysicalModelName": module_type.model,
-                        "entPhysicalSerialNum": "NEW-TARGET",
-                    }
-                ],
-                server_key=server_key,
-            ),
+        seed_mapped_modules(
+            device,
+            [
+                {
+                    "entPhysicalIndex": 100,
+                    "entPhysicalModelName": module_type.model,
+                    "entPhysicalSerialNum": "NEW-TARGET",
+                }
+            ],
+            server_key=server_key,
         )
         try:
             with pytest.raises(Http404):
@@ -2649,13 +2642,10 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             "entPhysicalSerialNum": "INCOMING-CONFLICT",
         }
         cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
-        cache.set(
-            cache_key,
-            trusted_module_inventory_payload(
-                device,
-                [inventory_item],
-                server_key=server_key,
-            ),
+        seed_mapped_modules(
+            device,
+            [inventory_item],
+            server_key=server_key,
         )
         _action, fields = rendered_modal_form(device, 100, "replace-module", user=user, server_key=server_key)
         Module.objects.filter(pk=hidden.pk).update(serial="INCOMING-CONFLICT")
@@ -2719,21 +2709,18 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         )
         view.setup(request)
         cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
-        cache.set(
-            cache_key,
-            trusted_module_inventory_payload(
-                device,
-                [
-                    {
-                        "entPhysicalIndex": 100,
-                        "entPhysicalClass": "module",
-                        "entPhysicalName": target.module_bay.name,
-                        "entPhysicalModelName": module_type.model,
-                        "entPhysicalSerialNum": hidden.serial,
-                    }
-                ],
-                server_key=server_key,
-            ),
+        seed_mapped_modules(
+            device,
+            [
+                {
+                    "entPhysicalIndex": 100,
+                    "entPhysicalClass": "module",
+                    "entPhysicalName": target.module_bay.name,
+                    "entPhysicalModelName": module_type.model,
+                    "entPhysicalSerialNum": hidden.serial,
+                }
+            ],
+            server_key=server_key,
         )
         from netbox_librenms_plugin.tests.view_test_helpers import rendered_preview_query
 

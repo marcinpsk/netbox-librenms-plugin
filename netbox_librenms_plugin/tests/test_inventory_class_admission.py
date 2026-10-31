@@ -1,10 +1,13 @@
 """Inventory class admission through include rules: the seeded classes, filters, display flag and failures."""
 
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_mapped_modules
+
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
 import json
 import re
 from copy import deepcopy
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -296,8 +299,6 @@ class TestEmptyPolicy:
         from netbox_librenms_plugin.models import InventoryIgnoreRule
         from netbox_librenms_plugin.tests.conftest import make_superuser
         from netbox_librenms_plugin.tests.test_modules_view import _make_mixed_manufacturer_chassis, configure_servers
-        from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         configure_servers(
             settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
@@ -313,8 +314,7 @@ class TestEmptyPolicy:
             require_serial_match_parent=False,
             manufacturer=admitting.device_type.manufacturer,
         )
-        payload = trusted_module_inventory_payload(page, inventory, librenms_id=9304)
-        cache.set(DeviceModuleTableView().get_cache_key(page, "inventory", server_key="default"), payload, 300)
+        seed_mapped_modules(page, inventory, librenms_id=9304)
         cache.set("librenms_device_info_default_9304", (True, {"device_id": 9304, "hostname": page.name}), 300)
         client.force_login(make_superuser(f"{tag}-user"))
 
@@ -387,12 +387,11 @@ class TestInvalidStoredFilter:
         assert 'id="module-inventory-rule-error"' in content
         assert rule.get_absolute_url() in content
         assert "No inventory data loaded" not in content
-        assert "Inventory data refreshed successfully." not in content
         from django.core.cache import cache
         from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, SyncTabState
 
         state = cache.get(SyncCacheConsistency(device).state_key(SyncTab.MODULES, server_key))
-        assert state["state"] == SyncTabState.REFRESH_FAILED.value
+        assert state["state"] == SyncTabState.READY.value
 
     def test_the_rule_loader_raises_a_typed_error_naming_rule_and_field(self):
         from netbox_librenms_plugin.inventory_policy import load_inventory_policy
@@ -450,7 +449,7 @@ class TestInvalidStoredFilter:
             ],
         )
         view_class = InstallSelectedView if action == "install_selected" else InstallBranchView
-        seed_inventory(view_class(), device, inventory, librenms_id=7)
+        seed_inventory(device, inventory, librenms_id=7)
         content = render_module_tab(device, user=user)
         if action == "install_selected":
             _action, data = rendered_module_form(content, "install-selected")
@@ -458,7 +457,7 @@ class TestInvalidStoredFilter:
         else:
             _action, data = rendered_module_form(content, "install-branch", 2)
         request = make_request("post", data, user=user)
-        view = make_view(view_class, request, librenms_api=SimpleNamespace(server_key="default"))
+        view = make_view(view_class, request, librenms_api=LibreNMSAPI(server_key="default"))
         _break_the_scb_filter()
 
         post(view, request, pk=device.pk)

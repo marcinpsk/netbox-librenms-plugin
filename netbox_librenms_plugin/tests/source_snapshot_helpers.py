@@ -387,3 +387,154 @@ def seed_cables_snapshot(
     )
     assert source_cache.store(subject, Resource.CABLES, snapshot), "the cables seed has no usable scope"
     return snapshot
+
+
+def seed_modules_snapshot(subject, inventory, ports=(), transceivers=(), *, oob_inventory=None, server_key="default"):
+    """Store raw module source facts through the real acquirer and source transport."""
+    for rows in (inventory, () if oob_inventory is None or isinstance(oob_inventory, Failed) else oob_inventory):
+        if any(key.startswith("_") for row in rows for key in row):
+            raise TypeError("Module seeds require raw endpoint facts.")
+    return seed_source_snapshot(
+        subject,
+        Resource.MODULES,
+        server_key,
+        inventory=list(inventory),
+        ports=list(ports),
+        transceivers=list(transceivers),
+        oob=None
+        if oob_inventory is None
+        else {"inventory": oob_inventory if isinstance(oob_inventory, Failed) else list(oob_inventory)},
+    )
+
+
+def module_inventory(subject, server_key="default"):
+    """Read the current module assessment through the bound source transport."""
+    from netbox_librenms_plugin.views.base.modules_view import read_module_assessment
+
+    assessed = read_module_assessment(subject, server_key)
+    return assessed["inventory"] if assessed is not None else None
+
+
+def acquire_recording(api, recording, resources, *, include_serial=False, inventory_probes=False):
+    """Replay real HTTP responses through acquisition for a mapped NetBox subject."""
+    from copy import deepcopy
+    from django.conf import settings
+    from django.test import override_settings
+    from netbox_librenms_plugin.acquisition.coordinator import acquire
+    from netbox_librenms_plugin.tests.conftest import make_device
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
+    subject = seed_mapping(
+        make_device(f"replay-{uuid4().hex}"),
+        api.server_key,
+        own=recording["device_id"],
+        oob=(recording.get("meta") or {}).get("oob_id"),
+    )
+    config = deepcopy(settings.PLUGINS_CONFIG)
+    config["netbox_librenms_plugin"]["servers"] = {
+        api.server_key: {
+            "librenms_url": api.librenms_url,
+            "api_token": api.headers["X-Auth-Token"],
+            "verify_ssl": False,
+        }
+    }
+    with override_settings(PLUGINS_CONFIG=config):
+        snapshot = acquire(
+            subject,
+            server_key=api.server_key,
+            resources=resources,
+            include_serial=include_serial,
+            inventory_probes=inventory_probes,
+        )
+    return snapshot, subject
+
+
+def recording_interface_assessment(api, recording):
+    """Acquire and assess a recording with its stored OS name patterns."""
+    from netbox_librenms_plugin.assessment.interfaces import assess_interfaces
+    from netbox_librenms_plugin.models import PortStackLagPattern
+
+    snapshot, _subject = acquire_recording(api, recording, [Resource.INTERFACES])
+    lag_patterns = recording.get("lag_patterns") or {}
+    sap_patterns = recording.get("sap_patterns") or {}
+    names = set(lag_patterns) | set(sap_patterns)
+    for rule_os in names:
+        PortStackLagPattern.objects.update_or_create(
+            librenms_os=rule_os,
+            defaults={
+                "lag_name_pattern": lag_patterns.get(rule_os) or "a^",
+                "sap_name_pattern": sap_patterns.get(rule_os, ""),
+                "bridge_name_pattern": "",
+            },
+        )
+    return assess_interfaces(snapshot, "ifName")
+
+
+def recording_serial_projection(api, recording, sensor_types=None):
+    """Acquire raw sensors and apply the recording's serial recognition map."""
+    from netbox_librenms_plugin.serial_utils import get_serial_sensor_type_patterns, project_serial_sensors
+
+    snapshot, _subject = acquire_recording(api, recording, [Resource.CABLES], include_serial=True)
+    record = snapshot.record(Resource.CABLES, "sensors")
+    if not record.obtained:
+        return False, record.reason
+    projection = project_serial_sensors(
+        record.value, get_serial_sensor_type_patterns() if sensor_types is None else sensor_types
+    )
+    return (True, projection.rows) if projection.ready else (False, projection.reason)
+
+
+def recording_part(api, device_id, resource, part):
+    """Acquire a recording part and return its obtained value or failure reason."""
+    snapshot, _subject = acquire_recording(
+        api, {"device_id": device_id}, [resource], include_serial=resource is Resource.CABLES
+    )
+    record = snapshot.record(resource, part)
+    return (True, record.value) if record.obtained else (False, record.reason)
+
+
+def acquire_ports_record(api, device_id):
+    """Acquire a port response through the coordinator over the configured HTTP server."""
+    snapshot, _subject = acquire_recording(api, {"device_id": device_id}, [Resource.INTERFACES])
+    return snapshot.record(Resource.INTERFACES, "ports")
+
+
+def inventory_row(index, name, *, model="", serial="", physical_class="module", parent=0, **facts):
+    """Build one raw ENTITY-MIB inventory row."""
+    return {
+        "entPhysicalIndex": index,
+        "entPhysicalName": name,
+        "entPhysicalModelName": model,
+        "entPhysicalSerialNum": serial,
+        "entPhysicalClass": physical_class,
+        "entPhysicalContainedIn": parent,
+        **facts,
+    }
+
+
+def transceiver_row(index, *, port_id=None, model="", serial="", kind=""):
+    """Build one raw transceiver response row."""
+    return {"entity_physical_index": index, "port_id": port_id, "model": model, "serial": serial, "type": kind}
+
+
+def seed_mapped_modules(
+    subject,
+    inventory,
+    ports=(),
+    transceivers=(),
+    *,
+    librenms_id=1,
+    server_key="default",
+    oob_inventory=None,
+    oob_id=None,
+):
+    """Map the subject and seed explicit module endpoint facts."""
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
+    seed_mapping(subject, server_key, own=librenms_id)
+    if oob_id is not None:
+        seed_mapping(subject, server_key, oob=oob_id)
+    subject.__dict__.pop("cf", None)
+    return seed_modules_snapshot(
+        subject, inventory, ports, transceivers, server_key=server_key, oob_inventory=oob_inventory
+    )
