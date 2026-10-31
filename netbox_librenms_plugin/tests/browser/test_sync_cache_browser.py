@@ -2919,6 +2919,24 @@ def test_refresh_forms_and_countdowns_live_in_the_swapped_content(tab):
     assert "_hidden_server_key.html" in refresh
 
 
+def test_the_search_line_shares_the_sync_row_and_clears_the_refresh_controls(page):
+    """Rendered live-search controls share the toolbar and wrap without overflow."""
+    from test_sync_toolbar_browser import load_tab
+
+    load_tab(page, "interface", "interface_sync")
+    page.set_viewport_size({"width": 1440, "height": 900})
+    actions = page.locator(".sync-tab-actions").bounding_box()
+    search = page.locator(".sync-filter-search").bounding_box()
+    refresh = page.locator(".sync-tab-refresh-toolbar button").bounding_box()
+    assert search["y"] == pytest.approx(actions["y"], abs=1)
+    assert refresh["y"] == pytest.approx(actions["y"], abs=1)
+    assert search["x"] + search["width"] < refresh["x"]
+    diagnostics = page.locator(".sync-tab-lead-row").bounding_box()
+    assert diagnostics["y"] >= refresh["y"] + refresh["height"]
+    page.set_viewport_size({"width": 390, "height": 900})
+    assert page.evaluate("document.documentElement.scrollWidth") <= 390
+
+
 def test_vlan_group_verification_ignores_a_late_response_for_an_old_selection(page):
     """A late group response must not replace the selected group's row state."""
     page.set_content(
@@ -5135,3 +5153,113 @@ def test_vlan_modal_warning_icons_are_named_by_their_titles(page):
         icon = icons.nth(index)
         assert icon.get_attribute("role") == "img"
         assert icon.get_attribute("aria-label") == icon.get_attribute("title")
+
+
+NETBOX_ONLY_URL = "https://plugin.example.com/netbox-only-interfaces/?server_key=primary"
+
+
+def _netbox_only_rows():
+    from django.conf import settings
+    from django.template import Context, Engine
+
+    if not settings.configured:
+        settings.configure(USE_I18N=False, USE_TZ=True)
+    engine = Engine(dirs=[str(TEMPLATE_DIR.parent)])
+    interfaces = [{"id": pk, "name": f"eth{pk}", "type": "Other", "enabled": True, "url": f"/i/{pk}/"} for pk in (1, 2)]
+    return engine.get_template("netbox_librenms_plugin/inc/_netbox_only_interfaces.html").render(
+        Context({"interface_sync": {"netbox_only_interfaces": interfaces}, "migrated_to_marker": None})
+    )
+
+
+def test_the_netbox_only_dialog_loads_its_rows_when_it_opens(page):
+    requests = []
+    page.route(
+        NETBOX_ONLY_URL,
+        lambda route: (requests.append(route.request.url), route.fulfill(body=_netbox_only_rows()))[-1],
+    )
+    page.set_content(
+        f"""<div id="netboxOnlyInterfacesModal" style="display: none">
+              <div id="netbox-only-interfaces-rows" hx-get="{NETBOX_ONLY_URL}" hx-trigger="intersect once"
+                   hx-swap="innerHTML">Loading interfaces</div>
+            </div>"""
+    )
+    _add_page_scripts(page)
+    page.wait_for_timeout(300)
+    # A closed dialog loads nothing: a filter render can leave thousands of rows out.
+    assert requests == []
+
+    page.locator("#netboxOnlyInterfacesModal").evaluate("dialog => { dialog.style.display = 'block'; }")
+
+    expect(page.locator(".netbox-interface-checkbox")).to_have_count(2)
+    page.check("#select-all-netbox-interfaces")
+    expect(page.locator(".netbox-interface-checkbox:checked")).to_have_count(2)
+    assert requests == [NETBOX_ONLY_URL]
+
+
+@pytest.mark.parametrize("failure", ["not found", "network"])
+def test_a_failed_load_of_the_netbox_only_rows_replaces_the_spinner(page, failure):
+    # An expired snapshot answers 404, which htmx does not swap; a dropped connection answers nothing.
+    page.route(
+        NETBOX_ONLY_URL,
+        lambda route: route.fulfill(status=404, body="gone") if failure == "not found" else route.abort(),
+    )
+    page.set_content(
+        f"""<div id="netboxOnlyInterfacesModal" style="display: none">
+              <div id="netbox-only-interfaces-rows" hx-get="{NETBOX_ONLY_URL}" hx-trigger="intersect once"
+                   hx-swap="innerHTML"><div role="status"><span class="spinner-border"></span>Loading</div></div>
+            </div>"""
+    )
+    _add_page_scripts(page)
+    page.locator("#netboxOnlyInterfacesModal").evaluate("dialog => { dialog.style.display = 'block'; }")
+
+    expect(page.locator("#netbox-only-interfaces-rows [role=alert]")).to_have_count(1)
+    expect(page.locator("#netbox-only-interfaces-rows .spinner-border")).to_have_count(0)
+
+
+def test_a_history_restore_keeps_one_set_of_page_listeners_on_the_restored_controller(page):
+    """Back restores a new cache-state root; the page listeners must serve its controller, once."""
+    initial = {"interfaces": _state("before-interfaces"), "ipaddresses": _state("before-ip")}
+    link = (
+        '<a id="go" hx-get="https://plugin.example.com/next" hx-push-url="https://plugin.example.com/page?next=1"'
+        ' hx-target="#htmx-modal-content">Next</a>'
+    )
+    page.route(
+        "https://plugin.example.com/page**",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="text/html",
+            body=f"<!doctype html><html><body>{_page_html(initial)}{link}</body></html>",
+        ),
+    )
+    page.route(
+        "https://plugin.example.com/next",
+        lambda route: route.fulfill(status=200, content_type="text/html", body='<p id="next">next</p>'),
+    )
+    statuses = []
+    page.route(
+        "https://plugin.example.com/status?*",
+        lambda route: (statuses.append(route.request.url), route.fulfill(json={"tabs": initial})),
+    )
+    page.goto("https://plugin.example.com/page?tab=interfaces")
+    _add_page_scripts(page)
+    page.evaluate("initializeScripts()")
+    page.click("#go")
+    page.wait_for_selector("#next")
+
+    page.go_back()
+    page.wait_for_selector("#go")
+    # The restore can start its own status check; count only once no request has come for a while.
+    seen = -1
+    while seen != len(statuses):
+        seen = len(statuses)
+        page.wait_for_timeout(300)
+        page.wait_for_function("syncCacheController() && syncCacheController().checking === null")
+    statuses.clear()
+    page.evaluate("window.dispatchEvent(new Event('blur')); window.dispatchEvent(new Event('focus'))")
+    page.wait_for_timeout(500)
+    assert len(statuses) == 1
+    page.evaluate(
+        "document.dispatchEvent(new CustomEvent('librenmsCacheChanged', {detail: {revisions: {interfaces: 'r-new'}}}))"
+    )
+
+    assert page.evaluate("syncCacheController().ownRevisions.has('r-new')")

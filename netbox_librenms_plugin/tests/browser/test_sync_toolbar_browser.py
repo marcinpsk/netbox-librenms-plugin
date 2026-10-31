@@ -43,7 +43,16 @@ body { padding: 16px; }
 
 
 def render_tab(
-    tab, key, *, model="device", cached=True, migrated=False, partial=False, timeout=600, server_key="secondary"
+    tab,
+    key,
+    *,
+    model="device",
+    cached=True,
+    migrated=False,
+    partial=False,
+    timeout=600,
+    server_key="secondary",
+    active_count=0,
 ):
     """Use real templates with only NetBox tags and table rendering replaced."""
     from django.conf import settings
@@ -64,6 +73,7 @@ def render_tab(
         name="sync_tab_query_items",
     )
     query.simple_tag(lambda server_key: timeout, name="sync_cache_timeout")
+    query.simple_tag(lambda *args: "interface_name_field=ifName", name="sync_selection_scope")
     fixtures = {
         "inc/table.html": '<table id="test-rows"><tbody><tr><td>Ethernet1</td></tr></tbody></table>',
         "inc/messages.html": "",
@@ -90,6 +100,7 @@ def render_tab(
         is_valid=True,
         in_use=True,
         active=True,
+        active_count=active_count,
         form=SimpleNamespace(
             q=field("q"),
             sync_state=field("sync_state", [("", "All sync states"), ("new", "New")]),
@@ -130,7 +141,8 @@ def render_tab(
 def load_tab(page, tab, key, **kwargs):
     page.clock.install(time=NOW)
     page.set_content(
-        f"<style>{CSS}</style><div class='tab-pane' data-tab-id='{tab}s'>{render_tab(tab, key, **kwargs)}</div>"
+        f"<style>{CSS}</style><div id='librenms-sync-tabs'>"
+        f"<div class='tab-pane' data-tab-id='{tab}s'>{render_tab(tab, key, **kwargs)}</div></div>"
     )
     page.add_style_tag(path=str(STYLE_PATH))
 
@@ -283,19 +295,25 @@ def test_filter_controls_need_a_snapshot_even_with_filter_input(page, tab, key):
 def test_filter_controls_submit_the_get_form(page, field, value):
     load_tab(page, "interface", "interface_sync")
     page.clock.pause_at(NOW + timedelta(seconds=1))
-    initial_url = page.url
-    page.route("**/browser-fixture?*", lambda route: route.fulfill(body="<p id='filtered'></p>"))
+    posted = []
+    page.route(
+        "**/endpoint/sync_tab_filter/**",
+        lambda route: (
+            posted.append(route.request),
+            route.fulfill(body="<div id='interface-sync-content-results'><p id='filtered'></p></div>"),
+        )[-1],
+    )
     _add_page_scripts(page)
     page.evaluate("initializeScripts()")
-    with page.expect_navigation() as navigation:
-        if field == "q":
-            page.locator("input[type=search]").fill(value)
-            page.clock.fast_forward(399)
-            assert page.url == initial_url
-            page.clock.fast_forward(1)
-        else:
-            page.locator(".sync-filter-controls select").select_option(value)
-    query = parse_qs(navigation.value.url.split("?", 1)[1])
+    if field == "q":
+        page.locator("input[type=search]").fill(value)
+        page.clock.fast_forward(499)
+        assert posted == []
+        page.clock.fast_forward(1)
+    else:
+        page.locator(".sync-filter-controls select").select_option(value)
+    expect(page.locator("#filtered")).to_have_count(1)
+    query = parse_qs(posted[0].url.split("?", 1)[1])
     assert query[f"interface_{field}"] == [value]
     assert query["server_key"] == ["secondary"]
     assert query["tab"] == ["interfaces"]
@@ -322,8 +340,9 @@ def test_sync_actions_submit_selected_rows_and_toolbar_options(page):
     assert parse_qs(posted[0].post_data)["server_key"] == ["secondary"]
 
 
-def test_active_filters_share_the_row_with_actions_in_the_netbox_frame(page):
-    load_tab(page, "interface", "interface_sync")
+@pytest.mark.parametrize("active_count", [0, 1])
+def test_active_filters_share_the_row_with_actions_in_the_netbox_frame(page, active_count):
+    load_tab(page, "interface", "interface_sync", active_count=active_count)
     page.set_viewport_size({"width": 1440, "height": 900})
     # These dimensions match the live NetBox sidebar and control widths.
     page.add_style_tag(
@@ -336,6 +355,9 @@ def test_active_filters_share_the_row_with_actions_in_the_netbox_frame(page):
         .sync-tab-refresh-toolbar button { width: 147px; }
     """
     )
+    if active_count:
+        page.add_style_tag(content=".sync-filter-toggle { width: 104px; }")
+        expect(page.locator("#interfaces_filter-count .badge")).to_have_text("1")
     sync = page.locator('button[form="interface-sync-form"]').bounding_box()
     refresh = page.locator(".sync-tab-refresh-toolbar button").bounding_box()
     clear = page.locator(".sync-filter-clear").bounding_box()
@@ -387,3 +409,119 @@ def test_relationship_diagnostics_share_the_colour_key_row(page, model, width):
     assert page.locator(".sync-tab-lead-row").evaluate(
         "e => e.parentElement.parentElement.contains(document.querySelector('.color-key'))"
     )
+
+
+@pytest.mark.parametrize(("tab", "key"), TABS[:-1])
+@pytest.mark.parametrize("server_key", ["secondary", None])
+def test_filter_get_keeps_the_toolbar_cache_bar_and_scoped_refresh(page, tab, key, server_key):
+    load_tab(page, tab, key, server_key=server_key)
+    page.set_viewport_size({"width": 1440, "height": 900})
+    _add_page_scripts(page)
+    page.evaluate("window.originalFilter = document.querySelector('.sync-filter-form')")
+    endpoint = "**/endpoint/sync_tab_filter/**"
+    page.route(
+        endpoint,
+        lambda route: route.fulfill(
+            status=200, content_type="text/html", body=render_tab(tab, key, partial=True, server_key=server_key)
+        ),
+    )
+    with page.expect_response(endpoint):
+        page.locator("input[type=search]").fill("Ethernet")
+    expect(page.locator(f"#{tab}-sync-content-results #test-rows")).to_have_count(1)
+    assert page.evaluate("originalFilter === document.querySelector('.sync-filter-form')")
+    expect(page.get_by_role("progressbar")).to_have_count(1)
+    refresh = page.locator(".sync-tab-refresh-toolbar button")
+    if server_key:
+        expect(refresh).to_be_enabled()
+        expect(page.locator(".sync-tab-refresh-toolbar [name=server_key]")).to_have_value(server_key)
+    else:
+        expect(refresh).to_be_disabled()
+        assert refresh.get_attribute("hx-post") is None
+    search_box = page.locator("input[type=search]").bounding_box()
+    assert search_box["y"] == pytest.approx(refresh.bounding_box()["y"], abs=1)
+    assert page.evaluate("document.documentElement.scrollWidth") <= 1440
+
+
+@pytest.mark.parametrize("expire_during_filter", [False, True])
+def test_cache_expiry_hides_filters_until_refresh(page, expire_during_filter):
+    from test_sync_cache_browser import _page_html, _state
+
+    page.clock.install(time=NOW)
+    initial = {"interfaces": _state("ready"), "ipaddresses": _state("ready-ip")}
+    page.route("**/status?*", lambda route: route.fulfill(json={"tabs": initial}))
+    page.set_content(f"<style>{CSS}</style>" + _page_html(initial))
+    page.locator("#interface-sync-content").evaluate(
+        "(e, html) => e.innerHTML = html", render_tab("interface", "interface_sync", partial=True, timeout=2)
+    )
+    page.add_style_tag(path=str(STYLE_PATH))
+    _add_page_scripts(page)
+    page.evaluate("initializeScripts()")
+    if expire_during_filter:
+        page.route(
+            "**/endpoint/sync_tab_filter/**",
+            lambda route: route.fulfill(body=render_tab("interface", "interface_sync", partial=True, cached=False)),
+        )
+        page.locator("input[type=search]").fill("Ethernet")
+        page.clock.fast_forward(500)
+    else:
+        page.clock.fast_forward(2000)
+    expect(page.locator(".sync-filter-controls, .sync-filter-form, #interfaceFilterSection")).to_have_count(0)
+    page.route(
+        "**/endpoint/device_interface_sync/**",
+        lambda route: route.fulfill(body=render_tab("interface", "interface_sync", partial=True)),
+    )
+    page.locator("#interface-sync-content .sync-tab-refresh-toolbar button").click()
+    expect(page.locator("#interface-sync-content .sync-filter-controls")).to_have_count(1)
+    expect(page.locator("#interface-sync-content .sync-filter-form")).to_have_count(1)
+    expect(page.get_by_role("progressbar")).to_have_count(1)
+
+
+def test_filter_settle_preserves_an_untouched_tab_without_a_snapshot(page):
+    from test_sync_cache_browser import _page_html, _state
+
+    page.clock.install(time=NOW)
+    initial = {
+        "interfaces": _state("ready"),
+        "ipaddresses": _state(None, state="missing", available=False),
+    }
+    initial["ipaddresses"]["timestamp"] = None
+    page.route("**/status?*", lambda route: route.fulfill(json={"tabs": initial}))
+    page.set_content(f"<style>{CSS}</style>" + _page_html(initial))
+    for tab, key, cached in (("interface", "interface_sync", True), ("ipaddress", "ip_sync", False)):
+        page.locator(f"#{tab}-sync-content").evaluate(
+            "(e, html) => e.innerHTML = html", render_tab(tab, key, partial=True, cached=cached)
+        )
+    _add_page_scripts(page)
+    page.evaluate("initializeScripts()")
+    untouched = page.locator("#ipaddress-sync-content")
+    expect(untouched.locator('[data-filter-snapshot="false"]')).to_have_count(1)
+    original = untouched.inner_html()
+    page.route(
+        "**/endpoint/sync_tab_filter/**",
+        lambda route: route.fulfill(body=render_tab("interface", "interface_sync", partial=True)),
+    )
+    page.evaluate("""() => {
+        window.filterSettled = false;
+        document.getElementById('interface-sync-content-results').addEventListener(
+            'htmx:afterSettle', () => { window.filterSettled = true; }, {once: true}
+        );
+    }""")
+
+    page.locator("#interfaces input[type=search]").fill("Ethernet")
+    page.clock.fast_forward(500)
+    page.wait_for_function("window.filterSettled")
+
+    assert untouched.inner_html() == original
+    assert page.evaluate("[...syncCacheController().invalidatedLocally]") == []
+    assert page.evaluate("syncCacheController().status.ipaddresses.state") == "missing"
+
+
+@pytest.mark.parametrize(("width", "wrapping"), [(1440, "nowrap"), (390, "wrap")])
+def test_table_cells_wrap_only_at_phone_width(page, width, wrapping):
+    load_tab(page, "vlan", "vlan_sync")
+    page.set_viewport_size({"width": width, "height": 900})
+    page.locator("#test-rows").evaluate("e => e.id = 'librenms-vlan-table'")
+    page.locator("#librenms-vlan-table td").evaluate(
+        "e => e.innerHTML = '<div class=d-flex><span>100</span><span>Users</span></div>'"
+    )
+    assert page.locator("#librenms-vlan-table .d-flex").evaluate("e => getComputedStyle(e).flexWrap") == wrapping

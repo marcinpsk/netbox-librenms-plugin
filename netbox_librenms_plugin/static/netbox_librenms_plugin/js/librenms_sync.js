@@ -1042,19 +1042,27 @@ function checkSyncCacheStatus() {
     return controller.checking;
 }
 
-function initializeSyncCacheConsistency() {
-    const controller = syncCacheController();
-    if (!controller || controller.root.dataset.listenersInitialized === 'true') return;
-    controller.root.dataset.listenersInitialized = 'true';
+// The page listeners outlive a history restore, which replaces the cache-state root and its controller.
+let syncCachePageListenersBound = false;
 
-    window.addEventListener('blur', () => { controller.lostFocus = true; });
+function initializeSyncCacheConsistency() {
+    if (!syncCacheController() || syncCachePageListenersBound) return;
+    syncCachePageListenersBound = true;
+
+    window.addEventListener('blur', () => {
+        const controller = syncCacheController();
+        if (controller) controller.lostFocus = true;
+    });
     window.addEventListener('focus', () => {
-        if (controller.lostFocus) {
+        const controller = syncCacheController();
+        if (controller?.lostFocus) {
             controller.lostFocus = false;
             checkSyncCacheStatus();
         }
     });
     document.addEventListener('librenmsCacheChanged', event => {
+        const controller = syncCacheController();
+        if (!controller) return;
         const payload = event.detail?.value || event.detail || {};
         Object.values(payload.revisions || {}).forEach(revision => controller.ownRevisions.add(revision));
         if (payload.source_fragment_required) {
@@ -1484,6 +1492,12 @@ function initializeTableCheckboxes(tableId) {
  * Initialize checkbox handling for all sync comparison tables.
  */
 function initializeCheckboxes() {
+    // Each tab renders its scope in every state, also with no table, so a scope change always starts empty.
+    document.querySelectorAll('[data-sync-filter-tab][data-selection-scope]').forEach((tab) => {
+        SELECTABLE_TABLE_IDS
+            .filter((tableId) => SELECTABLE_TABLE_TABS[tableId] === tab.dataset.syncFilterTab)
+            .forEach((tableId) => pruneOtherSelectionScopes(tableId, tab.dataset.selectionScope));
+    });
     initializeTableCheckboxes('librenms-interface-table');
     initializeTableCheckboxes('librenms-interface-table-vm');
     initializeTableCheckboxes('librenms-cable-table');
@@ -1861,33 +1875,71 @@ function offPageRecords(table, selection) {
 }
 
 /** Tables whose selection survives pagination, and the tab each belongs to. */
-const SELECTABLE_TABLE_IDS = [
-    'librenms-interface-table',
-    'librenms-interface-table-vm',
-    'librenms-cable-table',
-    'librenms-cable-table-vc',
-    'librenms-ipaddress-table',
-    'librenms-vlan-table',
-    'librenms-port-vlan-table',
-    'librenms-module-table',
-];
+const SELECTABLE_TABLE_TABS = {
+    'librenms-interface-table': 'interfaces',
+    'librenms-interface-table-vm': 'interfaces',
+    'librenms-cable-table': 'cables',
+    'librenms-cable-table-vc': 'cables',
+    'librenms-ipaddress-table': 'ipaddresses',
+    'librenms-vlan-table': 'vlans',
+    'librenms-port-vlan-table': 'vlans',
+    'librenms-module-table': 'modules',
+};
+const SELECTABLE_TABLE_IDS = Object.keys(SELECTABLE_TABLE_TABS);
 
 /**
  * Build the sessionStorage key for one table.
  *
- * Scoped to the object being synced (the path), the table, the LibreNMS server, and the filter
- * signature the server renders on a filtered table, so two devices, two tabs, two servers or two
- * filters never share a selection. The page number, sort and page size are deliberately left out:
- * carrying the selection across pages is the whole point.
+ * Scoped to the object being synced (the path), the table, the LibreNMS server, and the selection
+ * scope the server renders on the tab (the name field and the ignored toggle), so two devices, two
+ * tabs or two servers never share a selection. The page number, sort, page size and filters are left
+ * out: the selection follows the user across pages and filters.
  *
  * @param {HTMLElement} table - The table element.
  * @returns {string} The storage key.
  */
 function _selectionStorageKey(table) {
-    const serverKey = syncServerKey();
-    const key = 'lnmsSelection:' + window.location.pathname + ':' + table.id + ':' + serverKey;
-    const signature = table.dataset.filterSignature;
-    return signature ? key + ':' + signature : key;
+    const key = _selectionStoreBase(table.id);
+    const scope = table.closest('[data-selection-scope]')?.dataset.selectionScope;
+    return scope ? key + ':' + scope : key;
+}
+
+/**
+ * Build the part of a table's storage key that every selection scope of the table shares.
+ *
+ * @param {string} tableId - The table element ID.
+ * @returns {string} The key without the selection scope.
+ */
+function _selectionStoreBase(tableId) {
+    return 'lnmsSelection:' + window.location.pathname + ':' + tableId + ':' + syncServerKey();
+}
+
+/**
+ * Forget the stored selections of the table's other selection scopes on this server.
+ *
+ * A scope change starts with no rows selected, and a return to an earlier scope must not restore
+ * its old selection. Each scope store has a ':mgmt' companion, which goes with it.
+ *
+ * @param {string} tableId - The table element ID.
+ * @param {string|undefined} scope - The selection scope of the current render.
+ * @returns {void}
+ */
+function pruneOtherSelectionScopes(tableId, scope) {
+    if (!scope) return;
+    const base = _selectionStoreBase(tableId);
+    try {
+        const stale = [];
+        for (let i = 0; i < window.sessionStorage.length; i++) {
+            const key = window.sessionStorage.key(i);
+            const owner = key.endsWith(':mgmt') ? key.slice(0, -':mgmt'.length) : key;
+            const rest = owner === base ? '' : owner.startsWith(base + ':') ? owner.slice(base.length + 1) : null;
+            // The scope is URL-encoded and has no colon, so a colon in the rest names another server's key.
+            if (rest !== null && rest !== scope && !rest.includes(':')) stale.push(key);
+        }
+        stale.forEach((key) => window.sessionStorage.removeItem(key));
+    } catch (_) {
+        // Without storage, no selection of another scope can come back.
+    }
 }
 
 /**
@@ -4022,7 +4074,7 @@ function updateBulkActionButton() {
  *
  * The server chose the rows at the last load. A client-side repaint can change the text or the
  * state that the filter matched, and the cells alone cannot prove a match, so the row is marked
- * and never hidden or moved. Apply reloads the table and clears every mark.
+ * and never hidden or moved. A filter load renders the table again and clears every mark.
  *
  * @param {?HTMLTableRowElement} row - The repainted row.
  * @returns {void}
@@ -4057,7 +4109,7 @@ function showFilterStaleNotice(table) {
     notice.setAttribute('role', 'status');
     table.parentNode.insertBefore(notice, table);
     // The live region is in the page before its text changes, so a screen reader announces it.
-    notice.textContent = 'Results reflect the last load. Apply to update.';
+    notice.textContent = 'Results reflect the last load. Filter again or reload the page to update.';
 }
 
 // ============================================
@@ -4112,25 +4164,98 @@ function applyFilterDisclosureState(section, button, expanded) {
     }
 }
 
-function initializeSyncFilters() {
-    document.querySelectorAll('.sync-filter-form').forEach((form) => {
-        if (form.dataset.liveSearchBound) return;
-        form.dataset.liveSearchBound = 'true';
-        let timer;
-        const submit = () => { clearTimeout(timer); form.requestSubmit(); };
-        Array.from(form.elements).forEach((field) => {
-            if (field.type === 'search') {
-                field.addEventListener('input', () => {
-                    clearTimeout(timer);
-                    timer = setTimeout(submit, 400);
-                });
-            } else if (field.name.endsWith('_sync_state')) {
-                field.addEventListener('change', submit);
+const pendingFilterApplies = new WeakSet();
+const initializedFilterTargets = new WeakSet();
+
+// Keep an explicit Apply when queue-last replaces its submit with a later change.
+document.addEventListener('submit', function (event) {
+    if (event.target.matches('.sync-filter-form')) pendingFilterApplies.add(event.target);
+}, true);
+
+// Restored HTML has initial control values; the restored URL names the displayed filters.
+// A cached snapshot keeps the binding markers of its controls but not their listeners; the swap binds them again.
+document.addEventListener('htmx:historyCacheHit', function (event) {
+    const snapshot = document.createElement('template');
+    snapshot.innerHTML = event.detail.item.content;
+    snapshot.content.querySelectorAll('*').forEach(element => {
+        Object.keys(element.dataset).filter(key => /(^initialized|Initialized|Bound)$/.test(key)).forEach(key => {
+            delete element.dataset[key];
+        });
+    });
+    // TomSelect markup stays without its instance, and NetBox enhances only a plain select: undo it as destroy() does.
+    snapshot.content.querySelectorAll('.ts-wrapper').forEach(wrapper => wrapper.remove());
+    snapshot.content.querySelectorAll('select.tomselected').forEach(select => {
+        select.classList.remove('tomselected', 'ts-hidden-accessible');
+        select.removeAttribute('tabindex');
+    });
+    event.detail.item.content = snapshot.innerHTML;
+});
+
+document.addEventListener('htmx:historyRestore', function () {
+    const parameters = new URLSearchParams(window.location.search);
+    document.querySelectorAll('.sync-filter-form').forEach(form => {
+        [...form.elements].filter(control => control.id && control.name).forEach(control => {
+            control.value = parameters.get(control.name) ?? '';
+        });
+    });
+});
+
+// An empty field means no filter, so it stays out of the page URL that the response pushes.
+document.addEventListener('htmx:configRequest', function (event) {
+    if (event.detail.elt instanceof HTMLFormElement && event.detail.elt.matches('.sync-filter-form')) {
+        const form = event.detail.elt;
+        const target = event.detail.target;
+        if (!initializedFilterTargets.has(target)) {
+            // Refresh can replace this target before the response arrives, so reject its stale swap and URL.
+            target.addEventListener('htmx:beforeSwap', function (swap) {
+                if (!target.isConnected) swap.preventDefault();
+            });
+            initializedFilterTargets.add(target);
+        }
+        const results = target.querySelector('[data-filter-search]');
+        // A cancelled automatic choice must not apply column edits made after that choice.
+        if (event.detail.triggeringEvent?.type === 'change' && !pendingFilterApplies.has(form)) {
+            const search = [...form.elements].find(control => control.matches('.sync-filter-search'));
+            const state = [...form.elements].find(control => control.tagName === 'SELECT');
+            if (search?.value === results.dataset.filterSearch && state?.value === results.dataset.filterState) {
+                event.preventDefault();
+                return;
+            }
+        }
+        pendingFilterApplies.delete(form);
+        const parameters = event.detail.parameters;
+        [...parameters.keys()].filter(key => parameters.getAll(key).every(value => value === '')).forEach(key => parameters.delete(key));
+    }
+});
+
+// Validation belongs to the response, while the user's controls stay connected.
+document.addEventListener('htmx:afterSwap', function () {
+    document.querySelectorAll('.sync-filter-form').forEach(form => {
+        const errors = document.getElementById(form.id.replace('filter-form', 'filter-errors'));
+        const invalidIds = new Set([...errors?.querySelectorAll('[data-filter-error-for]') || []]
+            .map(error => error.dataset.filterErrorFor));
+        [...form.elements].filter(control => control.id && control.name).forEach(control => {
+            const invalid = invalidIds.has(control.id);
+            control.classList.toggle('is-invalid', invalid);
+            if (invalid) {
+                control.setAttribute('aria-invalid', 'true');
+                control.setAttribute('aria-describedby', errors.id);
+            } else {
+                control.removeAttribute('aria-invalid');
+                control.removeAttribute('aria-describedby');
             }
         });
-        form.addEventListener('submit', () => clearTimeout(timer));
     });
-}
+});
+
+// HTMX must bind the new Refresh control before cache expiry moves it.
+document.addEventListener('htmx:afterSettle', function (event) {
+    const settled = event.detail?.elt || event.target;
+    if (!(settled instanceof Element)) return;
+    const pane = settled.closest('.tab-pane[data-tab-id]');
+    if (!pane) return;
+    pane.querySelectorAll('[data-filter-snapshot="false"]').forEach(expireSyncTabFromElement);
+});
 
 function initializeFilterDisclosures() {
     document.querySelectorAll('.sync-filter-toggle[aria-controls]').forEach((button) => {
@@ -4427,6 +4552,19 @@ function setInterfaceNameFieldFromURL() {
         }
     }
 }
+
+// The dialog loads its rows once, and htmx swaps no error answer, so a failed load replaces the spinner here.
+HTMX_FAILURE_EVENTS.forEach(name => {
+    document.body.addEventListener(name, function (event) {
+        const rows = event.target;
+        if (rows?.id !== 'netbox-only-interfaces-rows') return;
+        const alert = document.createElement('div');
+        alert.className = 'alert alert-warning mb-0';
+        alert.setAttribute('role', 'alert');
+        alert.textContent = 'The NetBox-only interfaces could not load. Refresh the Interfaces tab, then open this dialog again.';
+        rows.replaceChildren(alert);
+    });
+});
 
 
 // NetBox-only interfaces functionality
@@ -4869,7 +5007,6 @@ function initializeScripts() {
     initializeVlanGroupSelects();
     initializeVlanModalSave();
     initializeFilterDisclosures();
-    initializeSyncFilters();
     initializeCountdowns();
     initializeCheckboxListeners();
     initializeBulkEditApply();
