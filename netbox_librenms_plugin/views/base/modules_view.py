@@ -817,10 +817,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         empty = {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
         if unresolved or self._render_server_key() is None:
             return None, None, None, empty
+        from dcim.models import Device
+
         from netbox_librenms_plugin.models import RuleConfigurationError
 
         try:
             assessed = read_module_assessment(obj, scoped_server)
+        except Device.DoesNotExist:
+            return None, None, None, empty
         except RuleConfigurationError as exc:
             return None, None, None, {**empty, "inventory_rule_error": exc}
         if assessed is None:
