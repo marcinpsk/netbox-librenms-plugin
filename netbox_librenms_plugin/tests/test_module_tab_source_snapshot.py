@@ -183,6 +183,31 @@ def test_another_reader_sees_the_blocked_oob_source_on_the_cached_tab(client, li
 
 
 @pytest.mark.django_db
+def test_the_json_verify_of_a_blocked_source_queues_no_page_notice(client, live_librenms):
+    import json
+
+    from django.contrib.messages import get_messages
+
+    subject = device("module-verify-blocked-oob", oob={"id": OOB_ID, "type": "idrac"})
+    client.force_login(make_superuser("module-verify-blocked-user"))
+    serve(live_librenms.server, inventory=INVENTORY, transceivers=[])
+    live_librenms.server.register(f"/api/v0/inventory/{OOB_ID}/all", {"status": "error"}, status=500)
+    assert refresh(client, subject).context["module_sync"]["table"] is not None
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:verify_module"),
+        data=json.dumps(
+            {"device_id": subject.pk, "page_device_id": subject.pk, "ent_physical_index": 2, "server_key": "default"}
+        ),
+        content_type="application/json",
+    )
+
+    # The table was built, so the refused grant answers; a missing table would answer 404.
+    assert response.status_code == 409
+    assert list(get_messages(response.wsgi_request)) == []
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("changed_version", ["plugin", "netbox"])
 def test_a_version_change_requires_a_new_source_snapshot(client, live_librenms, monkeypatch, settings, changed_version):
     from dataclasses import replace
