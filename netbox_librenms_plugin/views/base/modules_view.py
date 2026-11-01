@@ -811,8 +811,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             messages.error(request, "Inventory data could not be cached. Refresh Modules before syncing.")
         return self.render_sync_partial(request, obj, server_key, {"module_sync": context})
 
-    def _read_render_inventory(self, request, obj, server_key=None):
-        """Read and assess the source without discovery or HTTP."""
+    def _read_render_inventory(self, request, obj, server_key=None, *, notify=True):
+        """Read and assess the source without discovery or HTTP; *notify* queues a notice per blocked scope."""
         scoped_server, unresolved = self.resolve_get_render_server_key(request, server_key)
         empty = {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
         if unresolved or self._render_server_key() is None:
@@ -829,8 +829,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             return None, None, None, {**empty, "inventory_rule_error": exc.shown_to(request.user)}
         if assessed is None:
             return None, None, None, empty
-        for blockers in assessed["blocked"].values():
-            messages.warning(request, source_cache.blocker_notice(blockers))
+        if notify:
+            for blockers in assessed["blocked"].values():
+                messages.warning(request, source_cache.blocker_notice(blockers))
         if "host" in assessed["blocked"]:
             return None, None, None, empty
         owner = self._get_sync_device(obj, server_key=scoped_server)
@@ -855,7 +856,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         from netbox_librenms_plugin.models import RuleConfigurationError
 
-        scoped_server, sync_device, inventory, empty = self._read_render_inventory(request, page_device, server_key)
+        # The verify answer is JSON, so a queued notice would show on a later page.
+        scoped_server, sync_device, inventory, empty = self._read_render_inventory(
+            request, page_device, server_key, notify=False
+        )
         if empty is not None:
             return empty
         try:
