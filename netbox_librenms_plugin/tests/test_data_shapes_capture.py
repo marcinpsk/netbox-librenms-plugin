@@ -874,7 +874,8 @@ def test_capture_rejects_an_invalid_linked_controller(capture_http, oob_id):
     with pytest.raises(RuntimeError):
         capture_device_recording(subject, server_key=api.server_key)
 
-    assert all("/oob/" not in request["path"] for request in server.requests)
+    assert server.requests
+    assert [request["path"] for request in server.requests if str(oob_id) in request["path"].split("/")] == []
 
 
 def test_capture_fails_when_successful_route_has_no_json_body(capture_http):
