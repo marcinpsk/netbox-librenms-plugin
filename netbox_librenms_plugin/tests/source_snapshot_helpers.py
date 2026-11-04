@@ -63,6 +63,10 @@ class _CableSeededFetch(_SeededFetch):
     """Decode each raw seeded envelope through the real cable endpoint contract."""
 
     def __call__(self, endpoint):
+        if endpoint.request.key not in self._values:
+            raise TypeError(
+                f"The cables seed has no value for {endpoint.request.path}; it seeds only {sorted(self._values)}."
+            )
         value = self._values[endpoint.request.key]
         if isinstance(value, Failed):
             status = 500
