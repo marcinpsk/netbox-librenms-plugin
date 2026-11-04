@@ -151,7 +151,13 @@ class TestTheTableShowsAnIgnoredAddress:
 
     def test_an_ignored_management_row_is_no_set_primary_ip_candidate(self, client, device):
         IPAddressMapping.objects.create(prefix="fe80::/10")
-        _seed(device, [_row(LINK_LOCAL), _row(GLOBAL_V4)], device={"device_id": 4510, "ip": "fe80::1"})
+        # The device record carries the LibreNMS management address.
+        seed_ip_snapshot(
+            device,
+            [_row(LINK_LOCAL), _row(GLOBAL_V4)],
+            [_port(PORT_ID, "eth0")],
+            device={"device_id": 4510, "ip": "fe80::1"},
+        )
 
         response = client.get(
             reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
