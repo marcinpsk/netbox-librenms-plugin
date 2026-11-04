@@ -887,7 +887,7 @@ class TestMergeTransceiverDataPortIdentity:
         assert error is None
         assert len(inventory) == 1
         # Both existing values are real (not placeholders), so the transceiver data must not overwrite them.
-        assert inventory[0]["entPhysicalModelName"] == 1000
+        assert inventory[0]["entPhysicalModelName"] == "1000"
         assert inventory[0]["entPhysicalSerialNum"] == 4242
         # The port ID proves that the merge matched the row and reached supplementation.
         assert inventory[0]["_librenms_port_id"] == 11
