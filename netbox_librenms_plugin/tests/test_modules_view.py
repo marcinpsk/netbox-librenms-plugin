@@ -893,9 +893,7 @@ class TestMergeTransceiverDataPortIdentity:
         assert inventory[0]["_librenms_port_id"] == 11
 
     def test_integer_index_matches_string_transceiver_index_without_a_duplicate(self, settings, librenms_server):
-        """LibreNMS may report the ENTITY index as a string while the transceiver API returns an int; coercing both sides matches the existing row instead of caching a duplicate."""
-        from netbox_librenms_plugin.serial_identity import SerialRules
-
+        """LibreNMS may report the ENTITY index as an int while the transceiver API returns a string; coercing both sides matches the existing row instead of caching a duplicate."""
         view = _real_api_view(settings, librenms_server, librenms_id=103)
         librenms_server.register(
             "/api/v0/devices/103/transceivers",
@@ -920,7 +918,7 @@ class TestMergeTransceiverDataPortIdentity:
         )
         inventory_seed = [
             {
-                "entPhysicalIndex": 300,  # string index from ENTITY-MIB
+                "entPhysicalIndex": 300,  # integer index from ENTITY-MIB
                 "entPhysicalName": "Transceiver slot",
                 "entPhysicalModelName": "builtin",
                 "entPhysicalSerialNum": "-",
