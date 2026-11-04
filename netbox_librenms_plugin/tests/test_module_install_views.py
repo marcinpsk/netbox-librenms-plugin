@@ -481,6 +481,19 @@ class TestInstallSelectedView:
         assert not Module.objects.filter(device=device).exists()
         assert cache.get(key)["schema"] == 0
 
+    def test_a_numeric_model_installs_its_module_type(self, live_librenms):
+        """LibreNMS sends an all-digit entPhysicalModelName as a JSON number; the install reads it as text."""
+        from dcim.models import Module
+
+        device = make_device_with_module_bays("selected-numeric-model", ["Slot 1"])
+        seed_mapping(device, "default", own=77)
+        module_type = make_module_type("7700")
+
+        request = _post_selected(device, [_item(10, 7700, "Slot 1")], [10], 77, live_librenms)
+
+        assert message_texts(request, "error") == []
+        assert Module.objects.filter(device=device, module_type=module_type).exists()
+
     @SKIPPED_HOLDER_SHAPES
     def test_a_selected_row_below_a_skipped_holder_installs_nothing(self, live_librenms, holder_class, holder_model):
         from dcim.models import Module

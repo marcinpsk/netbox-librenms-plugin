@@ -854,7 +854,7 @@ class TestMergeTransceiverDataPortIdentity:
         assert error is None
         assert len(inventory) == 1
         # Both existing values are real (not placeholders), so the transceiver data must not overwrite them.
-        assert inventory[0]["entPhysicalModelName"] == 1000
+        assert inventory[0]["entPhysicalModelName"] == "1000"
         assert inventory[0]["entPhysicalSerialNum"] == 4242
 
     def test_integer_index_matches_string_transceiver_index_without_a_duplicate(self, settings, librenms_server):

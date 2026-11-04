@@ -61,9 +61,10 @@ def assess(snapshot, *, subject):
                 item["entPhysicalContainedIn"] += offset
         inventory.extend(oob)
     for item in inventory:
-        name = item.get("entPhysicalName")
-        if name is not None and not isinstance(name, str):
-            item["entPhysicalName"] = normalize_serial(name)
+        for field in ("entPhysicalName", "entPhysicalModelName"):
+            value = item.get(field)
+            if value is not None and not isinstance(value, str):
+                item[field] = normalize_serial(value)
     return {"inventory": inventory, "blocked": blocked}
 
 
