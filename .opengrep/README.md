@@ -378,5 +378,6 @@ keys from `MappingSource.parts`. Comparisons through aliases or other functions 
 this narrow check.
 
 `recording-export-needs-response-keys` rejects unkeyed response iteration in
-`_export_responses`. The export uses part keys to omit neighbour-only responses.
+`_export_responses` and `_recording_records`. The export uses part keys to omit
+neighbour-only responses.
 The rule does not prove which keys the export excludes or follow iteration aliases.
