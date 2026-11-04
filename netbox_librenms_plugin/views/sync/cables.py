@@ -72,7 +72,7 @@ from netbox_librenms_plugin.utils import (
     exception_text_for,
     render_cable_trace,
 )
-from netbox_librenms_plugin.assessment.cables import remote_port_ref
+from netbox_librenms_plugin.assessment.cables import link_neighbour_id, remote_port_ref
 from netbox_librenms_plugin.views.base.cables_view import (
     CABLE_MODAL_QUERY_KEYS,
     cable_row_ports,
@@ -1708,7 +1708,7 @@ class CableRemoteCreateView(SyncCablesView):
     @staticmethod
     def _port_record_is_live_on_neighbour(port, row):
         """True only when *port* is a not-deleted port of the row's neighbour; a missing field refuses."""
-        neighbour_id = coerce_librenms_id(row.get("remote_device_id"))
+        neighbour_id = link_neighbour_id(row)
         return (
             neighbour_id is not None
             and coerce_librenms_id(port.get("device_id")) == neighbour_id

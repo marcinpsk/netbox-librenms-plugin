@@ -327,3 +327,34 @@ def test_far_end_actions_refuse_incomplete_snapshot_evidence(client, live_libren
     assert response.status_code == 409
     assert not Interface.objects.filter(device=neighbour).exists()
     assert not Cable.objects.exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("port_owner", [NEIGHBOUR_ID, NEIGHBOUR_ID + 1], ids=["neighbour-port", "other-device-port"])
+def test_create_far_end_of_a_hostname_only_link_checks_the_resolved_neighbour(client, live_librenms, port_owner):
+    """The create endpoint checks the port against the neighbour that acquisition resolved from the hostname."""
+    subject, neighbour, local, _remote, _snapshot, local_port, _remote_port = _pair()
+    seed_cables_snapshot(
+        subject,
+        [
+            link_row(
+                LOCAL_PORT_ID, "eth2", local_port="eth1", remote_port_id=REMOTE_PORT_ID, remote_hostname=neighbour.name
+            )
+        ],
+        [local_port],
+        neighbour_ports={NEIGHBOUR_ID: [port_row(REMOTE_PORT_ID, "eth2", device_id=port_owner)]},
+        server_key=SERVER_KEY,
+    )
+    client.force_login(make_superuser("source-hostname-only-create"))
+    (row,) = _rows(_fragment(client, subject))
+    assert row["remote_device_id"] is None
+    assert row.get("remote_create_url")
+
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[subject.pk]),
+        {"server_key": SERVER_KEY, "row_id": str(LOCAL_PORT_ID), "expected_local_id": local.pk},
+    )
+
+    assert live_librenms.server.requests == []
+    assert response.status_code == (200 if port_owner == NEIGHBOUR_ID else 409)
+    assert not Interface.objects.filter(device=neighbour).exists()

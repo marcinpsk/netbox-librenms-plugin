@@ -226,12 +226,10 @@ def _attach_remote_port_aliases(links, ports_by_neighbour):
     """Attach a matched neighbour port's identity, rule inputs and alternate names."""
     indexes = {device_id: _remote_port_name_index(ports) for device_id, ports in ports_by_neighbour.items()}
     for link in links:
-        device_id = coerce_librenms_id(link.get("remote_device_id"))
-        if device_id is None:
+        device_id = link_neighbour_id(link)
+        if link["remote_device_id"] is None and device_id not in indexes:
             # A hostname-only link names the neighbour whose ports acquisition read for it, unless that scope is blocked.
-            device_id = link.get("_neighbour_ports_id")
-            if device_id not in indexes:
-                continue
+            continue
         by_port_id, by_name = indexes[device_id]
         remote_port = link.get("remote_port")
         matched = by_port_id.get(coerce_librenms_id(link.get("remote_port_id")))
@@ -251,7 +249,7 @@ def _attach_remote_port_aliases(links, ports_by_neighbour):
             link["remote_port_aliases"] = aliases
 
 
-def _link_neighbour_id(row):
+def link_neighbour_id(row):
     """Return the neighbour a link row names: its LibreNMS ID, or the ID acquisition resolved from its hostname."""
     return row["remote_device_id"] if row["remote_device_id"] is not None else row.get("_neighbour_ports_id")
 
@@ -266,7 +264,7 @@ def _mapping_rows(snapshot, mapping, scope, blocked, interface_name_field):
     name_map, alt_map = _build_cable_port_name_maps(ports, interface_name_field, alternate)
     source = MAIN_INVENTORY_SOURCE if scope == "host" else OOB_INVENTORY_SOURCE
     rows = _collect_cable_links(snapshot.value(resource, "links", mapping.role), name_map, alt_map, source)
-    rows = [row for row in rows if neighbor_scope_key(scope, _link_neighbour_id(row)) not in blocked]
+    rows = [row for row in rows if neighbor_scope_key(scope, link_neighbour_id(row)) not in blocked]
     local_records = _port_records_by_id(ports)
     for row in rows:
         record = local_records.get(row["local_port_id"])
