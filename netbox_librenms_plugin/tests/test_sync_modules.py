@@ -3011,11 +3011,10 @@ def _install_selected(client, device, rows, select):
     from django.urls import reverse
 
     from netbox_librenms_plugin.tests.conftest import make_superuser
-    from netbox_librenms_plugin.views.mixins import CacheMixin
 
-    cache.set(
-        CacheMixin().get_cache_key(device, "inventory", "default"), trusted_module_inventory_payload(device, rows)
-    )
+    # The snapshot answers only for the LibreNMS device that the stored mapping names.
+    seed_stored_mapping(device, {"default": {"id": 4601}}, save=True)
+    seed_inventory(device, rows, librenms_id=4601)
     user = make_superuser(f"{device.name}-user")
     data = {**_rendered_fields(device, "install-selected", user=user), "select": select}
     client.force_login(user)
@@ -4167,7 +4166,6 @@ def test_an_install_waits_for_the_serial_lock_of_another_member_page_of_its_chas
         make_virtual_chassis,
     )
     from netbox_librenms_plugin.tests.view_test_helpers import render_module_tab, rendered_module_form
-    from netbox_librenms_plugin.views.mixins import CacheMixin
     from netbox_librenms_plugin.views.sync.modules import _lock_page_device_serials
 
     page = make_device_with_module_bays("chassis-lock-page", ["Slot 1"])
@@ -4185,8 +4183,7 @@ def test_an_install_waits_for_the_serial_lock_of_another_member_page_of_its_chas
             "entPhysicalSerialNum": "SN-CHASSIS-LOCK",
         },
     ]
-    key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(key, trusted_module_inventory_payload(page, rows))
+    key = seed_inventory(page, rows, librenms_id=4602)
     action, fields = rendered_module_form(render_module_tab(page), "install-module", 2)
     user = make_superuser("chassis-lock-user")
     held, release, holder = Event(), Event(), {}
