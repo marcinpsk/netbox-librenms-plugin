@@ -23,7 +23,8 @@ from netbox_librenms_plugin.tests.conftest import (
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import SERVER_KEY
 from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row, lock_timeout, second_connection
 from netbox_librenms_plugin.tests.test_interface_late_write import seed_ip_rows
-from netbox_librenms_plugin.tests.view_test_helpers import messages_on, select_ip_rows
+from netbox_librenms_plugin.tests.test_ip_selection_draft import _checked
+from netbox_librenms_plugin.tests.view_test_helpers import ip_tab, messages_on, select_ip_rows
 from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
 from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
@@ -105,3 +106,6 @@ def test_lock_conflicts_on_both_attempts_give_the_try_again_answer_and_commit_no
     assert response.status_code == 302
     assert messages_on(response.wsgi_request) == [("error", TRY_AGAIN_MESSAGE)]
     assert not IPAddress.objects.filter(address__in=[f"{address}/24" for address, _, _ in ROWS]).exists()
+    # Nothing committed, so the claimed rows are selected again for the next try.
+    tab = ip_tab(client, device, server_key=SERVER_KEY)
+    assert all(_checked(tab, row_id) for row_id in ROW_IDS)

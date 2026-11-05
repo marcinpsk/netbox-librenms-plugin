@@ -51,6 +51,7 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     read_ip_row,
     select_ip_rows,
     submit_ip_selection,
+    sync_ip_row,
     write_ip_rows,
 )
 
@@ -815,13 +816,9 @@ def test_row_action_syncs_only_its_ip_when_another_row_is_checked(client, settin
     assert refresh_response.status_code == 200
     rendered = refresh_response.content.decode()
     assert 'name="sync_one" value="198.18.31.10/24"' in rendered
-    sync_url = reverse(
-        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-        kwargs={"object_type": "device", "pk": device.pk},
-    )
     # The other row is selected in the draft; the row action leaves it there.
     select_ip_rows(client, device, ["198.18.30.10/24"])
-    response = client.post(sync_url, {"server_key": "default", "sync_one": "198.18.31.10/24"})
+    response = sync_ip_row(client, device, "198.18.31.10/24")
 
     assert response.status_code == 302
     assert not IPAddress.objects.filter(address="198.18.30.10/24").exists()

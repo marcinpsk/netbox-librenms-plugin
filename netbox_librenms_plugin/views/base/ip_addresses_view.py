@@ -22,6 +22,7 @@ from netbox_librenms_plugin.sync_rows import (
     REVISION_HEADER,
     ROW_STALE_EVENT,
     VRF_CHOICE,
+    find_ip_draft,
     ip_row_html,
     ip_rows,
     ip_table,
@@ -330,6 +331,11 @@ class _IPDraftCommandView(_IPDraftView):
         """Return the answer of a command that named another draft or revision."""
         return HttpResponse(status=409)
 
+    @staticmethod
+    def draft(request, obj, server_key, snapshot):
+        """Return the stored draft of the snapshot that the command read; None (a conflict) when a newer one replaced it."""
+        return find_ip_draft(request, obj, server_key, snapshot) if snapshot is not None else None
+
 
 class IPSelectionView(_IPDraftCommandView):
     """Set the absolute selection state of IP rows in the user's draft; the page's unload beacon posts here too."""
@@ -341,12 +347,10 @@ class IPSelectionView(_IPDraftCommandView):
             return error
         draft_id, expected_revision = self.draft_version(request.POST)
         assignments = _parse_assignments(request.POST.get("assignments"), obj, server_key)
-        if snapshot is None:
+        if (draft := self.draft(request, obj, server_key, snapshot)) is None:
             return self.conflict()
         try:
-            revision = open_ip_draft(request, obj, server_key, snapshot).assign(
-                draft_id, expected_revision, assignments
-            )
+            revision = draft.assign(draft_id, expected_revision, assignments)
         except DraftConflict:
             return self.conflict()
         return self.acknowledge(revision)
@@ -363,7 +367,7 @@ class IPChoiceView(_IPDraftCommandView):
         draft_id, expected_revision = self.draft_version(request.POST)
         row_key = _canonical_row_key(request.POST.get("row"))
         vrf_id = parse_vrf_id(request.POST.get("value"))
-        if snapshot is None:
+        if (draft := self.draft(request, obj, server_key, snapshot)) is None:
             return self.conflict()
         rows = read_ip_assessment(request, obj, snapshot, server_key).rows
         row = next((row for row in rows if row["row_id"] == row_key), None)
@@ -375,9 +379,7 @@ class IPChoiceView(_IPDraftCommandView):
         # The VRF that the row shows without a choice is no choice: the row then follows a later suggestion.
         value = None if vrf_id == shown_vrf_id(row) else "" if vrf_id is None else str(vrf_id)
         try:
-            revision = open_ip_draft(request, obj, server_key, snapshot).choose(
-                draft_id, expected_revision, row_key, VRF_CHOICE, value
-            )
+            revision = draft.choose(draft_id, expected_revision, row_key, VRF_CHOICE, value)
         except DraftConflict:
             return self.conflict()
         return self.acknowledge(revision, {ROW_STALE_EVENT: {"key": row_key}})
@@ -395,9 +397,8 @@ class IPManagementView(_IPDraftCommandView):
         selected = request.POST.get("selected")
         if selected not in ("on", "off"):
             raise BadRequest("Set Primary IP is on or off.")
-        if snapshot is None:
+        if (draft := self.draft(request, obj, server_key, snapshot)) is None:
             return self.conflict()
-        draft = open_ip_draft(request, obj, server_key, snapshot)
         rows = ip_rows(request, obj, server_key, snapshot, draft.entries()).rows
         try:
             revision = draft.assign(draft_id, expected_revision, management_assignments(rows, selected == "on"))
@@ -416,6 +417,7 @@ class IPRowView(_IPDraftView):
             return error
         if snapshot is None:
             raise Http404("The IP snapshot is not available.")
+        # A row read is a presentation: like the tab render, it opens the draft of the published snapshot.
         html = ip_row_html(
             request, obj, server_key, snapshot, open_ip_draft(request, obj, server_key, snapshot), row_key
         )

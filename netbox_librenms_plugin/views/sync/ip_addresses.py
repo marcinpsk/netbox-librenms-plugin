@@ -18,14 +18,14 @@ from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
-from netbox_librenms_plugin.assessment.ip_addresses import ip_assignment_ports, shown_vrf_id
+from netbox_librenms_plugin.assessment.ip_addresses import ip_assignment_ports
 from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.interface_rules import PortSyncBlocked, interface_rules_for_request
 from netbox_librenms_plugin.interface_sync import resolve_or_create_interface_from_port
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix
 from netbox_librenms_plugin.ip_rules import ip_rules_for_request
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
-from netbox_librenms_plugin.selection_draft import DraftConflict, Intent
+from netbox_librenms_plugin.selection_draft import DraftConflict, Intent, evidence_changed, read_evidence
 from netbox_librenms_plugin.server_mappings import name_match_may_be_port, read_mapping
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
@@ -35,9 +35,11 @@ from netbox_librenms_plugin.sync_cache import (
 )
 from netbox_librenms_plugin.sync_query import page_query_url
 from netbox_librenms_plugin.sync_rows import (
+    IP_TAB,
     RESULTS_STALE_EVENT,
+    REVISION_HEADER,
+    find_ip_draft,
     ip_rows,
-    open_ip_draft,
     read_ip_assessment,
     selection_problem,
 )
@@ -48,7 +50,13 @@ from netbox_librenms_plugin.sync_view_scope import (
     VisibleInterface,
     address_key,
 )
-from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, saved_in_scope, update_existing_row
+from netbox_librenms_plugin.transactions import (
+    CommittedFollowUpError,
+    classify_conflict,
+    run_transaction,
+    saved_in_scope,
+    update_existing_row,
+)
 from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
     build_migrated_context,
@@ -86,6 +94,8 @@ STALE_INTERFACE_REFUSAL = (
 SELECTION_CHANGED = (
     "The selection changed in another window, or the IP data was refreshed. Review the tab and sync again."
 )
+# A row action of a page that does not show the row as it is now.
+ROW_CHANGED = "The IP address changed after the page showed it, so it was not synced. Review the row and sync it again."
 
 
 def _ip_host_lock_identity(parsed, vrf) -> str:
@@ -280,12 +290,15 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             assessment = read_ip_assessment(request, obj, snapshot, post_server_key)
             selected = dict.fromkeys(self._confirmed_rows(request, force_intents))
         elif sync_one := request.POST.get("sync_one"):
-            entries = open_ip_draft(request, obj, post_server_key, snapshot).entries()
-            assessment = ip_rows(request, obj, post_server_key, snapshot, entries)
-            selected = {sync_one: self._shown_vrf(assessment, sync_one)}
+            assessment, selected = self._displayed_row(request, obj, post_server_key, snapshot, sync_one)
+            if not selected:
+                messages.error(request, ROW_CHANGED)
+                return self.redirect_to_ip_tab(request, obj)
         else:
-            draft = open_ip_draft(request, obj, post_server_key, snapshot)
+            draft = find_ip_draft(request, obj, post_server_key, snapshot)
             try:
+                if draft is None:
+                    raise DraftConflict("A newer snapshot replaced the draft.")
                 claim = draft.claim(str(request.POST.get("draft_id")), int(request.POST.get("expected_revision")))
             except (DraftConflict, TypeError, ValueError):
                 messages.error(request, SELECTION_CHANGED)
@@ -298,7 +311,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 draft.restore(claim, claim.entries)
                 if not any(entry.intent is Intent.ON for entry in claim.entries.values()):
                     messages.error(request, "No IP addresses selected for synchronization.")
-                return self.draft_answer(request, obj)
+                return self.draft_answer(request, obj, draft)
             if intent_errors:
                 for error in dict.fromkeys(intent_errors.values()):
                     messages.error(request, error)
@@ -306,7 +319,16 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             messages.error(request, "No IP addresses selected for synchronization.")
             return self.redirect_to_ip_tab(request, obj)
 
-        results = self.process_ip_sync(request, selected, assessment, obj, object_type, force_intents=force_intents)
+        try:
+            results = self.process_ip_sync(request, selected, assessment, obj, object_type, force_intents=force_intents)
+        except CommittedFollowUpError:
+            # The rows committed, so the claim keeps them as written.
+            raise
+        except Exception:
+            # Every other failure rolled the whole batch back, so the claimed rows go back as the user left them.
+            if claim is not None:
+                draft.restore(claim, claim.entries)
+            raise
         if claim is not None:
             # A row that wrote nothing, a choice and an exclusion stay in the draft for the next submit.
             draft.restore(claim, set(claim.entries) - results["written"])
@@ -350,18 +372,21 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 if claim is not None:
                     # The claim changed the draft, so the tab behind the dialog reads its results again.
                     response["HX-Trigger"] = json.dumps({RESULTS_STALE_EVENT: None})
+                    response[REVISION_HEADER] = str(draft.revision)
             return apply_request_cache_transition(request, response)
 
         if claim is not None:
-            return apply_request_cache_transition(request, self.draft_answer(request, obj))
+            return apply_request_cache_transition(request, self.draft_answer(request, obj, draft))
         return apply_request_cache_transition(request, self.redirect_to_ip_tab(request, obj))
 
-    def draft_answer(self, request, obj):
+    def draft_answer(self, request, obj, draft=None):
         """
         Answer a bulk submit: the messages, and the event that makes the page read the tab's results again.
 
-        The answer carries no table: the page reads the results from the draft after the claim. A
-        plain POST goes back to the tab.
+        The answer carries no table: the page reads the results from the draft after the claim. After a
+        claim, ``X-Draft-Revision`` names the revision that the claim and the restore left, which the
+        page's draft writer sends with the input made during the submit; without one, the page's draft
+        is stale. A plain POST goes back to the tab.
         """
         if not request.htmx:
             return self.redirect_to_ip_tab(request, obj)
@@ -369,6 +394,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         # Only the out-of-band messages swap; the sync form's target stays as it is.
         response["HX-Reswap"] = "none"
         response["HX-Trigger"] = json.dumps({RESULTS_STALE_EVENT: None})
+        if draft is not None:
+            response[REVISION_HEADER] = str(draft.revision)
         return response
 
     @staticmethod
@@ -389,14 +416,28 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         return [row_id for row_id in force_intents if row_id in confirmed]
 
     @staticmethod
-    def _shown_vrf(assessment, raw_row_id):
-        """Return the VRF that the row's select shows, from the draft; None (Global) for an unknown row, which the writer refuses."""
+    def _displayed_row(request, obj, server_key, snapshot, raw_row_id):
+        """
+        Return the assessment and ``{row_id: VRF}`` of a row action whose page shows the row as it is now.
+
+        The action posts the draft ID and revision of its page and the row's evidence token. Another
+        draft or revision, or evidence that is not the row's current evidence, gives an empty dict: the
+        action writes nothing and leaves the draft as it is.
+        """
+        draft = find_ip_draft(request, obj, server_key, snapshot)
         try:
             row_id = normalize_ip_sync_row_id(raw_row_id)
-        except ValueError:
-            return None
+            shown = (str(request.POST.get("draft_id")), int(request.POST.get("expected_revision")))
+            payload = read_evidence(IP_TAB, request.POST.get("evidence") or "")
+        except (TypeError, ValueError, signing.BadSignature):
+            return None, {}
+        if draft is None or shown != (draft.draft_id, draft.revision):
+            return None, {}
+        assessment = ip_rows(request, obj, server_key, snapshot, draft.entries())
         row = next((row for row in assessment.rows if row["row_id"] == row_id), None)
-        return shown_vrf_id(row) if row is not None else None
+        if row is None or evidence_changed(payload, row["evidence"]):
+            return assessment, {}
+        return assessment, {row_id: payload["vrf"]}
 
     @staticmethod
     def _approved_rows(request, claim, assessment):

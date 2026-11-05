@@ -290,6 +290,8 @@ class TestTheBulkSubmit:
         after = ip_tab(client, tab)
         assert not _checked(after, CREATE_ROW)
         assert _checked(after, NO_INTERFACE_ROW)
+        # The page's draft writer goes on from the revision that the claim and the restore left.
+        assert response["X-Draft-Revision"] == after.table["data-draft-revision"]
 
     def test_a_row_that_changed_after_its_selection_is_refused_and_put_back(self, client, tab):
         draft = select_ip_rows(client, tab, [CREATE_ROW])
@@ -364,22 +366,57 @@ class TestTheBulkSubmit:
         assert not IPAddress.objects.filter(address=CREATE_ROW).exists()
 
 
-class TestTheRowAction:
-    """A row's own button syncs that row with the VRF the draft shows for it, and leaves the draft as it is."""
+def _row_action(client, owner, state, row_key):
+    """Post the row's own sync button as the page that rendered *state* does: its draft, revision and the row's evidence."""
+    return client.post(
+        reverse("plugins:netbox_librenms_plugin:sync_device_ip_addresses", args=["device", owner.pk]),
+        {
+            "server_key": SERVER_KEY,
+            "sync_one": row_key,
+            "draft_id": state.table["data-draft-id"],
+            "expected_revision": state.table["data-draft-revision"],
+            "evidence": state.rows[row_key]["data-evidence"],
+        },
+        **HTMX,
+    )
 
-    def test_sync_one_takes_the_chosen_vrf_and_keeps_the_selection(self, client, tab):
+
+class TestTheRowAction:
+    """A row's own button syncs the row that the page shows, in its VRF, and leaves the draft as it is."""
+
+    def test_sync_one_takes_the_vrf_that_the_page_shows_and_keeps_the_selection(self, client, tab):
         blue = VRF.objects.create(name="sync-one-blue")
         select_ip_rows(client, tab, [NO_INTERFACE_ROW], vrfs={CREATE_ROW: str(blue.pk)})
 
-        response = client.post(
-            reverse("plugins:netbox_librenms_plugin:sync_device_ip_addresses", args=["device", tab.pk]),
-            {"server_key": SERVER_KEY, "sync_one": CREATE_ROW},
-            **HTMX,
-        )
+        response = _row_action(client, tab, ip_tab(client, tab), CREATE_ROW)
 
         assert response["HX-Redirect"]
         assert IPAddress.objects.get(address=CREATE_ROW).vrf == blue
         assert _checked(ip_tab(client, tab), NO_INTERFACE_ROW)
+
+    def test_a_row_action_of_a_page_that_shows_another_vrf_writes_nothing(self, client, tab):
+        blue = VRF.objects.create(name="sync-one-other-window")
+        shown = ip_tab(client, tab)
+        # Another window of the user chooses blue after this page showed the row in Global.
+        select_ip_rows(client, tab, [], vrfs={CREATE_ROW: str(blue.pk)})
+
+        response = _row_action(client, tab, shown, CREATE_ROW)
+
+        assert response["HX-Redirect"]
+        assert not IPAddress.objects.filter(address=CREATE_ROW).exists()
+        after = ip_tab(client, tab)
+        assert re.search(rf'<option value="{blue.pk}"\s+selected>', _row_html(after.html, CREATE_ROW))
+        assert after.table["data-draft-revision"] == str(int(shown.table["data-draft-revision"]) + 1)
+
+    def test_a_row_action_whose_evidence_is_not_the_current_one_writes_nothing(self, client, tab):
+        shown = ip_tab(client, tab)
+        # Another interface of the same name takes the place of the one the page showed.
+        tab.interfaces.get(name="eth10").delete()
+        make_interface(tab, "eth10", iface_type="1000base-t")
+
+        _row_action(client, tab, shown, CREATE_ROW)
+
+        assert not IPAddress.objects.filter(address=CREATE_ROW).exists()
 
 
 class TestSetPrimaryIp:
@@ -465,3 +502,77 @@ def test_a_row_read_is_the_row_of_a_page_without_a_server_key(client, seeded):
 
     assert response.status_code == 200
     assert _normalized_row(response.content.decode()) == _normalized_row(row_html)
+
+
+def _stored_draft_record(user, owner):
+    """Return the stored IP draft record of *user* on *owner*, or None, read straight from the cache."""
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.selection_draft import draft_key
+    from netbox_librenms_plugin.sync_filters import selection_scope
+    from netbox_librenms_plugin.tests.view_test_helpers import make_request
+
+    request = make_request("get", {"server_key": SERVER_KEY}, user=user)
+    scope = selection_scope(request, owner, SERVER_KEY, "ipaddresses")
+    return cache.get(draft_key(user, owner, "ipaddresses", "ipaddresses", SERVER_KEY, scope))
+
+
+def test_a_command_starts_no_draft(client, tab):
+    from django.contrib.auth import get_user_model
+
+    state = ip_tab(client, tab)
+    other_user = get_user_model().objects.create_user(username="ip-draft-no-draft", is_superuser=True)
+    other = Client()
+    other.force_login(other_user)
+    assignments = json.dumps({CREATE_ROW: {"state": "none", "token": None}})
+
+    response = _command(
+        other, state.table["data-selection-url"], draft_id="no-draft", expected_revision=0, assignments=assignments
+    )
+
+    assert response.status_code == 409
+    assert _stored_draft_record(other_user, tab) is None
+
+
+def test_a_presentation_of_an_older_snapshot_keeps_the_newer_draft(client, tab):
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.sync_rows import open_ip_draft
+    from netbox_librenms_plugin.tests.view_test_helpers import make_request
+
+    older = source_cache.read(tab, Resource.IP_ADDRESSES, SERVER_KEY)
+    refreshed = client.post(
+        reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[tab.pk]),
+        {"server_key": SERVER_KEY, "interface_name_field": "ifName"},
+        **HTMX,
+    )
+    assert refreshed.status_code == 200
+    assert source_cache.read(tab, Resource.IP_ADDRESSES, SERVER_KEY).snapshot_id != older.snapshot_id
+    select_ip_rows(client, tab, [CREATE_ROW])
+    user = refreshed.wsgi_request.user
+
+    # A page READ that read the snapshot before the refresh opens its draft after it.
+    open_ip_draft(make_request("get", {"server_key": SERVER_KEY}, user=user), tab, SERVER_KEY, older)
+
+    assert _checked(ip_tab(client, tab), CREATE_ROW)
+
+
+def test_a_new_address_in_the_chosen_vrf_asks_to_select_the_row_again(client, tab):
+    blue = VRF.objects.create(name="evidence-blue")
+    interface = tab.interfaces.get(name="eth10")
+    IPAddress.objects.create(address=CREATE_ROW)
+    chosen = IPAddress.objects.create(address=CREATE_ROW, vrf=blue, assigned_object=interface)
+    draft = select_ip_rows(client, tab, [CREATE_ROW], vrfs={CREATE_ROW: str(blue.pk)})
+    # Another address takes the place of the one the row showed in blue, on the same interface.
+    chosen.delete()
+    replacement = IPAddress.objects.create(address=CREATE_ROW, vrf=blue, assigned_object=interface)
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:sync_device_ip_addresses", args=["device", tab.pk]),
+        {"server_key": SERVER_KEY, **draft},
+        **HTMX,
+    )
+
+    assert any("198.18.60.10" in text and "changed" in text for text in _messages(response))
+    assert ip_tab(client, tab).rows[CREATE_ROW]["data-evidence-changed"] == "true"
+    assert IPAddress.objects.get(pk=replacement.pk).assigned_object == interface
