@@ -558,3 +558,48 @@ def test_a_cable_row_on_a_hidden_local_or_remote_member_names_no_member(client, 
     (withheld,) = [select for select in selects if "disabled" in select]
     assert '<option value="" selected>' in withheld
     assert 'name="sync_one"' not in html
+
+
+@pytest.mark.parametrize("view_interfaces", [True, False], ids=["hidden_member", "hidden_interface"])
+def test_the_interface_delete_refuses_an_interface_the_user_cannot_view(client, view_interfaces):
+    from dcim.models import Interface
+
+    from netbox_librenms_plugin.tests.conftest import make_interface
+
+    page, hidden = _chassis(f"delete-scope-{view_interfaces}")
+    target = make_interface(hidden if view_interfaces else page, "Gi9/0/1", iface_type="1000base-t")
+    # The delete grant covers every interface; only the view scope hides the target.
+    extra = [("delete", Interface, None)]
+    if view_interfaces:
+        extra.append(("view", Interface, None))
+    else:
+        extra.append(("view", Interface, {"pk__in": [0]}))
+    client.force_login(_page_only_user(f"delete-scope-user-{view_interfaces}", page, extra=extra))
+
+    response = client.post(
+        reverse(
+            "plugins:netbox_librenms_plugin:delete_netbox_interfaces",
+            kwargs={"object_type": "device", "object_id": page.pk},
+        ),
+        {"interface_ids": [str(target.pk)]},
+    )
+
+    assert Interface.objects.filter(pk=target.pk).exists()
+    body = response.content.decode()
+    if not view_interfaces:
+        assert target.name not in body
+    assert hidden.name not in body
+
+
+def test_a_cable_row_cannot_be_moved_onto_a_member_the_user_cannot_view():
+    from types import SimpleNamespace
+
+    from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+    page, hidden = _chassis("cable-target-scope")
+    sync = object.__new__(SyncCablesView)
+    sync.request = SimpleNamespace(user=_page_only_user("cable-target-scope-user", page))
+    sync._initial_device = page
+
+    assert sync._selected_device_is_in_page_context(page.pk)
+    assert not sync._selected_device_is_in_page_context(hidden.pk)

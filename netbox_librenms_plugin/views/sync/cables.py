@@ -1075,7 +1075,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         return all(link_data.get(field) for field in required_fields)
 
     def _selected_device_is_in_page_context(self, selected_device_id):
-        """Return whether a posted device is the page device or one of its VC members."""
+        """Return whether a posted device is the page device or one of its VC members that the user may view."""
         initial_device = getattr(self, "_initial_device", None)
         if initial_device is None:
             return False
@@ -1085,8 +1085,9 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             return False
         if selected_device_id == initial_device.pk:
             return True
-        virtual_chassis = getattr(initial_device, "virtual_chassis", None)
-        return bool(virtual_chassis and virtual_chassis.members.filter(pk=selected_device_id).exists())
+        if getattr(initial_device, "virtual_chassis_id", None) is None:
+            return False
+        return selected_device_id in self.sync_view_scope(initial_device).chassis.visible_ids
 
     def handle_cable_creation(self, link_data, interface, force=False, port_records=None):
         """Create a cable from link data and return the operation result."""
