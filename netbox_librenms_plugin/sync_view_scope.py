@@ -224,6 +224,31 @@ class SyncViewScope:
             )
         return self._chassis
 
+    def remote_members(self, chassis_ids):
+        """
+        Return ``{chassis id: ChassisScope}`` for the chassis at the far ends of the subject's cables.
+
+        A far-end port is attributed to any member of its chassis, so each scope holds every member
+        for attribution; a far-end member identity is disclosed only through its ``owner(pk)``.
+        """
+        members_by_chassis = {chassis_id: [] for chassis_id in chassis_ids}
+        for member in Device.objects.filter(virtual_chassis_id__in=members_by_chassis):
+            members_by_chassis[member.virtual_chassis_id].append(member)
+        visible_ids = set(
+            Device.objects.restrict(self.actor, "view")
+            .filter(pk__in=[member.pk for members in members_by_chassis.values() for member in members])
+            .values_list("pk", flat=True)
+        )
+        scopes = {}
+        for chassis_id, members in members_by_chassis.items():
+            visible = tuple(member for member in members if member.pk in visible_ids)
+            scopes[chassis_id] = ChassisScope(
+                attribution_members=tuple(members),
+                visible=visible,
+                visible_ids=frozenset(member.pk for member in visible),
+            )
+        return scopes
+
     def owner(self, model, pk):
         """
         Return the *model* object *pk* as :class:`Visible`, or :data:`WITHHELD` when the actor may not view it.
