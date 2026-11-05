@@ -56,7 +56,7 @@ from netbox_librenms_plugin.views.mixins import (
 
 logger = logging.getLogger(__name__)
 
-MOVE_OUT_OF_SCOPE = "The move would leave an interface or IP address outside your permissions. Nothing was moved."
+MOVE_OUT_OF_SCOPE = "The move touches an interface or IP address outside your permissions. Nothing was moved."
 
 
 def _resolve_winner_for_donor(donor, server_key="default"):
@@ -649,6 +649,17 @@ class MoveInterfaceToWinnerView(_MoveResourceToWinnerView):
                             "it, and you do not have permission to change all of them.",
                             status=403,
                         )
+                # The family re-homes its addresses, so each one must be in the scope before the move as well as after it.
+                attached_ips = _addresses_on([interface, *dependents])
+                if attached_ips:
+                    attached_pks = {ip.pk for ip in attached_ips}
+                    permitted = set(
+                        self.viewable_restricted_queryset(IPAddress, "change")
+                        .filter(pk__in=attached_pks)
+                        .values_list("pk", flat=True)
+                    )
+                    if permitted != attached_pks:
+                        return self._fail(request, MOVE_OUT_OF_SCOPE, status=403)
                 colliding = sorted(
                     Interface.objects.filter(device=winner, name__in=[dep.name for dep in dependents]).values_list(
                         "name", flat=True

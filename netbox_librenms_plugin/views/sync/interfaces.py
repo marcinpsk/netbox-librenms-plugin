@@ -2278,6 +2278,11 @@ class DeleteNetBoxInterfacesView(
                 else:
                     interface = self._deletable_interface(VMInterface, interface_id)
                     if interface.virtual_machine_id != obj.id:
+                        # An interface on a virtual machine the user cannot view reads as missing.
+                        if isinstance(
+                            self.sync_view_scope(obj).owner(VirtualMachine, interface.virtual_machine_id), Withheld
+                        ):
+                            raise VMInterface.DoesNotExist
                         errors.append(f"Interface {interface.name} does not belong to this virtual machine")
                         continue
             except (Interface.DoesNotExist, VMInterface.DoesNotExist):
