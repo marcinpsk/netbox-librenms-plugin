@@ -8,7 +8,8 @@ description: Frontend patterns for templates, HTMX, and static assets
 ## HTMX Conventions
 - HTMX 2.x is the primary async layer. Table row updates return `<tr hx-swap-oob="true">`.
 - Avoid `outerHTML` swaps; use OOB or targeted `innerHTML` swaps to keep table layout intact.
-- One recorded exception: the sync tab link (`inc/_sync_tab_link.html`) swaps `#librenms-sync-tabs` with `outerHTML`. That container carries `data-active-tab`, which `activeSyncTab()` in `librenms_sync.js` reads to resolve the active tab. A swap that keeps the element would leave the previous tab in that attribute. `test_the_swapped_tab_region_carries_the_active_tab_marker` pins the behaviour. Do not extend the exception to other nodes.
+- One recorded exception: the sync navigation loader (`#librenms-sync-nav` in `librenms_sync_base.html`) swaps `#librenms-sync-tabs` with `outerHTML`. That container carries `data-active-tab`, which `activeSyncTab()` in `librenms_sync.js` reads to resolve the active tab. A swap that keeps the element would leave the previous tab in that attribute. `test_the_swapped_tab_region_carries_the_active_tab_marker` pins the behaviour. Do not extend the exception to other nodes.
+- `sync_draft.js` is the only writer of the sync page's browser history. Every READ that changes what the sync tabs show (a tab, page, sort, Per Page or Clear filters link, a filter, Back and Forward) goes through its navigation scheduler. In-page links carry `data-sync-nav` and keep only `href` (NetBox renders the sort links, which the scheduler matches as `thead th > a[href^="?"]`). No element carries `hx-push-url` and no response sends `HX-Push-Url`: the filter endpoint names the page URL in `X-Sync-Page-Url`.
 - NetBox imports HTMX as a module, so a page has no `htmx` global and HTML written with `innerHTML` is never HTMX-bound: any HTML that carries `hx-` attributes must arrive through an HTMX swap. The sync tabs restore their cached content through the hidden `[data-fragment-loader]` element each pane renders in `librenms_sync_base.html`.
 - All HTMX requests and `fetch()` calls must include a CSRF token. The standard pattern is `document.querySelector('[name=csrfmiddlewaretoken]').value` (from a hidden form input). The import JS also uses `getCookie('csrftoken')` as a fallback — prefer the hidden input approach for consistency.
 
@@ -57,7 +58,7 @@ description: Frontend patterns for templates, HTMX, and static assets
 - The test-connection button is an HTMX POST to `TestLibreNMSConnectionView`, returning an inline alert fragment.
 
 ## Paginator
-- `inc/paginator.html` is a custom paginator that preserves tab state and `interface_name_field` in pagination URLs. Used across all sync tables.
+- `inc/paginator.html` is a custom paginator that preserves tab state and `interface_name_field` in pagination URLs. Used across all sync tables. Its links carry `data-sync-nav`, so `sync_draft.js` loads them into the sync tabs.
 
 ## Import Page JavaScript (`librenms_import.js`)
 - Wrapped in an IIFE with `window.LibreNMSImportInitialized` guard to prevent re-initialization during HTMX swaps.

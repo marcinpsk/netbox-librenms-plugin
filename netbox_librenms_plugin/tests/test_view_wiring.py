@@ -650,7 +650,7 @@ class TestTemplateSyntax:
 class TestHtmxSwapConvention:
     """The frontend guideline allows one outerHTML swap, so the templates must match it."""
 
-    EXCEPTION = _TEMPLATE_DIR / "inc" / "_sync_tab_link.html"
+    EXCEPTION = _TEMPLATE_DIR / "librenms_sync_base.html"
 
     def test_only_the_recorded_exception_swaps_outerhtml(self):
         """A second outerHTML swap has to be argued in the guideline, not added quietly."""

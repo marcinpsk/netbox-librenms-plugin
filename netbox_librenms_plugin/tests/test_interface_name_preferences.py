@@ -29,13 +29,6 @@ def _selector_tag(html):
     return html[html.rfind("<div", 0, position) : html.index(">", position) + 1]
 
 
-def _checked_selector_radio(html):
-    """Return the checked radio inside the selector that the tab links name in hx-include."""
-    selector = html[html.index('id="interface-name-field-selector"') :]
-    selector = selector[: selector.index("</div>")]
-    return re.search(r"<input\b[^>]*\bchecked\b[^>]*>", selector).group(0)
-
-
 @pytest.mark.django_db
 @pytest.mark.parametrize(("tab", "hidden"), [("interfaces", False), ("modules", True), ("vlans", True)])
 def test_interface_name_selector_visibility_follows_the_active_sync_tab(client, settings, tab, hidden):
@@ -128,9 +121,17 @@ def test_a_remembered_tab_that_does_not_apply_falls_back(client, settings):
     assert _active_tab(client.get(url).content.decode()) == "interfaces"
 
 
+def _opening_tag(html, marker, tag):
+    """Return the attributes of the element whose opening tag holds *marker*."""
+    position = html.index(marker)
+    return dict(
+        parse_html(html[html.rfind(f"<{tag}", 0, position) : html.index(">", position) + 1] + f"</{tag}>").attributes
+    )
+
+
 @pytest.mark.django_db
-def test_sync_tab_links_replace_the_server_rendered_region(client, settings):
-    """Tab links must work normally and enhance the same navigation through HTMX."""
+def test_sync_tab_links_are_page_links_that_the_navigation_scheduler_loads(client, settings):
+    """A tab link loads its href as a document without JavaScript; sync_draft.js loads it into the tabs."""
     _device, url = _sync_page(settings, "htmx-sync-tabs")
     client.force_login(make_superuser("htmx-sync-tabs-user"))
 
@@ -141,26 +142,34 @@ def test_sync_tab_links_replace_the_server_rendered_region(client, settings):
 
     assert response.status_code == 200
     html = response.content.decode()
-    marker = 'id="ipaddresses-tab"'
-    position = html.index(marker)
-    link = html[html.rfind("<a", 0, position) : html.index(">", position) + 1]
-    expected_query = "?tab=ipaddresses&amp;server_key=default"
-    assert f'href="{response.request["PATH_INFO"]}{expected_query}&amp;interface_name_field=ifDescr"' in link
-    # hx-include adds the selected name field to the HTMX request, so its URL carries none.
-    assert f'hx-get="{response.request["PATH_INFO"]}{expected_query}"' in link
-    assert 'hx-target="#librenms-sync-tabs"' in link
-    assert 'hx-select="#librenms-sync-tabs"' in link
-    assert 'hx-swap="outerHTML"' in link
-    assert 'hx-push-url="true"' in link
-    assert 'hx-sync="#librenms-sync-tabs:replace"' in link
-    assert 'hx-include="#interface-name-field-selector"' in link
-    assert 'class="nav-link active"' in link
-    assert 'aria-selected="true"' in link
+    link = _opening_tag(html, 'id="ipaddresses-tab"', "a")
+    expected_query = "?tab=ipaddresses&server_key=default&interface_name_field=ifDescr"
+    assert link["href"] == f"{response.request['PATH_INFO']}{expected_query}"
+    assert "data-sync-nav" in link
+    # The link sends no request of its own, so it never writes the history.
+    assert not [name for name in link if name.startswith("hx-")]
+    assert (set(link["class"].split()), link["aria-selected"]) == ({"nav-link", "active"}, "true")
+    # The page loader sends every READ of the tabs, replaces the tab region and keeps no htmx snapshot.
+    loader = _opening_tag(html, 'id="librenms-sync-nav"', "span")
+    assert {name: loader[name] for name in loader if name.startswith("hx-")} == {
+        "hx-get": "",
+        "hx-trigger": "librenms:navigate",
+        "hx-sync": "this:replace",
+        "hx-target": "#librenms-sync-tabs",
+        "hx-select": "#librenms-sync-tabs",
+        "hx-swap": "outerHTML",
+        "hx-history": "false",
+    }
+    assert html.index('id="librenms-sync-nav"') < html.index('id="librenms-sync-tabs"')
+    assert html.count('id="librenms-sync-nav"') == 1
+    assert "hx-push-url" not in html
+    scripts = re.findall(r'<script src="[^"]*/(librenms_sync|sync_draft)[^"/]*\.js"', html)
+    assert scripts == ["librenms_sync", "sync_draft"]
 
 
 @pytest.mark.django_db
 def test_tab_clicks_keep_one_interface_name_field_in_the_url(client, settings):
-    """Each click pushes the link URL plus the included radio, so the field must not pile up."""
+    """The scheduler loads and pushes each link's href, so the name field must not pile up."""
     from urllib.parse import parse_qs, urlsplit
 
     _device, url = _sync_page(settings, "htmx-sync-tab-name-field")
@@ -168,16 +177,9 @@ def test_tab_clicks_keep_one_interface_name_field_in_the_url(client, settings):
     pushed = f"{url}?tab=interfaces&server_key=default&interface_name_field=ifName"
 
     for tab in ("modules", "cables", "modules"):
-        html = client.get(pushed).content.decode()
-        position = html.index(f'id="{tab}-tab"')
-        link = parse_html(html[html.rfind("<a", 0, position) : html.index(">", position) + 1] + "</a>")
-        attributes = dict(link.attributes)
-        # htmx appends the checked radio of the included selector to the hx-get URL and pushes the result.
-        included = dict(parse_html(_checked_selector_radio(html)).attributes)
-        pushed = f"{attributes['hx-get']}&{included['name']}={included['value']}"
+        pushed = _opening_tag(client.get(pushed).content.decode(), f'id="{tab}-tab"', "a")["href"]
 
         assert parse_qs(urlsplit(pushed).query)["interface_name_field"] == ["ifName"]
-        assert parse_qs(urlsplit(attributes["href"]).query)["interface_name_field"] == ["ifName"]
 
 
 @pytest.mark.django_db
