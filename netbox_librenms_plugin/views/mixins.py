@@ -459,6 +459,12 @@ class NetBoxObjectPermissionMixin:
         """
         return model.objects.restrict(self.request.user, action)
 
+    def viewable_restricted_queryset(self, model, action):
+        """Return the *model* rows that the request user may *action* and also view: a hidden row answers as a missing one."""
+        return self.restricted_queryset(model, action).filter(
+            pk__in=self.restricted_queryset(model, "view").values("pk")
+        )
+
     # This is the canonical permission helper trusted by the import-disclosure rule.
     # nosemgrep: import-disclosure-sanitizer-shadow
     def restrict_object_or_404(self, model, action="view", select_related=(), **kwargs):

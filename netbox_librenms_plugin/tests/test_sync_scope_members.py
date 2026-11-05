@@ -318,6 +318,31 @@ def test_a_preference_post_needs_view_and_change_on_the_owner(client, servers, o
     assert response.status_code == 404
 
 
+@pytest.mark.parametrize("object_type", ["device", "virtualmachine"])
+def test_a_remove_mapping_post_needs_view_and_change_on_the_owner(client, servers, object_type):
+    """A forged remove-mapping POST for an owner that the user may change but not view removes nothing."""
+    from dcim.models import Device
+    from virtualization.models import VirtualMachine
+
+    from netbox_librenms_plugin.tests.conftest import make_vm
+    from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
+
+    model = VirtualMachine if object_type == "virtualmachine" else Device
+    owner = make_vm("remove-hidden-vm") if model is VirtualMachine else make_device("remove-hidden-device")
+    seed_stored_mapping(owner, {"primary": {"id": 14195}, "retired": {"id": 14196}}, save=True)
+    user = make_user_with_perms(f"remove-hidden-{object_type}", [("change", model)])
+    client.force_login(grant(user, "view", model, constraints={"pk": owner.pk + 100000}))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:remove_server_mapping", args=[owner.pk]),
+        {"object_type": object_type, "server_key": "retired", "active_server_key": "primary"},
+    )
+
+    owner.refresh_from_db()
+    assert "retired" in stored_mapping_for_test(owner)
+    assert response.status_code == 404
+
+
 # =============================================================================
 # Sync page: the migration winner
 # =============================================================================
