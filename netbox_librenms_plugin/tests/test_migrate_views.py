@@ -579,3 +579,227 @@ def test_device_ip_fk_labels_cover_every_supported_field():
 
     assert set(DEVICE_IP_FK_LABELS) == set(DEVICE_IP_FK_FIELDS)
     assert set(DEVICE_IP_FK_FIELDS) == {"primary_ip4", "primary_ip6", "oob_ip"}
+
+
+def _move_user(username, view=None, change=None):
+    """Return a plugin writer with view and change grants on devices, interfaces and IPs, constrained per model."""
+    from dcim.models import Interface
+    from ipam.models import IPAddress
+
+    user = make_user_with_perms(username, [])
+    for model in (Device, Interface, IPAddress):
+        user = grant(user, "view", model, constraints=(view or {}).get(model))
+        user = grant(user, "change", model, constraints=(change or {}).get(model))
+    return user
+
+
+def _assert_withheld(response, *objects):
+    content = response.content.decode()
+    for obj in objects:
+        assert str(obj) not in content
+        assert obj.get_absolute_url() not in content
+
+
+@pytest.mark.django_db
+class TestMoveEndpointsViewScope:
+    """A move needs the view scope of every object that it discloses or moves, before and after the write."""
+
+    def test_ip_move_answers_a_hidden_ip_as_a_missing_one(self, client):
+        from ipam.models import IPAddress
+
+        donor = make_device("scope-ip-hidden-donor")
+        winner = make_device("scope-ip-hidden-winner")
+        _mark(donor, winner)
+        donor_interface = make_interface(donor, "Ethernet1")
+        make_interface(winner, "Ethernet1")
+        address = make_ip("198.18.241.10/24", assigned_object=donor_interface)
+        client.force_login(_move_user("scope-ip-hidden-user", view={IPAddress: {"status": "deprecated"}}))
+
+        response = _move_ip(client, address)
+
+        assert response.status_code == 404
+        _assert_withheld(response, winner)
+        address.refresh_from_db()
+        assert address.assigned_object == donor_interface
+
+    def test_ip_move_answers_an_ip_on_a_hidden_donor_interface_as_a_missing_one(self, client):
+        from dcim.models import Interface
+
+        donor = make_device("scope-ip-hidiface-donor")
+        winner = make_device("scope-ip-hidiface-winner")
+        _mark(donor, winner)
+        donor_interface = make_interface(donor, "Ethernet1")
+        make_interface(winner, "Ethernet1")
+        address = make_ip("198.18.242.10/24", assigned_object=donor_interface)
+        client.force_login(_move_user("scope-ip-hidiface-user", view={Interface: {"device_id": winner.pk}}))
+
+        response = _move_ip(client, address)
+
+        assert response.status_code == 404
+        address.refresh_from_db()
+        assert address.assigned_object == donor_interface
+
+    def test_ip_move_answers_a_hidden_winner_as_a_deleted_one(self, client):
+        hidden_winner = make_device("scope-ip-hidwinner")
+        hidden_donor = make_device("scope-ip-hidwinner-donor-a")
+        missing_donor = make_device("scope-ip-hidwinner-donor-b")
+        _mark(hidden_donor, hidden_winner)
+        apply_mapping_change(missing_donor, mark_migrated(missing_donor, hidden_winner.pk + 100000, SERVER_KEY))
+        missing_donor.save(update_fields=["custom_field_data"])
+        make_interface(hidden_winner, "Ethernet1")
+        hidden_address = make_ip("198.18.243.10/24", assigned_object=make_interface(hidden_donor, "Ethernet1"))
+        missing_address = make_ip("198.18.243.20/24", assigned_object=make_interface(missing_donor, "Ethernet1"))
+        user = _move_user("scope-ip-hidwinner-user", view={Device: {"pk__in": [hidden_donor.pk, missing_donor.pk]}})
+        client.force_login(user)
+
+        hidden = _move_ip(client, hidden_address)
+        missing = _move_ip(client, missing_address)
+
+        assert hidden.content == missing.content
+        assert "HX-Refresh" not in hidden.headers
+        _assert_withheld(hidden, hidden_winner)
+        hidden_address.refresh_from_db()
+        assert hidden_address.assigned_object.device == hidden_donor
+
+    def test_ip_move_answers_a_hidden_winner_interface_as_a_missing_one(self, client):
+        from dcim.models import Interface
+
+        donor = make_device("scope-ip-hidtarget-donor")
+        winner = make_device("scope-ip-hidtarget-winner")
+        _mark(donor, winner)
+        donor_interface = make_interface(donor, "Ethernet1")
+        winner_interface = make_interface(winner, "Ethernet1")
+        address = make_ip("198.18.244.10/24", assigned_object=donor_interface)
+        client.force_login(_move_user("scope-ip-hidtarget-user", view={Interface: {"device_id": donor.pk}}))
+
+        hidden = _move_ip(client, address)
+        winner_interface.delete()
+        missing = _move_ip(client, address)
+
+        assert hidden.content == missing.content
+        assert "HX-Refresh" not in hidden.headers
+        address.refresh_from_db()
+        assert address.assigned_object == donor_interface
+
+    @pytest.mark.parametrize("action", ["view", "change"])
+    def test_an_ip_move_that_leaves_the_ip_scope_rolls_back(self, client, action):
+        from ipam.models import IPAddress
+
+        donor = make_device(f"scope-ip-leaves-{action}-donor")
+        winner = make_device(f"scope-ip-leaves-{action}-winner")
+        _mark(donor, winner)
+        donor_interface = make_interface(donor, "Ethernet1")
+        make_interface(winner, "Ethernet1")
+        address = make_ip("198.18.245.10/24", assigned_object=donor_interface)
+        set_device_ip_fk(donor, "primary_ip4", address)
+        user = _move_user(
+            f"scope-ip-leaves-{action}-user", **{action: {IPAddress: {"assigned_object_id": donor_interface.pk}}}
+        )
+        client.force_login(user)
+
+        response = _move_ip(client, address)
+
+        assert "HX-Refresh" not in response.headers
+        address.refresh_from_db()
+        donor.refresh_from_db()
+        winner.refresh_from_db()
+        assert address.assigned_object == donor_interface
+        assert donor.primary_ip4 == address
+        assert winner.primary_ip4 is None
+
+    def test_interface_move_answers_a_hidden_interface_as_a_missing_one(self, client):
+        from dcim.models import Interface
+
+        donor = make_device("scope-if-hidden-donor")
+        winner = make_device("scope-if-hidden-winner")
+        _mark(donor, winner)
+        interface = make_interface(donor, "Ethernet1")
+        client.force_login(_move_user("scope-if-hidden-user", view={Interface: {"name": "Ethernet2"}}))
+
+        response = _move_interface(client, interface)
+
+        assert response.status_code == 404
+        _assert_withheld(response, winner)
+        interface.refresh_from_db()
+        assert interface.device == donor
+
+    def test_interface_move_answers_a_hidden_winner_as_a_deleted_one(self, client):
+        hidden_winner = make_device("scope-if-hidwinner")
+        hidden_donor = make_device("scope-if-hidwinner-donor-a")
+        missing_donor = make_device("scope-if-hidwinner-donor-b")
+        _mark(hidden_donor, hidden_winner)
+        apply_mapping_change(missing_donor, mark_migrated(missing_donor, hidden_winner.pk + 100000, SERVER_KEY))
+        missing_donor.save(update_fields=["custom_field_data"])
+        hidden_interface = make_interface(hidden_donor, "Ethernet1")
+        missing_interface = make_interface(missing_donor, "Ethernet1")
+        user = _move_user("scope-if-hidwinner-user", view={Device: {"pk__in": [hidden_donor.pk, missing_donor.pk]}})
+        client.force_login(user)
+
+        hidden = _move_interface(client, hidden_interface)
+        missing = _move_interface(client, missing_interface)
+
+        assert hidden.content == missing.content
+        assert "HX-Refresh" not in hidden.headers
+        _assert_withheld(hidden, hidden_winner)
+        hidden_interface.refresh_from_db()
+        assert hidden_interface.device == hidden_donor
+
+    def test_interface_move_refuses_a_hidden_attached_interface_without_naming_it(self, client):
+        from dcim.models import Interface
+
+        donor = make_device("scope-if-hidmember-donor")
+        winner = make_device("scope-if-hidmember-winner")
+        _mark(donor, winner)
+        lag = make_interface(donor, "Port-Channel1", iface_type="lag")
+        member = make_interface(donor, "HiddenMember7")
+        member.lag = lag
+        member.save(update_fields=["lag"])
+        client.force_login(_move_user("scope-if-hidmember-user", view={Interface: {"name": lag.name}}))
+
+        response = _move_interface(client, lag)
+
+        assert "HX-Refresh" not in response.headers
+        assert member.name not in response.content.decode()
+        lag.refresh_from_db()
+        member.refresh_from_db()
+        assert lag.device == donor
+        assert member.device == donor
+
+    @pytest.mark.parametrize("action", ["view", "change"])
+    def test_an_interface_move_that_takes_an_ip_out_of_its_scope_rolls_back(self, client, action):
+        from ipam.models import IPAddress
+
+        donor = make_device(f"scope-if-ipleaves-{action}-donor")
+        winner = make_device(f"scope-if-ipleaves-{action}-winner")
+        _mark(donor, winner)
+        interface = make_interface(donor, "Ethernet1")
+        address = make_ip("198.18.246.10/24", assigned_object=interface)
+        set_device_ip_fk(donor, "primary_ip4", address)
+        user = _move_user(
+            f"scope-if-ipleaves-{action}-user", **{action: {IPAddress: {"interface__device_id": donor.pk}}}
+        )
+        client.force_login(user)
+
+        response = _move_interface(client, interface)
+
+        assert "HX-Refresh" not in response.headers
+        interface.refresh_from_db()
+        donor.refresh_from_db()
+        winner.refresh_from_db()
+        assert interface.device == donor
+        assert donor.primary_ip4 == address
+        assert winner.primary_ip4 is None
+
+    def test_an_interface_move_keeps_an_ip_that_stays_in_scope(self, client):
+        donor = make_device("scope-if-ipstays-donor")
+        winner = make_device("scope-if-ipstays-winner")
+        _mark(donor, winner)
+        interface = make_interface(donor, "Ethernet1")
+        make_ip("198.18.247.10/24", assigned_object=interface)
+        client.force_login(_move_user("scope-if-ipstays-user"))
+
+        response = _move_interface(client, interface)
+
+        assert response.headers["HX-Refresh"] == "true"
+        interface.refresh_from_db()
+        assert interface.device == winner

@@ -333,3 +333,32 @@ class TestSaveVlanGroupOverridesBranches:
         assert response.status_code == 200
         assert response.json() == {"status": "success"}
         assert cache.get(view.get_vlan_overrides_key(device, SERVER_KEY)) == {"942": "23"}
+
+
+@pytest.mark.django_db
+def test_the_vlan_verify_reads_an_interface_the_user_cannot_view_as_absent(client):
+    """The verify compares only an interface in the view scope: a hidden one answers as a missing one."""
+    from dcim.models import Device, Interface
+    from ipam.models import VLAN, VLANGroup
+
+    from netbox_librenms_plugin.tests.conftest import make_device
+    from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+    device = make_device("vlan-verify-hidden-iface")
+    group = _vlan_group("Verify Hidden Iface")
+    hidden = _tagged_interface(device, "Ethernet4", [_vlan(932, "hidden-iface", group=group)])
+    user = make_user_with_perms("vlan-verify-hidden-user", [("view", Device), ("view", VLANGroup), ("view", VLAN)])
+    client.force_login(grant(user, "view", Interface, constraints={"name": "VisibleOnly"}))
+    body = {
+        "device_id": device.pk,
+        "interface_name": hidden.name,
+        "vid": "932",
+        "vlan_type": "T",
+        "vlan_group_id": group.pk,
+    }
+
+    hidden_answer = _json_post(client, "verify_vlan_group", body).json()
+    hidden.delete()
+    absent_answer = _json_post(client, "verify_vlan_group", body).json()
+
+    assert hidden_answer == absent_answer
