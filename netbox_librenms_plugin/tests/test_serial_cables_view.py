@@ -533,6 +533,7 @@ class TestSerialDeviceIdPreserved:
 
         from netbox_librenms_plugin.assessment.cables import assess as assess_cables
         from netbox_librenms_plugin.tables.cables import VCCableTable
+        from netbox_librenms_plugin.tests.view_test_helpers import superuser_chassis
         from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
 
         viewed, _, _ = make_serial_device("serial-vc-viewed")
@@ -541,7 +542,9 @@ class TestSerialDeviceIdPreserved:
         server_key = configured_server_key()
         seed_mapping(owner, server_key, own=8)
         snapshot = seed_cables_snapshot(viewed, sensors=[sensor_row(501, 1, device_id=8)], server_key=server_key)
-        table = VCCableTable(assess_cables(snapshot, subject=viewed)["links"], device=viewed)
+        table = VCCableTable(
+            assess_cables(snapshot, subject=viewed)["links"], device=viewed, chassis=superuser_chassis(viewed)
+        )
         request = RequestFactory().get("/")
 
         html = table.as_html(request)
