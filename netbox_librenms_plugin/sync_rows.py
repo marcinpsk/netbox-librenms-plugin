@@ -12,6 +12,8 @@ from dataclasses import replace
 from django.template.loader import render_to_string
 from django.urls import reverse
 
+from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.assessment.ip_addresses import apply_vrf_choices, assess, shown_vrf_id
 from netbox_librenms_plugin.selection_draft import (
     Assignment,
@@ -70,6 +72,8 @@ def read_ip_assessment(request, obj, snapshot, server_key, vrf_choices=None):
         row["device_url"] = obj.get_absolute_url()
         if ip := row.pop("netbox_ip", None):
             row["ip_url"] = ip.get_absolute_url()
+            # The address the row links to; a VRF choice can make it another one than netbox_ip_id.
+            row["shown_ip_id"] = ip.pk
         if interface := row.pop("netbox_interface", None):
             row["interface_url"] = interface.get_absolute_url()
             row["interface_id"] = interface.pk
@@ -78,10 +82,27 @@ def read_ip_assessment(request, obj, snapshot, server_key, vrf_choices=None):
     return replace(result, rows=rows)
 
 
-def open_ip_draft(request, obj, server_key, snapshot):
-    """Return the request user's IP draft for the snapshot, in the tab's selection scope."""
+def _draft_identity(request, obj, server_key, snapshot):
     scope = selection_scope(request, obj, server_key, IP_TAB.value)
-    return SelectionDraft.open(request.user, obj, IP_TAB, IP_TABLE_VARIANT, server_key, scope, snapshot.snapshot_id)
+    return (request.user, obj, IP_TAB, IP_TABLE_VARIANT, server_key, scope, snapshot.snapshot_id)
+
+
+def _published_generation(obj, server_key):
+    snapshot = source_cache.read(obj, Resource.IP_ADDRESSES, server_key)
+    return snapshot.snapshot_id if snapshot is not None else None
+
+
+def open_ip_draft(request, obj, server_key, snapshot):
+    """Return the request user's IP draft for a presentation of the snapshot; only the published snapshot starts one."""
+    return SelectionDraft.open(
+        *_draft_identity(request, obj, server_key, snapshot),
+        published=lambda: _published_generation(obj, server_key),
+    )
+
+
+def find_ip_draft(request, obj, server_key, snapshot):
+    """Return the request user's stored IP draft of the snapshot that a command read, or None."""
+    return SelectionDraft.find(*_draft_identity(request, obj, server_key, snapshot))
 
 
 def ip_evidence(obj, server_key, row):
@@ -89,7 +110,8 @@ def ip_evidence(obj, server_key, row):
     Return the facts that selecting one IP row approves.
 
     The writer acts on the row, its VRF, its NetBox address and interface and its state, so a change of
-    any of them asks the user to select the row again. The subject and the server bind the token to its tab.
+    any of them asks the user to select the row again. The address is the one that the row shows in its
+    VRF. The subject and the server bind the token to its tab.
     """
     return {
         "subject": [obj._meta.label_lower, obj.pk],
@@ -97,7 +119,7 @@ def ip_evidence(obj, server_key, row):
         "row": row["row_id"],
         "vrf": shown_vrf_id(row),
         "status": row.get("status"),
-        "ip": row.get("netbox_ip_id"),
+        "ip": row.get("shown_ip_id"),
         "interface": row.get("interface_id"),
         "selectable": offers_selection(row),
     }

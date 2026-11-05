@@ -151,12 +151,14 @@ class SelectionDraft:
         self.cleared = cleared
 
     @classmethod
-    def open(cls, user, subject, tab, variant, server_key, scope, generation, fingerprint=None):
+    def open(cls, user, subject, tab, variant, server_key, scope, generation, fingerprint=None, *, published):
         """
-        Return the user's draft for the generation, and start an empty one when the stored draft is for another.
+        Return the user's draft for the generation that a presentation shows.
 
-        ``cleared`` is True only on the open that replaced a draft that had entries, so the page that
-        opened it can tell the user once.
+        A stored draft of another generation is replaced by an empty one only while *generation* is the
+        published one. A presentation of an older generation gets a detached empty draft, which is never
+        stored: every command on it conflicts, so it cannot replace the newer draft. ``cleared`` is True
+        only on the open that replaced a draft that had entries, so the page can tell the user once.
 
         Args:
             user (User): The signed-in user who owns the draft.
@@ -167,6 +169,7 @@ class SelectionDraft:
             scope (str): The selection scope of the tab.
             generation (str): The snapshot generation that the rows come from.
             fingerprint (str | None): Other data the rows depend on; another value starts an empty draft too.
+            published (Callable[[], str | None]): Returns the generation that is published now.
 
         Returns:
             SelectionDraft: The draft.
@@ -183,10 +186,26 @@ class SelectionDraft:
             if _is_bound(record, generation, fingerprint):
                 cache.touch(key, DRAFT_TTL_SECONDS)
                 return cls(key, record, cleared=False)
+            if published() != generation:
+                return cls(key, _new_record(generation, fingerprint), cleared=False)
             cleared = bool(record and record["entries"])
             record = _new_record(generation, fingerprint)
             cache.set(key, record, DRAFT_TTL_SECONDS)
         return cls(key, record, cleared)
+
+    @classmethod
+    def find(cls, user, subject, tab, variant, server_key, scope, generation, fingerprint=None):
+        """
+        Return the stored draft of the generation that a command read, or None; a command never starts or replaces a draft.
+
+        Takes the arguments of :meth:`open`, without ``published``.
+        """
+        key = draft_key(user, subject, tab, variant, server_key, scope)
+        record = cache.get(key)
+        if not _is_bound(record, generation, fingerprint):
+            return None
+        cache.touch(key, DRAFT_TTL_SECONDS)
+        return cls(key, record, cleared=False)
 
     @property
     def draft_id(self):

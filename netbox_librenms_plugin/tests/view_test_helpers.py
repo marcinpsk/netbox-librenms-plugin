@@ -415,7 +415,7 @@ def submit_ip_selection(client, owner, row_ids, *, server_key="default", vrfs=No
 
 def sync_ip_row(client, owner, row_id, *, server_key="default", vrf=None, headers=None, **fields):
     """
-    Post the row action of one IP row (``sync_one``), after choosing *vrf* for it through the draft when given.
+    Post the row action of one IP row (``sync_one``) as its page does, after choosing *vrf* for it through the draft when given.
 
     Args:
         vrf (str | None): The VRF to choose first: "" is Global, else a VRF pk; None chooses nothing.
@@ -430,11 +430,18 @@ def sync_ip_row(client, owner, row_id, *, server_key="default", vrf=None, header
 
     if vrf is not None:
         select_ip_rows(client, owner, [], server_key=server_key, vrfs={row_id: vrf})
+    # The button posts what its page shows: the draft, its revision and the row's evidence.
+    tab = ip_tab(client, owner, server_key=server_key)
+    shown = {
+        "draft_id": tab.table["data-draft-id"],
+        "expected_revision": tab.table["data-draft-revision"],
+        "evidence": tab.rows.get(row_id, {}).get("data-evidence", ""),
+    }
     url = reverse(
         "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
         kwargs={"object_type": owner._meta.model_name, "pk": owner.pk},
     )
-    return client.post(url, {"server_key": server_key, "sync_one": row_id, **fields}, **(headers or {}))
+    return client.post(url, {"server_key": server_key, "sync_one": row_id, **shown, **fields}, **(headers or {}))
 
 
 def write_ip_rows(owner, user, selected, *, server_key="default", **fields):
