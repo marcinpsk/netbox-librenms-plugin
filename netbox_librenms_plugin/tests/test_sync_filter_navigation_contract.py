@@ -8,6 +8,7 @@ checks each one. A URL the test does not know fails, so a new hop must be classi
 
 import json
 import re
+from html import unescape
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, urlsplit
 
@@ -270,6 +271,29 @@ def test_every_interface_tab_hop_keeps_the_page_query_or_applies_its_reset(clien
         {"rebind"} if kind == "device" else set()
     )
     assert required <= kinds, required - kinds
+
+
+@pytest.mark.django_db
+def test_the_page_links_of_a_tab_load_through_the_navigation_scheduler(client, settings, librenms_server):
+    """Each paging, page size, sort and Clear filters link is one that sync_draft.js loads into the tabs."""
+    owner, object_type = _contract_owner("device")
+    _seed(owner, _contract_ports())
+    serve_sync_page(client, settings, librenms_server, owner)
+
+    page_path, html = _render_page(client, owner)
+    hops = _hops(html, "interfaces")
+    routes = _routes(owner, object_type)
+    links = [hop for hop in hops.urls if _classify(hop, page_path, routes) in ("page link", "clear")]
+    # NetBox renders the sort links (inc/table.html); the scheduler takes every query link of a table head.
+    sort_links = {unescape(url) for url in re.findall(r'<th[^>]*>\s*<a href="(\?[^"]*)"', html)}
+
+    marked = [hop for hop in links if "data-sync-nav" in hop["attrs"]]
+    assert sort_links and len(marked) >= 4
+    assert all(hop in marked or hop["url"] in sort_links for hop in links), links
+    assert not [hop for hop in hops.urls if "hx-push-url" in hop["attrs"]]
+    (filter_form,) = [form for form in hops.get_forms if "sync-filter-form" in (form["attrs"].get("class") or "")]
+    # A search waits for the running READ of the same loader, so a tab switch can stop it.
+    assert filter_form["attrs"]["hx-sync"] == "#librenms-sync-nav:queue last"
 
 
 @pytest.mark.django_db
