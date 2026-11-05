@@ -6,16 +6,22 @@ a template. ``sync_view_scope.ChassisScope`` holds every member for attribution 
 only through ``owner(pk)``.
 
 The scan recognizes direct chains and a local name bound to ``<x>.virtual_chassis``. It does not
-follow calls into other functions, ``getattr`` or generic relations. It covers the read side
-(``views/base/``, ``views/object_sync/``, ``tables/``); the locked writers in ``views/sync/`` and the
-assessment modules are not scanned.
+follow calls into other functions, ``getattr`` or generic relations. It covers the views, the tables
+and the assessment modules. A locked writer that must read every member to lock or re-check the
+chassis is named in ``LOCKED_MEMBER_READS``; it discloses no member.
 """
 
 import ast
 from pathlib import Path
 
 PACKAGE = Path(__file__).resolve().parents[1]
-SCANNED = ("views/base", "views/object_sync", "tables")
+SCANNED = ("views/base", "views/object_sync", "views/sync", "tables", "assessment")
+# (file, function): writers that lock or re-check every member under the chassis lock.
+LOCKED_MEMBER_READS = {
+    ("views/sync/interfaces.py", "_lock_selected_device_targets"),
+    ("views/sync/interfaces.py", "_lock_relationship_scope"),
+    ("views/sync/ip_addresses.py", "_lock_interface_owner_scope"),
+}
 TEMPLATES = PACKAGE / "templates" / "netbox_librenms_plugin"
 
 
@@ -96,10 +102,16 @@ def _scan(source):
 
 def test_no_sync_view_or_table_reads_members_outside_the_view_scope():
     offenders = []
+    seen = set()
     for directory in SCANNED:
         for path in sorted((PACKAGE / directory).rglob("*.py")):
+            relative = str(path.relative_to(PACKAGE))
             for function, line in _member_reads(ast.parse(path.read_text())):
-                offenders.append(f"{path.relative_to(PACKAGE)}:{line} in {function}")
+                if (relative, function) in LOCKED_MEMBER_READS:
+                    seen.add((relative, function))
+                    continue
+                offenders.append(f"{relative}:{line} in {function}")
+    assert not set(LOCKED_MEMBER_READS) - seen, f"Stale exceptions: {sorted(set(LOCKED_MEMBER_READS) - seen)}"
     assert not offenders, (
         "Read chassis members through SyncViewScope.chassis (attribution_members for matching, "
         f"visible or owner(pk) for anything shown): {offenders}"

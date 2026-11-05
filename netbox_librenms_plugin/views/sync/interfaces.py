@@ -601,7 +601,7 @@ class SyncInterfacesView(
 
         locked_members = {member.pk: member for member in members or ()}
         members = (
-            [locked_members.get(member.pk, member) for member in obj.virtual_chassis.members.all()]
+            [locked_members.get(member.pk, member) for member in self.sync_view_scope(obj).chassis.attribution_members]
             if obj.virtual_chassis_id is not None
             else [locked_members.get(obj.pk, obj)]
         )
@@ -2246,6 +2246,14 @@ class DeleteNetBoxInterfacesView(
             )
         return apply_request_cache_transition(request, JsonResponse(response_data))
 
+    def _deletable_interface(self, model, interface_id):
+        """Return the *model* interface *interface_id* that the user may delete and view."""
+        return (
+            self.restricted_queryset(model, "delete")
+            .filter(pk__in=self.restricted_queryset(model, "view").values("pk"))
+            .get(id=interface_id)
+        )
+
     def _delete_attempt(self, obj, object_type, interface_ids):
         """
         Delete the selected interfaces of *obj*; return the deleted count and the per-row errors.
@@ -2257,12 +2265,10 @@ class DeleteNetBoxInterfacesView(
         for interface_id in interface_ids:
             try:
                 if object_type == "device":
-                    # Scoped by "delete": the ownership checks below prove where the
-                    # interface sits, not that the grant covers it.
-                    interface = self.restricted_queryset(Interface, "delete").get(id=interface_id)
+                    # Scoped by "delete" and "view": an interface the user cannot view reads as missing.
+                    interface = self._deletable_interface(Interface, interface_id)
                     if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-                        valid_device_ids = [member.id for member in obj.virtual_chassis.members.all()]
-                        if interface.device_id not in valid_device_ids:
+                        if interface.device_id not in self.sync_view_scope(obj).chassis.visible_ids:
                             errors.append(
                                 f"Interface {interface.name} does not belong to this device or its virtual chassis"
                             )
@@ -2271,7 +2277,7 @@ class DeleteNetBoxInterfacesView(
                         errors.append(f"Interface {interface.name} does not belong to this device")
                         continue
                 else:
-                    interface = self.restricted_queryset(VMInterface, "delete").get(id=interface_id)
+                    interface = self._deletable_interface(VMInterface, interface_id)
                     if interface.virtual_machine_id != obj.id:
                         errors.append(f"Interface {interface.name} does not belong to this virtual machine")
                         continue
