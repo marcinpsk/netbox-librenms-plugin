@@ -7,16 +7,17 @@ can sit before the tab's sync form. The visible fields join it with the form att
 below it. The tab's page is left out, so a new filter starts at page 1.
 Search and Sync state filter as they change, and the column panel has its own Apply.
 The filter response selects the results and updates the status and action fragments out of band.
+Its X-Sync-Page-Url header names the page URL, which sync_draft.js writes to the browser history.
 The form and its controls stay connected, so HTMX keeps its delay and queued requests.
 Takes: filters (SyncFilters), prefix, tab, owner, content_id, server_key.
 {% endcomment %}
 {% with form=filters.form %}
-{# The server cannot stop a request the browser drops, so a new filter waits for the running one (queue last). #}
+{# The server cannot stop a request the browser drops, so a filter waits for the running READ of the page loader (queue last). #}
 {% url 'plugins:netbox_librenms_plugin:sync_tab_filter' object_type=owner|meta:"model_name" pk=owner.pk tab=tab as filter_url %}
 <form method="get" id="{{ prefix }}filter-form" class="sync-filter-form noprint" data-sync-filter-tab="{{ tab }}"
     hx-get="{{ filter_url }}" hx-trigger="submit, input delay:500ms from:#{{ form.q.auto_id }}, change from:#{{ form.sync_state.auto_id }}"
     hx-target="#{{ content_id }}-results" hx-select="#{{ content_id }}-results > *" hx-swap="innerHTML"
-    hx-select-oob="#{{ prefix }}filter-count,#{{ prefix }}filter-clear,#{{ prefix }}filter-validation,#{{ content_id }}-refresh,#{{ content_id }}-actions" hx-sync="#librenms-sync-tabs:queue last"
+    hx-select-oob="#{{ prefix }}filter-count,#{{ prefix }}filter-clear,#{{ prefix }}filter-validation,#{{ content_id }}-refresh,#{{ content_id }}-actions" hx-sync="#librenms-sync-nav:queue last"
     hx-vals='{"server_key": "{{ server_key|escapejs }}"}'>
     {# No server_key input: the sync scripts read the first one on the page, which must be the sync form's. #}
     {% sync_tab_query_items prefix=prefix tab=tab reset="page filters server_key" as hidden_items %}

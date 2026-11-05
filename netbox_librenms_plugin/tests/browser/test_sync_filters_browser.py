@@ -8,7 +8,14 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from playwright.sync_api import expect
 
-from test_sync_cache_browser import _add_page_scripts, _page_html, _state
+from test_sync_cache_browser import (
+    _add_page_scripts,
+    _navigation_loader,
+    _page_html,
+    _serve_page_scripts,
+    _state,
+    _sync_document,
+)
 
 PAGE_URL = "https://plugin.example.com/dcim/devices/1/librenms-sync/"
 VERIFY_ROUTE = "**/plugins/librenms_plugin/verify-interface/*"
@@ -769,20 +776,27 @@ def _filter_tab(query):
         </form></div></div>"""
 
 
-def _filter_page(query):
+def _filter_page(query, extra=""):
     tab = f'<div id="librenms-sync-tabs"><div id="interface-sync-content">{_filter_tab(query)}</div></div>'
-    return f"<!doctype html><html><body>{tab}</body></html>"
+    return _sync_document(f"{_navigation_loader()}{tab}{extra}")
 
 
-def _serve_filter_tab(page):
-    """Serve the tab, and hold each filter request until the test answers it with the tab for its query."""
+def _route_query(route):
+    return {key: values[0] for key, values in parse_qs(urlsplit(route.request.url).query).items()}
+
+
+def _serve_filter_tab(page, extra=""):
+    """Serve the sync page for its query, and hold each filter request until the test answers it."""
     held = []
+    _serve_page_scripts(page)
     page.route(
-        f"{PAGE_URL}**", lambda route: route.fulfill(status=200, content_type="text/html", body=_filter_page({}))
+        f"{PAGE_URL}**",
+        lambda route: route.fulfill(
+            status=200, content_type="text/html", body=_filter_page(_route_query(route), extra)
+        ),
     )
     page.route(f"{FILTER_ENDPOINT}**", lambda route: held.append(route))
     page.goto(f"{PAGE_URL}?tab=interfaces&server_key=primary&cables_q=keep")
-    _add_page_scripts(page)
     return held
 
 
@@ -795,14 +809,13 @@ def _next_request(page, held, count):
 
 
 def _answer(route):
-    """Answer like the filter endpoint: the tab content, and the page URL with the request query to push."""
+    """Answer like the filter endpoint: the tab content, and the path of the page URL that shows it."""
     split = urlsplit(route.request.url)
-    query = {key: values[0] for key, values in parse_qs(split.query).items()}
     route.fulfill(
         status=200,
         content_type="text/html",
-        headers={"HX-Push-Url": f"{PAGE_URL}?{split.query}"},
-        body=_filter_tab(query),
+        headers={"X-Sync-Page-Url": f"{urlsplit(PAGE_URL).path}?{split.query}"},
+        body=_filter_tab(_route_query(route)),
     )
 
 
@@ -1139,7 +1152,7 @@ def test_an_applied_column_survives_a_cancelled_queued_state_change(page):
     assert len(held) == 2
 
 
-def test_history_restores_the_filter_controls_with_the_results(page):
+def test_back_and_forward_load_the_filter_controls_with_the_results(page):
     held = _serve_filter_tab(page)
     for count, value in enumerate(("eth", "xe"), start=1):
         page.fill("#id_interfaces_q", value)
@@ -1156,58 +1169,13 @@ def test_history_restores_the_filter_controls_with_the_results(page):
     expect(page.locator("#id_interfaces_q")).to_have_value("xe")
 
 
-def test_history_restore_binds_the_restored_select_all_control_again(page):
-    held = _serve_filter_tab(page)
-    page.evaluate(
-        f"""() => {{
-            const table = document.getElementById('{TABLE}');
-            table.innerHTML = '<thead><tr><th><input type="checkbox" class="toggle" id="toggle-all"></th></tr></thead>'
-                + '<tbody><tr data-port-id="1"><td data-col="selection"><input type="checkbox" name="select" value="1"></td></tr>'
-                + '<tr data-port-id="2"><td data-col="selection"><input type="checkbox" name="select" value="2"></td></tr></tbody>';
-            document.body.insertAdjacentHTML('beforeend', `<div id="vlanDetailModal" data-current-row-key="r1">
-                <table><tbody id="vlanDetailTableBody"><tr><td><select class="vlan-modal-group-select" data-vid="10">
-                <option value="5" selected>g</option></select></td></tr></tbody></table>
-                <button type="button" id="saveVlanGroups">Save</button></div>
-                <span></span><button type="button" class="vlan-edit-btn" data-row-key="r1"
-                    data-vlans='[{{"vid": 10, "type": "U"}}]' data-vlan-groups='[{{"id": 5, "name": "g"}}]'></button>
-                <input type="hidden" class="vlan-group-hidden" name="vlan_group_r1_10" value="">
-                <select id="ts-member" class="form-select tomselected ts-hidden-accessible" tabindex="-1">
-                <option value="1">1</option></select><div class="ts-wrapper form-select single">
-                <div class="ts-control"></div><div class="ts-dropdown single"></div></div>`);
-            initializeScripts();
-        }}"""
-    )
-    page.fill("#id_interfaces_q", "eth")
-    _answer(_next_request(page, held, 1))
-    expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "eth")
-
-    page.go_back()
-    expect(page.locator("#toggle-all")).to_be_attached()
-    page.check("#toggle-all")
-
-    expect(page.locator(f'#{TABLE} td input[name="select"]:checked')).to_have_count(2)
-    # The VLAN modal Save button marks itself with a plain data-initialized.
-    page.click("#saveVlanGroups")
-    expect(page.locator('input[name="vlan_group_r1_10"]')).to_have_value("5")
-    # TomSelect markup without its instance: NetBox enhances only a select that matches its selector.
-    assert page.locator(".ts-wrapper").count() == 0
-    assert page.evaluate(
-        "document.getElementById('ts-member').matches("
-        "'select:not(.tomselected):not(.no-ts):not([size]):not(.api-select):not(.color-select)')"
-    )
-    assert page.evaluate("document.getElementById('ts-member').getAttribute('tabindex')") is None
-
-
-def test_a_history_cache_miss_binds_each_control_once(page):
+def test_back_loads_the_tabs_again_and_binds_each_control_once(page):
     vlan_modal = """<div id="vlanDetailModal" data-current-row-key="r1" data-current-device-id="1">
         <div class="modal-body"></div><table><tbody id="vlanDetailTableBody"><tr><td>
         <select class="vlan-modal-group-select" data-vid="10"><option value="5" selected>g</option></select>
         </td></tr></tbody></table><input type="checkbox" id="applyVlanGroupToAll" checked>
         <button type="button" id="saveVlanGroups">Save</button></div>"""
-    html = _filter_page({}).replace("</body>", f"{vlan_modal}</body>")
-    held, saves = [], []
-    page.route(f"{PAGE_URL}**", lambda route: route.fulfill(status=200, content_type="text/html", body=html))
-    page.route(f"{FILTER_ENDPOINT}**", lambda route: held.append(route))
+    saves = []
     page.route(
         "**/save-vlan-group-overrides/",
         lambda route: (
@@ -1215,10 +1183,7 @@ def test_a_history_cache_miss_binds_each_control_once(page):
             route.fulfill(status=200, content_type="application/json", body="{}"),
         ),
     )
-    page.goto(f"{PAGE_URL}?tab=interfaces&server_key=primary")
-    _add_page_scripts(page)
-    # Without a history cache, Back loads the page from the server again.
-    page.evaluate("htmxTest.config.historyCacheSize = 0")
+    held = _serve_filter_tab(page, extra=vlan_modal)
     page.fill("#id_interfaces_q", "eth")
     _answer(_next_request(page, held, 1))
     expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "eth")

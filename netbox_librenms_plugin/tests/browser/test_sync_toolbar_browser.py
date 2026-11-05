@@ -8,7 +8,7 @@ from urllib.parse import parse_qs
 import pytest
 from playwright.sync_api import expect
 
-from test_sync_cache_browser import STYLE_PATH, TEMPLATE_DIR, _add_page_scripts
+from test_sync_cache_browser import STYLE_PATH, TEMPLATE_DIR, _add_page_scripts, _navigation_loader
 from test_sync_page_layout_browser import NETBOX_PAGE_CSS
 
 
@@ -141,7 +141,7 @@ def render_tab(
 def load_tab(page, tab, key, **kwargs):
     page.clock.install(time=NOW)
     page.set_content(
-        f"<style>{CSS}</style><div id='librenms-sync-tabs'>"
+        f"<style>{CSS}</style>{_navigation_loader()}<div id='librenms-sync-tabs'>"
         f"<div class='tab-pane' data-tab-id='{tab}s'>{render_tab(tab, key, **kwargs)}</div></div>"
     )
     page.add_style_tag(path=str(STYLE_PATH))

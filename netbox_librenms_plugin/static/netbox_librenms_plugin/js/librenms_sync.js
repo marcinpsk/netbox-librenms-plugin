@@ -4308,35 +4308,7 @@ document.addEventListener('submit', function (event) {
     if (event.target.matches('.sync-filter-form')) pendingFilterApplies.add(event.target);
 }, true);
 
-// Restored HTML has initial control values; the restored URL names the displayed filters.
-// A cached snapshot keeps the binding markers of its controls but not their listeners; the swap binds them again.
-document.addEventListener('htmx:historyCacheHit', function (event) {
-    const snapshot = document.createElement('template');
-    snapshot.innerHTML = event.detail.item.content;
-    snapshot.content.querySelectorAll('*').forEach(element => {
-        Object.keys(element.dataset).filter(key => /(^initialized|Initialized|Bound)$/.test(key)).forEach(key => {
-            delete element.dataset[key];
-        });
-    });
-    // TomSelect markup stays without its instance, and NetBox enhances only a plain select: undo it as destroy() does.
-    snapshot.content.querySelectorAll('.ts-wrapper').forEach(wrapper => wrapper.remove());
-    snapshot.content.querySelectorAll('select.tomselected').forEach(select => {
-        select.classList.remove('tomselected', 'ts-hidden-accessible');
-        select.removeAttribute('tabindex');
-    });
-    event.detail.item.content = snapshot.innerHTML;
-});
-
-document.addEventListener('htmx:historyRestore', function () {
-    const parameters = new URLSearchParams(window.location.search);
-    document.querySelectorAll('.sync-filter-form').forEach(form => {
-        [...form.elements].filter(control => control.id && control.name).forEach(control => {
-            control.value = parameters.get(control.name) ?? '';
-        });
-    });
-});
-
-// An empty field means no filter, so it stays out of the page URL that the response pushes.
+// An empty field means no filter, so it stays out of the page URL that the response names.
 document.addEventListener('htmx:configRequest', function (event) {
     if (event.detail.elt instanceof HTMLFormElement && event.detail.elt.matches('.sync-filter-form')) {
         const form = event.detail.elt;
