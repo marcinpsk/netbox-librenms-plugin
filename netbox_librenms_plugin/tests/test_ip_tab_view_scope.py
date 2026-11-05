@@ -515,6 +515,43 @@ class TestTheWriterRefusesWhatTheActorCannotView:
         assert "private-b" not in response.content.decode()
         assert not IPAddress.objects.filter(address="198.18.130.10/24").exists()
 
+    @transactional_db_with_all_apps()
+    def test_a_hidden_member_that_joins_the_chassis_while_the_sync_waits_for_its_locks_refuses_the_row(
+        self, client, settings, monkeypatch
+    ):
+        """The port first resolves by name on the page; then a hidden device that holds its binding joins the chassis."""
+        from dcim.models import VirtualChassis
+
+        from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change, second_connection
+        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
+
+        _servers(settings, SERVER_KEY)
+        device, (eth6,) = _device("ip-scope-writer-join", "eth6")
+        chassis = VirtualChassis.objects.create(name="ip-scope-writer-join-vc", master=device)
+        device.virtual_chassis, device.vc_position = chassis, 1
+        device.save()
+        joining = make_device("ip-scope-writer-join-hidden")
+        seed_mapping(make_interface(joining, "Gi2/0/6", iface_type="1000base-t"), SERVER_KEY, own=7140)
+        _seed(device, [("198.18.140.10", 24, 7140, "eth6")])
+        client.force_login(_reader("ip-scope-writer-join", owner_view={"pk": device.pk}))
+        real_lock = SyncIPAddressesView._lock_interface_owner_scope
+        commits = []
+
+        with second_connection() as other:
+
+            def lock_after_a_concurrent_join(self, *args, **kwargs):
+                if not commits:
+                    commit_row_change(other, Device, joining.pk, {"virtual_chassis_id": chassis.pk, "vc_position": 2})
+                    commits.append(joining.pk)
+                return real_lock(self, *args, **kwargs)
+
+            monkeypatch.setattr(SyncIPAddressesView, "_lock_interface_owner_scope", lock_after_a_concurrent_join)
+            response = _sync(client, device, ["198.18.140.10/24"])
+
+        assert commits == [joining.pk]
+        assert joining.name not in response.content.decode()
+        assert not IPAddress.objects.filter(address="198.18.140.10/24").exists()
+
     def test_a_confirmation_signed_before_the_address_was_hidden_is_refused(self, client, settings):
         _servers(settings, SERVER_KEY)
         device, (eth1, eth2) = _device("ip-scope-writer-force", "eth1", "eth2")
