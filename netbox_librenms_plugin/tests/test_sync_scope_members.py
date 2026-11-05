@@ -585,6 +585,29 @@ def test_an_interface_the_user_may_change_but_not_view_is_absent_from_the_tab_an
     assert _table_rows(hidden_html, "data-port-id")[905] == _table_rows(absent_html, "data-port-id")[905]
 
 
+def test_a_visible_cross_member_lag_reads_the_same_in_the_table_and_the_verify(client, default_server):
+    """Interface A on member 1 is in LAG B on member 2, and LibreNMS reports no LAG: both show the NetBox-only LAG."""
+    from netbox_librenms_plugin.tests.conftest import make_interface, make_superuser
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_interfaces_snapshot
+
+    page, other = _chassis("rel-cross-member")
+    seed_stored_mapping(page, {"default": {"id": 14271}}, save=True)
+    member = make_interface(page, "Gi1/0/1", iface_type="1000base-t")
+    seed_mapping(member, "default", own=901, save=True)
+    member.lag = make_interface(other, "Po2", iface_type="lag")
+    member.save()
+    seed_interfaces_snapshot(page, [_interface_port(901, "Gi1/0/1")], server_key="default")
+    client.force_login(make_superuser("rel-cross-member-user"))
+
+    row = _table_rows(_interface_tab(client, page), "data-port-id")[901]
+    table_cell = re.search(r'<td data-col="parent">(.*?)</td>', row, re.S).group(1)
+    verify_cell = json.loads(_verify_port(client, page, 901))["formatted_row"]["parent"]
+
+    assert table_cell
+    assert verify_cell == table_cell
+
+
 @pytest.mark.parametrize("relation", ["lag", "parent", "bridge"])
 def test_a_hidden_relationship_target_renders_the_same_as_no_target(client, default_server, relation):
     """A visible interface whose LAG, parent or bridge the user cannot view: table and verify read as no target."""
