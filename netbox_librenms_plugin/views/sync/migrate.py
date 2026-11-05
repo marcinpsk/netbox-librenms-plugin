@@ -21,8 +21,8 @@ from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import Q
-from django.http import HttpResponse
-from django.shortcuts import redirect
+from django.http import Http404, HttpResponse
+from django.shortcuts import get_object_or_404, redirect
 from django.urls import get_script_prefix, reverse
 from django.views import View
 from ipam.models import IPAddress
@@ -35,6 +35,7 @@ from netbox_librenms_plugin.sync_cache import (
     schedule_request_cache_mutation,
     sync_subject_key,
 )
+from netbox_librenms_plugin.transactions import saved_in_scope
 from netbox_librenms_plugin.utils import (
     DEVICE_IP_FK_FIELDS,
     DEVICE_IP_FK_LABELS,
@@ -54,6 +55,8 @@ from netbox_librenms_plugin.views.mixins import (
 )
 
 logger = logging.getLogger(__name__)
+
+MOVE_OUT_OF_SCOPE = "The move would leave an IP address outside your permissions. Nothing was moved."
 
 
 def _resolve_winner_for_donor(donor, server_key="default"):
@@ -444,6 +447,55 @@ class _BaseMoveToWinnerView(
         return donor, winner, None
 
 
+class _MoveResourceToWinnerView(_BaseMoveToWinnerView):
+    """
+    Shared view scope of the interface and IP moves.
+
+    A move names the objects that it re-homes and the winner, so each one must be in the user's view
+    scope as well as the change scope. A hidden object answers as a missing one.
+    """
+
+    def _viewable_and_changeable(self, model):
+        """Return the *model* rows that the user may view and change."""
+        return self.restricted_queryset(model, "change").filter(
+            pk__in=self.restricted_queryset(model, "view").values("pk")
+        )
+
+    def _require_viewable(self, model, obj):
+        """Raise Http404 unless the user may view *obj*: a hidden object answers as a missing one."""
+        if not self.restricted_queryset(model, "view").filter(pk=obj.pk).exists():
+            raise Http404
+
+    def _resolve_winner_or_fail(self, request, donor, server_key):
+        """Resolve the winner as the base does, but answer a winner the user may not view as a deleted one."""
+        winner, marker = _resolve_winner_for_donor(donor, server_key)
+        if winner is not None and not self.restricted_queryset(Device, "view").filter(pk=winner.pk).exists():
+            return None, _fail_winner_unavailable(self, request, donor, marker)
+        return super()._resolve_winner_or_fail(request, donor, server_key)
+
+    def _lock_donor_winner_and_reverify(self, request, donor, winner, server_key):
+        """Lock and re-verify as the base does, then re-check the view scope of both locked devices."""
+        donor, winner, err = super()._lock_donor_winner_and_reverify(request, donor, winner, server_key)
+        if err is None and self.restricted_queryset(Device, "view").filter(pk__in={donor.pk, winner.pk}).count() != 2:
+            return None, None, self._fail(request, "Device was deleted concurrently.", status=410)
+        return donor, winner, err
+
+    def _ips_out_of_scope(self, ips):
+        """Return whether a moved IP, as the move saved it, is outside the user's change or view scope."""
+        user = self.request.user
+        return any(not (saved_in_scope(ip, user, "change") and saved_in_scope(ip, user, "view")) for ip in ips)
+
+
+def _addresses_on(interfaces):
+    """Return the IP addresses assigned to *interfaces*, which an interface move re-homes with them."""
+    return list(
+        IPAddress.objects.filter(
+            assigned_object_type=ContentType.objects.get_for_model(Interface),
+            assigned_object_id__in=[interface.pk for interface in interfaces],
+        )
+    )
+
+
 def _refresh_cable_termination_caches(interface):
     """
     Re-save the interface's cable terminations after a device move.
@@ -497,7 +549,7 @@ def _donor_side_dependents(interface, donor):
     return dependents
 
 
-class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
+class MoveInterfaceToWinnerView(_MoveResourceToWinnerView):
     """
     Reassign ``Interface.device`` from donor to winner.
 
@@ -519,19 +571,26 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
     # _reconcile_donor_device_ip_fks(), which writes device-level FKs
     # (winner/donor primary_ip4/primary_ip6/oob_ip). NetBoxObjectPermissionMixin is
     # model-level only, so Device must be in the declared boundary.
-    required_object_permissions = {"POST": [("change", Interface), ("change", Device)]}
+    required_object_permissions = {
+        "POST": [("view", Interface), ("change", Interface), ("view", Device), ("change", Device)]
+    }
 
     def post(self, request, pk):  # noqa: C901
         gate = self._gate(request)
         if gate is not None:
             return gate
 
-        # Object-scoped: the gate above is model-level only, so a constrained change_interface
-        # grant would otherwise move an interface it cannot see.
-        interface = self.restrict_object_or_404(Interface, "change", pk=pk)
+        # Object-scoped: the gate above is model-level only, so a constrained interface grant
+        # would otherwise move or name an interface that the user cannot see.
+        interface = get_object_or_404(
+            self.restricted_queryset(Interface, "change"),
+            pk=pk,
+            pk__in=self.restricted_queryset(Interface, "view").values("pk"),
+        )
         donor = interface.device
         if donor is None:
             return self._fail(request, "Interface has no device.")
+        self._require_viewable(Device, donor)
 
         # Fall back to active_server_key (never builds LibreNMSAPI) so a misconfigured default
         # server can't 500 a move that only needs the marker's server namespace, not the live API.
@@ -543,7 +602,7 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
 
         # Quick pre-check before acquiring the lock (avoids round-trip in the
         # obvious already-taken case).  The check is repeated under the lock
-        # below to close the TOCTOU window.
+        # below to close the TOCTOU window. A hidden namesake blocks too: the database refuses it.
         if Interface.objects.filter(device=winner, name=interface.name).exists():
             return self._fail(
                 request,
@@ -561,7 +620,7 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
                 # concurrent rename would otherwise let a stale name slip past the
                 # collision check below while the row is still moved by pk.
                 interface = (
-                    self.restricted_queryset(Interface, "change")
+                    self._viewable_and_changeable(Interface)
                     .select_for_update(of=("self",))
                     .filter(pk=interface.pk, device=donor)
                     .first()
@@ -585,11 +644,11 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
                 # before anything is saved, so the family either moves whole or not at all.
                 dependents = _donor_side_dependents(interface, donor)
                 # The family is DERIVED from the moved row, not the scoped pk, and every member is
-                # saved below. The move is all-or-nothing, so refuse unless the grant covers all of it.
+                # saved and named below. The move is all-or-nothing, so refuse unless the grants cover all of it.
                 if dependents:
                     dependent_pks = {dep.pk for dep in dependents}
                     authorized = set(
-                        self.restricted_queryset(Interface, "change")
+                        self._viewable_and_changeable(Interface)
                         .filter(pk__in=dependent_pks)
                         .values_list("pk", flat=True)
                     )
@@ -707,6 +766,10 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
                 for dep in dependents:
                     _refresh_cable_termination_caches(dep)
 
+                if self._ips_out_of_scope(_addresses_on([interface, *dependents])):
+                    transaction.set_rollback(True)
+                    return self._fail(request, MOVE_OUT_OF_SCOPE, status=403)
+
                 # The moved interface may carry an address the donor still points at via
                 # primary_ip4/primary_ip6/oob_ip; reconcile those device FKs so the donor isn't
                 # left referencing an address now on a winner-owned interface.
@@ -733,7 +796,7 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
             return response
 
 
-class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
+class MoveIPAddressToWinnerView(_MoveResourceToWinnerView):
     """
     Reassign ``IPAddress.assigned_object`` from a donor-owned target to the winner's equivalent.
 
@@ -751,7 +814,9 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
     # _reconcile_donor_device_ip_fks(), which writes device-level FKs
     # (winner/donor primary_ip4/primary_ip6/oob_ip). NetBoxObjectPermissionMixin is
     # model-level only, so Device must be in the declared boundary.
-    required_object_permissions = {"POST": [("change", IPAddress), ("change", Device)]}
+    required_object_permissions = {
+        "POST": [("view", IPAddress), ("change", IPAddress), ("view", Interface), ("view", Device), ("change", Device)]
+    }
 
     def post(self, request, pk):
         gate = self._gate(request)
@@ -759,7 +824,11 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
             return gate
 
         # Object-scoped — see MoveInterfaceToWinnerView.post.
-        ip = self.restrict_object_or_404(IPAddress, "change", pk=pk)
+        ip = get_object_or_404(
+            self.restricted_queryset(IPAddress, "change"),
+            pk=pk,
+            pk__in=self.restricted_queryset(IPAddress, "view").values("pk"),
+        )
         assigned = ip.assigned_object
         if not isinstance(assigned, Interface):
             return self._fail(
@@ -767,9 +836,11 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
                 "IP is not assigned to a donor interface; nothing to migrate.",
                 status=409,
             )
+        self._require_viewable(Interface, assigned)
         donor = assigned.device
         if donor is None:
             return self._fail(request, "IP's interface has no device.", status=409)
+        self._require_viewable(Device, donor)
 
         # Fall back to active_server_key (never builds LibreNMSAPI) so a misconfigured default
         # server can't 500 a move that only needs the marker's server namespace, not the live API.
@@ -780,7 +851,7 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
             return err
 
         # Quick pre-check before acquiring the lock.  Repeated under lock below.
-        if not Interface.objects.filter(device=winner, name=assigned.name).exists():
+        if not self.restricted_queryset(Interface, "view").filter(device=winner, name=assigned.name).exists():
             return self._fail(
                 request,
                 f"Winner '{winner.name}' has no interface named '{assigned.name}'. "
@@ -793,12 +864,7 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
                 donor, winner, err = self._lock_donor_winner_and_reverify(request, donor, winner, server_key)
                 if err is not None:
                     return err
-                ip = (
-                    self.restricted_queryset(IPAddress, "change")
-                    .select_for_update(of=("self",))
-                    .filter(pk=ip.pk)
-                    .first()
-                )
+                ip = self._viewable_and_changeable(IPAddress).select_for_update(of=("self",)).filter(pk=ip.pk).first()
                 if ip is None:
                     return self._fail(request, "IP address no longer exists.", status=410)
                 assigned = ip.assigned_object
@@ -807,11 +873,12 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
                 # Lock the donor interface row too and re-read it: its name is used
                 # below to find the winner-side interface, so a concurrent rename
                 # would otherwise send the IP to the wrong interface (TOCTOU).
-                assigned = self.relock_scoped_row(Interface, pk=assigned.pk, device=donor)
+                viewable_interfaces = self.restricted_queryset(Interface, "view").select_for_update(of=("self",))
+                assigned = viewable_interfaces.filter(pk=assigned.pk, device=donor).first()
                 if assigned is None:
                     return self._fail(request, "IP is no longer assigned to the donor interface.", status=409)
                 # Re-fetch the winner interface under the lock to close the TOCTOU window.
-                winner_iface = Interface.objects.select_for_update().filter(device=winner, name=assigned.name).first()
+                winner_iface = viewable_interfaces.filter(device=winner, name=assigned.name).first()
                 if winner_iface is None:
                     return self._fail(
                         request,
@@ -822,6 +889,9 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
                 ip.snapshot()
                 ip.assigned_object = winner_iface
                 ip.save(update_fields=["assigned_object_type", "assigned_object_id", "last_updated"])
+                if self._ips_out_of_scope([ip]):
+                    transaction.set_rollback(True)
+                    return self._fail(request, MOVE_OUT_OF_SCOPE, status=403)
 
                 # The moved address may itself be the donor's primary_ip4/primary_ip6/oob_ip;
                 # reconcile those device FKs so the donor isn't left referencing an address now on a

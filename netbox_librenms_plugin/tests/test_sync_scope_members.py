@@ -292,6 +292,32 @@ def test_preference_management_needs_view_and_change_on_the_owner(client, server
     assert view_and_change.context["can_manage_server_preference"] is True
 
 
+@pytest.mark.parametrize("object_type", ["device", "virtualmachine"])
+def test_a_preference_post_needs_view_and_change_on_the_owner(client, servers, object_type):
+    """A forged preference POST for an owner that the user may change but not view writes nothing."""
+    from dcim.models import Device
+    from virtualization.models import VirtualMachine
+
+    from netbox_librenms_plugin.server_mappings import PREFERRED_SERVER_FIELD
+    from netbox_librenms_plugin.tests.conftest import make_vm
+    from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
+
+    model = VirtualMachine if object_type == "virtualmachine" else Device
+    owner = make_vm("preference-hidden-vm") if model is VirtualMachine else make_device("preference-hidden-device")
+    seed_stored_mapping(owner, {"primary": {"id": 14191}, "secondary": {"id": 14192}}, save=True)
+    user = make_user_with_perms(f"preference-hidden-{object_type}", [("change", model)])
+    client.force_login(grant(user, "view", model, constraints={"pk": owner.pk + 100000}))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:set_preferred_server", args=[owner.pk]),
+        {"object_type": object_type, "server_key": "secondary", "active_server_key": "primary"},
+    )
+
+    owner.refresh_from_db()
+    assert PREFERRED_SERVER_FIELD not in stored_mapping_for_test(owner)
+    assert response.status_code == 404
+
+
 # =============================================================================
 # Sync page: the migration winner
 # =============================================================================
@@ -490,6 +516,48 @@ def test_the_interface_verify_of_a_hidden_member_row_returns_no_hidden_identity(
     assert hidden.get_absolute_url() not in body
     assert bound.get_absolute_url() not in body
     assert f'\\"{hidden.pk}\\"' not in body
+
+
+def _verify_port(client, device, port_id):
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:verify_interface"),
+        data=json.dumps(
+            {"device_id": device.pk, "origin_device_id": device.pk, "port_id": port_id, "server_key": "default"}
+        ),
+        content_type="application/json",
+    )
+    assert response.status_code == 200
+    return json.dumps(response.json(), sort_keys=True)
+
+
+def test_an_interface_the_user_may_change_but_not_view_is_absent_from_the_tab_and_the_verify(client, default_server):
+    """A change grant does not show an interface: the row and the verify read as if it did not exist."""
+    from dcim.models import Device, Interface
+
+    from netbox_librenms_plugin.tests.conftest import make_interface
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_interfaces_snapshot
+
+    owner = make_device("iface-changeonly-owner")
+    seed_stored_mapping(owner, {"default": {"id": 14221}}, save=True)
+    hidden = make_interface(owner, "HiddenEth5", iface_type="100gbase-x-qsfp28")
+    seed_mapping(hidden, "default", own=905, save=True)
+    seed_interfaces_snapshot(owner, [_interface_port(905, "Ethernet5")], server_key="default")
+    user = make_user_with_perms("iface-changeonly-user", [("view", Device), ("change", Device), ("change", Interface)])
+    client.force_login(grant(user, "view", Interface, constraints={"name": "VisibleOnly"}))
+    hidden_marks = (hidden.name, hidden.get_absolute_url(), hidden.type, f'"{hidden.pk}"')
+
+    hidden_html = _interface_tab(client, owner)
+    hidden_verify = _verify_port(client, owner, 905)
+    hidden.delete()
+    absent_html = _interface_tab(client, owner)
+    absent_verify = _verify_port(client, owner, 905)
+
+    for mark in hidden_marks:
+        assert mark not in hidden_html
+        assert mark not in hidden_verify
+    assert hidden_verify == absent_verify
+    assert _table_rows(hidden_html, "data-port-id")[905] == _table_rows(absent_html, "data-port-id")[905]
 
 
 # =============================================================================

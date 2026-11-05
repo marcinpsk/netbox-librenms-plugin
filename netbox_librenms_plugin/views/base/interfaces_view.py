@@ -577,10 +577,10 @@ class BaseInterfaceTableView(
             # Only interfaces on owners the user may view are shown, named or acted on.
             scoped_interfaces = interface_model.objects.filter(**{f"{owner_field}_id__in": actionable_owner_ids})
             viewable_interface_ids = set(scoped_interfaces.restrict(request.user, "view").values_list("pk", flat=True))
-            changeable_interface_ids = set(
+            # A change grant does not show an interface: an action needs both grants.
+            changeable_interface_ids = viewable_interface_ids & set(
                 scoped_interfaces.restrict(request.user, "change").values_list("pk", flat=True)
             )
-            related_interface_ids = viewable_interface_ids | changeable_interface_ids
             can_write_relationships = self.has_write_permission()
             related_interfaces_by_port_id = {}
             related_interfaces_by_name = {}
@@ -589,14 +589,14 @@ class BaseInterfaceTableView(
                     permitted = [
                         interface
                         for interface in interfaces
-                        if interface.pk in related_interface_ids
+                        if interface.pk in viewable_interface_ids
                         and getattr(interface, f"{owner_field}_id") in actionable_owner_ids
                     ]
                     if permitted:
                         related_interfaces_by_port_id.setdefault(port_id, []).extend(permitted)
                 for interface_name, interface in interface_maps["by_name"].items():
                     if (
-                        interface.pk in related_interface_ids
+                        interface.pk in viewable_interface_ids
                         and getattr(interface, f"{owner_field}_id") in actionable_owner_ids
                     ):
                         related_interfaces_by_name.setdefault(interface_name, []).append(interface)

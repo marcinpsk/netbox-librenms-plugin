@@ -73,7 +73,7 @@ def test_interface_move_preserves_source_snapshots_for_donor_and_winner(
 
     user = make_user_with_perms(
         "claim-interface-user",
-        [("change", Interface), ("change", Device)],
+        [("view", Interface), ("change", Interface), ("view", Device), ("change", Device)],
     )
     client.force_login(user)
     url = reverse("plugins:netbox_librenms_plugin:interface_move_to_winner", args=[interface.pk])
@@ -122,7 +122,7 @@ def test_ip_address_move_preserves_source_snapshots_for_donor_and_winner(
 
     user = make_user_with_perms(
         "claim-ip-user",
-        [("change", IPAddress), ("change", Device)],
+        [("view", IPAddress), ("change", IPAddress), ("view", Interface), ("view", Device), ("change", Device)],
     )
     client.force_login(user)
     url = reverse("plugins:netbox_librenms_plugin:ipaddress_move_to_winner", args=[address.pk])

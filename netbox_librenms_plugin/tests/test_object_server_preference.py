@@ -225,7 +225,7 @@ def test_preference_post_requires_change_scope_on_mapping_owner(client, servers)
         [("change", type(owner))],
         constraints={"pk": allowed.pk},
     )
-    client.force_login(user)
+    client.force_login(grant(user, "view", type(owner)))
 
     response = client.post(
         _preference_url(owner),

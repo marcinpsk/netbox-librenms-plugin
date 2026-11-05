@@ -836,10 +836,10 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
 
 
 class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
-    """Store the preferred server on a Device or VirtualMachine mapping owner."""
+    """Store the preferred server on a Device or VirtualMachine mapping owner that the user may view and change."""
 
     required_object_permissions = {
-        "POST": [("change", Device), ("change", VirtualMachine)],
+        "POST": [("view", Device), ("change", Device), ("view", VirtualMachine), ("change", VirtualMachine)],
     }
 
     def _redirect(self, object_type, pk, active_server_key=None, active_sync_tab=None):
@@ -852,7 +852,7 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
             return HttpResponse(f"Invalid object_type: {escape(raw_object_type)}", status=400)
 
         model = _sync_model(object_type)
-        self.required_object_permissions = {"POST": [("change", model)]}
+        self.required_object_permissions = {"POST": [("view", model), ("change", model)]}
         if error := self.require_all_permissions("POST"):
             return error
 
@@ -868,7 +868,9 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
 
         with transaction.atomic():
             owner = get_object_or_404(
-                self.restricted_queryset(model, "change").select_for_update(of=("self",)),
+                self.restricted_queryset(model, "change")
+                .filter(pk__in=self.restricted_queryset(model, "view").values("pk"))
+                .select_for_update(of=("self",)),
                 pk=pk,
             )
             mappings = build_server_mappings(owner)
