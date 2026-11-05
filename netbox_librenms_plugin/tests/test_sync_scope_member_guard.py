@@ -119,6 +119,7 @@ def _member_reads(tree):
                     and any((keyword.arg or "").startswith("virtual_chassis") for keyword in node.keywords)
                     and _device_manager_chain(func.value, device_aliases)
                     and not _view_restricted(func.value)
+                    and not view_restricted_above(node, parents)
                 ):
                     found.append((function.name, node.lineno))
     return sorted(set(found), key=lambda item: item[1])
@@ -186,5 +187,7 @@ def test_the_scan_passes_the_scoped_reads():
         "def f(user, pk):\n    rows = Device.objects.restrict(user, 'view')\n    return rows.filter(virtual_chassis_id=pk)\n",
         "def f(user, pk):\n    return VirtualChassis.objects.restrict(user, 'view').get(pk=pk)\n",
         "def f(pk):\n    rows = Device.objects\n    return rows.filter(pk=pk)\n",
+        "def f(user, pk):\n    return Device.objects.filter(virtual_chassis_id=pk).restrict(user, 'view')\n",
+        "def f(user, pk):\n    rows = Device.objects\n    return rows.filter(virtual_chassis_id=pk).restrict(user, 'view').first()\n",
     ):
         assert not _scan(source), source
