@@ -550,9 +550,10 @@ class TestMigrationPresentationHelpers:
 @pytest.mark.django_db
 class TestMovableMigrationIPs:
     def _movable(self, donor, server_key=SERVER_KEY):
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
         from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
 
-        return DeviceIPAddressTableView._movable_ips_for_migration(donor, server_key)
+        return DeviceIPAddressTableView._movable_ips_for_migration(make_request("get"), donor, server_key)
 
     def test_unmarked_device_has_no_move_candidates(self):
         donor = make_device("movable-unmarked-donor")
