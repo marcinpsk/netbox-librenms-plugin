@@ -840,8 +840,9 @@ def build_candidate_relationship_context(obj, server_key, user, can_write, port_
     )
     permitted_queryset = candidate_queryset.filter(**{f"{owner_field}__in": actionable_owner_ids})
     viewable_ids = set(permitted_queryset.restrict(user, "view").values_list("pk", flat=True))
-    changeable_ids = set(permitted_queryset.restrict(user, "change").values_list("pk", flat=True))
-    display_index = build_interface_index(obj, server_key, allowed_ids=viewable_ids | changeable_ids)
+    # A change grant does not show an interface: an action needs both grants.
+    changeable_ids = viewable_ids & set(permitted_queryset.restrict(user, "change").values_list("pk", flat=True))
+    display_index = build_interface_index(obj, server_key, allowed_ids=viewable_ids)
     source_index = filter_interface_index(display_index, changeable_ids)
     return RelationshipResolutionContext(
         obj=obj,

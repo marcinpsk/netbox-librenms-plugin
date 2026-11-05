@@ -613,8 +613,8 @@ class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
         is_missing = vid not in available_vids
         missing_vlans = [vid] if is_missing else []
 
-        # Get NetBox interface for comparison
-        netbox_interface = device.interfaces.filter(name=interface_name).first()
+        # Compare only an interface in the view scope: a hidden one reads as a missing one.
+        netbox_interface = device.interfaces.restrict(request.user, "view").filter(name=interface_name).first()
         exists_in_netbox = bool(netbox_interface)
 
         # Get NetBox VLAN assignments (VID + group for group-aware comparison)
