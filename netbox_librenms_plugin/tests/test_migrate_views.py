@@ -847,3 +847,31 @@ class TestInterfaceMoveResultScope:
         member.refresh_from_db()
         assert lag.device == donor
         assert member.device == donor
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("action", ["view", "change"])
+def test_an_interface_move_never_brings_an_ip_into_its_scope(client, action):
+    """The attached IP is outside the user's scope until the move: the move is refused and the family stays."""
+    from ipam.models import IPAddress
+
+    donor = make_device(f"scope-if-ipenters-{action}-donor")
+    winner = make_device(f"scope-if-ipenters-{action}-winner")
+    _mark(donor, winner)
+    lag = make_interface(donor, "Port-Channel1", iface_type="lag")
+    member = make_interface(donor, "Ethernet1")
+    member.lag = lag
+    member.save(update_fields=["lag"])
+    address = make_ip("198.18.248.10/24", assigned_object=member)
+    user = _move_user(f"scope-if-ipenters-{action}-user", **{action: {IPAddress: {"interface__device_id": winner.pk}}})
+    client.force_login(user)
+
+    response = _move_interface(client, lag)
+
+    assert "HX-Refresh" not in response.headers
+    assert str(address.address) not in response.content.decode()
+    lag.refresh_from_db()
+    member.refresh_from_db()
+    address.refresh_from_db()
+    assert (lag.device, member.device) == (donor, donor)
+    assert address.assigned_object == member
