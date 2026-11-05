@@ -225,6 +225,24 @@ def _set_cable_state(link, status, comparison):
     link["cable_comparison"] = comparison
 
 
+def _bound_port_owner_ids(port_ids, server_key):
+    """
+    Map each bound LibreNMS port ID to the device that owns its one bound Interface, for attribution only.
+
+    A port bound to a VMInterface, or held twice, maps to None. An unbound port is absent.
+    """
+    holders = port_holders(port_ids, server=server_key)
+    interface_owner_ids = dict(
+        Interface.objects.filter(
+            pk__in=[holder[1] for holder in holders.values() if holder is not None and holder[0] == "dcim.interface"]
+        ).values_list("pk", "device_id")
+    )
+    return {
+        port_id: interface_owner_ids.get(holder[1]) if holder is not None and holder[0] == "dcim.interface" else None
+        for port_id, holder in holders.items()
+    }
+
+
 class BaseCableTableView(
     NetBoxObjectPermissionMixin,
     LibreNMSPermissionMixin,
@@ -393,7 +411,9 @@ class BaseCableTableView(
                 if device is not None and device.virtual_chassis_id is not None
             }
         )
-        remote_owner_by_link = self._resolve_remote_owners(normal_links, remote_device_by_link, remote_chassis)
+        remote_owner_by_link = self._resolve_remote_owners(
+            normal_links, remote_device_by_link, remote_chassis, server_key
+        )
         _members, local_owner_by_link = self._resolve_local_owners(normal_links, obj, server_key)
         manual_ids, candidate_specs = self._collect_interface_candidates(
             normal_links, local_owner_by_link, remote_owner_by_link
@@ -467,21 +487,41 @@ class BaseCableTableView(
             for link in normal_links
         }
 
-    def _resolve_remote_owners(self, normal_links, remote_device_by_link, remote_chassis):
-        """Resolve which chassis member actually owns each row's remote port, among every member of its chassis."""
+    def _resolve_remote_owners(self, normal_links, remote_device_by_link, remote_chassis, server_key):
+        """Resolve each remote chassis member by stable port binding before a port name, among every member."""
         remote_members_by_chassis = {
             chassis_id: {
                 member.vc_position: member for member in chassis.attribution_members if member.vc_position is not None
             }
             for chassis_id, chassis in remote_chassis.items()
         }
+        remote_members_by_id = {
+            member.pk: member for chassis in remote_chassis.values() for member in chassis.attribution_members
+        }
+        bound_owner_ids = _bound_port_owner_ids(
+            (
+                remote_port_ref(link)
+                for link in normal_links
+                if getattr(remote_device_by_link.get(id(link)), "virtual_chassis_id", None) is not None
+            ),
+            server_key,
+        )
         remote_owner_by_link = {}
         for link in normal_links:
             remote_device = remote_device_by_link.get(id(link))
+            port_id = remote_port_ref(link)
             if remote_device is None:
                 remote_owner = None
             elif remote_device.virtual_chassis_id is None:
                 remote_owner = remote_device
+            elif port_id in bound_owner_ids:
+                # A port bound outside this chassis, or held twice, has no owner here.
+                owner = remote_members_by_id.get(bound_owner_ids[port_id])
+                remote_owner = (
+                    owner
+                    if owner is not None and owner.virtual_chassis_id == remote_device.virtual_chassis_id
+                    else None
+                )
             else:
                 remote_owner = get_virtual_chassis_member(
                     remote_device,
@@ -501,21 +541,12 @@ class BaseCableTableView(
         members_by_position = {
             member.vc_position: member for member in chassis_members if member.vc_position is not None
         }
-        holders = port_holders((link.get("local_port_id") for link in normal_links), server=server_key)
-        owner_ids = dict(
-            Interface.objects.filter(
-                pk__in=[
-                    holder[1] for holder in holders.values() if holder is not None and holder[0] == "dcim.interface"
-                ]
-            ).values_list("pk", "device_id")
-        )
+        bound_owner_ids = _bound_port_owner_ids((link.get("local_port_id") for link in normal_links), server_key)
         owners = {}
         for link in normal_links:
             port_id = coerce_librenms_id(link.get("local_port_id"))
-            if port_id in holders:
-                holder = holders[port_id]
-                owner_id = owner_ids.get(holder[1]) if holder is not None and holder[0] == "dcim.interface" else None
-                owners[id(link)] = members_by_id.get(owner_id)
+            if port_id in bound_owner_ids:
+                owners[id(link)] = members_by_id.get(bound_owner_ids[port_id])
             else:
                 owners[id(link)] = get_virtual_chassis_member(
                     obj, link.get("local_port"), members_by_position=members_by_position

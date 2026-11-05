@@ -56,7 +56,7 @@ from netbox_librenms_plugin.views.mixins import (
 
 logger = logging.getLogger(__name__)
 
-MOVE_OUT_OF_SCOPE = "The move would leave an IP address outside your permissions. Nothing was moved."
+MOVE_OUT_OF_SCOPE = "The move would leave an interface or IP address outside your permissions. Nothing was moved."
 
 
 def _resolve_winner_for_donor(donor, server_key="default"):
@@ -474,10 +474,10 @@ class _MoveResourceToWinnerView(_BaseMoveToWinnerView):
             return None, None, self._fail(request, "Device was deleted concurrently.", status=410)
         return donor, winner, err
 
-    def _ips_out_of_scope(self, ips):
-        """Return whether a moved IP, as the move saved it, is outside the user's change or view scope."""
+    def _moved_out_of_scope(self, moved):
+        """Return whether a moved interface or IP, as the move saved it, is outside the user's change or view scope."""
         user = self.request.user
-        return any(not (saved_in_scope(ip, user, "change") and saved_in_scope(ip, user, "view")) for ip in ips)
+        return any(not (saved_in_scope(obj, user, "change") and saved_in_scope(obj, user, "view")) for obj in moved)
 
 
 def _addresses_on(interfaces):
@@ -756,7 +756,8 @@ class MoveInterfaceToWinnerView(_MoveResourceToWinnerView):
                 for dep in dependents:
                     _refresh_cable_termination_caches(dep)
 
-                if self._ips_out_of_scope(_addresses_on([interface, *dependents])):
+                moved = [interface, *dependents]
+                if self._moved_out_of_scope([*moved, *_addresses_on(moved)]):
                     transaction.set_rollback(True)
                     return self._fail(request, MOVE_OUT_OF_SCOPE, status=403)
 
@@ -880,7 +881,7 @@ class MoveIPAddressToWinnerView(_MoveResourceToWinnerView):
                 ip.snapshot()
                 ip.assigned_object = winner_iface
                 ip.save(update_fields=["assigned_object_type", "assigned_object_id", "last_updated"])
-                if self._ips_out_of_scope([ip]):
+                if self._moved_out_of_scope([ip]):
                     transaction.set_rollback(True)
                     return self._fail(request, MOVE_OUT_OF_SCOPE, status=403)
 
