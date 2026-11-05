@@ -91,7 +91,9 @@ class TestRelationshipPillWithoutALibreNMSName:
         no_relationships = dict.fromkeys(("lag_members", "sub_interfaces", "bridge_members", "stacked_ports"), {})
         maps = build_relationship_maps({"ports": [record], "port_stack_relationships": no_relationships})
 
-        enrich_port_relationships(record, maps, interface_name_field="ifName", server_key="default")
+        enrich_port_relationships(
+            record, maps, interface_name_field="ifName", server_key="default", viewable_interface_ids={lag.pk}
+        )
         html = str(_interface_table(device).render_parent(None, record))
 
         assert record["lag_sync_status"] == "missing_lnms"
