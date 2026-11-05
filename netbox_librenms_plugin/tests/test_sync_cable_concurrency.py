@@ -209,12 +209,12 @@ def test_termination_change_scope_is_rechecked_after_row_lock():
     user = get_user_model().objects.create_user("lock-scope-user")
     scoped_csp = ObjectPermission.objects.create(
         name="lock-scope-csp",
-        actions=["change"],
+        actions=["view", "change"],
         constraints={"description": "managed"},
     )
     scoped_csp.object_types.add(ObjectType.objects.get_for_model(ConsoleServerPort))
     scoped_csp.users.add(user)
-    console_ports = ObjectPermission.objects.create(name="lock-scope-cp", actions=["change"])
+    console_ports = ObjectPermission.objects.create(name="lock-scope-cp", actions=["view", "change"])
     console_ports.object_types.add(ObjectType.objects.get_for_model(ConsolePort))
     console_ports.users.add(user)
     # Owners are locked before terminations, and that lock is gated on Device view scope, so the
@@ -281,12 +281,12 @@ def test_termination_owner_device_is_locked_with_permission_scope():
     user = get_user_model().objects.create_user("cable-owner-scope-user")
     scoped_csp = ObjectPermission.objects.create(
         name="cable-owner-csp",
-        actions=["change"],
+        actions=["view", "change"],
         constraints={"device__site_id": in_scope.pk},
     )
     scoped_csp.object_types.add(ObjectType.objects.get_for_model(ConsoleServerPort))
     scoped_csp.users.add(user)
-    console_ports = ObjectPermission.objects.create(name="cable-owner-cp", actions=["change"])
+    console_ports = ObjectPermission.objects.create(name="cable-owner-cp", actions=["view", "change"])
     console_ports.object_types.add(ObjectType.objects.get_for_model(ConsolePort))
     console_ports.users.add(user)
     device_view = ObjectPermission.objects.create(name="cable-owner-device-view", actions=["view"])

@@ -3453,6 +3453,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             "scope-serial-view",
             [
                 (Device, "view", None),
+                (ConsoleServerPort, "view", None),
                 (ConsoleServerPort, "change", None),
                 (ConsolePort, "view", None),
                 (Cable, "add", None),
