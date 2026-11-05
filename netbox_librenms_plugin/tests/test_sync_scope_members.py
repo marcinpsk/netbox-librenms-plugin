@@ -954,8 +954,7 @@ def test_the_interface_delete_refuses_an_interface_the_user_cannot_view(client, 
 
     assert Interface.objects.filter(pk=target.pk).exists()
     body = response.content.decode()
-    if not view_interfaces:
-        assert target.name not in body
+    assert target.name not in body
     assert hidden.name not in body
 
 

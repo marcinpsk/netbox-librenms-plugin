@@ -62,6 +62,7 @@ from netbox_librenms_plugin.sync_cache import (
     schedule_request_cache_mutation,
 )
 from netbox_librenms_plugin.sync_query import page_query_url
+from netbox_librenms_plugin.sync_view_scope import Withheld
 from netbox_librenms_plugin.transactions import CommittedFollowUpError, classify_conflict, run_transaction
 from netbox_librenms_plugin.utils import (
     build_migrated_context,
@@ -2263,14 +2264,16 @@ class DeleteNetBoxInterfacesView(
                 if object_type == "device":
                     # Scoped by "delete" and "view": an interface the user cannot view reads as missing.
                     interface = self._deletable_interface(Interface, interface_id)
-                    if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-                        if interface.device_id not in self.sync_view_scope(obj).chassis.visible_ids:
-                            errors.append(
-                                f"Interface {interface.name} does not belong to this device or its virtual chassis"
-                            )
-                            continue
-                    elif interface.device_id != obj.id:
-                        errors.append(f"Interface {interface.name} does not belong to this device")
+                    scope = self.sync_view_scope(obj)
+                    if interface.device_id not in scope.chassis.visible_ids:
+                        # An interface on a device the user cannot view reads as missing.
+                        if isinstance(scope.owner(Device, interface.device_id), Withheld):
+                            raise Interface.DoesNotExist
+                        errors.append(
+                            f"Interface {interface.name} does not belong to this device or its virtual chassis"
+                            if obj.virtual_chassis_id
+                            else f"Interface {interface.name} does not belong to this device"
+                        )
                         continue
                 else:
                     interface = self._deletable_interface(VMInterface, interface_id)
