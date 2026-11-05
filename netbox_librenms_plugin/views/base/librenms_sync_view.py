@@ -7,6 +7,7 @@ from django.conf import settings as django_settings
 from django.contrib import messages
 from django.shortcuts import redirect, render
 from django.urls import reverse
+from ipam.models import IPAddress
 from netbox.views import generic
 
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
@@ -564,7 +565,20 @@ class BaseLibreNMSSyncView(
                 # Get NetBox device details
                 netbox_primary_ips = primary_ips(obj)
                 netbox_addresses = [str(ip.address.ip).lower() for ip in netbox_primary_ips]
-                netbox_dns_names = list(dict.fromkeys(ip.dns_name.lower() for ip in netbox_primary_ips if ip.dns_name))
+                # NetBox shows the primary addresses to every viewer of the device, but not their DNS names.
+                named_ips = [ip for ip in netbox_primary_ips if ip.dns_name]
+                viewable_ip_pks = (
+                    set(
+                        IPAddress.objects.restrict(request.user, "view")
+                        .filter(pk__in=[ip.pk for ip in named_ips])
+                        .values_list("pk", flat=True)
+                    )
+                    if named_ips and request is not None
+                    else set()
+                )
+                netbox_dns_names = list(
+                    dict.fromkeys(ip.dns_name.lower() for ip in named_ips if ip.pk in viewable_ip_pks)
+                )
                 netbox_name = obj.name
 
                 # Get LibreNMS device details

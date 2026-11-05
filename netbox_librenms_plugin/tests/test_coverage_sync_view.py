@@ -494,7 +494,9 @@ class TestLibreNMSDeviceInfo:
         view = _device_view()
         view.librenms_id = 6633
 
-        result = view.get_librenms_device_info(device)
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        result = view.get_librenms_device_info(device, _request_for(make_superuser("dns-identity-user")))
 
         assert result["mismatched_device"] is False
         assert result["librenms_device_details"]["netbox_dns_names"] == ["dns-identity.example.test"]
@@ -955,3 +957,11 @@ class TestDualStackDiscovery:
         assert read_mapping(type(device).objects.get(pk=device.pk)).own_id(SERVER_KEY) == 6697
         paths = [request["path"] for request in librenms_server.requests]
         assert paths[:2] == ["/api/v0/devices/192.0.2.8", "/api/v0/devices/2001:db8::8"]
+
+
+def _request_for(user):
+    from django.test import RequestFactory
+
+    request = RequestFactory().get("/")
+    request.user = user
+    return request
