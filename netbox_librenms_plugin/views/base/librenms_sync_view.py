@@ -6,6 +6,7 @@ from django.conf import settings as django_settings
 from django.contrib import messages
 from django.shortcuts import redirect, render
 from django.urls import reverse
+from ipam.models import IPAddress
 from netbox.views import generic
 
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
@@ -635,8 +636,14 @@ class BaseLibreNMSSyncView(
                     netbox_name_vc_stripped = self._strip_vc_pattern(netbox_name_norm)
 
                 # Collect all NetBox identity values to compare against
+                # NetBox shows the device's primary address to every viewer of the device, but not its DNS name.
                 netbox_dns_name = (
-                    obj.primary_ip.dns_name.lower() if obj.primary_ip and obj.primary_ip.dns_name else None
+                    obj.primary_ip.dns_name.lower()
+                    if obj.primary_ip
+                    and obj.primary_ip.dns_name
+                    and request is not None
+                    and IPAddress.objects.restrict(request.user, "view").filter(pk=obj.primary_ip.pk).exists()
+                    else None
                 )
                 netbox_identities = {
                     v

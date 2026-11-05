@@ -288,3 +288,28 @@ class TestVirtualChassisLookup:
         device = _netbox_device("standalone")
 
         assert get_librenms_sync_device(device, server_key="default") == device
+
+
+@pytest.mark.parametrize("ip_view", [True, False], ids=["visible_ip", "hidden_ip"])
+def test_the_identity_check_names_the_primary_dns_name_only_when_the_user_may_view_the_ip(live_librenms, ip_view):
+    from dcim.models import Device
+    from ipam.models import IPAddress
+
+    from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+    device = _netbox_device("dns-scope", name="switch-dns", primary_ip="198.18.0.1", dns_name="private.example.test")
+    _register_device_info(live_librenms, {"sysName": "other", "hostname": "other", "ip": "198.18.0.9"})
+    user = make_user_with_perms("dns-scope-user", [("view", Device)])
+    user = grant(user, "view", IPAddress, constraints=None if ip_view else {"pk__in": [0]})
+
+    result = _view(live_librenms).get_librenms_device_info(device, _request_for(user))
+
+    assert (result["librenms_device_details"]["netbox_dns_name"] == "private.example.test") is ip_view
+
+
+def _request_for(user):
+    from django.test import RequestFactory
+
+    request = RequestFactory().get("/")
+    request.user = user
+    return request

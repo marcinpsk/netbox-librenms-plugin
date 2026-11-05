@@ -446,7 +446,9 @@ class TestLibreNMSDeviceInfo:
         view = _device_view()
         view.librenms_id = 6633
 
-        result = view.get_librenms_device_info(device)
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        result = view.get_librenms_device_info(device, _request_for(make_superuser("dns-identity-user")))
 
         assert result["mismatched_device"] is False
         assert result["librenms_device_details"]["netbox_dns_name"] == "dns-identity.example.test"
@@ -795,3 +797,11 @@ class TestPlatformAndPatternHelpers:
         assert view.get_ip_context(request, device) is None
         assert view.get_vlan_context(request, device) is None
         assert view.get_module_context(request, device) is None
+
+
+def _request_for(user):
+    from django.test import RequestFactory
+
+    request = RequestFactory().get("/")
+    request.user = user
+    return request
