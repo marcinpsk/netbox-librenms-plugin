@@ -13,6 +13,8 @@ query path is broken. Reserve mocks for the LibreNMS HTTP boundary and for error
 cannot produce (a lock ``DatabaseError``, a ``save()`` that raises).
 """
 
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
 from contextlib import contextmanager
 from html.parser import HTMLParser
 from uuid import uuid4
@@ -291,13 +293,12 @@ def rendered_preview_query(device, ent_index, *, user=None, server_key="default"
 
 def rendered_modal_form(device, ent_index, path_part, *, user=None, server_key="default"):
     """Return ``(action URL, fields)`` of a form in the modal that the rendered Replace button of row *ent_index* opens."""
-    from types import SimpleNamespace
 
     from netbox_librenms_plugin.views.sync.modules import ModuleMismatchPreviewView
 
     query = rendered_preview_query(device, ent_index, user=user, server_key=server_key)
     request = make_request("get", query, user=user)
-    view = make_view(ModuleMismatchPreviewView, request, librenms_api=SimpleNamespace(server_key=server_key))
+    view = make_view(ModuleMismatchPreviewView, request, librenms_api=LibreNMSAPI(server_key=server_key))
     response = get(view, request, pk=device.pk)
     assert response.status_code == 200, response.content
     return rendered_module_form(response.content.decode(), path_part, ent_index)
@@ -372,17 +373,6 @@ def missing_pk(model, offset=1000):
     """Return a primary key that is above every current row for *model*."""
     highest_pk = model.objects.order_by("-pk").values_list("pk", flat=True).first()
     return (highest_pk or 0) + offset
-
-
-def trusted_module_inventory_payload(device, inventory, *, server_key="default", librenms_id=1):
-    """Build a module inventory payload bound to the device's verified current LibreNMS mapping."""
-    from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
-
-    seed_mapping(device, server_key, own=librenms_id)
-    # cf is a cached_property over the applicable custom fields: drop it so the next read sees the write.
-    device.__dict__.pop("cf", None)
-    return module_inventory_cache_payload(inventory, librenms_id, None)
 
 
 def assert_locked_before_update(captured, table):

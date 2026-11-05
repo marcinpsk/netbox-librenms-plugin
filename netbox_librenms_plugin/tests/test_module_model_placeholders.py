@@ -189,7 +189,7 @@ class TestTransceiverMergeTreatsPlaceholdersAsMissing:
     @staticmethod
     def _merge_rows(settings, server, transceiver, inventory):
         """Merge one transceiver into ENTITY-MIB rows, through the real HTTP client."""
-        from netbox_librenms_plugin.tests.test_modules_view import _real_api_view
+        from netbox_librenms_plugin.tests.test_modules_view import _assess_inventory, _real_api_view
 
         view = _real_api_view(settings, server, librenms_id=101)
         server.register(
@@ -202,7 +202,7 @@ class TestTransceiverMergeTreatsPlaceholdersAsMissing:
             {"status": "ok", "ports": [{"port_id": 99, "ifName": "Eth2/1"}]},
             method="GET",
         )
-        merged, error = view._merge_transceiver_data(inventory)
+        merged, error = _assess_inventory(view, inventory)
         assert error is None
         return merged
 

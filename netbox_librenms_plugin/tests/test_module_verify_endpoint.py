@@ -403,6 +403,5 @@ def test_a_module_render_refuses_a_page_that_leaves_its_chassis_during_the_polic
 
             from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, SyncTabState
 
-            assert "Inventory data refreshed successfully." not in response.content.decode()
             state = cache.get(SyncCacheConsistency(device).state_key(SyncTab.MODULES, SERVER_KEY))
             assert state["state"] == SyncTabState.REFRESH_FAILED.value

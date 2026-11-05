@@ -17,6 +17,7 @@ from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
+from netbox_librenms_plugin.assessment.ip_addresses import ip_assignment_ports
 from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.interface_rules import PortSyncBlocked, interface_rules_for_request
 from netbox_librenms_plugin.interface_sync import resolve_or_create_interface_from_port
@@ -50,8 +51,7 @@ from netbox_librenms_plugin.utils import (
     exception_text_for,
 )
 from netbox_librenms_plugin.views.base.ip_addresses_view import (
-    assess_ip_snapshot,
-    ip_assignment_ports,
+    read_ip_assessment,
     ip_interface_scope,
 )
 from netbox_librenms_plugin.views.mixins import (
@@ -187,7 +187,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         snapshot = source_cache.read(obj, Resource.IP_ADDRESSES, self._post_server_key)
         if snapshot is None:
             return None
-        return assess_ip_snapshot(self.request, obj, snapshot, self._post_server_key)
+        return read_ip_assessment(self.request, obj, snapshot, self._post_server_key)
 
     @staticmethod
     def _owner_action(request):
@@ -1401,14 +1401,14 @@ class CreateVRFFromIPRowView(SyncIPAddressesView):
             raise _VRFCreateRefusedError("The Create VRF request names no valid IP row.") from None
         index, duplicates = index_ip_sync_rows(assessment.rows)
         row = index.get(row_id) if row_id not in duplicates else None
-        if row is not None and row.get("vrf_create_url"):
+        if row is not None and row.get("can_create_vrf"):
             # As in the IP sync: the VRF does not exist yet, so only a mapping without a VRF can match.
             ip_rule = ip_rules_for_request(self.request).decide(parse_address_with_prefix(row["ip_with_mask"]).ip, None)
             if ip_rule is not None:
                 raise _VRFCreateRefusedError(
                     f"IP row {row_id} is not synced, so the NetBox VRF is not created: {ip_rule.reason}."
                 )
-        if row is None or not row.get("vrf_create_url"):
+        if row is None or not row.get("can_create_vrf"):
             raise _VRFCreateRefusedError(
                 f"IP row {row_id} has no LibreNMS VRF that NetBox lacks. Refresh the IP data and try again."
             )

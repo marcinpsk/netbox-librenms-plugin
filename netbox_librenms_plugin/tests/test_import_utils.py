@@ -1521,23 +1521,34 @@ class TestVCCacheKey:
             ("server-a", 1, ["server-a", "1"]),
         ],
     )
-    def test_cache_key_contains_scope(self, server_key, device_id, expected_parts):
-        from types import SimpleNamespace
+    def test_cache_key_contains_scope(self, server_key, device_id, expected_parts, configure_librenms, librenms_server):
 
         from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key
 
-        key = _vc_cache_key(SimpleNamespace(server_key=server_key), device_id)
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        configure_librenms(
+            {server_key: {"librenms_url": librenms_server.url, "api_token": "test-token", "verify_ssl": False}}
+        )
+        key = _vc_cache_key(LibreNMSAPI(server_key=server_key), device_id)
 
         assert "librenms_vc_detection" in key
         assert all(part in key for part in expected_parts)
 
-    def test_cache_key_changes_with_server_and_device(self):
-        from types import SimpleNamespace
+    def test_cache_key_changes_with_server_and_device(self, configure_librenms, librenms_server):
 
         from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key
 
-        server_a = SimpleNamespace(server_key="server-a")
-        server_b = SimpleNamespace(server_key="server-b")
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        configure_librenms(
+            {
+                key: {"librenms_url": librenms_server.url, "api_token": "test-token", "verify_ssl": False}
+                for key in ("server-a", "server-b")
+            }
+        )
+        server_a = LibreNMSAPI(server_key="server-a")
+        server_b = LibreNMSAPI(server_key="server-b")
 
         assert _vc_cache_key(server_a, 1) != _vc_cache_key(server_b, 1)
         assert _vc_cache_key(server_a, 1) != _vc_cache_key(server_a, 2)

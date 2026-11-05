@@ -1,0 +1,298 @@
+"""Capture exports acquisition responses and replays them through acquisition and assessment."""
+
+import pytest
+
+from netbox_librenms_plugin.acquisition.coordinator import acquire
+from netbox_librenms_plugin.acquisition.registry import Resource
+from netbox_librenms_plugin.assessment.cables import assess as assess_cables
+from netbox_librenms_plugin.assessment.interfaces import assess_interfaces
+from netbox_librenms_plugin.assessment.modules import assess as assess_modules
+from netbox_librenms_plugin.data_shapes.capture import capture_device_recording
+from netbox_librenms_plugin.data_shapes.recordings_store import SERIAL_SENSORS_META_KEY, SERIAL_SENSORS_UNAVAILABLE
+from netbox_librenms_plugin.models import PortStackLagPattern
+from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis_members
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
+RESOURCES = [Resource.INTERFACES, Resource.IP_ADDRESSES, Resource.CABLES, Resource.MODULES]
+ROOT = {"entPhysicalIndex": 10, "entPhysicalContainedIn": 0, "entPhysicalClass": "stack"}
+MEMBER = {
+    "entPhysicalIndex": 11,
+    "entPhysicalContainedIn": 10,
+    "entPhysicalClass": "chassis",
+    "entPhysicalSerialNum": "MEMBER",
+}
+
+
+def serve(server, device_id=5501, *, os_name="capture-test", sensors=()):
+    server.register(
+        f"/api/v0/devices/{device_id}", {"status": "ok", "devices": [{"device_id": device_id, "os": os_name}]}
+    )
+    server.register(
+        f"/api/v0/devices/{device_id}/ports",
+        {"status": "ok", "ports": [{"port_id": 7, "ifName": "eth3", "ifType": "ethernetCsmacd"}]},
+    )
+    server.register(f"/api/v0/devices/{device_id}/port_stack", {"status": "ok", "mappings": []})
+    server.register(f"/api/v0/devices/{device_id}/ip", {"status": "ok", "addresses": []})
+    server.register(f"/api/v0/devices/{device_id}/links", {"status": "ok", "links": []})
+    server.register(f"/api/v0/devices/{device_id}/transceivers", {"status": "ok", "transceivers": []})
+    server.register(f"/api/v0/inventory/{device_id}/all", {"status": "ok", "inventory": [ROOT, MEMBER]})
+    server.register(f"/api/v0/inventory/{device_id}", {"status": "ok", "inventory": []})
+    server.register("/api/v0/resources/sensors", {"status": "ok", "sensors": list(sensors)})
+
+
+def capture(subject, *, include_serial=True):
+    return capture_device_recording(
+        subject,
+        server_key="default",
+        name="captured",
+        description="Captured fixture.",
+        meta={},
+        include_serial=include_serial,
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("vc_member", [False, True])
+def test_capture_replays_source_acquisition_including_a_vc_member(
+    live_librenms, configure_librenms, recording_server, vc_member
+):
+    if vc_member:
+        _vc, (owner, subject) = make_virtual_chassis_members("capture-source-vc")
+        seed_mapping(owner, "default", own=5501)
+        seed_mapping(subject, "default", own=5502)
+        serve(live_librenms.server, 5502)
+    else:
+        subject = seed_mapping(make_device("capture-source"), "default", own=5501)
+    serve(live_librenms.server)
+    if vc_member:
+        live_librenms.server.register(
+            "/api/v0/devices/5501/links",
+            {"status": "ok", "links": [{"local_port_id": 7, "remote_device_id": 5502, "remote_port_id": 7}]},
+        )
+    before = acquire(subject, server_key="default", resources=RESOURCES, include_serial=True, inventory_probes=True)
+
+    recording = capture(subject)
+
+    assert recording["device_id"] == 5501
+    assert recording["responses"]["GET /api/v0/inventory/5501?entPhysicalContainedIn=0"]["inventory"] == [ROOT]
+    assert recording["responses"]["GET /api/v0/inventory/5501?entPhysicalContainedIn=10"]["inventory"] == [MEMBER]
+    replay, replay_api = recording_server(recording)
+    configure_librenms(
+        {"default": {"librenms_url": replay.url, "api_token": replay_api.headers["X-Auth-Token"], "verify_ssl": False}}
+    )
+    after = acquire(subject, server_key="default", resources=RESOURCES, include_serial=True, inventory_probes=True)
+    assert assess_modules(after, subject=subject) == assess_modules(before, subject=subject)
+    assert assess_interfaces(after, "ifName") == assess_interfaces(before, "ifName")
+    assert assess_cables(after, subject=subject) == assess_cables(before, subject=subject)
+    assert after.value(Resource.IP_ADDRESSES, "addresses") == before.value(Resource.IP_ADDRESSES, "addresses")
+
+
+@pytest.mark.django_db
+def test_capture_modal_keeps_the_vc_member_as_the_acquisition_subject(client, live_librenms):
+    from django.urls import reverse
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+
+    _vc, (owner, subject) = make_virtual_chassis_members("capture-modal-vc")
+    seed_mapping(owner, "default", own=5501)
+    seed_mapping(subject, "default", own=5502)
+    serve(live_librenms.server, 5501)
+    serve(live_librenms.server, 5502)
+    live_librenms.server.ports_response(
+        5501,
+        [
+            {"port_id": 7, "ifName": "eth3", "ifType": "ethernetCsmacd"},
+            {"port_id": 8, "ifName": "eth4", "ifType": "ethernetCsmacd"},
+        ],
+    )
+    live_librenms.server.register(
+        "/api/v0/devices/5502/ip",
+        {"status": "ok", "addresses": [{"port_id": 17, "ipv4_address": "198.18.0.1", "ipv4_prefixlen": 24}]},
+    )
+    live_librenms.server.ports_response(5502, [{"port_id": 17, "ifName": "eth4", "ifType": "ethernetCsmacd"}])
+    client.force_login(make_superuser("capture-modal-vc-user"))
+
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:capture_data_shape", kwargs={"device_id": subject.pk}),
+        {"server_key": "default"},
+    )
+
+    assert response.status_code == 200
+    import json
+
+    recording = json.loads(response.context["recording_json"])
+    assert recording["meta"]["compressed_ports"] == {"from": 2, "to": 1}
+    addresses = next(body["addresses"] for key, body in recording["responses"].items() if key.endswith("/ip"))
+    member_ports = next(
+        body["ports"]
+        for key, body in recording["responses"].items()
+        if key.endswith("/ports") and key != f"GET /api/v0/devices/{recording['device_id']}/ports"
+    )
+    assert len(addresses) == 1
+    assert addresses[0]["port_id"] == member_ports[0]["port_id"]
+    paths = {request["path"] for request in live_librenms.server.requests}
+    assert "/api/v0/devices/5502/ip" in paths
+    assert "/api/v0/devices/5501/ip" not in paths
+    assert "/api/v0/inventory/5501/all" in paths
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("state", ["active", "deleted", "invalid", "failed", "not_requested"])
+def test_capture_serial_projection_controls_the_recorded_route_and_map(live_librenms, state):
+    subject = seed_mapping(make_device("capture-serial-projection"), "default", own=5501)
+    sensor = {
+        "sensor_id": 1,
+        "device_id": 5501,
+        "sensor_type": "acsSerialPortTable",
+        "sensor_index": "acsSerialPortTableStatus.7",
+        "sensor_descr": "ttyS7 Status",
+    }
+    if state == "deleted":
+        sensor.update(sensor_deleted="1", sensor_id=False, sensor_index=None)
+    if state == "invalid":
+        sensor["sensor_deleted"] = True
+    serve(live_librenms.server, sensors=[sensor])
+    if state == "failed":
+        live_librenms.server.register("/api/v0/resources/sensors", {"status": "error"}, status=500)
+
+    recording = capture(subject, include_serial=state != "not_requested")
+
+    if state == "active":
+        assert recording["responses"]["GET /api/v0/resources/sensors"]["sensors"] == [sensor]
+        assert "acsSerialPortTable" in recording["serial_type_patterns"]
+    else:
+        assert "GET /api/v0/resources/sensors" not in recording["responses"]
+        assert "serial_type_patterns" not in recording
+    assert (recording["meta"].get(SERIAL_SENSORS_META_KEY) == SERIAL_SENSORS_UNAVAILABLE) is (
+        state in {"invalid", "failed", "not_requested"}
+    )
+
+
+@pytest.mark.django_db
+def test_capture_without_an_os_uses_productions_lag_and_sap_scopes(live_librenms):
+    subject = seed_mapping(make_device("capture-no-os"), "default", own=5501)
+    serve(live_librenms.server, os_name=None)
+    PortStackLagPattern.objects.create(
+        librenms_os="capture-vendor", lag_name_pattern=r"^Bundle\d+$", sap_name_pattern=":"
+    )
+
+    recording = capture(subject)
+
+    assert recording["lag_patterns"] == {}
+    assert recording["sap_patterns"]["capture-vendor"] == ":"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "path,field", [("devices/5501", "devices"), ("devices/5501/ports", "ports"), ("inventory/5501/all", "inventory")]
+)
+def test_capture_requires_success_envelopes_for_its_structural_sources(live_librenms, path, field):
+    subject = seed_mapping(make_device("capture-success-envelope"), "default", own=5501)
+    serve(live_librenms.server)
+    body = {field: [{"device_id": 5501, "os": "capture-test"}]} if field == "devices" else {field: []}
+    live_librenms.server.register(f"/api/v0/{path}", body)
+    with pytest.raises(RuntimeError, match=path):
+        capture(subject)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("oob_id", [5501, "5501"])
+def test_capture_of_a_self_link_preserves_host_ports_without_an_oob_stamp(live_librenms, oob_id):
+    subject = seed_mapping(make_device("capture-self-oob"), "default", own=5501, oob=oob_id)
+    serve(live_librenms.server)
+
+    recording = capture(subject)
+
+    assert "oob_id" not in recording["meta"]
+    assert recording["responses"]["GET /api/v0/devices/5501/ports"]["ports"] == [
+        {"port_id": 7, "ifName": "eth3", "ifType": "ethernetCsmacd"}
+    ]
+    requests = [
+        request
+        for request in live_librenms.server.requests
+        if request["path"] == "/api/v0/devices/5501/ports" and request["query"].get("with") == ["vlans"]
+    ]
+    assert len(requests) == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("status", [200, 503])
+def test_capture_excludes_neighbour_port_tables(live_librenms, status):
+    subject = seed_mapping(make_device("capture-neighbour-table"), "default", own=5501)
+    serve(live_librenms.server)
+    live_librenms.server.register(
+        "/api/v0/devices/5501/links",
+        {"status": "ok", "links": [{"local_port_id": 7, "remote_device_id": 5503, "remote_port_id": 17}]},
+    )
+    live_librenms.server.register(
+        "/api/v0/devices/5503/ports",
+        {"status": "ok" if status == 200 else "error", "ports": [{"port_id": 17, "ifName": "neighbour-only"}]},
+        status=status,
+    )
+
+    recording = capture(subject)
+
+    assert "/api/v0/devices/5503/ports" in [entry["path"] for entry in live_librenms.server.requests]
+    assert "GET /api/v0/devices/5503/ports" not in recording["responses"]
+    assert "GET /api/v0/devices/5501/ports" in recording["responses"]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("explicit_sap", [False, True])
+def test_recording_assessment_preserves_unnamed_os_patterns(live_librenms, recording_server, explicit_sap):
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import recording_interface_assessment
+
+    subject = seed_mapping(make_device("recording-os-patterns"), "default", own=5501)
+    serve(live_librenms.server, os_name="pattern-test")
+    pattern = PortStackLagPattern.objects.create(librenms_os="pattern-test", lag_name_pattern=r"^Bundle\d+$")
+    recording = capture(subject)
+    recording["lag_patterns"] = {}
+    recording["sap_patterns"] = {"pattern-test": ":"} if explicit_sap else {}
+    _server, api = recording_server(recording)
+
+    recording_interface_assessment(api, recording)
+
+    pattern.refresh_from_db()
+    if explicit_sap:
+        assert all(regex.search("") is None for regex in PortStackLagPattern.compiled_patterns_for_os("pattern-test"))
+    else:
+        assert pattern.lag_name_pattern == r"^Bundle\d+$"
+
+
+@pytest.mark.django_db
+def test_capture_preserves_device_facts_needed_by_replay(live_librenms, recording_server):
+    subject = seed_mapping(make_device("capture-device-replay-facts"), "default", own=5501)
+    serve(live_librenms.server)
+    kept = {"device_id": 5501, "os": "capture-test", "serial": "EXAMPLE-MASTER", "poller_group": 7}
+    live_librenms.server.register(
+        "/api/v0/devices/5501",
+        {"status": "ok", "devices": [{**kept, "snmp_community": "example-secret"}]},
+    )
+
+    recording = capture(subject)
+    _server, api = recording_server(recording)
+
+    assert recording["responses"]["GET /api/v0/devices/5501"]["devices"] == [kept]
+    assert api.get_device_info(5501, use_cache=False) == (True, kept)
+
+
+@pytest.mark.django_db
+def test_a_missing_transceiver_route_is_captured_and_replays_the_same_modules(
+    live_librenms, configure_librenms, recording_server
+):
+    from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
+
+    subject = seed_mapping(make_device("capture-no-transceiver-route"), "default", own=5501)
+    serve(live_librenms.server)
+    missing = {"status": "error", "message": "Not Found"}
+    live_librenms.server.register("/api/v0/devices/5501/transceivers", missing, status=404)
+    before = assess_modules(acquire(subject, server_key="default", resources=RESOURCES), subject=subject)
+
+    recording = capture(subject)
+    replay, replay_api = recording_server(recording)
+    configure_librenms(
+        {"default": {"librenms_url": replay.url, "api_token": replay_api.headers["X-Auth-Token"], "verify_ssl": False}}
+    )
+
+    assert unwrap_response(recording["responses"]["GET /api/v0/devices/5501/transceivers"]) == (404, missing)
+    assert before["inventory"]
+    assert assess_modules(acquire(subject, server_key="default", resources=RESOURCES), subject=subject) == before

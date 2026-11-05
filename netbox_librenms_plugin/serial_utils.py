@@ -185,8 +185,7 @@ def map_sensors_to_serial_links(
     are also skipped.
 
     Args:
-        sensors: Raw sensor dicts as returned by
-            ``LibreNMSAPI.get_serial_port_sensors()``.
+        sensors: Projected serial sensor dicts from source acquisition.
         port_name_pattern: Fallback template for the local ConsoleServerPort name when a type has
             no configured pattern.  ``{N}`` is replaced with the port number.  Default ``"ttyS{N}"``.
         device_id: NetBox device id for the host these serial ports belong to.

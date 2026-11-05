@@ -12,7 +12,8 @@ the plugin-config lookup is stubbed. VC detection reads the serial normalization
 rules and the member-name pattern, so the outcome tests use the test database.
 """
 
-from functools import partial
+from netbox_librenms_plugin.tests.source_snapshot_helpers import acquire_ports_record
+
 from io import StringIO
 import json
 import re
@@ -27,10 +28,8 @@ from netbox_librenms_plugin.constants import (
 )
 from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
 from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
-from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns, compile_sap_patterns
-from netbox_librenms_plugin.interface_relationships import resolve_port_relationships
 
-from netbox_librenms_plugin.tests.conftest import name_rules, run_in_threads
+from netbox_librenms_plugin.tests.conftest import run_in_threads
 from netbox_librenms_plugin.tests.recordings import iter_recording_paths, iter_recordings
 
 _RECORDINGS = iter_recordings()
@@ -40,61 +39,45 @@ def _ids(recording):
     return recording.get("name", "unnamed")
 
 
-def read_ip_addresses_as_acquisition(api, device_id):
-    """Read the IP route with the request and the contract that acquisition uses; return ``(obtained, rows)``."""
-    from netbox_librenms_plugin.acquisition import responses
-    from netbox_librenms_plugin.acquisition.snapshot import Outcome
-
-    endpoint = responses.ip_addresses(device_id)
-    decoded = endpoint.decode(*api.get_response(endpoint.request.path, dict(endpoint.request.params)))
-    if decoded.outcome is not Outcome.OBTAINED:
-        return False, decoded.reason
-    return True, decoded.value
-
-
-def read_links_as_acquisition(api, device_id):
-    """Read links through the request and contract used by acquisition."""
-    from netbox_librenms_plugin.acquisition import responses
-    from netbox_librenms_plugin.acquisition.snapshot import Outcome
-
-    endpoint = responses.links(device_id)
-    decoded = endpoint.decode(*api.get_response(endpoint.request.path))
-    return (True, decoded.value) if decoded.outcome is Outcome.OBTAINED else (False, decoded.reason)
-
-
 def test_recordings_present():
     """The recordings directory must contain at least one scenario."""
     assert iter_recording_paths(), "no recording JSON files found in data_shapes/recordings/"
 
 
+@pytest.mark.django_db
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
 def test_bundled_empty_responses_replay_as_success(recording_server, recording):
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.acquisition.snapshot import Outcome
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import acquire_recording
+
     _server, api = recording_server(recording)
-    readers = {
-        f"GET /api/v0/devices/{recording['device_id']}/links": (partial(read_links_as_acquisition, api), "links"),
-        f"GET /api/v0/devices/{recording['device_id']}/ip": (
-            partial(read_ip_addresses_as_acquisition, api),
-            "addresses",
-        ),
-        "GET /api/v0/routing/vrf": (api.get_device_vrfs, "vrfs"),
-        f"GET /api/v0/inventory/{recording['device_id']}/all": (api.get_device_inventory, "inventory"),
+    snapshot, _subject = acquire_recording(
+        api,
+        recording,
+        [Resource.INTERFACES, Resource.IP_ADDRESSES, Resource.CABLES, Resource.MODULES],
+        include_serial=True,
+    )
+    device_id = recording["device_id"]
+    parts = {
+        f"GET /api/v0/devices/{device_id}/links": (Resource.CABLES, "links", "links"),
+        f"GET /api/v0/devices/{device_id}/ip": (Resource.IP_ADDRESSES, "addresses", "addresses"),
+        "GET /api/v0/routing/vrf": (Resource.IP_ADDRESSES, "vrfs", "vrfs"),
+        f"GET /api/v0/inventory/{device_id}/all": (Resource.MODULES, "inventory", "inventory"),
+        "GET /api/v0/resources/sensors": (Resource.CABLES, "sensors", "sensors"),
     }
-    for route, (reader, field) in readers.items():
+    for route, (resource, part, field) in parts.items():
         if route not in recording["responses"]:
             continue
         status, body = unwrap_response(recording["responses"][route])
+        record = snapshot.record(resource, part)
+        if record.outcome is Outcome.NOT_APPLICABLE:
+            continue
         if status == 404 or (status == 200 and body.get(field) == []):
-            success, result = reader(recording["device_id"])
-            assert success, (route, result)
-            assert result == []
-    route = "GET /api/v0/resources/sensors"
-    if route in recording["responses"]:
-        status, body = unwrap_response(recording["responses"][route])
-        if status == 404 or (status == 200 and body.get("sensors") == []):
-            assert api.get_serial_port_sensors(recording["device_id"], sensor_types={"serial": "Port {N}"}) == (
-                True,
-                [],
-            )
+            if resource is Resource.MODULES and status == 404:
+                assert record.outcome is Outcome.FAILED
+            else:
+                assert snapshot.value(resource, part) == []
 
 
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
@@ -437,13 +420,15 @@ def test_replay_matches_request_with_blank_valued_query_param(recording_server):
     assert b'"port_id"' in body
 
 
+@pytest.mark.django_db
 def test_get_ports_real_fetch_and_parse_via_recording(recording_server):
-    """Real-HTTP de-mock demo: get_ports() fetches and parses a real captured recording through the live LibreNMSAPI client (real `requests` → MockLibreNMSServer → real parse), so a regression in the request build or response parsing is caught — unlike test_librenms_api.py::test_get_ports_all, which mocks requests.get and feeds canned JSON straight back."""
+    """Replay a recording through the real client's request and response parser."""
     from netbox_librenms_plugin.tests.recordings import load_recording
 
     recording = load_recording("cisco-lag-and-subinterface")
     _server, api = recording_server(recording)
-    success, data = api.get_ports(device_id=recording["device_id"])
+    port_record = acquire_ports_record(api, recording["device_id"])
+    success, data = port_record.obtained, port_record.body
 
     assert success is True
     ports = data.get("ports")
@@ -709,16 +694,11 @@ def _assert_virtual_chassis(api, device_id, expected):
 
 
 def _assert_port_relationships(api, device_id, recording, expected):
-    ok_ports, ports_data = api.get_ports(device_id)
-    assert ok_ports, ports_data
-    ok_stack, port_stack = api.get_port_stack(device_id)
-    assert ok_stack, port_stack
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import recording_interface_assessment
 
-    relationships = resolve_port_relationships(
-        ports_data["ports"],
-        port_stack,
-        **name_rules(lag=compile_lag_patterns(recording), sap=compile_sap_patterns(recording)),
-    )
+    relationships = recording_interface_assessment(api, {"device_id": device_id, **recording})[
+        "port_stack_relationships"
+    ]
 
     # port_stack and ports are independent payloads whose ids may differ in type,
     # so compare both sides normalised to str -- matching how production keys lookups.
@@ -730,16 +710,20 @@ def _assert_port_relationships(api, device_id, recording, expected):
 
 
 def _assert_transceivers(api, device_id, expected):
-    ok, transceivers = api.get_device_transceivers(device_id)
-    assert ok, transceivers
-    assert len(transceivers) == expected["count"]
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import acquire_recording
+
+    snapshot, _subject = acquire_recording(api, {"device_id": device_id}, [Resource.MODULES])
+    assert len(snapshot.value(Resource.MODULES, "transceivers")) == expected["count"]
 
 
 def _assert_serial_ports(api, device_id, expected, sensor_types):
     """Verify serial rows use the recording's serial_type_patterns map instead of live database state."""
     from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 
-    ok, sensors = api.get_serial_port_sensors(device_id, sensor_types=sensor_types)
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import recording_serial_projection
+
+    ok, sensors = recording_serial_projection(api, {"device_id": device_id}, sensor_types=sensor_types)
     assert ok, sensors
     rows = map_sensors_to_serial_links(sensors, device_id=device_id, sensor_types=sensor_types)
     assert len(rows) == expected["count"]
@@ -752,7 +736,8 @@ def _assert_oob(api, recording, expected):
     # `(meta or {})` not `meta, {}`: an explicit "meta": null returns None and .get would crash.
     oob_id = (recording.get("meta") or {}).get("oob_id")
     assert oob_id is not None, f"{recording['name']} declares oob outcome but no meta.oob_id"
-    ok, oob_data = api.get_ports(oob_id)
+    port_record = acquire_ports_record(api, oob_id)
+    ok, oob_data = port_record.obtained, port_record.body
     assert ok, oob_data
     assert len(oob_data["ports"]) == expected["controller_ports"]
 
@@ -761,6 +746,7 @@ def _assert_oob(api, recording, expected):
 def test_assert_port_relationships_tolerates_explicit_null_meta(live_librenms):
     """An explicit meta: null recording must normalize to {} in the replay assert, not AttributeError."""
     live_librenms.server.ports_response(device_id=1, ports=[])
+    live_librenms.server.register("/api/v0/devices/1/port_stack", {"status": "ok", "mappings": []})
     # "meta": null is a shape recording_schema_errors() accepts; os is optional. The helper must
     # read (meta or {}).get("os") — reading meta.get directly would AttributeError on None.
     recording = {"name": "null-meta", "meta": None, "lag_patterns": {}}
@@ -768,10 +754,8 @@ def test_assert_port_relationships_tolerates_explicit_null_meta(live_librenms):
 
 
 @pytest.mark.django_db
-def test_assert_port_relationships_tolerates_explicit_null_lag_patterns(live_librenms):
-    """An explicit lag_patterns: null recording must not load live database patterns."""
-    # Without an OS, a database read applies every stored rule: the seeded ios ^Po\d+$ LAG rule
-    # and the seeded timos ":" SAP rule.
+def test_null_recorded_patterns_keep_the_unknown_os_sap_fallback(live_librenms):
+    """An unknown OS keeps the production SAP fallback when a recording names no rules."""
     live_librenms.server.ports_response(
         device_id=1,
         ports=[
@@ -792,10 +776,13 @@ def test_assert_port_relationships_tolerates_explicit_null_lag_patterns(live_lib
         },
         method="GET",
     )
+    live_librenms.server.register(
+        "/api/v0/devices/1", {"status": "ok", "devices": [{"device_id": 1, "os": "recording-test"}]}
+    )
     recording = {"name": "null-lag-patterns", "meta": {}, "lag_patterns": None}
 
-    # Po1 is no LAG without the stored LAG rule, and lag1:0 stays a member without the stored SAP rule.
-    _assert_port_relationships(live_librenms.api, 1, recording, expected={"lag_members": {30: 40}})
+    # The unknown OS has no LAG rule and retains the stored SAP fallback.
+    _assert_port_relationships(live_librenms.api, 1, recording, expected={"lag_members": {}})
 
 
 @pytest.mark.django_db
