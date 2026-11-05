@@ -211,9 +211,13 @@ TAB_SPECS = {
 }
 
 # Web-transport state that a tab keeps next to its snapshot, and that goes with the snapshot.
-_LAST_FETCHED_TABS = frozenset({SyncTab.INTERFACES, SyncTab.VLANS})
+_LAST_FETCHED_TABS = frozenset({SyncTab.INTERFACES})
 _VLAN_OVERRIDE_TABS = frozenset({SyncTab.INTERFACES})
 _CABLE_PICK_TABS = frozenset({SyncTab.CABLES})
+
+
+# The resources whose snapshot source_cache stores; the other tabs still store their own payload.
+_ACQUIRED_RESOURCES = frozenset({Resource.IP_ADDRESSES, Resource.VLANS})
 
 
 def _shares_vc_owner(tab):
@@ -748,6 +752,11 @@ class SyncCacheConsistency:
 
     def _snapshot_readable(self, tab, server_key):
         """Return whether the tab's snapshot exists in a form its reader accepts."""
+        resource = TAB_SPECS[tab].resource
+        if resource in _ACQUIRED_RESOURCES:
+            from netbox_librenms_plugin import source_cache
+
+            return source_cache.read(self.subject, resource, server_key) is not None
         key = self.snapshot_key(tab, server_key)
         if tab == SyncTab.MODULES:
             payload = cache.get(key)

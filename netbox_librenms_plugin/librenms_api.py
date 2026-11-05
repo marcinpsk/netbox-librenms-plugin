@@ -11,7 +11,6 @@ from django.db import transaction
 from netbox.plugins import get_plugin_config
 
 from netbox_librenms_plugin.constants import (
-    LIBRENMS_NO_IPS_MESSAGE,
     LIBRENMS_NO_LINKS_MESSAGES,
     LIBRENMS_NO_SENSORS_MESSAGE,
     LIBRENMS_NO_VRFS_MESSAGE,
@@ -751,21 +750,21 @@ class LibreNMSAPI:
             # A 2xx whose body carries no usable device is treated as absent, as before.
             return False, None
 
-    def _raw_get(self, path: str, params: dict | None = None) -> tuple[int, object]:
+    def get_response(self, path: str, params: dict | None = None) -> tuple[int | None, object]:
         """
-        Issue a raw GET against the LibreNMS API and return ``(status_code, body)`` verbatim.
+        Issue a GET against the LibreNMS API and return ``(status_code, body)`` verbatim.
 
         Unlike the typed ``get_*`` helpers this performs no shape validation or normalisation:
-        it returns the parsed JSON body exactly as LibreNMS sent it so the data-shape capture
-        tooling records the real wire shape. A transport error yields ``(0, None)`` and a
-        non-JSON body yields ``(status_code, None)``.
+        it returns the parsed JSON body exactly as LibreNMS sent it, for source acquisition and the
+        data-shape capture. A transport error yields ``(None, None)`` and a non-JSON body yields
+        ``(status_code, None)``.
 
         Args:
             path (str): API path relative to ``/api/v0/`` (e.g. ``"devices/1000"``).
             params (dict | None): Optional query parameters.
 
         Returns:
-            tuple: ``(status_code, body)`` where body is the parsed JSON (dict/list/scalar) or None.
+            tuple: ``(status_code, body)``; the status is None when no HTTP response arrived.
 
         """
         url = f"{self.librenms_url}/api/v0/{path.lstrip('/')}"
@@ -778,7 +777,7 @@ class LibreNMSAPI:
                 verify=self.verify_ssl,
             )
         except requests.exceptions.RequestException:
-            return 0, None
+            return None, None
         try:
             body = response.json()
         except ValueError:
@@ -1136,47 +1135,6 @@ class LibreNMSAPI:
                 return False, message if isinstance(message, str) and message else str(e)
             return False, str(e)
         except requests.exceptions.RequestException as e:
-            return False, str(e)
-
-    def get_device_ips(self, device_id):
-        """
-        Fetch IP address data for a specific device from LibreNMS.
-
-        Args:
-            device_id: LibreNMS Device ID
-
-        Returns:
-            tuple: (success: bool, data: dict)
-
-        """
-        try:
-            response = _session.get(
-                f"{self.librenms_url}/api/v0/devices/{device_id}/ip",
-                headers=self.headers,
-                timeout=DEFAULT_API_TIMEOUT,
-                verify=self.verify_ssl,
-            )
-            response.raise_for_status()
-            data = response.json()
-            addresses = data.get("addresses") if isinstance(data, dict) else None
-            if not isinstance(addresses, list):
-                message = data.get("message") if isinstance(data, dict) else None
-                return False, message or "Unexpected response format: 'addresses' must be a list"
-            return True, addresses
-        except requests.exceptions.HTTPError as e:
-            # LibreNMS returns this specific HTTP 404 for an existing device with no IP
-            # addresses. Other 404s (for example a stale device id) remain real failures.
-            if e.response is not None and e.response.status_code == 404:
-                try:
-                    error_data = e.response.json()
-                except ValueError:
-                    error_data = None
-                message = error_data.get("message") if isinstance(error_data, dict) else None
-                if isinstance(message, str) and LIBRENMS_NO_IPS_MESSAGE in message.lower():
-                    return True, []
-                return False, message or str(e)
-            return False, str(e)
-        except (requests.exceptions.RequestException, ValueError) as e:
             return False, str(e)
 
     def get_device_vrfs(self, device_id):
@@ -1608,64 +1566,6 @@ class LibreNMSAPI:
     # =========================================================================
     # VLAN Methods
     # =========================================================================
-
-    def get_device_vlans(self, device_id: int) -> tuple[bool, list | str]:
-        """
-        Fetch all VLANs configured on a device using the resources endpoint.
-
-        This method uses /api/v0/resources/vlans which includes the vlan_id
-        primary key, unlike /api/v0/devices/{device_id}/vlans which omits it.
-
-        Route: /api/v0/resources/vlans
-
-        Args:
-            device_id: LibreNMS device ID
-
-        Returns:
-            tuple: (success: bool, data: list of VLAN dicts or error string)
-
-        Example VLAN:
-            {
-                "vlan_id": 123,
-                "device_id": 1,
-                "vlan_vlan": 50,
-                "vlan_domain": 1,
-                "vlan_name": "ORG_DATA",
-                "vlan_type": "ethernet",
-                "vlan_state": 1
-            }
-
-        """
-        try:
-            response = _session.get(
-                f"{self.librenms_url}/api/v0/resources/vlans",
-                headers=self.headers,
-                timeout=DEFAULT_API_TIMEOUT,
-                verify=self.verify_ssl,
-            )
-            response.raise_for_status()
-
-            result = response.json()
-            if isinstance(result, dict) and result.get("status") == "ok":
-                all_vlans = result.get("vlans")
-                if not isinstance(all_vlans, list):
-                    msg = result.get("message")
-                    return False, msg or "Unexpected response format: missing 'vlans' list"
-                if not all(isinstance(v, dict) for v in all_vlans):
-                    return False, "Unexpected response format: invalid item shape in 'vlans'"
-                # Filter VLANs by device_id since resources endpoint returns all VLANs
-                device_vlans = [v for v in all_vlans if str(v.get("device_id")) == str(device_id)]
-                return True, device_vlans
-            if isinstance(result, dict):
-                return False, result.get("message") or "Unexpected response format"
-            return False, "Unexpected response format"
-
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 404:
-                return False, "VLANs resource not found"
-            return False, f"HTTP error: {str(e)}"
-        except (requests.exceptions.RequestException, ValueError) as e:
-            return False, f"Error connecting to LibreNMS: {str(e)}"
 
     def get_serial_port_sensors(self, device_id: int, sensor_types: dict | None = None) -> tuple[bool, list | str]:
         """

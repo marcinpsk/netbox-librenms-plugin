@@ -5,7 +5,6 @@ import netaddr
 from dcim.models import Device, Interface, VirtualChassis
 from django.contrib import messages
 from django.core import signing
-from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import Q
@@ -16,12 +15,13 @@ from django.views import View
 from ipam.models import VRF, IPAddress
 from virtualization.models import VirtualMachine, VMInterface
 
-from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE, is_supported_interface_name_field
+from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin.acquisition.registry import Resource
+from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.interface_rules import PortSyncBlocked, interface_rules_for_request
 from netbox_librenms_plugin.interface_sync import resolve_or_create_interface_from_port
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix
 from netbox_librenms_plugin.ip_rules import ip_rules_for_request
-from netbox_librenms_plugin.librenms_api import LibreNMSIDConflictError
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.server_mappings import name_match_may_be_port, read_mapping
 from netbox_librenms_plugin.sync_cache import (
@@ -49,7 +49,11 @@ from netbox_librenms_plugin.utils import (
     syncable_interface_name,
     exception_text_for,
 )
-from netbox_librenms_plugin.views.base.ip_addresses_view import ip_assignment_ports, ip_interface_scope
+from netbox_librenms_plugin.views.base.ip_addresses_view import (
+    assess_ip_snapshot,
+    ip_assignment_ports,
+    ip_interface_scope,
+)
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -178,18 +182,12 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         except (VRF.DoesNotExist, TypeError, ValueError):
             raise ValueError("Selected VRF is no longer available or you do not have permission to view it.") from None
 
-    def get_cached_ip_snapshot(self, obj, *, require_create_metadata=False):
-        """Return the cached LibreNMS IP snapshot when it satisfies the requested contract."""
-        server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
-        cached_data = cache.get(self.get_cache_key(obj, "ip_addresses", server_key))
-        if not isinstance(cached_data, dict) or not isinstance(cached_data.get("ip_addresses"), list):
+    def assess_cached_snapshot(self, obj):
+        """Return the stored IP snapshot assessed for the request user, or None when none is stored."""
+        snapshot = source_cache.read(obj, Resource.IP_ADDRESSES, self._post_server_key)
+        if snapshot is None:
             return None
-        if require_create_metadata and (
-            not isinstance(cached_data.get("ports_by_id"), dict)
-            or not is_supported_interface_name_field(cached_data.get("interface_name_field"))
-        ):
-            return None
-        return cached_data
+        return assess_ip_snapshot(self.request, obj, snapshot, self._post_server_key)
 
     @staticmethod
     def _owner_action(request):
@@ -243,26 +241,20 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
         obj = self.get_object(object_type, pk, self._owner_action(request))
 
-        # Rebind the cached API client to the POSTed server so live lookups (e.g. the
-        # management-IP fetch for Set-Primary-IP) hit the same LibreNMS instance the cached
-        # rows came from. The key comes from request POST, so a stale/tampered request could
-        # carry an unknown key — surface a user-facing error instead of a 500. (Uses the
-        # shared mixin helper, which also resolves/normalizes the key.)
+        # The POSTed server scopes the snapshot. A stale or tampered request can carry an
+        # unknown key, so answer with a user-facing error instead of a 500.
         post_server_key = self.rebind_api_for_posted_server(request.POST)
         if post_server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return self.redirect_to_ip_tab(request, obj)
         self._post_server_key = post_server_key
 
-        cached_snapshot = self.get_cached_ip_snapshot(
-            obj,
-            require_create_metadata=self._create_missing_interfaces(request),
-        )
+        assessment = self.assess_cached_snapshot(obj)
 
         # A refresh that finds no IPs still writes a valid snapshot, so only a genuine miss (None)
         # is a cache miss. An empty list is a real result and goes through the selection path,
         # which reports that nothing was selected.
-        if cached_snapshot is None:
+        if assessment is None:
             if response := render_sync_cache_miss(
                 request,
                 "IP Addresses",
@@ -271,7 +263,6 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 return response
             messages.error(request, "Cache has expired. Please refresh the IP data.")
             return self.redirect_to_ip_tab(request, obj)
-        cached_ips = cached_snapshot["ip_addresses"]
 
         force_intents, intent_errors = self._load_force_intents(request, obj, object_type, post_server_key)
         if request.POST.get("force_all"):
@@ -299,21 +290,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             messages.error(request, "No IP addresses selected for synchronization.")
             return self.redirect_to_ip_tab(request, obj)
 
-        try:
-            results = self.process_ip_sync(
-                request,
-                selected_ips,
-                cached_ips,
-                obj,
-                object_type,
-                force_intents=force_intents,
-                cached_ports_by_id=cached_snapshot.get("ports_by_id") or {},
-                bound_ports_by_id=cached_snapshot.get("bound_ports_by_id") or {},
-                interface_name_field=cached_snapshot.get("interface_name_field"),
-            )
-        except LibreNMSIDConflictError as exc:
-            messages.error(request, self.scoped_lookup_message(exc))
-            return self.redirect_to_ip_tab(request, obj)
+        results = self.process_ip_sync(request, selected_ips, assessment, obj, object_type, force_intents=force_intents)
         self.display_sync_results(request, results)
         for error in dict.fromkeys(intent_errors.values()):
             messages.error(request, error)
@@ -393,59 +370,6 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 )
         return intents, errors
 
-    def get_management_ip(self, obj):
-        """
-        Return the LibreNMS management/polling IP for *obj*, or None.
-
-        Used to decide which synced IP (if any) should become the object's
-        Primary IP. Transport and response failures yield None. An assignment
-        conflict stops the sync so the caller can report its conflicting owner.
-
-        Args:
-            obj (Device | VirtualMachine): The object whose management IP to read.
-
-        Returns:
-            str | None: The management/polling IP, or None if the lookup fails or has no result.
-
-        Raises:
-            LibreNMSIDConflictError: If discovery finds an ID owned by another object.
-            TransactionConflict: If another operation holds the claim that discovery needs.
-
-        """
-        try:
-            librenms_id, lookup_error = self.resolve_librenms_id(obj)
-            if lookup_error is not None:
-                # Carry the conflicting object across the re-raise, or the render site below can
-                # no longer tell a permitted viewer which object holds the ID.
-                raise LibreNMSIDConflictError(
-                    lookup_error.message,
-                    conflict=lookup_error.conflict,
-                    named_message=lookup_error.named_message,
-                )
-            if not librenms_id:
-                return None
-            # get_live_device_info reads live (uncached): this feeds the Primary-IP write decision,
-            # so it must read the current management IP, not a stale sync-tab snapshot.
-            success, info = self.get_live_device_info(librenms_id)
-            # get_device_info returns (True, ...) only after its own dict check, so a truthy
-            # success already guarantees a dict payload here.
-            if not success:
-                return None
-            ip = info.get("ip")
-            # Guard the type explicitly (like _resolve_management_ip in ip_addresses_view) rather
-            # than letting a non-string ip raise AttributeError into the broad except below: a
-            # malformed non-string ip is "no management IP", not an unexpected failure to swallow.
-            if not isinstance(ip, str):
-                return None
-            return ip.strip() or None
-        except LibreNMSIDConflictError:
-            raise
-        except Exception as exc:
-            if classify_conflict(exc):
-                raise
-            logger.warning("Management IP lookup failed for %s: %s", obj, exc, exc_info=True)
-            return None
-
     @staticmethod
     def _same_host(a, b):
         """Report whether two address strings refer to the same host IP."""
@@ -455,8 +379,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         """
         Index the object's *current* interfaces by LibreNMS port id and by name.
 
-        Used to re-resolve the target interface at sync time instead of trusting the cached
-        ``interface_url`` (see ``_match_interface``).
+        The sync adds each interface it creates to these maps, so a later row of the batch
+        resolves to it (see ``_match_interface``).
 
         For a Device in a Virtual Chassis, authorized member interfaces are indexed (not just the
         viewed member's), matching the shared stable-ID interface resolver:
@@ -471,36 +395,25 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             server_key (str): LibreNMS server key scoping the per-server librenms_id lookup.
 
         Returns:
-            tuple[dict, dict, dict]: The (by_librenms_id, by_name, by_pk) maps; an ambiguous
-                id/name key maps to None. ``by_pk`` keys the same interface set by string PK so a
-                cached ``interface_url`` (which survives a rename) can still resolve the target.
+            tuple[dict, dict]: The (by_librenms_id, by_name) maps; an ambiguous id/name key maps
+                to None.
 
         """
         _owners, interfaces = ip_interface_scope(self, obj)
         return index_ip_source_interfaces(interfaces, server_key, obj.pk if isinstance(obj, Device) else None)
 
     @staticmethod
-    def _match_interface(ip_data, by_librenms_id, by_name, by_pk=None, *, server_key):
+    def _match_interface(ip_data, by_librenms_id, by_name, *, server_key):
         """
-        Resolve the NetBox interface for a cached IP row against current state.
+        Resolve the NetBox interface of an assessed IP row against the sync's interface maps.
 
-        The cached ``interface_url`` is enrichment captured when the rows were fetched, so an
-        interface synced *afterwards* is missed and the sync would wrongly report "no interface"
-        until a manual cache refresh. The rendered table re-enriches on every load (so it already
-        shows the link); matching here on the stable LibreNMS port id (preferred), then interface
-        name, then the cached ``interface_url`` PK keeps the sync consistent with what the user
-        sees. The PK fallback is what recovers a *renamed* interface that has no stored port id
-        (e.g. the common VMInterface case): its name no longer matches the cached LibreNMS name,
-        but the PK in ``interface_url`` survives the rename — without it the row is silently
-        skipped (regression vs. the pre-refactor code that resolved purely by ``interface_url``).
+        The rule is the table's rule: the stable LibreNMS port id first, then the interface name.
+        The maps also hold the interfaces that this batch created.
 
         Args:
-            ip_data (dict): The cached IP row (carries ``port_id``, ``interface_name`` and
-                ``interface_url``).
+            ip_data (dict): The assessed IP row (carries ``port_id`` and ``interface_name``).
             by_librenms_id (dict): Current interfaces keyed by LibreNMS port id (str).
             by_name (dict): Current interfaces keyed by name.
-            by_pk (dict | None): Current interfaces keyed by string PK, scoped to the object's own
-                (and VC members') interfaces; used for the rename-safe ``interface_url`` fallback.
             server_key (str): The server the maps were built for; a name or PK match bound to a
                 different port on it is refused.
 
@@ -508,7 +421,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             Interface | VMInterface | None: The matched interface, or None if none resolves.
 
         """
-        return resolve_ip_source_interface(ip_data, by_librenms_id, by_name, by_pk, server_key=server_key)
+        return resolve_ip_source_interface(ip_data, by_librenms_id, by_name, server_key=server_key)
 
     def _lock_interface_owner_scope(self, obj):
         """Lock the current interface-owner scope in the shared chassis-first order."""
@@ -573,9 +486,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         interfaces_by_librenms_id,
         interface_creation_state=None,
     ):
-        """Create one missing interface from the cached port that owns an IP row."""
-        if not is_supported_interface_name_field(interface_name_field):
-            raise ValueError("The cached interface naming field is missing or invalid. Refresh the IP data.")
+        """Create one missing interface from the snapshot port that owns an IP row."""
         port = ip_row_port_record(cached_ports_by_id, ip_data.get("port_id"))
         if port is None or port.get("_source") == OOB_INVENTORY_SOURCE:
             raise ValueError("The cached LibreNMS port is missing or ambiguous. Refresh the IP data.")
@@ -732,8 +643,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
         Args:
             request (HttpRequest): The request that contains the VRF selections.
-            selected_ips (list[str]): The selected cached IP row identifiers.
-            cached_index (dict[str, dict]): The cached rows indexed by canonical CIDR.
+            selected_ips (list[str]): The selected IP row identifiers.
+            cached_index (dict[str, dict]): The assessed rows indexed by canonical CIDR.
             duplicate_cached_rows (set[str]): The canonical row identifiers that occur more than once.
             force_intents (dict[str, dict]): The confirmed IP changes indexed by canonical row identifier.
 
@@ -1053,31 +964,17 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         except IPAddress.DoesNotExist:
             raise ValueError("The existing IP address is no longer available in your change scope.") from None
 
-    def process_ip_sync(
-        self,
-        request,
-        selected_ips,
-        cached_ips,
-        obj,
-        object_type,
-        force_intents=None,
-        cached_ports_by_id=None,
-        interface_name_field=None,
-        bound_ports_by_id=None,
-    ):
+    def process_ip_sync(self, request, selected_ips, assessment, obj, object_type, force_intents=None):
         """Sync selected IP rows in one transaction with per-row savepoints; a lock conflict retries the batch once."""
         return run_transaction(
             lambda: self._process_ip_sync(
                 request,
                 selected_ips,
-                cached_ips,
+                assessment,
                 # Each attempt reads the owner again: a rolled-back attempt leaves its writes on the instance.
                 self.get_object(object_type, obj.pk, self._owner_action(request)),
                 object_type,
                 force_intents=force_intents,
-                cached_ports_by_id=cached_ports_by_id,
-                interface_name_field=interface_name_field,
-                bound_ports_by_id=bound_ports_by_id,
             )
         )
 
@@ -1085,32 +982,25 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         self,
         request,
         selected_ips,
-        cached_ips,
+        assessment,
         obj,
         object_type,
         force_intents=None,
-        cached_ports_by_id=None,
-        interface_name_field=None,
-        bound_ports_by_id=None,
     ):
         """
-        Create or update IP addresses in NetBox from cached LibreNMS data.
+        Create or update IP addresses in NetBox from the assessed snapshot rows.
 
-        When the "set Primary IP" toggle is on, the synced IP that matches the LibreNMS management
+        When the "set Primary IP" toggle is on, the synced IP that matches the snapshot's management
         IP and ends up assigned to one of the object's interfaces is also set as the object's
         ``primary_ip4``/``primary_ip6``.
 
         Args:
             request (HttpRequest): The current HTTP request.
-            selected_ips (list[str]): The selected cached IP row identifiers.
-            cached_ips (list[dict]): The cached LibreNMS IP rows.
+            selected_ips (list[str]): The selected IP row identifiers.
+            assessment (IPAssessment): The snapshot rows and port evidence, assessed for the request user.
             obj (Device | VirtualMachine): The object that owns the target interfaces.
             object_type (str): The synced object type.
             force_intents (dict[str, dict] | None): Confirmed IP changes indexed by canonical row identifier.
-            cached_ports_by_id (dict[str, dict] | None): Cached LibreNMS ports indexed by stable port ID.
-            interface_name_field (str | None): The configured LibreNMS interface name field.
-            bound_ports_by_id (dict[str, dict] | None): Cached records of the ports bound to
-                interfaces in scope; evidence for the interface rules only.
 
         Returns:
             dict: The per-outcome row lists, errors, conflicts, warnings, and batch mutation state.
@@ -1134,24 +1024,21 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         }
         mutated_rows = set()
 
-        set_primary = resolve_set_primary_ip(request)
-        mgmt_ip = self.get_management_ip(obj) if set_primary else None
+        mgmt_ip = (assessment.mgmt_ip or None) if resolve_set_primary_ip(request) else None
         if mgmt_ip and sum(self._same_host(str(row_id).partition("@")[0], mgmt_ip) for row_id in selected_ips) > 1:
             results["warnings"].append(
                 "Primary IP not set: multiple selected source rows match the management IP. Select one row to set it."
             )
             mgmt_ip = None
 
-        # Re-resolve interfaces from current NetBox state (not the cached
-        # interface_url) so an interface synced after these rows were cached is
-        # picked up without a manual cache refresh.
+        # The maps also take the interfaces this sync creates, so later rows resolve to them.
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
-        interfaces_by_librenms_id, interfaces_by_name, interfaces_by_pk = self._build_interface_maps(obj, server_key)
-        cached_index, duplicate_cached_rows = self._cached_ip_index(cached_ips)
+        interfaces_by_librenms_id, interfaces_by_name = self._build_interface_maps(obj, server_key)
+        cached_index, duplicate_cached_rows = self._cached_ip_index(assessment.rows)
         force_intents = force_intents or {}
         create_missing_interfaces = self._create_missing_interfaces(request)
-        cached_ports_by_id = index_ip_port_records(cached_ports_by_id)
-        bound_ports_by_id = index_ip_port_records(bound_ports_by_id)
+        cached_ports_by_id = index_ip_port_records(assessment.ports_by_id)
+        bound_ports_by_id = index_ip_port_records(assessment.bound_ports_by_id)
         interface_creation_state = None
         prelocked_host_locks = self._prelock_ip_hosts(
             request,
@@ -1174,7 +1061,6 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 (
                     dict(interfaces_by_librenms_id),
                     dict(interfaces_by_name),
-                    dict(interfaces_by_pk),
                     (
                         {key: list(value) for key, value in interface_creation_state["interfaces_by_port_id"].items()}
                         if interface_creation_state is not None
@@ -1211,7 +1097,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         _acquire_ip_host_lock(parsed, vrf)
 
                     interface = self._match_interface(
-                        ip_data, interfaces_by_librenms_id, interfaces_by_name, interfaces_by_pk, server_key=server_key
+                        ip_data, interfaces_by_librenms_id, interfaces_by_name, server_key=server_key
                     )
 
                     if interface is None and create_missing_interfaces:
@@ -1219,13 +1105,12 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             obj,
                             ip_data,
                             cached_ports_by_id,
-                            interface_name_field,
+                            assessment.interface_name_field,
                             server_key,
                             interfaces_by_librenms_id,
                             interface_creation_state=interface_creation_state,
                         )
                         interfaces_by_name[interface.name] = interface
-                        interfaces_by_pk[str(interface.pk)] = interface
                         row_mutations.add(row_id)
 
                     if interface is not None:
@@ -1247,7 +1132,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         blocked = interface_rules_for_request(request).first_blocked_port(
                             ip_assignment_ports(
                                 cached_ports_by_id,
-                                bound_ports_by_id or {},
+                                bound_ports_by_id,
                                 ip_data.get("port_id"),
                                 locked_interface,
                                 server_key,
@@ -1333,15 +1218,12 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     (
                         interfaces_by_librenms_id_before,
                         interfaces_by_name_before,
-                        interfaces_by_pk_before,
                         interfaces_by_port_id_before,
                     ) = interface_maps_before_row
                     interfaces_by_librenms_id.clear()
                     interfaces_by_librenms_id.update(interfaces_by_librenms_id_before)
                     interfaces_by_name.clear()
                     interfaces_by_name.update(interfaces_by_name_before)
-                    interfaces_by_pk.clear()
-                    interfaces_by_pk.update(interfaces_by_pk_before)
                     interface_creation_state = interface_creation_state_before_row
                     if interface_creation_state is not None:
                         interface_creation_state["interfaces_by_port_id"].clear()
@@ -1449,7 +1331,7 @@ class CreateVRFFromIPRowView(SyncIPAddressesView):
     Create the NetBox VRF that one IP row's LibreNMS VRF names, when NetBox has none.
 
     Only the row ID comes from the POST. The row and its LibreNMS VRF identity are re-derived from
-    the cached snapshot through the same enrichment the table renders, and a row that does not
+    the stored snapshot through the same assessment the table renders, and a row that does not
     carry ``vrf_create_url`` is refused, so the button and this endpoint cannot disagree. The
     action creates the VRF only: the row's normal suggestion then preselects it for the IP sync.
     """
@@ -1465,7 +1347,7 @@ class CreateVRFFromIPRowView(SyncIPAddressesView):
         return {"POST": [("view", owner_model), ("add", VRF)]}
 
     def post(self, request, object_type, pk):
-        """Create one missing NetBox VRF from a cached IP row's LibreNMS VRF identity."""
+        """Create one missing NetBox VRF from a snapshot IP row's LibreNMS VRF identity."""
         self.required_object_permissions = self._required_permissions(object_type)
         if error := self.require_all_permissions("POST"):
             return error
@@ -1478,12 +1360,12 @@ class CreateVRFFromIPRowView(SyncIPAddressesView):
         if isinstance(obj, Device) and build_migrated_context(obj, server_key).get("migrated_to_marker"):
             messages.error(request, "This LibreNMS source has been migrated and is read-only.")
             return self.redirect_to_ip_tab(request, obj)
-        snapshot = self.get_cached_ip_snapshot(obj)
-        if snapshot is None:
+        assessment = self.assess_cached_snapshot(obj)
+        if assessment is None:
             messages.error(request, "Cache has expired. Please refresh the IP data.")
             return self.redirect_to_ip_tab(request, obj)
         try:
-            identity = self._creatable_vrf_identity(obj, snapshot, request.POST.get("create_vrf"), server_key)
+            identity = self._creatable_vrf_identity(assessment, request.POST.get("create_vrf"))
             with transaction.atomic():
                 vrf = self._create_vrf(request, identity)
         except _VRFCreateRefusedError as refusal:
@@ -1497,15 +1379,13 @@ class CreateVRFFromIPRowView(SyncIPAddressesView):
         )
         return self.redirect_to_ip_tab(request, obj)
 
-    def _creatable_vrf_identity(self, obj, snapshot, raw_row_id, server_key):
+    def _creatable_vrf_identity(self, assessment, raw_row_id):
         """
-        Re-derive the posted row from the cached snapshot and return its LibreNMS VRF identity.
+        Find the posted row among the assessed snapshot rows and return its LibreNMS VRF identity.
 
         Args:
-            obj (Device | VirtualMachine): The page object.
-            snapshot (dict): The cached IP snapshot.
+            assessment (IPAssessment): The stored snapshot, assessed for the request user.
             raw_row_id (str | None): The posted row ID.
-            server_key (str): The active LibreNMS server key.
 
         Returns:
             dict: The row's ``{"name", "rd"}`` LibreNMS VRF identity.
@@ -1515,24 +1395,11 @@ class CreateVRFFromIPRowView(SyncIPAddressesView):
                 ignores its address.
 
         """
-        from netbox_librenms_plugin.views.base.ip_addresses_view import BaseIPAddressTableView
-
         try:
             row_id = normalize_ip_sync_row_id(raw_row_id)
         except ValueError:
             raise _VRFCreateRefusedError("The Create VRF request names no valid IP row.") from None
-        # The table's own enrichment, against current NetBox state; the cached pipeline never reads LibreNMS.
-        table_view = BaseIPAddressTableView()
-        table_view.setup(self.request)
-        rows = table_view.enrich_ip_data(
-            snapshot["ip_addresses"],
-            obj,
-            snapshot.get("interface_name_field"),
-            server_key=server_key,
-            port_data_cache=dict(snapshot.get("ports_by_id") or {}),
-            fetch_vrf_identities=False,
-        )
-        index, duplicates = index_ip_sync_rows(rows)
+        index, duplicates = index_ip_sync_rows(assessment.rows)
         row = index.get(row_id) if row_id not in duplicates else None
         if row is not None and row.get("vrf_create_url"):
             # As in the IP sync: the VRF does not exist yet, so only a mapping without a VRF can match.

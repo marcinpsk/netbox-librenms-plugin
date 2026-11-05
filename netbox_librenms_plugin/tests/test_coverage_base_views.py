@@ -3,6 +3,8 @@
 import pytest
 from django.core.cache import cache, caches
 
+from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.tests.conftest import (
     cable_together,
     make_device,
@@ -11,6 +13,7 @@ from netbox_librenms_plugin.tests.conftest import (
     map_device_to_librenms,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot, stored_source_value
 from netbox_librenms_plugin.tests.view_test_helpers import make_request
 from netbox_librenms_plugin.tests.view_test_helpers import post as view_post
 
@@ -531,7 +534,6 @@ class TestIPAddressHTTPAndORM:
             {"status": "ok", "addresses": addresses},
         )
         port = {"port_id": 101, "ifName": "Ethernet1", "ifDescr": "uplink-1"}
-        live_librenms.server.register("/api/v0/ports/101", {"status": "ok", "port": [port]})
         # The IP tab reads each row's interface name from the device's port list, not per port.
         live_librenms.server.register("/api/v0/devices/42/ports", {"status": "ok", "ports": [port]})
         live_librenms.server.device_info_response(
@@ -540,45 +542,47 @@ class TestIPAddressHTTPAndORM:
             ip="198.18.20.1",
         )
 
-    def test_real_http_rows_match_real_interface_and_ip(self, live_librenms):
+    def _refresh(self, live_librenms, device):
+        """POST the real IP refresh view over the loopback LibreNMS."""
         from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
 
+        request = _request("post", {"server_key": "default", "interface_name_field": "ifName"})
+        view = _view(DeviceIPAddressTableView, live_librenms, request)
+        return view, view_post(view, request, pk=device.pk)
+
+    def _assessed(self, view, device):
+        snapshot = source_cache.read(device, Resource.IP_ADDRESSES, "default")
+        assert snapshot is not None
+        return view.assess_snapshot(device, snapshot, "default")
+
+    def test_real_http_rows_match_real_interface_and_ip(self, live_librenms):
         device, interface = self._device()
         address = make_ip("198.18.20.1/24", assigned_object=interface)
         rows = [{"ip_address": "198.18.20.1", "prefix_length": 24, "port_id": 101}]
         self._register(live_librenms, rows)
-        view = _view(DeviceIPAddressTableView, live_librenms)
 
-        success, raw = view.get_ip_addresses(device)
-        enriched = view.enrich_ip_data(
-            raw,
-            device,
-            "ifName",
-            mgmt_ip="198.18.20.1",
-            server_key="default",
-        )
+        view, response = self._refresh(live_librenms, device)
+        (row,) = self._assessed(view, device).rows
 
-        assert success is True
-        assert enriched[0]["netbox_ip_id"] == address.pk
-        assert enriched[0]["interface_name"] == interface.name
-        assert enriched[0]["status"] == "matched"
-        assert enriched[0]["is_mgmt_ip"] is True
+        assert response.status_code == 200
+        assert row["netbox_ip_id"] == address.pk
+        assert row["interface_name"] == interface.name
+        assert row["status"] == "matched"
+        # The device record of the same refresh names the management IP.
+        assert row["is_mgmt_ip"] is True
 
     def test_new_address_is_a_sync_candidate(self, live_librenms):
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
-
         device, interface = self._device()
         rows = [{"ip_address": "198.18.21.1", "prefix_length": 24, "port_id": 101}]
         self._register(live_librenms, rows)
-        view = _view(DeviceIPAddressTableView, live_librenms)
 
-        success, raw = view.get_ip_addresses(device)
-        enriched = view.enrich_ip_data(raw, device, "ifName", server_key="default")
+        view, response = self._refresh(live_librenms, device)
+        (row,) = self._assessed(view, device).rows
 
-        assert success is True
-        assert enriched[0]["exists"] is False
-        assert enriched[0]["status"] == "sync"
-        assert enriched[0]["interface_url"] == interface.get_absolute_url()
+        assert response.status_code == 200
+        assert row["exists"] is False
+        assert row["status"] == "sync"
+        assert row["interface_url"] == interface.get_absolute_url()
 
     @pytest.mark.parametrize(
         ("entry", "expected"),
@@ -621,62 +625,41 @@ class TestIPAddressHTTPAndORM:
         assert str(reported.address) in prefetched["ip_addresses_map"]
         assert str(unreported.address) not in prefetched["ip_addresses_map"]
 
-    def test_fresh_context_uses_http_then_warm_context_uses_cache(self, live_librenms):
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
-
-        live_librenms.api.cache_timeout = 300
+    def test_a_refresh_uses_http_then_the_render_uses_the_snapshot(self, live_librenms):
         device, _interface = self._device()
         rows = [{"ip_address": "198.18.50.1", "prefix_length": 24, "port_id": 101}]
         self._register(live_librenms, rows)
-        request = _request()
-        view = _view(DeviceIPAddressTableView, live_librenms, request)
 
-        fresh = view._prepare_context(
-            request,
-            device,
-            "ifName",
-            fetch_fresh=True,
-            server_key="default",
-        )
-        request_count = len(live_librenms.server.requests)
-        warm = view._prepare_context(
-            request,
-            device,
-            "ifName",
-            fetch_fresh=False,
-            server_key="default",
-        )
+        view, response = self._refresh(live_librenms, device)
+        refresh_paths = sorted(request["path"] for request in live_librenms.server.requests)
+        live_librenms.server.requests.clear()
+        context = view._prepare_context(view.request, device, "default")
 
-        assert fresh["table"] is not None
-        assert warm["table"] is not None
-        assert len(live_librenms.server.requests) == request_count
-        cached = cache.get(view.get_cache_key(device, "ip_addresses", "default"))
-        assert cached["ports_by_id"]["101"]["ifName"] == "Ethernet1"
-        assert cached["mgmt_ip"] == "198.18.20.1"
+        assert response.status_code == 200
+        assert refresh_paths == ["/api/v0/devices/42", "/api/v0/devices/42/ip", "/api/v0/devices/42/ports"]
+        assert context["table"] is not None
+        assert live_librenms.server.requests == []
+        assert stored_source_value(device, Resource.IP_ADDRESSES, "ports")[0]["ifName"] == "Ethernet1"
+        assert stored_source_value(device, Resource.IP_ADDRESSES, "device")["ip"] == "198.18.20.1"
 
-    def test_a_missing_port_is_cached_as_a_known_absence(self, live_librenms):
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
-
-        live_librenms.api.cache_timeout = 300
+    def test_a_port_the_snapshot_lacks_is_a_known_absence(self, live_librenms):
         device, _interface = self._device()
         rows = [
             {"ip_address": "198.18.50.1", "prefix_length": 24, "port_id": 101},
             {"ip_address": "198.18.51.1", "prefix_length": 24, "port_id": 202},
         ]
         self._register(live_librenms, rows)
-        request = _request()
-        view = _view(DeviceIPAddressTableView, live_librenms, request)
 
-        fresh = view._prepare_context(request, device, "ifName", fetch_fresh=True, server_key="default")
-        request_count = len(live_librenms.server.requests)
-        view.cache_only = True
-        warm = view._prepare_context(request, device, "ifName", fetch_fresh=False, server_key="default")
+        view, response = self._refresh(live_librenms, device)
+        live_librenms.server.requests.clear()
+        context = view._prepare_context(view.request, device, "default")
+        assessment = self._assessed(view, device)
 
-        assert fresh["table"] is not None
-        assert warm["table"] is not None
-        assert len(live_librenms.server.requests) == request_count
-        cached = cache.get(view.get_cache_key(device, "ip_addresses", "default"))
-        assert cached["ports_by_id"]["202"] is None
+        assert response.status_code == 200
+        assert len(list(context["table"].data)) == 2
+        assert live_librenms.server.requests == []
+        assert assessment.ports_by_id["101"]["ifName"] == "Ethernet1"
+        assert assessment.ports_by_id["202"] is None
 
     @pytest.mark.parametrize(
         "body",
@@ -685,32 +668,38 @@ class TestIPAddressHTTPAndORM:
             {"status": "ok", "addresses": [{"ip_address": "198.18.60.1", "prefix_length": 24}]},
         ],
     )
-    def test_bad_http_snapshot_is_not_cached(self, live_librenms, body):
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
-
+    def test_bad_http_snapshot_is_not_stored(self, live_librenms, body):
         device, _interface = self._device()
+        self._register(live_librenms, [])
         live_librenms.server.register("/api/v0/devices/42/ip", body)
-        request = _request()
-        view = _view(DeviceIPAddressTableView, live_librenms, request)
-        cache_key = view.get_cache_key(device, "ip_addresses", "default")
-        cache.set(cache_key, {"old": "snapshot"}, timeout=300)
+        seed_ip_snapshot(device, [ip_address_row("198.18.60.2", 101)], [{"port_id": 101, "ifName": "Ethernet1"}])
 
-        result = view._prepare_context(request, device, "ifName", fetch_fresh=True, server_key="default")
+        view, response = self._refresh(live_librenms, device)
 
-        assert result is None
-        assert cache.get(cache_key) is None
+        assert response.status_code == 200
+        assert source_cache.read(device, Resource.IP_ADDRESSES, "default") is None
+        assert view._prepare_context(view.request, device, "default") is None
 
-    def test_corrupt_cached_snapshot_is_purged(self, live_librenms):
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            ["not", "an", "envelope"],
+            {"ip_addresses": [], "mgmt_ip": "", "ports_by_id": {}, "interface_name_field": "ifName"},
+        ],
+        ids=["not-an-envelope", "old-enriched-payload"],
+    )
+    def test_a_payload_of_another_shape_reads_as_no_snapshot(self, live_librenms, payload):
         from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
 
         device, _interface = self._device()
         request = _request()
         view = _view(DeviceIPAddressTableView, live_librenms, request)
-        cache_key = view.get_cache_key(device, "ip_addresses", "default")
-        cache.set(cache_key, ["not", "an", "envelope"], timeout=300)
+        key = source_cache.snapshot_key(device, Resource.IP_ADDRESSES, "default")
+        cache.set(key, payload, timeout=300)
 
-        assert view._prepare_context(request, device, "ifName", server_key="default") is None
-        assert cache.get(cache_key) is None
+        assert view._prepare_context(request, device, "default") is None
+        # A read never deletes: a concurrent refresh can store a new snapshot under the same key.
+        assert cache.get(key) == payload
 
 
 class TestBaseClassContracts:

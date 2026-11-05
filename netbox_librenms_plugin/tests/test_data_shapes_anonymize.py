@@ -1269,7 +1269,8 @@ def test_response_free_text_is_scrubbed(field):
     [
         ("devices/1/links", "get_device_links", "Device does not have any links"),
         ("devices/1/links", "get_device_links", "Links do not exist"),
-        ("devices/1/ip", "get_device_ips", "Device does not have any ip addresses"),
+        # Acquisition reads this route; no client method does.
+        ("devices/1/ip", "acquisition", "Device does not have any ip addresses"),
         ("routing/vrf", "get_device_vrfs", "VRFs do not exist"),
         ("resources/sensors", "get_serial_port_sensors", "Sensors do not exist"),
     ],
@@ -1277,6 +1278,7 @@ def test_response_free_text_is_scrubbed(field):
 @pytest.mark.parametrize("include_device_name", [False, True])
 def test_anonymization_preserves_empty_response_replay(recording_server, route, method, message, include_device_name):
     from netbox_librenms_plugin.data_shapes.envelope import wrap_response
+    from netbox_librenms_plugin.tests.test_recordings import read_ip_addresses_as_acquisition
 
     if include_device_name:
         message = f"device.example.invalid: {message.upper()}"
@@ -1287,7 +1289,10 @@ def test_anonymization_preserves_empty_response_replay(recording_server, route, 
     for replay in (recording, anonymize_recording(recording)):
         _server, api = recording_server(replay)
         kwargs = {"sensor_types": {"serial": "Port {N}"}} if method == "get_serial_port_sensors" else {}
-        success, result = getattr(api, method)(replay["device_id"], **kwargs)
+        if method == "acquisition":
+            success, result = read_ip_addresses_as_acquisition(api, replay["device_id"])
+        else:
+            success, result = getattr(api, method)(replay["device_id"], **kwargs)
         assert success, result
         assert (result["links"] if method == "get_device_links" else result) == []
     assert "device.example.invalid" not in str(replay)

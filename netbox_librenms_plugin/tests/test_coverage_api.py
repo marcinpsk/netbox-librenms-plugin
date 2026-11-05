@@ -321,24 +321,6 @@ READ_ENDPOINTS = [
         id="get_inventory_filtered",
     ),
     pytest.param(
-        "/api/v0/resources/vlans",
-        lambda api: api.get_device_vlans(1),
-        {
-            "status": "ok",
-            "vlans": [
-                {"device_id": 1, "vlan_vlan": 100},
-                {"device_id": 2, "vlan_vlan": 200},
-            ],
-        },
-        [{"device_id": 1, "vlan_vlan": 100}],
-        {},
-        {
-            404: ("VLANs resource not found",),
-            500: ("HTTP error:", "500"),
-        },
-        id="get_device_vlans",
-    ),
-    pytest.param(
         "/api/v0/devices/1/links",
         lambda api: api.get_device_links(1),
         {"status": "ok", "links": [{"id": 3}]},
@@ -361,18 +343,6 @@ READ_ENDPOINTS = [
             500: ("500", "/api/v0/devices"),
         },
         id="list_devices",
-    ),
-    pytest.param(
-        "/api/v0/devices/1/ip",
-        lambda api: api.get_device_ips(1),
-        {"status": "ok", "addresses": [{"ipv4_address": "192.0.2.10"}]},
-        [{"ipv4_address": "192.0.2.10"}],
-        {},
-        {
-            404: ("404", "/api/v0/devices/1/ip"),
-            500: ("500", "/api/v0/devices/1/ip"),
-        },
-        id="get_device_ips",
     ),
     pytest.param(
         "/api/v0/ports/1",
@@ -576,37 +546,6 @@ class TestGetInventoryFilteredErrors:
         assert ok is False
         assert isinstance(result, str)
         assert result
-
-
-@pytest.mark.django_db
-class TestGetDeviceVlansErrors:
-    """get_device_vlans distinguishes a missing resource from a server error."""
-
-    def test_http_error_404_names_the_resource(self, settings, librenms_server):
-        librenms_server.register(
-            "/api/v0/resources/vlans",
-            {"status": "error"},
-            status=404,
-            method="GET",
-        )
-
-        ok, msg = api_for(settings, librenms_server.url).get_device_vlans(1)
-
-        assert ok is False
-        assert "not found" in msg.lower()
-
-    def test_non_200_returns_http_status(self, settings, librenms_server):
-        librenms_server.register(
-            "/api/v0/resources/vlans",
-            {"status": "error"},
-            status=503,
-            method="GET",
-        )
-
-        ok, msg = api_for(settings, librenms_server.url).get_device_vlans(1)
-
-        assert ok is False
-        assert "503" in msg
 
 
 @pytest.mark.django_db
@@ -1692,28 +1631,6 @@ class TestGetInventoryFilteredNonOk:
         assert result == (False, "Unexpected response format")
 
 
-class TestGetDeviceVlansHttpError:
-    """get_device_vlans reports real HTTP errors."""
-
-    def test_http_404_returns_not_found(self, settings, librenms_server):
-        """A 404 response names the missing VLAN resource."""
-        librenms_server.register("/api/v0/resources/vlans", {"status": "error"}, status=404, method="GET")
-
-        result = api_for(settings, librenms_server.url).get_device_vlans(1)
-
-        assert result == (False, "VLANs resource not found")
-
-    def test_http_5xx_returns_error(self, settings, librenms_server):
-        """A 500 response returns an HTTP error detail."""
-        librenms_server.register("/api/v0/resources/vlans", {"status": "error"}, status=500, method="GET")
-
-        ok, msg = api_for(settings, librenms_server.url).get_device_vlans(1)
-
-        assert ok is False
-        assert "HTTP error" in msg
-        assert "500" in msg
-
-
 class TestGetPortVlanDetailsHttpError:
     """get_port_vlan_details reports a real non-404 HTTP error."""
 
@@ -1739,22 +1656,6 @@ class TestGetInventoryFilteredNonOkStatus:
 
         assert ok is False
         assert "500" in data
-
-
-class TestGetDeviceVlansNonOkResponse:
-    """get_device_vlans reports a real non-ok payload."""
-
-    def test_vlans_response_status_not_ok(self, settings, librenms_server):
-        """An error payload returns the server message."""
-        librenms_server.register(
-            "/api/v0/resources/vlans",
-            {"status": "error", "message": "Failed to retrieve VLANs"},
-            method="GET",
-        )
-
-        result = api_for(settings, librenms_server.url).get_device_vlans(1)
-
-        assert result == (False, "Failed to retrieve VLANs")
 
 
 class TestGetDeviceInventoryNonOkStatus:
@@ -1872,36 +1773,3 @@ class TestMalformedPayloads:
         result = api_for(settings, librenms_server.url).list_devices()
 
         assert result == (False, "Unexpected response format: missing 'devices' list")
-
-    def test_get_device_vlans_none_vlans(self, settings, librenms_server):
-        """A null VLANs field is rejected."""
-        librenms_server.register(
-            "/api/v0/resources/vlans",
-            {"status": "ok", "vlans": None},
-            method="GET",
-        )
-
-        result = api_for(settings, librenms_server.url).get_device_vlans(1)
-
-        assert result == (False, "Unexpected response format: missing 'vlans' list")
-
-    def test_get_device_vlans_fails_closed_on_non_dict_items(self, settings, librenms_server):
-        """A non-object VLAN item is rejected."""
-        vlans = [None, "bad", {"device_id": 1, "vlan_id": 10}]
-        librenms_server.register(
-            "/api/v0/resources/vlans",
-            {"status": "ok", "vlans": vlans},
-            method="GET",
-        )
-
-        result = api_for(settings, librenms_server.url).get_device_vlans(1)
-
-        assert result == (False, "Unexpected response format: invalid item shape in 'vlans'")
-
-    def test_get_device_ips_none_addresses(self, settings, librenms_server):
-        """A null addresses field is rejected."""
-        librenms_server.register("/api/v0/devices/1/ip", {"addresses": None}, method="GET")
-
-        result = api_for(settings, librenms_server.url).get_device_ips(1)
-
-        assert result == (False, "Unexpected response format: 'addresses' must be a list")
