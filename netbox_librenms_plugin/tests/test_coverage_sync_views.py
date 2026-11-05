@@ -27,7 +27,7 @@ from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     seed_ip_snapshot,
     seed_source_snapshot,
 )
-from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts
+from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, submit_ip_selection
 from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
 
@@ -243,13 +243,7 @@ class TestIPAddressSynchronization:
         )
         _login(client, "ip-create-user")
 
-        response = client.post(
-            reverse(
-                "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-                kwargs={"object_type": "device", "pk": device.pk},
-            ),
-            {"server_key": SERVER_KEY, "select": row_id, f"vrf_{row_id}": ""},
-        )
+        response = submit_ip_selection(client, device, [row_id], server_key=SERVER_KEY)
 
         assert response.status_code == 302
         address = IPAddress.objects.get(address=row_id)
@@ -265,7 +259,7 @@ class TestIPAddressSynchronization:
                 "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
                 kwargs={"object_type": "device", "pk": device.pk},
             ),
-            {"server_key": SERVER_KEY, "select": "198.18.82.10/24"},
+            {"server_key": SERVER_KEY},
         )
 
         assert response.status_code == 302
@@ -487,12 +481,7 @@ def test_ambiguous_port_id_is_skipped_despite_matching_name(client, live_librenm
         server_key=SERVER_KEY,
     )
     _login(client, "ambiguous-port-sync-user")
-    response = client.post(
-        reverse(
-            "plugins:netbox_librenms_plugin:sync_device_ip_addresses", kwargs={"object_type": "device", "pk": device.pk}
-        ),
-        {"server_key": SERVER_KEY, "select": row_id, f"vrf_{row_id}": ""},
-    )
+    response = submit_ip_selection(client, device, [row_id], server_key=SERVER_KEY)
     assert response.status_code == 302
     assert not IPAddress.objects.filter(address=row_id).exists()
     assert any(row_id in text and "no matching NetBox interface" in text for text in _response_messages(response))

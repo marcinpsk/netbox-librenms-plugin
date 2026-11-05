@@ -436,7 +436,17 @@ def _classify_tab_hop(hop, page_path, tab, owner, page_query):
         # A refresh, sync or VRF create comes back to the same filters and page, clamped to the last page.
         _assert_keeps(query, tuple(page_query), url, page_query)
         return posts[path]
+    if tab == "ipaddresses" and path.startswith(_ip_row_prefix(owner)):
+        # A row read answers the row as the page shows it, so it states the whole page query.
+        _assert_keeps(query, tuple(page_query), url, page_query)
+        return "row read"
     pytest.fail(f"An unclassified hop in the {tab} pane: <{hop['tag']}> {url}")
+
+
+def _ip_row_prefix(owner):
+    """Return the path that every row read URL of the owner's IP rows starts with."""
+    kwargs = {"object_type": owner._meta.model_name, "pk": owner.pk, "row_key": "0.0.0.0/0"}
+    return reverse("plugins:netbox_librenms_plugin:ip_row", kwargs=kwargs).removesuffix("0.0.0.0/0/")
 
 
 def _check_tab_filter_form(hops, tab, page_query):
@@ -588,13 +598,22 @@ def _four_tab_owner(client, settings, librenms_server):
 
 
 def _signatures(client, owner, field):
-    """Return the selection scope of each tab that the full sync page renders, by tab."""
+    """
+    Return the selection scope of each tab that the full sync page renders, by tab.
+
+    The IP tab keeps its selection in a server-side draft, so its scope is the draft of its table.
+    """
     response = client.get(
         reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[owner.pk]),
         {"server_key": SERVER_KEY, "interface_name_field": field},
     )
     assert response.status_code == 200
-    return dict(re.findall(r'data-sync-filter-tab="([^"]+)" data-selection-scope="([^"]*)"', response.content.decode()))
+    html = response.content.decode()
+    signatures = dict(re.findall(r'data-sync-filter-tab="([^"]+)" data-selection-scope="([^"]*)"', html))
+    ip_table = re.search(r'<table[^>]*id="librenms-ipaddress-table"[^>]*data-draft-id="([^"]+)"', html)
+    if ip_table:
+        signatures["ipaddresses"] = ip_table.group(1)
+    return signatures
 
 
 @pytest.mark.django_db
@@ -608,9 +627,12 @@ def test_every_tab_signs_its_selection_with_the_interface_name_field(client, set
 
     signatures = {field: _signatures(client, owner, field) for field in ("ifName", "ifDescr")}
 
-    assert set(signatures["ifName"]) == set(TAB_TABLES)
-    for tab in TAB_TABLES:
-        assert f"server_key={SERVER_KEY}" in signatures["ifName"][tab], tab
+    # With no snapshot the IP tab renders no table, so it holds no draft to keep.
+    expected = set(TAB_TABLES) if snapshot else set(TAB_TABLES) - {"ipaddresses"}
+    assert set(signatures["ifName"]) == expected
+    for tab in expected:
+        if tab != "ipaddresses":
+            assert f"server_key={SERVER_KEY}" in signatures["ifName"][tab], tab
         assert signatures["ifName"][tab] != signatures["ifDescr"][tab], tab
 
 

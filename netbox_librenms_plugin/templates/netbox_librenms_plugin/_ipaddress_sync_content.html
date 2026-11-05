@@ -25,7 +25,13 @@
 {% if ip_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_panel.html" with owner=ip_sync.object content_id="ipaddress-sync-content" server_key=ip_sync.server_key filters=ip_sync.filters prefix="ipaddresses_" tab="ipaddresses" section_id="ipFilterSection" label="Filter IP addresses" %}{% endif %}
 
 <div id="ipaddress-sync-content-results">
-<div data-sync-filter-tab="ipaddresses" data-selection-scope="{% sync_selection_scope ip_sync.object ip_sync.server_key "ipaddresses" %}" data-filter-snapshot="{% if ip_sync.table %}true{% else %}false{% endif %}" data-filter-search="{{ ip_sync.filters.form.q.value|default:'' }}" data-filter-state="{{ ip_sync.filters.form.sync_state.value|default:'' }}">
+<div data-sync-filter-tab="ipaddresses" data-filter-snapshot="{% if ip_sync.table %}true{% else %}false{% endif %}" data-filter-search="{{ ip_sync.filters.form.q.value|default:'' }}" data-filter-state="{{ ip_sync.filters.form.sync_state.value|default:'' }}">
+{% if ip_sync.selection_cleared %}
+<div class="alert alert-info py-1 px-2 small mb-2" role="status" data-selection-cleared>
+    <i class="mdi mdi-information-outline me-1" aria-hidden="true"></i>
+    The IP data was refreshed, so the rows you selected before are no longer selected.
+</div>
+{% endif %}
 
 <!-- IP Address Sync Table -->
 {% if ip_sync.table %}

@@ -678,11 +678,13 @@ class LibreNMSStubServer(MockLibreNMSServer):
             self._device_links_handler(device_id),
             method="GET",
         )
-        self.register(
-            f"/api/v0/devices/{device_id}/ip",
-            self._device_ips_handler(device_id),
-            method="GET",
-        )
+        # A recording that holds the device's addresses serves them; the others get the derived management address.
+        if f"GET /api/v0/devices/{device_id}/ip" not in self.routes:
+            self.register(
+                f"/api/v0/devices/{device_id}/ip",
+                self._device_ips_handler(device_id),
+                method="GET",
+            )
         self.register(
             f"/api/v0/devices/{device_id}/ports",
             self.ports_body_by_device.get(

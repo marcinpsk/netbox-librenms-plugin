@@ -5,7 +5,6 @@ The tests drive real requests against real NetBox objects and real IP mappings. 
 is seeded the way a refresh stores it; the server is a loopback LibreNMS.
 """
 
-import json
 import re
 from html import unescape
 
@@ -19,10 +18,17 @@ from netbox_librenms_plugin.tests.conftest import make_device, make_interface, m
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot
 from netbox_librenms_plugin.tests.test_interface_rule_writes import _port
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    ip_tab,
+    read_ip_row,
+    submit_ip_selection,
+    write_ip_rows,
+)
 
 pytestmark = pytest.mark.django_db
 
 SERVER_KEY = "default"
+HTMX = {"HTTP_HX_REQUEST": "true"}
 LIBRENMS_ID = 4510
 PORT_ID = 7501
 LINK_LOCAL = "fe80::1/64"
@@ -39,16 +45,20 @@ def _seed(device, rows, **snapshot):
 
 
 def _sync(client, device, vrfs):
-    """Select every address in *vrfs* (address to posted VRF pk, or "" for Global) and sync it."""
-    data = {"server_key": SERVER_KEY, "select": list(vrfs)}
-    data.update({f"vrf_{address}": vrf for address, vrf in vrfs.items()})
-    return client.post(
-        reverse(
-            "plugins:netbox_librenms_plugin:sync_device_ip_addresses", kwargs={"object_type": "device", "pk": device.pk}
-        ),
-        data,
-        HTTP_HX_REQUEST="true",
+    """Select every address in *vrfs* (address to its VRF pk, or "" for Global) through the tab's draft and sync it."""
+    return submit_ip_selection(
+        client, device, list(vrfs), vrfs={address: str(vrf) for address, vrf in vrfs.items()}, headers=HTMX
     )
+
+
+def _write(device, vrfs):
+    """Run the writer on rows the tab offers for no selection: *vrfs* maps each address to its VRF pk or None."""
+    return " ".join(write_ip_rows(device, make_superuser(), vrfs).messages)
+
+
+def _offered(client, device, address, vrf=None):
+    """Return whether the tab offers the row of *address* for selection, after choosing *vrf* for it when given."""
+    return read_ip_row(client, device, address, vrf=vrf).selectable
 
 
 def _messages(response):
@@ -77,22 +87,22 @@ def _checkbox(row_html):
 
 
 def _verify(client, device, address, vrf):
-    response = client.post(
-        reverse("plugins:netbox_librenms_plugin:verify_ipaddress"),
-        json.dumps(
-            {
-                "device_id": device.pk,
-                "object_type": "device",
-                "ip_address": address,
-                "row_id": address,
-                "vrf_id": vrf.pk if vrf is not None else "",
-                "server_key": SERVER_KEY,
-            }
-        ),
-        content_type="application/json",
+    """Choose *vrf* (None is Global) for the row through the draft and read the row as the page does."""
+    return read_ip_row(client, device, address, vrf=str(vrf.pk) if vrf is not None else "")
+
+
+def _choose(client, device, address, vrf_pk):
+    """Post the VRF choice command of the row of *address* and return the response."""
+    table = ip_tab(client, device).table
+    return client.post(
+        table["data-choice-url"],
+        {
+            "draft_id": table["data-draft-id"],
+            "expected_revision": table["data-draft-revision"],
+            "row": address,
+            "value": vrf_pk,
+        },
     )
-    assert response.status_code == 200
-    return response.json()["formatted_row"]
 
 
 @pytest.fixture
@@ -159,14 +169,20 @@ class TestTheTableShowsAnIgnoredAddress:
             device={"device_id": 4510, "ip": "fe80::1"},
         )
 
-        response = client.get(
-            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
-            {"tab": "ipaddresses", "server_key": SERVER_KEY},
+        tab = ip_tab(client, device)
+        response = client.post(
+            tab.table["data-management-url"],
+            {
+                "draft_id": tab.table["data-draft-id"],
+                "expected_revision": tab.table["data-draft-revision"],
+                "selected": "on",
+            },
         )
 
-        table = response.context["ip_sync"]["table"]
-        assert [row.get("is_mgmt_ip") for row in table.data if row["ip_with_mask"] == LINK_LOCAL] == [True]
-        assert json.loads(table.attrs["data-mgmt-rows"]) == []
+        assert response.status_code == 204
+        assert tab.rows[LINK_LOCAL]["data-mgmt-ip"] == "true"
+        # Set Primary IP selects no row: the IP mapping refuses the management row.
+        assert "checked" not in _checkbox(read_ip_row(client, device, LINK_LOCAL).html)
 
 
 class TestTheWriterRefusesAnIgnoredAddress:
@@ -174,11 +190,13 @@ class TestTheWriterRefusesAnIgnoredAddress:
         IPAddressMapping.objects.create(prefix="fe80::/10")
         _seed(device, [_row(LINK_LOCAL), _row(GLOBAL_V4)])
 
-        response = _sync(client, device, {LINK_LOCAL: "", GLOBAL_V4: ""})
+        assert not _offered(client, device, LINK_LOCAL)
+        _sync(client, device, {GLOBAL_V4: ""})
+        refused = _write(device, {LINK_LOCAL: None})
 
         assert IPAddress.objects.filter(address=GLOBAL_V4).exists()
         assert not IPAddress.objects.filter(address__net_host_contained="fe80::/10").exists()
-        assert f"{LINK_LOCAL} (IP mapping fe80::/10 ignores this address)" in _messages(response)
+        assert f"{LINK_LOCAL} (IP mapping fe80::/10 ignores this address)" in refused
 
     def test_an_address_netbox_holds_is_neither_changed_nor_deleted(self, client, device):
         IPAddressMapping.objects.create(prefix="fe80::/10")
@@ -186,12 +204,13 @@ class TestTheWriterRefusesAnIgnoredAddress:
         existing = IPAddress.objects.create(address=LINK_LOCAL, assigned_object=eth0, description="kept")
         _seed(device, [_row(LINK_LOCAL)])
 
-        response = _sync(client, device, {LINK_LOCAL: ""})
+        assert not _offered(client, device, LINK_LOCAL)
+        refused = _write(device, {LINK_LOCAL: None})
 
         existing.refresh_from_db()
         assert existing.assigned_object == eth0
         assert existing.description == "kept"
-        assert f"{LINK_LOCAL} (IP mapping fe80::/10 ignores this address)" in _messages(response)
+        assert f"{LINK_LOCAL} (IP mapping fe80::/10 ignores this address)" in refused
 
     @pytest.mark.parametrize("ignored", [True, False], ids=["ignored", "control"])
     def test_a_confirmed_reassignment_is_refused(self, client, device, ignored):
@@ -225,15 +244,19 @@ class TestTheWriterRefusesAnIgnoredAddress:
         _seed(device, [_row(LINK_LOCAL)])
         vrf = {"blue": blue, "red": red, "global": None}[posted]
 
-        response = _sync(client, device, {LINK_LOCAL: vrf.pk if vrf is not None else ""})
+        if posted == "blue":
+            assert not _offered(client, device, LINK_LOCAL, vrf=str(blue.pk))
+            messages = _write(device, {LINK_LOCAL: blue.pk})
+        else:
+            messages = _messages(_sync(client, device, {LINK_LOCAL: vrf.pk if vrf is not None else ""}))
 
         created = IPAddress.objects.filter(address=LINK_LOCAL)
         if posted == "blue":
             assert not created.exists()
-            assert f"{LINK_LOCAL} (IP mapping fe80::/10 ignores this address)" in _messages(response)
+            assert f"{LINK_LOCAL} (IP mapping fe80::/10 ignores this address)" in messages
         else:
             assert list(created.values_list("vrf", flat=True)) == [vrf.pk if vrf is not None else None]
-            assert "Skipped" not in _messages(response)
+            assert "Skipped" not in messages
 
     @pytest.mark.parametrize("ignored", [True, False], ids=["ignored", "control"])
     def test_an_ignored_address_creates_no_missing_interface(self, client, settings, live_librenms, ignored):
@@ -257,21 +280,15 @@ class TestTheWriterRefusesAnIgnoredAddress:
         assert refreshed.status_code == 200
         if ignored:
             IPAddressMapping.objects.create(prefix="fe80::/10")
+        create_missing = {"create-missing-interfaces-toggle": "on"}
 
-        response = client.post(
-            reverse(
-                "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-                kwargs={"object_type": "device", "pk": device.pk},
-            ),
-            {
-                "server_key": SERVER_KEY,
-                "create-missing-interfaces-toggle": "on",
-                "select": [LINK_LOCAL],
-                f"vrf_{LINK_LOCAL}": "",
-            },
-        )
+        if ignored:
+            assert not _offered(client, device, LINK_LOCAL)
+            messages = " ".join(write_ip_rows(device, make_superuser(), {LINK_LOCAL: None}, **create_missing).messages)
+        else:
+            messages = _messages(submit_ip_selection(client, device, [LINK_LOCAL], **create_missing))
 
-        assert Interface.objects.filter(device=device, name="Ethernet7").exists() is (not ignored), _messages(response)
+        assert Interface.objects.filter(device=device, name="Ethernet7").exists() is (not ignored), messages
         assert IPAddress.objects.filter(address=LINK_LOCAL).exists() is (not ignored)
 
 
@@ -291,12 +308,12 @@ class TestAVrfChangeRedecidesTheRow:
         into_red = _verify(client, device, LINK_LOCAL, red)
         into_global = _verify(client, device, LINK_LOCAL, None)
 
-        assert "IP mapping fe80::/10 ignores this address" in into_blue["status"]
-        assert into_blue["selectable"] is False
+        assert "IP mapping fe80::/10 ignores this address" in into_blue.status
+        assert into_blue.selectable is False
         for verdict in (into_red, into_global):
-            assert "Ignored" not in verdict["status"]
-            assert "Create</button>" in verdict["status"]
-            assert verdict["selectable"] is True
+            assert "Ignored" not in verdict.status
+            assert "Create</button>" in verdict.status
+            assert verdict.selectable is True
 
     def test_an_ignored_address_netbox_holds_unassigned_in_the_chosen_vrf_shows_the_mapping(self, client, device, blue):
         IPAddressMapping.objects.create(prefix="fe80::/10", vrf=blue)
@@ -305,9 +322,9 @@ class TestAVrfChangeRedecidesTheRow:
 
         verdict = _verify(client, device, LINK_LOCAL, blue)
 
-        assert "IP mapping fe80::/10 ignores this address" in verdict["status"]
-        assert "Synced" not in verdict["status"]
-        assert verdict["selectable"] is False
+        assert "IP mapping fe80::/10 ignores this address" in verdict.status
+        assert "Synced" not in verdict.status
+        assert verdict.selectable is False
 
     def test_an_ignored_address_netbox_holds_on_the_row_interface_stays_synced(self, client, device, blue):
         IPAddressMapping.objects.create(prefix="fe80::/10", vrf=blue)
@@ -316,9 +333,9 @@ class TestAVrfChangeRedecidesTheRow:
 
         verdict = _verify(client, device, LINK_LOCAL, blue)
 
-        assert "Synced" in verdict["status"]
-        assert "Ignored" not in verdict["status"]
-        assert verdict["selectable"] is False
+        assert "Synced" in verdict.status
+        assert "Ignored" not in verdict.status
+        assert verdict.selectable is False
 
     def test_an_ignored_address_that_two_interfaces_hold_stays_synced_on_the_row_interface(self, client, device, blue):
         other = make_interface(device, "eth1", iface_type="virtual")
@@ -329,28 +346,25 @@ class TestAVrfChangeRedecidesTheRow:
 
         verdict = _verify(client, device, LINK_LOCAL, blue)
 
-        assert "Synced" in verdict["status"]
-        assert verdict["selectable"] is False
+        assert "Synced" in verdict.status
+        assert verdict.selectable is False
 
     def test_a_vrf_the_user_cannot_view_answers_not_found(self, client, device, blue):
-        from dcim.models import Device
+        from dcim.models import Device, Interface
 
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
         IPAddressMapping.objects.create(prefix="fe80::/10", vrf=blue)
         _seed(device, [_row(LINK_LOCAL)])
-        client.force_login(make_user_with_perms("ip-rule-no-vrf-view", [("view", Device)]))
-        body = {"device_id": device.pk, "object_type": "device", "ip_address": LINK_LOCAL, "row_id": LINK_LOCAL}
+        perms = [("view", Device), ("view", Interface), ("view", IPAddress)]
+        client.force_login(make_user_with_perms("ip-rule-no-vrf-view", perms))
 
-        response = client.post(
-            reverse("plugins:netbox_librenms_plugin:verify_ipaddress"),
-            json.dumps({**body, "vrf_id": blue.pk, "server_key": SERVER_KEY}),
-            content_type="application/json",
-        )
+        response = _choose(client, device, LINK_LOCAL, str(blue.pk))
 
         assert response.status_code == 404
-        assert "formatted_row" not in response.json()
         assert blue.name not in response.content.decode()
+        # The control: the row takes a choice of a VRF the user can name.
+        assert _choose(client, device, LINK_LOCAL, "").status_code == 204
 
     @pytest.mark.parametrize("mapping", ["none", "all-vrf", "blue"])
     @pytest.mark.parametrize("held", [False, True], ids=["not-held", "held-on-eth0"])
@@ -373,24 +387,15 @@ class TestAVrfChangeRedecidesTheRow:
         client.force_login(grant(user, "view", VRF, constraints={"name": red.name}))
 
         def verify(vrf_pk):
-            body = {
-                "device_id": device.pk,
-                "object_type": "device",
-                "ip_address": LINK_LOCAL,
-                "row_id": LINK_LOCAL,
-                "vrf_id": vrf_pk,
-                "server_key": SERVER_KEY,
-            }
-            response = client.post(
-                reverse("plugins:netbox_librenms_plugin:verify_ipaddress"),
-                json.dumps(body),
-                content_type="application/json",
-            )
-            return response.status_code, response.json()
+            response = _choose(client, device, LINK_LOCAL, str(vrf_pk))
+            # The page carries a per-request CSRF token, so only the status and the VRF's name are compared.
+            return response.status_code, blue.name in response.content.decode()
 
         hidden = verify(blue.pk)
-        assert hidden[0] == 404, hidden
+        assert hidden == (404, False), hidden
         assert hidden == verify(gone_pk)
+        # The control: the row takes a choice of the VRF the user can view, unless the hidden held address blocks it.
+        assert verify(red.pk)[0] == (404 if held else 204)
 
 
 def _two_holders(device, mapping_vrf, holder_vrf):
@@ -402,8 +407,8 @@ def _two_holders(device, mapping_vrf, holder_vrf):
     )
 
 
-class TestTheTableAndTheVerifyDecideARowAlike:
-    """Two NetBox addresses match one source row; the table and a verify of the VRF it shows give one verdict."""
+class TestTheTableAndTheRowReadDecideARowAlike:
+    """Two NetBox addresses match one source row; the table and a row read in the VRF it shows give one verdict."""
 
     @pytest.mark.parametrize(
         ("mapping_in_blue", "holders_in_blue", "synced"),
@@ -422,11 +427,11 @@ class TestTheTableAndTheVerifyDecideARowAlike:
             return {"synced": "Synced" in status, "ignored": "Ignored" in status, "disabled": disabled}
 
         table = verdict_of(_cell(row, "status"), "disabled" in _checkbox(row))
-        assert table == verdict_of(verdict["status"], not verdict["selectable"])
+        assert table == verdict_of(verdict.status, not verdict.selectable)
         assert table["synced"] is synced
 
     def test_an_address_held_in_a_vrf_the_user_cannot_view_blocks_the_row(self, client, device, blue):
-        """The block wins over the mapping and over Synced, in the table and in the verify alike."""
+        """The block wins over the mapping and over Synced, in the table and in the row read alike."""
         from dcim.models import Device, Interface
 
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
@@ -438,27 +443,29 @@ class TestTheTableAndTheVerifyDecideARowAlike:
         client.force_login(make_user_with_perms("ip-rule-hidden-holder", perms))
 
         row = _row_html(client, device, LINK_LOCAL)
-        verdict = _verify(client, device, LINK_LOCAL, None)
+        verdict = read_ip_row(client, device, LINK_LOCAL)
 
-        for status in (_cell(row, "status"), verdict["status"]):
+        for status in (_cell(row, "status"), verdict.status):
             assert "Ignored" not in status
             assert "Synced" not in status
         assert "disabled" in _checkbox(row)
-        assert verdict["selectable"] is False
+        assert verdict.selectable is False
+        # A blocked row takes no VRF choice, so no other VRF can decide it.
+        assert _choose(client, device, LINK_LOCAL, "").status_code == 404
 
 
 class TestTheReasonNamesNoVrf:
     """A user who cannot view the mapping's VRF must not learn its name, so the reason names the prefix only."""
 
-    def test_the_pill_the_verify_and_the_writer_name_only_the_prefix(self, client, device, blue):
+    def test_the_pill_the_row_read_and_the_writer_name_only_the_prefix(self, client, device, blue):
         IPAddressMapping.objects.create(prefix="fe80::/10", vrf=blue)
-        # The NetBox address in blue makes the row show blue; the second row has none, so its verify is not Synced.
+        # The NetBox address in blue makes the row show blue; the second row has none, so its row read is not Synced.
         IPAddress.objects.create(address=LINK_LOCAL, vrf=blue)
         _seed(device, [_row(LINK_LOCAL), _row("fe80::2/64")])
 
         pill = _cell(_row_html(client, device, LINK_LOCAL), "status")
-        verdict = _verify(client, device, "fe80::2/64", blue)["status"]
-        message = _messages(_sync(client, device, {LINK_LOCAL: blue.pk}))
+        verdict = _verify(client, device, "fe80::2/64", blue).status
+        message = _write(device, {LINK_LOCAL: blue.pk})
 
         for text in (pill, verdict, message):
             assert "IP mapping fe80::/10 ignores this address" in text

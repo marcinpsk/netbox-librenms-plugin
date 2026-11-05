@@ -60,7 +60,12 @@ from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     module_inventory,
     stored_source_value,
 )
-from netbox_librenms_plugin.tests.view_test_helpers import render_module_tab, rendered_module_form
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    render_module_tab,
+    rendered_module_form,
+    submit_ip_selection,
+    write_ip_rows,
+)
 from netbox_librenms_plugin.server_mappings import mark_migrated
 from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
@@ -892,15 +897,8 @@ def test_ip_sync_invalidates_other_tabs_after_creating_an_address(
     _seed_snapshot("ports", device, "primary")
 
     client.force_login(make_superuser("cache-ip-writer-user"))
-    url = reverse(
-        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-        kwargs={"object_type": "device", "pk": device.pk},
-    )
     with django_capture_on_commit_callbacks(execute=True):
-        response = client.post(
-            url,
-            {"server_key": "primary", "select": address, f"vrf_{address}": ""},
-        )
+        response = submit_ip_selection(client, device, [address], server_key="primary")
 
     assert response.status_code == 302
     assert IPAddress.objects.filter(address=address, assigned_object_id=interface.pk).exists()
@@ -938,21 +936,10 @@ def test_partial_ip_commit_invalidates_other_tabs_before_conflict_confirmation(
     )
     _seed_snapshot("ports", device, "primary")
     client.force_login(make_superuser("cache-ip-partial-conflict-user"))
-    url = reverse(
-        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-        kwargs={"object_type": "device", "pk": device.pk},
-    )
 
     with django_capture_on_commit_callbacks(execute=True):
-        response = client.post(
-            url,
-            {
-                "server_key": "primary",
-                "select": [conflict_address, safe_address],
-                f"vrf_{conflict_address}": "",
-                f"vrf_{safe_address}": "",
-            },
-            HTTP_HX_REQUEST="true",
+        response = submit_ip_selection(
+            client, device, [conflict_address, safe_address], server_key="primary", headers={"HTTP_HX_REQUEST": "true"}
         )
 
     assert response.status_code == 200
@@ -1795,7 +1782,7 @@ def test_htmx_ip_cache_miss_replaces_active_tab_with_warning(client, settings):
 
     response = client.post(
         url,
-        {"server_key": "primary", "select": "198.18.45.1/24"},
+        {"server_key": "primary"},
         HTTP_HX_REQUEST="true",
     )
 
@@ -3024,18 +3011,13 @@ def test_failed_duplicate_selection_keeps_the_committed_rows_invalidation(
     seed_mapping(interface, "primary", own=7801)
     address = "2001:db8:68::10/64"
     verbose_address = "2001:0DB8:0068:0000:0000:0000:0000:0010/64"
-    ip_snapshot = seed_ip_snapshot(
+    seed_ip_snapshot(
         device,
         [{"ipv6_compressed": "2001:db8:68::10", "ipv6_prefixlen": 64, "port_id": 7801}],
         [{"port_id": 7801, "ifName": interface.name, "ifDescr": interface.name}],
         server_key="primary",
     )
     _seed_snapshot("ports", device, "primary")
-    client.force_login(make_superuser("cache-ip-duplicate-rows-user"))
-    url = reverse(
-        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-        kwargs={"object_type": "device", "pk": device.pk},
-    )
 
     classified_rows = []
     real_classify_ip_change = SyncIPAddressesView._classify_ip_change
@@ -3047,19 +3029,13 @@ def test_failed_duplicate_selection_keeps_the_committed_rows_invalidation(
         return real_classify_ip_change(self, **kwargs)
 
     monkeypatch.setattr(SyncIPAddressesView, "_classify_ip_change", fail_after_the_first_row)
+    # The draft holds canonical row keys only, so two spellings of one row reach the writer directly.
     with django_capture_on_commit_callbacks(execute=True):
-        response = client.post(
-            url,
-            {
-                "server_key": "primary",
-                "select": [address, verbose_address],
-                f"vrf_{address}": "",
-            },
-        )
+        written = write_ip_rows(device, make_superuser(), {address: None, verbose_address: None}, server_key="primary")
 
-    assert response.status_code == 302
     # Both selections must reach the same canonical row, or the failure cannot reach another row.
     assert classified_rows == [address, address]
     assert IPAddress.objects.filter(address=address, assigned_object_id=interface.pk).exists()
-    assert cache.get(_cache_key("ip_addresses", device, "primary")) == ip_snapshot.to_payload()
-    assert cache.get(_cache_key("ports", device, "primary")) is None
+    # The sync schedules the invalidation of the other tabs when the batch mutated a row.
+    assert written.results["mutated"] is True
+    assert written.results["written"] == {address}

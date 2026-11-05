@@ -23,7 +23,7 @@ class TestIpAddressSyncContentTemplateMigratedMode:
         device = make_device("ip-tmpl-dev")
         request = RequestFactory().get("/")
         request.user = AnonymousUser()
-        table = IPAddressTable([], mgmt_row_vrfs={})
+        table = IPAddressTable([])
         RequestConfig(request).configure(table)
         ctx = {
             "ip_sync": {
