@@ -478,6 +478,43 @@ class TestTheWriterRefusesWhatTheActorCannotView:
         assert all(payload.get("ip_pk") != str(existing.pk) for payload in _intents(html))
         assert not IPAddress.objects.filter(address="198.18.120.10/24").exists()
 
+    @transactional_db_with_all_apps()
+    def test_a_port_bound_on_a_hidden_interface_while_the_sync_waits_for_its_locks_is_refused(
+        self, client, settings, monkeypatch
+    ):
+        """The port first resolves by name to a visible interface; another transaction then binds it to a hidden one."""
+        from netbox_librenms_plugin.tests.lock_conflict_helpers import second_connection
+        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
+
+        _servers(settings, SERVER_KEY)
+        device, (eth5, hidden) = _device("ip-scope-writer-rebind", "eth5", "private-b")
+        _seed(device, [("198.18.130.10", 24, 7130, "eth5")])
+        client.force_login(_reader("ip-scope-writer-rebind", interface_view={"name__startswith": "eth"}))
+        seed_mapping(hidden, SERVER_KEY, own=7130, save=False)
+        bound_value = json.dumps(hidden.custom_field_data)
+        real_lock = SyncIPAddressesView._lock_target_interface
+        commits = []
+
+        with second_connection() as other:
+
+            def lock_after_a_concurrent_binding(self, *args, **kwargs):
+                if not commits:
+                    with other.cursor() as cursor:
+                        cursor.execute(
+                            'UPDATE "dcim_interface" SET "custom_field_data" = %s::jsonb WHERE id = %s',
+                            [bound_value, hidden.pk],
+                        )
+                    other.commit()
+                    commits.append(hidden.pk)
+                return real_lock(self, *args, **kwargs)
+
+            monkeypatch.setattr(SyncIPAddressesView, "_lock_target_interface", lock_after_a_concurrent_binding)
+            response = _sync(client, device, ["198.18.130.10/24"])
+
+        assert commits == [hidden.pk]
+        assert "private-b" not in response.content.decode()
+        assert not IPAddress.objects.filter(address="198.18.130.10/24").exists()
+
     def test_a_confirmation_signed_before_the_address_was_hidden_is_refused(self, client, settings):
         _servers(settings, SERVER_KEY)
         device, (eth1, eth2) = _device("ip-scope-writer-force", "eth1", "eth2")
