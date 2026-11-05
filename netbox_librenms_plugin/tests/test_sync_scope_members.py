@@ -958,6 +958,38 @@ def test_the_interface_delete_refuses_an_interface_the_user_cannot_view(client, 
     assert hidden.name not in body
 
 
+@pytest.mark.parametrize("hidden_by", ["owner", "interface"])
+def test_the_vm_interface_delete_answers_a_hidden_interface_as_a_missing_one(client, hidden_by):
+    from virtualization.models import VirtualMachine, VMInterface
+
+    from netbox_librenms_plugin.tests.conftest import make_vm
+
+    page = make_vm(f"vm-delete-scope-page-{hidden_by}")
+    other = make_vm(f"vm-delete-scope-other-{hidden_by}")
+    target = VMInterface.objects.create(virtual_machine=other, name=f"private-uplink-{hidden_by}")
+    user = make_user_with_perms(
+        f"vm-delete-scope-user-{hidden_by}",
+        [("view", VirtualMachine)],
+        constraints={"pk__in": [page.pk, other.pk] if hidden_by == "interface" else [page.pk]},
+    )
+    user = grant(user, "delete", VMInterface)
+    user = grant(user, "view", VMInterface, constraints={"pk__in": [0]} if hidden_by == "interface" else None)
+    client.force_login(user)
+
+    response = client.post(
+        reverse(
+            "plugins:netbox_librenms_plugin:delete_netbox_interfaces",
+            kwargs={"object_type": "virtualmachine", "object_id": page.pk},
+        ),
+        {"interface_ids": [str(target.pk)]},
+    )
+
+    assert VMInterface.objects.filter(pk=target.pk).exists()
+    body = response.content.decode()
+    assert target.name not in body
+    assert other.name not in body
+
+
 def test_a_cable_row_cannot_be_moved_onto_a_member_the_user_cannot_view():
     from types import SimpleNamespace
 
