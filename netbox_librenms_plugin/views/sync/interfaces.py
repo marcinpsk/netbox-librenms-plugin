@@ -2248,11 +2248,7 @@ class DeleteNetBoxInterfacesView(
 
     def _deletable_interface(self, model, interface_id):
         """Return the *model* interface *interface_id* that the user may delete and view."""
-        return (
-            self.restricted_queryset(model, "delete")
-            .filter(pk__in=self.restricted_queryset(model, "view").values("pk"))
-            .get(id=interface_id)
-        )
+        return self.viewable_restricted_queryset(model, "delete").get(id=interface_id)
 
     def _delete_attempt(self, obj, object_type, interface_ids):
         """

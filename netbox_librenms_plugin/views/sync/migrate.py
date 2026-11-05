@@ -455,12 +455,6 @@ class _MoveResourceToWinnerView(_BaseMoveToWinnerView):
     scope as well as the change scope. A hidden object answers as a missing one.
     """
 
-    def _viewable_and_changeable(self, model):
-        """Return the *model* rows that the user may view and change."""
-        return self.restricted_queryset(model, "change").filter(
-            pk__in=self.restricted_queryset(model, "view").values("pk")
-        )
-
     def _require_viewable(self, model, obj):
         """Raise Http404 unless the user may view *obj*: a hidden object answers as a missing one."""
         if not self.restricted_queryset(model, "view").filter(pk=obj.pk).exists():
@@ -582,11 +576,7 @@ class MoveInterfaceToWinnerView(_MoveResourceToWinnerView):
 
         # Object-scoped: the gate above is model-level only, so a constrained interface grant
         # would otherwise move or name an interface that the user cannot see.
-        interface = get_object_or_404(
-            self.restricted_queryset(Interface, "change"),
-            pk=pk,
-            pk__in=self.restricted_queryset(Interface, "view").values("pk"),
-        )
+        interface = get_object_or_404(self.viewable_restricted_queryset(Interface, "change"), pk=pk)
         donor = interface.device
         if donor is None:
             return self._fail(request, "Interface has no device.")
@@ -620,7 +610,7 @@ class MoveInterfaceToWinnerView(_MoveResourceToWinnerView):
                 # concurrent rename would otherwise let a stale name slip past the
                 # collision check below while the row is still moved by pk.
                 interface = (
-                    self._viewable_and_changeable(Interface)
+                    self.viewable_restricted_queryset(Interface, "change")
                     .select_for_update(of=("self",))
                     .filter(pk=interface.pk, device=donor)
                     .first()
@@ -648,7 +638,7 @@ class MoveInterfaceToWinnerView(_MoveResourceToWinnerView):
                 if dependents:
                     dependent_pks = {dep.pk for dep in dependents}
                     authorized = set(
-                        self._viewable_and_changeable(Interface)
+                        self.viewable_restricted_queryset(Interface, "change")
                         .filter(pk__in=dependent_pks)
                         .values_list("pk", flat=True)
                     )
@@ -824,11 +814,7 @@ class MoveIPAddressToWinnerView(_MoveResourceToWinnerView):
             return gate
 
         # Object-scoped — see MoveInterfaceToWinnerView.post.
-        ip = get_object_or_404(
-            self.restricted_queryset(IPAddress, "change"),
-            pk=pk,
-            pk__in=self.restricted_queryset(IPAddress, "view").values("pk"),
-        )
+        ip = get_object_or_404(self.viewable_restricted_queryset(IPAddress, "change"), pk=pk)
         assigned = ip.assigned_object
         if not isinstance(assigned, Interface):
             return self._fail(
@@ -864,7 +850,12 @@ class MoveIPAddressToWinnerView(_MoveResourceToWinnerView):
                 donor, winner, err = self._lock_donor_winner_and_reverify(request, donor, winner, server_key)
                 if err is not None:
                     return err
-                ip = self._viewable_and_changeable(IPAddress).select_for_update(of=("self",)).filter(pk=ip.pk).first()
+                ip = (
+                    self.viewable_restricted_queryset(IPAddress, "change")
+                    .select_for_update(of=("self",))
+                    .filter(pk=ip.pk)
+                    .first()
+                )
                 if ip is None:
                     return self._fail(request, "IP address no longer exists.", status=410)
                 assigned = ip.assigned_object
