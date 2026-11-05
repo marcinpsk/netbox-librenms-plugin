@@ -27,6 +27,7 @@ from netbox_librenms_plugin.constants import (
 from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
 from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
 from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns, compile_sap_patterns
+from netbox_librenms_plugin.interface_relationships import resolve_port_relationships
 
 from netbox_librenms_plugin.tests.conftest import run_in_threads
 from netbox_librenms_plugin.tests.recordings import iter_recording_paths, iter_recordings
@@ -671,7 +672,7 @@ def _assert_port_relationships(api, device_id, recording, expected):
     ok_stack, port_stack = api.get_port_stack(device_id)
     assert ok_stack, port_stack
 
-    relationships = api.resolve_port_relationships(
+    relationships = resolve_port_relationships(
         ports_data["ports"],
         port_stack,
         # Normalize missing and explicit null patterns so resolution never touches the DB.
@@ -721,48 +722,45 @@ def _assert_oob(api, recording, expected):
     assert len(oob_data["ports"]) == expected["controller_ports"]
 
 
-def test_assert_port_relationships_tolerates_explicit_null_meta():
+@pytest.mark.django_db
+def test_assert_port_relationships_tolerates_explicit_null_meta(live_librenms):
     """An explicit meta: null recording must normalize to {} in the replay assert, not AttributeError."""
-    from types import SimpleNamespace
-
-    api = SimpleNamespace(
-        get_ports=lambda device_id: (True, {"ports": []}),
-        get_port_stack=lambda device_id: (True, []),
-        # **kwargs: the stub must not pin the resolver's keyword list, or every new pattern
-        # argument breaks this test instead of the behaviour it guards.
-        resolve_port_relationships=lambda ports, stack, **kwargs: {},
-    )
+    live_librenms.server.ports_response(device_id=1, ports=[])
     # "meta": null is a shape recording_schema_errors() accepts; os is optional. The helper must
     # read (meta or {}).get("os") — reading meta.get directly would AttributeError on None.
     recording = {"name": "null-meta", "meta": None, "lag_patterns": {}}
-    _assert_port_relationships(api, 1, recording, expected={})
+    _assert_port_relationships(live_librenms.api, 1, recording, expected={})
 
 
-def test_assert_port_relationships_tolerates_explicit_null_lag_patterns():
+@pytest.mark.django_db
+def test_assert_port_relationships_tolerates_explicit_null_lag_patterns(live_librenms):
     """An explicit lag_patterns: null recording must not load live database patterns."""
-
-    class RecordingAPI:
-        lag_patterns = None
-
-        def get_ports(self, device_id):
-            return True, {"ports": []}
-
-        def get_port_stack(self, device_id):
-            return True, []
-
-        def resolve_port_relationships(self, ports, stack, compiled_lag_patterns=None, **kwargs):
-            self.lag_patterns = compiled_lag_patterns
-            self.sap_patterns = kwargs.get("compiled_sap_patterns")
-            return {}
-
-    api = RecordingAPI()
+    # Without an OS, a database read applies every stored rule: the seeded ios ^Po\d+$ LAG rule
+    # and the seeded timos ":" SAP rule.
+    live_librenms.server.ports_response(
+        device_id=1,
+        ports=[
+            {"port_id": 10, "ifName": "Ethernet1", "ifDescr": "Ethernet1", "ifType": "ethernetCsmacd"},
+            {"port_id": 20, "ifName": "Po1", "ifDescr": "Po1", "ifType": "propVirtual"},
+            {"port_id": 30, "ifName": "lag1:0", "ifDescr": "lag1:0", "ifType": "ethernetCsmacd"},
+            {"port_id": 40, "ifName": "Bundle1", "ifDescr": "Bundle1", "ifType": "ieee8023adLag"},
+        ],
+    )
+    live_librenms.server.register(
+        "/api/v0/devices/1/port_stack",
+        {
+            "status": "ok",
+            "mappings": [
+                {"high_port_id": 20, "low_port_id": 10},
+                {"high_port_id": 40, "low_port_id": 30},
+            ],
+        },
+        method="GET",
+    )
     recording = {"name": "null-lag-patterns", "meta": {}, "lag_patterns": None}
 
-    _assert_port_relationships(api, 1, recording, expected={})
-
-    assert api.lag_patterns == []
-    # A null lag_patterns must not pull the stored SAP rule from the database either.
-    assert api.sap_patterns == []
+    # Po1 is no LAG without the stored LAG rule, and lag1:0 stays a member without the stored SAP rule.
+    _assert_port_relationships(live_librenms.api, 1, recording, expected={"lag_members": {30: 40}})
 
 
 @pytest.mark.django_db

@@ -1,7 +1,5 @@
 """Real multi-server cache-scoping tests for sync-tab GET renders."""
 
-from copy import deepcopy
-
 import pytest
 
 from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
@@ -248,29 +246,3 @@ class TestRemovedServerFailsClosed:
             {"id": address.pk, "address": "198.18.31.1/24", "interface_name": "Ethernet5"}
         ]
         assert context["set_primary_ip"] is False
-
-
-def test_cables_render_with_a_cache_backend_without_ttl(settings, configured_servers):
-    """Cable rendering degrades cleanly on Django cache backends without ``ttl``."""
-    from django.core.cache import cache
-
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
-
-    cache_config = deepcopy(settings.CACHES)
-    cache_config["default"] = {
-        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
-        "LOCATION": "multiserver-no-ttl",
-    }
-    settings.CACHES = cache_config
-    assert not hasattr(cache, "ttl")
-    device = make_device("multiserver-no-ttl")
-    view = DeviceCableTableView()
-    request = _request("production")
-    key = view.get_cache_key(device, "links", "production")
-    cache.set(key, {"links": [{"local_port": "Ethernet6", "local_port_id": 31}]})
-
-    context = _bind(view, request).get_context_data(request, device)
-
-    assert context["server_key"] == "production"
-    assert context["table"] is not None
-    assert context["cache_expiry"] is None

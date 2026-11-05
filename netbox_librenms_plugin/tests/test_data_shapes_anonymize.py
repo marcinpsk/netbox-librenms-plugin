@@ -7,6 +7,7 @@ import re
 import pytest
 
 from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording, find_pii, pseudonymize_os
+from netbox_librenms_plugin.interface_relationships import resolve_port_relationships
 from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 from netbox_librenms_plugin.tests.recordings import load_recording
 
@@ -1665,7 +1666,7 @@ def test_anonymization_preserves_port_relationships(recording_server, recording_
         _server, api = recording_server(recording)
         _ok, ports = api.get_ports(recording["device_id"])
         _ok2, stack = api.get_port_stack(recording["device_id"])
-        rel = api.resolve_port_relationships(
+        rel = resolve_port_relationships(
             ports["ports"],
             stack,
             lag_patterns=recording.get("lag_patterns", {}),
@@ -1706,7 +1707,7 @@ def test_anonymization_preserves_a_custom_base_subinterface_relationship(recordi
         _server, api = recording_server(recording)
         _ports_ok, ports = api.get_ports(recording["device_id"])
         _stack_ok, stack = api.get_port_stack(recording["device_id"])
-        return api.resolve_port_relationships(ports["ports"], stack, lag_patterns={})["sub_interfaces"]
+        return resolve_port_relationships(ports["ports"], stack, lag_patterns={})["sub_interfaces"]
 
     anonymized = anonymize_recording(rec)
     names = [port["ifName"] for port in _response(anonymized, "GET /api/v0/devices/1/ports")["ports"]]

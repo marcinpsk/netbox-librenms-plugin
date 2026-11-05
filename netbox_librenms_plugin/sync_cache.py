@@ -16,11 +16,11 @@ from django.shortcuts import render
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
+from netbox_librenms_plugin.acquisition.registry import RESOURCE_SPECS, OwnerPolicy, Resource
 from netbox_librenms_plugin.librenms_api import configured_cache_timeout, stored_librenms_id
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
-from netbox_librenms_plugin.server_mappings import mapped_device_servers, read_mapping
+from netbox_librenms_plugin.server_mappings import mapped_device_servers, read_mapping, require_server_key
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
-from netbox_librenms_plugin.utils import cache_remaining_ttl
 
 logger = logging.getLogger(__name__)
 
@@ -161,68 +161,63 @@ class SyncTabState(StrEnum):
 
 @dataclass(frozen=True)
 class SyncTabSpec:
-    """Describe one tab's cache payload and object support."""
+    """Describe how the sync page presents one tab, and the resource the tab shows."""
 
-    data_type: str
+    resource: Resource
     context_name: str
     content_id: str
     label: str
-    shared_vc_owner: bool
-    supports_virtual_machine: bool
     # The context key the tab's partial reads its table from; VLANs use their own.
     table_context_key: str = "table"
-    has_last_fetched_key: bool = False
-    has_vlan_overrides: bool = False
-    has_cable_picks: bool = False
+
+    @property
+    def source(self):
+        """Return the cache identity and the owner policy of the tab's resource."""
+        return RESOURCE_SPECS[self.resource]
 
 
 TAB_SPECS = {
     SyncTab.INTERFACES: SyncTabSpec(
-        data_type="ports",
+        resource=Resource.INTERFACES,
         context_name="interface_sync",
         content_id="interface-sync-content",
         label="Interface",
-        shared_vc_owner=True,
-        supports_virtual_machine=True,
-        has_last_fetched_key=True,
-        has_vlan_overrides=True,
     ),
     SyncTab.CABLES: SyncTabSpec(
-        data_type="links",
+        resource=Resource.CABLES,
         context_name="cable_sync",
         content_id="cable-sync-content",
         label="Cable",
-        shared_vc_owner=True,
-        supports_virtual_machine=False,
-        has_cable_picks=True,
     ),
     SyncTab.IP_ADDRESSES: SyncTabSpec(
-        data_type="ip_addresses",
+        resource=Resource.IP_ADDRESSES,
         context_name="ip_sync",
         content_id="ipaddress-sync-content",
         label="IP address",
-        shared_vc_owner=False,
-        supports_virtual_machine=True,
     ),
     SyncTab.MODULES: SyncTabSpec(
-        data_type="inventory",
+        resource=Resource.MODULES,
         context_name="module_sync",
         content_id="module-sync-content",
         label="Module",
-        shared_vc_owner=True,
-        supports_virtual_machine=False,
     ),
     SyncTab.VLANS: SyncTabSpec(
-        data_type="vlans",
+        resource=Resource.VLANS,
         context_name="vlan_sync",
         content_id="vlan-sync-content",
         label="VLAN",
-        shared_vc_owner=False,
-        supports_virtual_machine=False,
         table_context_key="vlan_table",
-        has_last_fetched_key=True,
     ),
 }
+
+# Web-transport state that a tab keeps next to its snapshot, and that goes with the snapshot.
+_LAST_FETCHED_TABS = frozenset({SyncTab.INTERFACES, SyncTab.VLANS})
+_VLAN_OVERRIDE_TABS = frozenset({SyncTab.INTERFACES})
+_CABLE_PICK_TABS = frozenset({SyncTab.CABLES})
+
+
+def _shares_vc_owner(tab):
+    return TAB_SPECS[tab].source.owner_policy is OwnerPolicy.VC_SYNC_OWNER
 
 
 def sync_cache_browser_contract(tabs):
@@ -387,25 +382,23 @@ def request_actor_id(request):
     return actor_id if isinstance(actor_id, int) and not isinstance(actor_id, bool) else None
 
 
-def sync_snapshot_key(obj, data_type, server_key=None):
-    """Return the shared snapshot key for one object, data type, and server."""
-    base = f"librenms_{data_type}_{obj._meta.model_name}_{obj.pk}"
-    return f"{base}_{server_key}" if server_key else base
+def sync_snapshot_key(obj, data_type, server_key):
+    """Return the shared snapshot key for one object, data type, and configured server."""
+    return f"librenms_{data_type}_{obj._meta.model_name}_{obj.pk}_{require_server_key(server_key)}"
 
 
-def sync_last_fetched_key(obj, data_type, server_key=None):
-    """Return the shared last-fetched key for one object, data type, and server."""
-    base = f"librenms_{data_type}_last_fetched_{obj._meta.model_name}_{obj.pk}"
-    return f"{base}_{server_key}" if server_key else base
+def sync_last_fetched_key(obj, data_type, server_key):
+    """Return the shared last-fetched key for one object, data type, and configured server."""
+    return f"librenms_{data_type}_last_fetched_{obj._meta.model_name}_{obj.pk}_{require_server_key(server_key)}"
 
 
-def sync_vlan_overrides_key(obj, server_key=None):
-    """Return the VLAN override key for one object and server."""
-    base = f"librenms_vlan_group_overrides_{obj._meta.model_name}_{obj.pk}"
-    return f"{base}_{server_key}" if server_key else base
+def sync_vlan_overrides_key(obj, server_key):
+    """Return the VLAN override key for one object and configured server."""
+    return f"librenms_vlan_group_overrides_{obj._meta.model_name}_{obj.pk}_{require_server_key(server_key)}"
 
 
 def _state_key(subject, server_key, tab):
+    server_key = require_server_key(server_key)
     return f"librenms_sync_tab_state_{subject._meta.model_name}_{subject.pk}_{server_key}_{tab.value}"
 
 
@@ -421,7 +414,9 @@ class SyncCacheConsistency:
     def applicable_tabs(self):
         """Return the tabs supported by the synchronization subject's model."""
         is_virtual_machine = self.subject._meta.model_name == "virtualmachine"
-        return tuple(tab for tab, spec in TAB_SPECS.items() if not is_virtual_machine or spec.supports_virtual_machine)
+        return tuple(
+            tab for tab, spec in TAB_SPECS.items() if not is_virtual_machine or spec.source.supports_virtual_machine
+        )
 
     def _shared_owner(self, server_key):
         if self.subject._meta.model_name != "device":
@@ -433,19 +428,18 @@ class SyncCacheConsistency:
         return self._shared_owners[server_key]
 
     def _primary_owner(self, tab, server_key):
-        return self._shared_owner(server_key) if TAB_SPECS[tab].shared_vc_owner else self.subject
+        return self._shared_owner(server_key) if _shares_vc_owner(tab) else self.subject
 
     def _candidate_owners(self, tab, server_key):
         owners = {self.subject.pk: self.subject}
-        if TAB_SPECS[tab].shared_vc_owner:
+        if _shares_vc_owner(tab):
             shared_owner = self._shared_owner(server_key)
             owners[shared_owner.pk] = shared_owner
         return tuple(owners.values())
 
     def snapshot_key(self, tab, server_key):
         """Return the key read by the tab for this page and server."""
-        spec = TAB_SPECS[tab]
-        return sync_snapshot_key(self._primary_owner(tab, server_key), spec.data_type, server_key)
+        return sync_snapshot_key(self._primary_owner(tab, server_key), TAB_SPECS[tab].source.data_type, server_key)
 
     def state_key(self, tab, server_key):
         """Return the state key for one tab and server, scoped like its snapshot."""
@@ -523,7 +517,7 @@ class SyncCacheConsistency:
 
     def _remaining_state_timeout(self, state_key, record, server_key):
         """Return a state record's remaining lifetime without extending it."""
-        remaining_timeout = cache_remaining_ttl(cache, state_key)
+        remaining_timeout = cache.ttl(state_key)
         if isinstance(remaining_timeout, int):
             return remaining_timeout
         created_at = parse_datetime(record.get("timestamp") or "")
@@ -588,7 +582,7 @@ class SyncCacheConsistency:
         """
         owner = self._primary_owner(tab, server_key)
         keys = {sync_subject_key(owner)}
-        if not TAB_SPECS[tab].shared_vc_owner:
+        if not _shares_vc_owner(tab):
             return keys
         virtual_chassis = getattr(owner, "virtual_chassis", None)
         if virtual_chassis is not None:
@@ -631,44 +625,26 @@ class SyncCacheConsistency:
                 )
 
     def _delete_pattern(self, pattern):
-        delete_pattern = getattr(cache, "delete_pattern", None)
-        if not callable(delete_pattern):
-            return 0
-        try:
-            return int(delete_pattern(pattern) or 0)
-        except (AttributeError, NotImplementedError):
-            return 0
+        return int(cache.delete_pattern(pattern) or 0)
 
     @staticmethod
     def _pattern_has_values(pattern):
         """Return whether a snapshot-bound wildcard key currently exists."""
-        iter_keys = getattr(cache, "iter_keys", None)
-        if callable(iter_keys):
-            try:
-                return next(iter_keys(pattern), None) is not None
-            except (AttributeError, NotImplementedError):
-                return False
-        keys = getattr(cache, "keys", None)
-        if callable(keys):
-            try:
-                return bool(keys(pattern))
-            except (AttributeError, NotImplementedError):
-                return False
-        return False
+        return next(cache.iter_keys(pattern), None) is not None
 
     def _tab_has_values(self, tab, server_key):
         """Return whether a tab has a snapshot or snapshot-bound temporary state."""
         spec = TAB_SPECS[tab]
         for owner in self._candidate_owners(tab, server_key):
-            snapshot_key = sync_snapshot_key(owner, spec.data_type, server_key)
+            snapshot_key = sync_snapshot_key(owner, spec.source.data_type, server_key)
             keys = {snapshot_key}
-            if spec.has_last_fetched_key:
-                keys.add(sync_last_fetched_key(owner, spec.data_type, server_key))
-            if spec.has_vlan_overrides:
+            if tab in _LAST_FETCHED_TABS:
+                keys.add(sync_last_fetched_key(owner, spec.source.data_type, server_key))
+            if tab in _VLAN_OVERRIDE_TABS:
                 keys.add(sync_vlan_overrides_key(owner, server_key))
             if any(cache.has_key(key) for key in keys):
                 return True
-            if spec.has_cable_picks and self._pattern_has_values(f"{snapshot_key}:manual-remote:*"):
+            if tab in _CABLE_PICK_TABS and self._pattern_has_values(f"{snapshot_key}:manual-remote:*"):
                 return True
         return False
 
@@ -677,14 +653,14 @@ class SyncCacheConsistency:
         keys = set()
         patterns = set()
         for owner in self._candidate_owners(tab, server_key):
-            snapshot_key = sync_snapshot_key(owner, spec.data_type, server_key)
+            snapshot_key = sync_snapshot_key(owner, spec.source.data_type, server_key)
             if snapshot_key != preserve_key:
                 keys.add(snapshot_key)
-                if spec.has_last_fetched_key:
-                    keys.add(sync_last_fetched_key(owner, spec.data_type, server_key))
-                if spec.has_vlan_overrides:
+                if tab in _LAST_FETCHED_TABS:
+                    keys.add(sync_last_fetched_key(owner, spec.source.data_type, server_key))
+                if tab in _VLAN_OVERRIDE_TABS:
                     keys.add(sync_vlan_overrides_key(owner, server_key))
-                if spec.has_cable_picks:
+                if tab in _CABLE_PICK_TABS:
                     patterns.add(f"{snapshot_key}:manual-remote:*")
 
         existing = {key for key in keys if cache.has_key(key)}

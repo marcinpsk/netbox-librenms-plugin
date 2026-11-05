@@ -77,6 +77,27 @@ class TestModulesTabDegradesOnUnbuildableClient:
 
 
 @pytest.mark.django_db
+class TestIPAddressTabDegradesOnUnbuildableClient:
+    def test_get_context_data_returns_empty_panel_not_500(self):
+        from django.contrib.auth.models import AnonymousUser
+        from django.test import RequestFactory
+
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
+
+        device = _make_device("degrade-ip-dev")
+        request = RequestFactory().get("/")
+        request.user = AnonymousUser()
+        view = DeviceIPAddressTableView()
+        view.request = request
+
+        with _patch_unbuildable_config():
+            context = view.get_context_data(request, device)
+
+        assert context["table"] is None
+        assert context["object"] == device
+
+
+@pytest.mark.django_db
 class TestInterfacesTabDegradesOnUnbuildableClient:
     def test_get_context_data_renders_with_none_key_not_500(self):
         from django.contrib.auth.models import AnonymousUser
@@ -156,3 +177,36 @@ class TestVlanTabDegradesOnUnbuildableClient:
         assert context["server_key"] is None
         assert context["vlan_table"] is None
         assert context["object"] == device
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("route_name", "body"),
+    [
+        ("verify_interface", {"port_id": 4001}),
+        ("verify_cable", {"row_id": "row-1"}),
+        ("verify_module", {"ent_physical_index": 100, "depth": 0}),
+        ("save_vlan_group_overrides", {"vid_group_map": {"10": "1"}}),
+    ],
+)
+def test_a_verify_or_override_post_without_a_usable_server_answers_unavailable(client, route_name, body):
+    import json
+
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+
+    device = _make_device(f"degrade-{route_name}")
+    client.force_login(make_superuser(f"degrade-{route_name}-user"))
+    payload = {**body, "device_id": device.pk, "page_device_id": device.pk, "server_key": "default"}
+
+    with _patch_unbuildable_config():
+        response = client.post(
+            reverse(f"plugins:netbox_librenms_plugin:{route_name}"),
+            data=json.dumps(payload),
+            content_type="application/json",
+        )
+
+    # No usable server has no snapshot namespace to read or write.
+    assert response.status_code == 503
+    assert response.json() == {"status": "error", "message": "No usable LibreNMS server is configured."}
