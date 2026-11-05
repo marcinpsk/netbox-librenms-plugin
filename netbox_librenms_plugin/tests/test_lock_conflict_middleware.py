@@ -24,6 +24,7 @@ from netbox_librenms_plugin.tests.lock_conflict_helpers import (
     second_connection,
     wrapped_database_error,
 )
+from netbox_librenms_plugin.tests.source_snapshot_helpers import port_pair
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, messages_on
 from netbox_librenms_plugin.transactions import CommittedFollowUpError
 
@@ -70,7 +71,7 @@ def test_a_lock_conflict_in_a_relationship_sync_is_a_json_answer(client, setting
     seed_ports(
         device,
         [sync_port(10, "eth1"), sync_port(20, "Po1", if_type="ieee8023adLag")],
-        lag_members={10: 20},
+        [port_pair(10, 20)],
     )
     client.force_login(make_superuser("middleware-relationship-sync-user"))
 

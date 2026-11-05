@@ -23,7 +23,7 @@ from ipam.models import IPAddress, VRF
 from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.server_mappings import read_mapping
-from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncCacheConsistency, SyncTab, sync_snapshot_key
+from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab
 from netbox_librenms_plugin.tests.conftest import (
     _PORT_KEYS_UNSET,
     make_device,
@@ -35,7 +35,11 @@ from netbox_librenms_plugin.tests.conftest import (
     run_in_threads,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
-from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot
+from netbox_librenms_plugin.tests.source_snapshot_helpers import (
+    ip_address_row,
+    seed_interfaces_snapshot,
+    seed_ip_snapshot,
+)
 from netbox_librenms_plugin.tests.view_test_helpers import (
     assert_update_logged,
     grant,
@@ -1399,10 +1403,11 @@ def test_interface_sync_keeps_its_source_snapshot_and_clears_the_ip_snapshot(
         },
     )
 
+    live_librenms.server.register("/api/v0/devices/42/port_stack", {"status": "ok", "mappings": []})
+
     client.force_login(make_superuser("ip-cache-cleared-user"))
     ip_refresh_url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk])
     interface_refresh_url = reverse("plugins:netbox_librenms_plugin:device_interface_sync", args=[device.pk])
-    interface_cache_key = sync_snapshot_key(device, TAB_SPECS[SyncTab.INTERFACES].source.data_type, "default")
     assert (
         client.post(
             ip_refresh_url,
@@ -1438,7 +1443,7 @@ def test_interface_sync_keeps_its_source_snapshot_and_clears_the_ip_snapshot(
         )
 
     assert response.status_code == 302
-    assert cache.get(interface_cache_key) is not None
+    assert source_cache.read(device, Resource.INTERFACES, "default") is not None
     assert source_cache.read(device, Resource.IP_ADDRESSES, "default") is None
 
 
@@ -2530,10 +2535,7 @@ def test_netbox_only_interfaces_respect_view_scope(client, settings, live_libren
     user = make_user_with_perms("netbox-only-scope-user", [("view", Device)])
     user = grant(user, "view", Interface, constraints={"pk": visible.pk})
     client.force_login(user)
-    cache.set(
-        f"librenms_ports_device_{device.pk}_default",
-        {"ports": [{"port_id": 7010, "ifName": "remote-only", "ifDescr": "remote-only"}]},
-    )
+    seed_interfaces_snapshot(device, [{"port_id": 7010, "ifName": "remote-only", "ifDescr": "remote-only"}])
     response = client.get(
         reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
         {"tab": "interfaces", "server_key": "default", "interface_name_field": "ifName"},
