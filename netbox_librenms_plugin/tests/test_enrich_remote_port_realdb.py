@@ -15,6 +15,7 @@ assertions fail — a genuine red→green guard.
 import pytest
 
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.view_test_helpers import superuser_chassis
 
 
 def _make_view():
@@ -140,7 +141,7 @@ class TestVCCableTableSerialOwnership:
                 }
             ]
         )
-        return VCCableTable(rows, device=member), rows[0], outsider, member
+        return VCCableTable(rows, device=member, chassis=superuser_chassis(member)), rows[0], outsider, member
 
     def test_the_hidden_field_keeps_the_ports_own_device(self):
         """Substituting a member here submits an ID the sync view will reject."""
@@ -191,7 +192,7 @@ class TestVCCableTableMemberQueryCount:
         # Build the table OUTSIDE the capture so the one-time member fetch isn't counted.
         # The view assigns row identities before the table renders; do the same here.
         rows = assign_cable_row_ids(rows)
-        table = VCCableTable(rows, device=m1)
+        table = VCCableTable(rows, device=m1, chassis=superuser_chassis(m1))
 
         with CaptureQueriesContext(connection) as ctx:
             for row in rows:
@@ -227,7 +228,9 @@ class TestModuleTableInstalledModulePrefetch:
             rows.append({"installed_module_id": module.pk, "status": "Matched", "name": f"Slot{i}"})
 
         # Build OUTSIDE the capture so the one-time batch prefetch isn't counted.
-        table = VCModuleTable(rows, device=member, has_write_permission=True, can_add_module=True)
+        table = VCModuleTable(
+            rows, device=member, chassis=superuser_chassis(member), has_write_permission=True, can_add_module=True
+        )
 
         with CaptureQueriesContext(connection) as ctx:
             for row in rows:

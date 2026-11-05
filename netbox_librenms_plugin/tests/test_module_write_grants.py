@@ -905,6 +905,36 @@ def test_a_row_on_a_hidden_member_shows_no_bay_module_or_action_of_that_member(c
     assert rendered_module_form(content, "install-module", CARD)
 
 
+def test_no_signed_grant_of_the_page_names_a_hidden_member(client, vc_grants):
+    """Optic 1 belongs to the hidden member: its row signs nothing, and no grant of the page holds that member."""
+    from dcim.models import Device, Module, ModuleBay, ModuleType
+    from django.core import signing
+
+    from netbox_librenms_plugin.module_grants import _SALT
+    from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+    page, member = vc_grants(optic_1_on_member=True)
+    user = make_user_with_perms("module-grants-hidden-grants", [("view", Device)], constraints={"pk": page.pk})
+    for action, model in (("view", ModuleBay), ("view", ModuleType), ("view", Module), ("add", Module)):
+        user = grant(user, action, model)
+    client.force_login(user)
+
+    content = render(client, page)
+
+    tokens = re.findall(r'(?:name="inventory_binding" value|data-verify-binding)="([^"]+)"', content)
+    payloads = [signing.loads(token, salt=_SALT) for token in tokens]
+    assert any(payload["action"] == "install_selected" for payload in payloads)
+    for payload in payloads:
+        assert payload["device_id"] != member.pk
+        assert all(member.pk not in row[1:2] for row in payload["rows"] or ())
+    assert all(
+        row[0] != OPTIC_1 for payload in payloads if payload["action"] == "install_selected" for row in payload["rows"]
+    )
+    (select,) = re.findall(rf'<select name="device_selection_{OPTIC_1}".*?</select>', content, flags=re.S)
+    assert " disabled" in select
+    assert "data-verify-binding" not in select
+
+
 def test_a_serial_conflict_on_a_device_the_user_cannot_view_names_nothing_and_offers_no_move(client, vc_grants):
     """The card serial sits on a module of a device outside the user's view: the row neither names nor moves it."""
     from dcim.models import Device, Module, ModuleBay, ModuleType

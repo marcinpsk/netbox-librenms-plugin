@@ -14,7 +14,6 @@ from django.core.paginator import EmptyPage, PageNotAnInteger
 from django.db import DatabaseError, IntegrityError, transaction
 from django.db.models import Count, Max
 from django.http import HttpRequest
-from django.utils.functional import SimpleLazyObject
 from django.utils.html import escape, format_html
 from django.utils.safestring import mark_safe
 from netbox.config import get_config
@@ -3078,6 +3077,15 @@ def vlan_source_namer(device):
 SYNC_TABLE_HEADER_ATTRS = {"class": "text-wrap", "data-col": lambda bound_column: bound_column.name}
 
 
+# The empty choice of a member dropdown whose row no listed member owns.
+VC_MEMBER_PLACEHOLDER = "Select a member"
+
+
+def selected_vc_member(members, selected_id):
+    """Return the member of *members* whose id is *selected_id* (int or numeric string), or None."""
+    return next((member for member in members if str(member.id) == str(selected_id)), None)
+
+
 def render_vc_member_options(members, selected_id):
     """
     Build the ``<option>`` list for a Virtual Chassis member dropdown.
@@ -3087,18 +3095,27 @@ def render_vc_member_options(members, selected_id):
     (the XSS escaping was previously added to each copy separately). Ids are compared as
     strings because the module table's selected id can arrive as a string from cached
     row data, while the other tables pass ints — ``str()`` makes both compare correctly.
+    When no listed member has *selected_id* (the row has no owner, or an owner the user may
+    not view), the list starts with the selected empty choice :data:`VC_MEMBER_PLACEHOLDER`.
 
     Args:
         members: Iterable of VC member devices (anything with ``.id`` and ``.name``).
-        selected_id: The member id to mark selected (int or numeric string).
+        selected_id: The member id to mark selected (int or numeric string), or None.
 
     Returns:
         SafeString: The concatenated ``<option>`` elements, member names escaped.
 
     """
+    members = list(members)
+    placeholder = (
+        f'<option value="" selected>{VC_MEMBER_PLACEHOLDER}</option>'
+        if selected_vc_member(members, selected_id) is None
+        else ""
+    )
     # Names are escaped above and the ids are model pks, so the markup is trusted.
     return mark_safe(
-        "".join(
+        placeholder
+        + "".join(
             f'<option value="{member.id}"{" selected" if str(member.id) == str(selected_id) else ""}>'
             f"{escape(member.name)}</option>"
             for member in members
@@ -3816,29 +3833,24 @@ def build_migrated_context(obj, server_key: str = "default") -> dict:
     render and after a tab refresh (the partial-render views build their own context
     and would otherwise drop the marker).
 
-    ``migrated_to_winner`` is a lazy proxy: the winner ``Device`` row is fetched only when a template
-    actually reads it (the interface/IP partials, which render the per-row "Move to winner" controls).
-    The cable/module/VLAN partials render only the marker banner and never touch it, so they avoid the
-    lookup on every HTMX refresh. The self-pointing suppression is done in memory (``device_id ==
-    obj.pk``) so it never forces that fetch — the donor always exists, so the old ``Device`` lookup
-    could only ever have returned ``obj`` itself.
+    The winner is not part of it: a template names the winner only through
+    :func:`~netbox_librenms_plugin.views.mixins.migrated_template_context`, which reads it through the
+    actor's view scope. The self-pointing suppression is done in memory (``device_id == obj.pk``).
 
     Args:
         obj: The donor device to build migrated-mode context for.
         server_key (str): The LibreNMS server key the marker is namespaced under.
 
     Returns:
-        dict: ``{migrated_to_marker, migrated_to_winner}``. Both None when not in migrated mode (a
-            rejected server key, no marker, or a corrupt self-pointing marker). ``migrated_to_winner``
-            is a lazy ``Device`` proxy (truthiness/attribute access resolves it; it proxies None if
-            the winner row was since deleted) — test it via truthiness in templates, not ``is None``.
+        dict: ``{migrated_to_marker}``, None when not in migrated mode (a rejected server key, no
+            marker, or a corrupt self-pointing marker).
 
     """
     # Callers pass a request-supplied scope. Only mark_migrated() writes markers, and it
     # validates the key first, so a rejected key can hold none — report migrated mode off instead
     # of letting the marker reader raise on it.
     if not is_server_key(server_key or "default"):
-        return {"migrated_to_marker": None, "migrated_to_winner": None}
+        return {"migrated_to_marker": None}
     marker = read_mapping(obj).migrated_to(server_key or "default") if obj is not None else None
     # A self-pointing marker (winner == this donor) is corrupt: it would flip the donor's own sync
     # page into migrated mode resolving the "winner" to itself, hiding the ordinary sync controls.
@@ -3846,14 +3858,8 @@ def build_migrated_context(obj, server_key: str = "default") -> dict:
     # only ever return obj. The marker reader deliberately does NOT reject it: the move views read
     # it via _resolve_winner_for_donor() to report it as "stale/corrupt".
     if marker is None or marker.device_id == getattr(obj, "pk", None):
-        return {"migrated_to_marker": None, "migrated_to_winner": None}
-
-    # Defer the row fetch until a template reads the winner (cable/module/VLAN never do), saving a
-    # query per HTMX refresh.
-    return {
-        "migrated_to_marker": marker,
-        "migrated_to_winner": SimpleLazyObject(lambda: Device.objects.filter(pk=marker.device_id).first()),
-    }
+        return {"migrated_to_marker": None}
+    return {"migrated_to_marker": marker}
 
 
 def has_nested_name_conflict(module_type, module_bay, sibling_counts=None):

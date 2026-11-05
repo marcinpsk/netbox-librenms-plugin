@@ -60,7 +60,9 @@
     <div>
         <strong>No mapped LibreNMS server is usable.</strong>
         Every mapping below is disabled, so no sync tab can run against this object.
-        {% if lookup_device_pk != object.pk %}
+        {% if not lookup_device_pk %}
+        The mappings belong to a virtual chassis member that is not available to you.
+        {% elif lookup_device_pk != object.pk %}
         The mappings belong to the virtual chassis sync device. Correct or remove them on
         <a href="{% if lookup_device_model_name == 'virtualmachine' %}{% url 'plugins:netbox_librenms_plugin:vm_librenms_sync' pk=lookup_device_pk %}{% else %}{% url 'plugins:netbox_librenms_plugin:device_librenms_sync' pk=lookup_device_pk %}{% endif %}"
            class="alert-link">that device&#39;s LibreNMS tab</a>.
@@ -88,9 +90,9 @@
                 <strong>{{ migrated_to_winner.name }}</strong>
             </a>.
         {% else %}
-            The winner device (<code>id={{ migrated_to_marker.device_id }}</code>)
-            no longer exists. The marker is stale &mdash; remove it manually
-            from <code>librenms_id.{{ migrated_to_marker.server_key }}._migrated_to</code>
+            {# A winner the user may not view and a deleted winner render the same text. #}
+            The device it was merged into is not available to you. If that device was deleted,
+            remove the marker <code>librenms_id.{{ migrated_to_marker.server_key }}._migrated_to</code>
             to re-enable sync.
         {% endif %}
         <div class="text-muted small mt-1">
@@ -251,7 +253,7 @@
                         </button>
                     </form>
                     {% else %}
-                    <span class="text-muted small" title="Mapping belongs to VC sync device {{ librenms_sync_device|escape }} — navigate there to remove it">
+                    <span class="text-muted small" title="{% if librenms_sync_device %}Mapping belongs to VC sync device {{ librenms_sync_device }}, navigate there to remove it{% else %}Mapping belongs to another virtual chassis member{% endif %}">
                         <i class="mdi mdi-information-outline me-1"></i>Managed by VC sync device
                     </span>
                     {% endif %}
@@ -330,7 +332,7 @@
                             <th scope="row" style="padding-left: 1rem;">ID</th>
                             <td>
                                 {{ librenms_device_id }}
-                                {% if librenms_id_is_legacy %}
+                                {% if librenms_id_is_legacy and lookup_device_pk %}
                                 <form style="display:inline" method="post"
                                       action="{% url 'plugins:netbox_librenms_plugin:convert_legacy_librenms_id' pk=lookup_device_pk %}">
                                     {% csrf_token %}
@@ -716,7 +718,14 @@
 
 {% if is_vc_member and not object_has_recorded_mapping %}
 <!-- VC Member Message - Non-sync members redirect to the designated sync device -->
-    {% if sync_device_has_librenms_id %}
+    {% if sync_device_withheld %}
+    <div class="alert alert-info">
+        <div>
+            <i class="mdi mdi-information-outline"></i>
+            LibreNMS sync for this virtual chassis is managed by a member that is not available to you
+        </div>
+    </div>
+    {% elif sync_device_has_librenms_id %}
     <!-- A VC member already has librenms_id configured -->
     <div class="alert alert-info">
         <div>
@@ -1172,6 +1181,8 @@ that may well be correct.
                                         <span class="text-success ms-1" title="Already assigned">
                                             <i class="mdi mdi-check-circle"></i>
                                         </span>
+                                    {% elif item.assigned_withheld %}
+                                        <span class="text-muted">A member that is not available to you</span>
                                     {% else %}
                                         <span class="text-muted">-</span>
                                     {% endif %}
@@ -1180,7 +1191,7 @@ that may well be correct.
                                     <input type="hidden" name="librenms_serial_{{ forloop.counter }}" value="{{ item.librenms_serial }}">
                                     <select name="member_id_{{ forloop.counter }}" class="form-select form-select-sm">
                                         <option value="">Select member...</option>
-                                        {% for member in object.virtual_chassis.members.all %}
+                                        {% for member in vc_member_choices %}
                                         <option value="{{ member.pk }}" {% if item.assigned_member and item.assigned_member.pk == member.pk %}selected{% endif %}>
                                             {{ member.name }}
                                         </option>
@@ -1191,6 +1202,12 @@ that may well be correct.
                             {% endfor %}
                         </tbody>
                     </table>
+                    {% if vc_hidden_member_count %}
+                    <p class="text-muted small mb-0">
+                        {{ vc_hidden_member_count }} member{{ vc_hidden_member_count|pluralize }} of this virtual chassis
+                        {{ vc_hidden_member_count|pluralize:"is,are" }} not available to you.
+                    </p>
+                    {% endif %}
                 </form>
             </div>
             <div class="modal-footer">

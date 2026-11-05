@@ -605,7 +605,7 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
     """Assign serial numbers to each virtual chassis member."""
 
     required_object_permissions = {
-        "POST": [("change", Device)],
+        "POST": [("view", Device), ("change", Device)],
     }
 
     def post(self, request, pk):
@@ -614,7 +614,9 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
         if error := self.require_all_permissions("POST"):
             return error
 
-        device = self.restrict_object_or_404(Device, "change", pk=pk)
+        device = self.restrict_object_or_404(
+            Device, pk=pk, pk__in=self.restricted_queryset(Device, "change").values("pk")
+        )
         # The modal posts the tab's server scope, so return the user to that same server and tab
         # instead of the session/default one.
         active_server_key = _validated_active_server_key(request, "server_key")
@@ -677,14 +679,18 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
 
         def apply(member):
             locked.append(member)
+            # The lock reads the member's current chassis; the user may view it, so naming it is safe.
             if member.virtual_chassis_id != device.virtual_chassis_id:
                 raise _WriteRefused(f"{member.name} is not part of the same virtual chassis")
             member.serial = serial
 
+        # The member's pk comes from the POST: only a member the user may view and change is
+        # locked, and any other pk is "not found", so a constrained grant names no hidden member.
+        writable = self.restricted_queryset(Device).filter(
+            pk=member_id, pk__in=self.restricted_queryset(Device, "change").values("pk")
+        )
         try:
-            # Scoped like the page device: the member's pk comes from the POST, so the same-VC
-            # check alone would let a constrained grant write a serial onto a member it does not cover.
-            update_existing_row(self.restricted_queryset(Device, "change").filter(pk=member_id), apply)
+            update_existing_row(writable, apply)
         except _WriteRefused as exc:
             return str(exc)
         except (ValidationError, IntegrityError) as e:

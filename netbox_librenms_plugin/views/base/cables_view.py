@@ -56,6 +56,7 @@ from netbox_librenms_plugin.sync_cache import (
 )
 from netbox_librenms_plugin.sync_filters import filter_sync_table, parse_table_filters
 from netbox_librenms_plugin.sync_query import SyncQuery
+from netbox_librenms_plugin.sync_view_scope import Visible
 from netbox_librenms_plugin.tables.cables import SYNC_CABLE_LABEL
 from netbox_librenms_plugin.utils import (
     cable_far_terminations,
@@ -378,20 +379,35 @@ class BaseCableTableView(
         if not normal_links:
             return None
 
+        scope = self.sync_view_scope(obj)
         devices_by_name, devices_by_librenms_id, visible_device_ids = self._load_remote_device_catalog(
             normal_links, server_key
         )
         remote_device_by_link = self._resolve_remote_devices(
             normal_links, devices_by_name, devices_by_librenms_id, visible_device_ids
         )
-        remote_owner_by_link = self._resolve_remote_owners(normal_links, remote_device_by_link)
-        chassis_members, local_owner_by_link = self._resolve_local_owners(normal_links, obj, server_key)
+        remote_chassis = scope.remote_members(
+            {
+                device.virtual_chassis_id
+                for device in remote_device_by_link.values()
+                if device is not None and device.virtual_chassis_id is not None
+            }
+        )
+        remote_owner_by_link = self._resolve_remote_owners(normal_links, remote_device_by_link, remote_chassis)
+        _members, local_owner_by_link = self._resolve_local_owners(normal_links, obj, server_key)
         manual_ids, candidate_specs = self._collect_interface_candidates(
             normal_links, local_owner_by_link, remote_owner_by_link
         )
-        owner_ids = {device.pk for device in chassis_members}
-        owner_ids.update(device.pk for device in remote_owner_by_link.values() if device is not None)
-        context = self._load_interface_catalog(candidate_specs, manual_ids, owner_ids, server_key)
+        # Every owner is attributed; an owner is shown only through its chassis scope. A standalone
+        # remote owner is the remote device itself, which resolves only when the user may view it.
+        shown_owner_ids = set(scope.chassis.visible_ids)
+        shown_owner_ids.update(member_id for chassis in remote_chassis.values() for member_id in chassis.visible_ids)
+        shown_owner_ids.update(
+            device.pk
+            for device in remote_owner_by_link.values()
+            if device is not None and device.virtual_chassis_id is None
+        )
+        context = self._load_interface_catalog(candidate_specs, manual_ids, shown_owner_ids, server_key)
         context["local_owner_by_link"] = local_owner_by_link
         context["remote_device_by_link"] = remote_device_by_link
         context["remote_owner_by_link"] = remote_owner_by_link
@@ -451,18 +467,14 @@ class BaseCableTableView(
             for link in normal_links
         }
 
-    def _resolve_remote_owners(self, normal_links, remote_device_by_link):
-        """Resolve which chassis member actually owns each row's remote port."""
-        remote_chassis_ids = {
-            device.virtual_chassis_id
-            for device in remote_device_by_link.values()
-            if device is not None and device.virtual_chassis_id is not None
+    def _resolve_remote_owners(self, normal_links, remote_device_by_link, remote_chassis):
+        """Resolve which chassis member actually owns each row's remote port, among every member of its chassis."""
+        remote_members_by_chassis = {
+            chassis_id: {
+                member.vc_position: member for member in chassis.attribution_members if member.vc_position is not None
+            }
+            for chassis_id, chassis in remote_chassis.items()
         }
-        remote_members_by_chassis = defaultdict(dict)
-        if remote_chassis_ids:
-            for member in Device.objects.filter(virtual_chassis_id__in=remote_chassis_ids):
-                if member.vc_position is not None:
-                    remote_members_by_chassis[member.virtual_chassis_id][member.vc_position] = member
         remote_owner_by_link = {}
         for link in normal_links:
             remote_device = remote_device_by_link.get(id(link))
@@ -481,10 +493,10 @@ class BaseCableTableView(
         return remote_owner_by_link
 
     def _resolve_local_owners(self, normal_links, obj, server_key):
-        """Resolve local owners by stable port binding before a chassis member name."""
+        """Resolve local owners by stable port binding before a chassis member name, among every member."""
         if obj.virtual_chassis_id is None:
             return [obj], {id(link): obj for link in normal_links}
-        chassis_members = list(obj.virtual_chassis.members.all())
+        chassis_members = self.sync_view_scope(obj).chassis.attribution_members
         members_by_id = {member.pk: member for member in chassis_members}
         members_by_position = {
             member.vc_position: member for member in chassis_members if member.vc_position is not None
@@ -536,7 +548,7 @@ class BaseCableTableView(
                     candidate_specs[remote_owner.pk]["ids"].add(remote_id)
         return manual_ids, candidate_specs
 
-    def _load_interface_catalog(self, candidate_specs, manual_ids, owner_ids, server_key):
+    def _load_interface_catalog(self, candidate_specs, manual_ids, shown_owner_ids, server_key):
         """Prefetch every candidate interface once and build the row lookup and permission sets."""
         candidate_pks = set(manual_ids)
         named_candidate_items = [
@@ -575,7 +587,9 @@ class BaseCableTableView(
             )
         )
         # A manual pick can name an interface on a device no row resolved an owner for.
-        owner_ids.update(interface.device_id for interface in catalog_interfaces if interface.pk in manual_ids)
+        manual_owner_ids = {
+            interface.device_id for interface in catalog_interfaces if interface.pk in manual_ids
+        } - shown_owner_ids
         interface_ids_by_device = defaultdict(list)
         interfaces_by_name = defaultdict(list)
         interfaces_by_pk = {}
@@ -600,9 +614,8 @@ class BaseCableTableView(
             "visible_interface_ids": set(
                 self._viewable_queryset(Interface).filter(pk__in=interfaces_by_pk).values_list("pk", flat=True)
             ),
-            "visible_owner_ids": set(
-                self._viewable_queryset(Device).filter(pk__in=owner_ids).values_list("pk", flat=True)
-            ),
+            "visible_owner_ids": shown_owner_ids
+            | set(self._viewable_queryset(Device).filter(pk__in=manual_owner_ids).values_list("pk", flat=True)),
             "visible_cable_ids": set(
                 self._viewable_queryset(Cable).filter(pk__in=cable_ids).values_list("pk", flat=True)
             ),
@@ -1974,6 +1987,8 @@ class BaseCableTableView(
                 continue
 
             link["device_id"] = obj.id
+            if obj.virtual_chassis_id is not None and normal_context is not None:
+                self._set_local_member(link, obj, normal_context)
 
             # A manually picked remote Interface wins over LLDP name matching entirely (the
             # names mismatching is why the user picked by hand). check_cable_status then derives
@@ -2042,6 +2057,13 @@ class BaseCableTableView(
         )
         self._apply_cable_rule_blocks(links_data, server_key)
         return links_data
+
+    def _set_local_member(self, link, obj, normal_context):
+        """Give a chassis row the member that owns its local port, or ``member_withheld`` when the user may not view it."""
+        owner = normal_context["local_owner_by_link"].get(id(link))
+        shown = self.sync_view_scope(obj).chassis.owner(owner.pk) if owner is not None else None
+        link["member_withheld"] = owner is not None and not isinstance(shown, Visible)
+        link["local_owner_id"] = shown.obj.pk if isinstance(shown, Visible) else None
 
     def _remote_port_owner(self, link, server_key, normal_context=None):
         """
@@ -2609,7 +2631,7 @@ class CableRemotePickerView(BaseCableTableView):
         if source != SERIAL_INVENTORY_SOURCE:
             _members, owners = self._resolve_local_owners([row], obj, server_key)
             owner = owners[id(row)]
-            if owner is None or not self.restricted_queryset(Device).filter(pk=owner.pk).exists():
+            if owner is None or not isinstance(self.sync_view_scope(obj).chassis.owner(owner.pk), Visible):
                 return False
             interface = resolve_device_port(
                 owner,

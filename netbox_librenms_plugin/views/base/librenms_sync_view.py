@@ -38,6 +38,7 @@ from netbox_librenms_plugin.sync_cache import (
     sync_cache_browser_contract,
 )
 from netbox_librenms_plugin.sync_query import SyncQuery
+from netbox_librenms_plugin.sync_view_scope import SyncViewScope, Visible
 from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_user_pref,
@@ -47,7 +48,12 @@ from netbox_librenms_plugin.utils import (
     resolve_naming_preferences,
     save_user_pref,
 )
-from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
+from netbox_librenms_plugin.views.mixins import (
+    LibreNMSAPIMixin,
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+    migrated_template_context,
+)
 
 # Remembering the tab is what makes the page usable across a detour into NetBox proper:
 # an operator who leaves to fix a bay mapping comes back to the tab they were working in.
@@ -202,22 +208,30 @@ class BaseLibreNMSSyncView(
         status = 400 if invalid_filter and not request.htmx else 200
         return render(request, self.template_name, context, status=status)
 
-    def _can_manage_server_preference(self, selection):
-        """Check plugin write and object change scope for the mapping owner."""
+    @staticmethod
+    def _disclosed_owner(scope, owner):
+        """Return *owner* (a mapping or sync owner) when the actor may view it, else None."""
+        if owner is None:
+            return None
+        disclosed = scope.owner(type(owner), owner.pk)
+        return disclosed.obj if isinstance(disclosed, Visible) else None
+
+    def _can_manage_server_preference(self, scope, selection):
+        """Check plugin write and the view and change scope of the mapping owner."""
         if not selection or not selection.has_multiple_usable_mappings or not self.has_write_permission():
             return False
-        owner = selection.mapping_owner
-        return self.restricted_queryset(type(owner), "change").filter(pk=owner.pk).exists()
+        owner = self._disclosed_owner(scope, selection.mapping_owner)
+        return owner is not None and self.restricted_queryset(type(owner), "change").filter(pk=owner.pk).exists()
 
     def _render_server_selection_blocked(self, request, obj, selection):
         """Render the object page shell without constructing or querying an API client."""
-        from netbox_librenms_plugin.utils import build_migrated_context
-
+        scope = SyncViewScope.for_request(request.user, obj)
         applicable_tabs = SyncCacheConsistency(obj).applicable_tabs()
         applicable_tab_names = {tab.value for tab in applicable_tabs}
         requested_tab = request.GET.get("tab") or SyncTab.INTERFACES.value
         active_sync_tab = requested_tab if requested_tab in applicable_tab_names else SyncTab.INTERFACES.value
         mapping_owner = selection.mapping_owner
+        shown_owner = self._disclosed_owner(scope, mapping_owner)
         self._librenms_lookup_device = mapping_owner
         self._server_key_unresolved = True
         self._scoped_render_server_key = selection.active_key
@@ -238,17 +252,18 @@ class BaseLibreNMSSyncView(
                 "server_selection_active_name": selection.active_display_name,
                 "server_selection_preferred_key": selection.preferred_key,
                 "server_selection_has_usable_mapping": selection.has_usable_mapping,
-                "can_manage_server_preference": self._can_manage_server_preference(selection),
+                "can_manage_server_preference": self._can_manage_server_preference(scope, selection),
                 "server_selection_blocked": True,
                 "has_librenms_id": False,
                 "found_in_librenms": False,
                 "librenms_device_details": {},
                 "platform_info": {},
                 "has_write_permission": self.has_write_permission(),
-                "lookup_device_pk": mapping_owner.pk,
+                # The mapping owner is named and linked only when the actor may view it.
+                "lookup_device_pk": shown_owner.pk if shown_owner is not None else None,
                 "lookup_device_model_name": mapping_owner._meta.model_name,
                 "object_model_name": obj._meta.model_name,
-                **build_migrated_context(obj, selection.active_key),
+                **migrated_template_context(request, obj, selection.active_key),
             },
         )
 
@@ -256,6 +271,7 @@ class BaseLibreNMSSyncView(
         """Get the context data for the LibreNMS sync view."""
         # Get context from parent classes (including LibreNMSAPIMixin)
         context = super().get_context_data()
+        scope = SyncViewScope.for_request(request.user, obj)
         coordinator = SyncCacheConsistency(obj)
         applicable_tabs = coordinator.applicable_tabs()
         applicable_tab_names = {tab.value for tab in applicable_tabs}
@@ -296,7 +312,9 @@ class BaseLibreNMSSyncView(
             and obj.virtual_chassis
         ):
             # Use helper function to determine the sync device
-            librenms_sync_device = get_librenms_sync_device(obj, server_key=self.librenms_api.server_key)
+            sync_device = get_librenms_sync_device(obj, server_key=self.librenms_api.server_key)
+            # A sync member the actor may not view is not named, linked or described.
+            librenms_sync_device = self._disclosed_owner(scope, sync_device)
 
             # Determine sync device status
             sync_device_has_librenms_id = False
@@ -315,6 +333,7 @@ class BaseLibreNMSSyncView(
                     "object_has_recorded_mapping": read_mapping(obj).has_recorded_state,
                     "sync_device_has_primary_ip": sync_device_has_primary_ip,
                     "librenms_sync_device": librenms_sync_device,
+                    "sync_device_withheld": sync_device is not None and librenms_sync_device is None,
                     "sync_device_has_librenms_id": sync_device_has_librenms_id,
                 }
             )
@@ -362,6 +381,12 @@ class BaseLibreNMSSyncView(
         device_info_unavailable = librenms_info.get("device_info_unavailable", False)
         show_add_device = not librenms_info["found_in_librenms"] and not device_info_unavailable
         selection = getattr(self, "_server_selection", None)
+        shown_lookup_device = self._disclosed_owner(scope, _lookup_device or obj)
+        vc_inventory_serials = (
+            self._get_vc_inventory_serials(obj, scope.chassis)
+            if librenms_info["found_in_librenms"] and getattr(obj, "virtual_chassis", None)
+            else []
+        )
 
         context.update(
             {
@@ -396,7 +421,10 @@ class BaseLibreNMSSyncView(
                 **librenms_info["librenms_device_details"],
                 "interface_name_field": interface_name_field,
                 "platform_info": platform_info,
-                "vc_inventory_serials": librenms_info["librenms_device_details"].get("vc_inventory_serials", []),
+                "vc_inventory_serials": vc_inventory_serials,
+                # The serial dialog offers only the members the actor may view, and counts the others.
+                "vc_member_choices": scope.chassis.visible,
+                "vc_hidden_member_count": len(scope.chassis.attribution_members) - len(scope.chassis.visible),
                 "manufacturers": manufacturers,
                 # Same safe accessor as "server_key" above — only the is_active highlight needs it.
                 "all_server_mappings": (
@@ -411,12 +439,12 @@ class BaseLibreNMSSyncView(
                 "server_selection_warning": selection.warning if selection is not None else None,
                 "server_selection_active_name": selection.active_display_name if selection is not None else None,
                 "server_selection_preferred_key": selection.preferred_key if selection is not None else None,
-                "can_manage_server_preference": self._can_manage_server_preference(selection),
+                "can_manage_server_preference": self._can_manage_server_preference(scope, selection),
                 "librenms_id_is_legacy": librenms_id_is_legacy,
                 "librenms_id_serial_confirmed": librenms_id_serial_confirmed,
                 # Lookup device may differ from object (e.g. VC master vs member).
                 # Used by the Remove server mapping form to post to the correct device.
-                "lookup_device_pk": _lookup_device.pk if _lookup_device else obj.pk,
+                "lookup_device_pk": shown_lookup_device.pk if shown_lookup_device is not None else None,
                 "lookup_device_model_name": (
                     _lookup_device._meta.model_name if _lookup_device else obj._meta.model_name
                 ),
@@ -429,7 +457,7 @@ class BaseLibreNMSSyncView(
                 # on the sync sibling, whose sync page is where its migrated controls surface.
                 # Use the resolved render key (not the lazy librenms_api property, which re-derives
                 # the global default and mis-namespaces the marker on the stale-?server_key path).
-                **self._build_migrated_context(obj, self._scoped_render_server_key or self.active_server_key),
+                **migrated_template_context(request, obj, self._scoped_render_server_key or self.active_server_key),
             }
         )
 
@@ -465,30 +493,6 @@ class BaseLibreNMSSyncView(
             )
 
         return context
-
-    @staticmethod
-    def _build_migrated_context(obj, server_key):
-        """
-        Build Stage 2b "donor migrated mode" context.
-
-        When ``migrated_to_marker`` is set, all sync action buttons should be hidden
-        and per-row "Move to winner" actions should be shown instead. Delegates to
-        :func:`utils.build_migrated_context` so the full page and the HTMX tab partials
-        share one implementation.
-
-        Args:
-            obj: The donor device to build migrated-mode context for.
-            server_key: The LibreNMS server key the marker is namespaced under.
-
-        Returns:
-            dict: ``{migrated_to_marker, migrated_to_winner}`` — the marker dict
-                ``{device_id, server_key, at}`` (or None), and the winner
-                :class:`Device` (or None if deleted since the marker was written).
-
-        """
-        from netbox_librenms_plugin.utils import build_migrated_context
-
-        return build_migrated_context(obj, server_key)
 
     @staticmethod
     def _build_all_server_mappings(obj, active_server_key):
@@ -541,7 +545,6 @@ class BaseLibreNMSSyncView(
             "librenms_device_features": "-",
             "librenms_device_location": "-",
             "librenms_device_hardware_match": None,
-            "vc_inventory_serials": [],
         }
 
         if self.librenms_id is not None:
@@ -615,10 +618,6 @@ class BaseLibreNMSSyncView(
                         "librenms_device_hardware_match": hardware_match,
                     }
                 )
-
-                # For Virtual Chassis, fetch inventory
-                if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-                    librenms_device_details["vc_inventory_serials"] = self._get_vc_inventory_serials(obj)
 
                 # Device was retrieved successfully via librenms_id — trust the ID
                 found_in_librenms = True
@@ -800,15 +799,17 @@ class BaseLibreNMSSyncView(
         except Exception:
             return None
 
-    def _get_vc_inventory_serials(self, obj):
+    def _get_vc_inventory_serials(self, obj, chassis):
         """
         Fetch inventory serials for Virtual Chassis members.
 
         The members come from :func:`extract_vc_members`, the same definition that import
-        detection uses, so a Junos VC lists its FPC members and not the root chassis.
+        detection uses, so a Junos VC lists its FPC members and not the root chassis. A serial
+        is matched against every member, and the match is named only when the actor may view it.
 
         Args:
             obj: NetBox device object (VC member)
+            chassis (ChassisScope): The chassis members of *obj*, split by what the actor may view.
 
         Returns:
             list: [
@@ -817,7 +818,8 @@ class BaseLibreNMSSyncView(
                     'serial': 'serial key, as the dialog shows it',
                     'librenms_serial': 'trimmed raw serial, as the dialog posts it',
                     'model': 'model name',
-                    'assigned_member': Device object or None (if serial matches existing assignment)
+                    'assigned_member': visible Device or None (if serial matches existing assignment)
+                    'assigned_withheld': True when the serial matches a member the actor may not view
                 }
             ]
 
@@ -826,20 +828,18 @@ class BaseLibreNMSSyncView(
         if not success:
             return []
 
-        # Get all VC members
-        vc_members = obj.virtual_chassis.members.all()
-
         # Members store the raw serial, so both sides go through the serial key; the dialog shows the key.
         serial_key = chassis_serial_key(obj)
         # A serial key that two members share assigns neither.
-        members_by_key = members_by_serial_key(vc_members, serial_key)
+        members_by_key = members_by_serial_key(chassis.attribution_members, serial_key)
 
         result = []
         for component in extract_vc_members(inventory, (serial_key,)):
             serial = serial_key(component["serial"])
             if not serial:
                 continue
-            assigned_member = members_by_key.get(serial)
+            matched = members_by_key.get(serial)
+            assigned = chassis.owner(matched.pk) if matched is not None else None
 
             result.append(
                 {
@@ -847,7 +847,8 @@ class BaseLibreNMSSyncView(
                     "serial": serial,
                     "librenms_serial": normalize_serial(component["serial"]),
                     "model": component["model"] or "-",
-                    "assigned_member": assigned_member,
+                    "assigned_member": assigned.obj if isinstance(assigned, Visible) else None,
+                    "assigned_withheld": matched is not None and not isinstance(assigned, Visible),
                 }
             )
 

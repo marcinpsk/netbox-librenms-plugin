@@ -17,6 +17,7 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
+from netbox_librenms_plugin.tests.view_test_helpers import superuser_chassis
 
 
 SERVER_KEY = "default"
@@ -542,7 +543,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6648
 
-        result = view._get_vc_inventory_serials(members[0])
+        result = view._get_vc_inventory_serials(members[0], superuser_chassis(members[0]))
 
         assert [(item["serial"], item["assigned_member"]) for item in result] == [("VC-DUP", None), ("VC-OTHER", None)]
 
@@ -568,7 +569,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6641
 
-        result = view._get_vc_inventory_serials(members[0])
+        result = view._get_vc_inventory_serials(members[0], superuser_chassis(members[0]))
 
         assert len(result) == 2
         assert result[0]["assigned_member"] == members[0]
@@ -593,7 +594,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6644
 
-        result = view._get_vc_inventory_serials(members[0])
+        result = view._get_vc_inventory_serials(members[0], superuser_chassis(members[0]))
 
         assert len(result) == 2
         assert result[0]["serial"] == "BCFB9793"
@@ -631,7 +632,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6646
 
-        result = view._get_vc_inventory_serials(member)
+        result = view._get_vc_inventory_serials(member, superuser_chassis(member))
 
         assert result[0]["serial"] == member.serial
         assert result[0]["assigned_member"] == member
@@ -661,7 +662,7 @@ class TestVirtualChassisInventory:
         view.librenms_id = 6645
 
         with CaptureQueriesContext(connection) as captured:
-            result = view._get_vc_inventory_serials(members[0])
+            result = view._get_vc_inventory_serials(members[0], superuser_chassis(members[0]))
 
         assert len(result) == 5
         rule_queries = [q for q in captured.captured_queries if "normalizationrule" in q["sql"].lower()]
@@ -675,7 +676,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6642
 
-        assert view._get_vc_inventory_serials(members[0]) == []
+        assert view._get_vc_inventory_serials(members[0], superuser_chassis(members[0])) == []
 
     def test_the_dialog_stores_the_raw_serial_and_shows_the_member_as_assigned(self, logged_in_client, librenms_server):
         """The dialog posts the LibreNMS serial, shows its serial key, and finds the member on the next render."""

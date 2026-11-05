@@ -1,4 +1,3 @@
-import re
 from html import unescape
 
 import django_tables2 as tables
@@ -13,9 +12,11 @@ from netbox_librenms_plugin.utils import (
     oob_badge_html,
     paginate_sync_table,
     remote_port_html,
+    VC_MEMBER_PLACEHOLDER,
     render_vc_member_options,
     rule_block_html,
     rule_block_label,
+    selected_vc_member,
 )
 
 # Static trusted markup for the "Serial" console-port badge. The leading space is intentional.
@@ -266,20 +267,11 @@ class VCCableTable(LibreNMSCableTable):
         attrs={"td": {"class": "device-selection-col", "data-col": "device_selection"}},
     )
 
-    def __init__(self, *args, device=None, allowed_vc_member_ids=None, **kwargs):
-        """Initialize the VC cable table with device context."""
+    def __init__(self, *args, device=None, chassis, **kwargs):
+        """Initialize the VC cable table with device context and its chassis scope."""
         super().__init__(*args, device=device, **kwargs)
-        # Cache the VC member set once so render_device_selection doesn't re-query
-        # members.all() (and a members.get per row via get_virtual_chassis_member) for every
-        # row in large cable tables. Mirrors VCModuleTable.
-        self._vc_members = []
-        self._vc_member_by_position = {}
-        if getattr(self.device, "virtual_chassis", None):
-            members = self.device.virtual_chassis.members.all()
-            if allowed_vc_member_ids is not None:
-                members = members.filter(pk__in=allowed_vc_member_ids)
-            self._vc_members = list(members)
-            self._vc_member_by_position = {m.vc_position: m for m in self._vc_members}
+        # The member dropdowns offer only the members the user may view.
+        self._vc_members = list(chassis.visible)
         # Done here, not in a render method: the selection checkbox reads can_create_cable and
         # its column is sequenced BEFORE device_selection, so a render-time flip would arrive
         # after the checkbox had already been drawn enabled.
@@ -306,44 +298,27 @@ class VCCableTable(LibreNMSCableTable):
         return (FilterColumn("vc_member", str(self.columns["device_selection"].header), self.text_vc_member),)
 
     def _row_member_id(self, record):
-        """Select the resolved port owner when it is a visible chassis member."""
+        """
+        Select the member that owns the row's local port, as the view attributed it.
+
+        A row owned by a member the user may not view selects none; a row without an owner the
+        user may view selects the table device.
+        """
+        if record.get("member_withheld"):
+            return None
         owner_id = (
             record.get("device_id")
             if record.get("_source") == SERIAL_INVENTORY_SOURCE
-            else record.get("netbox_local_device_id")
+            else record.get("local_owner_id")
         )
-        if owner_id and any(str(member.pk) == str(owner_id) for member in self._vc_members):
+        if owner_id and selected_vc_member(self._vc_members, owner_id) is not None:
             return owner_id
-        return self._selected_member_id(record["local_port"])
+        return self.device.id
 
     def text_vc_member(self, record):
-        """Return the visible text of the member cell: the selected option, or the first one when none is selected."""
-        selected_id = self._row_member_id(record)
-        names = [member.name for member in self._vc_members if str(member.id) == str(selected_id)]
-        if names:
-            return names[0]
-        return self._vc_members[0].name if self._vc_members else ""
-
-    def _selected_member_id(self, port_name):
-        """
-        Resolve the selected VC member id from the port name.
-
-        Served from the cached member set, mirroring get_virtual_chassis_member's position
-        parse but without a per-row members.get() query.
-
-        Args:
-            port_name: The LibreNMS local port name (e.g. ``Ethernet3``).
-
-        Returns:
-            int: The matched member's id, or the table device's id when no member matches.
-
-        """
-        match = re.match(r"^[A-Za-z]+(\d+)", port_name or "")
-        if match:
-            member = self._vc_member_by_position.get(int(match.group(1)))
-            if member is not None:
-                return member.id
-        return self.device.id
+        """Return the visible text of the member cell: the selected option, or the empty choice."""
+        selected = selected_vc_member(self._vc_members, self._row_member_id(record))
+        return selected.name if selected is not None else VC_MEMBER_PLACEHOLDER
 
     def render_device_selection(self, value, record):
         """Render a dropdown to select the virtual chassis member for a port."""
@@ -362,10 +337,13 @@ class VCCableTable(LibreNMSCableTable):
                 serial_owner_id,
             )
 
+        # A row on a member the user may not view cannot be moved to another member from here.
+        disabled = mark_safe(' disabled aria-disabled="true"') if record.get("member_withheld") else ""
         return format_html(
-            '<select name="device_selection_{0}" id="device_selection_{0}" class="form-select" data-interface="{0}" data-row-id="{0}">{1}</select>',
+            '<select name="device_selection_{0}" id="device_selection_{0}" class="form-select" data-interface="{0}" data-row-id="{0}"{2}>{1}</select>',
             row_id,
             render_vc_member_options(self._vc_members, selected_member_id),
+            disabled,
         )
 
     class Meta(LibreNMSCableTable.Meta):

@@ -116,8 +116,7 @@ class TestMigrationMarkerContract:
 
         assert winner is None
         assert marker is not None
-        assert context["migrated_to_marker"] is None
-        assert context["migrated_to_winner"] is None
+        assert context == {"migrated_to_marker": None}
 
     def test_marker_scope_does_not_leak_between_servers(self):
         donor = make_device("marker-scope-donor")

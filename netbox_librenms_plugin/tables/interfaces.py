@@ -1,6 +1,5 @@
 import copy
 import json as json_module
-from functools import cached_property
 from typing import Callable, NamedTuple
 
 import django_tables2 as tables
@@ -47,8 +46,9 @@ from netbox_librenms_plugin.utils import (
     get_untagged_vlan_css_class,
     note_icon,
     paginate_sync_table,
+    VC_MEMBER_PLACEHOLDER,
     render_vc_member_options,
-    resolve_interface_row_device,
+    selected_vc_member,
 )
 
 # (colour, mdi icon, full status text) per relationship sync status. Colour + icon read at a
@@ -91,7 +91,6 @@ _MEMBER_TOOLTIP_LIMIT = 15
 # orange "mismatched values", green "matching values".
 _VERDICT_CSS_CLASS = {ABSENT: "text-danger", DIFFERS: "text-warning", MATCHES: "text-success", NOT_SYNCED: "text-muted"}
 
-_NO_MEMBER_OPTION = "Select a member"
 
 _OWNER_UNRESOLVED_HINT = (
     "Select the Virtual Chassis member this interface belongs to: the interface rules depend on its platform."
@@ -548,7 +547,9 @@ class LibreNMSInterfaceTable(tables.Table):
         return json_module.dumps(group_options)
 
     def _render_vlan_edit_button(self, record, all_vlans, context, interface_name, row_key):
-        """Render the button that opens the VLAN group modal for this row."""
+        """Render the button that opens the VLAN group modal for this row; a withheld row has none."""
+        if record.get("member_withheld"):
+            return ""
         device_id = record.get("selected_object_id") or (self.device.pk if self.device else "")
         return format_html(
             '<button type="button" class="btn btn-sm btn-link p-0 ms-1 vlan-edit-btn" '
@@ -755,47 +756,6 @@ class LibreNMSInterfaceTable(tables.Table):
         noun = singular if count == 1 else plural
         return self._info_pill("secondary", icon, f"{count} {noun}", f"{tooltip_prefix}: {listed}")
 
-    @cached_property
-    def _vc_members(self):
-        """
-        Prefetch the chassis member Devices once per table render.
-
-        Both :meth:`_vc_members_by_position` (per-row owner resolution) and
-        :meth:`VCInterfaceTable.render_device_selection` (the per-row member dropdown) need the
-        member list; resolving it here keeps ``members.all()`` to a single query per render
-        instead of one per row (an N+1 on a large chassis table).
-
-        Returns:
-            list[Device]: The chassis members available to this table.
-
-        """
-        device = self.device
-        if device is None or not getattr(device, "virtual_chassis", None):
-            return []
-        try:
-            members = list(device.virtual_chassis.members.all())
-            allowed_ids = getattr(self, "allowed_vc_member_ids", None)
-            return members if allowed_ids is None else [member for member in members if member.pk in allowed_ids]
-        except (TypeError, AttributeError):
-            # A non-iterable or attribute-less stand-in device in a unit test.
-            return []
-
-    @cached_property
-    def _vc_members_by_position(self):
-        """
-        Prefetch ``{vc_position: member Device}`` once per table render.
-
-        :meth:`_resolve_row_member_id` is hit per row from BOTH the relationship sync button and
-        the VC member dropdown, and its name-based fallback otherwise issues a
-        ``members.get(vc_position=...)`` query per unresolved row. This creates a quadratic query
-        load on a large chassis table. Resolving from this map keeps it O(1) per row (one prefetch total).
-
-        Returns:
-            dict[int, Device]: The chassis members keyed by virtual chassis position.
-
-        """
-        return {member.vc_position: member for member in self._vc_members if member.vc_position is not None}
-
     def _resolve_row_member_id(self, record):
         """
         Resolve the id of the device/VM that owns this row's interface.
@@ -804,10 +764,11 @@ class LibreNMSInterfaceTable(tables.Table):
         (:meth:`VCInterfaceTable.render_device_selection`) must agree on the owner: the JS posts
         the dropdown's value as the object id, so if the button resolved a different device the
         sync POSTs to the wrong member and 404s (a non-ethernet sub-interface owned by another
-        member is the classic case). Both call this. Preference, most to least authoritative:
-        (1) the matched NetBox interface's device, (2) the row-selected object stamped during
-        enrichment or the cross-page verify path, (3) the shared guarded name heuristic for an
-        unbound physical row, (4) the viewed device.
+        member is the classic case). Both call this. The view attributes every row to its owner, so
+        the table never re-attributes one. Preference, most to least authoritative: (1) the matched
+        NetBox interface's device, (2) the row-selected object stamped during enrichment or the
+        cross-page verify path, (3) the viewed device. A row owned by a member the user may not
+        view has no owner here.
 
         Args:
             record (dict): The interface table row whose owner is resolved.
@@ -816,19 +777,14 @@ class LibreNMSInterfaceTable(tables.Table):
             int | str: The owning object's ID, or an empty string when no device is available.
 
         """
+        if record.get("member_withheld"):
+            return ""
         nb_iface = record.get("netbox_interface")
         if nb_iface is not None and getattr(nb_iface, "device_id", None):
             return nb_iface.device_id
         row_object_id = record.get("selected_object_id")
         if row_object_id:
             return row_object_id
-        if self.device is not None and getattr(self.device, "virtual_chassis", None):
-            return resolve_interface_row_device(
-                self.device,
-                record,
-                self.interface_name_field,
-                members_by_position=self._vc_members_by_position or None,
-            ).pk
         return self.device.pk if self.device else ""
 
     def _info_pill(self, color, icon, label, title):
@@ -1224,11 +1180,13 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
         attrs={"td": {"class": "device-selection-col", "data-col": "device_selection"}},
     )
 
-    def __init__(self, *args, device=None, interface_name_field=None, vlan_groups=None, **kwargs):
-        """Initialize VC interface table with device and name field."""
+    def __init__(self, *args, device=None, chassis, interface_name_field=None, vlan_groups=None, **kwargs):
+        """Initialize VC interface table with device, its chassis scope and name field."""
         super().__init__(
             *args, device=device, interface_name_field=interface_name_field, vlan_groups=vlan_groups, **kwargs
         )
+        # The member dropdowns offer only the members the user may view.
+        self._vc_members = list(chassis.visible)
         # Ensure device_selection column is visible
         if hasattr(self.device, "virtual_chassis") and self.device.virtual_chassis:
             self.columns.show("device_selection")
@@ -1248,16 +1206,11 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
             SafeString: The HTML select element with the available member options.
 
         """
-        # Reuse the per-render member prefetch (see _vc_members) so the dropdown doesn't re-query
-        # the chassis members for every row (N+1 on a large chassis).
         members = self._vc_members
         interface_name = record.get(self.interface_name_field)
         port_id = record.get("port_id") or ""
 
-        selected_member_id = self._selected_member_id(record)
-        options = render_vc_member_options(members, selected_member_id)
-        if selected_member_id is None:
-            options = format_html('<option value="" selected>{}</option>{}', _NO_MEMBER_OPTION, options)
+        options = render_vc_member_options(members, self._selected_member_id(record))
 
         # Create unique base ID for TomSelect components
         base_id = f"device_selection_{port_id}"
@@ -1278,9 +1231,9 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
         Return the member the row's dropdown selects, or None when the row's owner is unresolved.
 
         The dropdown defaults to the owner the relationship sync button resolves (matched NetBox
-        interface's device, then cross-page selection, then name heuristic), so the JS, which posts
-        this dropdown's value as the sync object id, cannot disagree with the button and 404. An
-        unresolved owner selects no member, so the sync POST carries none and refuses the row.
+        interface's device, then cross-page selection), so the JS, which posts this dropdown's value
+        as the sync object id, cannot disagree with the button and 404. An unresolved owner, or an
+        owner the user may not view, selects no member, so the sync POST carries none and refuses the row.
 
         Args:
             record (dict): The interface table row.
@@ -1289,20 +1242,14 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
             int | None: The selected member's ID.
 
         """
-        if blocked_row_state(record["rule_decision"]) == ROW_OWNER_UNRESOLVED:
+        if record.get("member_withheld") or blocked_row_state(record["rule_decision"]) == ROW_OWNER_UNRESOLVED:
             return None
         return self._resolve_row_member_id(record) or self.device.id
 
     def text_device_selection(self, record):
         """Return the label of the option the member dropdown shows as selected."""
-        selected_member_id = self._selected_member_id(record)
-        if selected_member_id is None:
-            return _NO_MEMBER_OPTION
-        members = self._vc_members
-        selected = next((member for member in members if str(member.id) == str(selected_member_id)), None)
-        # With no option marked selected, the browser shows the first one.
-        shown = selected or (members[0] if members else None)
-        return str(shown.name) if shown is not None else ""
+        selected = selected_vc_member(self._vc_members, self._selected_member_id(record))
+        return str(selected.name) if selected is not None else VC_MEMBER_PLACEHOLDER
 
     def format_interface_data(self, port_data, device):
         """Format interface data including VC device selection column."""

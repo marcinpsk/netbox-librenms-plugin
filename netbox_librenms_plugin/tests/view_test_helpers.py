@@ -80,6 +80,13 @@ def make_user_with_perms(username, perm_specs, *, constraints=None, plugin_write
     return user
 
 
+def superuser_chassis(device):
+    """Return the chassis scope of *device* as a superuser sees it: every member is visible."""
+    from netbox_librenms_plugin.sync_view_scope import SyncViewScope
+
+    return SyncViewScope.for_request(make_superuser(), device).chassis
+
+
 def plugin_perms():
     """The two plugin permission strings every write view checks."""
     return (PERM_VIEW_PLUGIN, PERM_CHANGE_PLUGIN)
