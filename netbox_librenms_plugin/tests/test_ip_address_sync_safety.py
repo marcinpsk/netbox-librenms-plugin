@@ -1068,7 +1068,12 @@ def test_create_missing_interfaces_reuses_interface_catalog_for_bulk_rows(client
         def __call__(self, execute, sql, params, many, context):
             nonlocal catalog_reads
             normalized = " ".join(sql.split())
-            if 'FROM "dcim_interface"' in normalized and '"dcim_interface"."device_id" IN' in normalized:
+            # A lookup of one row's port and name is not a catalog read.
+            if (
+                'FROM "dcim_interface"' in normalized
+                and '"dcim_interface"."device_id" IN' in normalized
+                and '"dcim_interface"."name" IN' not in normalized
+            ):
                 catalog_reads += 1
             return execute(sql, params, many, context)
 
@@ -1092,7 +1097,7 @@ def test_create_missing_interfaces_reuses_interface_catalog_for_bulk_rows(client
     # Upper bound, not an exact count: the counter matches generated SQL text, and a NetBox
     # release that adds a select_related or prefetch would change it without changing behaviour.
     # The point of the assertion is that the catalog is reused, not rebuilt per row.
-    assert catalog_reads <= 3  # the assessment's scope, the sync's matching map, one reusable creation catalog
+    assert catalog_reads <= 2  # the assessment's visible interfaces, one reusable creation catalog
     assert {interface.name for interface in Interface.objects.filter(device=device)} == {"Ethernet21", "Ethernet22"}
     assert IPAddress.objects.get(address="198.18.12.21/24").assigned_object.name == "Ethernet21"
     assert IPAddress.objects.get(address="198.18.12.22/24").assigned_object.name == "Ethernet22"
@@ -1701,7 +1706,7 @@ def test_existing_ip_outside_change_scope_is_reported_without_mutation(client, s
     changeable_ip = IPAddress.objects.create(address="198.18.20.11/24", status="active")
     user = make_user_with_perms(
         "ip-change-scope-user",
-        [("view", Device), ("view", Interface), ("add", IPAddress)],
+        [("view", Device), ("view", Interface), ("view", IPAddress), ("add", IPAddress)],
     )
     user = grant(user, "change", IPAddress, constraints={"pk": changeable_ip.pk})
     client.force_login(user)
@@ -2273,6 +2278,7 @@ def test_create_missing_interfaces_is_refused_without_add_and_change_grants(clie
     user = make_user_with_perms("ip-view-only-user", [])
     user = grant(user, "view", Device, constraints={"pk": device.pk})
     user = grant(user, "view", Interface)
+    user = grant(user, "view", IPAddress)
     user = grant(user, "add", IPAddress)
     user = grant(user, "change", IPAddress)
     client.force_login(user)

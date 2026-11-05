@@ -457,11 +457,8 @@ class TestIpRowVrfSuggestions:
 
     def test_ambiguous_route_distinguisher_does_not_suggest_a_vrf(self, live_librenms):
         """An RD claimed by two NetBox VRFs binds neither one."""
-        from netbox_librenms_plugin.assessment.ip_addresses import (
-            _Assessment,
-            _index_snapshot_ports,
-            _vrf_identities,
-        )
+        from netbox_librenms_plugin.assessment.ip_addresses import _index_snapshot_ports, _vrf_identities
+        from netbox_librenms_plugin.sync_view_scope import match_vrf_identities
 
         first = VRF.objects.create(name="First RD claimant", rd=_RD_VRF_RD)
         # NetBox enforces RD uniqueness, so keep the second candidate unsaved.
@@ -473,9 +470,10 @@ class TestIpRowVrfSuggestions:
         vrf_identities = _vrf_identities(ports_by_id, rows, snapshot.value(Resource.IP_ADDRESSES, "vrfs"))
 
         assert str(_RD_PORT_ID) in vrf_identities
-        suggestions = _Assessment(None, "ifName")._load_vrf_suggestions(vrf_identities, [first, second])
+        match = match_vrf_identities(vrf_identities, [first, second])[str(_RD_PORT_ID)]
 
-        assert str(_RD_PORT_ID) not in suggestions
+        assert match.suggested is None
+        assert match.blocks_create
 
     def test_ambiguous_name_does_not_suggest_a_vrf(self, live_librenms):
         """A name claimed by two NetBox VRFs binds neither one."""

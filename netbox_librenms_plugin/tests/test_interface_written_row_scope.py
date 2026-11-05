@@ -838,6 +838,7 @@ def test_the_ip_tab_refuses_a_new_interface_outside_a_constrained_scope(client, 
 def test_the_ip_tab_creates_a_new_interface_inside_the_constrained_scopes(client):
     device = make_device("created-scope-ip-inside", librenms_cf={SERVER_KEY: {"id": 45}})
     user = _user("created-scope-ip-inside-user", Device, Interface, add=IN_SCOPE, change=IN_SCOPE)
+    user = grant(user, "view", IPAddress)
     user = grant(user, "add", IPAddress)
     client.force_login(grant(user, "change", IPAddress))
 

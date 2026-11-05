@@ -666,7 +666,7 @@ def test_a_row_that_leaves_the_change_scope_in_the_ip_tab_is_never_written(clien
     seed_ip_rows(device, [("198.18.22.10", 7022, "eth2/1")])
     client.force_login(
         _user_who_may_change_only_eth_interfaces(
-            f"late-write-ip-scope-{commit_point}-user", ("add", IPAddress), ("change", IPAddress)
+            f"late-write-ip-scope-{commit_point}-user", ("view", IPAddress), ("add", IPAddress), ("change", IPAddress)
         )
     )
 

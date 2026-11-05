@@ -332,7 +332,7 @@ class TestAVrfChangeRedecidesTheRow:
         assert "Synced" in verdict["status"]
         assert verdict["selectable"] is False
 
-    def test_a_vrf_the_user_cannot_view_decides_nothing(self, client, device, blue):
+    def test_a_vrf_the_user_cannot_view_answers_not_found(self, client, device, blue):
         from dcim.models import Device
 
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
@@ -340,11 +340,17 @@ class TestAVrfChangeRedecidesTheRow:
         IPAddressMapping.objects.create(prefix="fe80::/10", vrf=blue)
         _seed(device, [_row(LINK_LOCAL)])
         client.force_login(make_user_with_perms("ip-rule-no-vrf-view", [("view", Device)]))
+        body = {"device_id": device.pk, "object_type": "device", "ip_address": LINK_LOCAL, "row_id": LINK_LOCAL}
 
-        verdict = _verify(client, device, LINK_LOCAL, blue)
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:verify_ipaddress"),
+            json.dumps({**body, "vrf_id": blue.pk, "server_key": SERVER_KEY}),
+            content_type="application/json",
+        )
 
-        assert "Ignored" not in verdict["status"]
-        assert verdict["selectable"] is True
+        assert response.status_code == 404
+        assert "formatted_row" not in response.json()
+        assert blue.name not in response.content.decode()
 
     @pytest.mark.parametrize("mapping", ["none", "all-vrf", "blue"])
     @pytest.mark.parametrize("held", [False, True], ids=["not-held", "held-on-eth0"])
@@ -383,7 +389,7 @@ class TestAVrfChangeRedecidesTheRow:
             return response.status_code, response.json()
 
         hidden = verify(blue.pk)
-        assert hidden[0] == 200, hidden
+        assert hidden[0] == 404, hidden
         assert hidden == verify(gone_pk)
 
 
@@ -419,7 +425,8 @@ class TestTheTableAndTheVerifyDecideARowAlike:
         assert table == verdict_of(verdict["status"], not verdict["selectable"])
         assert table["synced"] is synced
 
-    def test_an_address_held_in_a_vrf_the_user_cannot_view_is_decided_in_global(self, client, device, blue):
+    def test_an_address_held_in_a_vrf_the_user_cannot_view_blocks_the_row(self, client, device, blue):
+        """The block wins over the mapping and over Synced, in the table and in the verify alike."""
         from dcim.models import Device, Interface
 
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
@@ -433,9 +440,11 @@ class TestTheTableAndTheVerifyDecideARowAlike:
         row = _row_html(client, device, LINK_LOCAL)
         verdict = _verify(client, device, LINK_LOCAL, None)
 
-        assert "Ignored" in _cell(row, "status")
-        assert "Synced" not in _cell(row, "status")
-        assert "Ignored" in verdict["status"]
+        for status in (_cell(row, "status"), verdict["status"]):
+            assert "Ignored" not in status
+            assert "Synced" not in status
+        assert "disabled" in _checkbox(row)
+        assert verdict["selectable"] is False
 
 
 class TestTheReasonNamesNoVrf:
