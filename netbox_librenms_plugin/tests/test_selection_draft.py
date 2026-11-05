@@ -41,8 +41,8 @@ def _user(username):
     return get_user_model().objects.create_user(username=username, password="x")
 
 
-def _open(user, subject, generation="g1", **changes):
-    arguments = {
+def _arguments(generation, changes):
+    return {
         "tab": "ipaddresses",
         "variant": "device",
         "server_key": "default",
@@ -50,7 +50,16 @@ def _open(user, subject, generation="g1", **changes):
         "generation": generation,
         **changes,
     }
-    return SelectionDraft.open(user, subject, **arguments)
+
+
+def _open(user, subject, generation="g1", published=None, **changes):
+    """Open the draft as a presentation of *generation*, which is the published one unless *published* names another."""
+    current = generation if published is None else published
+    return SelectionDraft.open(user, subject, **_arguments(generation, changes), published=lambda: current)
+
+
+def _find(user, subject, generation="g1", **changes):
+    return SelectionDraft.find(user, subject, **_arguments(generation, changes))
 
 
 def _intents(draft):
@@ -318,3 +327,33 @@ def test_evidence_signed_in_another_second_is_unchanged_and_other_facts_are_chan
     assert not evidence_changed(approved, {"target": {"vrf": None, "address": "192.0.2.1/24"}, "action": "create"})
     assert evidence_changed(approved, {**EVIDENCE, "target": {"address": "192.0.2.1/24", "vrf": 7}})
     assert evidence_changed(None, EVIDENCE)
+
+
+@pytest.mark.django_db
+def test_a_presentation_of_an_older_generation_keeps_the_newer_draft():
+    user, device = _user("draft-older-read"), make_device("draft-older-read")
+    newer = _open(user, device, generation="g2")
+    newer.assign(newer.draft_id, 0, {"ip-1": Assignment(Intent.ON, EVIDENCE)})
+
+    older = _open(user, device, generation="g1", published="g2")
+
+    assert older.entries() == {}
+    assert older.draft_id != newer.draft_id
+    with pytest.raises(DraftConflict):
+        older.assign(older.draft_id, 0, {"ip-2": Assignment(Intent.ON, EVIDENCE)})
+    kept = _open(user, device, generation="g2")
+    assert (kept.draft_id, _intents(kept)) == (newer.draft_id, {"ip-1": Intent.ON})
+
+
+@pytest.mark.django_db
+def test_a_command_finds_only_the_draft_of_its_generation_and_never_starts_one():
+    user, device = _user("draft-find"), make_device("draft-find")
+    assert _find(user, device) is None
+    assert cache.get(draft_key(user, device, "ipaddresses", "device", "default", SCOPE)) is None
+
+    draft = _open(user, device, generation="g2")
+    draft.assign(draft.draft_id, 0, {"ip-1": Assignment(Intent.ON, EVIDENCE)})
+
+    assert _find(user, device, generation="g1") is None
+    assert _find(user, device, generation="g2").draft_id == draft.draft_id
+    assert _intents(_open(user, device, generation="g2")) == {"ip-1": Intent.ON}

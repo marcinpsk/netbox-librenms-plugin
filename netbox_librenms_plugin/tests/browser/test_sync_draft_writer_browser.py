@@ -25,6 +25,8 @@ MANAGEMENT_URL = (
 )
 ROW_URL = "https://plugin.example.com/plugins/librenms_plugin/device/1/ip-row/"
 SUBMIT_URL = "https://plugin.example.com/plugins/librenms_plugin/device/1/sync-ip-addresses/"
+FRAGMENT_URL = "https://plugin.example.com/plugins/librenms_plugin/device/1/sync-cache-fragment/ipaddresses/"
+REFRESH_URL = "https://plugin.example.com/plugins/librenms_plugin/devices/1/ipaddress-sync/"
 ROWS = ("198.18.0.1/24", "198.18.0.2/24", "198.18.0.3/24", "198.18.0.4/24")
 
 
@@ -41,7 +43,11 @@ def _form_fields(request):
 
 
 class _DraftServer:
-    """Keep one draft and serve the page, the row reads and the draft commands from it; hold requests on demand."""
+    """
+    Keep one draft and serve the page, the row reads, the tab fragment and the draft commands from it.
+
+    The server handles each request when it arrives, as the plugin does; a held request only delays its answer.
+    """
 
     def __init__(self, page):
         self.page = page
@@ -66,6 +72,8 @@ class _DraftServer:
             MANAGEMENT_URL: "management",
             f"{ROW_URL}**": "row",
             f"{SUBMIT_URL}**": "submit",
+            FRAGMENT_URL: "fragment",
+            REFRESH_URL: "refresh",
         }
         for url, kind in routes.items():
             page.route(url, self._handler(kind))
@@ -76,39 +84,52 @@ class _DraftServer:
 
     def _take(self, kind, route):
         request = route.request
-        if kind == "page" and request.headers.get("hx-request") == "true":
-            self.reads.append(request.url)
-        elif kind == "row":
+        if (kind == "page" and request.headers.get("hx-request") == "true") or kind in ("row", "fragment"):
             self.reads.append(request.url)
         elif kind in ("selection", "choice", "management"):
             self.commands.append((kind, _form_fields(request)))
         elif kind == "submit":
             self.submits.append(_form_fields(request))
+        answer = self._answer(kind, request)
         if kind in self.hold:
-            self.held.append((kind, route))
-            return
-        self.answer(kind, route)
-
-    def answer(self, kind, route):
-        """Answer one request from the draft as the plugin does."""
-        if kind == "page":
-            route.fulfill(status=200, content_type="text/html", body=_sync_document(self.body()))
-        elif kind == "row":
-            key = parse_qs(urlsplit(route.request.url).query)["key"][0]
-            route.fulfill(status=200, content_type="text/html", body=self.row(key))
-        elif kind == "submit":
-            route.fulfill(status=200, content_type="text/html", body="", headers={"HX-Reswap": "none"})
+            self.held.append((kind, route, answer))
         else:
-            self._command(kind, route)
+            route.fulfill(**answer)
 
-    def _command(self, kind, route):
+    def _answer(self, kind, request):
+        """Handle one request as the plugin does, and return its answer."""
+        if kind == "page":
+            return {"status": 200, "content_type": "text/html", "body": _sync_document(self.body())}
+        if kind == "row":
+            key = parse_qs(urlsplit(request.url).query)["key"][0]
+            return {"status": 200, "content_type": "text/html", "body": self.row(key)}
+        if kind == "fragment":
+            return {"status": 200, "content_type": "text/html", "body": self.content()}
+        if kind == "refresh":
+            # A data refresh starts the draft of the new snapshot.
+            self.draft_id, self.revision, self.checked = f"{self.draft_id}+", 0, set()
+            return {"status": 200, "content_type": "text/html", "body": self.content()}
+        if kind == "submit":
+            return self._submit(_form_fields(request))
+        return self._command(kind, _form_fields(request))
+
+    def _submit(self, fields):
+        headers = {"HX-Reswap": "none", "HX-Trigger": json.dumps({"lnms-results-stale": None})}
+        if "sync_one" in fields:
+            return {"status": 200, "body": "", "headers": {"HX-Reswap": "none"}}
+        if int(fields["expected_revision"]) != self.revision:
+            return {"status": 200, "body": "", "headers": headers}
+        # The claim takes the rows and the writer writes them all.
+        self.revision += 1
+        self.checked = set()
+        return {"status": 200, "body": "", "headers": {**headers, "X-Draft-Revision": str(self.revision)}}
+
+    def _command(self, kind, fields):
         status = (self.answers.get(kind) or [204]).pop(0)
-        fields = _form_fields(route.request)
         if status == 204 and int(fields["expected_revision"]) != self.revision:
             status = 409
         if status != 204:
-            route.fulfill(status=status, body="")
-            return
+            return {"status": status, "body": ""}
         headers = {}
         if kind == "selection":
             for key, value in json.loads(fields["assignments"]).items():
@@ -121,7 +142,7 @@ class _DraftServer:
             headers["HX-Trigger"] = json.dumps({"lnms-results-stale": None})
         self.revision += 1
         headers["X-Draft-Revision"] = str(self.revision)
-        route.fulfill(status=204, body="", headers=headers)
+        return {"status": 204, "body": "", "headers": headers}
 
     def change_elsewhere(self):
         """Change the draft as another window of the user does."""
@@ -139,26 +160,35 @@ class _DraftServer:
             hx-get="{ROW_URL}?key={key}" hx-trigger="librenms:row-read" hx-target="this" hx-swap="outerHTML"
             hx-sync="this:replace" hx-params="none">
             <td data-col="selection"><input type="checkbox" name="select" value="{key}"{checked}></td>
-            <td data-col="vrf"><select class="form-select vrf-select">{options}</select></td></tr>"""
+            <td data-col="vrf"><select class="form-select vrf-select">{options}</select></td>
+            <td data-col="status"><button type="submit" name="sync_one" value="{key}">Create</button></td></tr>"""
 
-    def body(self):
+    def content(self):
+        """Render the IP tab content: the refresh button and the sync form with the draft table."""
         rows = "".join(self.row(key) for key in ROWS)
-        return f"""{_navigation_loader()}
-            <div id="librenms-sync-tabs" data-active-tab="ipaddresses">
-              <a id="cables-tab" data-sync-nav href="?tab=cables">Cables</a>
+        return f"""<button id="refresh" type="button" hx-post="{REFRESH_URL}" hx-target="#ipaddress-sync-content">
+                Refresh</button>
               <output id="revision">{self.revision}</output>
-              <input type="checkbox" id="set-primary-ip-toggle-cb">
               <form id="ipaddress-sync-form" method="post" action="{SUBMIT_URL}" hx-post="{SUBMIT_URL}"
                     hx-target="#htmx-modal-content" hx-swap="innerHTML">
                 <input type="hidden" name="csrfmiddlewaretoken" value="csrf-test">
                 <table id="librenms-ipaddress-table" data-draft-id="{self.draft_id}"
                        data-draft-revision="{self.revision}" data-selection-url="{escape(SELECTION_URL)}"
                        data-choice-url="{escape(CHOICE_URL)}" data-management-url="{escape(MANAGEMENT_URL)}">
-                  <thead><tr><th><input type="checkbox" class="toggle"></th><th>VRF</th></tr></thead>
+                  <thead><tr><th><input type="checkbox" class="toggle"></th><th>VRF</th><th>Status</th></tr></thead>
                   <tbody>{rows}</tbody>
                 </table>
                 <button id="sync-selected" type="submit"><span class="spinner spinner-border d-none"></span>Sync</button>
-              </form>
+              </form>"""
+
+    def body(self):
+        return f"""{_navigation_loader()}
+            <div id="librenms-sync-tabs" data-active-tab="ipaddresses">
+              <a id="cables-tab" data-sync-nav href="?tab=cables">Cables</a>
+              <input type="checkbox" id="set-primary-ip-toggle-cb">
+              <span id="fragment-loader" class="d-none" data-fragment-loader hx-get="{FRAGMENT_URL}"
+                    hx-trigger="librenms:load-fragment" hx-target="#ipaddress-sync-content" hx-swap="innerHTML"></span>
+              <div id="ipaddress-sync-content">{self.content()}</div>
             </div>
             <div id="htmx-modal-content"></div>"""
 
@@ -179,9 +209,9 @@ class _DraftServer:
 
     def release(self, kind):
         """Answer the oldest held request of *kind*."""
-        index = next(i for i, (held_kind, _route) in enumerate(self.held) if held_kind == kind)
-        _kind, route = self.held.pop(index)
-        self.answer(kind, route)
+        index = next(i for i, (held_kind, _route, _answer) in enumerate(self.held) if held_kind == kind)
+        _kind, route, answer = self.held.pop(index)
+        route.fulfill(**answer)
 
 
 def _box(page, key):
@@ -434,3 +464,102 @@ def test_the_unload_beacon_carries_the_unsent_rows_with_the_csrf_token(page):
     assert fields["csrfmiddlewaretoken"] == "csrf-test"
     assert (fields["draft_id"], fields["expected_revision"]) == ("draft-1", "5")
     assert _assignments(fields) == {ROWS[3]: "on"}
+
+
+def test_a_row_action_names_the_draft_revision_and_the_evidence_of_its_row(page):
+    server = _DraftServer(page)
+    server.open()
+
+    page.locator(f'tr[data-row-key="{ROWS[1]}"] button[name="sync_one"]').click()
+    server.wait_until(lambda: server.submits)
+
+    (fields,) = server.submits
+    assert (fields["sync_one"], fields["draft_id"], fields["expected_revision"]) == (ROWS[1], "draft-1", "5")
+    assert fields["evidence"] == f"token-{ROWS[1]}-"
+
+
+def test_no_row_action_goes_while_the_page_waits_for_the_draft_of_another_window(page):
+    server = _DraftServer(page)
+    server.open()
+    server.change_elsewhere()
+    server.hold.add("page")
+
+    _box(page, ROWS[0]).click()
+    expect(page.locator('[data-draft-notice="conflict"]')).to_be_visible()
+    page.locator(f'tr[data-row-key="{ROWS[1]}"] button[name="sync_one"]').click()
+    page.wait_for_timeout(300)
+
+    assert server.submits == []
+    server.hold.clear()
+    server.release("page")
+    expect(page.locator("#revision")).to_have_text("6")
+    page.locator(f'tr[data-row-key="{ROWS[1]}"] button[name="sync_one"]').click()
+    server.wait_until(lambda: server.submits)
+    assert server.submits[0]["expected_revision"] == "6"
+
+
+def test_input_during_a_bulk_submit_waits_for_the_claim_and_takes_its_revision(page):
+    server = _DraftServer(page)
+    server.open()
+    server.hold.add("submit")
+    _box(page, ROWS[0]).click()
+
+    page.click("#sync-selected")
+    server.wait_until(lambda: server.submits)
+    _box(page, ROWS[2]).click()
+    page.wait_for_timeout(400)
+    assert [kind for kind, _fields in server.commands] == ["selection"]
+    server.hold.clear()
+    server.release("submit")
+    server.wait_for_commands(2)
+
+    # The claim took revision 7; the click during the submit goes with it, and nothing conflicts.
+    assert server.commands[1][1]["expected_revision"] == "7"
+    assert _assignments(server.commands[1][1]) == {ROWS[2]: "on"}
+    page.wait_for_timeout(300)
+    expect(page.locator("#librenms-draft-notice")).to_have_count(0)
+    assert server.checked == {ROWS[2]}
+
+
+def test_a_tab_fragment_read_before_a_later_input_does_not_replace_the_table(page):
+    server = _DraftServer(page)
+    server.open()
+    server.hold.add("fragment")
+    page.evaluate("document.getElementById('fragment-loader').dispatchEvent(new CustomEvent('librenms:load-fragment'))")
+    server.wait_until(lambda: server.held)
+    rendered = page.locator(f'tr[data-row-key="{ROWS[0]}"]').get_attribute("data-rendered")
+
+    _box(page, ROWS[0]).click()
+    server.wait_for_commands(1)
+    page.wait_for_timeout(200)
+    server.hold.clear()
+    server.release("fragment")
+
+    # The stale fragment does not replace the row; the page reads the tab again, which shows the click.
+    server.wait_until(lambda: any(url.startswith(PAGE_URL) for url in server.reads))
+    expect(page.locator("#revision")).to_have_text("6")
+    expect(_box(page, ROWS[0])).to_be_checked()
+    assert page.locator(f'tr[data-row-key="{ROWS[0]}"]').get_attribute("data-rendered") != rendered
+    _box(page, ROWS[1]).click()
+    server.wait_for_commands(2)
+    assert server.commands[1][1]["expected_revision"] == "6"
+
+
+def test_a_refresh_answer_before_a_later_input_reads_the_tab_again(page):
+    server = _DraftServer(page)
+    server.open()
+    server.hold.add("refresh")
+    page.click("#refresh")
+    server.wait_until(lambda: server.held)
+
+    _box(page, ROWS[0]).click()
+    server.wait_for_commands(1)
+    server.hold.clear()
+    server.release("refresh")
+
+    # The click went to the replaced draft and conflicts; the page shows the new draft.
+    server.wait_until(lambda: any(url.startswith(PAGE_URL) for url in server.reads))
+    expect(page.locator("#librenms-ipaddress-table")).to_have_attribute("data-draft-id", "draft-1+")
+    _box(page, ROWS[1]).click()
+    server.wait_for_commands(2)
+    assert (server.commands[1][1]["draft_id"], server.commands[1][1]["expected_revision"]) == ("draft-1+", "0")

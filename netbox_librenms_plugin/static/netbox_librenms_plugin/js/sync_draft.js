@@ -55,6 +55,8 @@
         failed: false,
         // Another window changed the draft: input waits for the fresh presentation, which this page reads.
         stale: false,
+        // The sync form whose bulk submit is the command in flight.
+        submitting: null,
         waiters: [],
         // The last choice this page sent per row, until a row READ shows the row again.
         choices: new Map(),
@@ -462,18 +464,53 @@
         event.returnValue = '';
     });
 
-    // A sync submit and a filter request read the draft, so they wait for the writer; the submit names the draft.
+    function isBulkSubmit(event) {
+        const name = event.detail.triggeringEvent?.submitter?.name;
+        return name !== 'sync_one' && name !== 'create_vrf';
+    }
+
+    // A filter request reads the draft, so it waits for the writer. A sync submit waits for the writer and
+    // names the draft; the bulk submit claims the draft, so it is the writer's command in flight.
     document.addEventListener('htmx:confirm', function (event) {
         const elt = event.detail.elt;
         const draftForm = elt instanceof HTMLFormElement && elt.querySelector(DRAFT_TABLE);
         if (!draftForm && !elt.matches?.('.sync-filter-form')) return;
-        if (idle() && !writer.failed) return;
+        if (!draftForm && idle() && !writer.failed) return;
         event.preventDefault();
-        flush().then(
-            () => event.detail.issueRequest(true),
-            // No request goes, so the page treats it as a request without an answer: the submit button works again.
-            () => elt.dispatchEvent(new CustomEvent('librenmsRequestFailed', { bubbles: true, detail: { elt } }))
-        );
+        // No request goes, so the page treats it as a request without an answer: the submit button works again.
+        const refuse = () => elt.dispatchEvent(new CustomEvent('librenmsRequestFailed', { bubbles: true, detail: { elt } }));
+        flush().then(() => {
+            if (draftForm && writer.stale) {
+                // The page waits for the draft that another window changed, so it writes nothing.
+                refuse();
+                return;
+            }
+            if (draftForm && isBulkSubmit(event)) {
+                writer.inFlight = true;
+                writer.submitting = elt;
+            }
+            event.detail.issueRequest(true);
+        }, () => {
+            if (draftForm) refuse();
+        });
+    });
+
+    // The claim answers with the revision it left, and the input made during the submit goes with it.
+    document.addEventListener('htmx:afterRequest', function (event) {
+        if (!writer.submitting || event.detail.elt !== writer.submitting) return;
+        writer.submitting = null;
+        writer.inFlight = false;
+        const revision = event.detail.successful ? event.detail.xhr.getResponseHeader(REVISION_HEADER) : null;
+        if (revision === null) {
+            // No claim, or its answer is lost: the input made during the submit cannot go, and the page reads the draft.
+            writer.stale = true;
+            writer.dirty.clear();
+            writer.commands = [];
+            readResults();
+        } else {
+            writer.revision = Number(revision);
+        }
+        pump();
     });
 
     document.addEventListener(RESULTS_STALE_EVENT, readResults);
@@ -500,8 +537,12 @@
         if (elt.id === LOADER_ID) {
             event.detail.path = event.detail.triggeringEvent.detail.url;
         } else if (elt instanceof HTMLFormElement && elt.querySelector(DRAFT_TABLE) && writer.draftId) {
-            event.detail.parameters.set('draft_id', writer.draftId);
-            event.detail.parameters.set('expected_revision', String(writer.revision));
+            const parameters = event.detail.parameters;
+            parameters.set('draft_id', writer.draftId);
+            parameters.set('expected_revision', String(writer.revision));
+            // A row action syncs the row that the page shows: its evidence names the row's state and VRF.
+            const rowKey = parameters.get('sync_one');
+            if (rowKey) parameters.set('evidence', rowByKey(rowKey)?.dataset.evidence || '');
         }
     });
 
@@ -516,13 +557,16 @@
             reads.set(xhr, { navEpoch, inputEpoch, url: null, history: 'push' });
         } else if (elt.matches('tr[data-row-key]') && elt.closest(DRAFT_TABLE)) {
             reads.set(xhr, { navEpoch, inputEpoch, rowKey: elt.dataset.rowKey });
+        } else if (draftTable() && event.detail.target?.contains(draftTable())) {
+            // A tab fragment or a data refresh replaces the draft table too; it is sent without a flush.
+            reads.set(xhr, { navEpoch, inputEpoch, region: true, sentIdle: idle() });
         }
     });
 
     // The gate runs before htmx reads any header, out-of-band content or swap of the response.
     document.addEventListener('htmx:beforeOnLoad', function (event) {
         const read = reads.get(event.detail.xhr);
-        if (!read) return;
+        if (!read || read.region) return;
         if (read.navEpoch !== navEpoch) {
             event.preventDefault();
         } else if (read.inputEpoch !== inputEpoch) {
@@ -540,6 +584,14 @@
     // htmx writes its history before the swap too, so the swapped content reads the new URL.
     document.addEventListener('htmx:beforeSwap', function (event) {
         const read = reads.get(event.detail.xhr);
+        if (read?.region) {
+            // Decided here, not in beforeOnLoad: the fragment loader reads the request outcome, and only a swap is held.
+            if (read.navEpoch !== navEpoch || read.inputEpoch !== inputEpoch || !read.sentIdle) {
+                event.detail.shouldSwap = false;
+                if (read.navEpoch === navEpoch) readResults();
+            }
+            return;
+        }
         if (!read?.accepted || read.rowKey || event.defaultPrevented || !event.detail.shouldSwap) return;
         writeHistory(pageUrl(read, event.detail.xhr), read.history);
     });
