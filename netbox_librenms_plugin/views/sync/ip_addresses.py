@@ -69,6 +69,9 @@ IP_CONFLICT_SIGNING_SALT = "netbox_librenms_plugin.ip_address_conflict"
 
 # One refusal for every row that an object outside the view scope blocks; it names no object.
 VIEW_SCOPE_REFUSAL = "The address or its interface is outside your view scope. Refresh the IP data and try again."
+STALE_INTERFACE_REFUSAL = (
+    "The matched NetBox interface is now bound to a different LibreNMS port. Refresh the IP data and try again."
+)
 
 
 def _ip_host_lock_identity(parsed, vrf) -> str:
@@ -1109,10 +1112,14 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         if not name_match_may_be_port(
                             locked_interface, server=server_key, port_id=ip_data.get("port_id")
                         ):
-                            raise ValueError(
-                                "The matched NetBox interface is now bound to a different LibreNMS port. "
-                                "Refresh the IP data and try again."
-                            )
+                            raise ValueError(STALE_INTERFACE_REFUSAL)
+                        if isinstance(target, VisibleInterface):
+                            # Resolve the port again under the owner lock: another interface may hold it now.
+                            current = scope.resolve_ip_interface(ip_data)
+                            if current is WITHHELD:
+                                raise ValueError(VIEW_SCOPE_REFUSAL)
+                            if not isinstance(current, VisibleInterface) or current.interface.pk != locked_interface.pk:
+                                raise ValueError(STALE_INTERFACE_REFUSAL)
                         blocked = interface_rules_for_request(request).first_blocked_port(
                             ip_assignment_ports(
                                 cached_ports_by_id,

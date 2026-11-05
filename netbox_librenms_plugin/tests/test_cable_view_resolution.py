@@ -146,6 +146,7 @@ class TestNormalLinkContextResolution:
             "server_key",
             "local_owner_by_link",
             "remote_device_by_link",
+            "remote_device_error_by_link",
             "remote_owner_by_link",
             "interfaces_by_pk",
             "interfaces_by_name",

@@ -2865,6 +2865,7 @@ class TestSyncInterfacesViewPost:
             source_index=index,
             actionable_owner_ids={device.pk},
             changeable_interface_ids={iface.pk},
+            viewable_interface_ids={iface.pk},
             can_write=True,
         )
 

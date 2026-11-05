@@ -401,9 +401,10 @@ class BaseCableTableView(
         devices_by_name, devices_by_librenms_id, visible_device_ids = self._load_remote_device_catalog(
             normal_links, server_key
         )
-        remote_device_by_link = self._resolve_remote_devices(
+        remote_resolution = self._resolve_remote_devices(
             normal_links, devices_by_name, devices_by_librenms_id, visible_device_ids
         )
+        remote_device_by_link = {key: device for key, (device, _error) in remote_resolution.items()}
         remote_chassis = scope.remote_members(
             {
                 device.virtual_chassis_id
@@ -430,6 +431,7 @@ class BaseCableTableView(
         context = self._load_interface_catalog(candidate_specs, manual_ids, shown_owner_ids, server_key)
         context["local_owner_by_link"] = local_owner_by_link
         context["remote_device_by_link"] = remote_device_by_link
+        context["remote_device_error_by_link"] = {key: error for key, (_device, error) in remote_resolution.items()}
         context["remote_owner_by_link"] = remote_owner_by_link
         trace_paths = self._load_link_traces(normal_links, context, local_owner_by_link, remote_owner_by_link)
         context["trace_paths"] = trace_paths
@@ -475,17 +477,15 @@ class BaseCableTableView(
         return devices_by_name, devices_by_librenms_id, visible_device_ids
 
     def _resolve_remote_devices(self, normal_links, devices_by_name, devices_by_librenms_id, visible_device_ids):
-        """Resolve each row's remote device, LibreNMS id first, then exact name, then stripped name."""
+        """Return ``(device, error)`` of each row's remote device: LibreNMS id first, then exact name, then stripped name."""
         catalog = devices_by_name, devices_by_librenms_id, visible_device_ids
-        return {
-            id(link): resolve_remote_device(
-                link.get("remote_device_id"),
-                link.get("remote_device"),
-                server_key="",
-                catalog=catalog,
-            )[0]
-            for link in normal_links
-        }
+        resolved = {}
+        for link in normal_links:
+            device, _found, error = resolve_remote_device(
+                link.get("remote_device_id"), link.get("remote_device"), server_key="", catalog=catalog
+            )
+            resolved[id(link)] = device, error
+        return resolved
 
     def _resolve_remote_owners(self, normal_links, remote_device_by_link, remote_chassis, server_key):
         """Resolve each remote chassis member by stable port binding before a port name, among every member."""
@@ -1885,7 +1885,7 @@ class BaseCableTableView(
         if normal_context is not None:
             device = normal_context["remote_device_by_link"].get(id(link))
             found = device is not None
-            error_message = None
+            error_message = normal_context["remote_device_error_by_link"].get(id(link))
         else:
             device, found, error_message = self.get_device_by_id_or_name(
                 remote_device_id,
@@ -2462,14 +2462,19 @@ class SingleCableVerifyView(BaseCableTableView):
                     # render, so the two can't drift.
                     oob_badge = oob_badge_html(link_data, leading_space=True)
 
-                    # Re-enrich remote side from current NetBox state
+                    # Re-enrich remote side from current NetBox state, with the table's binding-first attribution.
+                    normal_context = self._build_normal_link_context([link_data], origin_device, server_key)
                     remote_hostname = link_data.get("remote_device", "")
-                    if not self._apply_manual_interface_target(link_data) and remote_hostname:
+                    if not self._apply_manual_interface_target(link_data, normal_context) and remote_hostname:
                         link_data = self.process_remote_device(
-                            link_data, remote_hostname, link_data.get("remote_device_id"), server_key=server_key
+                            link_data,
+                            remote_hostname,
+                            link_data.get("remote_device_id"),
+                            server_key=server_key,
+                            normal_context=normal_context,
                         )
                     link_data["remote_port_owner_id"] = getattr(
-                        self._remote_port_owner(link_data, server_key), "pk", None
+                        self._remote_port_owner(link_data, server_key, normal_context), "pk", None
                     )
 
                     # `or ""` (not a .get default): the OOB-merge path stores local_port=None when

@@ -619,6 +619,7 @@ class BaseInterfaceTableView(
                 source_index=filter_interface_index(related_index, changeable_interface_ids),
                 actionable_owner_ids=actionable_owner_ids,
                 changeable_interface_ids=changeable_interface_ids,
+                viewable_interface_ids=viewable_interface_ids,
                 can_write=can_write_relationships,
             )
 

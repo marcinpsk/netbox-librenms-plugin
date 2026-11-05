@@ -585,6 +585,37 @@ def test_an_interface_the_user_may_change_but_not_view_is_absent_from_the_tab_an
     assert _table_rows(hidden_html, "data-port-id")[905] == _table_rows(absent_html, "data-port-id")[905]
 
 
+@pytest.mark.parametrize("relation", ["lag", "parent", "bridge"])
+def test_a_hidden_relationship_target_renders_the_same_as_no_target(client, default_server, relation):
+    """A visible interface whose LAG, parent or bridge the user cannot view: table and verify read as no target."""
+    from dcim.models import Device, Interface
+
+    from netbox_librenms_plugin.tests.conftest import make_interface
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_interfaces_snapshot
+
+    owner = make_device(f"rel-hidden-{relation}")
+    seed_stored_mapping(owner, {"default": {"id": 14251}}, save=True)
+    visible = make_interface(owner, "eth1", iface_type="1000base-t")
+    seed_mapping(visible, "default", own=801, save=True)
+    target = make_interface(owner, f"private-{relation}", iface_type="lag" if relation == "lag" else "1000base-t")
+    seed_interfaces_snapshot(owner, [_interface_port(801, "eth1")], server_key="default")
+    user = make_user_with_perms(f"rel-hidden-{relation}-user", [("view", Device)])
+    client.force_login(grant(user, "view", Interface, constraints={"name__startswith": "eth"}))
+
+    setattr(visible, relation, target)
+    visible.save()
+    hidden_row = _table_rows(_interface_tab(client, owner), "data-port-id")[801]
+    hidden_verify = _verify_port(client, owner, 801)
+    setattr(visible, relation, None)
+    visible.save()
+    absent_row = _table_rows(_interface_tab(client, owner), "data-port-id")[801]
+    absent_verify = _verify_port(client, owner, 801)
+
+    assert hidden_row == absent_row
+    assert hidden_verify == absent_verify
+
+
 # =============================================================================
 # Cables tab: local and remote ends on hidden members
 # =============================================================================
@@ -700,6 +731,24 @@ def test_a_remote_port_bound_on_a_hidden_member_never_resolves_to_a_visible_name
     assert 'name="sync_one"' not in html
 
 
+def test_the_cable_verify_never_resolves_a_hidden_bound_port_to_a_visible_namesake(client, default_server):
+    page, _local, remote_a, namesake, user = _remote_bound_on_a_hidden_member("cable-verify-bound")
+    client.force_login(user)
+    _cable_tab(client, page)
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:verify_cable"),
+        data=json.dumps({"device_id": page.pk, "row_id": "731", "server_key": "default"}),
+        content_type="application/json",
+    )
+
+    assert response.status_code == 200
+    row = response.json()["formatted_row"]
+    assert row["expected_remote_id"] is None
+    assert row["can_create_cable"] is False
+    assert namesake.get_absolute_url() not in json.dumps(row)
+
+
 def test_a_forged_cable_post_cannot_cable_the_visible_namesake_of_a_hidden_bound_port(client, default_server):
     from dcim.models import Cable
 
@@ -722,6 +771,57 @@ def test_a_forged_cable_post_cannot_cable_the_visible_namesake_of_a_hidden_bound
 
     namesake.refresh_from_db()
     assert namesake.cable_id is None
+    assert not Cable.objects.exists()
+
+
+def test_a_forged_cable_post_cannot_cable_a_local_interface_that_the_user_cannot_view(client, default_server):
+    """The user may change the bound local interface but not view it: no cable reaches it."""
+    from dcim.models import Cable, Device, Interface
+
+    from netbox_librenms_plugin.tests.conftest import make_interface
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import link_row, port_row, seed_cables_snapshot
+
+    page = make_device("cable-hidden-local-page")
+    seed_stored_mapping(page, {"default": {"id": 14241}}, save=True)
+    hidden = make_interface(page, "private-uplink", iface_type="1000base-t")
+    seed_mapping(hidden, "default", own=741, save=True)
+    remote = make_device("cable-hidden-local-remote")
+    remote_port = make_interface(remote, "Ethernet9", iface_type="1000base-t")
+    seed_cables_snapshot(
+        page,
+        [link_row(741, remote_port.name, local_port="uplink", remote_hostname=remote.name)],
+        [port_row(741, "uplink", device_id=14241, if_descr=None)],
+        server_key="default",
+    )
+    user = make_user_with_perms("cable-hidden-local-user", [("view", Device), ("change", Device)])
+    for action, model, constraints in (
+        ("view", Interface, {"name__startswith": "Eth"}),
+        ("change", Interface, None),
+        ("view", Cable, None),
+        ("add", Cable, None),
+        ("change", Cable, None),
+    ):
+        user = grant(user, action, model, constraints=constraints)
+    client.force_login(user)
+
+    html = _cable_tab(client, page)
+    client.post(
+        reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[page.pk]),
+        {
+            "sync_one": "741",
+            "server_key": "default",
+            "expected_local_id_741": hidden.pk,
+            "expected_local_device_id_741": page.pk,
+            "expected_remote_id_741": remote_port.pk,
+            "expected_remote_device_id_741": remote.pk,
+        },
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert hidden.get_absolute_url() not in html
+    hidden.refresh_from_db()
+    assert hidden.cable_id is None
     assert not Cable.objects.exists()
 
 

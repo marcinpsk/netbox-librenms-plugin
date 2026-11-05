@@ -477,7 +477,8 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         cable the write may remove. Those rows and their owners, and the *port_owner_ids* that own
         the row's LibreNMS ports, are locked in the same statements, so the rule gate reads their
         bindings and platforms under the lock. They are not the write's endpoints, so they need
-        no change scope. The *extra_endpoints* (the parent of a channel) are written, so they need it.
+        no change scope. The *extra_endpoints* (the parent of a channel) are written, so they need
+        the view and the change scope, as the two ends do.
         """
         self._termination_lock_failure = "denied"
         displaced = displaced or {}
@@ -486,9 +487,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         # Check the submitted candidates before taking locks so a forged request cannot lock
         # rows that are outside its current object scope. The same check runs again after the
         # rows are locked, where it protects mutable constraint-based grants. Cabling a
-        # termination is a write, so change scope is what governs it: the POST gate does not ask
-        # for view on the termination models either, and demanding it here would lock out a
-        # change-only grant.
+        # termination writes it and names it, so it must be in the view and the change scope.
         if not self._terminations_are_changeable(grouped):
             return None
 
@@ -677,10 +676,12 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         return self._snapshot_cable_port_records(link_data, terminations, prefetched)
 
     def _terminations_are_changeable(self, grouped):
-        """Return whether the request may change every submitted termination."""
+        """Return whether the request may view and change every submitted termination."""
         for model, requested_ids in grouped.items():
             permitted_ids = set(
-                self.restricted_queryset(model, "change").filter(pk__in=requested_ids).values_list("pk", flat=True)
+                self.viewable_restricted_queryset(model, "change")
+                .filter(pk__in=requested_ids)
+                .values_list("pk", flat=True)
             )
             if permitted_ids != requested_ids:
                 return False
@@ -1045,7 +1046,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             )
             if (
                 selected_local is None
-                or not self.restricted_queryset(Interface, "change").filter(pk=selected_local.pk).exists()
+                or not self.viewable_restricted_queryset(Interface, "change").filter(pk=selected_local.pk).exists()
             ):
                 return None, {"status": "stale", "interface": display_name}
             link_data["netbox_local_interface_id"] = selected_local.pk
@@ -1130,11 +1131,11 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             if not cp_id:
                 return {"status": "missing_remote", "interface": display_name}
             try:
-                csp = self.restricted_queryset(ConsoleServerPort, "change").get(pk=csp_id)
+                csp = self.viewable_restricted_queryset(ConsoleServerPort, "change").get(pk=csp_id)
             except ConsoleServerPort.DoesNotExist:
                 return {"status": "invalid", "interface": display_name}
             try:
-                cp = self.restricted_queryset(ConsolePort, "change").get(pk=cp_id)
+                cp = self.viewable_restricted_queryset(ConsolePort, "change").get(pk=cp_id)
             except ConsolePort.DoesNotExist:
                 return {"status": "missing_remote", "interface": display_name}
             if str(interface.get("device_id")) != str(csp.device_id):
@@ -1147,7 +1148,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             return {"status": "invalid", "interface": display_name}
 
         try:
-            local_interface = self.restricted_queryset(Interface, "change").get(
+            local_interface = self.viewable_restricted_queryset(Interface, "change").get(
                 pk=link_data["netbox_local_interface_id"]
             )
         except Interface.DoesNotExist:
@@ -1165,7 +1166,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                 return {"status": "rejected_selection", "interface": display_name}
             port_name = link_data.get("local_port") or local_interface.name
             try:
-                local_interface = self.restricted_queryset(Interface, "change").get(
+                local_interface = self.viewable_restricted_queryset(Interface, "change").get(
                     device_id=selected_device_id,
                     name=port_name,
                 )
@@ -1178,7 +1179,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                 return {"status": "invalid", "interface": display_name}
 
         try:
-            remote_interface = self.restricted_queryset(Interface, "change").get(
+            remote_interface = self.viewable_restricted_queryset(Interface, "change").get(
                 pk=link_data["netbox_remote_interface_id"]
             )
         except Interface.DoesNotExist:
@@ -1652,7 +1653,7 @@ class CableRemoteCreateView(SyncCablesView):
             return None, HttpResponse("The local interface changed. Refresh the Cables tab.", status=409)
         remote_device = self.restricted_queryset(Device, "view").filter(pk=row["remote_port_owner_id"]).first()
         local_interface = (
-            self.restricted_queryset(Interface, "change")
+            self.viewable_restricted_queryset(Interface, "change")
             .filter(pk=row["netbox_local_interface_id"])
             .select_related("device")
             .first()
