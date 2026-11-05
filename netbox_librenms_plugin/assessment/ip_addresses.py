@@ -35,11 +35,79 @@ class ViewBlock(StrEnum):
     INTERFACE = "interface"
 
 
+def shown_vrf_id(row):
+    """Return the VRF that the row's select shows: its NetBox VRF, else its suggested VRF, when offered; None is Global."""
+    offered = {vrf.pk for vrf in row.get("vrfs") or ()}
+    # The assessment sets vrf_id or suggested_vrf_id, never both.
+    return next(
+        (pk for pk in (row.get("vrf_id"), row.get("suggested_vrf_id")) if pk is not None and pk in offered), None
+    )
+
+
+def apply_vrf_choices(rows, choices, scope):
+    """
+    Return the assessed rows, each row of *choices* decided in the VRF that the user chose for it.
+
+    A choice of a VRF that the row no longer offers, or of the VRF that the row shows anyway, leaves
+    the row as the assessment decided it. A row that a hidden object blocks keeps its block.
+
+    Args:
+        rows (list[dict]): The rows of :func:`assess`, before the web readers convert their objects to URLs.
+        choices (dict[str, int | None]): The chosen VRF pk of each row ID; None is Global.
+        scope (SyncViewScope): The actor's view scope on the subject.
+
+    Returns:
+        list[dict]: The rows; a decided row is a new dict.
+
+    """
+    rules = IPRuleMatcher.load()
+    decided = []
+    for row in rows:
+        vrf_id = choices.get(row.get("row_id"), shown_vrf_id(row))
+        offered = vrf_id is None or any(vrf.pk == vrf_id for vrf in row.get("vrfs") or ())
+        if row.get("view_block") is not None or not offered or vrf_id == shown_vrf_id(row):
+            decided.append(row)
+        else:
+            decided.append(_row_in_vrf(row, vrf_id, scope, rules))
+    return decided
+
+
+def _row_in_vrf(row, vrf_id, scope, rules):
+    """
+    Return *row* decided in *vrf_id*: the address exists when a viewable NetBox address equals it, and is Synced in *vrf_id*.
+
+    ``netbox_ip`` becomes the one viewable address in *vrf_id*, else the only viewable address, else None.
+    """
+    key = row["ip_with_mask"]
+    visible = sorted(scope.address_states([key])[key].visible, key=lambda ip: ip.pk)
+    in_vrf = [ip for ip in visible if ip.vrf_id == vrf_id]
+    decided = {
+        name: value
+        for name, value in row.items()
+        if name not in ("vrf_id", "suggested_vrf_id", "status", "ip_rule_block", "exists")
+    }
+    decided.update(vrf_id=vrf_id, exists=bool(visible))
+    if visible:
+        decided["status"] = "matched" if len(in_vrf) == 1 else "update"
+        decided["netbox_ip"] = in_vrf[0] if len(in_vrf) == 1 else visible[0] if len(visible) == 1 else None
+    else:
+        # The address left NetBox; the VRF it had there still counts as its own.
+        decided["status"] = "matched" if row["vrf_id"] is not None and row["vrf_id"] == vrf_id else "sync"
+    rule, held = decide_ip_row_rule(rules, key, vrf_id, row.get("netbox_interface"), visible)
+    if rule is not None:
+        decided["ip_rule_block"] = row_ip_rule_block(rule)
+        if held:
+            decided["status"] = "matched"
+        elif decided["status"] == "matched":
+            decided["status"] = "update"
+    return decided
+
+
 def decide_ip_row_rule(rules, ip_with_mask, vrf_id, interface, netbox_addresses):
     """
     Return the IP mapping that ignores a row in *vrf_id*, and whether the ignored row shows Synced.
 
-    The table and the VRF verify both decide a row here. An ignored row shows Synced when NetBox
+    The table and a VRF choice both decide a row here. An ignored row shows Synced when NetBox
     holds the address in *vrf_id* on the row's interface, also when another interface holds it too.
 
     Args:
@@ -211,7 +279,7 @@ class _Assessment:
         """
         Assess the snapshot's IP rows against current NetBox state, as the request user may see it.
 
-        The table, the verify and the sync all read the rows through this method, so they agree.
+        The table, the row read and the sync all read the rows through this method, so they agree.
         It reads the snapshot and NetBox only.
 
         Args:
@@ -260,7 +328,7 @@ class _Assessment:
         assignments = [(row, target) for row, target in rows if target is not None]
         self._add_rule_blocks(assignments, (ports_by_id, bound_ports_by_id), server_key)
         enriched_data = [row for row, _target in rows]
-        self._add_ip_rule_blocks(rows, address_states, {vrf.pk for vrf in vrfs})
+        self._add_ip_rule_blocks(rows, address_states)
         self._flag_management_ip(enriched_data, mgmt_ip)
         return IPAssessment(
             rows=identify_ip_sync_rows(enriched_data),
@@ -392,8 +460,8 @@ class _Assessment:
         if not match.blocks_create:
             enriched_ip["can_create_vrf"] = True
         elif match.suggested is not None:
-            # Its own key, never vrf_id: that one means "the VRF NetBox has for this row", and the
-            # verify path reads it to decide whether an address is already synced.
+            # Its own key, never vrf_id: that one means "the VRF NetBox has for this row", and a
+            # VRF choice reads it to decide whether an address is already synced.
             enriched_ip["suggested_vrf_id"] = match.suggested.pk
             enriched_ip["vrf_suggested_from"] = {"name": librenms_vrf["name"], "matched_by": match.matched_by}
 
@@ -465,26 +533,24 @@ class _Assessment:
             if (blocked := rules.first_blocked_port(ports, disclose)) is not None:
                 enriched_ip["rule_block"] = row_rule_block(*blocked)
 
-    def _add_ip_rule_blocks(self, row_targets, address_states, visible_vrf_ids):
+    def _add_ip_rule_blocks(self, row_targets, address_states):
         """
         Stamp each row whose address an IP mapping ignores in the VRF the row selects first.
 
-        The VRF select shows the row's NetBox VRF or its suggested VRF when the user may view it,
-        else Global. A VRF change re-decides the row in ``SingleIPAddressVerifyView``, with the same
-        :func:`decide_ip_row_rule`. A view-blocked row is not decided: the block wins.
+        The VRF select shows :func:`shown_vrf_id`. A VRF choice decides the row again in
+        :func:`apply_vrf_choices`, with the same :func:`decide_ip_row_rule`. A view-blocked row is not
+        decided: the block wins.
 
         Args:
             row_targets (list[tuple[dict, VisibleInterface | None]]): Each row and its interface.
             address_states (dict): The :class:`AddressState` of each ``address/prefix``.
-            visible_vrf_ids (set[int]): The VRFs the select lists.
 
         """
         rules = IPRuleMatcher.load()
         for enriched_ip, target in row_targets:
             if enriched_ip.get("view_block") is not None:
                 continue
-            shown = (enriched_ip["vrf_id"], enriched_ip.get("suggested_vrf_id"))
-            vrf_id = next((pk for pk in shown if pk is not None and pk in visible_vrf_ids), None)
+            vrf_id = shown_vrf_id(enriched_ip)
             ip_with_mask = enriched_ip["ip_with_mask"]
             interface = target.interface if target is not None else None
             rule, held = decide_ip_row_rule(

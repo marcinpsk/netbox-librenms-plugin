@@ -24,7 +24,7 @@ from netbox_librenms_plugin.utils import (
     resolve_set_primary_ip,
 )
 from netbox_librenms_plugin.views.imports.actions import SaveUserPrefView
-from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms, read_ip_row, submit_ip_selection
 
 PREFERENCE = "plugins.netbox_librenms_plugin.interface_sync_options"
 SERVER_KEY = "default"
@@ -461,13 +461,8 @@ class TestSavedIPChoicesThroughTheSyncView:
             HTTP_HX_REQUEST="true",
         )
         assert refresh.status_code == 200
-        response = client.post(
-            reverse(
-                "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-                kwargs={"object_type": "device", "pk": device.pk},
-            ),
-            {"server_key": SERVER_KEY, "select": SYNC_ROW, f"vrf_{SYNC_ROW}": "", **toggles},
-            HTTP_HX_REQUEST="true",
+        response = submit_ip_selection(
+            client, device, [SYNC_ROW], server_key=SERVER_KEY, headers={"HTTP_HX_REQUEST": "true"}, **toggles
         )
         device.refresh_from_db()
         return response, device, interface
@@ -641,14 +636,21 @@ class TestRenderingTheIPMenu:
         html = response.content.decode()
         assert not [tag for tag in open_tags(html, "tr") if tag.get("data-mgmt-ip") == "true"]
         (table,) = [tag for tag in open_tags(html, "table") if tag.get("id") == "librenms-ipaddress-table"]
-        assert json.loads(table["data-mgmt-rows"]) == ["198.18.41.8/24"]
-        assert json.loads(table["data-mgmt-row-vrfs"]) == {"198.18.41.8/24": ""}
+        # Set Primary IP selects the management row on the server, also from a page that does not render it.
+        selected = client.post(
+            table["data-management-url"],
+            {"draft_id": table["data-draft-id"], "expected_revision": table["data-draft-revision"], "selected": "on"},
+        )
+        assert selected.status_code == 204
+        row = read_ip_row(client, device, "198.18.41.8/24")
+        assert "checked" in next(tag for tag in open_tags(row.html, "input") if tag.get("name") == "select")
+        assert row.shown_vrf == ""
 
     @pytest.mark.parametrize("vrf_key", ["vrf_id", "suggested_vrf_id"])
-    def test_the_view_gives_the_vrf_that_the_management_row_shows(self, vrf_key):
+    def test_a_row_shows_only_a_vrf_that_it_offers(self, vrf_key):
         from ipam.models import VRF
 
-        from netbox_librenms_plugin.tables.ipaddresses import management_row_vrfs
+        from netbox_librenms_plugin.assessment.ip_addresses import shown_vrf_id
 
         blue = VRF.objects.create(name="mgmt-vrf-blue")
         hidden_id = VRF.objects.create(name="mgmt-vrf-hidden").pk
@@ -659,9 +661,8 @@ class TestRenderingTheIPMenu:
             {"ip_with_mask": "198.18.42.3/24", "vrfs": [blue], vrf_key: blue.pk},
         ]
 
-        rows = [{**row, "row_id": row["ip_with_mask"]} for row in rows]
-
-        assert management_row_vrfs(rows) == {"198.18.42.1/24": str(blue.pk), "198.18.42.2/24": ""}
+        # The selection of a management row approves this VRF, so it is the one the select shows.
+        assert [shown_vrf_id(row) for row in rows] == [blue.pk, None, blue.pk]
 
     def test_a_posted_toggle_beats_the_saved_choice_on_refresh(self, client, settings, live_librenms):
         _configure_test_server(settings)

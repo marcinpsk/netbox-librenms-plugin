@@ -1,4 +1,4 @@
-"""IP verification uses the interface-name option of the rendered table."""
+"""The IP row read uses the interface-name option of the rendered table."""
 
 import pytest
 
@@ -6,12 +6,13 @@ import pytest
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     ("interface_name_field", "can_create"),
-    [("ifDescr", True), ("ifName", False), (None, False), ("unsupported", False), ([], False)],
+    [("ifDescr", True), ("ifName", False), (None, False), ("unsupported", False)],
 )
-def test_verify_uses_the_validated_interface_name_option(client, live_librenms, interface_name_field, can_create):
+def test_the_row_read_uses_the_validated_interface_name_option(client, live_librenms, interface_name_field, can_create):
     from django.urls import reverse
 
     from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
+    from netbox_librenms_plugin.tests.view_test_helpers import read_ip_row
 
     device = make_device("ip-verify-choice", librenms_cf={"default": {"id": 4501}})
     make_interface(device, "Ethernet1", iface_type="1000base-t")
@@ -31,20 +32,8 @@ def test_verify_uses_the_validated_interface_name_option(client, live_librenms, 
     )
     assert refreshed.status_code == 200
 
-    response = client.post(
-        reverse("plugins:netbox_librenms_plugin:verify_ipaddress"),
-        {
-            "device_id": device.pk,
-            "object_type": "device",
-            "ip_address": "198.18.70.1/24",
-            "row_id": "198.18.70.1/24",
-            "server_key": "default",
-            "interface_name_field": interface_name_field,
-        },
-        content_type="application/json",
-    )
+    query = {} if interface_name_field is None else {"interface_name_field": interface_name_field}
 
-    assert response.status_code == 200
-    result = response.json()
-    assert result["status"] == "success"
-    assert ('name="sync_one"' in result["formatted_row"]["status"]) == can_create
+    row = read_ip_row(client, device, "198.18.70.1/24", **query)
+
+    assert ('name="sync_one"' in row.status) == can_create
