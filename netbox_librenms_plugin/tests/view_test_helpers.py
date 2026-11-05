@@ -15,6 +15,7 @@ cannot produce (a lock ``DatabaseError``, a ``save()`` that raises).
 
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
+import json
 from contextlib import contextmanager
 from html.parser import HTMLParser
 from uuid import uuid4
@@ -300,7 +301,6 @@ def rendered_preview_query(device, ent_index, *, user=None, server_key="default"
 
 def rendered_modal_form(device, ent_index, path_part, *, user=None, server_key="default"):
     """Return ``(action URL, fields)`` of a form in the modal that the rendered Replace button of row *ent_index* opens."""
-
     from netbox_librenms_plugin.views.sync.modules import ModuleMismatchPreviewView
 
     query = rendered_preview_query(device, ent_index, user=user, server_key=server_key)
@@ -309,6 +309,196 @@ def rendered_modal_form(device, ent_index, path_part, *, user=None, server_key="
     response = get(view, request, pk=device.pk)
     assert response.status_code == 200, response.content
     return rendered_module_form(response.content.decode(), path_part, ent_index)
+
+
+# =============================================================================
+# The IP tab's selection draft, through its real endpoints
+# =============================================================================
+
+
+def ip_tab(client, owner, *, server_key="default", **query):
+    """
+    Render the IP tab as the user's page shows it, from the cached snapshot.
+
+    Returns:
+        SimpleNamespace: ``html``, ``table`` (the table's attributes) and ``rows`` (each row's attributes by row key).
+
+    """
+    from types import SimpleNamespace
+
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests._html_helpers import open_tags
+
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_fragment",
+        kwargs={"object_type": owner._meta.model_name, "pk": owner.pk, "tab": "ipaddresses"},
+    )
+    response = client.get(url, {"server_key": server_key, "ipaddresses_per_page": "1000", **query})
+    assert response.status_code == 200, response.content
+    html = response.content.decode()
+    tables = [attrs for attrs in open_tags(html, "table") if attrs.get("id") == "librenms-ipaddress-table"]
+    assert len(tables) == 1, "the IP tab renders no table"
+    rows = {attrs["data-row-key"]: attrs for attrs in open_tags(html, "tr") if attrs.get("data-row-key")}
+    return SimpleNamespace(html=html, table=tables[0], rows=rows)
+
+
+def select_ip_rows(client, owner, row_ids, *, server_key="default", vrfs=None, **query):
+    """
+    Select *row_ids* in the user's IP draft as the tab does: each VRF of *vrfs* first, then one batch of checks.
+
+    Each check carries the evidence token that the tab renders for the row with its chosen VRF.
+
+    Args:
+        client (Client): A signed-in client.
+        owner (Device | VirtualMachine): The subject of the sync page.
+        row_ids (Iterable[str]): The row keys to select.
+        server_key (str): The LibreNMS server of the tab.
+        vrfs (dict[str, str] | None): The VRF to choose per row key: "" is Global, else a VRF pk.
+        **query: More page query parameters, for example ``interface_name_field``.
+
+    Returns:
+        dict[str, str]: The ``draft_id`` and ``expected_revision`` that a bulk submit posts.
+
+    """
+    tab = ip_tab(client, owner, server_key=server_key, **query)
+    draft_id, revision = tab.table["data-draft-id"], int(tab.table["data-draft-revision"])
+    for row_id, value in (vrfs or {}).items():
+        response = client.post(
+            tab.table["data-choice-url"],
+            {"draft_id": draft_id, "expected_revision": revision, "row": row_id, "value": value},
+        )
+        assert response.status_code == 204, (response.status_code, response.content)
+        revision = int(response["X-Draft-Revision"])
+    if vrfs:
+        tab = ip_tab(client, owner, server_key=server_key, **query)
+    row_ids = list(row_ids)
+    if row_ids:
+        missing = [row_id for row_id in row_ids if not tab.rows.get(row_id, {}).get("data-evidence")]
+        assert not missing, f"the tab offers no selection of {missing}"
+        assignments = {row_id: {"state": "on", "token": tab.rows[row_id]["data-evidence"]} for row_id in row_ids}
+        response = client.post(
+            tab.table["data-selection-url"],
+            {"draft_id": draft_id, "expected_revision": revision, "assignments": json.dumps(assignments)},
+        )
+        assert response.status_code == 204, (response.status_code, response.content)
+        revision = int(response["X-Draft-Revision"])
+    return {"draft_id": draft_id, "expected_revision": str(revision)}
+
+
+def submit_ip_selection(client, owner, row_ids, *, server_key="default", vrfs=None, query=None, headers=None, **fields):
+    """
+    Select *row_ids* through the tab's draft (see :func:`select_ip_rows`), then post the bulk IP sync with the draft.
+
+    Args:
+        query (dict | None): More page query parameters for the tab and the submit URL.
+        headers (dict | None): Extra request headers of the submit, for example ``HTTP_HX_REQUEST``.
+        **fields: More submit fields, for example ``set-primary-ip-toggle``.
+
+    Returns:
+        HttpResponse: The submit's response.
+
+    """
+    from urllib.parse import urlencode
+
+    from django.urls import reverse
+
+    draft = select_ip_rows(client, owner, row_ids, server_key=server_key, vrfs=vrfs, **(query or {}))
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+        kwargs={"object_type": owner._meta.model_name, "pk": owner.pk},
+    )
+    if query:
+        url = f"{url}?{urlencode(query)}"
+    return client.post(url, {"server_key": server_key, **draft, **fields}, **(headers or {}))
+
+
+def sync_ip_row(client, owner, row_id, *, server_key="default", vrf=None, headers=None, **fields):
+    """
+    Post the row action of one IP row (``sync_one``), after choosing *vrf* for it through the draft when given.
+
+    Args:
+        vrf (str | None): The VRF to choose first: "" is Global, else a VRF pk; None chooses nothing.
+        headers (dict | None): Extra request headers of the post, for example ``HTTP_HX_REQUEST``.
+        **fields: More post fields, for example ``create-missing-interfaces-toggle``.
+
+    Returns:
+        HttpResponse: The post's response.
+
+    """
+    from django.urls import reverse
+
+    if vrf is not None:
+        select_ip_rows(client, owner, [], server_key=server_key, vrfs={row_id: vrf})
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+        kwargs={"object_type": owner._meta.model_name, "pk": owner.pk},
+    )
+    return client.post(url, {"server_key": server_key, "sync_one": row_id, **fields}, **(headers or {}))
+
+
+def write_ip_rows(owner, user, selected, *, server_key="default", **fields):
+    """
+    Run the IP writer on *selected* as the sync does after its draft check.
+
+    For a row that the tab offers for no selection: the writer must refuse it on its own.
+
+    Args:
+        owner (Device | VirtualMachine): The subject of the sync page, with a stored IP snapshot.
+        user (User): The user who syncs.
+        selected (dict[str, int | None]): The VRF pk of each row ID; None is Global.
+        server_key (str): The LibreNMS server of the snapshot.
+        **fields: The submit's other fields, for example ``create-missing-interfaces-toggle``.
+
+    Returns:
+        SimpleNamespace: ``results`` (the writer's results), ``messages`` (the texts the sync shows) and
+            ``request`` (the request that holds the messages).
+
+    """
+    from types import SimpleNamespace
+
+    from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
+
+    request = make_request("post", {"server_key": server_key, **fields}, user=user)
+    view = make_view(SyncIPAddressesView, request)
+    view._post_server_key = server_key
+    assessment = view.assess_cached_snapshot(owner)
+    results = view.process_ip_sync(request, selected, assessment, owner, owner._meta.model_name)
+    view.display_sync_results(request, results)
+    return SimpleNamespace(results=results, messages=message_texts(request), request=request)
+
+
+def read_ip_row(client, owner, row_id, *, server_key="default", vrf=None, **query):
+    """
+    Read one IP row as the page's row read does, after choosing *vrf* for it through the draft when given.
+
+    Args:
+        vrf (str | None): The VRF to choose first: "" is Global, else a VRF pk; None chooses nothing.
+
+    Returns:
+        SimpleNamespace: ``html`` (the ``<tr>``), ``status`` (the status cell's markup), ``selectable``
+            (the row has an enabled checkbox) and ``shown_vrf`` (the value of the selected VRF option).
+
+    """
+    import re
+    from types import SimpleNamespace
+
+    from netbox_librenms_plugin.tests._html_helpers import open_tags
+
+    if vrf is not None:
+        select_ip_rows(client, owner, [], server_key=server_key, vrfs={row_id: vrf}, **query)
+    response = client.get(ip_tab(client, owner, server_key=server_key, **query).rows[row_id]["hx-get"])
+    assert response.status_code == 200, (response.status_code, response.content)
+    html = response.content.decode()
+    status = re.search(r'<td[^>]*data-col="status"[^>]*>(.*?)</td>', html, flags=re.S).group(1)
+    boxes = [attrs for attrs in open_tags(html, "input") if attrs.get("name") == "select"]
+    shown = re.search(r'<option value="(\d*)"\s+selected>', html)
+    return SimpleNamespace(
+        html=html,
+        status=status,
+        selectable=bool(boxes) and "disabled" not in boxes[0],
+        shown_vrf=shown.group(1) if shown else "",
+    )
 
 
 def _message_level(name):
