@@ -857,8 +857,11 @@ def build_candidate_relationship_context(obj, server_key, user, can_write, port_
         for target_id in row.values()
         if target_id is not None
     }
+    # A target is shown when the user may view it and its owner, whatever owners the candidates have.
     viewable_target_ids = set(
-        interface_queryset.filter(pk__in=target_ids, **{f"{owner_field}__in": actionable_owner_ids})
+        interface_queryset.filter(
+            pk__in=target_ids, **{f"{owner_field}__in": owner_model.objects.restrict(user, "view").values("pk")}
+        )
         .restrict(user, "view")
         .values_list("pk", flat=True)
     )
