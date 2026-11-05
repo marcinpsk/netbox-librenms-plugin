@@ -882,7 +882,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             }
         if policy.member(member.pk) is None:
             return {"table": None, "object": page_device, "server_key": scoped_server}
-        return self._build_context(
+        context = self._build_context(
             request,
             page_device,
             inventory,
@@ -891,6 +891,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             policy=policy,
             pin_to=member,
         )
+        # The pinned table attributes every row to the member, so it cannot tell which rows the page withholds.
+        context["withheld_indices"] = self.withheld_indices(
+            inventory, policy, self.sync_view_scope(page_device).chassis
+        )
+        return context
 
     def _build_context(
         self,
@@ -1112,7 +1117,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
     @staticmethod
     def _mark_verify_rows(table_data):
-        """Give each row of the page table the indices of itself and of the rows below it, in table order."""
+        """
+        Give each row of the page table the indices of itself and of the rows below it, in table order.
+
+        A row on a member the user may not view is in no list: a verify of an ancestor must not sign it
+        again for another member.
+        """
         open_rows = []
         for row in table_data:
             depth = row.get("depth", 0)
@@ -1121,9 +1131,36 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             open_rows.append(row)
             row["verify_rows"] = []
             index = coerce_positive_int(row.get("ent_physical_index"))
-            if index is not None:
+            if index is not None and not row.get("member_withheld"):
                 for owner in open_rows:
                     owner["verify_rows"].append(index)
+
+    @classmethod
+    def withheld_indices(cls, inventory, policy, chassis):
+        """
+        Return the inventory indices that the page table shows withheld for the user of *chassis*.
+
+        The page table attributes each row as here and withholds a row on a member the user may not
+        view, so a verify and every writer refuse these indices with the same rule.
+
+        Args:
+            inventory (list[dict]): The inventory snapshot.
+            policy (InventoryPolicy): The loaded rules and devices of the page device.
+            chassis (ChassisScope): The page device's chassis, split by what the user may view.
+
+        Returns:
+            frozenset[int]: The withheld indices.
+
+        """
+        _default, contexts = cls._build_inventory_ignore_contexts(
+            policy.page_device, inventory, policy.vc_members, policy
+        )
+        return frozenset(
+            index
+            for item in inventory
+            if (index := coerce_positive_int(item.get("entPhysicalIndex"))) is not None
+            and not isinstance(chassis.owner(contexts[_inventory_item_key(item)]["selected_device"].pk), Visible)
+        )
 
     def _selection_manifest(self, table, table_data):
         """Return the signed list of every rendered row a selected install may name, or None without grants."""

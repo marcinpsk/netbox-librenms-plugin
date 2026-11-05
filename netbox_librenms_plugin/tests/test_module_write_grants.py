@@ -905,34 +905,96 @@ def test_a_row_on_a_hidden_member_shows_no_bay_module_or_action_of_that_member(c
     assert rendered_module_form(content, "install-module", CARD)
 
 
-def test_no_signed_grant_of_the_page_names_a_hidden_member(client, vc_grants):
-    """Optic 1 belongs to the hidden member: its row signs nothing, and no grant of the page holds that member."""
-    from dcim.models import Device, Module, ModuleBay, ModuleType
+def _page_only_module_user(username, page):
+    """Return a plugin writer who may view only *page* among the devices, and install modules."""
+    from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
+
+    from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+    user = make_user_with_perms(username, [("view", Device)], constraints={"pk": page.pk})
+    for action, model in (("view", ModuleBay), ("view", ModuleType), ("view", Module), ("add", Module)):
+        user = grant(user, action, model)
+    # A branch install also creates, adopts and removes the module interfaces.
+    for action in ("view", "add", "change", "delete"):
+        user = grant(user, action, Interface)
+    return user
+
+
+def _grant_payloads(html):
     from django.core import signing
 
     from netbox_librenms_plugin.module_grants import _SALT
-    from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+    tokens = re.findall(r'(?:name="inventory_binding" value|data-verify-binding)="([^"]+)"', html)
+    return [signing.loads(token, salt=_SALT) for token in tokens]
+
+
+def test_no_signed_grant_of_the_page_names_a_hidden_member(client, vc_grants):
+    """Optic 1 belongs to the hidden member: no grant of the page names that member or Optic 1, its ancestors' too."""
+    from netbox_librenms_plugin.module_grants import _ROW_SHAPES
 
     page, member = vc_grants(optic_1_on_member=True)
-    user = make_user_with_perms("module-grants-hidden-grants", [("view", Device)], constraints={"pk": page.pk})
-    for action, model in (("view", ModuleBay), ("view", ModuleType), ("view", Module), ("add", Module)):
-        user = grant(user, action, model)
-    client.force_login(user)
+    client.force_login(_page_only_module_user("module-grants-hidden-grants", page))
 
     content = render(client, page)
 
-    tokens = re.findall(r'(?:name="inventory_binding" value|data-verify-binding)="([^"]+)"', content)
-    payloads = [signing.loads(token, salt=_SALT) for token in tokens]
-    assert any(payload["action"] == "install_selected" for payload in payloads)
+    payloads = _grant_payloads(content)
+    actions = {payload["action"] for payload in payloads}
+    assert {"install_selected", "verify_module"} <= actions
+    # The carrier is an ancestor of Optic 1, so its verify grant is the one that could name it.
+    assert any(payload["action"] == "verify_module" and payload["ent_index"] == CARRIER for payload in payloads)
     for payload in payloads:
         assert payload["device_id"] != member.pk
-        assert all(member.pk not in row[1:2] for row in payload["rows"] or ())
-    assert all(
-        row[0] != OPTIC_1 for payload in payloads if payload["action"] == "install_selected" for row in payload["rows"]
-    )
+        assert payload["ent_index"] != OPTIC_1
+        columns = [name for name, _kind in _ROW_SHAPES.get(payload["action"], ())]
+        for row in payload["rows"] or ():
+            assert row[columns.index("index")] != OPTIC_1, payload
+            if "target" in columns:
+                assert row[columns.index("target")] != member.pk, payload
     (select,) = re.findall(rf'<select name="device_selection_{OPTIC_1}".*?</select>', content, flags=re.S)
     assert " disabled" in select
     assert "data-verify-binding" not in select
+
+
+def test_a_verified_branch_never_installs_a_row_of_a_hidden_member(client, vc_grants):
+    """Verifying the carrier onto the visible member signs its branch again: Optic 1 of the hidden member stays out."""
+    page, member = vc_grants(optic_1_on_member=True)
+    client.force_login(_page_only_module_user("module-grants-hidden-branch", page))
+
+    response = verify(client, render(client, page), page, page, CARRIER)
+
+    assert response.status_code == 200, response.content
+    formatted = response.json()["formatted_row"]
+    action, fields = rendered_module_form(formatted["actions"], "install-branch", CARRIER)
+    post(client, action, fields)
+    installed = _installed(page)
+    # Optic 2 belongs to the visible member, so the branch still installs it.
+    assert ("Cage 2", "GR-OPTIC") in installed
+    assert ("Cage 1", "GR-OPTIC") not in installed
+    assert _installed(member) == set()
+    for payload in _grant_payloads(formatted["actions"] + formatted["device_selection"]):
+        assert all(row[0] != OPTIC_1 for row in payload["rows"] or ()), payload
+
+
+def test_a_branch_grant_naming_a_row_of_a_hidden_member_installs_nothing(client, vc_grants):
+    """A branch grant that names Optic 1, as one signed before the hidden rows left the verify grant, refuses the whole branch."""
+    from django.core import signing
+
+    from netbox_librenms_plugin.module_grants import _SALT, GrantRefusal
+
+    page, member = vc_grants(optic_1_on_member=True)
+    client.force_login(_page_only_module_user("module-grants-hidden-old-branch", page))
+    formatted = verify(client, render(client, page), page, page, CARRIER).json()["formatted_row"]
+    action, fields = rendered_module_form(formatted["actions"], "install-branch", CARRIER)
+    payload = signing.loads(fields["inventory_binding"], salt=_SALT)
+    payload["rows"] = [*payload["rows"], [OPTIC_1, page.pk]]
+    fields["inventory_binding"] = signing.dumps(payload, salt=_SALT, compress=True)
+
+    response = post(client, action, fields)
+
+    assert GrantRefusal.DESTINATION.message in messages_of(response)
+    assert _installed(page) == set()
+    assert _installed(member) == set()
 
 
 def test_a_serial_conflict_on_a_device_the_user_cannot_view_names_nothing_and_offers_no_move(client, vc_grants):
