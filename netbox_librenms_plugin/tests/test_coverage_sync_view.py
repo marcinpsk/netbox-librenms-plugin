@@ -17,7 +17,7 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
-from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms, superuser_chassis
 
 
 SERVER_KEY = "default"
@@ -259,9 +259,10 @@ class TestSyncPageRouting:
         response = client.get(_sync_url(viewed))
 
         assert response.status_code == 200
-        assert response.context["librenms_sync_device"] == sync_device
-        assert response.context["sync_device_has_librenms_id"] is (banner == "managed")
-        assert response.context["sync_device_has_primary_ip"] is (banner == "configure")
+        assert response.context["librenms_sync_device"] == (sync_device if sync_device_visible else None)
+        assert response.context["sync_device_withheld"] is (not sync_device_visible)
+        assert response.context["sync_device_has_librenms_id"] is (sync_device_visible and banner == "managed")
+        assert response.context["sync_device_has_primary_ip"] is (sync_device_visible and banner == "configure")
         html = response.content.decode()
         assert (f'href="{sync_device.get_absolute_url()}"' in html) is sync_device_visible
         assert (sync_device.get_absolute_url() in html) is sync_device_visible
@@ -704,11 +705,6 @@ class TestLibreNMSDeviceInfo:
         assert result["librenms_device_details"]["netbox_dns_names"] == ["dns-identity.example.test"]
 
 
-def _all_members(device):
-    """Return every member of the chassis of *device*: a viewer who may view them all."""
-    return list(device.virtual_chassis.members.all())
-
-
 def _stack_inventory(*members, extra=()):
     """Return a stack root, its chassis members and *extra* rows as one inventory."""
     root = {"entPhysicalIndex": 1, "entPhysicalClass": "stack", "entPhysicalContainedIn": 0}
@@ -878,7 +874,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6648
 
-        result = view._get_vc_inventory_serials(members[0], _all_members(members[0]))
+        result = view._get_vc_inventory_serials(members[0], superuser_chassis(members[0]))
 
         assert [(item["serial"], item["assigned_member"]) for item in result] == [("VC-DUP", None), ("VC-OTHER", None)]
 
@@ -904,7 +900,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6641
 
-        result = view._get_vc_inventory_serials(members[0], _all_members(members[0]))
+        result = view._get_vc_inventory_serials(members[0], superuser_chassis(members[0]))
 
         assert len(result) == 2
         assert result[0]["assigned_member"] == members[0]
@@ -929,7 +925,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6644
 
-        result = view._get_vc_inventory_serials(members[0], _all_members(members[0]))
+        result = view._get_vc_inventory_serials(members[0], superuser_chassis(members[0]))
 
         assert len(result) == 2
         assert result[0]["serial"] == "S/N BCFB9793"
@@ -966,7 +962,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6646
 
-        result = view._get_vc_inventory_serials(member, _all_members(member))
+        result = view._get_vc_inventory_serials(member, superuser_chassis(member))
 
         assert result[0]["serial"] == "VENDOR:MEMBER-SERIAL"
         assert result[0]["assigned_member"] == member
@@ -1000,7 +996,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6650
 
-        result = view._get_vc_inventory_serials(page, _all_members(page))
+        result = view._get_vc_inventory_serials(page, superuser_chassis(page))
 
         assert result[0]["serial"] == "TAG ABC-DIALOG"
         assert result[0]["assigned_member"] is None
@@ -1032,7 +1028,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6651
 
-        result = view._get_vc_inventory_serials(page, _all_members(page))
+        result = view._get_vc_inventory_serials(page, superuser_chassis(page))
 
         assert [(item["serial"], item["assigned_member"]) for item in result][0] == ("TAG-AB", member)
 
@@ -1063,7 +1059,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6652
 
-        result = view._get_vc_inventory_serials(page, _all_members(page))
+        result = view._get_vc_inventory_serials(page, superuser_chassis(page))
 
         assert [(item["serial"], item["assigned_member"]) for item in result] == [("ROOT123", None), ("TAG-AB", member)]
 
@@ -1089,10 +1085,9 @@ class TestVirtualChassisInventory:
         _register_device(librenms_server, 6645, members[0].name, inventory=inventory)
         view = _device_view()
         view.librenms_id = 6645
-        viewable = _all_members(members[0])
 
         with CaptureQueriesContext(connection) as captured:
-            result = view._get_vc_inventory_serials(members[0], viewable)
+            result = view._get_vc_inventory_serials(members[0], superuser_chassis(members[0]))
 
         assert len(result) == 5
         rule_queries = [q for q in captured.captured_queries if "normalizationrule" in q["sql"].lower()]
@@ -1105,6 +1100,14 @@ class TestVirtualChassisInventory:
             if re.search(r'FROM "dcim_(devicetype|virtualchassis)"', q["sql"])
         ]
         assert per_member == []
+
+    def test_failed_inventory_lookup_returns_none(self, librenms_server):
+        _vc, (member,) = make_virtual_chassis_members("inventory-failure", count=1)
+        librenms_server.register("/api/v0/inventory/6642/all", {"status": "error"}, status=503)
+        view = _device_view()
+        view.librenms_id = 6642
+
+        assert view._get_vc_inventory_serials(member, superuser_chassis(member)) is None
 
     @pytest.mark.parametrize(("status", "read_error"), [(404, False), (503, True)])
     def test_inventory_lookup_distinguishes_empty_from_failed(
@@ -1119,6 +1122,7 @@ class TestVirtualChassisInventory:
 
         assert response.status_code == 200
         assert response.context["found_in_librenms"] is True
+        assert response.context["vc_inventory_serials"] == []
         assert response.context["vc_inventory_unavailable"] is read_error
         assert (b"data-vc-inventory-error" in response.content) is read_error
         assert (b"data-vc-serial-unavailable" in response.content) is (not read_error)
@@ -1131,7 +1135,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6649
 
-        result = view._get_vc_inventory_serials(members[0], _all_members(members[0]))
+        result = view._get_vc_inventory_serials(members[0], superuser_chassis(members[0]))
 
         assert [item["librenms_serial"] for item in result] == ["VC-REAL-SERIAL"]
 
