@@ -774,6 +774,86 @@ def test_a_forged_cable_post_cannot_cable_the_visible_namesake_of_a_hidden_bound
     assert not Cable.objects.exists()
 
 
+def _local_bound_on_a_hidden_member(tag):
+    """Return a row whose local port is bound on hidden member B while its name points at the visible page member."""
+    from dcim.models import Cable, Device, Interface
+
+    from netbox_librenms_plugin.tests.conftest import make_interface
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import link_row, port_row, seed_cables_snapshot
+
+    page, hidden = _chassis(tag)
+    seed_stored_mapping(page, {"default": {"id": 14261}}, save=True)
+    # The name Gi1/0/5 selects member 1 (the page); the stable binding of port 751 is on B.
+    namesake = make_interface(page, "Gi1/0/5", iface_type="1000base-t")
+    bound = make_interface(hidden, "Gi2/0/9", iface_type="1000base-t")
+    seed_mapping(bound, "default", own=751, save=True)
+    remote = make_device(f"{tag}-remote")
+    remote_port = make_interface(remote, "Ethernet9", iface_type="1000base-t")
+    seed_cables_snapshot(
+        page,
+        [link_row(751, remote_port.name, local_port="Gi1/0/5", remote_hostname=remote.name)],
+        [port_row(751, "Gi1/0/5", device_id=14261, if_descr=None)],
+        server_key="default",
+    )
+    user = make_user_with_perms(
+        f"{tag}-user", [("view", Device), ("change", Device)], constraints={"pk__in": [page.pk, remote.pk]}
+    )
+    for action, model in (
+        ("view", Interface),
+        ("change", Interface),
+        ("view", Cable),
+        ("add", Cable),
+        ("change", Cable),
+    ):
+        user = grant(user, action, model)
+    return page, namesake, remote, remote_port, user
+
+
+def test_the_cable_verify_never_moves_a_hidden_bound_local_port_to_a_visible_namesake(client, default_server):
+    page, namesake, _remote, _remote_port, user = _local_bound_on_a_hidden_member("cable-local-verify")
+    client.force_login(user)
+    _cable_tab(client, page)
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:verify_cable"),
+        data=json.dumps({"device_id": page.pk, "row_id": "751", "server_key": "default"}),
+        content_type="application/json",
+    )
+
+    assert response.status_code == 200
+    row = response.json()["formatted_row"]
+    assert row["expected_local_id"] is None
+    assert row["can_create_cable"] is False
+    assert namesake.get_absolute_url() not in json.dumps(row)
+
+
+def test_a_forged_member_selection_cannot_cable_the_namesake_of_a_hidden_bound_local_port(client, default_server):
+    from dcim.models import Cable
+
+    page, namesake, remote, remote_port, user = _local_bound_on_a_hidden_member("cable-local-forged")
+    client.force_login(user)
+    _cable_tab(client, page)
+
+    client.post(
+        reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[page.pk]),
+        {
+            "sync_one": "751",
+            "server_key": "default",
+            "device_selection_751": page.pk,
+            "expected_local_id_751": namesake.pk,
+            "expected_local_device_id_751": page.pk,
+            "expected_remote_id_751": remote_port.pk,
+            "expected_remote_device_id_751": remote.pk,
+        },
+        HTTP_HX_REQUEST="true",
+    )
+
+    namesake.refresh_from_db()
+    assert namesake.cable_id is None
+    assert not Cable.objects.exists()
+
+
 def test_a_forged_cable_post_cannot_cable_a_local_interface_that_the_user_cannot_view(client, default_server):
     """The user may change the bound local interface but not view it: no cable reaches it."""
     from dcim.models import Cable, Device, Interface

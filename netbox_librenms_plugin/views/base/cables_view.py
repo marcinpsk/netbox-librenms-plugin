@@ -15,7 +15,7 @@ from django.utils.html import escape
 from django.views import View
 
 from netbox_librenms_plugin.cable_scope import remote_name_candidates as _remote_name_candidates
-from netbox_librenms_plugin.cable_scope import resolve_remote_device
+from netbox_librenms_plugin.cable_scope import bound_port_owner_ids, resolve_remote_device
 from netbox_librenms_plugin.breakout_cables import (
     HIDDEN_REASONS,
     breakout_far_end,
@@ -40,7 +40,6 @@ from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
     MappingRole,
     find_port_owner,
-    port_holders,
     identity_q,
     name_match_may_be_port,
     read_mapping,
@@ -223,24 +222,6 @@ def _set_cable_state(link, status, comparison):
     """
     link["cable_status"] = status
     link["cable_comparison"] = comparison
-
-
-def _bound_port_owner_ids(port_ids, server_key):
-    """
-    Map each bound LibreNMS port ID to the device that owns its one bound Interface, for attribution only.
-
-    A port bound to a VMInterface, or held twice, maps to None. An unbound port is absent.
-    """
-    holders = port_holders(port_ids, server=server_key)
-    interface_owner_ids = dict(
-        Interface.objects.filter(
-            pk__in=[holder[1] for holder in holders.values() if holder is not None and holder[0] == "dcim.interface"]
-        ).values_list("pk", "device_id")
-    )
-    return {
-        port_id: interface_owner_ids.get(holder[1]) if holder is not None and holder[0] == "dcim.interface" else None
-        for port_id, holder in holders.items()
-    }
 
 
 class BaseCableTableView(
@@ -498,7 +479,7 @@ class BaseCableTableView(
         remote_members_by_id = {
             member.pk: member for chassis in remote_chassis.values() for member in chassis.attribution_members
         }
-        bound_owner_ids = _bound_port_owner_ids(
+        bound_owner_ids = bound_port_owner_ids(
             (
                 remote_port_ref(link)
                 for link in normal_links
@@ -541,7 +522,7 @@ class BaseCableTableView(
         members_by_position = {
             member.vc_position: member for member in chassis_members if member.vc_position is not None
         }
-        bound_owner_ids = _bound_port_owner_ids((link.get("local_port_id") for link in normal_links), server_key)
+        bound_owner_ids = bound_port_owner_ids((link.get("local_port_id") for link in normal_links), server_key)
         owners = {}
         for link in normal_links:
             port_id = coerce_librenms_id(link.get("local_port_id"))
@@ -2493,7 +2474,13 @@ class SingleCableVerifyView(BaseCableTableView):
                     # a HOST interface here — mirrors enrich_local_port's guard on the initial
                     # render. Left unresolved, the row takes the labelled, badge-carrying
                     # unresolved branch below instead of linking the wrong interface.
-                    if link_data.get("_source") != OOB_INVENTORY_SOURCE:
+                    local_port_id = coerce_librenms_id(link_data.get("local_port_id"))
+                    bound_owner_ids = bound_port_owner_ids([local_port_id], server_key)
+                    # A bound port belongs to its holder: a selection never moves it to a namesake.
+                    held_elsewhere = (
+                        local_port_id in bound_owner_ids and bound_owner_ids[local_port_id] != lookup_device.pk
+                    )
+                    if link_data.get("_source") != OOB_INVENTORY_SOURCE and not held_elsewhere:
                         # Shared id→dual-name resolution core (issue #88 fallback included), so
                         # this path can't drift from enrich_local_port's again.
                         name_candidates = [n for n in (local_port, link_data.get("local_port_alt")) if n]

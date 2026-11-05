@@ -5,7 +5,7 @@ from django.contrib.contenttypes.models import ContentType
 
 from netbox_librenms_plugin.breakout_cables import is_channel
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
-from netbox_librenms_plugin.server_mappings import MappingRole, identity_q, read_mapping
+from netbox_librenms_plugin.server_mappings import MappingRole, identity_q, port_holders, read_mapping
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
 
@@ -14,6 +14,24 @@ def remote_name_candidates(hostname):
     if not isinstance(hostname, str) or not (hostname := hostname.strip()):
         return ()
     return hostname, hostname.split(".")[0]
+
+
+def bound_port_owner_ids(port_ids, server_key):
+    """
+    Map each bound LibreNMS port ID to the device that owns its one bound Interface, for attribution only.
+
+    A port bound to a VMInterface, or held twice, maps to None. An unbound port is absent.
+    """
+    holders = port_holders(port_ids, server=server_key)
+    interface_owner_ids = dict(
+        Interface.objects.filter(
+            pk__in=[holder[1] for holder in holders.values() if holder is not None and holder[0] == "dcim.interface"]
+        ).values_list("pk", "device_id")
+    )
+    return {
+        port_id: interface_owner_ids.get(holder[1]) if holder is not None and holder[0] == "dcim.interface" else None
+        for port_id, holder in holders.items()
+    }
 
 
 def resolve_remote_device(remote_device_id, hostname, *, server_key, queryset=None, catalog=None):

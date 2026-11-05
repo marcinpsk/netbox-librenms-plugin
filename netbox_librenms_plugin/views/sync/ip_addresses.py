@@ -69,6 +69,7 @@ IP_CONFLICT_SIGNING_SALT = "netbox_librenms_plugin.ip_address_conflict"
 
 # One refusal for every row that an object outside the view scope blocks; it names no object.
 VIEW_SCOPE_REFUSAL = "The address or its interface is outside your view scope. Refresh the IP data and try again."
+STALE_MEMBERSHIP_REFUSAL = "The chassis members changed. Refresh the IP data and try again."
 STALE_INTERFACE_REFUSAL = (
     "The matched NetBox interface is now bound to a different LibreNMS port. Refresh the IP data and try again."
 )
@@ -383,8 +384,13 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         """Report whether two address strings refer to the same host IP."""
         return same_host(a, b)
 
-    def _lock_interface_owner_scope(self, obj):
-        """Lock the current interface-owner scope in the shared chassis-first order."""
+    def _lock_interface_owner_scope(self, obj, *, attribution_ids):
+        """
+        Lock the current interface-owner scope in the shared chassis-first order.
+
+        *attribution_ids* are the members that resolved the row's port before the lock. A chassis
+        whose members changed since then refuses the row, because that resolution is stale.
+        """
         if isinstance(obj, VirtualMachine):
             locked = self.restricted_queryset(VirtualMachine).select_for_update(of=("self",)).filter(pk=obj.pk).first()
             return locked, [locked] if locked is not None else []
@@ -396,6 +402,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             if locked_chassis is None:
                 return None, []
             owner_ids.update(Device.objects.filter(virtual_chassis_id=virtual_chassis_id).values_list("pk", flat=True))
+        if owner_ids != set(attribution_ids):
+            raise ValueError(STALE_MEMBERSHIP_REFUSAL)
         locked_by_id = {
             device.pk: device
             for device in self.restricted_queryset(Device)
@@ -409,9 +417,9 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         members = [device for device in locked_by_id.values() if device.virtual_chassis_id == virtual_chassis_id]
         return locked_obj, members
 
-    def _build_interface_creation_state(self, obj, server_key):
+    def _build_interface_creation_state(self, obj, server_key, *, attribution_ids):
         """Lock one interface-owner scope and materialize its current interface catalog."""
-        locked_obj, locked_members = self._lock_interface_owner_scope(obj)
+        locked_obj, locked_members = self._lock_interface_owner_scope(obj, attribution_ids=attribution_ids)
         if locked_obj is None:
             raise ValueError("The interface owner is no longer available in your view scope.")
 
@@ -444,6 +452,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         interface_name_field,
         server_key,
         interface_creation_state=None,
+        *,
+        attribution_ids,
     ):
         """Create one missing interface from the snapshot port that owns an IP row; a later row resolves to it."""
         port = ip_row_port_record(cached_ports_by_id, ip_data.get("port_id"))
@@ -465,7 +475,9 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             raise ValueError("The cached LibreNMS interface name is missing or ambiguous. Refresh the IP data.")
 
         if interface_creation_state is None:
-            interface_creation_state = self._build_interface_creation_state(obj, server_key)
+            interface_creation_state = self._build_interface_creation_state(
+                obj, server_key, attribution_ids=attribution_ids
+            )
         locked_obj = interface_creation_state["locked_obj"]
         if isinstance(locked_obj, Device):
             owner = resolve_interface_row_device(
@@ -502,7 +514,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         ).append(interface)
         return interface, interface_creation_state
 
-    def _lock_target_interface(self, obj, interface, interface_creation_state=None):
+    def _lock_target_interface(self, obj, interface, interface_creation_state=None, *, attribution_ids):
         """
         Lock and recheck the current interface owner before an IP assignment.
 
@@ -512,7 +524,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
         """
         if interface_creation_state is None:
-            locked_obj, locked_owners = self._lock_interface_owner_scope(obj)
+            locked_obj, locked_owners = self._lock_interface_owner_scope(obj, attribution_ids=attribution_ids)
         else:
             locked_obj = interface_creation_state["locked_obj"]
             locked_owners = interface_creation_state["locked_members"]
@@ -1027,6 +1039,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
         # Each row reads its interface again, so a later row resolves to an interface this sync created.
         scope = SyncViewScope.for_request(request.user, obj, server_key)
+        attribution_ids = frozenset(member.pk for member in scope.chassis.attribution_members)
         cached_index, duplicate_cached_rows = self._cached_ip_index(assessment.rows)
         force_intents = force_intents or {}
         create_missing_interfaces = self._create_missing_interfaces(request)
@@ -1097,11 +1110,14 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             assessment.interface_name_field,
                             server_key,
                             interface_creation_state=interface_creation_state,
+                            attribution_ids=attribution_ids,
                         )
                         row_mutations.add(row_id)
 
                     if interface is not None:
-                        locked_interface, owner = self._lock_target_interface(obj, interface, interface_creation_state)
+                        locked_interface, owner = self._lock_target_interface(
+                            obj, interface, interface_creation_state, attribution_ids=attribution_ids
+                        )
                         if locked_interface is None:
                             raise ValueError(
                                 "The matched NetBox interface is no longer available in your view scope. "

@@ -23,7 +23,12 @@ from netbox_librenms_plugin.breakout_cables import (
     holds_a_cable,
     is_channel,
 )
-from netbox_librenms_plugin.cable_scope import cable_port_owner_ids, cable_rule_interfaces, displaced_interfaces
+from netbox_librenms_plugin.cable_scope import (
+    bound_port_owner_ids,
+    cable_port_owner_ids,
+    cable_rule_interfaces,
+    displaced_interfaces,
+)
 from netbox_librenms_plugin.constants import (
     INTERFACE_NAME_FIELDS,
     OOB_INVENTORY_SOURCE,
@@ -528,22 +533,33 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             locked_remote,
         )
 
+    def _local_port_held_elsewhere(self, link_data, device_id):
+        """Return whether the row's local LibreNMS port is bound to an interface that *device_id* does not own."""
+        server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
+        port_id = coerce_librenms_id(link_data.get("local_port_id"))
+        owner_ids = bound_port_owner_ids([port_id], server_key)
+        return port_id in owner_ids and owner_ids[port_id] != device_id
+
     def _locked_ends_may_be_row_ports(self, local_term, remote_term, link_data):
         """
         Return whether each locked Interface end may still be the LibreNMS port its row names.
 
         The ends were resolved before the lock, so a binding written since then is read here. A
         manually picked remote is the user's choice, not a port match, so only the local end is checked.
-        A remote port that another interface holds is that interface's port, on any member.
+        A port that another interface holds is that interface's port, on any member.
         """
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
-        ends = [(local_term, link_data.get("local_port_id"))]
+        local_port_id = coerce_librenms_id(link_data.get("local_port_id"))
+        ends = [(local_term, local_port_id)]
         if not link_data.get("manual_remote"):
-            remote_port_id = remote_port_ref(link_data)
-            ends.append((remote_term, remote_port_id))
-            holders = port_holders([remote_port_id], server=server_key)
-            if remote_port_id in holders and holders[remote_port_id] != (Interface._meta.label_lower, remote_term.pk):
-                return False
+            ends.append((remote_term, remote_port_ref(link_data)))
+        holders = port_holders([port_id for _term, port_id in ends], server=server_key)
+        if any(
+            port_id in holders and holders[port_id] != (term._meta.label_lower, term.pk)
+            for term, port_id in ends
+            if isinstance(term, Interface)
+        ):
+            return False
         return all(
             name_match_may_be_port(term, server=server_key, port_id=port_id)
             for term, port_id in ends
@@ -1035,6 +1051,11 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         if selected_device_id is not None and selected_device_id != current_local_device_id:
             if not self._selected_device_is_in_page_context(selected_device_id):
                 return None, {"status": "rejected_selection", "interface": display_name}
+            # A row owned by a member the user may not view takes no selection.
+            if link_data.get("member_withheld"):
+                return None, {"status": "rejected_selection", "interface": display_name}
+            if self._local_port_held_elsewhere(link_data, selected_device_id):
+                return None, {"status": "stale", "interface": display_name}
             selected_device = self.restricted_queryset(Device, "view").filter(pk=selected_device_id).first()
             if selected_device is None:
                 return None, {"status": "rejected_selection", "interface": display_name}
@@ -1164,6 +1185,8 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                     selected_device_id,
                 )
                 return {"status": "rejected_selection", "interface": display_name}
+            if self._local_port_held_elsewhere(link_data, coerce_librenms_id(selected_device_id)):
+                return {"status": "stale", "interface": display_name}
             port_name = link_data.get("local_port") or local_interface.name
             try:
                 local_interface = self.viewable_restricted_queryset(Interface, "change").get(
