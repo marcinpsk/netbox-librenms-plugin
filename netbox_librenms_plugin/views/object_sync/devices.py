@@ -519,7 +519,8 @@ class SingleModuleVerifyView(
             return JsonResponse({"status": "error", "message": GrantRefusal.POLICY.message}, status=409)
 
         # A grant needs both renders: the signed page rows show the row, and the table pinned to the member shows it.
-        page_rows = [index for (index,) in grant.rows]
+        # A row the page withholds now is never signed again, also from a grant signed before it was withheld.
+        page_rows = [index for (index,) in grant.rows if index not in context["withheld_indices"]]
         row = self._pinned_row(table.data, selected_device.pk, ent_physical_index, row_depth)
         if row is None or ent_physical_index not in page_rows:
             return JsonResponse(
