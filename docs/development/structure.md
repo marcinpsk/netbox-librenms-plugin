@@ -30,8 +30,8 @@ This document provides an overview of the NetBox LibreNMS Plugin's codebase orga
   - `interface_relationships.py` — Parent, child, and LAG relationship resolution
   - `ip_addressing.py` — Shared IP address handling
   - `acquisition/` — Source acquisition: the snapshot types, one contract per LibreNMS endpoint, the resource registry and the coordinator (`acquire`). It needs no request and writes nothing
-  - `assessment/`: Assessment of a source snapshot at read time. `interfaces.py` derives the interface rows: parsed VLANs, source tags, shared-LOM flags and the port relationships of the stored name rules. It reads no request, cache or HTTP and writes nothing
-  - `source_cache.py` — The web transport of source snapshots: refresh, store and read
+  - `assessment/`: Assessment of a source snapshot at read time. `interfaces.py` derives the interface rows: parsed VLANs, source tags, shared-LOM flags and the port relationships of the stored name rules. `cables.py` derives cable names, aliases, port records, serial rows and row IDs. Assessment reads no request, cache or HTTP and writes nothing
+  - `source_cache.py`: Web transport for source snapshots. Refresh requires the request. Cable readers apply the actor's serial visibility to the shared snapshot. Cable actions use its port evidence
   - `sync_cache.py` and `cache_signals.py` — Sync-tab cache coordination and invalidation
   - `jobs.py` — Background import jobs
   - `signals.py` — Public extension signals

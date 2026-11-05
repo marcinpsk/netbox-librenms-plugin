@@ -12,6 +12,8 @@ from html.parser import HTMLParser
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+
+from netbox_librenms_plugin.tests.source_snapshot_helpers import link_row, port_row, seed_cables_snapshot
 from django.contrib.auth.models import AnonymousUser
 from django.core.cache import cache
 from django.template.loader import render_to_string
@@ -20,7 +22,6 @@ from django.urls import reverse
 
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
-from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.tests.conftest import (
     bind_librenms_server,
     configure_librenms_servers,
@@ -461,34 +462,16 @@ def _cable_owner(kind, client, settings, server):
         seed_stored_mapping(owner, {SERVER_KEY: {"id": LIBRENMS_ID}}, save=True)
     peer = make_device("contract-cables-peer")
     links = []
+    ports = []
     for n in range(1, 13):
         member = members[(n - 1) % len(members)]
         local = make_interface(member, f"Gi{member.vc_position or 1}/0/{n}")
         make_interface(peer, f"Ethernet{n}")
-        links.append(
-            {
-                "_source": "main",
-                "local_port_id": 9600 + n,
-                "local_port": local.name,
-                "remote_device": f"Peer a&b+c É {n}" if n % 3 else peer.name,
-                "remote_port": f"Ethernet{n}",
-            }
-        )
-    links.append(
-        {
-            "_source": "main",
-            "local_port_id": 9699,
-            "local_port": "xe-9",
-            "remote_device": "Peer a&b+c É",
-            "remote_port": "xe-9",
-        }
-    )
-    sync_device = get_librenms_sync_device(owner, server_key=SERVER_KEY) or owner
-    cache.set(
-        object.__new__(SyncCablesView).get_cache_key(sync_device, "links", SERVER_KEY),
-        {"links": links, "snapshot_token": "contract-cables", "incomplete_sources": []},
-        timeout=300,
-    )
+        links.append(link_row(9600 + n, f"Ethernet{n}", remote_hostname=f"Peer a&b+c É {n}" if n % 3 else peer.name))
+        ports.append(port_row(9600 + n, local.name, device_id=LIBRENMS_ID))
+    links.append(link_row(9699, "xe-9", remote_hostname="Peer a&b+c É"))
+    ports.append(port_row(9699, "xe-9", device_id=LIBRENMS_ID))
+    seed_cables_snapshot(owner, links, ports, server_key=SERVER_KEY)
     return serve_sync_page(client, settings, server, owner)
 
 
@@ -564,22 +547,11 @@ def _four_tab_owner(client, settings, librenms_server):
         SERVER_KEY,
         vlans=[{"vlan_vlan": 100, "vlan_name": "v100", "vlan_type": "ethernet", "vlan_state": 1}],
     )
-    cache.set(
-        object.__new__(SyncCablesView).get_cache_key(owner, "links", SERVER_KEY),
-        {
-            "links": [
-                {
-                    "_source": "main",
-                    "local_port_id": 9601,
-                    "local_port": "eth0",
-                    "remote_device": "peer",
-                    "remote_port": "xe-1",
-                }
-            ],
-            "snapshot_token": "signature",
-            "incomplete_sources": [],
-        },
-        timeout=300,
+    seed_cables_snapshot(
+        owner,
+        [link_row(9601, "xe-1", remote_hostname="peer")],
+        [port_row(9601, "eth0", device_id=42)],
+        server_key=SERVER_KEY,
     )
     _refresh(
         client,

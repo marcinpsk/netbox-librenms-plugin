@@ -12,6 +12,8 @@ HTTP calls.
 import json
 from functools import partial
 
+from netbox_librenms_plugin.tests.source_snapshot_helpers import link_row, port_row, seed_cables_snapshot
+
 import pytest
 
 from netbox_librenms_plugin.tests.conftest import (
@@ -116,46 +118,42 @@ class TestCableViewableQuerysetFallback:
 
 
 @pytest.mark.django_db
-class TestCablePortsDataWithoutHostMapping:
-    def test_no_host_librenms_id_returns_empty_ports_without_a_request(self, librenms_server, settings):
-        """An OOB-only/unmapped device has no host ports to fetch."""
-        view = _cable_view(settings, librenms_server)
+class TestCableSourceCompleteness:
+    def test_a_failed_ports_fetch_blocks_rows_with_obtained_links(self, librenms_server, settings):
+        from netbox_librenms_plugin.acquisition.coordinator import acquire
+        from netbox_librenms_plugin.acquisition.registry import Resource
+        from netbox_librenms_plugin.assessment.cables import assess
+        from netbox_librenms_plugin import source_cache
 
-        ports_data = view.get_ports_data(None)
+        device = _map_device(make_device("cable-ports-failed"), 141)
+        _bind_server(settings, librenms_server)
+        _links_route(librenms_server, 141, [link_row(1, "eth1", local_port="eth0")])
 
-        assert ports_data == {"ports": []}
-        assert librenms_server.requests == []
+        snapshot = acquire(device, server_key=SERVER_KEY, resources=[Resource.CABLES])
+        assessment = assess(snapshot, subject=device)
 
-    def test_a_failed_ports_fetch_returns_an_empty_payload(self, librenms_server, settings):
-        """A LibreNMS ports failure must degrade to an empty payload, not the error string."""
-        view = _cable_view(settings, librenms_server)
-        # /api/v0/devices/141/ports stays unregistered, so the loopback answers 404.
+        assert assessment["links"] == []
+        assert any(blocker.path.endswith("/141/ports") for blocker in assessment["blockers"])
+        assert not source_cache.store(device, Resource.CABLES, snapshot)
 
-        ports_data = view.get_ports_data(141)
+    def test_an_unmapped_local_port_id_uses_the_reported_name(self, librenms_server, settings):
+        from netbox_librenms_plugin.acquisition.coordinator import acquire
+        from netbox_librenms_plugin.acquisition.registry import Resource
+        from netbox_librenms_plugin.assessment.cables import assess
 
-        assert ports_data == {"ports": []}
-        assert "/api/v0/devices/141/ports" in [r["path"] for r in librenms_server.requests]
-
-
-@pytest.mark.django_db
-class TestCableLinkCollection:
-    def test_an_unmapped_local_port_id_falls_back_to_the_librenms_port_name(self, librenms_server, settings):
-        """When the ports map has no entry for a link, the LibreNMS-reported local_port is used."""
         device = _map_device(make_device("cable-name-fallback"), 61)
+        _bind_server(settings, librenms_server)
         librenms_server.ports_response(device_id=61, ports=[{"port_id": 1, "ifName": "eth0"}])
         _links_route(
             librenms_server,
             61,
-            [
-                # local_port_id 999 is absent from the ports payload above.
-                {"id": 1, "local_port_id": 999, "local_port": "eth9", "remote_hostname": "peer", "remote_port": "e1"}
-            ],
+            [link_row(999, "e1", id=1, local_port="eth9", remote_hostname="peer")],
         )
-        view = _cable_view(settings, librenms_server)
 
-        links = view.get_links_data(device, server_key=SERVER_KEY)
+        snapshot = acquire(device, server_key=SERVER_KEY, resources=[Resource.CABLES])
+        assessment = assess(snapshot, subject=device)
 
-        assert [link["local_port"] for link in links] == ["eth9"]
+        assert [link["local_port"] for link in assessment["links"]] == ["eth9"]
 
 
 @pytest.mark.django_db
@@ -290,21 +288,21 @@ class TestCableRefreshFetchFailure:
         # /api/v0/devices/101/links stays unregistered, so the loopback answers 404.
         view = _cable_view(settings, librenms_server)
         links_key = view.get_cache_key(device, "links", SERVER_KEY)
-        cache.set(links_key, {"links": [{"local_port": "eth0", "local_port_id": 1}]}, timeout=300)
+        seed_cables_snapshot(device, [link_row(1, "")], [port_row(1, "eth0", device_id=101)], server_key=SERVER_KEY)
         request = make_request("post", {"server_key": SERVER_KEY}, user=make_superuser())
 
         response = _post(view, request, pk=device.pk)
 
         assert response.status_code == 200
         assert cache.get(links_key) is None
-        assert any(text.startswith("Failed to fetch links from LibreNMS:") for text in message_texts(request, "error"))
+        assert message_texts(request, "error")
 
 
 @pytest.mark.django_db
 class TestCableRefreshOobMerge:
     @pytest.mark.parametrize("port_device_id", [161, 162])
     def test_cable_port_names_are_fetched_without_vlan_expansion(self, librenms_server, settings, port_device_id):
-        from django.core.cache import cache
+        from netbox_librenms_plugin.views.base.cables_view import read_cable_assessment
 
         device = _map_device(make_device("cable-oob-port-names"), 161, oob={"id": 162, "type": "idrac"})
         librenms_server.ports_response(device_id=161, ports=[])
@@ -321,10 +319,11 @@ class TestCableRefreshOobMerge:
         response = _post(view, request, pk=device.pk)
 
         assert response.status_code == 200
-        cached = cache.get(view.get_cache_key(device, "links", SERVER_KEY))
-        assert len(cached["links"]) == 1
-        assert cached["links"][0]["local_port"] == "mgmt0"
-        assert cached["links"][0]["_source"] == "oob"
+        assessment = read_cable_assessment(request, device, SERVER_KEY)
+        assert len(assessment["links"]) == 1
+        assert assessment["links"][0]["local_port"] == "mgmt0"
+        assert assessment["links"][0]["_source"] == "oob"
+        assert not assessment["blockers"]
         assert message_texts(request, "warning") == []
         port_requests = [
             request
@@ -341,18 +340,20 @@ class TestCableRefreshOobMerge:
         _links_route(
             librenms_server,
             111,
-            [{"id": 1, "local_port_id": 1, "local_port": "eth0", "remote_hostname": "peer", "remote_port": "e1"}],
+            [link_row(1, "e1", id=1, local_port="eth0", remote_hostname="peer")],
         )
         view = _cable_view(settings, librenms_server)
         request = make_request("post", {"server_key": SERVER_KEY}, user=make_superuser())
 
-        _post(view, request, pk=device.pk)
+        response = _post(view, request, pk=device.pk)
 
-        assert message_texts(request, "warning") == [
-            "Cables refreshed, but OOB controller links fetch failed; "
-            "showing host cables only. See server logs for details."
-        ]
-        assert view._oob_links_fetch_failed is True
+        from netbox_librenms_plugin.views.base.cables_view import read_cable_assessment
+
+        assessment = read_cable_assessment(request, device, SERVER_KEY)
+        assert [row["_source"] for row in assessment["links"]] == ["main"]
+        assert assessment["blockers"]
+        assert message_texts(request, "warning") == []
+        assert response.content.count(b'class="alert alert-warning" role="alert"') == 1
         # The corrupt id must never become a request path.
         assert not [r["path"] for r in librenms_server.requests if "not-an-id" in r["path"]]
 
@@ -363,19 +364,21 @@ class TestCableRefreshOobMerge:
         _links_route(
             librenms_server,
             121,
-            [{"id": 1, "local_port_id": 1, "local_port": "eth0", "remote_hostname": "peer", "remote_port": "e1"}],
+            [link_row(1, "e1", id=1, local_port="eth0", remote_hostname="peer")],
         )
         # /api/v0/devices/122/links stays unregistered, so the loopback answers 404.
         view = _cable_view(settings, librenms_server)
         request = make_request("post", {"server_key": SERVER_KEY}, user=make_superuser())
 
-        _post(view, request, pk=device.pk)
+        response = _post(view, request, pk=device.pk)
 
-        assert message_texts(request, "warning") == [
-            "Cables refreshed, but OOB controller links fetch failed; "
-            "showing host cables only. See server logs for details."
-        ]
-        assert view._oob_links_fetch_failed is True
+        from netbox_librenms_plugin.views.base.cables_view import read_cable_assessment
+
+        assessment = read_cable_assessment(request, device, SERVER_KEY)
+        assert [row["_source"] for row in assessment["links"]] == ["main"]
+        assert assessment["blockers"]
+        assert message_texts(request, "warning") == []
+        assert response.content.count(b'class="alert alert-warning" role="alert"') == 1
         assert "/api/v0/devices/122/links" in [r["path"] for r in librenms_server.requests]
 
     def test_a_malformed_oob_links_payload_warns_and_keeps_the_host_rows(self, librenms_server, settings):
@@ -385,19 +388,21 @@ class TestCableRefreshOobMerge:
         _links_route(
             librenms_server,
             151,
-            [{"id": 1, "local_port_id": 1, "local_port": "eth0", "remote_hostname": "peer", "remote_port": "e1"}],
+            [link_row(1, "e1", id=1, local_port="eth0", remote_hostname="peer")],
         )
         librenms_server.register("/api/v0/devices/152/links", {"status": "ok", "links": {"not": "a list"}})
         view = _cable_view(settings, librenms_server)
         request = make_request("post", {"server_key": SERVER_KEY}, user=make_superuser())
 
-        _post(view, request, pk=device.pk)
+        response = _post(view, request, pk=device.pk)
 
-        assert message_texts(request, "warning") == [
-            "Cables refreshed, but OOB controller links fetch failed; "
-            "showing host cables only. See server logs for details."
-        ]
-        assert view._oob_links_fetch_failed is True
+        from netbox_librenms_plugin.views.base.cables_view import read_cable_assessment
+
+        assessment = read_cable_assessment(request, device, SERVER_KEY)
+        assert [row["_source"] for row in assessment["links"]] == ["main"]
+        assert assessment["blockers"]
+        assert message_texts(request, "warning") == []
+        assert response.content.count(b'class="alert alert-warning" role="alert"') == 1
 
 
 @pytest.mark.django_db
@@ -429,27 +434,14 @@ class TestSingleCableVerifyPermissions:
 class TestSingleCableVerifyRemoteDeviceMissing:
     def test_an_unknown_remote_hostname_is_reported_as_not_found(self, librenms_server, settings):
         """A remote hostname with no NetBox device must render the not-found status, not a link."""
-        from django.core.cache import cache
 
         device = _map_device(make_device("cable-verify-remote-missing"), 131)
-        view = _cable_view(settings, librenms_server)
-        links_key = view.get_cache_key(device, "links", SERVER_KEY)
-        cache.set(
-            links_key,
-            {
-                "links": [
-                    {
-                        # No NetBox interface carries this name, so the local end stays unresolved.
-                        "local_port": "eth-absent",
-                        "local_port_id": 700,
-                        "remote_port": "Gi0/1",
-                        "remote_device": "not-in-netbox",
-                        "remote_device_id": None,
-                        "_source": "main",
-                    }
-                ]
-            },
-            timeout=300,
+        _bind_server(settings, librenms_server)
+        seed_cables_snapshot(
+            device,
+            [link_row(700, "Gi0/1", remote_hostname="not-in-netbox")],
+            [port_row(700, "eth-absent", device_id=131)],
+            server_key=SERVER_KEY,
         )
         request = make_request(
             "post",

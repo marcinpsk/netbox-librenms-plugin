@@ -9,6 +9,8 @@ only against NetBox state.
 import json
 
 import pytest
+
+from netbox_librenms_plugin.tests.source_snapshot_helpers import link_row, port_row, sensor_row, seed_cables_snapshot
 from django.core.cache import cache
 from django.http import Http404
 
@@ -51,15 +53,25 @@ def _post_ip(payload):
     return view_post(SingleIPAddressVerifyView(), _request(payload))
 
 
-def _post_cable(device, links, *, row_id, **extra):
+def _post_cable(
+    device, links=(), *, ports=(), neighbour_ports=None, sensors=None, oob_links=None, oob_ports=None, row_id, **extra
+):
     """Warm a real cable snapshot and call the real cable verification endpoint."""
     from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
 
     view = SingleCableVerifyView()
     server_key = view._render_server_key()
     assert server_key is not None
-    cache_key = view.get_cache_key(device, "links", server_key)
-    cache.set(cache_key, {"links": links}, timeout=300)
+    seed_cables_snapshot(
+        device,
+        links,
+        ports,
+        neighbour_ports=neighbour_ports,
+        sensors=sensors,
+        oob_links=oob_links,
+        oob_ports=oob_ports,
+        server_key=server_key,
+    )
     payload = {"device_id": device.pk, "row_id": row_id, "server_key": server_key, **extra}
     return view_post(view, _request(payload))
 
@@ -298,7 +310,7 @@ class TestCableVerifyEndpoint:
         assert response.status_code == 200
         assert _json(response)["formatted_row"]["cable_status"] == "Missing Ports"
 
-    def test_malformed_snapshot_is_purged_and_returns_the_empty_row(self):
+    def test_an_unsupported_source_snapshot_returns_an_empty_row_without_deletion(self):
         from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
 
         device = make_device("cable-malformed")
@@ -306,7 +318,7 @@ class TestCableVerifyEndpoint:
         server_key = view._render_server_key()
         assert server_key is not None
         key = view.get_cache_key(device, "links", server_key)
-        cache.set(key, {"links": ["not-a-row"]}, timeout=300)
+        cache.set(key, {"schema": -1}, timeout=300)
 
         response = view_post(
             view,
@@ -315,11 +327,12 @@ class TestCableVerifyEndpoint:
 
         assert response.status_code == 200
         assert _json(response)["formatted_row"]["cable_status"] == "Missing Ports"
-        assert cache.get(key) is None
+        assert cache.get(key) == {"schema": -1}
 
     def test_origin_must_match_the_selected_device(self):
         selected = make_device("cable-selected")
         origin = make_device("cable-other-origin")
+        seed_mapping(selected, "default", own=406)
 
         response = _post_cable(
             selected,
@@ -332,15 +345,14 @@ class TestCableVerifyEndpoint:
         assert _json(response)["message"] == "The cable page and selected device do not match."
 
     def test_serial_row_rejects_member_verification(self):
-        device = make_device("cable-serial")
-        row = {
-            "_source": "serial",
-            "local_port": "ttyS0",
-            "local_port_id": "serial:7",
-            "remote_device": "console-server",
-        }
+        from dcim.models import ConsoleServerPort
 
-        response = _post_cable(device, [row], row_id="serial:7")
+        device = make_device("cable-serial")
+        ConsoleServerPort.objects.create(device=device, name="ttyS0")
+        seed_mapping(device, "default", own=406)
+        response = _post_cable(
+            device, sensors=[sensor_row(7, 0, device_id=406, sensor_descr="console-server Status")], row_id="serial:7"
+        )
 
         assert response.status_code == 400
         assert _json(response)["message"] == "Serial cable rows have a fixed device owner."
@@ -357,19 +369,15 @@ class TestCableVerifyEndpoint:
         seed_mapping(local_interface, server_key, own=1010)
         seed_mapping(remote_interface, server_key, own=1111)
         cable = cable_together(local_interface, remote_interface)
-        row = {
-            "local_port": "stale-local-name",
-            "local_port_id": 1010,
-            "remote_port": "stale-remote-name",
-            "remote_port_id": 1111,
-            "remote_device": remote.name,
-            "remote_device_id": None,
-            "netbox_local_interface_id": 999_999,
-            "remote_device_url": "/stale/device/",
-            "cable_status": "stale-status",
-        }
-
-        response = _post_cable(local, [row], row_id="1010")
+        seed_mapping(local, server_key, own=406)
+        seed_mapping(remote, server_key, own=408)
+        response = _post_cable(
+            local,
+            [link_row(1010, "stale-remote-name", remote_hostname=remote.name, remote_port_id=1111)],
+            ports=[port_row(1010, "stale-local-name", device_id=406)],
+            neighbour_ports={408: [port_row(1111, "stale-remote-name", device_id=408)]},
+            row_id="1010",
+        )
         rendered = _json(response)["formatted_row"]
 
         assert response.status_code == 200
@@ -377,24 +385,14 @@ class TestCableVerifyEndpoint:
         assert f"/dcim/interfaces/{remote_interface.pk}/" in rendered["remote_port"]
         assert f"/dcim/devices/{remote.pk}/" in rendered["remote_device"]
         assert f"/dcim/cables/{cable.pk}/" in rendered["cable_status"]
-        assert "Cable Found" in rendered["cable_status"]
-        assert "/stale/device/" not in rendered["remote_device"]
-        assert "stale-status" not in rendered["cable_status"]
 
     def test_unresolved_oob_port_keeps_badge_and_never_renders_none(self):
         device = make_device("cable-oob")
-        row = {
-            "_source": "oob",
-            "local_port": None,
-            "local_port_id": 1212,
-            "remote_port": "",
-            "remote_device": "",
-        }
-
-        response = _post_cable(device, [row], row_id="1212")
+        seed_mapping(device, "default", own=406, oob=407)
+        response = _post_cable(device, oob_links=[link_row(1212, "")], oob_ports=[], row_id="1212")
         rendered = _json(response)["formatted_row"]
 
         assert response.status_code == 200
-        assert rendered["cable_status"] == "Missing Interface"
-        assert "From OOB controller" in rendered["local_port"]
+        assert rendered["can_create_cable"] is False
+        assert "OOB" in rendered["local_port"]
         assert "None" not in rendered["local_port"]

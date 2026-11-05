@@ -29,11 +29,19 @@ class ResourceSpec:
     data_type: str
     owner_policy: OwnerPolicy
     supports_virtual_machine: bool
+    permits_oob_only: bool = False
+    serial_sensors: bool = False
+
+    def acquisition_options(self, *, include_serial):
+        """Return the options that this resource's acquirer accepts."""
+        return {"include_serial": include_serial} if self.serial_sensors else {}
 
 
 RESOURCE_SPECS = {
     Resource.INTERFACES: ResourceSpec("ports", OwnerPolicy.VC_SYNC_OWNER, supports_virtual_machine=True),
-    Resource.CABLES: ResourceSpec("links", OwnerPolicy.VC_SYNC_OWNER, supports_virtual_machine=False),
+    Resource.CABLES: ResourceSpec(
+        "links", OwnerPolicy.VC_SYNC_OWNER, supports_virtual_machine=False, permits_oob_only=True, serial_sensors=True
+    ),
     Resource.IP_ADDRESSES: ResourceSpec("ip_addresses", OwnerPolicy.SUBJECT, supports_virtual_machine=True),
     Resource.MODULES: ResourceSpec("inventory", OwnerPolicy.VC_SYNC_OWNER, supports_virtual_machine=False),
     Resource.VLANS: ResourceSpec("vlans", OwnerPolicy.SUBJECT, supports_virtual_machine=False),
