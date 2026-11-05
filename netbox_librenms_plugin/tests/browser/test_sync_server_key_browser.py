@@ -38,7 +38,6 @@ PAGE_HTML = f"""<!doctype html><html><body>
       <table><tbody><tr data-ent-index="5" data-depth="0"><td>
         <select id="module-select" data-row-id="5"><option value="1">m1</option></select>
       </td></tr></tbody></table>
-      <select id="vrf-select" data-ip="192.0.2.1" data-prefix="24" data-row-id="ip-1"><option value="3">v</option></select>
       <button id="confirm-delete-interfaces">Delete</button>
     </div>
     </body></html>"""
@@ -70,10 +69,9 @@ def _form_server_key(request):
         ),
         (CABLE_VERIFY_URL, "handleCableChange(document.getElementById('cable-select'), '2')", _json_server_key),
         ("**/verify-module/", "handleModuleChange(document.getElementById('module-select'), '1')", _json_server_key),
-        ("**/verify-ipaddress/", "handleVRFChange(document.getElementById('vrf-select'), '3')", _json_server_key),
         (LAG_SYNC_URL, "document.querySelector('.lag-sync-btn').click()", _form_server_key),
     ],
-    ids=["interface-verify", "cable-verify", "module-verify", "ip-vrf-verify", "relationship-sync"],
+    ids=["interface-verify", "cable-verify", "module-verify", "relationship-sync"],
 )
 def test_a_request_posts_the_server_key_of_the_sync_page(page, url, action, read):
     """Another server's form earlier in the page does not decide the server of a tab request."""

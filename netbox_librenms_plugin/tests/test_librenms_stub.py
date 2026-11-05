@@ -228,10 +228,8 @@ def test_stub_serves_recordings_and_derived_instance_endpoints_over_real_http():
 
         ok, addresses = recording_part(api, device_id, Resource.IP_ADDRESSES, "addresses")
         assert ok is True, addresses
-        assert addresses
-        recorded_device = recording["responses"][f"GET /api/v0/devices/{device_id}"]["devices"][0]
-        assert addresses[0]["ipv4_address"] == recorded_device["ip"]
-        assert addresses[0]["port_id"] is not None
+        # The recording holds the device's addresses, so the stub serves them.
+        assert addresses == recording["responses"][f"GET /api/v0/devices/{device_id}/ip"]["addresses"]
 
         from netbox_librenms_plugin.tests.source_snapshot_helpers import acquire_recording
 
@@ -1112,3 +1110,20 @@ def test_stub_preserves_ip_hostnames_as_complete_aliases(source, hostnames):
         assert _request(server, "GET", "/api/v0/devices/198").json()["devices"][0]["device_id"] == 198
     finally:
         server.stop()
+
+
+def test_a_recording_with_addresses_serves_them_and_another_gets_the_management_address():
+    """The recorded /ip answer of a device wins; a device without one gets its derived management address."""
+    with_addresses = load_recording("iosxe-subinterfaces")
+    recorded = LibreNMSStubServer._find_response(with_addresses, f"/api/v0/devices/{with_addresses['device_id']}/ip")
+    without = copy.deepcopy(load_recording("linux-host"))
+    without["responses"] = {key: value for key, value in without["responses"].items() if not key.endswith("/ip")}
+    server = LibreNMSStubServer(recordings=[with_addresses, without], api_token=TOKEN).start()
+    try:
+        served = _request(server, "GET", f"/api/v0/devices/{with_addresses['device_id']}/ip").json()
+        derived = _request(server, "GET", f"/api/v0/devices/{without['device_id']}/ip").json()
+    finally:
+        server.stop()
+
+    assert served["addresses"] == recorded["addresses"]
+    assert len(derived["addresses"]) == 1

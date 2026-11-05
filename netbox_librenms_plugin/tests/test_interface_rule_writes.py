@@ -39,7 +39,7 @@ from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     seed_interfaces_snapshot,
     seed_ip_snapshot,
 )
-from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, submit_ip_selection
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
 SERVER_KEY = "default"
@@ -960,17 +960,12 @@ def test_the_ip_tab_does_not_create_an_interface_for_an_ignored_port(superuser_c
     device = _device("rule-ip-create", platform)
     seed_ip_snapshot(device, [ip_address_row("198.18.30.10", 7030)], [_port(7030, "Ethernet1")], server_key=SERVER_KEY)
 
-    response = superuser_client.post(
-        reverse(
-            "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-            kwargs={"object_type": "device", "pk": device.pk},
-        ),
-        {
-            "server_key": SERVER_KEY,
-            "create-missing-interfaces-toggle": "on",
-            "select": "198.18.30.10/24",
-            "vrf_198.18.30.10/24": "",
-        },
+    response = submit_ip_selection(
+        superuser_client,
+        device,
+        ["198.18.30.10/24"],
+        server_key=SERVER_KEY,
+        **{"create-missing-interfaces-toggle": "on"},
     )
 
     assert not Interface.objects.filter(device=device).exists()

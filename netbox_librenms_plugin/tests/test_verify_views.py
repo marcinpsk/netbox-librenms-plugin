@@ -14,6 +14,7 @@ from netbox_librenms_plugin.tests.source_snapshot_helpers import link_row, port_
 import pytest
 from django.conf import settings
 from django.test import RequestFactory, override_settings
+from django.urls import reverse
 
 from netbox_librenms_plugin.tests.conftest import configured_server_key, make_superuser
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
@@ -757,10 +758,10 @@ class TestSingleInterfaceVerifyView:
 
 
 # ---------------------------------------------------------------------------
-# SingleIPAddressVerifyView — object-permission gate (real DB, real has_perm)
+# The IP row read: object-permission gate and server namespace (real DB, real has_perm)
 # ---------------------------------------------------------------------------
 def _make_gate_device(name="ipgate-dev"):
-    """Create a real Device for the IP-verify object-permission gate tests."""
+    """Create a real Device for the IP row read object-permission gate tests."""
     from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
 
     mfr, _ = Manufacturer.objects.get_or_create(name="IPGate-Mfr", slug="ipgate-mfr")
@@ -771,7 +772,7 @@ def _make_gate_device(name="ipgate-dev"):
 
 
 def _make_gate_vm(name="ipgate-vm"):
-    """Create a real VirtualMachine for the IP-verify object-permission gate tests."""
+    """Create a real VirtualMachine for the IP row read object-permission gate tests."""
     from virtualization.models import Cluster, ClusterType, VirtualMachine
 
     ct, _ = ClusterType.objects.get_or_create(name="IPGate-CT", slug="ipgate-ct")
@@ -779,135 +780,87 @@ def _make_gate_vm(name="ipgate-vm"):
     return VirtualMachine.objects.create(name=name, cluster=cluster, status="active")
 
 
+def _ip_row_url(owner, row_key="1.2.3.4/24", server_key="default"):
+    """Return the URL of the IP row read of *owner*, as the tab renders it on each row."""
+    path = reverse(
+        "plugins:netbox_librenms_plugin:ip_row",
+        kwargs={"object_type": owner._meta.model_name, "pk": owner.pk, "row_key": row_key},
+    )
+    return f"{path}?server_key={server_key}"
+
+
 @pytest.mark.django_db
-class TestSingleIPAddressVerifyObjectPermissionGate:
-    """SingleIPAddressVerifyView requires dcim.view_device before it reveals a JSON-selected device."""
+class TestTheIPRowReadObjectPermissionGate:
+    """The IP row read requires the view permission of the URL's subject model before it reveals the subject."""
 
-    def _post(self, user, device_id, object_type=None):
-        from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
+    @staticmethod
+    def _user(username, *models):
+        """Return a user with the plugin's permissions, so only the object gate can refuse, and *models* to view."""
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
-        payload = {"device_id": device_id, "ip_address": "1.2.3.4/24"}
-        if object_type is not None:
-            payload["object_type"] = object_type
-        request = RequestFactory().post(
-            "/plugins/librenms_plugin/verify-ipaddress/",
-            data=json.dumps(payload),
-            content_type="application/json",
-        )
-        request.user = user
-        # Direct post() bypasses dispatch(); supply the request the gate reads.
-        view = SingleIPAddressVerifyView()
-        view.request = request
-        view.kwargs = {}
-        view.args = ()
-        return view.post(request)
+        return make_user_with_perms(username, [("view", model) for model in models])
+
+    @staticmethod
+    def _get(user, owner):
+        from django.test import Client
+
+        client = Client()
+        client.force_login(user)
+        return client.get(_ip_row_url(owner))
 
     def test_user_without_view_device_is_denied(self):
         """A user lacking dcim.view_device is refused (403) before any object data is read."""
-        from django.contrib.auth import get_user_model
-
         device = _make_gate_device()
-        user = get_user_model().objects.create_user(username="ipgate-noperm", password="x")
 
-        response = self._post(user, device.pk)
+        response = self._get(self._user("ipgate-noperm"), device)
 
         assert response.status_code == 403
         # The denied response must NOT leak the hidden device's name.
         assert device.name.encode() not in response.content
 
     def test_user_with_view_device_passes_gate(self):
-        """A user granted dcim.view_device clears the gate (non-403, normal 200 path)."""
-        from core.models import ObjectType
+        """A user granted dcim.view_device clears the gate (non-403)."""
         from dcim.models import Device
-        from django.contrib.auth import get_user_model
-        from users.models import ObjectPermission
 
         device = _make_gate_device(name="ipgate-dev2")
-        user = get_user_model().objects.create_user(username="ipgate-perm", password="x")
-        perm = ObjectPermission.objects.create(name="ipgate-view-device", actions=["view"])
-        perm.object_types.set([ObjectType.objects.get_for_model(Device)])
-        perm.users.set([user])
-        # Re-fetch to clear NetBox's per-request object-permission cache on the user.
-        user = get_user_model().objects.get(pk=user.pk)
 
-        response = self._post(user, device.pk)
-
-        assert response.status_code != 403
+        assert self._get(self._user("ipgate-perm", Device), device).status_code != 403
 
     def test_device_view_only_user_denied_vm_data(self):
-        """A user with only dcim.view_device must NOT read VirtualMachine data through this endpoint."""
-        from core.models import ObjectType
+        """A user with only dcim.view_device must NOT read VirtualMachine data through the row read."""
         from dcim.models import Device
-        from django.contrib.auth import get_user_model
-        from users.models import ObjectPermission
 
         vm = _make_gate_vm()
-        user = get_user_model().objects.create_user(username="ipgate-devonly", password="x")
-        perm = ObjectPermission.objects.create(name="ipgate-view-dev-only", actions=["view"])
-        perm.object_types.set([ObjectType.objects.get_for_model(Device)])
-        perm.users.set([user])
-        user = get_user_model().objects.get(pk=user.pk)
 
-        # The static Device-only gate would have let this through (the user HAS dcim.view_device),
-        # leaking VM data; the per-object gate must require virtualization.view_virtualmachine.
-        response = self._post(user, vm.pk, object_type="virtualmachine")
+        response = self._get(self._user("ipgate-devonly", Device), vm)
 
         assert response.status_code == 403
         assert vm.name.encode() not in response.content
 
     def test_vm_view_user_passes_gate_for_vm(self):
         """A user granted virtualization.view_virtualmachine clears the gate for a VM target."""
-        from core.models import ObjectType
-        from django.contrib.auth import get_user_model
-        from users.models import ObjectPermission
         from virtualization.models import VirtualMachine
 
         vm = _make_gate_vm(name="ipgate-vm2")
-        user = get_user_model().objects.create_user(username="ipgate-vmperm", password="x")
-        perm = ObjectPermission.objects.create(name="ipgate-view-vm", actions=["view"])
-        perm.object_types.set([ObjectType.objects.get_for_model(VirtualMachine)])
-        perm.users.set([user])
-        user = get_user_model().objects.get(pk=user.pk)
 
-        response = self._post(user, vm.pk, object_type="virtualmachine")
-
-        assert response.status_code != 403
-
-    def test_vm_target_without_object_type_resolves_model_and_denies_device_only_user(self):
-        """Even with no object_type, a VM id resolves to its model so a Device-only user is denied."""
-        from core.models import ObjectType
-        from dcim.models import Device
-        from django.contrib.auth import get_user_model
-        from users.models import ObjectPermission
-
-        vm = _make_gate_vm(name="ipgate-vm3")
-        user = get_user_model().objects.create_user(username="ipgate-devonly2", password="x")
-        perm = ObjectPermission.objects.create(name="ipgate-view-dev-only2", actions=["view"])
-        perm.object_types.set([ObjectType.objects.get_for_model(Device)])
-        perm.users.set([user])
-        user = get_user_model().objects.get(pk=user.pk)
-
-        response = self._post(user, vm.pk)  # no object_type — server resolves the id to a VM
-
-        assert response.status_code == 403
-        assert vm.name.encode() not in response.content
+        assert self._get(self._user("ipgate-vmperm", VirtualMachine), vm).status_code != 403
 
 
 @pytest.mark.django_db
-class TestSingleIPAddressVerifyServerKeyCacheNamespace:
-    """An unconfigured server key cannot select an arbitrary IP verification cache namespace."""
+class TestTheIPRowReadServerKeyCacheNamespace:
+    """An unconfigured server key cannot select an arbitrary IP cache namespace for the row read."""
 
-    def test_forged_server_key_falls_back_to_configured_namespace(self):
+    def test_a_forged_server_key_reads_no_snapshot(self):
         from django.contrib.auth import get_user_model
+        from django.test import Client
 
         from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot
-        from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
 
         device = _make_gate_device(name="ipgate-srvkey")
         for own, namespace in enumerate(("default", "alpha", "evil-namespace"), start=4301):
             seed_mapping(device, namespace, own=own, save=False)
         device.save()
-        # The address is on two ports in each snapshot, so only the snapshot that holds the posted row id answers.
+        # The address is on two ports in each snapshot, so only the snapshot that holds the row key answers.
         for first_port, namespace in ((1, "default"), (3, "alpha"), (5, "evil-namespace")):
             port_ids = (first_port, first_port + 1)
             seed_ip_snapshot(
@@ -916,42 +869,19 @@ class TestSingleIPAddressVerifyServerKeyCacheNamespace:
                 [{"port_id": port_id, "ifName": f"eth{port_id}", "ifDescr": f"eth{port_id}"} for port_id in port_ids],
                 server_key=namespace,
             )
-        user = get_user_model().objects.create_user(username="ipgate-srvkey-su", password="x", is_superuser=True)
-        user = get_user_model().objects.get(pk=user.pk)
-
-        def verify(server_key, row_id):
-            request = RequestFactory().post(
-                "/plugins/librenms_plugin/verify-ipaddress/",
-                data=json.dumps(
-                    {
-                        "device_id": device.pk,
-                        "ip_address": "1.2.3.4/24",
-                        "object_type": "device",
-                        "row_id": row_id,
-                        "server_key": server_key,
-                    }
-                ),
-                content_type="application/json",
-            )
-            request.user = user
-            view = SingleIPAddressVerifyView()
-            view.request = request
-            view.kwargs = {}
-            view.args = ()
-            return view.post(request)
+        client = Client()
+        client.force_login(get_user_model().objects.create_user(username="ipgate-srvkey-su", is_superuser=True))
 
         servers = {
             "alpha": {"librenms_url": "https://a.example.com", "api_token": "t"},
             "beta": {"librenms_url": "https://b.example.com", "api_token": "t"},
         }
         with _servers_settings(servers):
-            forged_default_row = verify("evil-namespace", "1.2.3.4/24@1")
-            forged_own_row = verify("evil-namespace", "1.2.3.4/24@5")
-            configured_row = verify("alpha", "1.2.3.4/24@3")
+            forged_own_row = client.get(_ip_row_url(device, "1.2.3.4/24@5", "evil-namespace"))
+            configured_row = client.get(_ip_row_url(device, "1.2.3.4/24@3", "alpha"))
 
-        # The forged key reads the fixed "default" snapshot, never its own namespace.
-        assert forged_default_row.status_code == 200, forged_default_row.content
-        assert forged_own_row.status_code == 400
+        # The forged key never reads its own namespace.
+        assert forged_own_row.status_code == 404
         # Positive control: a configured key reads its own snapshot.
         assert configured_row.status_code == 200, configured_row.content
 

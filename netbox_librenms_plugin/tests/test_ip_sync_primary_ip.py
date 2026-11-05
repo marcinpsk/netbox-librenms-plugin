@@ -18,7 +18,15 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot
-from netbox_librenms_plugin.tests.view_test_helpers import assert_update_logged, make_view, missing_pk
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    assert_update_logged,
+    ip_tab,
+    make_view,
+    message_texts,
+    missing_pk,
+    select_ip_rows,
+    write_ip_rows,
+)
 from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
 
@@ -112,11 +120,9 @@ class _PrimaryIPStealer:
         return result
 
 
-def _sync_payload(rows, *, set_primary=True):
-    """Build the POST body the IP sync tab submits for *rows*."""
-    row_ids = [row["row_id"] for row in rows]
-    data = {"server_key": SERVER_KEY, "select": row_ids}
-    data.update({f"vrf_{row_id}": "" for row_id in row_ids})
+def _sync_payload(client, obj, rows, *, set_primary=True):
+    """Select *rows* through the tab's draft and build the POST body the IP sync tab submits for them."""
+    data = {"server_key": SERVER_KEY, **select_ip_rows(client, obj, [row["row_id"] for row in rows])}
     if set_primary:
         data["set-primary-ip-toggle"] = "true"
     return data
@@ -137,7 +143,7 @@ class TestPrimaryIPFromManagementAddress:
         _seed(device, [row], management_ip="198.18.40.10")
         _login(client, "ip-primary-set-user")
 
-        response = client.post(_ip_url(device), _sync_payload([row]))
+        response = client.post(_ip_url(device), _sync_payload(client, device, [row]))
 
         assert response.status_code == 302
         address = IPAddress.objects.get(address=row["row_id"])
@@ -163,7 +169,7 @@ class TestPrimaryIPFromManagementAddress:
         _seed(device, [row], management_ip=record_ip)
         _login(client, "ip-primary-record-user")
 
-        response = client.post(_ip_url(device), _sync_payload([row]))
+        response = client.post(_ip_url(device), _sync_payload(client, device, [row]))
 
         assert response.status_code == 302
         address = IPAddress.objects.get(address=row["row_id"])
@@ -205,7 +211,7 @@ class TestPrimaryIPFromManagementAddress:
                 )
             )
 
-        response = client.post(_ip_url(device), _sync_payload([row]))
+        response = client.post(_ip_url(device), _sync_payload(client, device, [row]))
 
         assert response.status_code == 302
         assert not IPAddress.objects.filter(address=row["row_id"]).exists()
@@ -234,7 +240,7 @@ class TestPrimaryIPFromManagementAddress:
         _seed(device, [row], management_ip="198.18.41.10")
         _login(client, "ip-primary-idempotent-user")
 
-        response = client.post(_ip_url(device), _sync_payload([row]))
+        response = client.post(_ip_url(device), _sync_payload(client, device, [row]))
 
         assert response.status_code == 302
         assert any("IP addresses already exist" in text for text in _messages(response, "warning"))
@@ -257,8 +263,9 @@ class TestPrimaryIPFromManagementAddress:
         _login(client, "ip-primary-stale-user")
         stealer = _PrimaryIPStealer(device.pk, address.pk)
 
+        payload = _sync_payload(client, device, [row])
         with connection.execute_wrapper(stealer):
-            response = client.post(_ip_url(device), _sync_payload([row]))
+            response = client.post(_ip_url(device), payload)
 
         assert stealer.fired is True
         assert response.status_code == 302
@@ -276,7 +283,7 @@ class TestPrimaryIPFromManagementAddress:
         _seed(device, [management_row, other_row], management_ip="198.18.42.10")
         _login(client, "ip-primary-no-interface-user")
 
-        response = client.post(_ip_url(device), _sync_payload([management_row, other_row]))
+        response = client.post(_ip_url(device), _sync_payload(client, device, [management_row, other_row]))
 
         assert response.status_code == 302
         assert IPAddress.objects.filter(address__in=["198.18.42.10/24", "198.18.42.11/24"]).count() == 0
@@ -299,7 +306,7 @@ class TestPrimaryIPFromManagementAddress:
         _seed(viewed, [row], management_ip="198.18.43.10")
         _login(client, "ip-primary-vc-user")
 
-        response = client.post(_ip_url(viewed), _sync_payload([row]))
+        response = client.post(_ip_url(viewed), _sync_payload(client, viewed, [row]))
 
         assert response.status_code == 302
         address = IPAddress.objects.get(address="198.18.43.10/24")
@@ -324,8 +331,9 @@ class TestPrimaryIPFromManagementAddress:
         _seed(device, [row], management_ip="198.18.44.10")
         _login(client, "ip-primary-busy-user")
 
+        payload = _sync_payload(client, device, [row])
         with failing_statement(lambda sql, _params: sql.startswith('UPDATE "dcim_device"'), "55P03") as failed:
-            response = client.post(_ip_url(device), _sync_payload([row]))
+            response = client.post(_ip_url(device), payload)
 
         assert len(failed) == 1
         assert response.status_code == 302
@@ -350,21 +358,25 @@ class TestIPRowResolution:
         row = _row("198.18.44.10", 9206, interface.name)
         _seed(device, [row])
         _login(client, "ip-vrf-missing-user")
+        table = ip_tab(client, device).table
 
-        response = client.post(
-            _ip_url(device),
+        choice = client.post(
+            table["data-choice-url"],
             {
-                "server_key": SERVER_KEY,
-                "select": row["row_id"],
-                f"vrf_{row['row_id']}": missing_pk(VRF),
+                "draft_id": table["data-draft-id"],
+                "expected_revision": table["data-draft-revision"],
+                "row": row["row_id"],
+                "value": missing_pk(VRF),
             },
         )
+        # The draft takes no such choice, so the writer's own refusal is driven directly.
+        written = write_ip_rows(device, make_superuser(), {row["row_id"]: missing_pk(VRF)})
 
-        assert response.status_code == 302
+        assert choice.status_code == 404
         assert not IPAddress.objects.filter(address="198.18.44.10/24").exists()
         assert any(
             "Selected VRF is no longer available or you do not have permission to view it." in text
-            for text in _messages(response, "error")
+            for text in message_texts(written.request, "error")
         )
 
 
@@ -389,7 +401,7 @@ class TestIPTabRedirect:
 
         response = client.post(
             _ip_url(device),
-            {"server_key": "removed", "select": "198.18.48.10/24"},
+            {"server_key": "removed"},
         )
 
         assert response.status_code == 302
