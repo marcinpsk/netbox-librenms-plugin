@@ -291,7 +291,7 @@ class TestEmptyPolicy:
         assert 'id="module-no-inventory-class"' not in response.content.decode()
 
     @staticmethod
-    def _render_vc_modules_tab(client, settings, tag, inventory, admitted_manufacturer_of):
+    def _render_vc_modules_tab(client, settings, tag, inventory, admitted_manufacturer_of, user_for=None):
         """Render a mixed-vendor VC's Modules tab with one include rule scoped to one member's vendor."""
         from django.core.cache import cache
         from django.urls import reverse
@@ -316,7 +316,7 @@ class TestEmptyPolicy:
         )
         seed_mapped_modules(page, inventory, librenms_id=9304)
         cache.set("librenms_device_info_default_9304", (True, {"device_id": 9304, "hostname": page.name}), 300)
-        client.force_login(make_superuser(f"{tag}-user"))
+        client.force_login(make_superuser(f"{tag}-user") if user_for is None else user_for(page))
 
         response = client.get(
             reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[page.pk]),
@@ -327,6 +327,38 @@ class TestEmptyPolicy:
         rows = list(response.context["module_sync"]["table"].data)
         alert = re.search(r'id="module-no-inventory-class".*?</div>', response.content.decode(), re.S)
         return page, member, rows, alert
+
+    def test_a_vc_alert_never_names_a_member_that_the_user_cannot_view(self, client, settings):
+        """The refused member is hidden, so the page and the htmx tab name no refused device."""
+        from django.urls import reverse
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+        member_row = _entity(161, "module", "Member card", "Member card", contained_in=0, position=2)
+        page_row = _entity(163, "module", "Page card", "Page card", contained_in=0)
+        del page_row["entPhysicalParentRelPos"]
+
+        def page_only(page):
+            return make_user_with_perms(
+                "vc-alert-hidden-user", [("view", Device), ("change", Device)], constraints={"pk": page.pk}
+            )
+
+        page, member, _rows, alert = self._render_vc_modules_tab(
+            client, settings, "vc-alert-hidden", [member_row, page_row], "page", user_for=page_only
+        )
+        fragment = client.get(
+            reverse(
+                "plugins:netbox_librenms_plugin:sync_cache_fragment",
+                kwargs={"object_type": "device", "pk": page.pk, "tab": "modules"},
+            ),
+            {"server_key": "default"},
+        )
+
+        assert fragment.status_code == 200
+        assert alert is None
+        assert member.name not in fragment.content.decode()
+        assert 'id="module-no-inventory-class"' not in fragment.content.decode()
 
     @pytest.mark.parametrize("admitted_manufacturer_of", ["page", "member"])
     def test_a_vc_alert_names_the_member_whose_rows_no_rule_admits(self, client, settings, admitted_manufacturer_of):

@@ -8,7 +8,8 @@ only through ``owner(pk)``.
 The scan flags ``<x>.virtual_chassis.members``, ``get_virtual_chassis_members()``, a
 ``Device.objects`` chain filtered on ``virtual_chassis*`` and any ``VirtualChassis.objects`` chain,
 unless the chain passes through ``.restrict(<user>, "view")``. It recognizes direct chains, a local
-name bound to ``<x>.virtual_chassis`` and a local name bound to ``Device.objects``. It does not
+name bound to ``<x>.virtual_chassis`` and a local name bound to ``Device.objects``. A direct
+``Device.objects.get(pk=...)`` is not a member read: ``test_view_wiring`` covers raw pk lookups. It does not
 follow calls into other functions, ``getattr`` or generic relations. It covers the views, the tables
 and the assessment modules. A locked writer that must read every member to lock or re-check the
 chassis is named in ``LOCKED_MEMBER_READS``; it discloses no member.

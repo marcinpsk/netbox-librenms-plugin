@@ -651,18 +651,36 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         }
         return signing.dumps(payload, salt=IP_CONFLICT_SIGNING_SALT, compress=True)
 
-    @staticmethod
-    def _viewable_rows(scope, parsed, vrf):
+    @classmethod
+    def _viewable_rows(cls, scope, parsed, vrf):
         """
         Return the rows of the row's address in every VRF and of its host in *vrf*, as the actor may view them.
 
         A hidden row, a row in a hidden VRF or a row on a hidden interface or owner refuses the row
-        before it is classified, signed or applied.
+        before it is classified, signed or applied. Call it after the owner and interface locks: the
+        visible rows are locked (Device before IPAddress) and read again, so a change that another
+        transaction committed while this row waited for a lock counts.
 
         Returns:
             tuple[tuple, tuple]: The rows of the address in every VRF, and the rows of the host in *vrf*.
 
         """
+        address_rows, host_rows = cls._read_viewable_rows(scope, parsed, vrf)
+        visible_pks = {ip.pk for ip in (*address_rows, *host_rows)}
+        if visible_pks:
+            list(
+                IPAddress.objects.restrict(scope.actor, "view")
+                .select_for_update(of=("self",))
+                .filter(pk__in=visible_pks)
+                .order_by("pk")
+                .values_list("pk", flat=True)
+            )
+            address_rows, host_rows = cls._read_viewable_rows(scope, parsed, vrf)
+        return address_rows, host_rows
+
+    @staticmethod
+    def _read_viewable_rows(scope, parsed, vrf):
+        """Return the rows of :meth:`_viewable_rows` without a lock, or refuse a blocked row."""
         key = address_key(parsed)
         address = scope.address_states([key])[key]
         host = scope.host_conflicts(parsed.ip, vrf)
@@ -1062,7 +1080,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         _acquire_ip_host_lock(parsed, vrf)
 
                     # Before any write: a row that a hidden object blocks changes nothing.
-                    viewable_rows = self._viewable_rows(scope, parsed, vrf)
+                    self._read_viewable_rows(scope, parsed, vrf)
                     target = scope.resolve_ip_interface(ip_data)
                     if target is WITHHELD:
                         raise ValueError(VIEW_SCOPE_REFUSAL)
@@ -1145,6 +1163,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         row_results.append(("updated", display_address))
                         row_mutations.add(row_id)
                     else:
+                        # Read again under the row locks: the first read only refuses early.
+                        viewable_rows = self._viewable_rows(scope, parsed, vrf)
                         ip_obj, outcome, conflict = self._classify_ip_change(
                             viewable_rows=viewable_rows,
                             row_id=row_id,

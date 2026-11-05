@@ -21,6 +21,7 @@ from virtualization.models import VirtualMachine, VMInterface
 from netbox_librenms_plugin.server_mappings import mark_migrated
 from netbox_librenms_plugin.tests.conftest import (
     configure_librenms_servers,
+    transactional_db_with_all_apps,
     make_device,
     make_interface,
     make_ip,
@@ -442,6 +443,40 @@ class TestTheWriterRefusesWhatTheActorCannotView:
         assert not IPAddress.objects.filter(address="198.18.113.10/24").exists()
         hidden.refresh_from_db()
         assert str(hidden.address) == "198.18.113.10/16"
+
+    @transactional_db_with_all_apps()
+    def test_an_address_hidden_while_the_sync_waits_for_its_locks_is_never_named_or_signed(
+        self, client, settings, monkeypatch
+    ):
+        """Another transaction hides the other-prefix address after the first read and before the row locks."""
+        from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change, second_connection
+        from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
+
+        _servers(settings, SERVER_KEY)
+        device, (eth1,) = _device("ip-scope-writer-race", "eth1")
+        seed_mapping(eth1, SERVER_KEY, own=7120)
+        existing = make_ip("198.18.120.10/25")
+        _seed(device, [("198.18.120.10", 24, 7120, "eth1")])
+        client.force_login(_reader("ip-scope-writer-race"))
+        real_lock = SyncIPAddressesView._lock_target_interface
+        commits = []
+
+        with second_connection() as other:
+
+            def lock_after_a_concurrent_commit(self, *args, **kwargs):
+                if not commits:
+                    commit_row_change(other, IPAddress, existing.pk, {"status": HIDDEN_STATUS})
+                    commits.append(existing.pk)
+                return real_lock(self, *args, **kwargs)
+
+            monkeypatch.setattr(SyncIPAddressesView, "_lock_target_interface", lock_after_a_concurrent_commit)
+            response = _sync(client, device, ["198.18.120.10/24"])
+
+        html = response.content.decode()
+        assert commits == [existing.pk]
+        assert "198.18.120.10/25" not in html
+        assert all(payload.get("ip_pk") != str(existing.pk) for payload in _intents(html))
+        assert not IPAddress.objects.filter(address="198.18.120.10/24").exists()
 
     def test_a_confirmation_signed_before_the_address_was_hidden_is_refused(self, client, settings):
         _servers(settings, SERVER_KEY)

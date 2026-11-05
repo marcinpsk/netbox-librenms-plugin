@@ -653,6 +653,78 @@ def test_a_cable_row_on_a_hidden_local_or_remote_member_names_no_member(client, 
     assert 'name="sync_one"' not in html
 
 
+def _remote_bound_on_a_hidden_member(tag):
+    """Return a row whose remote port is bound on hidden member B while its name points at visible member A."""
+    from dcim.models import Cable, Device, Interface
+
+    from netbox_librenms_plugin.tests.conftest import make_interface
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import link_row, port_row, seed_cables_snapshot
+
+    page = make_device(f"{tag}-page")
+    seed_stored_mapping(page, {"default": {"id": 14231}}, save=True)
+    local = make_interface(page, "Ethernet1", iface_type="1000base-t")
+    remote_a = make_device(f"{tag}-remote-a")
+    remote_b = make_device(f"{tag}-remote-b")
+    make_virtual_chassis(f"{tag}-remote-vc", remote_a, remote_b)
+    # The name ge-1/0/5 selects member 1 (A); the stable binding of port 9731 is on B.
+    namesake = make_interface(remote_a, "ge-1/0/5", iface_type="1000base-t")
+    bound = make_interface(remote_b, "Bound-B", iface_type="1000base-t")
+    seed_mapping(bound, "default", own=9731, save=True)
+    seed_cables_snapshot(
+        page,
+        [link_row(731, "ge-1/0/5", local_port=local.name, remote_hostname=remote_a.name, remote_port_id=9731)],
+        [port_row(731, local.name, device_id=14231, if_descr=None)],
+        server_key="default",
+    )
+    visible = {"pk__in": [page.pk, remote_a.pk]}
+    user = make_user_with_perms(f"{tag}-user", [("view", Device), ("change", Device)], constraints=visible)
+    for action, model in (
+        ("view", Interface),
+        ("change", Interface),
+        ("view", Cable),
+        ("add", Cable),
+        ("change", Cable),
+    ):
+        user = grant(user, action, model)
+    return page, local, remote_a, namesake, user
+
+
+def test_a_remote_port_bound_on_a_hidden_member_never_resolves_to_a_visible_namesake(client, default_server):
+    page, _local, _remote_a, namesake, user = _remote_bound_on_a_hidden_member("cable-remote-bound")
+    client.force_login(user)
+
+    html = _cable_tab(client, page)
+
+    assert namesake.get_absolute_url() not in html
+    assert 'name="sync_one"' not in html
+
+
+def test_a_forged_cable_post_cannot_cable_the_visible_namesake_of_a_hidden_bound_port(client, default_server):
+    from dcim.models import Cable
+
+    page, local, remote_a, namesake, user = _remote_bound_on_a_hidden_member("cable-remote-forged")
+    client.force_login(user)
+    _cable_tab(client, page)
+
+    client.post(
+        reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[page.pk]),
+        {
+            "sync_one": "731",
+            "server_key": "default",
+            "expected_local_id_731": local.pk,
+            "expected_local_device_id_731": page.pk,
+            "expected_remote_id_731": namesake.pk,
+            "expected_remote_device_id_731": remote_a.pk,
+        },
+        HTTP_HX_REQUEST="true",
+    )
+
+    namesake.refresh_from_db()
+    assert namesake.cable_id is None
+    assert not Cable.objects.exists()
+
+
 @pytest.mark.parametrize("view_interfaces", [True, False], ids=["hidden_member", "hidden_interface"])
 def test_the_interface_delete_refuses_an_interface_the_user_cannot_view(client, view_interfaces):
     from dcim.models import Interface

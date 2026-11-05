@@ -8,8 +8,12 @@ A ``"change"`` restrict does not count for a read. The scope module ``sync_view_
 scanned, and each other exception names one function, the first method of the chain, and its reason.
 
 Limits: the scan reads direct chains and the simple local aliases they start (``qs =
-IPAddress.objects`` is flagged where it is bound). It does not follow calls between functions,
-``getattr``, a manager reached through another related object, or ``restricted_queryset()``.
+IPAddress.objects`` and ``rows = obj.interfaces`` are flagged where they are bound). It does not
+follow calls between functions, ``getattr``, a manager reached through another related object or
+through an expression (``self.get_interfaces(obj).model.objects``), or ``restricted_queryset()``.
+The ``Interface``/``VMInterface`` rule covers only the IP tab modules: in the other modules about 14
+functions read interfaces on purpose (attribution catalogs, locked writers, name collision checks),
+and a list of that size would hide a new read rather than show it.
 """
 
 import ast
@@ -97,14 +101,16 @@ def view_restricted_above(node, parents):
 
 
 def _is_subject_interfaces(node, parents):
-    """Return whether *node* is ``<x>.interfaces`` read as a related manager (``<x>.interfaces.<m>``)."""
+    """Return whether *node* is ``<x>.interfaces`` read as a related manager, or bound to a local alias."""
     parent = parents.get(node)
     return (
         isinstance(node, ast.Attribute)
         and node.attr == "interfaces"
         and isinstance(node.value, (ast.Name, ast.Attribute))
-        and isinstance(parent, ast.Attribute)
-        and parent.value is node
+        and (
+            (isinstance(parent, ast.Attribute) and parent.value is node)
+            or (isinstance(parent, ast.Assign) and parent.value is node)
+        )
     )
 
 
@@ -159,6 +165,7 @@ def _scan(source, models=MODELS):
         "obj.interfaces.first()",
         "self.object.interfaces.filter(name='eth0').exists()",
         "device.interfaces.restrict(user, 'change').all()",
+        "rows = obj.interfaces\nrows.first()",
     ],
     ids=[
         "filter",
@@ -171,6 +178,7 @@ def _scan(source, models=MODELS):
         "subject-interfaces",
         "attribute-subject-interfaces",
         "subject-interfaces-change-restrict",
+        "subject-interfaces-alias",
     ],
 )
 def test_an_unscoped_chain_is_found(source):
@@ -205,6 +213,7 @@ def test_an_unscoped_interface_chain_is_found_in_the_ip_tab(source):
         "scope.interfaces()",
         "Interface.objects.restrict(user, 'view').filter(device=obj)",
         "port.get('interfaces')",
+        "rows = obj.interfaces.restrict(user, 'view')\nrows.first()",
     ],
     ids=[
         "view",
@@ -217,6 +226,7 @@ def test_an_unscoped_interface_chain_is_found_in_the_ip_tab(source):
         "scope-interfaces",
         "interface-view",
         "dict-key",
+        "subject-interfaces-alias-view",
     ],
 )
 def test_a_view_scoped_chain_passes(source):

@@ -803,3 +803,47 @@ class TestMoveEndpointsViewScope:
         assert response.headers["HX-Refresh"] == "true"
         interface.refresh_from_db()
         assert interface.device == winner
+
+
+@pytest.mark.django_db
+class TestInterfaceMoveResultScope:
+    """An interface move refuses when a moved interface, as the move saved it, leaves the view or change scope."""
+
+    @pytest.mark.parametrize("action", ["view", "change"])
+    def test_a_moved_interface_that_leaves_its_scope_rolls_back(self, client, action):
+        from dcim.models import Interface
+
+        donor = make_device(f"result-if-{action}-donor")
+        winner = make_device(f"result-if-{action}-winner")
+        _mark(donor, winner)
+        interface = make_interface(donor, "Ethernet1")
+        client.force_login(_move_user(f"result-if-{action}-user", **{action: {Interface: {"device_id": donor.pk}}}))
+
+        response = _move_interface(client, interface)
+
+        assert "HX-Refresh" not in response.headers
+        interface.refresh_from_db()
+        assert interface.device == donor
+
+    @pytest.mark.parametrize("action", ["view", "change"])
+    def test_a_moved_attached_interface_that_leaves_its_scope_rolls_back_the_family(self, client, action):
+        from dcim.models import Interface
+
+        donor = make_device(f"result-dep-{action}-donor")
+        winner = make_device(f"result-dep-{action}-winner")
+        _mark(donor, winner)
+        lag = make_interface(donor, "Port-Channel1", iface_type="lag")
+        member = make_interface(donor, "Member7")
+        member.lag = lag
+        member.save(update_fields=["lag"])
+        constraint = [{"device_id": donor.pk}, {"name": lag.name}]
+        client.force_login(_move_user(f"result-dep-{action}-user", **{action: {Interface: constraint}}))
+
+        response = _move_interface(client, lag)
+
+        assert "HX-Refresh" not in response.headers
+        assert member.name not in response.content.decode()
+        lag.refresh_from_db()
+        member.refresh_from_db()
+        assert lag.device == donor
+        assert member.device == donor

@@ -1069,18 +1069,19 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             "install_selected_inventory_binding": self._selection_manifest(table, table_data),
         }
 
-    @staticmethod
-    def _devices_without_inventory_class(obj, ignore_rules, item_ignore_contexts):
-        """Return each device whose rows follow a policy that has no include rule, in row order."""
+    def _devices_without_inventory_class(self, obj, ignore_rules, item_ignore_contexts):
+        """Return each device the user may view whose rows follow a policy that has no include rule, in row order."""
         # A VC row follows the rules of the member it targets, so each policy that a row uses counts.
         policies = {
             context["selected_device"].pk: (context["selected_device"], context["ignore_rules"])
             for context in item_ignore_contexts.values()
         } or {obj.pk: (obj, ignore_rules)}
+        chassis = self.sync_view_scope(obj).chassis
         return [
             device
             for device, rules in policies.values()
-            if not any(rule.action == rule.ACTION_INCLUDE for rule in rules)
+            if isinstance(chassis.owner(device.pk), Visible)
+            and not any(rule.action == rule.ACTION_INCLUDE for rule in rules)
         ]
 
     @staticmethod

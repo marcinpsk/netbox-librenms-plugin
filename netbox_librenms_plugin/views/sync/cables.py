@@ -41,6 +41,7 @@ from netbox_librenms_plugin.server_mappings import (
     identity_q,
     name_match_may_be_port,
     persist_mapping,
+    port_holders,
     read_mapping,
     resolve_device_port,
 )
@@ -534,11 +535,16 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
         The ends were resolved before the lock, so a binding written since then is read here. A
         manually picked remote is the user's choice, not a port match, so only the local end is checked.
+        A remote port that another interface holds is that interface's port, on any member.
         """
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
         ends = [(local_term, link_data.get("local_port_id"))]
         if not link_data.get("manual_remote"):
-            ends.append((remote_term, remote_port_ref(link_data)))
+            remote_port_id = remote_port_ref(link_data)
+            ends.append((remote_term, remote_port_id))
+            holders = port_holders([remote_port_id], server=server_key)
+            if remote_port_id in holders and holders[remote_port_id] != (Interface._meta.label_lower, remote_term.pk):
+                return False
         return all(
             name_match_may_be_port(term, server=server_key, port_id=port_id)
             for term, port_id in ends
