@@ -306,7 +306,7 @@ class TestInventoryCacheContract:
         )
         token = _rendered_fields(device, "update-module-serial", 77)["inventory_binding"]
 
-        granted = _authorize_module_grant(device, "default", ACTION_UPDATE_SERIAL, token)
+        granted = _authorize_module_grant(device, "default", ACTION_UPDATE_SERIAL, token, actor=make_superuser())
         row = granted.grant.require(
             device_id=device.pk, ent_index="77", action_target=installed_module_target(module.pk, module.module_bay_id)
         )
@@ -334,7 +334,7 @@ class TestInventoryCacheContract:
         item = _inventory_item(77, "CARD", "Slot 1", serial="NEW")
         seed_inventory(device, [item], librenms_id=772)
         token = _rendered_fields(device, "update-module-serial", 77)["inventory_binding"]
-        granted = _authorize_module_grant(device, "default", ACTION_UPDATE_SERIAL, token)
+        granted = _authorize_module_grant(device, "default", ACTION_UPDATE_SERIAL, token, actor=make_superuser())
 
         with pytest.raises(GrantRefused) as excinfo:
             granted.grant.require(
@@ -355,7 +355,7 @@ class TestInventoryCacheContract:
         seed_inventory(device, [_inventory_item(77, "CARD", "Te1/1/1")], librenms_id=555)
 
         with pytest.raises(GrantRefused) as excinfo:
-            _authorize_module_grant(device, "default", ACTION_UPDATE_SERIAL, "any-token")
+            _authorize_module_grant(device, "default", ACTION_UPDATE_SERIAL, "any-token", actor=make_superuser())
 
         assert excinfo.value.refusal is GrantRefusal.CACHE_MISSING
 
