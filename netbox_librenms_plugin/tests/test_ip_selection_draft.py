@@ -565,6 +565,26 @@ def test_the_selected_rows_that_the_page_does_not_show_are_counted_above_the_tab
     assert "data-offpage-selection" not in ip_tab(client, tab).html
 
 
+def test_an_invalid_filter_counts_every_selected_row_as_hidden_and_keeps_the_draft_on_the_page(client, tab):
+    select_ip_rows(client, tab, [CREATE_ROW, NO_INTERFACE_ROW])
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_fragment",
+        kwargs={"object_type": "device", "pk": tab.pk, "tab": "ipaddresses"},
+    )
+
+    # The search is longer than a filter takes, so the tab shows no row.
+    html = client.get(url, {"server_key": SERVER_KEY, "ipaddresses_q": "x" * 300}).content.decode()
+
+    assert "data-filter-invalid" in html
+    assert not [attrs for attrs in open_tags(html, "tr") if attrs.get("data-row-key")]
+    (clear,) = [attrs for attrs in open_tags(html, "button") if "data-clear-offpage" in attrs]
+    assert sorted(json.loads(clear["data-clear-offpage"])) == sorted([CREATE_ROW, NO_INTERFACE_ROW])
+    # The page keeps the draft that Clear and the submit name.
+    (table,) = [attrs for attrs in open_tags(html, "table") if attrs.get("data-draft-id")]
+    assert table["data-draft-id"] == ip_tab(client, tab).table["data-draft-id"]
+    assert table["data-selection-url"]
+
+
 def test_a_row_read_is_the_row_of_a_page_without_a_server_key(client, seeded):
     """The page query of the sync page names no server; the row read names it, and both render one Create VRF action."""
     owner = seeded("row-read-without-server-key")
