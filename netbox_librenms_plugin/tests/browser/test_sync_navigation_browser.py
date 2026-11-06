@@ -18,6 +18,7 @@ from test_sync_filters_browser import (
     TABLE,
     _answer,
     _filter_page,
+    _filter_tab,
     _next_request,
     _route_query,
     _serve_filter_tab,
@@ -411,3 +412,32 @@ def test_a_navigation_after_the_typing_wins_over_the_search_that_waits_for_its_d
     page.wait_for_timeout(300)
     assert held == []
     expect(page.locator("#id_interfaces_q")).to_have_value("")
+
+
+FRAGMENT_URL = "https://plugin.example.com/plugins/librenms_plugin/device/1/sync-cache-fragment/interfaces/"
+FRAGMENT_LOADER = (
+    f'<span id="fragment-loader" class="d-none" data-fragment-loader hx-get="{FRAGMENT_URL}"'
+    ' hx-trigger="librenms:load-fragment" hx-target="#interface-sync-content" hx-swap="innerHTML"></span>'
+)
+
+
+def test_a_fragment_answer_that_comes_while_a_search_waits_for_its_delay_does_not_drop_the_search(page):
+    held = _serve_filter_tab(page, extra=FRAGMENT_LOADER)
+    fragments = []
+    page.route(f"{FRAGMENT_URL}**", lambda route: fragments.append(route))
+    # The tab reloads its fragment, as after a data refresh, and the user types meanwhile.
+    page.evaluate("document.getElementById('fragment-loader').dispatchEvent(new CustomEvent('librenms:load-fragment'))")
+    for _ in range(100):
+        if fragments:
+            break
+        page.wait_for_timeout(20)
+    search = page.locator("#id_interfaces_q")
+
+    search.press_sequentially("eth")
+    fragments[0].fulfill(status=200, content_type="text/html", body=_filter_tab({}))
+
+    route = _next_request(page, held, 1)
+    assert parse_qs(urlsplit(route.request.url).query)["interfaces_q"] == ["eth"]
+    _answer(route)
+    expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "eth")
+    expect(search).to_have_value("eth")
