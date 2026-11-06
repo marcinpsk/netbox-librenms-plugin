@@ -14,7 +14,7 @@ from django.urls import reverse
 from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
 from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_device, make_superuser, make_vm
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
-from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+from netbox_librenms_plugin.tests.view_test_helpers import answers_in_place, grant, make_user_with_perms
 
 SERVER_KEY = "test"
 _RECORDING = load_recording("iosxe-subinterfaces")
@@ -422,6 +422,24 @@ class TestCreate:
                 [(key >> 32) & 0xFFFFFFFF, key & 0xFFFFFFFF],
             )
             assert cursor.fetchone()[0] == 1
+
+    def test_the_page_create_answers_in_place(self, client, seeded):
+        from ipam.models import VRF
+
+        owner = seeded("vrf-create-htmx")
+        client = _superuser_client(client)
+
+        response = client.post(
+            reverse(
+                "plugins:netbox_librenms_plugin:create_ip_row_vrf", kwargs={"object_type": "device", "pk": owner.pk}
+            ),
+            {"server_key": SERVER_KEY, "create_vrf": RD_ROWS[1]},
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert answers_in_place(response)
+        assert VRF.objects.filter(name=RD_VRF[0]).exists()
+        assert _messages(response, "success")
 
     def test_a_vrf_without_an_rd_is_created_with_none_and_matches_by_name(self, client, seeded):
         from ipam.models import VRF

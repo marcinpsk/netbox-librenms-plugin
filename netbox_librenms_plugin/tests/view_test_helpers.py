@@ -343,6 +343,21 @@ def ip_tab(client, owner, *, server_key="default", **query):
     return SimpleNamespace(html=html, table=tables[0], rows=rows)
 
 
+def answers_in_place(response):
+    """
+    Return whether *response* is the in-place answer of an IP tab action to an htmx request.
+
+    The answer carries the messages and the event that makes the page read the tab again through its
+    navigation scheduler; it never sends the browser to a URL of its own.
+    """
+    return (
+        response.status_code == 200
+        and not response.has_header("HX-Redirect")
+        and response.get("HX-Reswap") == "none"
+        and json.loads(response.get("HX-Trigger", "{}")).keys() - {"closeModal"} == {"lnms-results-stale"}
+    )
+
+
 def switch_set_primary_ip(client, table, selected):
     """
     Post the Set Primary IP command of an IP tab as its page does, with the evidence of the management rows it shows.

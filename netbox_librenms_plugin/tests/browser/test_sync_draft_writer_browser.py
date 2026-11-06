@@ -29,6 +29,7 @@ FRAGMENT_URL = "https://plugin.example.com/plugins/librenms_plugin/device/1/sync
 REFRESH_URL = "https://plugin.example.com/plugins/librenms_plugin/devices/1/ipaddress-sync/"
 FILTER_URL = "https://plugin.example.com/plugins/librenms_plugin/device/1/sync-tab-filter/ipaddresses/"
 ROWS = ("198.18.0.1/24", "198.18.0.2/24", "198.18.0.3/24", "198.18.0.4/24")
+MESSAGES = '<div id="django-messages" hx-swap-oob="true"><div class="toast">Created IP addresses</div></div>'
 # The management rows: one that the page shows and one that no page shows.
 MANAGEMENT_ROW = ROWS[3]
 OFF_PAGE_MANAGEMENT_ROW = "198.18.0.9/24"
@@ -70,6 +71,9 @@ class _DraftServer:
         self.changed_during_submit = False
         # False renders the page of a tab without a draft table.
         self.shows_table = True
+        # The rows that a row action synced, and the rows whose row action asks for a confirmation first.
+        self.synced = set()
+        self.conflicts = set()
         self.errors = []
         page.on("pageerror", lambda error: self.errors.append(str(error)))
         _serve_page_scripts(page)
@@ -131,9 +135,17 @@ class _DraftServer:
         return self._command(kind, _form_fields(request))
 
     def _submit(self, fields):
+        # The plugin's answer to an htmx sync: the messages out of band, and the event that reads the tab again.
         headers = {"HX-Reswap": "none", "HX-Trigger": json.dumps({"lnms-results-stale": None})}
+        if "force_conflict" in fields:
+            self.synced.add(fields["force_conflict"])
+            closing = json.dumps({"lnms-results-stale": None, "closeModal": None})
+            return {"status": 200, "body": MESSAGES, "headers": {**headers, "HX-Trigger": closing}}
+        if fields.get("sync_one") in self.conflicts:
+            return {"status": 200, "content_type": "text/html", "body": self.confirmation(fields["sync_one"])}
         if "sync_one" in fields:
-            return {"status": 200, "body": "", "headers": {"HX-Reswap": "none"}}
+            self.synced.add(fields["sync_one"])
+            return {"status": 200, "body": MESSAGES, "headers": headers}
         if int(fields["expected_revision"]) != self.revision:
             return {"status": 200, "body": "", "headers": headers}
         # The claim takes the rows and the writer writes them all.
@@ -177,12 +189,26 @@ class _DraftServer:
             for value, label in (("", "Global"), ("5", "Blue"), ("9", "Red"))
         )
         management = ' data-mgmt-ip="true"' if key == MANAGEMENT_ROW else ""
+        status = (
+            "Synced" if key in self.synced else f'<button type="submit" name="sync_one" value="{key}">Create</button>'
+        )
+
         return f"""<tr data-row-key="{key}" data-evidence="token-{key}-{vrf}" data-rendered="{self.renders}"{management}
             hx-get="{ROW_URL}?key={key}" hx-trigger="librenms:row-read" hx-target="this" hx-swap="outerHTML"
             hx-sync="this:replace" hx-params="none">
             <td data-col="selection"><input type="checkbox" name="select" value="{key}"{checked}></td>
             <td data-col="vrf"><select class="form-select vrf-select">{options}</select></td>
-            <td data-col="status"><button type="submit" name="sync_one" value="{key}">Create</button></td></tr>"""
+            <td data-col="status">{status}</td></tr>"""
+
+    @staticmethod
+    def confirmation(key):
+        """Render the dialog that asks to confirm the change of one row."""
+        return f"""<div class="modal-header"><h5 class="modal-title">Confirm IP address changes</h5></div>
+            <form hx-post="{SUBMIT_URL}" hx-target="#htmx-modal-content" hx-swap="innerHTML">
+              <input type="hidden" name="csrfmiddlewaretoken" value="csrf-test">
+              <input type="checkbox" name="force_conflict" value="{key}" checked>
+              <button id="confirm-change" type="submit">Sync confirmed changes</button>
+            </form>"""
 
     def content(self):
         """Render the IP tab content: the refresh button and the sync form with the draft table."""
@@ -221,7 +247,9 @@ class _DraftServer:
                     hx-trigger="librenms:load-fragment" hx-target="#ipaddress-sync-content" hx-swap="innerHTML"></span>
               <div id="ipaddress-sync-content">{self.content() if self.shows_table else ""}</div>
             </div>
-            <div id="htmx-modal-content"></div>"""
+            <div id="htmx-modal" class="modal"><div class="modal-dialog"><div class="modal-content"
+                id="htmx-modal-content"></div></div></div>
+            <div id="django-messages"></div>"""
 
     def open(self):
         self.page.goto(f"{PAGE_URL}?tab=ipaddresses")
@@ -975,3 +1003,80 @@ def test_a_table_of_an_older_revision_does_not_take_the_writer_back(page):
     server.wait_for_commands(2)
     assert server.commands[1][1]["expected_revision"] == "6"
     expect(page.locator("#librenms-draft-notice")).to_have_count(0)
+
+
+def _row_action(page, key):
+    page.locator(f'tr[data-row-key="{key}"] button[name="sync_one"]').click()
+
+
+def test_a_row_action_answer_after_a_newer_navigation_does_not_take_the_page_back(page):
+    server = _DraftServer(page)
+    server.open()
+    page.evaluate("window.__sameDocument = true")
+    server.hold.add("submit")
+    _row_action(page, ROWS[1])
+    server.wait_until(lambda: server.submits)
+
+    page.click("#cables-tab")
+    server.hold.clear()
+    server.release("submit")
+
+    page.wait_for_url(f"{PAGE_URL}?tab=cables")
+    expect(page.locator(f'tr[data-row-key="{ROWS[1]}"] td[data-col="status"]')).to_have_text("Synced")
+    page.wait_for_timeout(300)
+    assert page.url == f"{PAGE_URL}?tab=cables"
+    assert page.evaluate("window.__sameDocument") is True
+    expect(page.locator("#django-messages .toast")).to_have_count(1)
+
+
+def test_a_navigation_during_a_row_action_waits_for_it_and_reads_the_tab_after_it(page):
+    server = _DraftServer(page)
+    server.open()
+    server.hold.add("submit")
+    _row_action(page, ROWS[1])
+    server.wait_until(lambda: server.submits)
+
+    page.click("#cables-tab")
+    page.wait_for_timeout(300)
+    # The row action is the writer's command in flight, so the navigation waits for it.
+    assert not any(url.startswith(PAGE_URL) for url in server.reads)
+    server.hold.clear()
+    server.release("submit")
+
+    page.wait_for_url(f"{PAGE_URL}?tab=cables")
+    expect(page.locator(f'tr[data-row-key="{ROWS[1]}"] td[data-col="status"]')).to_have_text("Synced")
+    page.wait_for_timeout(300)
+    assert [url for url in server.reads if url.startswith(PAGE_URL)] == [f"{PAGE_URL}?tab=cables"]
+
+
+def test_a_read_sent_before_a_row_action_is_read_again_after_it(page):
+    server = _DraftServer(page)
+    server.open()
+    # The server renders the tab click before the row action, and its answer waits.
+    server.hold.add("page")
+    page.click("#cables-tab")
+    server.wait_until(lambda: server.held)
+
+    _row_action(page, ROWS[1])
+    server.wait_until(lambda: server.submits)
+    page.wait_for_function("librenmsSyncDraft.flush().then(() => true)")
+    server.hold.clear()
+    server.release("page")
+
+    page.wait_for_url(f"{PAGE_URL}?tab=cables")
+    expect(page.locator(f'tr[data-row-key="{ROWS[1]}"] td[data-col="status"]')).to_have_text("Synced")
+
+
+def test_a_confirmation_in_the_dialog_closes_it_and_reads_the_tab_again(page):
+    server = _DraftServer(page)
+    server.conflicts.add(ROWS[1])
+    server.open()
+    _row_action(page, ROWS[1])
+    expect(page.locator("#htmx-modal")).to_be_visible()
+
+    page.click("#confirm-change")
+
+    expect(page.locator("#htmx-modal")).to_be_hidden()
+    expect(page.locator(f'tr[data-row-key="{ROWS[1]}"] td[data-col="status"]')).to_have_text("Synced")
+    assert page.url == f"{PAGE_URL}?tab=ipaddresses"
+    assert server.errors == []
