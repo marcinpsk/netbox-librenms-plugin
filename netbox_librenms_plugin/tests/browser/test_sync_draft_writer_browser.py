@@ -29,6 +29,7 @@ FRAGMENT_URL = "https://plugin.example.com/plugins/librenms_plugin/device/1/sync
 REFRESH_URL = "https://plugin.example.com/plugins/librenms_plugin/devices/1/ipaddress-sync/"
 FILTER_URL = "https://plugin.example.com/plugins/librenms_plugin/device/1/sync-tab-filter/ipaddresses/"
 MOVE_URL = "https://plugin.example.com/plugins/librenms_plugin/ip-addresses/7/move-to-winner/"
+VRF_URL = "https://plugin.example.com/plugins/librenms_plugin/device/1/ip-row-vrf/"
 ROWS = ("198.18.0.1/24", "198.18.0.2/24", "198.18.0.3/24", "198.18.0.4/24")
 MESSAGES = '<div id="django-messages" hx-swap-oob="true"><div class="toast">Created IP addresses</div></div>'
 # The management rows: one that the page shows and one that no page shows.
@@ -91,6 +92,7 @@ class _DraftServer:
             REFRESH_URL: "refresh",
             f"{FILTER_URL}**": "filter",
             MOVE_URL: "move",
+            f"{VRF_URL}**": "vrf",
         }
         for url, kind in routes.items():
             page.route(url, self._handler(kind))
@@ -105,7 +107,7 @@ class _DraftServer:
             self.reads.append(request.url)
         elif kind in ("selection", "choice", "management"):
             self.commands.append((kind, _form_fields(request)))
-        elif kind == "submit":
+        elif kind in ("submit", "vrf"):
             self.submits.append(_form_fields(request))
         answer = self._answer(kind, request)
         if kind in self.hold:
@@ -136,6 +138,12 @@ class _DraftServer:
             return {"status": 200, "content_type": "text/html", "body": self.content()}
         if kind == "submit":
             return self._submit(_form_fields(request))
+        if kind == "vrf":
+            return {
+                "status": 200,
+                "body": MESSAGES,
+                "headers": {"HX-Reswap": "none", "HX-Trigger": json.dumps({"lnms-results-stale": None})},
+            }
         if kind == "move":
             # The plugin's answer to an htmx move: the messages out of band, and the event that reads the tab again.
             self.moved = True
@@ -206,7 +214,9 @@ class _DraftServer:
             hx-get="{ROW_URL}?key={key}" hx-trigger="librenms:row-read" hx-target="this" hx-swap="outerHTML"
             hx-sync="this:replace" hx-params="none">
             <td data-col="selection"><input type="checkbox" name="select" value="{key}"{checked}></td>
-            <td data-col="vrf"><select class="form-select vrf-select">{options}</select></td>
+            <td data-col="vrf"><select class="form-select vrf-select">{options}</select>
+              <button type="submit" name="create_vrf" value="{key}" formaction="{VRF_URL}"
+                      data-confirm="Create the VRF of this row?">Create VRF</button></td>
             <td data-col="status">{status}</td></tr>"""
 
     @staticmethod
@@ -1253,3 +1263,28 @@ def test_two_commands_that_wait_for_one_write_go_one_after_the_other(page):
     for key in ROWS[1:3]:
         expect(page.locator(f'tr[data-row-key="{key}"] td[data-col="status"]')).to_have_text("Synced")
     assert server.errors == []
+
+
+def test_a_row_action_that_a_refresh_replaced_while_it_waited_is_refused_and_input_works_again(page):
+    server = _DraftServer(page)
+    server.open()
+    server.hold.add("refresh")
+    page.click("#refresh")
+    server.wait_until(lambda: server.held)
+    # A confirmed row action waits for the refresh in flight.
+    page.locator(f'tr[data-row-key="{ROWS[2]}"] button[name="create_vrf"]').click()
+    page.click("#librenms-confirm-modal [data-confirm-accept]")
+    page.wait_for_timeout(200)
+    assert server.submits == []
+
+    server.hold.clear()
+    server.release("refresh")
+
+    # The refresh replaced the action's form: the page says the action was not sent, and sends nothing.
+    expect(page.locator("#librenms-draft-notice")).to_be_visible()
+    page.wait_for_timeout(300)
+    assert server.submits == []
+    expect(page.locator("#librenms-ipaddress-table")).to_have_attribute("data-draft-id", "draft-1+")
+    _box(page, ROWS[0]).click()
+    server.wait_for_commands(1)
+    assert (server.commands[0][1]["draft_id"], server.commands[0][1]["expected_revision"]) == ("draft-1+", "0")
