@@ -23,6 +23,7 @@ from django.urls import reverse
 
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
+from netbox_librenms_plugin.tests._html_helpers import open_tags
 from netbox_librenms_plugin.tests.conftest import (
     bind_librenms_server,
     configure_librenms_servers,
@@ -145,6 +146,7 @@ def _routes(owner, object_type):
         "fragment": plugin_url("sync_cache_fragment", object_type=object_type, pk=owner.pk, tab="interfaces"),
         "netbox_only": plugin_url("netbox_only_interfaces", object_type=object_type, pk=owner.pk),
         "patterns": plugin_url("portstacklagpattern_list"),
+        "row": plugin_url("interface_row", object_type=object_type, pk=owner.pk, row_key="0").removesuffix("0/"),
     }
 
 
@@ -197,6 +199,10 @@ def _classify(hop, page_path, routes):
         # The NetBox-only dialog loads its rows for the same page query.
         _assert_keeps(query, (*KEEP_ALL, "server_key"), url)
         return "netbox-only loader"
+    if path.startswith(routes["row"]):
+        # A row read and its VLAN groups dialog answer the row as the page shows it, for the same page query.
+        _assert_keeps(query, KEEP_ALL, url)
+        return "row read"
     if path in (routes["refresh"], routes["sync"], routes["rebind"]):
         # A refresh, sync or Rebind comes back to the same filters and page, clamped to the last page.
         _assert_keeps(query, (*KEEP_ALL, "server_key"), url)
@@ -267,7 +273,7 @@ def test_every_interface_tab_hop_keeps_the_page_query_or_applies_its_reset(clien
     kinds = {_classify(hop, page_path, _routes(owner, object_type)) for hop in hops.urls}
     _check_filter_form(hops)
 
-    required = {"fragment", "clear", "toggle", "page link", "refresh", "sync"} | (
+    required = {"fragment", "clear", "toggle", "page link", "refresh", "sync", "row read"} | (
         {"rebind"} if kind == "device" else set()
     )
     assert required <= kinds, required - kinds
@@ -460,17 +466,20 @@ def _classify_tab_hop(hop, page_path, tab, owner, page_query):
         # A refresh, sync or VRF create comes back to the same filters and page, clamped to the last page.
         _assert_keeps(query, tuple(page_query), url, page_query)
         return posts[path]
-    if tab == "ipaddresses" and path.startswith(_ip_row_prefix(owner)):
+    if (row_prefix := _row_prefix(owner, tab)) and path.startswith(row_prefix):
         # A row read answers the row as the page shows it, so it states the whole page query.
         _assert_keeps(query, tuple(page_query), url, page_query)
         return "row read"
     pytest.fail(f"An unclassified hop in the {tab} pane: <{hop['tag']}> {url}")
 
 
-def _ip_row_prefix(owner):
-    """Return the path that every row read URL of the owner's IP rows starts with."""
-    kwargs = {"object_type": owner._meta.model_name, "pk": owner.pk, "row_key": "0.0.0.0/0"}
-    return reverse("plugins:netbox_librenms_plugin:ip_row", kwargs=kwargs).removesuffix("0.0.0.0/0/")
+def _row_prefix(owner, tab):
+    """Return the path that every row read URL of the owner's rows on *tab* starts with, or None for a tab without one."""
+    if tab not in ("ipaddresses", "vlans"):
+        return None
+    name, row_key = ("ip_row", "0.0.0.0/0") if tab == "ipaddresses" else ("vlan_row", "0")
+    kwargs = {"object_type": owner._meta.model_name, "pk": owner.pk, "row_key": row_key}
+    return reverse(f"plugins:netbox_librenms_plugin:{name}", kwargs=kwargs).removesuffix(f"{row_key}/")
 
 
 def _check_tab_filter_form(hops, tab, page_query):
@@ -565,6 +574,8 @@ def test_every_ip_vlan_and_cable_tab_hop_keeps_the_page_query_or_applies_its_res
     kinds = {_classify_tab_hop(hop, page_path, tab, owner, page_query) for hop in hops.urls}
     _check_tab_filter_form(hops, tab, page_query)
     required = {"fragment", "clear", "page link", "refresh", "sync"} | ({"picker loader"} if tab == "cables" else set())
+    if tab != "cables":
+        required.add("row read")
     assert required <= kinds, kinds
 
 
@@ -626,7 +637,7 @@ def _signatures(client, owner, field):
     """
     Return the selection scope of each tab that the full sync page renders, by tab.
 
-    The IP tab keeps its selection in a server-side draft, so its scope is the draft of its table.
+    The Interfaces, IP and VLANs tabs keep their selection in a server-side draft, so their scope is the draft of their table.
     """
     response = client.get(
         reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[owner.pk]),
@@ -635,9 +646,10 @@ def _signatures(client, owner, field):
     assert response.status_code == 200
     html = response.content.decode()
     signatures = dict(re.findall(r'data-sync-filter-tab="([^"]+)" data-selection-scope="([^"]*)"', html))
-    ip_table = re.search(r'<table[^>]*id="librenms-ipaddress-table"[^>]*data-draft-id="([^"]+)"', html)
-    if ip_table:
-        signatures["ipaddresses"] = ip_table.group(1)
+    tabs = {table_id: tab for tab, (table_id, _data_type) in TAB_TABLES.items()}
+    for attrs in open_tags(html, "table"):
+        if attrs.get("data-draft-id") and attrs.get("id") in tabs:
+            signatures[tabs[attrs["id"]]] = attrs["data-draft-id"]
     return signatures
 
 
@@ -652,12 +664,11 @@ def test_every_tab_signs_its_selection_with_the_interface_name_field(client, set
 
     signatures = {field: _signatures(client, owner, field) for field in ("ifName", "ifDescr")}
 
-    # With no snapshot the IP tab renders no table, so it holds no draft to keep.
-    expected = set(TAB_TABLES) if snapshot else set(TAB_TABLES) - {"ipaddresses"}
+    # With no snapshot a draft tab renders no table, so it holds no draft to keep.
+    expected = set(TAB_TABLES) if snapshot else {"cables"}
     assert set(signatures["ifName"]) == expected
+    assert f"server_key={SERVER_KEY}" in signatures["ifName"]["cables"]
     for tab in expected:
-        if tab != "ipaddresses":
-            assert f"server_key={SERVER_KEY}" in signatures["ifName"][tab], tab
         assert signatures["ifName"][tab] != signatures["ifDescr"][tab], tab
 
 

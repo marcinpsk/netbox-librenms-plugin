@@ -1,39 +1,57 @@
-"""End-to-end coverage for per-row VLAN synchronization."""
-
-from netbox_librenms_plugin.assessment.vlans import compare_rows
+"""End-to-end coverage for per-row VLAN synchronization, and for the VLANs tab on the selection draft."""
 
 import json
+import re
+from html import unescape
 from html.parser import HTMLParser
 
 import pytest
+from dcim.models import Device, Site
+from django.urls import reverse
+from ipam.models import VLAN, VLANGroup
+
+from netbox_librenms_plugin.assessment.vlans import compare_rows
+from netbox_librenms_plugin.selection_draft import read_evidence
+from netbox_librenms_plugin.tests._html_helpers import open_tags
+from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_device, make_superuser
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    answers_in_place,
+    draft_command,
+    draft_tab,
+    grant,
+    make_user_with_perms,
+    row_action_fields,
+    select_rows,
+    submit_with_draft,
+)
+from netbox_librenms_plugin.views.base.vlan_table_view import VLAN_TAB
 
 
 class _VLANControlParser(HTMLParser):
-    """Collect the VLAN controls that a rendered table would submit."""
+    """Collect the VLAN controls that a rendered table shows: the checkboxes and the group each row shows."""
 
     def __init__(self):
         super().__init__()
         self.selected_vids = []
         self.group_fields = {}
-        self._select_name = None
+        self._select_vid = None
 
     def handle_starttag(self, tag, attrs):
         attributes = dict(attrs)
         if tag == "input" and attributes.get("name") == "select":
             self.selected_vids.append(attributes.get("value"))
-        elif tag == "select" and attributes.get("name", "").startswith("vlan_group_"):
-            self._select_name = attributes["name"]
-        elif tag == "option" and self._select_name and "selected" in attributes:
-            self.group_fields[self._select_name] = attributes.get("value", "")
+        elif tag == "select" and attributes.get("data-draft-choice") == "group":
+            self._select_vid = attributes["data-vlan-id"]
+        elif tag == "option" and self._select_vid and "selected" in attributes:
+            self.group_fields[self._select_vid] = attributes.get("value", "")
 
     def handle_endtag(self, tag):
         if tag == "select":
-            self._select_name = None
+            self._select_vid = None
 
 
 def _sync_url(device):
     """Return the public VLAN synchronization endpoint for a device."""
-    from django.urls import reverse
 
     return reverse(
         "plugins:netbox_librenms_plugin:sync_selected_vlans",
@@ -49,68 +67,70 @@ def _seed_vlan_snapshot(device, rows, server_key="default"):
     seed_source_snapshot(device, Resource.VLANS, server_key, vlans=rows)
 
 
+def _post(client, device, fields, **headers):
+    """POST one VLAN sync request with *fields*."""
+    return client.post(_sync_url(device), {"server_key": "default", "action": "create_vlans", **fields}, **headers)
+
+
+def _messages(response):
+    return [str(message) for message in response.wsgi_request._messages]
+
+
+def _status_cell(row_html):
+    """Return the inner markup of the status cell of one rendered VLAN row."""
+    import re
+
+    return re.search(r'<td[^>]*data-col="status"[^>]*>(.*?)</td>', row_html, re.S).group(1).strip()
+
+
+def _checked(shown, vid):
+    """Return whether the rendered tab *shown* checks the row of *vid*."""
+
+    boxes = [attrs for attrs in open_tags(shown.html, "input") if attrs.get("name") == "select"]
+    return any(attrs.get("value") == str(vid) and "checked" in attrs for attrs in boxes)
+
+
 @pytest.mark.django_db
 @pytest.mark.parametrize("source_vid", [501, "501", " 501 ", "0501"], ids=["int", "string", "padded", "leading-zero"])
 def test_usable_vlan_vid_spellings_round_trip_through_rendered_controls(client, settings, source_vid):
-    """Every accepted source spelling must submit one canonical grouped VLAN identity."""
-    from django.contrib.auth.models import AnonymousUser
-    from django.test import RequestFactory
-    from django.urls import reverse
+    """Every accepted source spelling must select and write one canonical grouped VLAN identity."""
+    from html import unescape
+
     from ipam.models import VLAN, VLANGroup
 
-    from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
+    from netbox_librenms_plugin.selection_draft import read_evidence
     from netbox_librenms_plugin.tests.conftest import (
         configure_default_librenms_server,
         make_device,
         make_superuser,
     )
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceVLANTableView
+    from netbox_librenms_plugin.tests.view_test_helpers import draft_tab, submit_with_draft
+    from netbox_librenms_plugin.views.base.vlan_table_view import VLAN_TAB
 
     configure_default_librenms_server(settings)
     suffix = str(source_vid).strip().replace(" ", "-") or "empty"
     device = make_device(f"vid-round-trip-{suffix}", librenms_cf={"default": {"id": 42}})
     group = VLANGroup.objects.create(name=f"VID group {suffix}", slug=f"vid-group-{suffix}")
     existing = VLAN.objects.create(vid=501, group=group, name="Application")
-    source_rows = [{"vlan_vlan": source_vid, "vlan_name": existing.name}]
-    comparison_view = DeviceVLANTableView()
-    compared_rows = compare_rows(
-        source_rows, lookup_maps=comparison_view._build_vlan_lookup_maps([group]), subject=device
-    )
-    table = LibreNMSVLANTable(compared_rows, vlan_groups=[group])
-    request = RequestFactory().get("/")
-    request.user = AnonymousUser()
-
-    html = table.as_html(request)
-
-    assert 'data-vlan-id="501"' in html
-    assert 'name="vlan_group_501"' in html
-    assert "Synced" in html
-    parser = _VLANControlParser()
-    parser.feed(html)
-    assert parser.selected_vids == ["501"]
-    assert parser.group_fields == {"vlan_group_501": str(group.pk)}
-
-    _seed_vlan_snapshot(device, source_rows)
+    _seed_vlan_snapshot(device, [{"vlan_vlan": source_vid, "vlan_name": existing.name}])
     client.force_login(make_superuser(f"vid-round-trip-{suffix}-user"))
-    verify_response = client.post(
-        reverse("plugins:netbox_librenms_plugin:verify_vlan_sync_group"),
-        data=json.dumps({"vid": source_vid, "name": existing.name, "vlan_group_id": group.pk}),
-        content_type="application/json",
-    )
-    response = client.post(
-        _sync_url(device),
-        {
-            "server_key": "default",
-            "action": "create_vlans",
-            "select": parser.selected_vids,
-            **parser.group_fields,
-        },
-    )
 
-    assert verify_response.status_code == 200
-    assert verify_response.json()["exists_in_netbox"] is True
-    assert verify_response.json()["name_matches"] is True
-    assert "Synced" in verify_response.json()["status_html"]
+    shown = draft_tab(client, device, "vlans")
+
+    assert 'data-vlan-id="501"' in shown.html
+    assert list(shown.rows) == ["501"]
+    parser = _VLANControlParser()
+    parser.feed(shown.html)
+    assert parser.selected_vids == ["501"]
+    assert parser.group_fields == {"501": str(group.pk)}
+    evidence = read_evidence(VLAN_TAB, shown.rows["501"]["data-evidence"])
+    assert (evidence["group"], evidence["vlan"]) == (group.pk, existing.pk)
+    row_read = client.get(unescape(shown.rows["501"]["hx-get"]))
+    assert row_read.status_code == 200
+    assert "Synced" in _status_cell(row_read.content.decode())
+
+    response = submit_with_draft(client, device, "vlans", _sync_url(device), [501], action="create_vlans")
+
     assert response.status_code == 302
     assert VLAN.objects.filter(vid=501, group=group, pk=existing.pk).exists()
     assert not VLAN.objects.filter(vid=501, group__isnull=True).exists()
@@ -172,8 +192,9 @@ def test_invalid_vlan_vid_rows_render_as_inert_escaped_diagnostics(source_vid, d
     assert "Active" in html
     assert "<script" not in html
     assert "data-vlan-id" not in html
+    assert "data-row-key" not in html
     assert 'name="select"' not in html
-    assert 'name="vlan_group_' not in html
+    assert "data-draft-choice" not in html
     assert 'name="sync_one"' not in html
 
 
@@ -190,7 +211,9 @@ def test_duplicate_canonical_vlan_vid_rows_are_blocked_on_render_and_post(client
         make_device,
         make_superuser,
     )
+    from netbox_librenms_plugin.tests.view_test_helpers import draft_tab
     from netbox_librenms_plugin.views.object_sync.devices import DeviceVLANTableView
+    from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
 
     configure_default_librenms_server(settings)
     device = make_device("duplicate-canonical-vid", librenms_cf={"default": {"id": 42}})
@@ -211,76 +234,65 @@ def test_duplicate_canonical_vlan_vid_rows_are_blocked_on_render_and_post(client
     assert html.count("Duplicate VID") == 2
     assert "data-vlan-id" not in html
     assert 'name="select"' not in html
-    assert 'name="vlan_group_' not in html
+    assert "data-draft-choice" not in html
     assert 'name="sync_one"' not in html
 
+    # A rename confirmation signed before the VID became a duplicate writes nothing.
+    existing = VLAN.objects.create(vid=501, name="Current name")
+    intent = SyncVLANsView()._build_conflict(
+        vlan=existing, proposed_name="First duplicate", obj=device, object_type="device", server_key="default"
+    )["intent"]
     _seed_vlan_snapshot(device, source_rows)
     client.force_login(make_superuser("duplicate-canonical-vid-user"))
-    response = client.post(
-        _sync_url(device),
-        {
-            "server_key": "default",
-            "action": "create_vlans",
-            "select": "501",
-            "vlan_group_501": "",
-        },
-    )
+    assert draft_tab(client, device, "vlans").rows == {}
+
+    response = _post(client, device, {"force_all": "1", "conflict_intent": intent})
 
     assert response.status_code == 302
-    assert not VLAN.objects.filter(vid=501).exists()
-    assert any("duplicate source rows" in str(message).lower() for message in response.wsgi_request._messages)
+    existing.refresh_from_db()
+    assert existing.name == "Current name"
+    assert VLAN.objects.filter(vid=501).count() == 1
+    assert any("duplicate source rows" in message.lower() for message in _messages(response))
 
 
 @pytest.mark.django_db
-def test_unsigned_vlan_selection_requires_a_present_canonical_group_field(client, settings):
-    """An absent group field must fail closed, while an explicit empty field selects global scope."""
-    from ipam.models import VLAN
+def test_an_explicit_global_choice_writes_the_vlan_without_a_group(client, settings):
+    """A row that shows a group writes to Global when the user chooses Global ("") for it."""
+    from ipam.models import VLAN, VLANGroup
 
     from netbox_librenms_plugin.tests.conftest import (
         configure_default_librenms_server,
         make_device,
         make_superuser,
     )
+    from netbox_librenms_plugin.tests.view_test_helpers import submit_with_draft
 
     configure_default_librenms_server(settings)
-    missing_field_device = make_device("missing-vlan-group-field", librenms_cf={"default": {"id": 42}})
-    explicit_global_device = make_device("explicit-global-vlan", librenms_cf={"default": {"id": 43}})
-    _seed_vlan_snapshot(missing_field_device, [{"vlan_vlan": "0611", "vlan_name": "Missing group field"}])
-    _seed_vlan_snapshot(explicit_global_device, [{"vlan_vlan": "0612", "vlan_name": "Explicit global"}])
+    device = make_device("explicit-global-vlan", librenms_cf={"default": {"id": 43}})
+    group = VLANGroup.objects.create(name="Explicit global", slug="explicit-global")
+    VLAN.objects.create(vid=612, group=group, name="Explicit global")
+    _seed_vlan_snapshot(device, [{"vlan_vlan": "0612", "vlan_name": "Explicit global"}])
     client.force_login(make_superuser("canonical-group-field-user"))
 
-    missing_response = client.post(
-        _sync_url(missing_field_device),
-        {
-            "server_key": "default",
-            "action": "create_vlans",
-            "select": "611",
-        },
-    )
-    global_response = client.post(
-        _sync_url(explicit_global_device),
-        {
-            "server_key": "default",
-            "action": "create_vlans",
-            "select": "612",
-            "vlan_group_612": "",
-            "expected_vlan_name_612": "Explicit global",
-        },
+    response = submit_with_draft(
+        client,
+        device,
+        "vlans",
+        _sync_url(device),
+        [612],
+        choices=[("data-choice-url", {"row": "612", "field": "group", "value": ""})],
+        action="create_vlans",
     )
 
-    assert missing_response.status_code == 302
-    assert not VLAN.objects.filter(vid=611).exists()
-    assert any(
-        "group selection is missing" in str(message).lower() for message in missing_response.wsgi_request._messages
-    )
-    assert global_response.status_code == 302
+    assert response.status_code == 302
     assert VLAN.objects.filter(vid=612, group__isnull=True, name="Explicit global").exists()
+    assert VLAN.objects.filter(vid=612, group=group).count() == 1
 
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("sync_one", ["", "not-a-vid"], ids=["empty", "invalid"])
 def test_present_unusable_sync_one_rejects_the_request_instead_of_running_bulk_rows(client, settings, sync_one):
-    """A malformed per-row action must not fall through to checked bulk selections."""
+    """A malformed per-row action must not fall through to the selected bulk rows."""
     from ipam.models import VLAN
 
     from netbox_librenms_plugin.tests.conftest import (
@@ -288,31 +300,24 @@ def test_present_unusable_sync_one_rejects_the_request_instead_of_running_bulk_r
         make_device,
         make_superuser,
     )
+    from netbox_librenms_plugin.tests.view_test_helpers import draft_tab, row_action_fields, select_rows
 
     configure_default_librenms_server(settings)
     device = make_device(f"invalid-sync-one-{sync_one or 'empty'}", librenms_cf={"default": {"id": 42}})
     _seed_vlan_snapshot(device, [{"vlan_vlan": 701, "vlan_name": "Checked bulk row"}])
     client.force_login(make_superuser(f"invalid-sync-one-{sync_one or 'empty'}-user"))
+    select_rows(client, device, "vlans", [701])
 
-    response = client.post(
-        _sync_url(device),
-        {
-            "server_key": "default",
-            "action": "create_vlans",
-            "sync_one": sync_one,
-            "select": "701",
-            "vlan_group_701": "",
-            "expected_vlan_name_701": "Checked bulk row",
-        },
-    )
+    response = _post(client, device, {"sync_one": sync_one, **row_action_fields(client, device, "vlans", 701)})
 
     assert response.status_code == 302
     assert not VLAN.objects.filter(vid=701).exists()
-    assert any("LibreNMS VID is invalid" in str(message) for message in response.wsgi_request._messages)
+    # The row action leaves the draft as it is: the bulk row stays selected.
+    assert _checked(draft_tab(client, device, "vlans"), 701)
 
 
-def test_selected_vlan_vids_are_canonical_deduplicated_and_report_invalid_values():
-    """Selection parsing must return one decimal identity and explicit errors for rejected values."""
+def test_confirmed_vlan_vids_are_canonical_deduplicated_and_report_invalid_values():
+    """Confirmation parsing must return one decimal identity and explicit errors for rejected values."""
     from django.test import RequestFactory
 
     from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
@@ -320,11 +325,12 @@ def test_selected_vlan_vids_are_canonical_deduplicated_and_report_invalid_values
     request = RequestFactory().post(
         "/",
         {
-            "select": ["501", "0501", " 501 ", "5000", "not-a-vid"],
+            "confirm_conflicts": "1",
+            "force_conflict": ["501", "0501", " 501 ", "5000", "not-a-vid"],
         },
     )
 
-    selection = SyncVLANsView._selected_vlan_vids(request, {})
+    selection = SyncVLANsView._confirmed_vlan_vids(request, {"501": {}})
 
     assert selection.vids == ["501"]
     assert selection.errors == [
@@ -335,35 +341,28 @@ def test_selected_vlan_vids_are_canonical_deduplicated_and_report_invalid_values
 
 @pytest.mark.django_db
 def test_per_row_group_selection_requires_vlan_group_view_permission(client, settings):
-    """A per-row group selection must pass the VLAN-group permission gate."""
+    """A user without the VLAN-group view permission cannot choose a group for a row."""
     from dcim.models import Device
     from ipam.models import VLAN, VLANGroup
 
     from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_device
-    from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+    from netbox_librenms_plugin.tests.view_test_helpers import draft_command, draft_tab, make_user_with_perms
 
     configure_default_librenms_server(settings)
     device = make_device("per-row-permission", librenms_cf={"default": {"id": 42}})
     group = VLANGroup.objects.create(name="Per-row permission", slug="per-row-permission")
+    _seed_vlan_snapshot(device, [{"vlan_vlan": 101, "vlan_name": "Proposed name"}])
     user = make_user_with_perms(
         "per-row-permission-user",
         [("view", Device), ("add", VLAN), ("change", VLAN)],
     )
     client.force_login(user)
+    shown = draft_tab(client, device, "vlans")
 
-    response = client.post(
-        _sync_url(device),
-        {
-            "server_key": "default",
-            "action": "create_vlans",
-            "sync_one": "101",
-            "vlan_group_101": str(group.pk),
-            "expected_vlan_name_101": "Proposed name",
-        },
-    )
+    response = draft_command(client, shown, "data-choice-url", row="101", field="group", value=str(group.pk))
 
-    assert response.status_code == 302
-    assert [str(message) for message in response.wsgi_request._messages] == ["Missing permissions: ipam.view_vlangroup"]
+    assert response.status_code == 404
+    assert draft_tab(client, device, "vlans").table["data-draft-revision"] == shown.table["data-draft-revision"]
     assert not VLAN.objects.filter(vid=101).exists()
 
 
@@ -402,8 +401,6 @@ def test_force_all_intent_group_requires_vlan_group_view_permission(client, sett
             "action": "create_vlans",
             "force_all": "1",
             "conflict_intent": intent,
-            "vlan_group_101": str(group.pk),
-            "expected_vlan_name_101": "Proposed name",
         },
     )
 
@@ -417,14 +414,12 @@ def test_force_all_intent_group_requires_vlan_group_view_permission(client, sett
 @pytest.mark.parametrize(
     ("selection_branch", "expected_work", "expected_errors"),
     [
-        ("select", ["101", "102"], ["VLAN empty: the LibreNMS VID is invalid; skipped."]),
-        ("sync-one", ["102"], []),
         ("confirm-conflicts", ["102"], ["VLAN not-a-vid: the LibreNMS VID is invalid; skipped."]),
         ("force-all", ["101", "102"], []),
     ],
 )
-def test_permission_selection_is_a_superset_of_every_work_list(selection_branch, expected_work, expected_errors):
-    """The permission pass names every VID that any work-list branch can select."""
+def test_permission_inputs_cover_every_confirmation_work_list(selection_branch, expected_work, expected_errors):
+    """The group permission check reads every signed intent, so it covers each VID that a confirmation can write."""
     from django.test import RequestFactory
     from ipam.models import VLAN, VLANGroup
 
@@ -449,8 +444,6 @@ def test_permission_selection_is_a_superset_of_every_work_list(selection_branch,
     ]
     intents = [conflict["intent"] for conflict in conflicts]
     selection_forms = {
-        "select": {"select": ["101", "", "101", "102"]},
-        "sync-one": {"sync_one": "102"},
         "confirm-conflicts": {
             "confirm_conflicts": "1",
             "force_conflict": ["102", "not-a-vid", "102"],
@@ -462,16 +455,15 @@ def test_permission_selection_is_a_superset_of_every_work_list(selection_branch,
     force_intents, errors = view._load_force_intents(request, device, "device", "default")
 
     assert errors == []
-    work_list = view._selected_vlan_vids(request, force_intents)
-    permission_superset = view._selected_vlan_vids(request)
+    work_list = view._confirmed_vlan_vids(request, force_intents)
     assert work_list.vids == expected_work
     assert work_list.errors == expected_errors
-    assert set(work_list.vids) <= set(permission_superset.vids)
+    assert set(work_list.vids) <= set(force_intents)
 
 
 @pytest.mark.django_db
 def test_per_row_create_ignores_other_ticked_rows(client, settings):
-    """A per-row create synchronizes only the button's VLAN."""
+    """A per-row create synchronizes only the button's VLAN, and the other selected rows stay selected."""
     from ipam.models import VLAN
 
     from netbox_librenms_plugin.tests.conftest import (
@@ -479,6 +471,7 @@ def test_per_row_create_ignores_other_ticked_rows(client, settings):
         make_device,
         make_superuser,
     )
+    from netbox_librenms_plugin.tests.view_test_helpers import draft_tab, row_action_fields, select_rows
 
     configure_default_librenms_server(settings)
     device = make_device("per-row-create", librenms_cf={"default": {"id": 42}})
@@ -491,21 +484,14 @@ def test_per_row_create_ignores_other_ticked_rows(client, settings):
         ],
     )
     client.force_login(make_superuser("per-row-create-user"))
+    select_rows(client, device, "vlans", [202, 203])
 
-    response = client.post(
-        _sync_url(device),
-        {
-            "server_key": "default",
-            "action": "create_vlans",
-            "sync_one": "201",
-            "vlan_group_201": "",
-            "expected_vlan_name_201": "Create this",
-            "select": ["202", "203"],
-        },
-    )
+    response = _post(client, device, {"sync_one": "201", **row_action_fields(client, device, "vlans", 201)})
 
     assert response.status_code == 302
     assert list(VLAN.objects.filter(vid__in=[201, 202, 203]).values_list("vid", "name")) == [(201, "Create this")]
+    after = draft_tab(client, device, "vlans")
+    assert _checked(after, 202) and _checked(after, 203)
 
 
 @pytest.mark.django_db
@@ -518,6 +504,7 @@ def test_per_row_update_keeps_one_row_through_confirmation(client, settings):
         make_device,
         make_superuser,
     )
+    from netbox_librenms_plugin.tests.view_test_helpers import row_action_fields, select_rows
 
     configure_default_librenms_server(settings)
     device = make_device("per-row-update", librenms_cf={"default": {"id": 42}})
@@ -532,50 +519,31 @@ def test_per_row_update_keeps_one_row_through_confirmation(client, settings):
         ],
     )
     client.force_login(make_superuser("per-row-update-user"))
-    url = _sync_url(device)
+    select_rows(client, device, "vlans", [302])
 
-    disclosure = client.post(
-        url,
-        {
-            "server_key": "default",
-            "action": "create_vlans",
-            "sync_one": "301",
-            "select": "302",
-            "vlan_group_301": str(group.pk),
-            "expected_vlan_name_301": "Updated selected",
-            "vlan_group_302": str(group.pk),
-            "expected_vlan_name_302": "Updated ticked",
-        },
+    disclosure = _post(
+        client,
+        device,
+        {"sync_one": "301", **row_action_fields(client, device, "vlans", 301)},
         HTTP_HX_REQUEST="true",
     )
 
     assert disclosure.status_code == 200
     assert [conflict["vid"] for conflict in disclosure.context["conflicts"]] == [301]
-    assert b'name="select" value="301"' in disclosure.content
-    assert b'name="select" value="302"' not in disclosure.content
     selected.refresh_from_db()
     ticked.refresh_from_db()
     assert selected.name == "Current selected"
     assert ticked.name == "Current ticked"
 
     conflict = disclosure.context["conflicts"][0]
-    confirmation = client.post(
-        url,
-        {
-            "server_key": "default",
-            "action": "create_vlans",
-            "confirm_conflicts": "1",
-            "force_conflict": "301",
-            "select": "301",
-            "conflict_intent": conflict["intent"],
-            "vlan_group_301": str(group.pk),
-            "expected_vlan_name_301": "Updated selected",
-        },
+    confirmation = _post(
+        client,
+        device,
+        {"confirm_conflicts": "1", "force_conflict": "301", "conflict_intent": conflict["intent"]},
         HTTP_HX_REQUEST="true",
     )
 
-    assert confirmation.status_code == 200
-    assert confirmation.headers["HX-Redirect"]
+    assert answers_in_place(confirmation)
     selected.refresh_from_db()
     ticked.refresh_from_db()
     assert selected.name == "Updated selected"
@@ -709,89 +677,75 @@ def test_vlan_status_action_uses_data_facts_when_css_class_is_widened(
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize(
-    ("sync_actions", "expected_actions"),
-    [
-        pytest.param(True, True, id="actions-enabled"),
-        pytest.param(False, False, id="actions-disabled"),
-        pytest.param(None, True, id="actions-default-enabled"),
-        pytest.param(0, True, id="zero-default-enabled"),
-        pytest.param("", True, id="empty-string-default-enabled"),
-        pytest.param([], True, id="list-default-enabled"),
-        pytest.param({}, True, id="object-default-enabled"),
-        pytest.param("false", True, id="string-default-enabled"),
-    ],
-)
-def test_verify_vlan_group_returns_the_shared_status_cell(client, sync_actions, expected_actions):
-    """The verify endpoint re-renders status through the shared server-side renderer."""
-    from django.urls import reverse
+def test_a_row_read_after_a_group_choice_returns_the_shared_status_cell(client, settings):
+    """The row read renders the status of the chosen group through the shared server-side renderer."""
+    from html import unescape
+
     from ipam.models import VLAN, VLANGroup
 
-    from netbox_librenms_plugin.tests.conftest import make_superuser
+    from netbox_librenms_plugin.tests.conftest import (
+        configure_default_librenms_server,
+        make_device,
+        make_superuser,
+    )
+    from netbox_librenms_plugin.tests.view_test_helpers import draft_command, draft_tab
     from netbox_librenms_plugin.utils import render_vlan_sync_action
 
-    group = VLANGroup.objects.create(
-        name=f"Verify per-row {sync_actions}",
-        slug=f"verify-per-row-{str(sync_actions).lower()}",
-    )
-    VLAN.objects.create(vid=501, group=group, name="Current name")
-    client.force_login(make_superuser(f"verify-per-row-{sync_actions}"))
+    configure_default_librenms_server(settings)
+    device = make_device("row-read-status", librenms_cf={"default": {"id": 42}})
+    current = VLANGroup.objects.create(name="Row read current", slug="row-read-current")
+    empty = VLANGroup.objects.create(name="Row read empty", slug="row-read-empty")
+    VLAN.objects.create(vid=501, group=current, name="Current name")
+    _seed_vlan_snapshot(device, [{"vlan_vlan": 501, "vlan_name": "Updated name"}])
+    client.force_login(make_superuser("row-read-status-user"))
+    shown = draft_tab(client, device, "vlans")
+    row_url = unescape(shown.rows["501"]["hx-get"])
+    statuses = []
 
-    payload = {
-        "vid": "501",
-        "name": "Updated name",
-        "vlan_group_id": group.pk,
-    }
-    if sync_actions is not None:
-        payload["sync_actions"] = sync_actions
-    response = client.post(
-        reverse("plugins:netbox_librenms_plugin:verify_vlan_sync_group"),
-        data=json.dumps(payload),
-        content_type="application/json",
-    )
+    for group in (empty, current):
+        response = draft_command(
+            client, shown, "data-choice-url", str(len(statuses)), row="501", field="group", value=str(group.pk)
+        )
+        assert response.status_code == 204
+        statuses.append(_status_cell(client.get(row_url).content.decode()))
 
-    assert response.status_code == 200
-    assert response.json()["status_html"] == str(
-        render_vlan_sync_action(501, True, False, actions_enabled=expected_actions)
-    )
+    assert statuses == [
+        str(render_vlan_sync_action(501, False, False)),
+        str(render_vlan_sync_action(501, True, False)),
+    ]
 
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(
-    ("vid", "message"),
-    [
-        (None, "No VID provided"),
-        ("", "No VID provided"),
-        (" ", "Invalid VID"),
-        ("abc", "Invalid VID"),
-        (0, "Invalid VID"),
-        (5000, "Invalid VID"),
-        (501.0, "Invalid VID"),
-        (True, "Invalid VID"),
-    ],
-    ids=["missing", "empty", "whitespace", "text", "zero", "too-large", "float", "boolean"],
+    "row",
+    [None, "", " ", "abc", "0", "5000", "501.0", "True", "0501", " 501 "],
+    ids=["missing", "empty", "whitespace", "text", "zero", "too-large", "float", "boolean", "leading-zero", "padded"],
 )
-def test_verify_vlan_group_rejects_every_unusable_vlan_identity(client, vid, message):
-    """The verify endpoint must apply the same VLAN identity boundary as render and write paths."""
-    from django.urls import reverse
-
-    from netbox_librenms_plugin.tests.conftest import make_superuser
-
-    client.force_login(make_superuser(f"verify-invalid-vid-{str(vid).replace(' ', 'space')}"))
-
-    response = client.post(
-        reverse("plugins:netbox_librenms_plugin:verify_vlan_sync_group"),
-        data=json.dumps({"vid": vid, "name": "Unusable", "vlan_group_id": ""}),
-        content_type="application/json",
+def test_a_group_choice_rejects_every_unusable_vlan_identity(client, settings, row):
+    """The choice command must apply the same VLAN identity boundary as render and write paths."""
+    from netbox_librenms_plugin.tests.conftest import (
+        configure_default_librenms_server,
+        make_device,
+        make_superuser,
     )
+    from netbox_librenms_plugin.tests.view_test_helpers import draft_command, draft_tab
+
+    configure_default_librenms_server(settings)
+    device = make_device("choice-invalid-vid", librenms_cf={"default": {"id": 42}})
+    _seed_vlan_snapshot(device, [{"vlan_vlan": 501, "vlan_name": "Usable"}])
+    client.force_login(make_superuser("choice-invalid-vid-user"))
+    shown = draft_tab(client, device, "vlans")
+    fields = {"field": "group", "value": ""} | ({} if row is None else {"row": row})
+
+    response = draft_command(client, shown, "data-choice-url", **fields)
 
     assert response.status_code == 400
-    assert response.json() == {"status": "error", "message": message}
+    assert draft_tab(client, device, "vlans").table["data-draft-revision"] == shown.table["data-draft-revision"]
 
 
 @pytest.mark.django_db
 def test_invalid_only_selection_still_reports_the_batch_summary(client, settings):
-    """A request whose every selection is unusable must keep its skip summary."""
+    """A confirmation whose every VID is unusable must keep its skip summary."""
     from netbox_librenms_plugin.tests.conftest import (
         configure_default_librenms_server,
         make_device,
@@ -803,19 +757,10 @@ def test_invalid_only_selection_still_reports_the_batch_summary(client, settings
     _seed_vlan_snapshot(device, [{"vlan_vlan": 0, "vlan_name": "Invalid VID"}])
     client.force_login(make_superuser("invalid-only-summary-user"))
 
-    response = client.post(
-        _sync_url(device),
-        {
-            "server_key": "default",
-            "action": "create_vlans",
-            "select": "0",
-            "vlan_group_0": "",
-            "expected_vlan_name_0": "Invalid VID",
-        },
-    )
+    response = _post(client, device, {"confirm_conflicts": "1", "force_conflict": "0"})
 
     assert response.status_code == 302
-    rendered = [str(message) for message in response.wsgi_request._messages]
+    rendered = _messages(response)
     assert "VLAN 0: the LibreNMS VID is invalid; skipped." in rendered
     assert "No VLANs synced: 1 skipped (invalid VLAN VID)." in rendered
     from ipam.models import VLAN
@@ -838,13 +783,10 @@ def test_unusable_selection_diagnostic_does_not_echo_an_unbounded_value(client, 
     client.force_login(make_superuser("unbounded-vid-diagnostic-user"))
     oversized = "x" * 5000
 
-    response = client.post(
-        _sync_url(device),
-        {"server_key": "default", "action": "create_vlans", "select": oversized},
-    )
+    response = _post(client, device, {"confirm_conflicts": "1", "force_conflict": oversized})
 
     assert response.status_code == 302
-    diagnostics = [str(message) for message in response.wsgi_request._messages]
+    diagnostics = _messages(response)
     assert any("the LibreNMS VID is invalid" in message for message in diagnostics)
     assert all(len(message) < 200 for message in diagnostics)
     assert not any(oversized in message for message in diagnostics)
@@ -891,3 +833,264 @@ def test_intent_only_group_requires_vlan_group_view_permission(client, settings,
     assert [str(message) for message in response.wsgi_request._messages] == ["Missing permissions: ipam.view_vlangroup"]
     vlan.refresh_from_db()
     assert vlan.name == "Current name"
+
+
+# ============================================
+# THE VLANS TAB ON THE SELECTION DRAFT
+# ============================================
+# The group choice, the row read, and the submit that claims the draft. Each test seeds a VLAN snapshot and
+# drives the real endpoints with a signed-in client; NetBox VLANs, VLAN groups and object permissions are real.
+
+SERVER_KEY = "default"
+HTMX = {"HTTP_HX_REQUEST": "true"}
+
+
+def _tab(client, device, **query):
+    return draft_tab(client, device, "vlans", **query)
+
+
+def _submit(client, device, rows, **kwargs):
+    kwargs.setdefault("headers", HTMX)
+    return submit_with_draft(client, device, "vlans", _sync_url(device), rows, action="create_vlans", **kwargs)
+
+
+def _row_html(html, row_key):
+    for match in re.finditer(r"<tr\b[^>]*>.*?</tr>", html, re.S):
+        if f'data-row-key="{row_key}"' in unescape(match.group(0)):
+            return match.group(0)
+    raise AssertionError(f"no row {row_key}")
+
+
+def _shown_group(row_html):
+    chosen = re.search(r'<option value="(\d*)"[^>]*selected', row_html)
+    return chosen.group(1) if chosen else ""
+
+
+def _normalized_row(html):
+    def payload(match):
+        return f'data-evidence="{json.dumps(read_evidence(VLAN_TAB, unescape(match.group(1))), sort_keys=True)}"'
+
+    return re.sub(r"\s+", " ", re.sub(r'data-evidence="([^"]+)"', payload, html)).strip()
+
+
+@pytest.fixture
+def device(client, settings):
+    """
+    Return a device whose VLAN 300 exists as "Users" in group A and nowhere else, and whose VLAN 310 is new.
+
+    Group B is a second device group. The client is signed in as a superuser.
+    """
+    configure_default_librenms_server(settings)
+    client.force_login(make_superuser("vlan-draft-user"))
+    owner = make_device("vlan-draft", librenms_cf={SERVER_KEY: {"id": 4700}})
+    group_a = VLANGroup.objects.create(name="vlan-draft-a", slug="vlan-draft-a", scope=owner.site)
+    group_b = VLANGroup.objects.create(name="vlan-draft-b", slug="vlan-draft-b", scope=owner.site)
+    VLAN.objects.create(vid=300, name="Users", group=group_a)
+    _seed_vlan_snapshot(owner, [{"vlan_vlan": 300, "vlan_name": "Users"}, {"vlan_vlan": 310, "vlan_name": "Voice"}])
+    owner.groups = (group_a, group_b)
+    return owner
+
+
+@pytest.mark.django_db
+class TestTheTab:
+    """The tab renders every row from the user's draft, with the evidence of its group and its proposed name."""
+
+    def test_each_row_names_its_group_and_name_in_its_evidence(self, client, device):
+        group_a, _group_b = device.groups
+        shown = _tab(client, device)
+
+        assert read_evidence(VLAN_TAB, shown.rows["300"]["data-evidence"])["group"] == group_a.pk
+        assert read_evidence(VLAN_TAB, shown.rows["310"]["data-evidence"])["name"] == "Voice"
+        assert shown.table["data-choice-url"].startswith("/plugins/")
+
+    def test_a_selected_row_renders_checked_on_the_next_render(self, client, device):
+        select_rows(client, device, "vlans", [310])
+
+        shown = _tab(client, device)
+
+        assert _checked(shown, "310") and not _checked(shown, "300")
+
+    def test_a_row_read_is_the_row_of_the_tab_render(self, client, device):
+        _group_a, group_b = device.groups
+        select_rows(
+            client,
+            device,
+            "vlans",
+            [300],
+            choices=[("data-choice-url", {"row": "310", "field": "group", "value": str(group_b.pk)})],
+        )
+        shown = _tab(client, device)
+
+        for row_key, attrs in shown.rows.items():
+            response = client.get(unescape(attrs["hx-get"]))
+
+            assert response.status_code == 200
+            assert _normalized_row(response.content.decode()) == _normalized_row(_row_html(shown.html, row_key))
+
+
+@pytest.mark.django_db
+class TestTheGroupChoice:
+    """A group choice is a draft command; the row read shows the row compared in that group."""
+
+    def test_a_choice_names_the_row_and_its_read_compares_the_vlan_in_that_group(self, client, device):
+        _group_a, group_b = device.groups
+        shown = _tab(client, device)
+        assert "Synced" in _status_cell(_row_html(shown.html, "300"))
+
+        response = draft_command(client, shown, "data-choice-url", row="300", field="group", value=str(group_b.pk))
+
+        assert response.status_code == 204
+        assert json.loads(response["HX-Trigger"]) == {"lnms-row-stale": {"key": "300"}}
+        row = client.get(unescape(shown.rows["300"]["hx-get"])).content.decode()
+        assert _shown_group(row) == str(group_b.pk)
+        assert 'name="sync_one" value="300"' in _status_cell(row)
+
+    def test_a_choice_on_a_selected_row_asks_to_select_it_again(self, client, device):
+        _group_a, group_b = device.groups
+        draft = select_rows(client, device, "vlans", [310])
+        shown = _tab(client, device)
+
+        draft_command(
+            client,
+            shown,
+            "data-choice-url",
+            draft["expected_revision"],
+            row="310",
+            field="group",
+            value=str(group_b.pk),
+        )
+
+        after = _tab(client, device)
+        assert not _checked(after, "310")
+        assert after.rows["310"]["data-evidence-changed"] == "true"
+
+    def test_choosing_the_group_the_row_shows_stores_no_choice(self, client, device):
+        group_a, _group_b = device.groups
+        shown = _tab(client, device)
+
+        assert (
+            draft_command(client, shown, "data-choice-url", row="300", field="group", value=str(group_a.pk)).status_code
+            == 204
+        )
+
+        # The group stays the shown one: a later VLAN of the row decides it again.
+        after = _tab(client, device)
+        assert after.table["data-draft-revision"] == "1"
+        assert _shown_group(_row_html(after.html, "300")) == str(group_a.pk)
+
+    def test_a_group_the_user_cannot_view_answers_404(self, client, device):
+        elsewhere = Site.objects.create(name="vlan-draft-elsewhere", slug="vlan-draft-elsewhere")
+        foreign = VLANGroup.objects.create(name="vlan-draft-foreign", slug="vlan-draft-foreign", scope=elsewhere)
+        shown = _tab(client, device)
+
+        response = draft_command(client, shown, "data-choice-url", row="300", field="group", value=str(foreign.pk))
+
+        assert response.status_code == 404
+        assert _tab(client, device).table["data-draft-revision"] == "0"
+
+
+@pytest.mark.django_db
+class TestTheSubmit:
+    """A bulk submit claims the draft, writes the approved rows and puts back every row it did not write."""
+
+    def test_the_submit_creates_the_vlan_in_the_chosen_group_and_consumes_the_row(self, client, device):
+        _group_a, group_b = device.groups
+
+        response = _submit(
+            client,
+            device,
+            [310],
+            choices=[("data-choice-url", {"row": "310", "field": "group", "value": str(group_b.pk)})],
+        )
+
+        assert response.status_code == 200
+        assert json.loads(response["HX-Trigger"]) == {"lnms-results-stale": None}
+        assert list(VLAN.objects.filter(vid=310).values_list("group_id", "name")) == [(group_b.pk, "Voice")]
+        after = _tab(client, device)
+        assert response["X-Draft-Revision"] == after.table["data-draft-revision"]
+        assert not _checked(after, "310")
+
+    def test_a_row_that_changed_after_its_selection_is_refused_and_put_back(self, client, device):
+        _group_a, group_b = device.groups
+        draft = select_rows(
+            client,
+            device,
+            "vlans",
+            [310],
+            choices=[("data-choice-url", {"row": "310", "field": "group", "value": str(group_b.pk)})],
+        )
+        # Another user creates the VLAN in the group the row writes to.
+        VLAN.objects.create(vid=310, name="Phones", group=group_b)
+
+        response = _post(client, device, draft, **HTMX)
+
+        assert list(VLAN.objects.filter(vid=310).values_list("name", flat=True)) == ["Phones"]
+        assert any("310" in text and "changed" in text for text in _messages(response))
+        assert _tab(client, device).rows["310"]["data-evidence-changed"] == "true"
+
+    def test_a_submit_of_an_older_revision_writes_nothing(self, client, device):
+        draft = select_rows(client, device, "vlans", [310])
+        select_rows(client, device, "vlans", [300])
+
+        response = _post(client, device, draft, **HTMX)
+
+        assert not VLAN.objects.filter(vid=310).exists()
+        assert any("selection changed" in text for text in _messages(response))
+
+    def test_a_rename_disclosure_keeps_the_row_and_names_the_revision(self, client, device):
+        VLAN.objects.filter(vid=300).update(name="Staff")
+
+        response = _submit(client, device, [300])
+
+        assert "conflict_intent" in response.content.decode()
+        assert json.loads(response["HX-Trigger"]) == {"lnms-results-stale": None}
+        after = _tab(client, device)
+        assert response["X-Draft-Revision"] == after.table["data-draft-revision"]
+        assert _checked(after, "300")
+
+    def test_a_row_whose_group_the_user_can_no_longer_view_is_refused_and_put_back(self, client, device):
+        from users.models import ObjectPermission
+
+        _group_a, group_b = device.groups
+        user = make_user_with_perms("vlan-draft-group-grant", [("view", Device), ("add", VLAN), ("change", VLAN)])
+        grant(user, "view", VLAN)
+        grant(user, "view", VLANGroup, name="vlan-draft-group-view")
+        client.force_login(user)
+        draft = select_rows(
+            client,
+            device,
+            "vlans",
+            [310],
+            choices=[("data-choice-url", {"row": "310", "field": "group", "value": str(group_b.pk)})],
+        )
+        # The group grant goes away after the user selected the row in that group.
+        ObjectPermission.objects.filter(name="vlan-draft-group-view").delete()
+
+        response = _post(client, device, draft, **HTMX)
+
+        assert not VLAN.objects.filter(vid=310).exists()
+        assert any("310" in text and "changed" in text for text in _messages(response))
+        # The submit put the row back; without the group it asks to be selected again.
+        assert _tab(client, device).rows["310"]["data-evidence-changed"] == "true"
+
+
+@pytest.mark.django_db
+class TestTheRowAction:
+    """``sync_one`` writes the row as its page shows it, and leaves the draft as it is."""
+
+    def test_sync_one_writes_the_shown_row_and_keeps_the_selection(self, client, device):
+        select_rows(client, device, "vlans", [300])
+
+        _post(client, device, {"sync_one": "310", **row_action_fields(client, device, "vlans", 310)}, **HTMX)
+
+        assert VLAN.objects.filter(vid=310, name="Voice").exists()
+        assert _checked(_tab(client, device), "300")
+
+    def test_a_row_action_of_another_revision_writes_nothing(self, client, device):
+        fields = row_action_fields(client, device, "vlans", 310)
+        select_rows(client, device, "vlans", [300])
+
+        response = _post(client, device, {"sync_one": "310", **fields}, **HTMX)
+
+        assert not VLAN.objects.filter(vid=310).exists()
+        assert any("changed after the page showed it" in text for text in _messages(response))

@@ -1,0 +1,52 @@
+{% comment %}
+The VLAN groups dialog of one interface row. A group change reads the dialog again with the groups it shows, so the
+colours follow them. Save sends them to the user's draft (sync_draft.js), and then the page reads the row again.
+Takes: row_key, interface_name, vlans, groups, command_url, preview_url, apply_to_all.
+{% endcomment %}
+<form id="vlan-groups-form" data-write-url="{{ command_url }}">
+<div class="modal-header">
+    <h5 class="modal-title" id="vlanDetailModalLabel">VLAN Assignments</h5>
+    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+</div>
+<div class="modal-body">
+    <p class="text-muted mb-2">Interface: <strong>{{ interface_name }}</strong></p>
+    <input type="hidden" name="row" value="{{ row_key }}">
+    <table class="table table-sm table-hover mb-3" id="vlanDetailTable">
+        <thead>
+            <tr>
+                <th style="width: 80px;">VID</th>
+                <th style="width: 60px;">Type</th>
+                <th>VLAN Group</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for vlan in vlans %}
+            <tr data-vid="{{ vlan.vid }}">
+                <td><span class="{{ vlan.css }}">{{ vlan.vid }}</span>{% if vlan.missing %} <i class="mdi mdi-alert text-danger" role="img" title="VLAN not in the selected group: use VLAN Sync first to create it" aria-label="VLAN not in the selected group: use VLAN Sync first to create it"></i>{% endif %}</td>
+                <td>{% if vlan.type == "U" %}Untagged{% else %}Tagged{% endif %}</td>
+                <td>
+                    <select name="group_{{ vlan.vid }}" class="form-select form-select-sm vlan-modal-group-select"
+                        hx-get="{{ preview_url }}" hx-include="closest form" hx-target="#vlanDetailModalContent"
+                        hx-swap="innerHTML" hx-sync="closest form:replace">
+                        <option value=""{% if not vlan.group_id %} selected{% endif %}>-- No Group (Global) --</option>
+                        {% for group in groups %}
+                        <option value="{{ group.pk }}"{% if vlan.group_id == group.pk|stringformat:"s" %} selected{% endif %}>{{ group.name }}{% if group.scope %} ({{ group.scope }}){% endif %}</option>
+                        {% endfor %}
+                    </select>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    <div class="form-check">
+        <input class="form-check-input" type="checkbox" id="applyVlanGroupToAll" name="apply_to_all" value="1"{% if apply_to_all %} checked{% endif %}>
+        <label class="form-check-label" for="applyVlanGroupToAll">
+            Apply these groups to the same VLANs on all interfaces of the device, on every page and in every filter
+        </label>
+    </div>
+</div>
+<div class="modal-footer">
+    <button type="button" class="btn btn-primary" id="saveVlanGroups" data-draft-write data-bs-dismiss="modal">Save</button>
+    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+</div>
+</form>

@@ -174,7 +174,9 @@ class TestRenderVlanGroupSelection:
         record = {"vlan_id": 10, "name": "DATA", "exists_in_netbox": False}
         html = str(table.render_vlan_group_selection(None, record))
         assert "<select" in html
-        assert 'name="vlan_group_10"' in html
+        # The page sends the group as a draft choice; the select posts no form field.
+        assert 'data-draft-choice="group"' in html
+        assert 'name="vlan_group_' not in html
 
     def test_no_selection_by_default(self):
         """When no auto-select criteria match, no option is pre-selected."""

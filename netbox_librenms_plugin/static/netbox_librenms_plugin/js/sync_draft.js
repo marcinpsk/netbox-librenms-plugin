@@ -24,6 +24,15 @@
  *
  * Every operation runs in ONE queue, one at a time in admission order (see admit()): the writes, the
  * commands and the READs. So a READ never shows a state from before an operation admitted ahead of it.
+ *
+ * A dialog form with data-write-url (the bulk VC member, a row's VLAN groups) is a write: its
+ * data-draft-write button sends the form's fields to that URL through the queue.
+ *
+ * A row with data-intent has a tri-state intent: on (selected), off (excluded) or none. Such a row also names
+ * the rows it requires (data-requires) and how many selected rows of other pages require it
+ * (data-offpage-requirers); while #autoSelectLagMembers is checked, the page mirrors the server's required-row
+ * rule over these attributes (mirrorChecks), so a required row ticks at once. A click on a row that stays
+ * required unticks it as an exclusion.
  */
 (function () {
     'use strict';
@@ -39,6 +48,7 @@
     const ROW_STALE_EVENT = 'lnms-row-stale';
     const RESULTS_STALE_EVENT = 'lnms-results-stale';
     const NOTICE_ID = 'librenms-draft-notice';
+    const AUTO_SELECT_ID = 'autoSelectLagMembers';
     const BATCH_DELAY_MS = 100;
     const CONFLICT_NOTICE_MS = 10000;
     // The operations that write the draft with a fetch: a batch of row states, and a choice or Set Primary IP.
@@ -292,8 +302,13 @@
     // THE DRAFT WRITER
     // ============================================
 
+    // The sync page renders the pane of every tab, so several draft tables can be in the document: only the
+    // pane of the active tab takes input. Its data-active-tab names the pane already in htmx:afterSwap, while
+    // htmx settles the panes' class later. A page without the tab panes has one draft table.
     function draftTable() {
-        return document.querySelector(DRAFT_TABLE);
+        if (!document.getElementById('librenmsTabContent')) return document.querySelector(DRAFT_TABLE);
+        const activeTab = document.getElementById('librenms-sync-tabs')?.dataset.activeTab;
+        return (activeTab && document.getElementById(activeTab)?.querySelector(DRAFT_TABLE)) || null;
     }
 
     function csrfToken() {
@@ -327,8 +342,94 @@
         writer.stale = false;
         writer.refused = false;
         writer.choices.clear();
+        applyMirror(table);
         // Also while the navigation that brought the table waits for its end: that READ is the stale one.
         if (older) navigate(destination, 'replace');
+    }
+
+    // ============================================
+    // THE REQUIRED-ROW MIRROR
+    // ============================================
+
+    /**
+     * Return which rows show checked under the required-row rule, as the server decides it (required_rows.py).
+     *
+     * A row shows checked when it is selected, or while the rule is enabled when it is not excluded and a selected
+     * row of another page (offpage > 0) or a selected row of this page requires it.
+     *
+     * @param {{key: string, intent: string, requires: string[], offpage: number}[]} rows - The page's rows.
+     * @param {boolean} enabled - Whether selected rows take their required rows along.
+     * @returns {Map<string, boolean>} The checked state of each row key.
+     */
+    function mirrorChecks(rows, enabled) {
+        const required = new Set();
+        if (enabled) {
+            rows.filter((row) => row.intent === 'on').forEach((row) => row.requires.forEach((key) => required.add(key)));
+        }
+        return new Map(rows.map((row) => [
+            row.key,
+            row.intent === 'on' || (enabled && row.intent !== 'off' && (row.offpage > 0 || required.has(row.key))),
+        ]));
+    }
+
+    function autoSelectEnabled() {
+        return Boolean(document.getElementById(AUTO_SELECT_ID)?.checked);
+    }
+
+    // The tri-state rows of a table, with their enabled checkboxes.
+    function ruleRows(table) {
+        return Array.from(table?.querySelectorAll('tr[data-intent]') || []).map((element) => {
+            let requires = [];
+            try {
+                requires = JSON.parse(element.dataset.requires || '[]');
+            } catch (_) {
+                requires = [];
+            }
+            return {
+                element,
+                box: element.querySelector(ROW_CHECKBOX),
+                key: element.dataset.rowKey,
+                intent: element.dataset.intent,
+                requires,
+                offpage: Number(element.dataset.offpageRequirers || 0),
+            };
+        });
+    }
+
+    /**
+     * Tick each enabled checkbox of the table's tri-state rows as the required-row rule decides.
+     *
+     * @param {?HTMLTableElement} table - A draft table.
+     * @returns {void}
+     */
+    function applyMirror(table) {
+        const rows = ruleRows(table);
+        if (!rows.length) return;
+        const checks = mirrorChecks(rows, autoSelectEnabled());
+        rows.forEach((row) => {
+            if (row.box && !row.box.disabled) row.box.checked = checks.get(row.key);
+        });
+    }
+
+    /**
+     * Set the intents of tri-state rows that one input set to *checked*, then tick the table again.
+     *
+     * A row that the input clears takes 'none', or 'off' when a selected row still requires it.
+     *
+     * @param {HTMLTableElement} table - The draft table.
+     * @param {HTMLInputElement[]} boxes - The row checkboxes that the input set.
+     * @returns {void}
+     */
+    function setIntents(table, boxes) {
+        const changed = boxes.map((box) => box.closest('tr[data-intent]')).filter(Boolean);
+        changed.forEach((row) => {
+            row.dataset.intent = row.querySelector(ROW_CHECKBOX).checked ? 'on' : 'none';
+        });
+        const checks = mirrorChecks(ruleRows(table), autoSelectEnabled());
+        changed.forEach((row) => {
+            if (row.dataset.intent === 'none' && checks.get(row.dataset.rowKey)) row.dataset.intent = 'off';
+        });
+        applyMirror(table);
     }
 
     function rowByKey(key) {
@@ -507,8 +608,8 @@
     function setRowState(checkbox) {
         const row = checkbox.closest('tr[data-row-key]');
         if (!row) return;
-        const checked = checkbox.checked;
-        tailBatch().set(row.dataset.rowKey, { state: checked ? 'on' : 'none', token: checked ? row.dataset.evidence : null });
+        const state = row.dataset.intent || (checkbox.checked ? 'on' : 'none');
+        tailBatch().set(row.dataset.rowKey, { state, token: state === 'on' ? row.dataset.evidence : null });
     }
 
     /**
@@ -560,6 +661,7 @@
      */
     function takeInput(boxes) {
         bumpInputEpoch();
+        setIntents(writer.table, boxes);
         boxes.forEach(setRowState);
         schedule();
         pump();
@@ -582,14 +684,19 @@
         const table = control.closest(DRAFT_TABLE);
         if (table && control.matches('th input.toggle')) {
             if (!accepts(table)) return;
-            const boxes = selectableBoxes(table).filter((box) => box.checked !== control.checked);
+            // Select all selects every row of the page, also one that another row requires.
+            const boxes = selectableBoxes(table).filter((box) => {
+                const intent = box.closest('tr')?.dataset.intent;
+                if (intent === undefined || !control.checked) return box.checked !== control.checked;
+                return intent !== 'on';
+            });
             boxes.forEach((box) => {
                 box.checked = control.checked;
             });
             takeInput(boxes);
         } else if (table && control.matches(ROW_CHECKBOX)) {
             if (accepts(table)) takeInput([control]);
-        } else if (table && control.matches('select.vrf-select')) {
+        } else if (table && control.matches('select.vrf-select, select[data-draft-choice]')) {
             const row = control.closest('tr[data-row-key]');
             const key = row?.dataset.rowKey;
             if (!key) return;
@@ -598,12 +705,27 @@
             // TomSelect can announce the value the row shows already; only a new value is a choice.
             if (control.value === shown || !accepts(table)) return;
             writer.choices.set(key, control.value);
-            enqueue({ url: writer.urls.choice, row: key, fields: { row: key, value: control.value } });
+            const fields = { row: key, value: control.value };
+            if (control.dataset.draftChoice) fields.field = control.dataset.draftChoice;
+            enqueue({ url: writer.urls.choice, row: key, fields });
         } else if (control.matches('#set-primary-ip-toggle-cb') && draftTable()) {
             if (!accepts(draftTable())) return;
             const evidence = JSON.stringify(shownManagementEvidence(draftTable()));
             enqueue({ url: writer.urls.management, fields: { selected: control.checked ? 'on' : 'off', evidence } });
+        } else if (control.matches(`#${AUTO_SELECT_ID}`)) {
+            // The rule's option changes what the rows require, never a row's intent.
+            applyMirror(draftTable());
         }
+    });
+
+    // A dialog's write (the bulk VC member, a row's VLAN groups) sends the fields of its form.
+    document.addEventListener('click', function (event) {
+        const button = event.target instanceof Element ? event.target.closest('[data-draft-write]') : null;
+        const form = button?.closest('form[data-write-url]');
+        if (!form) return;
+        event.preventDefault();
+        if (!accepts(draftTable())) return;
+        enqueue({ url: form.dataset.writeUrl, fields: Object.fromEntries(new FormData(form)) });
     });
 
     // A shift-click sets every row from the last clicked row to this one to the state of the last clicked row.
@@ -662,9 +784,11 @@
         event.returnValue = '';
     });
 
+    // A row action names one row and leaves the draft as it is.
+    const ROW_ACTIONS = ['sync_one', 'rebind_one', 'create_vrf'];
+
     function isBulkSubmit(event) {
-        const name = event.detail.triggeringEvent?.submitter?.name;
-        return name !== 'sync_one' && name !== 'create_vrf';
+        return !ROW_ACTIONS.includes(event.detail.triggeringEvent?.submitter?.name);
     }
 
     /**
@@ -843,8 +967,8 @@
         if (elt.matches?.('[data-draft-command="draft"]') && writer.draftId) {
             parameters.set('draft_id', writer.draftId);
             parameters.set('expected_revision', String(writer.revision));
-            // A row action syncs the row that the page shows: its evidence names the row's state and VRF.
-            const rowKey = parameters.get('sync_one');
+            // A row action acts on the row that the page shows: its evidence names the row's state and choices.
+            const rowKey = parameters.get('sync_one') || parameters.get('rebind_one');
             if (rowKey) parameters.set('evidence', rowByKey(rowKey)?.dataset.evidence || '');
         }
     });
@@ -938,6 +1062,8 @@
     document.addEventListener('htmx:afterSettle', function (event) {
         const read = reads.get(event.detail.xhr);
         if (!read?.accepted || !read.rowKey) return;
+        // The row's new intent can change what the other rows of the page require.
+        applyMirror(draftTable());
         rowByKey(read.rowKey)?.dispatchEvent(new CustomEvent('librenms:row-swapped', { bubbles: true }));
     });
 
@@ -958,5 +1084,5 @@
         if (reads.get(event.detail.xhr)?.rowKey) readResults();
     });
 
-    window.librenmsSyncDraft = Object.freeze({ navigate, flush, bumpInputEpoch });
+    window.librenmsSyncDraft = Object.freeze({ navigate, flush, bumpInputEpoch, mirrorChecks });
 })();

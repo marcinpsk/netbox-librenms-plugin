@@ -20,8 +20,9 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
     stamp_rule_decision,
 )
+from netbox_librenms_plugin.tests._html_helpers import open_tags
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
-from netbox_librenms_plugin.tests.view_test_helpers import superuser_chassis
+from netbox_librenms_plugin.tests.view_test_helpers import draft_tab, superuser_chassis
 
 
 def _import_record(device_id=4101, **validation):
@@ -1218,8 +1219,8 @@ class TestInterfaceVlans:
         assert "200(T)" in html
         assert '<span class="text-success">100(U)' in html
         assert '<span class="text-success">200(T)' in html
-        assert 'name="vlan_group_10_100"' in html
-        assert 'name="vlan_group_10_200"' in html
+        # The groups live in the user's draft, so the row renders no group input.
+        assert 'name="vlan_group_' not in html
         assert group.name in html
 
     def test_empty_and_long_vlan_sets_render_compactly(self):
@@ -1284,88 +1285,51 @@ class TestInterfaceVlans:
 
         assert "VLAN 100(U) \u2192 Global" in html
 
-    def test_the_modal_payload_carries_one_entry_per_vlan_with_its_css_and_group(self):
-        """data-vlans drives the edit modal, so every field it reads must survive."""
-        import json
-        from html import unescape
+    def test_the_dialog_renders_one_row_per_vlan_with_its_group_and_missing_flag(self, client, settings):
+        """The VLAN groups dialog of a row shows each VLAN, its selected group and whether that group holds it."""
+        device, group = _vlan_dialog_device(client, settings, "vlan-modal", untagged=100, tagged=[200])
 
-        from ipam.models import VLANGroup
+        dialog = _vlan_dialog(client, device, "41")
 
-        group = VLANGroup.objects.create(name="vlan-modal-group", slug="vlan-modal-group")
-        table = _interface_table(make_device("vlan-modal-device"))
-        record = _port(
-            untagged_vlan=100,
-            tagged_vlans=[200],
-            missing_vlans=[200],
-            vlan_group_map={100: {"group_id": str(group.pk), "group_name": group.name}},
-            vlan_groups=[group],
+        assert [(attrs["data-vid"]) for attrs in open_tags(dialog, "tr") if "data-vid" in attrs] == ["100", "200"]
+        assert re.search(rf'<select name="group_100"[^>]*>.*?<option value="{group.pk}"\s+selected>', dialog, re.S)
+        # A VLAN that no group holds is flagged in the dialog, not silently shown as Global.
+        assert "mdi-alert" not in _dialog_row(dialog, "100")
+        assert "mdi-alert" in _dialog_row(dialog, "200")
+
+    def test_the_dialog_css_matches_the_inline_css_for_the_same_vlan(self, client, settings):
+        """The inline summary and the dialog derive the class separately; they must agree."""
+        device, _group = _vlan_dialog_device(client, settings, "vlan-csspair", untagged=100, tagged=[200])
+        shown = draft_tab(client, device, "interfaces", interface_name_field="ifName")
+        row = re.search(r'<tr\b[^>]*data-row-key="41".*?</tr>', shown.html, re.S).group(0)
+        inline = {vid: css for css, vid in re.findall(r'<span class="([^"]+)">(\d+)\(', row)}
+
+        dialog = _vlan_dialog(client, device, "41")
+        in_dialog = {
+            vid: re.search(r'<span class="([^"]+)">', _dialog_row(dialog, vid)).group(1) for vid in ("100", "200")
+        }
+
+        assert inline and inline == in_dialog
+
+    def test_the_group_dropdown_offers_the_global_option_first(self, client, settings):
+        device, group = _vlan_dialog_device(client, settings, "vlan-options", untagged=100)
+
+        dialog = _vlan_dialog(client, device, "41")
+        options = re.findall(r'<option value="(\d*)"', _dialog_row(dialog, "100"))
+
+        assert options[0] == ""
+        assert str(group.pk) in options
+
+    def test_the_edit_button_opens_the_rows_dialog_and_a_withheld_row_has_none(self):
+        table = _interface_table(make_device("vlan-edit-button"))
+
+        html = str(table.render_vlans(None, _port(untagged_vlan=100, vlan_modal_url="/vlan-dialog/41/")))
+        withheld = str(
+            table.render_vlans(None, _port(untagged_vlan=100, vlan_modal_url="/vlan-dialog/41/", member_withheld=True))
         )
 
-        html = str(table.render_vlans(None, record))
-        payload = json.loads(unescape(html.split("data-vlans='")[1].split("'")[0]))
-
-        assert [entry["vid"] for entry in payload] == [100, 200]
-        assert [entry["type"] for entry in payload] == ["U", "T"]
-        assert payload[0]["group_name"] == group.name
-        assert payload[0]["group_id"] == str(group.pk)
-        assert payload[0]["missing"] is False
-        # A missing VLAN is labelled in the modal, not silently shown as Global.
-        assert payload[1]["group_name"] == "Not in NetBox"
-        assert payload[1]["missing"] is True
-
-    def test_the_modal_css_matches_the_inline_css_for_the_same_vlan(self):
-        """The inline summary and the modal derive the class separately; they must agree."""
-        import json
-        import re
-        from html import unescape
-
-        table = _interface_table(make_device("vlan-csspair-device"))
-        record = _port(exists_in_netbox=False, untagged_vlan=100, tagged_vlans=[200])
-
-        html = str(table.render_vlans(None, record))
-        payload = json.loads(unescape(html.split("data-vlans='")[1].split("'")[0]))
-        inline = dict(re.findall(r'<span class="([^"]+)">(\d+)\(', html))
-
-        by_vid = {str(entry["vid"]): entry["css"] for entry in payload}
-        assert by_vid, "the modal payload must carry a css class per VLAN"
-        for css, vid in inline.items():
-            assert by_vid[vid] == css, f"VLAN {vid} renders {css} inline but {by_vid[vid]} in the modal"
-
-    def test_the_group_dropdown_offers_the_global_option_first(self):
-        import json
-        from html import unescape
-
-        from ipam.models import VLANGroup
-
-        group = VLANGroup.objects.create(name="vlan-options-group", slug="vlan-options-group")
-        table = _interface_table(make_device("vlan-options-device"))
-        record = _port(untagged_vlan=100, vlan_groups=[group])
-
-        html = str(table.render_vlans(None, record))
-        options = json.loads(unescape(html.split("data-vlan-groups='")[1].split("'")[0]))
-
-        assert options[0] == {"id": "", "name": "-- No Group (Global) --", "scope": ""}
-        assert {"id": str(group.pk), "name": group.name, "scope": ""} in options
-
-    def test_the_edit_button_targets_the_row_selected_device_when_one_is_chosen(self):
-        """A VC member override must not submit VLAN edits against the page device."""
-        page = make_device("vlan-device-page")
-        member = make_device("vlan-device-member")
-        table = _interface_table(page)
-        record = _port(untagged_vlan=100, selected_object_id=member.pk)
-
-        html = str(table.render_vlans(None, record))
-
-        assert f'data-device-id="{member.pk}"' in html
-
-    def test_the_edit_button_falls_back_to_the_page_device(self):
-        page = make_device("vlan-device-fallback")
-        table = _interface_table(page)
-        record = _port(untagged_vlan=100)
-
-        html = str(table.render_vlans(None, record))
-
-        assert f'data-device-id="{page.pk}"' in html
+        assert 'hx-get="/vlan-dialog/41/"' in html
+        assert "vlan-edit-btn" not in withheld
 
     def test_missing_port_id_does_not_render_literal_none_form_keys(self):
         table = _interface_table(make_device("vlan-missing-port-id"))
@@ -1376,8 +1340,42 @@ class TestInterfaceVlans:
 
         html = str(table.render_vlans(None, record))
 
-        assert "vlan_group_None_100" not in html
-        assert "vlan_group__100" in html
+        assert "None" not in html
+        assert 'name="vlan_group_' not in html
+
+
+def _vlan_dialog_device(client, settings, tag, *, untagged=None, tagged=()):
+    """Return a mapped device whose row 41 carries the VLANs, and a device group that holds VLAN 100 only."""
+    from ipam.models import VLAN, VLANGroup
+
+    from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server
+    from netbox_librenms_plugin.tests.interface_sync_post_helpers import sync_port
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import port_vlans, seed_interfaces_snapshot
+
+    configure_default_librenms_server(settings)
+    client.force_login(make_superuser(f"{tag}-user"))
+    device = make_device(f"{tag}-device", librenms_cf={"default": {"id": 4410}})
+    group = VLANGroup.objects.create(name=f"{tag}-group", slug=f"{tag}-group", scope=device.site)
+    VLAN.objects.create(vid=100, name=f"{tag}-100", group=group)
+    mode = "tagged" if tagged else "access"
+    seed_interfaces_snapshot(
+        device, [sync_port(41, "eth41", **port_vlans(mode, untagged, tagged))], server_key="default"
+    )
+    return device, group
+
+
+def _vlan_dialog(client, device, row_key):
+    """Return the VLAN groups dialog that the edit button of the row opens."""
+    shown = draft_tab(client, device, "interfaces", interface_name_field="ifName")
+    row = re.search(rf'<tr\b[^>]*data-row-key="{row_key}".*?</tr>', shown.html, re.S).group(0)
+    (button,) = [attrs for attrs in open_tags(row, "button") if "vlan-edit-btn" in attrs.get("class", "")]
+    response = client.get(button["hx-get"])
+    assert response.status_code == 200
+    return response.content.decode()
+
+
+def _dialog_row(dialog, vid):
+    return re.search(rf'<tr data-vid="{vid}">.*?</tr>', dialog, re.S).group(0)
 
 
 @pytest.mark.django_db
@@ -1460,46 +1458,49 @@ class TestInterfaceRelationships:
 
 @pytest.mark.django_db
 class TestInterfaceFormatting:
-    def test_the_formatted_row_keeps_the_resolved_interface(self):
-        """The verify view resolves the interface by port_id first, so formatting must not change it."""
-        device = make_device("format-interface")
-        interface = make_interface(device, "Ethernet1")
-        main = _port(netbox_interface=interface, exists_in_netbox=True, _source="main")
+    def test_the_row_read_keeps_the_resolved_interface(self, client, settings):
+        """The row read resolves the interface by port_id first, and its evidence names that interface."""
+        from netbox_librenms_plugin.selection_draft import read_evidence
+        from netbox_librenms_plugin.tests.interface_sync_post_helpers import bound_interface
+        from netbox_librenms_plugin.views.base.interfaces_view import INTERFACE_TAB
 
-        main_result = _interface_table(device).format_interface_data(main, device)
+        device = _formatting_device(client, settings, "format-interface", [_snapshot_port(42, "Ethernet1")])
+        interface = bound_interface(device, "Ethernet1", 42)
+        shown = draft_tab(client, device, "interfaces", interface_name_field="ifName")
 
-        assert main["netbox_interface"] == interface
-        assert main["exists_in_netbox"] is True
-        assert set(main_result) == {
+        response = client.get(shown.rows["42"]["hx-get"])
+
+        assert response.status_code == 200
+        row = response.content.decode()
+        (tr,) = open_tags(row, "tr")
+        assert read_evidence(INTERFACE_TAB, tr["data-evidence"])["interface"] == interface.pk
+        assert re.findall(r'<td[^>]*data-col="([^"]+)"', row) == [
             "selection",
-            "rule_state",
             "name",
             "type",
             "speed",
+            "vlans",
             "mac_address",
             "mtu",
             "enabled",
             "description",
-            "vlans",
             "librenms_id",
             "parent",
             "actions",
-            "librenms_lag_port_id",
-            "librenms_lag_name",
-            "librenms_parent_port_id",
-            "librenms_parent_name",
-            "librenms_bridge_port_id",
-            "librenms_bridge_name",
-        }
+        ]
 
-    def test_matching_alias_is_cleared_in_the_real_formatted_result(self):
-        device = make_device("format-alias")
-        record = _port(ifAlias="Ethernet1")
+    def test_a_matching_alias_is_cleared_in_the_rendered_row(self, client, settings):
+        device = _formatting_device(
+            client, settings, "format-alias", [_snapshot_port(42, "Ethernet1", ifAlias="Ethernet1")]
+        )
 
-        result = _interface_table(device).format_interface_data(record, device)
+        shown = draft_tab(client, device, "interfaces", interface_name_field="ifName")
+        row = re.search(r'<tr\b[^>]*data-row-key="42".*?</tr>', shown.html, re.S).group(0)
 
-        assert record["ifAlias"] == ""
-        assert ">Ethernet1<" not in str(result["description"])
+        assert (
+            ">Ethernet1<"
+            not in dict(re.findall(r'<td[^>]*data-col="([^"]+)"[^>]*>(.*?)</td>', row, re.S))["description"]
+        )
 
     def test_constructor_state_is_per_instance(self):
         device = make_device("table-instance-state")
@@ -1530,6 +1531,24 @@ class TestInterfaceFormatting:
         table = _interface_table(make_device("row-attr-real-port-id"))
 
         assert table.row_attrs["data-port-id"](_port(port_id=42)) == "42"
+
+
+def _snapshot_port(port_id, name, **fields):
+    from netbox_librenms_plugin.tests.interface_sync_post_helpers import sync_port
+
+    return sync_port(port_id, name, **fields)
+
+
+def _formatting_device(client, settings, tag, ports):
+    """Return a mapped device with the interface snapshot *ports*, with the client signed in as a superuser."""
+    from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_interfaces_snapshot
+
+    configure_default_librenms_server(settings)
+    client.force_login(make_superuser(f"{tag}-user"))
+    device = make_device(tag, librenms_cf={"default": {"id": 4420}})
+    seed_interfaces_snapshot(device, ports, server_key="default")
+    return device
 
 
 @pytest.mark.django_db
@@ -1637,8 +1656,8 @@ class TestVirtualChassisInterfaceTable:
 
         assert 'name="select" value="10"' in selections[0]
         assert 'name="select" value="11"' in selections[1]
-        assert 'name="device_selection_10"' in dropdowns[0]
-        assert 'name="device_selection_11"' in dropdowns[1]
+        assert 'data-row-id="10"' in dropdowns[0]
+        assert 'data-row-id="11"' in dropdowns[1]
 
     def test_missing_port_id_does_not_render_literal_none_dropdown_key(self):
         first, _second = self._members("vc-missing-port-id")
@@ -1646,8 +1665,8 @@ class TestVirtualChassisInterfaceTable:
 
         html = str(table.render_device_selection(None, _port(port_id=None)))
 
-        assert "device_selection_None" not in html
-        assert 'name="device_selection_"' in html
+        assert "None" not in html
+        assert 'data-row-id=""' in html
 
     def test_member_names_are_escaped_in_dropdown_options(self):
         first = make_device("vc-escape-first")
@@ -1660,13 +1679,13 @@ class TestVirtualChassisInterfaceTable:
         assert "<script>" not in html
         assert "&lt;script&gt;" in html
 
-    def test_formatting_adds_the_real_member_selector(self):
+    def test_the_rendered_row_has_the_real_member_selector(self):
         first, _second = self._members("vc-format")
-        table = self._table(first)
+        table = self._table(first, data=[_port()])
 
-        result = table.format_interface_data(_port(), first)
+        (row,) = list(table.rows)
 
-        assert "vc-member-select" in str(result["device_selection"])
+        assert "vc-member-select" in str(row.get_cell("device_selection"))
 
 
 @pytest.mark.django_db

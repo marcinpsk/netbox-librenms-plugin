@@ -23,6 +23,7 @@ from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
     seed_ports,
     sync_port,
 )
+from netbox_librenms_plugin.views.sync.interfaces import APPROVED_ROW_CHANGED
 
 PORT = 9301
 LIBRENMS_DEVICE_ID = 71
@@ -240,7 +241,7 @@ def _second_waits_on_the_device_row(device):
 
 
 def test_two_interface_syncs_of_one_device_wait_on_the_device_row_lock(settings):
-    """The ifName sync holds the device row; the ifDescr sync waits for it and then finds the holder."""
+    """The ifName sync holds the device row; the ifDescr sync waits for it, then refuses its changed row."""
     configure_default_librenms_server(settings)
     device, _module, short, long = _seed()
     user_pk = make_superuser("port-claim-user").pk
@@ -254,14 +255,9 @@ def test_two_interface_syncs_of_one_device_wait_on_the_device_row_lock(settings)
 
     assert second_waited, "the second sync did not wait on the first sync's backend"
     assert _port_holders() == [short.pk]
-    assert second_messages == [
-        (
-            "warning",
-            f"Interface '{SHORT_NAME}' kept its current name because the reported name is in use "
-            f"on the same interface owner: '{LONG_NAME}'.",
-        ),
-        ("success", "Selected interfaces synced successfully."),
-    ]
+    # The first sync bound the port to the short interface after the second sync approved the long one.
+    assert second_messages == [("warning", f"1 interface(s) skipped: {LONG_NAME} ({APPROVED_ROW_CHANGED}).")]
+    assert _port_holders() == [short.pk]
     assert _persisted(long) == before
 
 

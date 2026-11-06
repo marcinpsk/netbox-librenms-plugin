@@ -12,7 +12,7 @@
   {% endif %}
 </div>
 {% url 'plugins:netbox_librenms_plugin:sync_selected_vlans' object_type=object_type object_id=object.pk as vlan_sync_url_path %}{% sync_tab_url vlan_sync_url_path as vlan_sync_url %}
-<form method="post"
+<form method="post" data-draft-command="action"
       action="{{ vlan_sync_url }}"
       {% if not full_page %}
       hx-post="{{ vlan_sync_url }}"

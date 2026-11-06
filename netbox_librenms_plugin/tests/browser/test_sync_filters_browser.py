@@ -18,7 +18,6 @@ from test_sync_cache_browser import (
 )
 
 PAGE_URL = "https://plugin.example.com/dcim/devices/1/librenms-sync/"
-VERIFY_ROUTE = "**/plugins/librenms_plugin/verify-interface/*"
 SAVE_PREF_URL = "https://plugin.example.com/plugins/librenms_plugin/save-user-pref/"
 TABLE = "librenms-interface-table"
 REFRESH_ENDPOINT = "https://plugin.example.com/plugins/librenms_plugin/device/1/refresh-interfaces/"
@@ -31,146 +30,17 @@ def _serve(page, html, url=PAGE_URL):
     _add_page_scripts(page)
 
 
-def _selection_page(scope, port_ids):
-    rows = "".join(
-        f'<tr data-port-id="{port_id}"><td data-col="selection">'
-        f'<input type="checkbox" name="select" value="{port_id}" id="cb-{port_id}"></td></tr>'
-        for port_id in port_ids
-    )
-    return f"""<!doctype html><html><body>
-        <input type="hidden" name="server_key" value="default">
-        <div data-sync-filter-tab="interfaces" data-selection-scope="{scope}">
-          <form method="post"><table id="{TABLE}"><tbody>{rows}</tbody></table></form></div>
-        </body></html>"""
-
-
-def test_the_selection_follows_the_user_across_filters_and_a_new_name_field_starts_an_empty_one(page):
-    # The server renders one scope for every filter of the tab: only the name field and the ignored toggle change it.
-    _serve(page, _selection_page("interface_name_field=ifName", ["101", "102"]))
-    page.evaluate("initializeCheckboxes()")
-    page.check("#cb-101")
-
-    # Another filter shows other rows: the checked row stays selected, and the notice counts it.
-    _serve(page, _selection_page("interface_name_field=ifName", ["201"]))
-    page.evaluate("initializeCheckboxes()")
-    assert page.evaluate(f"offPageSelectionKeys(document.getElementById('{TABLE}'))") == ["101"]
-    expect(page.locator(f"#{TABLE}-offpage-selection")).to_be_visible()
-
-    # A filter that shows the row again shows it checked.
-    _serve(page, _selection_page("interface_name_field=ifName", ["101", "201"]))
-    page.evaluate("initializeCheckboxes()")
-    expect(page.locator("#cb-101")).to_be_checked()
-
-    # Another name field names other rows, so it starts an empty selection.
-    _serve(page, _selection_page("interface_name_field=ifDescr", ["101"]))
-    page.evaluate("initializeCheckboxes()")
-    expect(page.locator("#cb-101")).not_to_be_checked()
-    assert page.locator(f"#{TABLE}-offpage-selection").count() == 0
-
-
-CELLS = ("name", "type", "speed", "mac_address", "mtu", "enabled", "description", "vlans", "librenms_id")
-
-
-def _member_row_page(filter_active):
-    cells = "".join(f'<td data-col="{column}">old</td>' for column in CELLS)
-    return f"""<!doctype html><html><body>
-        <input type="hidden" name="csrfmiddlewaretoken" value="token">
-        <input type="hidden" name="server_key" value="default">
-        <table id="{TABLE}" data-filter-active="{"true" if filter_active else "false"}"><tbody>
-          <tr data-port-id="101" data-interface="eth0">
-            <td data-col="selection"><input type="checkbox" name="select" value="101"></td>
-            <td data-col="device_selection"><select class="vc-member-select" data-interface="eth0">
-              <option value="1" selected>m1</option><option value="2">m2</option></select></td>
-            {cells}<td data-col="parent"></td><td data-col="actions"></td>
-          </tr>
-        </tbody></table></body></html>"""
-
-
-def _formatted_row():
-    row = {column: f"<span>new {column}</span>" for column in CELLS}
-    row.update(selection='<input type="checkbox" name="select" value="101">', parent="", actions="", rule_state="")
-    return json.dumps({"status": "success", "formatted_row": row})
-
-
-def _verify_member(page):
-    page.evaluate("handleInterfaceChange(document.querySelector('.vc-member-select'), '2')")
-
-
-def test_a_member_repaint_of_a_filtered_row_marks_it_stale(page):
-    requests = []
-
-    def answer(route):
-        requests.append(route.request.url)
-        route.fulfill(status=200, content_type="application/json", body=_formatted_row())
-
-    page.route(VERIFY_ROUTE, answer)
-    _serve(page, _member_row_page(filter_active=True), f"{PAGE_URL}?tab=interfaces&interfaces_q=eth")
-
-    _verify_member(page)
-
-    expect(page.locator('tr[data-port-id="101"][data-filter-stale="true"]')).to_have_count(1)
-    expect(page.locator('td[data-col="name"] .filter-stale-badge')).to_have_count(1)
-    notice = page.locator(f'#{TABLE}-filter-stale-notice[role="status"]')
-    expect(notice).to_have_count(1)
-    # The verify request carries the page query, so a repainted Rebind posts back to the same view.
-    assert parse_qs(urlsplit(requests[0]).query) == {"tab": ["interfaces"], "interfaces_q": ["eth"]}
-
-    # A second repaint keeps one badge and one notice.
-    _verify_member(page)
-    page.wait_for_function("document.querySelectorAll('.filter-stale-badge').length === 1")
-    expect(notice).to_have_count(1)
-
-
-def test_a_member_repaint_without_a_filter_marks_nothing(page):
-    page.route(
-        VERIFY_ROUTE, lambda route: route.fulfill(status=200, content_type="application/json", body=_formatted_row())
-    )
-    _serve(page, _member_row_page(filter_active=False))
-
-    _verify_member(page)
-
-    expect(page.locator('td[data-col="name"]')).to_have_text("new name")
-    assert page.locator("[data-filter-stale]").count() == 0
-    assert page.locator(f"#{TABLE}-filter-stale-notice").count() == 0
-
-
-def _vlan_modal_page():
-    vlans = json.dumps([{"vid": 100, "type": "U", "group_id": "", "group_name": "Global", "css": "text-danger"}])
-    groups = json.dumps([{"id": "", "name": "Global"}, {"id": "7", "name": "campus"}])
-    return f"""<!doctype html><html><body>
-        <table id="{TABLE}" data-filter-active="true"><tbody>
-          <tr data-port-id="101"><td data-col="name">eth0</td><td data-col="vlans">
-            <span title="VLAN 100(U)"><span class="text-danger">100(U)</span></span><button type="button"
-              class="vlan-edit-btn" data-row-key="101" data-vlans='{vlans}' data-vlan-groups='{groups}'>Edit</button>
-          </td></tr>
-          <tr data-port-id="102"><td data-col="name">eth1</td></tr>
-        </tbody></table>
-        <div class="modal" id="vlanDetailModal" data-current-row-key="101">
-          <table><tbody id="vlanDetailTableBody"><tr><td><select class="vlan-modal-group-select" data-vid="100">
-            <option value="">Global</option><option value="7" selected>campus</option></select></td></tr></tbody></table>
-          <input type="checkbox" id="applyVlanGroupToAll">
-          <button type="button" id="saveVlanGroups">Save</button>
-        </div></body></html>"""
-
-
-def test_a_vlan_group_change_on_a_filtered_row_marks_it_stale(page):
-    _serve(page, _vlan_modal_page())
-    page.evaluate("initializeVlanModalSave()")
-
-    page.click("#saveVlanGroups")
-
-    expect(page.locator('tr[data-port-id="101"][data-filter-stale="true"] .filter-stale-badge')).to_have_count(1)
-    assert page.locator('tr[data-port-id="102"][data-filter-stale]').count() == 0
-    expect(page.locator(f'#{TABLE}-filter-stale-notice[role="status"]')).to_have_count(1)
+def _name_field_selector():
+    return f"""<div id="interface-name-field-selector" data-platform-id="" data-save-pref-url="{SAVE_PREF_URL}">
+          <input type="radio" class="interface-name-field" name="interface_name_field" value="ifDescr" id="if-descr">
+          <input type="radio" class="interface-name-field" name="interface_name_field" value="ifName" id="if-name" checked>
+        </div>"""
 
 
 def _name_field_page():
     return f"""<!doctype html><html><body>
         <input type="hidden" name="csrfmiddlewaretoken" value="token">
-        <div id="interface-name-field-selector" data-platform-id="" data-save-pref-url="{SAVE_PREF_URL}">
-          <input type="radio" class="interface-name-field" name="interface_name_field" value="ifDescr" id="if-descr">
-          <input type="radio" class="interface-name-field" name="interface_name_field" value="ifName" id="if-name" checked>
-        </div></body></html>"""
+        {_name_field_selector()}</body></html>"""
 
 
 def test_a_name_field_change_saves_once_then_loads_the_page_with_the_filters_and_no_page(page):
@@ -315,90 +185,6 @@ def test_a_row_read_without_a_filter_marks_nothing(page):
     assert page.locator("#librenms-ipaddress-table-filter-stale-notice").count() == 0
 
 
-def _vlan_row_page(filter_active):
-    return f"""<!doctype html><html><body>
-        <input type="hidden" name="csrfmiddlewaretoken" value="token">
-        <form><table id="librenms-vlan-table" data-filter-active="{"true" if filter_active else "false"}"><tbody>
-          <tr data-vlan-id="501">
-            <td data-col="vlan_id"><span class="text-danger">501</span></td>
-            <td data-col="name"><span class="text-danger">Users</span></td>
-            <td data-col="vlan_group_selection"><select class="vlan-sync-group-select" name="vlan_group_501"
-                data-vlan-id="501" data-vlan-name="Users">
-              <option value="" selected>Global</option><option value="1">Group A</option></select></td>
-            <td data-col="status">Not in NetBox</td>
-          </tr>
-          <tr data-vlan-id="502"><td data-col="name"><span>Voice</span></td></tr>
-        </tbody></table></form></body></html>"""
-
-
-def _verify_vlan_group(page):
-    page.route(
-        "**/plugins/librenms_plugin/verify-vlan-sync-group/",
-        lambda route: route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps(
-                {
-                    "status": "success",
-                    "css_class": "text-success",
-                    "exists_in_netbox": True,
-                    "name_matches": True,
-                    "status_html": '<span id="group-a-status">Synced</span>',
-                }
-            ),
-        ),
-    )
-    page.evaluate("initializeVlanSyncGroupSelects()")
-    page.locator(".vlan-sync-group-select").select_option("1")
-    page.locator("#group-a-status").wait_for()
-
-
-def test_a_vlan_group_verification_of_a_filtered_vlan_row_marks_it_stale(page):
-    _serve(page, _vlan_row_page(filter_active=True))
-
-    _verify_vlan_group(page)
-
-    expect(page.locator('tr[data-vlan-id="501"][data-filter-stale="true"]')).to_have_count(1)
-    # The badge follows the name text, so the repaint of the name colour still finds the name.
-    expect(page.locator('td[data-col="name"] .filter-stale-badge')).to_have_count(1)
-    expect(page.locator('td[data-col="name"] span').first).to_have_class("text-success")
-    assert page.locator('tr[data-vlan-id="502"][data-filter-stale]').count() == 0
-    expect(page.locator('#librenms-vlan-table-filter-stale-notice[role="status"]')).to_have_count(1)
-
-
-def test_a_vlan_group_verification_without_a_filter_marks_nothing(page):
-    _serve(page, _vlan_row_page(filter_active=False))
-
-    _verify_vlan_group(page)
-
-    assert page.locator("[data-filter-stale]").count() == 0
-    assert page.locator("#librenms-vlan-table-filter-stale-notice").count() == 0
-
-
-def test_apply_to_all_on_a_filtered_table_saves_the_groups_for_the_whole_device(page):
-    saved = []
-
-    def save(route):
-        saved.append(json.loads(route.request.post_data))
-        route.fulfill(status=200, content_type="application/json", body="{}")
-
-    page.route("**/plugins/librenms_plugin/save-vlan-group-overrides/", save)
-    html = _vlan_modal_page().replace(
-        'id="vlanDetailModal" data-current-row-key="101"',
-        'id="vlanDetailModal" data-current-row-key="101" data-current-device-id="1"',
-    )
-    _serve(page, html.replace("<body>", '<body><input type="hidden" name="csrfmiddlewaretoken" value="token">'))
-    page.evaluate("initializeVlanModalSave()")
-
-    page.check("#applyVlanGroupToAll")
-    page.click("#saveVlanGroups")
-
-    # The option covers every page and filter: the server stores the groups for the device, not for the shown rows.
-    page.wait_for_function("document.querySelectorAll('.filter-stale-badge').length === 1")
-    assert saved == [{"device_id": "1", "vid_group_map": {"100": "7"}, "server_key": None}]
-    expect(page.locator('tr[data-port-id="101"][data-filter-stale="true"]')).to_have_count(1)
-
-
 CABLE_TABLE = "librenms-cable-table-vc"
 
 
@@ -521,6 +307,30 @@ def _cable_selection_page(signature, row_ids):
         </form></div></body></html>"""
 
 
+def test_the_selection_follows_the_user_across_filters_and_a_new_name_field_starts_an_empty_one(page):
+    # The server renders one scope for every filter of the tab: only the name field and the ignored toggle change it.
+    _serve(page, _cable_selection_page("interface_name_field=ifName", ["101", "102"]))
+    page.evaluate("initializeCheckboxes()")
+    page.check("#cb-101")
+
+    # Another filter shows other rows: the checked row stays selected, and the notice counts it.
+    _serve(page, _cable_selection_page("interface_name_field=ifName", ["201"]))
+    page.evaluate("initializeCheckboxes()")
+    assert page.evaluate("offPageSelectionKeys(document.getElementById('librenms-cable-table'))") == ["101"]
+    expect(page.locator("#librenms-cable-table-offpage-selection")).to_be_visible()
+
+    # A filter that shows the row again shows it checked.
+    _serve(page, _cable_selection_page("interface_name_field=ifName", ["101", "201"]))
+    page.evaluate("initializeCheckboxes()")
+    expect(page.locator("#cb-101")).to_be_checked()
+
+    # Another name field names other rows, so it starts an empty selection.
+    _serve(page, _cable_selection_page("interface_name_field=ifDescr", ["101"]))
+    page.evaluate("initializeCheckboxes()")
+    expect(page.locator("#cb-101")).not_to_be_checked()
+    assert page.locator("#librenms-cable-table-offpage-selection").count() == 0
+
+
 def test_a_name_field_change_drops_the_cable_selection_from_the_next_bulk_sync(page):
     # The server signs every tab with the name field (sync_filters.filter_sync_table).
     _serve(page, _cable_selection_page("cables_filter_local_port=uplink&interface_name_field=ifName", ["7301"]))
@@ -607,15 +417,12 @@ def test_a_name_field_change_without_a_table_does_not_restore_the_earlier_select
 
 
 def test_apply_clears_the_stale_marks_and_a_later_repaint_marks_again(page):
-    page.route(
-        VERIFY_ROUTE, lambda route: route.fulfill(status=200, content_type="application/json", body=_formatted_row())
-    )
     apply_form = '<form method="get" class="sync-filter-form"><button type="submit" id="apply">Apply</button></form>'
-    html = _member_row_page(filter_active=True).replace("<body>", f"<body>{apply_form}", 1)
-    _serve(page, html, f"{PAGE_URL}?tab=interfaces&interfaces_q=eth")
-    _verify_member(page)
+    html = _cable_row_page(filter_active=True).replace("<body>", f"<body>{apply_form}", 1)
+    _serve(page, html, f"{PAGE_URL}?tab=cables&cables_q=Ethernet1")
+    _verify_cable_member(page)
     expect(page.locator(".filter-stale-badge")).to_have_count(1)
-    expect(page.locator(f"#{TABLE}-filter-stale-notice")).to_have_count(1)
+    expect(page.locator(f"#{CABLE_TABLE}-filter-stale-notice")).to_have_count(1)
 
     # Apply loads the page again: the server chose the rows afresh, so no mark is left.
     with page.expect_navigation():
@@ -623,12 +430,12 @@ def test_apply_clears_the_stale_marks_and_a_later_repaint_marks_again(page):
     _add_page_scripts(page)
     assert page.locator("[data-filter-stale]").count() == 0
     assert page.locator(".filter-stale-badge").count() == 0
-    assert page.locator(f"#{TABLE}-filter-stale-notice").count() == 0
+    assert page.locator(f"#{CABLE_TABLE}-filter-stale-notice").count() == 0
 
-    _verify_member(page)
-    expect(page.locator('tr[data-port-id="101"][data-filter-stale="true"]')).to_have_count(1)
+    _verify_cable_member(page)
+    expect(page.locator('tr[data-interface="row-1"][data-filter-stale="true"]')).to_have_count(1)
     expect(page.locator(".filter-stale-badge")).to_have_count(1)
-    expect(page.locator(f"#{TABLE}-filter-stale-notice")).to_have_count(1)
+    expect(page.locator(f"#{CABLE_TABLE}-filter-stale-notice")).to_have_count(1)
 
 
 TEMPLATES_ROOT = Path(__file__).parents[2] / "templates"
@@ -1143,27 +950,16 @@ def test_back_and_forward_load_the_filter_controls_with_the_results(page):
 
 
 def test_back_loads_the_tabs_again_and_binds_each_control_once(page):
-    vlan_modal = """<div id="vlanDetailModal" data-current-row-key="r1" data-current-device-id="1">
-        <div class="modal-body"></div><table><tbody id="vlanDetailTableBody"><tr><td>
-        <select class="vlan-modal-group-select" data-vid="10"><option value="5" selected>g</option></select>
-        </td></tr></tbody></table><input type="checkbox" id="applyVlanGroupToAll" checked>
-        <button type="button" id="saveVlanGroups">Save</button></div>"""
     saves = []
-    page.route(
-        "**/save-vlan-group-overrides/",
-        lambda route: (
-            saves.append(route.request),
-            route.fulfill(status=200, content_type="application/json", body="{}"),
-        ),
-    )
-    held = _serve_filter_tab(page, extra=vlan_modal)
+    page.route(SAVE_PREF_URL, lambda route: saves.append(route))
+    held = _serve_filter_tab(page, extra=_name_field_selector())
     page.fill("#id_interfaces_q", "eth")
     _answer(_next_request(page, held, 1))
     expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "eth")
 
     page.go_back()
     expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "")
-    page.click("#saveVlanGroups")
+    page.check("#if-descr")
     page.wait_for_timeout(300)
 
     assert len(saves) == 1

@@ -103,13 +103,8 @@ class TestCacheMixinKeyGeneration:
     @pytest.mark.parametrize("server_key", [None, "", "  "])
     def test_every_key_refuses_a_blank_server_key(self, server_key):
         device = make_device(f"cache-key-blank-{len(server_key or '')}-{server_key is None}")
-        mixin = self._mixin()
-        for build in (
-            lambda: mixin.get_cache_key(device, "ports", server_key),
-            lambda: mixin.get_vlan_overrides_key(device, server_key),
-        ):
-            with pytest.raises(ValueError, match="server key"):
-                build()
+        with pytest.raises(ValueError, match="server key"):
+            self._mixin().get_cache_key(device, "ports", server_key)
 
     def test_get_cache_key_includes_server_key(self):
         device = make_device("cache-key-server")
@@ -131,14 +126,6 @@ class TestCacheMixinKeyGeneration:
         second = make_device("cache-key-second")
         mixin = self._mixin()
         assert mixin.get_cache_key(first, "ports", "prod") != mixin.get_cache_key(second, "ports", "prod")
-
-    def test_vlan_overrides_key_is_distinct_and_server_scoped(self):
-        device = make_device("cache-vlan-overrides")
-        mixin = self._mixin()
-        scoped = mixin.get_vlan_overrides_key(device, "prod")
-        assert scoped == f"librenms_vlan_group_overrides_device_{device.pk}_prod"
-        assert scoped != mixin.get_vlan_overrides_key(device, "lab")
-        assert scoped != mixin.get_cache_key(device, "vlans", "prod")
 
 
 class TestRedirectWithServerKey:
