@@ -42,7 +42,7 @@
 <div>
 {% else %}
 {% url 'plugins:netbox_librenms_plugin:sync_device_ip_addresses' object_type=model_name pk=ip_sync.object.pk as ip_sync_url_path %}{% sync_tab_url ip_sync_url_path as ip_sync_url %}
-<form method="post" id="ipaddress-sync-form"
+<form method="post" id="ipaddress-sync-form" data-draft-command="draft"
       action="{{ ip_sync_url }}"
       hx-post="{{ ip_sync_url }}"
       hx-target="#htmx-modal-content"

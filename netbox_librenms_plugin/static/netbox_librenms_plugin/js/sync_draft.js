@@ -17,6 +17,13 @@
  * write at a time in input order, each with the draft revision of the last acknowledgement. A row's choice is a
  * command too, after which the row is read again (a row READ, which is not a navigation). Every request
  * that reads the draft waits for flush(), so it never shows a state from before an input of this page.
+ *
+ * Every element of a tab or its dialogs that posts carries data-draft-command, and that marker alone makes
+ * its request a command of the writer: it waits for flush(), it is the write in flight, and a READ sent
+ * before it is read again after it. The value says what else the command does: "draft" names the user's
+ * draft (a bulk submit claims it), "refresh" answers with new tab content, "action" does neither.
+ * "reload" is the one value that is no command: its element asks its own confirmation, and its answer
+ * reloads the page, where the browser asks first while input is not saved.
  */
 (function () {
     'use strict';
@@ -25,6 +32,7 @@
     const PAGE_URL_HEADER = 'X-Sync-Page-Url';
     const NAVIGATION_LINKS = '#librenms-sync-tabs [data-sync-nav], #librenms-sync-tabs thead th > a[href^="?"]';
     const DRAFT_TABLE = 'table[data-draft-id]';
+    const COMMAND = '[data-draft-command]';
     const ROW_CHECKBOX = 'td input[type="checkbox"][name="select"]';
     const REVISION_HEADER = 'X-Draft-Revision';
     const ROW_READ_EVENT = 'librenms:row-read';
@@ -66,8 +74,9 @@
         failed: false,
         // Another window changed the draft: input waits for the fresh presentation, which this page reads.
         stale: false,
-        // The sync submit that is the command in flight: its form, and whether it claims the draft (the bulk
-        // submit) or acts on one row (a row action).
+        // The command in flight that a tab element posted (data-draft-command): the element, whether the
+        // command claims the draft (a bulk submit), and its request once htmx sends it. The answer's events
+        // name the request: htmx can fire them on the swap target when the answer replaced the element.
         submitting: null,
         waiters: [],
         // The last choice this page sent per row, until a row READ shows the row again.
@@ -559,13 +568,14 @@
         return name !== 'sync_one' && name !== 'create_vrf';
     }
 
-    // A filter request reads the draft, so it waits for the writer. A sync submit (the bulk submit or a row
-    // action) is the writer's command in flight: it waits for the writer and names the draft.
+    // A filter request reads the draft, so it waits for the writer. A command (data-draft-command) waits for
+    // the writer and is then the write in flight.
     document.addEventListener('htmx:confirm', function (event) {
         const elt = event.detail.elt;
-        const draftForm = elt instanceof HTMLFormElement && elt.querySelector(DRAFT_TABLE);
-        const filter = !draftForm && elt.matches?.('.sync-filter-form');
-        if (!draftForm && !filter) return;
+        const command = elt.matches?.(COMMAND) ? elt.dataset.draftCommand : null;
+        if (command === 'reload') return;
+        const filter = !command && elt.matches?.('.sync-filter-form');
+        if (!command && !filter) return;
         let epoch = null;
         if (filter) {
             epoch = filterEpochs.get(event.detail.triggeringEvent);
@@ -586,20 +596,22 @@
         flush().then(() => {
             // A newer navigation started while the filter waited for the writer.
             if (filter && epoch !== navEpoch) return;
-            if (draftForm && writer.stale) {
+            if (command === 'draft' && writer.stale) {
                 // The page waits for the draft that another window changed, so it writes nothing.
                 refuse();
                 return;
             }
-            if (draftForm) {
-                // The submit changes the tab like an input: a READ sent before it is read again after it.
+            if (command) {
+                // The command changes the tab like an input: a READ sent before it is read again after it.
                 bumpInputEpoch();
                 writer.inFlight = true;
-                writer.submitting = { form: elt, claims: isBulkSubmit(event) };
+                writer.submitting = { elt, claims: command === 'draft' && isBulkSubmit(event), xhr: null };
             }
             event.detail.issueRequest(true);
+            // htmx sends a command at once, or drops it (hx-sync, validation) with no event: then it ends here.
+            if (command && writer.submitting?.elt === elt && !writer.submitting.xhr) finishCommand(null, false);
         }, () => {
-            if (draftForm) refuse();
+            if (command) refuse();
             else endNavigation(epoch);
         });
     });
@@ -613,25 +625,43 @@
         filterEpochs.set(event, reserveNavigation(field.form));
     });
 
-    // A claim answers with the revision it left, and the input made during the submit goes with it. A row
-    // action leaves the draft as it is. Each answer asks for the tab's results again (RESULTS_STALE_EVENT).
-    document.addEventListener('htmx:afterRequest', function (event) {
-        const read = reads.get(event.detail.xhr);
-        if (read && !read.rowKey && !read.region) endNavigation(read.navEpoch);
-        if (!writer.submitting || event.detail.elt !== writer.submitting.form) return;
+    /**
+     * End the command in flight when its answer comes: before htmx swaps the answer (so the writer can take a
+     * table that the answer brings), or at the end of a request that swaps nothing.
+     *
+     * A claim answers with the revision it left, and the input made during the submit goes with it. Any
+     * other command leaves the draft as it is. Each answer asks for the tab's results again.
+     *
+     * @param {?XMLHttpRequest} xhr - The command's request; null when htmx sent none.
+     * @param {boolean} succeeded - Whether the answer is a success.
+     * @returns {void}
+     */
+    function finishCommand(xhr, succeeded) {
         const { claims } = writer.submitting;
+        const sent = writer.submitting.xhr !== null;
         writer.submitting = null;
         writer.inFlight = false;
-        const revision = event.detail.successful ? event.detail.xhr.getResponseHeader(REVISION_HEADER) : null;
-        if (claims && revision === null) {
+        const revision = succeeded ? xhr.getResponseHeader(REVISION_HEADER) : null;
+        // A claim that htmx did not send left the draft as it was.
+        if (claims && sent && revision === null) {
             // No claim, or its answer is lost: the input made during the submit cannot go, and the page reads the draft.
             writer.stale = true;
             writer.queue = [];
             readResults();
-        } else if (claims) {
+        } else if (claims && sent) {
             writer.revision = Number(revision);
         }
         pump();
+    }
+
+    function isCommandAnswer(detail) {
+        return writer.submitting !== null && writer.submitting.xhr === detail.xhr;
+    }
+
+    document.addEventListener('htmx:afterRequest', function (event) {
+        const read = reads.get(event.detail.xhr);
+        if (read && !read.rowKey && !read.region) endNavigation(read.navEpoch);
+        if (isCommandAnswer(event.detail)) finishCommand(event.detail.xhr, event.detail.successful);
     });
 
     document.addEventListener(RESULTS_STALE_EVENT, readResults);
@@ -657,7 +687,7 @@
         const elt = event.detail.elt;
         if (elt.id === LOADER_ID) {
             event.detail.path = event.detail.triggeringEvent.detail.url;
-        } else if (elt instanceof HTMLFormElement && elt.querySelector(DRAFT_TABLE) && writer.draftId) {
+        } else if (elt.matches?.('[data-draft-command="draft"]') && writer.draftId) {
             const parameters = event.detail.parameters;
             parameters.set('draft_id', writer.draftId);
             parameters.set('expected_revision', String(writer.revision));
@@ -669,6 +699,8 @@
 
     document.addEventListener('htmx:beforeRequest', function (event) {
         const { elt, xhr } = event.detail;
+        // htmx fires this one on the element that sends the request, before any swap.
+        if (writer.submitting && !writer.submitting.xhr && elt === writer.submitting.elt) writer.submitting.xhr = xhr;
         if (elt.id === LOADER_ID) {
             const { url, history, navEpoch: epoch } = event.detail.requestConfig.triggeringEvent.detail;
             reads.set(xhr, { navEpoch: epoch, inputEpoch, url, history });
@@ -679,8 +711,10 @@
         } else if (elt.matches('tr[data-row-key]') && elt.closest(DRAFT_TABLE)) {
             reads.set(xhr, { navEpoch, inputEpoch, rowKey: elt.dataset.rowKey });
         } else if (draftTable() && event.detail.target?.contains(draftTable())) {
-            // A tab fragment or a data refresh replaces the draft table too; it is sent without a flush.
-            reads.set(xhr, { navEpoch, inputEpoch, region: true, sentIdle: idle() });
+            // A tab fragment or a data refresh replaces the draft table too. A fragment is sent without a flush;
+            // a refresh is a command, which went when the writer had nothing else to do.
+            const command = isCommandAnswer(event.detail);
+            reads.set(xhr, { navEpoch, inputEpoch, region: true, sentIdle: command || idle() });
         }
     });
 
@@ -714,8 +748,11 @@
                 event.detail.shouldSwap = false;
                 if (read.navEpoch === navEpoch) readResults();
             }
-            return;
         }
+        if (isCommandAnswer(event.detail) && event.detail.shouldSwap) {
+            finishCommand(event.detail.xhr, !event.detail.isError);
+        }
+        if (read?.region) return;
         if (!read?.accepted || read.rowKey || event.defaultPrevented || !event.detail.shouldSwap) return;
         writeHistory(pageUrl(read, event.detail.xhr), read.history);
     });
