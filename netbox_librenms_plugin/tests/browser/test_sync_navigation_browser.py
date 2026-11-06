@@ -13,7 +13,15 @@ from urllib.parse import parse_qs, urlsplit
 from playwright.sync_api import expect
 
 from test_sync_cache_browser import TEMPLATE_DIR, _navigation_loader, _serve_page_scripts, _sync_document
-from test_sync_filters_browser import PAGE_URL, TABLE, _answer, _next_request, _serve_filter_tab
+from test_sync_filters_browser import (
+    PAGE_URL,
+    TABLE,
+    _answer,
+    _filter_page,
+    _next_request,
+    _route_query,
+    _serve_filter_tab,
+)
 
 PAGE_PATH = urlsplit(PAGE_URL).path
 TABS = ("interfaces", "cables", "ipaddresses")
@@ -341,3 +349,65 @@ def test_a_tab_switch_during_a_search_wins(page):
 
     assert page.url == f"{PAGE_URL}?tab=cables&server_key=primary"
     expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "")
+
+
+PAGE_TWO = f"{PAGE_URL}?tab=interfaces&server_key=primary&interfaces_page=2"
+
+
+def _hold_page_two(page):
+    """Add a page link to the filter tab, and hold its READ until the test answers it."""
+    page.evaluate(
+        """() => document.getElementById('librenms-sync-tabs').insertAdjacentHTML(
+            'afterbegin',
+            '<a id="go-page-two" data-sync-nav '
+            + 'href="?tab=interfaces&amp;server_key=primary&amp;interfaces_page=2">2</a>')"""
+    )
+    reads = []
+    page.route(PAGE_TWO, lambda route: reads.append(route))
+    return reads
+
+
+def _answer_page(route):
+    route.fulfill(status=200, content_type="text/html", body=_filter_page(_route_query(route)))
+
+
+def test_a_page_answer_that_comes_while_a_search_waits_for_its_delay_does_not_drop_the_search(page):
+    held = _serve_filter_tab(page)
+    reads = _hold_page_two(page)
+    page.click("#go-page-two")
+    for _ in range(100):
+        if reads:
+            break
+        page.wait_for_timeout(20)
+    search = page.locator("#id_interfaces_q")
+
+    # The page answer comes right after the typing, while the search still waits for its delay.
+    search.press_sequentially("eth")
+    _answer_page(reads[0])
+
+    route = _next_request(page, held, 1)
+    assert parse_qs(urlsplit(route.request.url).query)["interfaces_q"] == ["eth"]
+    _answer(route)
+    expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "eth")
+    assert parse_qs(urlsplit(page.url).query)["interfaces_q"] == ["eth"]
+    expect(search).to_have_value("eth")
+
+
+def test_a_navigation_after_the_typing_wins_over_the_search_that_waits_for_its_delay(page):
+    held = _serve_filter_tab(page)
+    reads = _hold_page_two(page)
+
+    page.locator("#id_interfaces_q").press_sequentially("eth")
+    page.click("#go-page-two")
+    # The search's delay ends while the page read waits.
+    page.wait_for_timeout(800)
+    for _ in range(100):
+        if reads:
+            break
+        page.wait_for_timeout(20)
+    _answer_page(reads[0])
+
+    page.wait_for_url(PAGE_TWO)
+    page.wait_for_timeout(300)
+    assert held == []
+    expect(page.locator("#id_interfaces_q")).to_have_value("")
