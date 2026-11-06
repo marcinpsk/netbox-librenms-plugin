@@ -491,6 +491,25 @@ def test_a_filter_keeps_the_draft_and_another_name_field_has_its_own(client, tab
     assert ip_tab(client, tab, interface_name_field="ifDescr").table["data-draft-id"] != draft
 
 
+def test_a_return_to_an_earlier_name_field_does_not_bring_back_its_selection(client, tab):
+    select_ip_rows(client, tab, [CREATE_ROW], interface_name_field="ifName")
+    first = ip_tab(client, tab, interface_name_field="ifName")
+    stale = {"draft_id": first.table["data-draft-id"], "expected_revision": first.table["data-draft-revision"]}
+    ip_tab(client, tab, interface_name_field="ifDescr")
+
+    # Back on ifName, with a filter that does not show the row selected before.
+    back = ip_tab(client, tab, interface_name_field="ifName", ipaddresses_q=MANAGEMENT_ROW.partition("/")[0])
+    assert CREATE_ROW not in back.rows
+    assert back.table["data-draft-id"] != stale["draft_id"]
+    draft = {"draft_id": back.table["data-draft-id"], "expected_revision": back.table["data-draft-revision"]}
+    # A submit of the page from before the change conflicts, and the page's own submit has no rows.
+    _submit(client, tab, stale, interface_name_field="ifName")
+    _submit(client, tab, draft, interface_name_field="ifName")
+
+    assert not IPAddress.objects.filter(address=CREATE_ROW).exists()
+    assert not _checked(ip_tab(client, tab, interface_name_field="ifName"), CREATE_ROW)
+
+
 def test_a_row_read_is_the_row_of_a_page_without_a_server_key(client, seeded):
     """The page query of the sync page names no server; the row read names it, and both render one Create VRF action."""
     owner = seeded("row-read-without-server-key")
@@ -514,12 +533,8 @@ def _stored_draft_record(user, owner):
     from django.core.cache import cache
 
     from netbox_librenms_plugin.selection_draft import draft_key
-    from netbox_librenms_plugin.sync_filters import selection_scope
-    from netbox_librenms_plugin.tests.view_test_helpers import make_request
 
-    request = make_request("get", {"server_key": SERVER_KEY}, user=user)
-    scope = selection_scope(request, owner, SERVER_KEY, "ipaddresses")
-    return cache.get(draft_key(user, owner, "ipaddresses", "ipaddresses", SERVER_KEY, scope))
+    return cache.get(draft_key(user, owner, "ipaddresses", "ipaddresses", SERVER_KEY))
 
 
 def test_a_command_starts_no_draft(client, tab):

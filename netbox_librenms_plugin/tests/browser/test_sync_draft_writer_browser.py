@@ -65,6 +65,8 @@ class _DraftServer:
         self.answers = {}
         # The submit answer names no revision, as after another window's change during the submit.
         self.changed_during_submit = False
+        # False renders the page of a tab without a draft table.
+        self.shows_table = True
         self.errors = []
         page.on("pageerror", lambda error: self.errors.append(str(error)))
         _serve_page_scripts(page)
@@ -207,7 +209,7 @@ class _DraftServer:
               </form>
               <span id="fragment-loader" class="d-none" data-fragment-loader hx-get="{FRAGMENT_URL}"
                     hx-trigger="librenms:load-fragment" hx-target="#ipaddress-sync-content" hx-swap="innerHTML"></span>
-              <div id="ipaddress-sync-content">{self.content()}</div>
+              <div id="ipaddress-sync-content">{self.content() if self.shows_table else ""}</div>
             </div>
             <div id="htmx-modal-content"></div>"""
 
@@ -771,3 +773,74 @@ def test_a_filter_that_another_script_cancels_does_not_hold_back_the_read_of_the
 
     server.wait_until(lambda: any(url.startswith(PAGE_URL) for url in server.reads))
     expect(page.locator("#revision")).to_have_text("6")
+
+
+def test_a_click_on_a_table_that_a_navigation_just_inserted_is_saved(page):
+    server = _DraftServer(page)
+    server.shows_table = False
+    server.open()
+    server.shows_table = True
+    # The click comes after htmx inserted the new table and before htmx settled it.
+    page.evaluate(
+        """() => {
+            document.addEventListener('htmx:afterSettle', () => { window.__settled = true; });
+            document.addEventListener('htmx:afterSwap', () => setTimeout(() => {
+                const box = document.querySelector('tr[data-row-key] input[name="select"]');
+                if (!box || window.__clicked !== undefined) return;
+                window.__clicked = !window.__settled;
+                box.click();
+            }, 0));
+        }"""
+    )
+
+    page.click("#cables-tab")
+
+    page.wait_for_function("window.__clicked !== undefined")
+    assert page.evaluate("window.__clicked") is True
+    server.wait_for_commands(1)
+    assert _assignments(server.commands[0][1]) == {ROWS[0]: "on"}
+    assert server.commands[0][1]["draft_id"] == "draft-1"
+    assert server.checked == {ROWS[0]}
+
+
+def test_a_click_on_a_table_whose_draft_the_writer_did_not_take_reads_the_tab_and_says_so(page):
+    server = _DraftServer(page)
+    server.open()
+    # A copy of the table that no READ installed, so the writer did not take it.
+    page.evaluate(
+        """() => {
+            const content = document.getElementById('ipaddress-sync-content');
+            content.innerHTML = content.innerHTML;
+        }"""
+    )
+
+    _box(page, ROWS[0]).click()
+
+    expect(page.locator("#librenms-draft-notice")).to_be_visible()
+    server.wait_until(lambda: any(url.startswith(PAGE_URL) for url in server.reads))
+    expect(page.locator("#revision")).to_have_text("5")
+    expect(_box(page, ROWS[0])).not_to_be_checked()
+    page.wait_for_timeout(300)
+    assert server.commands == []
+
+
+def test_a_page_that_back_restores_from_the_cache_reads_the_draft_again(bfcache_page):
+    page = bfcache_page
+    server = _DraftServer(page)
+    server.open()
+    other_page = "https://plugin.example.com/dcim/devices/1/"
+    page.route(other_page, lambda route: route.fulfill(status=200, content_type="text/html", body="<p>Device</p>"))
+    page.evaluate("window.__kept = true")
+    page.goto(other_page)
+    # Another window selects a row while this page is in the cache.
+    server.checked.add(ROWS[2])
+    server.change_elsewhere()
+
+    page.go_back(wait_until="commit")
+
+    # The browser restored the document itself, not a new load of it.
+    page.wait_for_function("window.__kept === true")
+    server.wait_until(lambda: any(url.startswith(PAGE_URL) for url in server.reads))
+    expect(page.locator("#revision")).to_have_text("6")
+    expect(_box(page, ROWS[2])).to_be_checked()
+    assert page.url == f"{PAGE_URL}?tab=ipaddresses"
