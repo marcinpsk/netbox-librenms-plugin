@@ -9,20 +9,21 @@
  * before its delay; so a filter that a later navigation replaced never goes, and an earlier navigation never
  * replaces it. The answer of a filter still shows while only later filters of its form came after it.
  * A response is accepted only while its navigation is the current one and no input came after it was
- * sent; a later input drops it and starts one new READ of its page URL after flush().
+ * sent; a later input drops it and starts one new READ of its page URL.
  * This script is the only writer of the page's browser history, and it handles every popstate itself.
  *
  * A converted table (table[data-draft-id]) keeps its selection in the user's draft on the server. A
- * checkbox paints at once; the writer sends the new row states in one batch per 100 ms of input, and one
- * write at a time in input order, each with the draft revision of the last acknowledgement. A row's choice is a
- * command too, after which the row is read again (a row READ, which is not a navigation). Every request
- * that reads the draft waits for flush(), so it never shows a state from before an input of this page.
+ * checkbox paints at once; the writer sends the new row states in one batch per 100 ms of input, each
+ * write with the draft revision of the last acknowledgement. A row's choice is a write too, after which
+ * the row is read again (a row READ, which is not a navigation).
  *
  * Every element of a tab or its dialogs that posts carries data-draft-command, and that marker alone makes
- * its request a command of the writer: it waits for flush(), it is the write in flight, and a READ sent
- * before it is read again after it. The value says what else the command does: "draft" names the user's
+ * its request a command of the writer. The value says what else the command does: "draft" names the user's
  * draft (a bulk submit claims it), "refresh" answers with new tab content, "action" does neither. An
- * element with hx-confirm asks first: its command starts when the user confirms.
+ * element with hx-confirm asks first: its command is admitted when the user confirms.
+ *
+ * Every operation runs in ONE queue, one at a time in admission order (see admit()): the writes, the
+ * commands and the READs. So a READ never shows a state from before an operation admitted ahead of it.
  */
 (function () {
     'use strict';
@@ -40,10 +41,14 @@
     const NOTICE_ID = 'librenms-draft-notice';
     const BATCH_DELAY_MS = 100;
     const CONFLICT_NOTICE_MS = 10000;
+    // The operations that write the draft with a fetch: a batch of row states, and a choice or Set Primary IP.
+    const WRITES = new Set(['batch', 'write']);
+    // The READs that a newer navigation replaces while they wait in the queue.
+    const SUPERSEDED_READS = new Set(['navigation', 'filter', 'row']);
 
     let navEpoch = 0;
     let inputEpoch = 0;
-    // The navigation that waits for the writer or for its READ; it shows the draft, so nothing else reads it.
+    // The navigation that waits in the queue or for its READ; it shows the draft, so nothing else reads it.
     let pendingNav = null;
     // The filter form whose request is pendingNav: htmx drops a queued request of a removed form with no event.
     let pendingForm = null;
@@ -64,55 +69,116 @@
         draftId: null,
         revision: null,
         urls: {},
-        // The writes that wait, in input order: batches of row states ({batch}, by row key) and commands.
-        // Input after a command starts a new batch, so no write overtakes an older one.
+        // The operations that wait, in admission order; see admit().
         queue: [],
-        inFlight: false,
+        // The operation that runs now. A write or a command runs until its answer; a READ ends when it is sent.
+        running: null,
         timer: null,
-        // A write failed: the input stays here, and nothing reads the draft until a retry succeeds.
+        // A write failed: it waits at the head of the queue for a retry, and nothing else runs.
         failed: false,
         // Another window changed the draft: input waits for the fresh presentation, which this page reads.
         stale: false,
-        // The command in flight that a tab element posted (data-draft-command): the element, whether the
-        // command claims the draft (a bulk submit), and its request once htmx sends it. The answer's events
-        // name the request: htmx can fire them on the swap target when the answer replaced the element.
-        submitting: null,
-        waiters: [],
         // The last choice this page sent per row, until a row READ shows the row again.
         choices: new Map(),
-        // The rows to read again once the writer is idle.
-        rowReads: new Set(),
     };
 
     function idle() {
-        return !writer.queue.length && !writer.inFlight;
+        return !writer.queue.length && !writer.running;
+    }
+
+    // An operation that changes the draft or NetBox: a write, or a command.
+    function writes(op) {
+        return WRITES.has(op.kind) || op.kind === 'command';
+    }
+
+    // Whether a write or a command waits or runs: then a table on the page can be older than the draft.
+    function writesPending() {
+        return writer.queue.some(writes) || Boolean(writer.running && writes(writer.running));
     }
 
     /**
-     * Wait until the selection draft has acknowledged every input of this page.
+     * Admit one operation at the end of the queue, and run the queue.
      *
-     * A failed write is tried again here, and a new failure rejects: the page keeps the failure notice.
-     * After a conflict (another window changed the draft) it resolves once the writer is idle, because the
-     * page must read the draft again; a navigation that waits is that READ.
+     * The kinds: "batch" (row states), "write" (a choice or Set Primary IP), "command" (a marked element's
+     * request), "navigation" (a READ of the loader), "filter" (a filter request that waits for its turn),
+     * "row" (a row READ) and "turn" (flush()). The supersession rules are these, and only these: a newer
+     * navigation removes the queued navigations, filters and row READs (reserveNavigation()); row states join
+     * only the batch at the tail of the queue (tailBatch()); a choice replaces only a choice of its row at the
+     * tail (enqueue()); a failed write drops every queued operation that is not a write (failure()); a
+     * conflict drops the queued writes (conflict()).
+     *
+     * @param {Object} op - The operation: its kind, run(op) that calls done(op) when it ends, and drop(error).
+     * @returns {void}
+     */
+    function admit(op) {
+        if (!WRITES.has(op.kind) && writer.failed) {
+            // An operation that is not input tries the failed write again first.
+            writer.failed = false;
+            hideNotice();
+        }
+        writer.queue.push(op);
+        pump();
+    }
+
+    /**
+     * Start the operation at the head of the queue when nothing runs. The newest batch waits for the batch
+     * time while nothing waits behind it.
+     *
+     * @returns {void}
+     */
+    function pump() {
+        if (writer.running || writer.failed) return;
+        const next = writer.queue[0];
+        if (!next) return;
+        if (next.kind === 'batch' && writer.queue.length === 1 && writer.timer !== null) return;
+        writer.queue.shift();
+        if (next.kind === 'batch') {
+            clearTimeout(writer.timer);
+            writer.timer = null;
+        }
+        // An operation that writes changes what the tab shows: a READ sent before it is read again after it.
+        if (writes(next)) bumpInputEpoch();
+        writer.running = next;
+        next.run(next);
+    }
+
+    /**
+     * End the running operation *op*, and start the next one after the current task: htmx ends a request
+     * (and lets its element send again) only when its answer's handlers return.
+     *
+     * @param {Object} op - The operation that ended.
+     * @returns {void}
+     */
+    function done(op) {
+        if (writer.running !== op) return;
+        writer.running = null;
+        queueMicrotask(pump);
+    }
+
+    function dropQueued(test, error) {
+        const dropped = writer.queue.filter(test);
+        writer.queue = writer.queue.filter((op) => !test(op));
+        dropped.forEach((op) => op.drop?.(error));
+    }
+
+    /**
+     * Wait for this page's turn in the queue: every operation admitted before has ended.
+     *
+     * A failed write is tried again first, and a new failure rejects: the page keeps the failure notice.
      *
      * @returns {Promise<?number>} The last acknowledged draft revision: null while the page has no draft table.
      */
     function flush() {
         return new Promise((resolve, reject) => {
-            writer.waiters.push({ resolve, reject });
-            if (writer.failed) {
-                writer.failed = false;
-                hideNotice();
-            }
-            clearTimeout(writer.timer);
-            writer.timer = null;
-            pump();
+            admit({
+                kind: 'turn',
+                run: (op) => {
+                    resolve(writer.revision);
+                    done(op);
+                },
+                drop: reject,
+            });
         });
-    }
-
-    function settleWaiters(error) {
-        const waiters = writer.waiters.splice(0);
-        waiters.forEach((waiter) => (error ? waiter.reject(error) : waiter.resolve(writer.revision)));
     }
 
     /**
@@ -125,22 +191,32 @@
     }
 
     /**
-     * Show the sync page at *url* in the sync tabs, after flush().
+     * Show the sync page at *url* in the sync tabs, when its turn in the queue comes.
      *
      * @param {string} url - A URL of the sync page.
      * @param {'push'|'replace'|'none'} history - How an accepted response enters the browser history.
-     * @returns {Promise<void>} Resolves when the READ is sent, or when a newer navigation or a refused flush stops it.
+     * @returns {Promise<void>} Resolves when the READ is sent, or when a newer navigation or a failed write stops it.
      */
     function navigate(url, history) {
         const epoch = reserveNavigation();
         const target = new URL(url, window.location.href).href;
         destination = target;
-        return flush().then(() => {
-            if (epoch !== navEpoch) return;
-            document.getElementById(LOADER_ID).dispatchEvent(
-                new CustomEvent('librenms:navigate', { detail: { url: target, history, navEpoch: epoch } })
-            );
-        }, () => endNavigation(epoch));
+        return new Promise((resolve) => {
+            admit({
+                kind: 'navigation',
+                run: (op) => {
+                    document.getElementById(LOADER_ID).dispatchEvent(
+                        new CustomEvent('librenms:navigate', { detail: { url: target, history, navEpoch: epoch } })
+                    );
+                    resolve();
+                    done(op);
+                },
+                drop: (error) => {
+                    if (error) endNavigation(epoch);
+                    resolve();
+                },
+            });
+        });
     }
 
     // A navigation takes its identity when the user starts it, so a later one wins also while both wait.
@@ -149,6 +225,7 @@
         if (!form || filterRun?.form !== form) filterRun = form ? { form, first: navEpoch } : null;
         pendingNav = navEpoch;
         pendingForm = form;
+        dropQueued((op) => SUPERSEDED_READS.has(op.kind), null);
         return navEpoch;
     }
 
@@ -218,15 +295,16 @@
     /**
      * Take the draft of a new presentation of the draft table: its draft ID, revision and command URLs.
      *
-     * Only an idle writer takes it: an accepted READ was sent after flush() and no input came after it. A
-     * table the writer took before keeps the writer's own revision, which later acknowledgements moved on.
-     * The writer never goes back to an older revision of its draft: it keeps its own and reads the tab again.
+     * Only a writer with no write pending takes it: an accepted READ was sent after every write admitted
+     * before it, and no input came after it. A table the writer took before keeps the writer's own
+     * revision, which later acknowledgements moved on. The writer never goes back to an older revision of
+     * its draft: it keeps its own and reads the tab again.
      *
      * @returns {void}
      */
     function adoptPresentation() {
         const table = draftTable();
-        if (!table || table === writer.table || !idle()) return;
+        if (!table || table === writer.table || writesPending()) return;
         const revision = Number(table.dataset.draftRevision);
         // A table of an older revision of this draft shows rows that a later command changed: read the tab again.
         const older = table.dataset.draftId === writer.draftId && revision < writer.revision;
@@ -250,18 +328,22 @@
     }
 
     /**
-     * Read one row of the draft table again, once the writer is idle; a row on no shown page is not read.
+     * Read one row of the draft table again, when its turn comes; a row on no shown page is not read.
      *
      * @param {string} key - The row key.
      * @returns {void}
      */
     function readRow(key) {
-        writer.rowReads.add(key);
-        flush().then(() => {
-            // After a conflict the page reads the whole table again.
-            if (!writer.rowReads.delete(key) || writer.stale) return;
-            rowByKey(key)?.dispatchEvent(new CustomEvent(ROW_READ_EVENT));
-        }, () => writer.rowReads.delete(key));
+        if (writer.queue.some((op) => op.kind === 'row' && op.key === key)) return;
+        admit({
+            kind: 'row',
+            key,
+            run: (op) => {
+                // After a conflict the page reads the whole table again.
+                if (!writer.stale) rowByKey(key)?.dispatchEvent(new CustomEvent(ROW_READ_EVENT));
+                done(op);
+            },
+        });
     }
 
     // A navigation that waits shows the draft with its own history entry, so it is the fresh READ.
@@ -280,41 +362,14 @@
         }
     }
 
-    /**
-     * Send the oldest write. The newest batch waits for the batch time, unless a READ waits for it.
-     *
-     * @returns {void}
-     */
-    function pump() {
-        if (writer.inFlight || writer.failed || writer.stale) {
-            if (writer.stale && idle()) settleWaiters();
-            return;
-        }
-        const next = writer.queue[0];
-        if (!next) {
-            settleWaiters();
-            return;
-        }
-        if (next.batch && writer.queue.length === 1 && writer.timer !== null && !writer.waiters.length) return;
-        writer.queue.shift();
-        if (next.batch) {
-            send({
-                url: writer.urls.selection,
-                fields: { assignments: JSON.stringify(Object.fromEntries(next.batch)) },
-                batch: next.batch,
-            });
-        } else {
-            send(next);
-        }
-    }
-
-    function send(command) {
+    // Run a write: post it with the draft and the revision of the last acknowledgement, and end at its answer.
+    function sendWrite(op) {
+        const fields = op.kind === 'batch' ? { assignments: JSON.stringify(Object.fromEntries(op.rows)) } : op.fields;
         const body = new FormData();
         body.set('draft_id', writer.draftId);
         body.set('expected_revision', String(writer.revision));
-        Object.entries(command.fields).forEach(([name, value]) => body.set(name, value));
-        writer.inFlight = true;
-        fetch(command.url, {
+        Object.entries(fields).forEach(([name, value]) => body.set(name, value));
+        fetch(op.kind === 'batch' ? writer.urls.selection : op.url, {
             method: 'POST',
             body,
             credentials: 'same-origin',
@@ -322,20 +377,17 @@
         })
             .then((response) => {
                 if (response.status === 204) {
-                    acknowledge(command, response);
+                    acknowledge(response);
                 } else if (response.status === 409) {
                     conflict();
                 } else {
-                    failure(command);
+                    failure(op);
                 }
-            }, () => failure(command))
-            .finally(() => {
-                writer.inFlight = false;
-                pump();
-            });
+            }, () => failure(op))
+            .finally(() => done(op));
     }
 
-    function acknowledge(command, response) {
+    function acknowledge(response) {
         writer.revision = Number(response.headers.get(REVISION_HEADER));
         let events = {};
         try {
@@ -350,24 +402,24 @@
     /**
      * Another window changed the draft: drop this page's unsent input and show the draft again.
      *
-     * The flushes that wait resolve when the write in flight ends, so a navigation that waits is the READ.
+     * The operations that wait run after the write in flight ends, so a navigation that waits is the READ.
      *
      * @returns {void}
      */
     function conflict() {
         writer.stale = true;
-        writer.queue = [];
+        dropQueued((op) => WRITES.has(op.kind), null);
         clearTimeout(writer.timer);
         writer.timer = null;
         showNotice('The selection changed in another window. The tab now shows it; select again.', null);
         readResults();
     }
 
-    function failure(command) {
+    function failure(op) {
         // The write goes first again at the retry; a newer state of a row that the user set meanwhile goes after it.
-        writer.queue.unshift(command.batch ? { batch: command.batch } : command);
+        writer.queue.unshift(op);
         writer.failed = true;
-        settleWaiters(new Error('The selection is not saved.'));
+        dropQueued((other) => !WRITES.has(other.kind), new Error('The selection is not saved.'));
         showNotice('The selection is not saved, so the tab cannot change until it is.', retry);
     }
 
@@ -406,13 +458,13 @@
         document.getElementById(NOTICE_ID)?.remove();
     }
 
-    // Input joins the newest batch; after a command it starts a new batch, which goes after that command.
+    // Input joins the batch at the tail; behind any other operation it starts a new batch, which goes after it.
     function tailBatch() {
         const tail = writer.queue.at(-1);
-        if (tail?.batch) return tail.batch;
-        const batch = new Map();
-        writer.queue.push({ batch });
-        return batch;
+        if (tail?.kind === 'batch') return tail.rows;
+        const batch = { kind: 'batch', rows: new Map(), run: sendWrite };
+        writer.queue.push(batch);
+        return batch.rows;
     }
 
     function setRowState(checkbox) {
@@ -473,20 +525,18 @@
         bumpInputEpoch();
         boxes.forEach(setRowState);
         schedule();
-        // A READ that waits for the writer gets the input at once.
-        if (writer.waiters.length) pump();
+        pump();
     }
 
-    function enqueue(command) {
+    function enqueue(write) {
         bumpInputEpoch();
-        // A choice of the same row that is the last queued write is replaced: the last choice is the one that counts.
+        // A choice of the same row that is the last queued operation is replaced: the last choice counts.
         const tail = writer.queue.at(-1);
-        if (command.row && tail?.row === command.row) {
-            tail.fields = command.fields;
-        } else {
-            writer.queue.push(command);
+        if (write.row && tail?.kind === 'write' && tail.row === write.row) {
+            tail.fields = write.fields;
+            return;
         }
-        pump();
+        admit({ kind: 'write', ...write, run: sendWrite });
     }
 
     document.addEventListener('change', function (event) {
@@ -539,25 +589,27 @@
     });
 
     // The unload carries the row states that no batch carries yet; the server takes them only for this revision.
-    // A command that waits is lost with the page (the unload prompt asks), so the rows go without it.
+    // A write or command that waits is lost with the page (the unload prompt asks), so the rows go without it.
     window.addEventListener('pagehide', function () {
         if (writer.stale || !writer.urls.selection) return;
         const rows = new Map();
-        writer.queue.forEach((write) => write.batch?.forEach((state, key) => rows.set(key, state)));
+        writer.queue.forEach((op) => op.kind === 'batch' && op.rows.forEach((state, key) => rows.set(key, state)));
         if (!rows.size) return;
+        const running = writer.running;
         const body = new FormData();
         body.set('csrfmiddlewaretoken', csrfToken());
         body.set('draft_id', writer.draftId);
-        // A command in flight takes the next revision when it commits.
-        body.set('expected_revision', String(writer.revision + (writer.inFlight ? 1 : 0)));
+        // A write or a claim in flight takes the next revision when it commits.
+        const nextRevision = running && (WRITES.has(running.kind) || running.claims);
+        body.set('expected_revision', String(writer.revision + (nextRevision ? 1 : 0)));
         body.set('assignments', JSON.stringify(Object.fromEntries(rows)));
         navigator.sendBeacon(writer.urls.selection, body);
-        writer.queue = writer.queue.filter((write) => !write.batch);
+        writer.queue = writer.queue.filter((op) => op.kind !== 'batch');
     });
 
     // A write that no answer acknowledged yet could be lost with the page, so the browser asks first.
     window.addEventListener('beforeunload', function (event) {
-        if (idle()) return;
+        if (!writesPending()) return;
         event.preventDefault();
         event.returnValue = '';
     });
@@ -568,35 +620,44 @@
     }
 
     /**
-     * Run one command of a tab element: wait for the writer, then send it as the write in flight.
+     * Admit one command of a marked element; it sends its request when its turn comes.
+     *
+     * The command keeps the path and the submit button of its start: htmx posts the button that the user
+     * clicked last, which can be another one by the time the command runs.
      *
      * @param {CustomEvent} event - The element's htmx:confirm event.
      * @param {string} command - The element's data-draft-command value.
      * @param {function(boolean): void} issue - The htmx function that sends the request.
      * @returns {void}
      */
-    function runCommand(event, command, issue) {
+    function admitCommand(event, command, issue) {
         const elt = event.detail.elt;
         // No request goes, so the page treats it as a request without an answer: the submit button works again.
         const refuse = () => elt.dispatchEvent(new CustomEvent('librenmsRequestFailed', { bubbles: true, detail: { elt } }));
-        flush().then(() => {
-            if (command === 'draft' && writer.stale) {
-                // The page waits for the draft that another window changed, so it writes nothing.
-                refuse();
-                return;
-            }
-            // The command changes the tab like an input: a READ sent before it is read again after it.
-            bumpInputEpoch();
-            writer.inFlight = true;
-            writer.submitting = { elt, claims: command === 'draft' && isBulkSubmit(event), xhr: null };
-            issue(true);
-            // htmx sends a command at once, or drops it (hx-sync, validation) with no event: then it ends here.
-            if (writer.submitting?.elt === elt && !writer.submitting.xhr) finishCommand(null, false);
-        }, refuse);
+        const submitter = event.detail.triggeringEvent?.submitter;
+        admit({
+            kind: 'command',
+            elt,
+            claims: command === 'draft' && isBulkSubmit(event),
+            path: event.detail.path,
+            submitter: submitter?.name ? { name: submitter.name, value: submitter.value } : null,
+            xhr: null,
+            run: (op) => {
+                if (command === 'draft' && writer.stale) {
+                    // The page waits for the draft that another window changed, so it writes nothing.
+                    refuse();
+                    done(op);
+                    return;
+                }
+                issue(true);
+                // htmx sends a command at once, or drops it (hx-sync, validation) with no event: then it ends here.
+                if (!op.xhr) finishCommand(op, null, false);
+            },
+            drop: refuse,
+        });
     }
 
-    // A command (data-draft-command) waits for the writer and is then the write in flight. A filter request
-    // reads the draft, so it waits for the writer too.
+    // A command (data-draft-command) and a filter request take their turn in the queue.
     document.addEventListener('htmx:confirm', function (event) {
         const elt = event.detail.elt;
         const command = elt.matches?.(COMMAND) ? elt.dataset.draftCommand : null;
@@ -604,11 +665,11 @@
             const issue = event.detail.issueRequest;
             if (event.detail.question) {
                 // The page's confirmation dialog asks first and then calls detail.issueRequest: the command
-                // starts only after the user confirmed.
-                event.detail.issueRequest = () => runCommand(event, command, issue);
+                // is admitted only after the user confirmed.
+                event.detail.issueRequest = () => admitCommand(event, command, issue);
             } else {
                 event.preventDefault();
-                runCommand(event, command, issue);
+                admitCommand(event, command, issue);
             }
             return;
         }
@@ -625,10 +686,16 @@
         }
         if (idle() && !writer.failed) return;
         event.preventDefault();
-        flush().then(() => {
-            // A newer navigation started while the filter waited for the writer.
-            if (epoch === navEpoch) event.detail.issueRequest(true);
-        }, () => endNavigation(epoch));
+        admit({
+            kind: 'filter',
+            run: (op) => {
+                event.detail.issueRequest(true);
+                done(op);
+            },
+            drop: (error) => {
+                if (error) endNavigation(epoch);
+            },
+        });
     });
 
     // A search takes its identity when the user types, before the search delay: a navigation sent before then
@@ -641,42 +708,39 @@
     });
 
     /**
-     * End the command in flight when its answer comes: before htmx swaps the answer (so the writer can take a
+     * End the command *op* when its answer comes: before htmx swaps the answer (so the writer can take a
      * table that the answer brings), or at the end of a request that swaps nothing.
      *
      * A claim answers with the revision it left, and the input made during the submit goes with it. Any
      * other command leaves the draft as it is. Each answer asks for the tab's results again.
      *
+     * @param {Object} op - The running command.
      * @param {?XMLHttpRequest} xhr - The command's request; null when htmx sent none.
      * @param {boolean} succeeded - Whether the answer is a success.
      * @returns {void}
      */
-    function finishCommand(xhr, succeeded) {
-        const { claims } = writer.submitting;
-        const sent = writer.submitting.xhr !== null;
-        writer.submitting = null;
-        writer.inFlight = false;
+    function finishCommand(op, xhr, succeeded) {
         const revision = succeeded ? xhr.getResponseHeader(REVISION_HEADER) : null;
         // A claim that htmx did not send left the draft as it was.
-        if (claims && sent && revision === null) {
+        if (op.claims && op.xhr && revision === null) {
             // No claim, or its answer is lost: the input made during the submit cannot go, and the page reads the draft.
             writer.stale = true;
-            writer.queue = [];
+            dropQueued((other) => WRITES.has(other.kind), null);
             readResults();
-        } else if (claims && sent) {
+        } else if (op.claims && op.xhr) {
             writer.revision = Number(revision);
         }
-        pump();
+        done(op);
     }
 
     function isCommandAnswer(detail) {
-        return writer.submitting !== null && writer.submitting.xhr === detail.xhr;
+        return writer.running?.kind === 'command' && writer.running.xhr === detail.xhr;
     }
 
     document.addEventListener('htmx:afterRequest', function (event) {
         const read = reads.get(event.detail.xhr);
         if (read && !read.rowKey && !read.region) endNavigation(read.navEpoch);
-        if (isCommandAnswer(event.detail)) finishCommand(event.detail.xhr, event.detail.successful);
+        if (isCommandAnswer(event.detail)) finishCommand(writer.running, event.detail.xhr, event.detail.successful);
     });
 
     document.addEventListener(RESULTS_STALE_EVENT, readResults);
@@ -700,10 +764,21 @@
 
     document.addEventListener('htmx:configRequest', function (event) {
         const elt = event.detail.elt;
+        const parameters = event.detail.parameters;
+        const op = writer.running;
         if (elt.id === LOADER_ID) {
             event.detail.path = event.detail.triggeringEvent.detail.url;
-        } else if (elt.matches?.('[data-draft-command="draft"]') && writer.draftId) {
-            const parameters = event.detail.parameters;
+            return;
+        }
+        if (op?.kind === 'command' && op.elt === elt && elt instanceof HTMLFormElement) {
+            // htmx posts the button that the user clicked last; the command posts the one that started it.
+            event.detail.path = op.path;
+            Array.from(elt.elements).forEach((control) => {
+                if (control.type === 'submit' && control.name) parameters.delete(control.name);
+            });
+            if (op.submitter) parameters.set(op.submitter.name, op.submitter.value);
+        }
+        if (elt.matches?.('[data-draft-command="draft"]') && writer.draftId) {
             parameters.set('draft_id', writer.draftId);
             parameters.set('expected_revision', String(writer.revision));
             // A row action syncs the row that the page shows: its evidence names the row's state and VRF.
@@ -714,8 +789,9 @@
 
     document.addEventListener('htmx:beforeRequest', function (event) {
         const { elt, xhr } = event.detail;
+        const op = writer.running;
         // htmx fires this one on the element that sends the request, before any swap.
-        if (writer.submitting && !writer.submitting.xhr && elt === writer.submitting.elt) writer.submitting.xhr = xhr;
+        if (op?.kind === 'command' && !op.xhr && elt === op.elt) op.xhr = xhr;
         if (elt.id === LOADER_ID) {
             const { url, history, navEpoch: epoch } = event.detail.requestConfig.triggeringEvent.detail;
             reads.set(xhr, { navEpoch: epoch, inputEpoch, url, history });
@@ -726,10 +802,10 @@
         } else if (elt.matches('tr[data-row-key]') && elt.closest(DRAFT_TABLE)) {
             reads.set(xhr, { navEpoch, inputEpoch, rowKey: elt.dataset.rowKey });
         } else if (draftTable() && event.detail.target?.contains(draftTable())) {
-            // A tab fragment or a data refresh replaces the draft table too. A fragment is sent without a flush;
-            // a refresh is a command, which went when the writer had nothing else to do.
+            // A tab fragment or a data refresh replaces the draft table too. A fragment is sent outside the
+            // queue; a refresh is a command, which runs when nothing else does.
             const command = isCommandAnswer(event.detail);
-            reads.set(xhr, { navEpoch, inputEpoch, region: true, sentIdle: command || idle() });
+            reads.set(xhr, { navEpoch, inputEpoch, region: true, sentIdle: command || !writesPending() });
         }
     });
 
@@ -765,7 +841,7 @@
             }
         }
         if (isCommandAnswer(event.detail) && event.detail.shouldSwap) {
-            finishCommand(event.detail.xhr, !event.detail.isError);
+            finishCommand(writer.running, event.detail.xhr, !event.detail.isError);
         }
         if (read?.region) return;
         if (!read?.accepted || read.rowKey || event.defaultPrevented || !event.detail.shouldSwap) return;
