@@ -33,6 +33,8 @@
 
     let navEpoch = 0;
     let inputEpoch = 0;
+    // The navigation that waits for the writer or for its READ; it shows the draft, so nothing else reads it.
+    let pendingNav = null;
     // The page URL that the last navigation shows, or will show when its READ is accepted.
     let destination = window.location.href;
     // The navigation and input epochs at which each READ was sent, by its XMLHttpRequest.
@@ -111,8 +113,7 @@
      * @returns {Promise<void>} Resolves when the READ is sent, or when a newer navigation or a refused flush stops it.
      */
     function navigate(url, history) {
-        navEpoch += 1;
-        const epoch = navEpoch;
+        const epoch = reserveNavigation();
         const target = new URL(url, window.location.href).href;
         destination = target;
         return flush().then(() => {
@@ -120,7 +121,18 @@
             document.getElementById(LOADER_ID).dispatchEvent(
                 new CustomEvent('librenms:navigate', { detail: { url: target, history, navEpoch: epoch } })
             );
-        }, () => {});
+        }, () => endNavigation(epoch));
+    }
+
+    // A navigation takes its identity when the user starts it, so a later one wins also while both wait.
+    function reserveNavigation() {
+        navEpoch += 1;
+        pendingNav = navEpoch;
+        return navEpoch;
+    }
+
+    function endNavigation(epoch) {
+        if (pendingNav === epoch) pendingNav = null;
     }
 
     function writeHistory(url, history) {
@@ -217,7 +229,9 @@
         }, () => writer.rowReads.delete(key));
     }
 
+    // A navigation that waits shows the draft with its own history entry, so it is the fresh READ.
     function readResults() {
+        if (pendingNav !== null) return;
         navigate(destination, 'replace');
     }
 
@@ -459,7 +473,7 @@
 
     // A command that no answer acknowledged yet could be lost with the page, so the browser asks first.
     window.addEventListener('beforeunload', function (event) {
-        if (!writer.inFlight && !writer.commands.length) return;
+        if (!writer.dirty.size && !writer.inFlight && !writer.commands.length) return;
         event.preventDefault();
         event.returnValue = '';
     });
@@ -479,7 +493,13 @@
         event.preventDefault();
         // No request goes, so the page treats it as a request without an answer: the submit button works again.
         const refuse = () => elt.dispatchEvent(new CustomEvent('librenmsRequestFailed', { bubbles: true, detail: { elt } }));
+        const epoch = draftForm ? null : reserveNavigation();
         flush().then(() => {
+            if (epoch !== null) {
+                // A newer navigation started while the filter waited for the writer.
+                if (epoch !== navEpoch) return;
+                elt._lnmsNavEpoch = epoch;
+            }
             if (draftForm && writer.stale) {
                 // The page waits for the draft that another window changed, so it writes nothing.
                 refuse();
@@ -492,11 +512,14 @@
             event.detail.issueRequest(true);
         }, () => {
             if (draftForm) refuse();
+            else endNavigation(epoch);
         });
     });
 
     // The claim answers with the revision it left, and the input made during the submit goes with it.
     document.addEventListener('htmx:afterRequest', function (event) {
+        const read = reads.get(event.detail.xhr);
+        if (read && !read.rowKey && !read.region) endNavigation(read.navEpoch);
         if (!writer.submitting || event.detail.elt !== writer.submitting) return;
         writer.submitting = null;
         writer.inFlight = false;
@@ -552,9 +575,10 @@
             const { url, history, navEpoch: epoch } = event.detail.requestConfig.triggeringEvent.detail;
             reads.set(xhr, { navEpoch: epoch, inputEpoch, url, history });
         } else if (elt.matches('.sync-filter-form')) {
-            // A filter request that htmx sends, also one it queued, is the newest navigation.
-            navEpoch += 1;
-            reads.set(xhr, { navEpoch, inputEpoch, url: null, history: 'push' });
+            // A filter that waited for the writer keeps the identity of its start; any other is the newest navigation.
+            const epoch = elt._lnmsNavEpoch ?? reserveNavigation();
+            delete elt._lnmsNavEpoch;
+            reads.set(xhr, { navEpoch: epoch, inputEpoch, url: null, history: 'push' });
         } else if (elt.matches('tr[data-row-key]') && elt.closest(DRAFT_TABLE)) {
             reads.set(xhr, { navEpoch, inputEpoch, rowKey: elt.dataset.rowKey });
         } else if (draftTable() && event.detail.target?.contains(draftTable())) {

@@ -27,6 +27,7 @@ ROW_URL = "https://plugin.example.com/plugins/librenms_plugin/device/1/ip-row/"
 SUBMIT_URL = "https://plugin.example.com/plugins/librenms_plugin/device/1/sync-ip-addresses/"
 FRAGMENT_URL = "https://plugin.example.com/plugins/librenms_plugin/device/1/sync-cache-fragment/ipaddresses/"
 REFRESH_URL = "https://plugin.example.com/plugins/librenms_plugin/devices/1/ipaddress-sync/"
+FILTER_URL = "https://plugin.example.com/plugins/librenms_plugin/device/1/sync-tab-filter/ipaddresses/"
 ROWS = ("198.18.0.1/24", "198.18.0.2/24", "198.18.0.3/24", "198.18.0.4/24")
 
 
@@ -62,6 +63,8 @@ class _DraftServer:
         self.reads = []
         self.submits = []
         self.answers = {}
+        # The submit answer names no revision, as after another window's change during the submit.
+        self.changed_during_submit = False
         self.errors = []
         page.on("pageerror", lambda error: self.errors.append(str(error)))
         _serve_page_scripts(page)
@@ -74,6 +77,7 @@ class _DraftServer:
             f"{SUBMIT_URL}**": "submit",
             FRAGMENT_URL: "fragment",
             REFRESH_URL: "refresh",
+            f"{FILTER_URL}**": "filter",
         }
         for url, kind in routes.items():
             page.route(url, self._handler(kind))
@@ -84,7 +88,7 @@ class _DraftServer:
 
     def _take(self, kind, route):
         request = route.request
-        if (kind == "page" and request.headers.get("hx-request") == "true") or kind in ("row", "fragment"):
+        if (kind == "page" and request.headers.get("hx-request") == "true") or kind in ("row", "fragment", "filter"):
             self.reads.append(request.url)
         elif kind in ("selection", "choice", "management"):
             self.commands.append((kind, _form_fields(request)))
@@ -105,6 +109,14 @@ class _DraftServer:
             return {"status": 200, "content_type": "text/html", "body": self.row(key)}
         if kind == "fragment":
             return {"status": 200, "content_type": "text/html", "body": self.content()}
+        if kind == "filter":
+            query = urlsplit(request.url).query
+            return {
+                "status": 200,
+                "content_type": "text/html",
+                "body": self.content(),
+                "headers": {"X-Sync-Page-Url": f"{PAGE_URL}?{query}"},
+            }
         if kind == "refresh":
             # A data refresh starts the draft of the new snapshot.
             self.draft_id, self.revision, self.checked = f"{self.draft_id}+", 0, set()
@@ -122,6 +134,9 @@ class _DraftServer:
         # The claim takes the rows and the writer writes them all.
         self.revision += 1
         self.checked = set()
+        if self.changed_during_submit:
+            self.revision += 1
+            return {"status": 200, "body": "", "headers": headers}
         return {"status": 200, "body": "", "headers": {**headers, "X-Draft-Revision": str(self.revision)}}
 
     def _command(self, kind, fields):
@@ -186,6 +201,10 @@ class _DraftServer:
             <div id="librenms-sync-tabs" data-active-tab="ipaddresses">
               <a id="cables-tab" data-sync-nav href="?tab=cables">Cables</a>
               <input type="checkbox" id="set-primary-ip-toggle-cb">
+              <form id="ipaddresses_filter-form" class="sync-filter-form" hx-get="{FILTER_URL}" hx-trigger="submit"
+                    hx-target="#ipaddress-sync-content" hx-swap="innerHTML" hx-sync="#librenms-sync-nav:queue last">
+                <input id="filter-q" name="ipaddresses_q" value="198.18">
+              </form>
               <span id="fragment-loader" class="d-none" data-fragment-loader hx-get="{FRAGMENT_URL}"
                     hx-trigger="librenms:load-fragment" hx-target="#ipaddress-sync-content" hx-swap="innerHTML"></span>
               <div id="ipaddress-sync-content">{self.content()}</div>
@@ -563,3 +582,87 @@ def test_a_refresh_answer_before_a_later_input_reads_the_tab_again(page):
     _box(page, ROWS[1]).click()
     server.wait_for_commands(2)
     assert (server.commands[1][1]["draft_id"], server.commands[1][1]["expected_revision"]) == ("draft-1+", "0")
+
+
+def _prompts_on_unload(page):
+    return page.evaluate(
+        """() => {
+            const event = new Event('beforeunload', {cancelable: true});
+            window.dispatchEvent(event);
+            return event.defaultPrevented;
+        }"""
+    )
+
+
+def test_the_unload_prompt_asks_for_unsent_rows_also_after_a_failed_write(page):
+    server = _DraftServer(page)
+    server.open()
+    server.answers["selection"] = [500]
+
+    # Within the batch time the click is not sent yet.
+    assert page.evaluate(
+        """() => {
+            [...document.querySelectorAll('tr[data-row-key]')][0].querySelector('input[name="select"]').click();
+            const event = new Event('beforeunload', {cancelable: true});
+            window.dispatchEvent(event);
+            return event.defaultPrevented;
+        }"""
+    )
+    expect(page.locator('[data-draft-notice="failed"]')).to_be_visible()
+
+    assert _prompts_on_unload(page) is True
+
+
+def test_a_tab_click_after_a_waiting_filter_wins(page):
+    server = _DraftServer(page)
+    server.open()
+    server.hold.add("selection")
+    _box(page, ROWS[0]).click()
+    server.wait_for_commands(1)
+
+    page.evaluate("document.getElementById('ipaddresses_filter-form').requestSubmit()")
+    page.click("#cables-tab")
+    server.hold.clear()
+    server.release("selection")
+
+    page.wait_for_url(f"{PAGE_URL}?tab=cables")
+    page.wait_for_timeout(300)
+    assert not any(url.startswith(FILTER_URL) for url in server.reads)
+    assert page.url == f"{PAGE_URL}?tab=cables"
+
+
+def test_a_command_answer_while_a_tab_click_waits_keeps_the_tab_history_entry(page):
+    server = _DraftServer(page)
+    server.open()
+    entries = page.evaluate("history.length")
+    server.hold.add("management")
+    page.check("#set-primary-ip-toggle-cb")
+    server.wait_for_commands(1)
+
+    page.click("#cables-tab")
+    server.hold.clear()
+    server.release("management")
+
+    page.wait_for_url(f"{PAGE_URL}?tab=cables")
+    page.wait_for_timeout(300)
+    assert page.evaluate("history.length") == entries + 1
+    assert [url for url in server.reads if url.startswith(PAGE_URL)] == [f"{PAGE_URL}?tab=cables"]
+    page.go_back()
+    page.wait_for_url(f"{PAGE_URL}?tab=ipaddresses")
+
+
+def test_a_submit_answer_without_a_revision_reads_the_tab_before_any_more_input(page):
+    server = _DraftServer(page)
+    server.open()
+    server.hold.add("submit")
+    server.changed_during_submit = True
+    page.click("#sync-selected")
+    server.wait_until(lambda: server.submits)
+    _box(page, ROWS[1]).click()
+    server.hold.clear()
+    server.release("submit")
+
+    server.wait_until(lambda: any(url.startswith(PAGE_URL) for url in server.reads))
+    expect(page.locator("#revision")).to_have_text("7")
+    page.wait_for_timeout(300)
+    assert server.commands == []

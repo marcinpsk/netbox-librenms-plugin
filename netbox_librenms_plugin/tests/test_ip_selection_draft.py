@@ -576,3 +576,116 @@ def test_a_new_address_in_the_chosen_vrf_asks_to_select_the_row_again(client, ta
     assert any("198.18.60.10" in text and "changed" in text for text in _messages(response))
     assert ip_tab(client, tab).rows[CREATE_ROW]["data-evidence-changed"] == "true"
     assert IPAddress.objects.get(pk=replacement.pk).assigned_object == interface
+
+
+@pytest.fixture
+def before_the_writer(monkeypatch):
+    """Run a callback at the start of each writer attempt: after the evidence check, before the writer reads NetBox."""
+    from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
+
+    real_attempt = SyncIPAddressesView._process_ip_sync
+    callbacks = []
+
+    def attempt(self, *args, **kwargs):
+        while callbacks:
+            callbacks.pop(0)()
+        return real_attempt(self, *args, **kwargs)
+
+    monkeypatch.setattr(SyncIPAddressesView, "_process_ip_sync", attempt)
+    return callbacks
+
+
+def _submit(client, owner, draft, **fields):
+    return client.post(
+        reverse("plugins:netbox_librenms_plugin:sync_device_ip_addresses", args=["device", owner.pk]),
+        {"server_key": SERVER_KEY, **draft, **fields},
+        **HTMX,
+    )
+
+
+class TestTheWriterChecksTheApprovedRow:
+    """The writer compares the evidence the user approved with what it is about to write, after its locks."""
+
+    def test_a_port_bound_to_another_interface_after_the_check_writes_nothing(self, client, tab, before_the_writer):
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
+        draft = select_ip_rows(client, tab, [CREATE_ROW])
+        other = make_interface(tab, "eth10b", iface_type="1000base-t")
+        before_the_writer.append(lambda: seed_mapping(other, SERVER_KEY, own=7610))
+
+        response = _submit(client, tab, draft)
+
+        assert not IPAddress.objects.filter(address=CREATE_ROW).exists()
+        assert any("198.18.60.10" in text and "changed" in text for text in _messages(response))
+        assert _checked(ip_tab(client, tab), CREATE_ROW) is False
+
+    def test_a_management_address_replaced_after_the_check_does_not_become_primary(
+        self, client, tab, before_the_writer
+    ):
+        interface = tab.interfaces.get(name="eth12")
+        approved = IPAddress.objects.create(address=MANAGEMENT_ROW, assigned_object=interface)
+        draft = select_ip_rows(client, tab, [MANAGEMENT_ROW])
+        replacement = {}
+
+        def replace():
+            approved.delete()
+            replacement["ip"] = IPAddress.objects.create(address=MANAGEMENT_ROW, assigned_object=interface)
+
+        before_the_writer.append(replace)
+
+        response = _submit(client, tab, draft, **{"set-primary-ip-toggle": "on"})
+
+        tab.refresh_from_db()
+        assert tab.primary_ip4_id is None
+        assert any("198.18.60.12" in text and "changed" in text for text in _messages(response))
+        assert IPAddress.objects.get(pk=replacement["ip"].pk).assigned_object == interface
+
+
+def test_a_submit_answer_names_no_revision_when_another_window_changed_the_draft_meanwhile(
+    client, tab, before_the_writer
+):
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.sync_rows import find_ip_draft
+    from netbox_librenms_plugin.tests.view_test_helpers import make_request
+
+    draft = select_ip_rows(client, tab, [CREATE_ROW, NO_INTERFACE_ROW])
+    token = ip_tab(client, tab).rows[MANAGEMENT_ROW]["data-evidence"]
+    user = client.get(reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[tab.pk])).wsgi_request.user
+
+    def other_window_selects():
+        request = make_request("get", {"server_key": SERVER_KEY}, user=user)
+        snapshot = source_cache.read(tab, Resource.IP_ADDRESSES, SERVER_KEY)
+        stored = find_ip_draft(request, tab, SERVER_KEY, snapshot)
+        stored.assign(
+            stored.draft_id, stored.revision, {MANAGEMENT_ROW: Assignment(Intent.ON, read_evidence(IP_TAB, token))}
+        )
+
+    before_the_writer.append(other_window_selects)
+
+    response = _submit(client, tab, draft)
+
+    # The restore puts back the refused row, but the page did not see the other window's change.
+    assert "X-Draft-Revision" not in response
+    after = ip_tab(client, tab)
+    assert _checked(after, NO_INTERFACE_ROW) and _checked(after, MANAGEMENT_ROW)
+
+
+def test_a_failure_after_the_claim_and_before_the_writer_puts_the_selection_back(client, tab):
+    from django.db import DatabaseError, connection
+
+    draft = select_ip_rows(client, tab, [CREATE_ROW, NO_INTERFACE_ROW])
+    state = {"claimed": False}
+
+    def fail_after_the_claim(execute, sql, params, many, context):
+        if "pg_advisory_xact_lock" in sql:
+            state["claimed"] = True
+        elif state["claimed"] and '"ipam_vrf"' in sql:
+            raise DatabaseError("The reassessment after the claim failed.")
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(fail_after_the_claim), pytest.raises(DatabaseError):
+        _submit(client, tab, draft)
+
+    after = ip_tab(client, tab)
+    assert _checked(after, CREATE_ROW) and _checked(after, NO_INTERFACE_ROW)
