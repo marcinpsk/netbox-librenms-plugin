@@ -294,6 +294,39 @@ class TestTheMemberChoice:
         assert not _checked(after, "2001")
         assert after.rows["2001"]["data-evidence-changed"] == "true"
 
+    def test_a_member_choice_that_unblocks_an_aggregate_reads_its_members_again(self, client, settings):
+        configure_default_librenms_server(settings)
+        client.force_login(make_superuser("iface-draft-vc-requires-user"))
+        _vc, (first, second) = make_virtual_chassis_members("iface-draft-vc-requires", 2)
+        seed_stored_mapping(first, {SERVER_KEY: {"id": 4310}}, save=True)
+        bound_interface(second, "Ethernet2/1", 3001)
+        # The aggregate has no NetBox interface, so it waits for its member choice.
+        seed_interfaces_snapshot(
+            first,
+            [sync_port(3000, "Port-channel1", if_type="ieee8023adLag"), sync_port(3001, "Ethernet2/1")],
+            [port_pair(3001, 3000)],
+            server_key=SERVER_KEY,
+        )
+        shown = _tab(client, first)
+        assert json.loads(shown.rows["3001"]["data-requires"]) == []
+
+        response = draft_command(client, shown, "data-choice-url", row="3000", field="member", value=str(second.pk))
+
+        # The member row requires the aggregate now, so the page reads the whole tab, not the chosen row only.
+        assert "lnms-results-stale" in json.loads(response["HX-Trigger"])
+        shown = _tab(client, first)
+        assert json.loads(shown.rows["3001"]["data-requires"]) == ["3000"]
+        draft = _select(client, first, [3001])
+        after = _tab(client, first)
+        checked = {key for key in ("3000", "3001") if _checked(after, key)}
+        _post(client, first, {**draft, "auto_select_lag_members": "on", "exclude_columns": ["mac_address"]})
+        written = {
+            str(port_id)
+            for port_id, name in ((3000, "Port-channel1"), (3001, "Ethernet2/1"))
+            if Interface.objects.filter(device=second, name=name).exists()
+        }
+        assert checked == written == {"3000", "3001"}
+
     def test_a_member_the_user_cannot_view_answers_404(self, client, chassis, settings):
         first, second = chassis
         viewer = make_user_with_perms("iface-draft-vc-viewer", [])

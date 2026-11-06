@@ -28,6 +28,7 @@ from netbox_librenms_plugin.interface_diff import (
     ROW_INCOMPLETE,
     blocked_row_state,
     interface_enabled_from_port,
+    planned_interface_type,
 )
 from netbox_librenms_plugin.interface_rules import RuleDecisionKind, decision_reason, interface_rules_for_request
 from netbox_librenms_plugin.interface_rows_cache import (
@@ -45,6 +46,7 @@ from netbox_librenms_plugin.interface_relationships import (
     resolve_relationship_row,
 )
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
+from netbox_librenms_plugin.models import RuleConfigurationError
 from netbox_librenms_plugin.required_rows import checked_rows, off_page_requirers, requirement_edges, requirements
 from netbox_librenms_plugin.selection_draft import DraftConflict, Intent, SelectionDraft, sign_evidence
 from netbox_librenms_plugin.server_mappings import read_mapping, read_mappings
@@ -1097,8 +1099,9 @@ def interface_evidence(obj, server_key, record, table):
     """
     Return the facts that selecting one interface row approves.
 
-    The writer writes the row to its member, onto the NetBox interface the row resolves to, with its
-    relationship targets and VLAN groups; the row's sync state says what the page showed. A change of
+    The writer writes the row to its member, onto the NetBox interface the row resolves to, with the
+    type the rules plan, its relationship targets and VLAN groups; the row's sync state says what the
+    page showed. A change of
     any of them asks the user to select the row again, and the writer compares the member and the
     interface again under its locks. The subject and the server bind the token to its tab.
     """
@@ -1110,11 +1113,23 @@ def interface_evidence(obj, server_key, record, table):
         "member": record.get("selected_object_id"),
         "interface": interface.pk if interface is not None else None,
         "state": table.row_sync_state(record).state,
+        "type": _proposed_type(record),
         "relations": [record.get(f"librenms_{relation}_port_id") for relation in ("lag", "parent", "bridge")],
         "vlan_groups": {
             str(vid): group.get("group_id", "") for vid, group in (record.get("vlan_group_map") or {}).items()
         },
     }
+
+
+def _proposed_type(record):
+    """Return the type that a sync of the row writes: the planned type of its interface, or the rule's type for a new one."""
+    decision = record.get("rule_decision")
+    if decision is None:
+        return None
+    interface = record.get("netbox_interface")
+    if interface is None or not record.get("exists_in_netbox"):
+        return decision.netbox_type
+    return planned_interface_type(interface, decision, created=False).value
 
 
 def effective_intents(obj, server_key, table, records, entries):
@@ -1270,6 +1285,30 @@ class _InterfaceDraftView(DraftView):
         view, _table, rows = current_interface_rows(request, obj, server_key, snapshot, entries)
         return view, rows
 
+    @staticmethod
+    def requirement_marks(request, obj, server_key, snapshot, entries):
+        """
+        Return, by row key, the requirements that the row renders and the selected rows that require it.
+
+        They give each row's ``data-requires`` and ``data-offpage-requirers`` (see show_interface_selection).
+        """
+        _view, table, rows = current_interface_rows(request, obj, server_key, snapshot, entries)
+        records = {key: record for record in rows["table_rows"] or () if (key := interface_row_key(record)) is not None}
+        edges = rows["requirement_edges"]
+        blocked = {str(port_id) for port_id in rows["blocked_port_ids"] if port_id is not None}
+        requirers = {}
+        for key, intent in effective_intents(obj, server_key, table, records, entries).items():
+            if intent is Intent.ON and key not in blocked:
+                for required in requirements(edges, key, blocked):
+                    requirers.setdefault(required, set()).add(key)
+        return {
+            key: (
+                frozenset() if key in blocked else frozenset(requirements(edges, key, blocked)),
+                frozenset(requirers.get(key, ())),
+            )
+            for key in records
+        }
+
 
 class _InterfaceDraftCommandView(DraftCommandView, _InterfaceDraftView):
     """A command on the user's interface draft."""
@@ -1313,7 +1352,12 @@ class InterfaceSelectionView(_InterfaceDraftCommandView):
 
 
 class InterfaceChoiceView(_InterfaceDraftCommandView):
-    """Store the Virtual Chassis member that the user chose for one interface row, then name the row for the page to read again."""
+    """
+    Store the Virtual Chassis member that the user chose for one interface row, then name what the page reads again.
+
+    A member can unblock or block the row, which changes the requirements that other rows render. Then the
+    page reads the whole tab; otherwise it reads the chosen row only.
+    """
 
     def post(self, request, object_type, pk):
         """Store ``value`` (a member pk; "" removes the choice) as the member of the row ``row`` (``field`` is ``member``)."""
@@ -1329,10 +1373,19 @@ class InterfaceChoiceView(_InterfaceDraftCommandView):
             return self.conflict()
         if row_key not in _snapshot_row_keys(obj, server_key):
             raise Http404("No current interface row has this key.")
+        earlier = draft.entries()
         try:
             revision = draft.choose(draft_id, expected_revision, row_key, MEMBER_CHOICE, value)
         except DraftConflict:
             return self.conflict()
+        try:
+            before = self.requirement_marks(request, obj, server_key, snapshot, earlier)
+            after = self.requirement_marks(request, obj, server_key, snapshot, draft.entries())
+        except RuleConfigurationError:
+            # The choice is stored; the row read evaluates the rules again and names the broken one.
+            return self.acknowledge(revision, {ROW_STALE_EVENT: {"key": row_key}})
+        if any(before.get(key) != after.get(key) for key in (before.keys() | after.keys()) - {row_key}):
+            return self.acknowledge(revision, {RESULTS_STALE_EVENT: None})
         return self.acknowledge(revision, {ROW_STALE_EVENT: {"key": row_key}})
 
 

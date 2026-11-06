@@ -272,6 +272,8 @@ class _BulkRelationshipContext:
     unique_host_port_ids: set
     unambiguous_name_port_ids: set
     excluded_columns: set
+    # The port IDs that the user excluded: no edge may write them.
+    excluded_port_ids: set
 
 
 class _HostInterfaceNameConflict(Exception):
@@ -367,7 +369,7 @@ class SyncInterfacesView(
                 messages.error(request, ROW_CHANGED)
                 return self._tab_response(request, object_type, interface_name_field, server_key)
             choices = InterfaceChoices.of(draft.entries())
-            excluded = set()
+            excluded = changed = set()
         else:
             draft = find_interface_draft(request, obj, server_key, self._snapshot)
             try:
@@ -378,7 +380,7 @@ class SyncInterfacesView(
                 messages.error(request, SELECTION_CHANGED)
                 return self._tab_response(request, object_type, interface_name_field, server_key)
             choices = InterfaceChoices.of(claim.entries)
-            approved = self._approved_rows(request, obj, server_key, claim)
+            approved, changed = self._approved_rows(request, obj, server_key, claim)
             excluded = {int(key) for key, entry in claim.entries.items() if entry.intent is Intent.OFF}
 
         # The answer names the revision after a claim only.
@@ -386,6 +388,8 @@ class SyncInterfacesView(
         self._row_choices = choices
         self._approved = {int(key): payload for key, payload in approved.items()}
         self._excluded_port_ids = excluded
+        # A selected row that the evidence check refused stays refused: the related-row walk never adds it.
+        self._changed_port_ids = changed
         visible_port_ids = set(self._approved)
         # The related-row walk runs under the owner locks (_lock_sync_scope), with the writer's state.
         self._related_walk = (
@@ -526,10 +530,14 @@ class SyncInterfacesView(
         Return the approved evidence of each claimed selected row whose evidence is still the current one.
 
         A row that changed after the user selected it is refused with one message; the restore puts it back.
+
+        Returns:
+            tuple[dict[str, dict], set[int]]: The approved evidence by row key, and the port IDs of the refused rows.
+
         """
         _view, table, rows = current_interface_rows(request, obj, server_key, self._snapshot, claim.entries)
         records = {key: row for row in rows["table_rows"] or () if (key := interface_row_key(row)) is not None}
-        approved, changed = {}, []
+        approved, changed, refused = {}, [], set()
         for key, entry in claim.entries.items():
             if entry.intent is not Intent.ON:
                 continue
@@ -543,9 +551,10 @@ class SyncInterfacesView(
                 approved[key] = entry.evidence
             else:
                 changed.append(str((record or {}).get(self.interface_name_field) or key))
+                refused.add(int(key))
         if changed:
             messages.warning(request, CHANGED_ROWS.format(", ".join(changed)))
-        return approved
+        return approved, refused
 
     def _sync_attempt(
         self,
@@ -764,7 +773,7 @@ class SyncInterfacesView(
 
         This is the required-row rule of the tab (``required_rows``) under the owner locks: the walk goes
         from each selected row through the rows it requires, transitively. A row that the user excluded
-        is walked through but not added. A row is walked only when ``_row_owner`` gives it an owner and
+        is walked through but not added. A selected row that the evidence check refused is neither. A row is walked only when ``_row_owner`` gives it an owner and
         ``check_interface_write`` allows the write; a required row that the writer refuses is reported
         with the writer's reason. The caller holds the owner locks and passes their state.
 
@@ -811,7 +820,8 @@ class SyncInterfacesView(
 
         frontier = {port_id for port_id in visible_port_ids if refusal(port_id, auto_added=False) is None}
         walked = set(frontier)
-        refused = set()
+        # The evidence check reported these rows already.
+        refused = set(getattr(self, "_changed_port_ids", set()))
         while frontier:
             required = {
                 port_id
@@ -926,6 +936,7 @@ class SyncInterfacesView(
                     unique_host_port_ids=unique_host_port_ids,
                     unambiguous_name_port_ids=unambiguous_name_port_ids,
                     excluded_columns=set(excluded_columns),
+                    excluded_port_ids=set(getattr(self, "_excluded_port_ids", set())),
                 )
                 self._apply_bulk_relationships(context, selected_edge_source_ids)
         except IntegrityError:
@@ -1049,7 +1060,12 @@ class SyncInterfacesView(
         decisions = self._bulk_edge_decisions(context, "LAG", (port_id, member), (raw_lag, aggregate))
         if decisions is None:
             return
-        if _lag_aggregate_needs_promotion(aggregate) and (conflict := _promotion_conflict(decisions[1], "lag")):
+        promotes = _lag_aggregate_needs_promotion(aggregate)
+        if promotes and normalize_librenms_port_id(raw_lag) in context.excluded_port_ids:
+            shown = self._shown(aggregate)
+            self._record_skipped_conflict(self._shown(member), f"LAG link to {shown} not synced; {shown} is excluded")
+            return
+        if promotes and (conflict := _promotion_conflict(decisions[1], "lag")):
             shown = self._shown(aggregate)
             self._record_skipped_conflict(self._shown(member), f"LAG link to {shown} not synced; {shown}: {conflict}")
             return

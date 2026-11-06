@@ -1,6 +1,7 @@
 {% comment %}
-The VLAN groups dialog of one interface row. A group change reads the dialog again with the groups it shows, so the
-colours follow them. Save sends them to the user's draft (sync_draft.js), and then the page reads the row again.
+The VLAN groups dialog of one interface row. A group change reads the dialog again with the groups it shows and swaps
+only the VID cells, so the colours follow them and no control changes. Save sends them to the user's draft
+(sync_draft.js), and then the page reads the row again.
 Takes: row_key, interface_name, vlans, groups, command_url, preview_url, apply_to_all.
 {% endcomment %}
 <form id="vlan-groups-form" data-write-url="{{ command_url }}">
@@ -22,12 +23,13 @@ Takes: row_key, interface_name, vlans, groups, command_url, preview_url, apply_t
         <tbody>
         {% for vlan in vlans %}
             <tr data-vid="{{ vlan.vid }}">
-                <td><span class="{{ vlan.css }}">{{ vlan.vid }}</span>{% if vlan.missing %} <i class="mdi mdi-alert text-danger" role="img" title="VLAN not in the selected group: use VLAN Sync first to create it" aria-label="VLAN not in the selected group: use VLAN Sync first to create it"></i>{% endif %}</td>
+                <td id="vlan-modal-vid-{{ vlan.vid }}"><span class="{{ vlan.css }}">{{ vlan.vid }}</span>{% if vlan.missing %} <i class="mdi mdi-alert text-danger" role="img" title="VLAN not in the selected group: use VLAN Sync first to create it" aria-label="VLAN not in the selected group: use VLAN Sync first to create it"></i>{% endif %}</td>
                 <td>{% if vlan.type == "U" %}Untagged{% else %}Tagged{% endif %}</td>
                 <td>
                     <select name="group_{{ vlan.vid }}" class="form-select form-select-sm vlan-modal-group-select"
-                        hx-get="{{ preview_url }}" hx-include="closest form" hx-target="#vlanDetailModalContent"
-                        hx-swap="innerHTML" hx-sync="closest form:replace">
+                        hx-get="{{ preview_url }}" hx-include="closest form" hx-swap="none"
+                        hx-select-oob="{% for shown in vlans %}#vlan-modal-vid-{{ shown.vid }}:innerHTML{% if not forloop.last %},{% endif %}{% endfor %}"
+                        hx-sync="closest form:replace">
                         <option value=""{% if not vlan.group_id %} selected{% endif %}>-- No Group (Global) --</option>
                         {% for group in groups %}
                         <option value="{{ group.pk }}"{% if vlan.group_id == group.pk|stringformat:"s" %} selected{% endif %}>{{ group.name }}{% if group.scope %} ({{ group.scope }}){% endif %}</option>

@@ -9,6 +9,7 @@ page must tick the rows that the server checks, and send the intent that the cas
 
 import importlib.util
 import json
+from types import SimpleNamespace
 from pathlib import Path
 
 from urllib.parse import parse_qs, urlsplit
@@ -16,7 +17,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from playwright.sync_api import expect
 
-from test_sync_cache_browser import _navigation_loader, _serve_page_scripts, _sync_document
+from test_sync_cache_browser import TEMPLATE_DIR, _navigation_loader, _serve_page_scripts, _sync_document
 from test_sync_filters_browser import TABLE, _answer, _filter_tab, _next_request, _serve_filter_tab
 from test_sync_navigation_browser import FRAGMENT_LOADER, FRAGMENT_URL
 from test_sync_draft_writer_browser import _form_fields
@@ -248,6 +249,73 @@ def test_a_refused_member_choice_refuses_the_interface_submit_queued_behind_it(p
     page.click("#sync-selected")
     _wait_for(page, lambda: submits)
     assert (submits[0]["draft_id"], submits[0]["expected_revision"]) == ("draft-1", "1")
+
+
+VLAN_GROUPS_URL = (
+    "https://plugin.example.com/plugins/librenms_plugin/device/1/interface-selection/vlan-groups/?server_key=default"
+)
+VLAN_PREVIEW_URL = "https://plugin.example.com/plugins/librenms_plugin/device/1/interface-row/10/vlan-groups/"
+
+
+def _vlan_dialog(group_id, *, apply_to_all, css="text-success", missing=False):
+    """Return the VLAN groups dialog of row 10 with VLAN 100 in group *group_id*, as the server renders it."""
+    from django.template import Context, Engine
+
+    engine = Engine(dirs=[str(TEMPLATE_DIR.parent)])
+    return engine.get_template("netbox_librenms_plugin/htmx/interface_vlan_groups.html").render(
+        Context(
+            {
+                "row_key": "10",
+                "interface_name": "eth0",
+                "vlans": [{"vid": 100, "type": "T", "css": css, "missing": missing, "group_id": group_id}],
+                "groups": [
+                    SimpleNamespace(pk=7, name="group-7", scope=None),
+                    SimpleNamespace(pk=8, name="group-8", scope=None),
+                ],
+                "command_url": VLAN_GROUPS_URL,
+                "preview_url": VLAN_PREVIEW_URL,
+                "apply_to_all": apply_to_all,
+            },
+            use_l10n=False,
+        )
+    )
+
+
+def test_a_late_vlan_dialog_preview_keeps_a_newer_apply_to_all_and_save_sends_it(page):
+    """A preview shows the colours of the chosen groups; it never sets back a control that the user changed after it."""
+    previews, writes = [], []
+    _serve_page_scripts(page)
+    body = _sync_document(
+        f"""<div id="librenms-sync-tabs"><input type="hidden" name="csrfmiddlewaretoken" value="csrf-test">
+            <table id="librenms-interface-table" data-draft-id="draft-1" data-draft-revision="1"
+                   data-selection-url="{SELECTION_URL}" data-choice-url="{CHOICE_URL}"><tbody></tbody></table>
+            <div id="vlanDetailModalContent">{_vlan_dialog("7", apply_to_all=False)}</div></div>"""
+    )
+
+    def write(route):
+        writes.append(_form_fields(route.request))
+        route.fulfill(status=204, headers={"X-Draft-Revision": "2"})
+
+    page.route(f"{PAGE_URL}**", lambda route: route.fulfill(status=200, content_type="text/html", body=body))
+    page.route(f"{VLAN_PREVIEW_URL}**", lambda route: previews.append(route))
+    page.route(VLAN_GROUPS_URL, write)
+    page.goto(PAGE_URL)
+    page.wait_for_function("() => window.librenmsSyncDraft !== undefined")
+
+    page.select_option('select[name="group_100"]', "8")
+    _wait_for(page, lambda: previews)
+    page.check("#applyVlanGroupToAll")
+    previews[0].fulfill(
+        status=200,
+        content_type="text/html",
+        body=_vlan_dialog("8", apply_to_all=False, css="text-danger", missing=True),
+    )
+
+    expect(page.locator('tr[data-vid="100"] span.text-danger')).to_have_count(1)
+    expect(page.locator("#applyVlanGroupToAll")).to_be_checked()
+    page.click("#saveVlanGroups")
+    _flush(page)
+    assert [(fields["row"], fields["group_100"], fields.get("apply_to_all")) for fields in writes] == [("10", "8", "1")]
 
 
 VLAN_SELECTION_URL = "https://plugin.example.com/plugins/librenms_plugin/device/1/vlan-selection/?server_key=default"
