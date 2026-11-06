@@ -552,6 +552,19 @@ def test_a_return_to_an_earlier_name_field_does_not_bring_back_its_selection(cli
     assert not _checked(ip_tab(client, tab, interface_name_field="ifName"), CREATE_ROW)
 
 
+def test_the_selected_rows_that_the_page_does_not_show_are_counted_above_the_table(client, tab):
+    select_ip_rows(client, tab, [CREATE_ROW, NO_INTERFACE_ROW])
+
+    # The filter shows only the management row, so both selected rows are on no shown page.
+    filtered = ip_tab(client, tab, ipaddresses_q=MANAGEMENT_ROW.partition("/")[0])
+
+    assert [attrs for attrs in open_tags(filtered.html, "div") if "data-offpage-selection" in attrs]
+    (clear,) = [attrs for attrs in open_tags(filtered.html, "button") if "data-clear-offpage" in attrs]
+    assert sorted(json.loads(clear["data-clear-offpage"])) == sorted([CREATE_ROW, NO_INTERFACE_ROW])
+    # A page that shows every selected row has no such notice.
+    assert "data-offpage-selection" not in ip_tab(client, tab).html
+
+
 def test_a_row_read_is_the_row_of_a_page_without_a_server_key(client, seeded):
     """The page query of the sync page names no server; the row read names it, and both render one Create VRF action."""
     owner = seeded("row-read-without-server-key")
