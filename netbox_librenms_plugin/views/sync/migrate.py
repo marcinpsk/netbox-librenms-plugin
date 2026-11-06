@@ -12,6 +12,7 @@ Permissions: each view requires plugin write permission AND the
 appropriate NetBox model permission on the object being moved.
 """
 
+import json
 import logging
 from urllib.parse import urlencode
 
@@ -22,12 +23,13 @@ from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.http import Http404, HttpResponse
-from django.shortcuts import get_object_or_404, redirect
+from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import get_script_prefix, reverse
 from django.views import View
 from ipam.models import IPAddress
 
 from netbox_librenms_plugin.server_mappings import read_mapping
+from netbox_librenms_plugin.sync_rows import RESULTS_STALE_EVENT
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
@@ -208,9 +210,33 @@ def _schedule_winner_cache_mutation(request, winner, source_tab, server_key):
     schedule_request_cache_mutation(request, winner, source_tab, server_key)
 
 
+def _move_answer(request, message, *, fallback_url=None):
+    """
+    Answer a successful move: the message, and the event that makes the sync page read its tab again.
+
+    An htmx request gets the message out of band and the results-stale event, so the page reads its current
+    destination through its navigation scheduler: a late answer never takes the page back over a newer
+    navigation, as a reload of the URL that was current at the answer would. A plain POST is redirected to
+    the validated Referer, else to *fallback_url* (the donor's sync tab).
+
+    Returns:
+        HttpResponse: The in-place answer (htmx) or the redirect.
+
+    """
+    messages.success(request, message)
+    if request.htmx:
+        response = render(request, "inc/messages.html")
+        # Only the out-of-band messages swap; the Move button's own swap is none.
+        response["HX-Reswap"] = "none"
+        response["HX-Trigger"] = json.dumps({RESULTS_STALE_EVENT: None})
+    else:
+        response = redirect(_safe_referer(request, fallback_url))
+    return apply_request_cache_transition(request, response)
+
+
 def _hx_response(request, message, level=messages.SUCCESS, *, status=200, fallback_url=None):
     """
-    Build the common HTMX (or redirect) response after a successful move.
+    Build the HTMX (or redirect) response after a successful device IP transfer.
 
     Queues a Django messages flash and emits the ``HX-Refresh`` header so the sync
     page re-renders with the row gone. For non-HTMX requests, queues the message and
@@ -794,8 +820,7 @@ class MoveInterfaceToWinnerView(_MoveResourceToWinnerView):
                 message += " " + "; ".join(notes) + "."
             schedule_request_cache_mutation(request, donor, SyncTab.INTERFACES, server_key)
             _schedule_winner_cache_mutation(request, winner, SyncTab.INTERFACES, server_key)
-            response = _hx_response(request, message, fallback_url=self._fallback_url)
-            return response
+            return _move_answer(request, message, fallback_url=self._fallback_url)
 
 
 class MoveIPAddressToWinnerView(_MoveResourceToWinnerView):
@@ -913,8 +938,7 @@ class MoveIPAddressToWinnerView(_MoveResourceToWinnerView):
                 message += " " + "; ".join(notes) + "."
             schedule_request_cache_mutation(request, donor, SyncTab.IP_ADDRESSES, server_key)
             _schedule_winner_cache_mutation(request, winner, SyncTab.IP_ADDRESSES, server_key)
-            response = _hx_response(request, message, fallback_url=self._fallback_url)
-            return response
+            return _move_answer(request, message, fallback_url=self._fallback_url)
 
 
 class TransferDeviceIPView(_BaseMoveToWinnerView):

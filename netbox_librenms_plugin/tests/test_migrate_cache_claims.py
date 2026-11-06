@@ -15,7 +15,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_interface,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
-from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+from netbox_librenms_plugin.tests.view_test_helpers import answers_in_place, make_user_with_perms
 from netbox_librenms_plugin.server_mappings import mark_migrated
 
 SERVER_KEY = "primary"
@@ -81,8 +81,7 @@ def test_interface_move_preserves_source_snapshots_for_donor_and_winner(
     with django_capture_on_commit_callbacks(execute=True):
         response = client.post(url, {"server_key": SERVER_KEY}, HTTP_HX_REQUEST="true")
 
-    assert response.status_code == 200
-    assert response.headers.get("HX-Refresh") == "true"
+    assert answers_in_place(response)
     interface.refresh_from_db()
     assert interface.device_id == winner.pk
     _assert_source_survives_and_other_tabs_are_cleared(
@@ -130,8 +129,7 @@ def test_ip_address_move_preserves_source_snapshots_for_donor_and_winner(
     with django_capture_on_commit_callbacks(execute=True):
         response = client.post(url, {"server_key": SERVER_KEY}, HTTP_HX_REQUEST="true")
 
-    assert response.status_code == 200
-    assert response.headers.get("HX-Refresh") == "true"
+    assert answers_in_place(response)
     address.refresh_from_db()
     assert address.assigned_object.device_id == winner.pk
     _assert_source_survives_and_other_tabs_are_cleared(

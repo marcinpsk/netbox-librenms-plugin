@@ -345,16 +345,17 @@ def ip_tab(client, owner, *, server_key="default", **query):
 
 def answers_in_place(response):
     """
-    Return whether *response* is the in-place answer of an IP tab action to an htmx request.
+    Return whether *response* is the in-place answer of a sync page action to an htmx request.
 
     The answer carries the messages and the event that makes the page read the tab again through its
-    navigation scheduler; it never sends the browser to a URL of its own.
+    navigation scheduler; it never sends the browser to a URL of its own, nor reloads the page.
     """
     return (
         response.status_code == 200
         and not response.has_header("HX-Redirect")
+        and not response.has_header("HX-Refresh")
         and response.get("HX-Reswap") == "none"
-        and json.loads(response.get("HX-Trigger", "{}")).keys() - {"closeModal"} == {"lnms-results-stale"}
+        and "lnms-results-stale" in json.loads(response.get("HX-Trigger", "{}"))
     )
 
 

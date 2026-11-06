@@ -21,9 +21,8 @@
  * Every element of a tab or its dialogs that posts carries data-draft-command, and that marker alone makes
  * its request a command of the writer: it waits for flush(), it is the write in flight, and a READ sent
  * before it is read again after it. The value says what else the command does: "draft" names the user's
- * draft (a bulk submit claims it), "refresh" answers with new tab content, "action" does neither.
- * "reload" is the one value that is no command: its element asks its own confirmation, and its answer
- * reloads the page, where the browser asks first while input is not saved.
+ * draft (a bulk submit claims it), "refresh" answers with new tab content, "action" does neither. An
+ * element with hx-confirm asks first: its command starts when the user confirms.
  */
 (function () {
     'use strict';
@@ -568,52 +567,68 @@
         return name !== 'sync_one' && name !== 'create_vrf';
     }
 
-    // A filter request reads the draft, so it waits for the writer. A command (data-draft-command) waits for
-    // the writer and is then the write in flight.
-    document.addEventListener('htmx:confirm', function (event) {
+    /**
+     * Run one command of a tab element: wait for the writer, then send it as the write in flight.
+     *
+     * @param {CustomEvent} event - The element's htmx:confirm event.
+     * @param {string} command - The element's data-draft-command value.
+     * @param {function(boolean): void} issue - The htmx function that sends the request.
+     * @returns {void}
+     */
+    function runCommand(event, command, issue) {
         const elt = event.detail.elt;
-        const command = elt.matches?.(COMMAND) ? elt.dataset.draftCommand : null;
-        if (command === 'reload') return;
-        const filter = !command && elt.matches?.('.sync-filter-form');
-        if (!command && !filter) return;
-        let epoch = null;
-        if (filter) {
-            epoch = filterEpochs.get(event.detail.triggeringEvent);
-            if (epoch === undefined) {
-                // The identity is taken before htmx queues the request behind a running READ.
-                epoch = reserveNavigation(elt);
-                filterEpochs.set(event.detail.triggeringEvent, epoch);
-            } else if (epoch !== navEpoch) {
-                // htmx sends a delayed or queued filter that a newer navigation replaced.
-                event.preventDefault();
-                return;
-            }
-            if (idle() && !writer.failed) return;
-        }
-        event.preventDefault();
         // No request goes, so the page treats it as a request without an answer: the submit button works again.
         const refuse = () => elt.dispatchEvent(new CustomEvent('librenmsRequestFailed', { bubbles: true, detail: { elt } }));
         flush().then(() => {
-            // A newer navigation started while the filter waited for the writer.
-            if (filter && epoch !== navEpoch) return;
             if (command === 'draft' && writer.stale) {
                 // The page waits for the draft that another window changed, so it writes nothing.
                 refuse();
                 return;
             }
-            if (command) {
-                // The command changes the tab like an input: a READ sent before it is read again after it.
-                bumpInputEpoch();
-                writer.inFlight = true;
-                writer.submitting = { elt, claims: command === 'draft' && isBulkSubmit(event), xhr: null };
-            }
-            event.detail.issueRequest(true);
+            // The command changes the tab like an input: a READ sent before it is read again after it.
+            bumpInputEpoch();
+            writer.inFlight = true;
+            writer.submitting = { elt, claims: command === 'draft' && isBulkSubmit(event), xhr: null };
+            issue(true);
             // htmx sends a command at once, or drops it (hx-sync, validation) with no event: then it ends here.
-            if (command && writer.submitting?.elt === elt && !writer.submitting.xhr) finishCommand(null, false);
-        }, () => {
-            if (command) refuse();
-            else endNavigation(epoch);
-        });
+            if (writer.submitting?.elt === elt && !writer.submitting.xhr) finishCommand(null, false);
+        }, refuse);
+    }
+
+    // A command (data-draft-command) waits for the writer and is then the write in flight. A filter request
+    // reads the draft, so it waits for the writer too.
+    document.addEventListener('htmx:confirm', function (event) {
+        const elt = event.detail.elt;
+        const command = elt.matches?.(COMMAND) ? elt.dataset.draftCommand : null;
+        if (command) {
+            const issue = event.detail.issueRequest;
+            if (event.detail.question) {
+                // The page's confirmation dialog asks first and then calls detail.issueRequest: the command
+                // starts only after the user confirmed.
+                event.detail.issueRequest = () => runCommand(event, command, issue);
+            } else {
+                event.preventDefault();
+                runCommand(event, command, issue);
+            }
+            return;
+        }
+        if (!elt.matches?.('.sync-filter-form')) return;
+        let epoch = filterEpochs.get(event.detail.triggeringEvent);
+        if (epoch === undefined) {
+            // The identity is taken before htmx queues the request behind a running READ.
+            epoch = reserveNavigation(elt);
+            filterEpochs.set(event.detail.triggeringEvent, epoch);
+        } else if (epoch !== navEpoch) {
+            // htmx sends a delayed or queued filter that a newer navigation replaced.
+            event.preventDefault();
+            return;
+        }
+        if (idle() && !writer.failed) return;
+        event.preventDefault();
+        flush().then(() => {
+            // A newer navigation started while the filter waited for the writer.
+            if (epoch === navEpoch) event.detail.issueRequest(true);
+        }, () => endNavigation(epoch));
     });
 
     // A search takes its identity when the user types, before the search delay: a navigation sent before then

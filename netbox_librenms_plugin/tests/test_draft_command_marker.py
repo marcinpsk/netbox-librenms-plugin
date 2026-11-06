@@ -20,7 +20,7 @@ INCLUDE = re.compile(r"""\{%\s*include\s+["'](netbox_librenms_plugin/[\w/.-]+\.h
 # One opening tag; a template tag inside it can hold ">".
 OPENING_TAG = re.compile(r"<[a-zA-Z][\w-]*((?:[^>{]|\{[^}]*\})*)>")
 POSTS = re.compile(r"""\bmethod\s*=\s*["']post["']|\bhx-(?:post|put|patch|delete)\s*=""", re.IGNORECASE)
-MARKER = re.compile(r"""\bdata-draft-command\s*=\s*["'](?:draft|action|refresh|reload)["']""")
+MARKER = re.compile(r"""\bdata-draft-command\s*=\s*["'](?:draft|action|refresh)["']""")
 
 
 def ip_tab_templates():
