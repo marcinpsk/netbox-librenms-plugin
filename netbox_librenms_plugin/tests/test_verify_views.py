@@ -31,7 +31,7 @@ from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     seed_interfaces_snapshot,
 )
 
-from netbox_librenms_plugin.tests.view_test_helpers import draft_command, draft_tab
+from netbox_librenms_plugin.tests.view_test_helpers import bind_relationship, draft_command, draft_tab
 from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
 
 
@@ -502,7 +502,7 @@ class TestTheInterfaceRowRead:
         )
         relationship_response = call_post(
             make_view(SyncInterfaceParentView, relationship_request),
-            relationship_request,
+            bind_relationship(relationship_request, page_device, server_key=server_key),
             object_type="device",
             object_id=page_device.pk,
         )
@@ -547,7 +547,7 @@ class TestTheInterfaceRowRead:
         )
         inline_response = call_post(
             make_view(SyncInterfaceLagView, inline_request),
-            inline_request,
+            bind_relationship(inline_request, device, server_key=server_key),
             object_type="device",
             object_id=device.pk,
         )

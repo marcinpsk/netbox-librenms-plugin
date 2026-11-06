@@ -113,6 +113,53 @@ def make_request(method="post", data=None, *, user=None, path="/", **factory_kwa
     return request
 
 
+def relationship_binding(user, owner, port_id, *, server_key="default", **query):
+    """
+    Return the draft binding that the relationship button of row *port_id* posts: the draft, its revision, the evidence.
+
+    The interfaces tab of *owner* renders the binding from *user*'s draft and the stored snapshot, as this does. A
+    row that the tab does not offer (hidden, or one that the user cannot select) has no button and no binding.
+    """
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.selection_draft import sign_evidence
+    from netbox_librenms_plugin.tables.interfaces import interface_row_key
+    from netbox_librenms_plugin.views.base.interfaces_view import (
+        INTERFACE_TAB,
+        current_interface_rows,
+        interface_evidence,
+        interface_selectable,
+        open_interface_draft,
+    )
+
+    request = make_request("get", {"server_key": server_key, **query}, user=user)
+    snapshot = source_cache.read(owner, Resource.INTERFACES, server_key)
+    if snapshot is None:
+        return {}
+    draft = open_interface_draft(request, owner, server_key, snapshot)
+    _view, table, rows = current_interface_rows(request, owner, server_key, snapshot, draft.entries())
+    shown = [row for row in rows["table_rows"] if interface_row_key(row) == str(port_id) and interface_selectable(row)]
+    if not shown:
+        return {}
+    (record,) = shown
+    evidence = interface_evidence(owner, server_key, record, table)
+    return {
+        "draft_id": draft.draft_id,
+        "expected_revision": str(draft.revision),
+        "evidence": sign_evidence(INTERFACE_TAB, evidence),
+    }
+
+
+def bind_relationship(request, owner, *, server_key="default"):
+    """Add to the relationship POST *request* the binding of its user's page of *owner*, as the row's button does; return it."""
+    data = request.POST.copy()
+    # The page's name field is part of the draft's scope, as the button's URL carries it.
+    query = {"interface_name_field": data["interface_name_field"]} if data.get("interface_name_field") else {}
+    data.update(relationship_binding(request.user, owner, data["port_id"], server_key=server_key, **query))
+    request.POST = data
+    return request
+
+
 def queued_request(user):
     """Return the ``copy_safe_request()`` copy that the import view queues with a background job."""
     from uuid import uuid4
