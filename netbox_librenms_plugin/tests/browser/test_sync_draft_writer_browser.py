@@ -281,7 +281,7 @@ class _DraftServer:
             </div>
             <div id="htmx-modal" class="modal"><div class="modal-dialog"><div class="modal-content"
                 id="htmx-modal-content"></div></div></div>
-            <div id="django-messages"></div>"""
+            <div id="django-messages" hx-swap-oob="true"></div>"""
 
     def open(self):
         self.page.goto(f"{PAGE_URL}?tab=ipaddresses")
@@ -1310,3 +1310,18 @@ def test_clear_on_the_offpage_notice_clears_those_rows_and_reads_the_tab_again(p
     expect(page.locator("[data-offpage-selection]")).to_have_count(0)
     assert _page_reads(server) == [f"{PAGE_URL}?tab=ipaddresses"]
     assert server.checked == set()
+
+
+def test_a_page_read_keeps_the_messages_that_the_last_request_showed(page):
+    server = _DraftServer(page)
+    server.open()
+    # The messages of the last request; NetBox's page, which a READ answers with, carries an empty container.
+    page.evaluate(
+        "document.getElementById('django-messages').innerHTML = '<div class=\"toast\" id=\"shown\">Synced</div>'"
+    )
+
+    page.click("#cables-tab")
+
+    page.wait_for_url(f"{PAGE_URL}?tab=cables")
+    expect(page.locator("#django-messages #shown")).to_have_count(1)
+    expect(page.locator("#cables-tab")).to_have_count(1)
