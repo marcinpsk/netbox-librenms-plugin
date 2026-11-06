@@ -114,7 +114,7 @@ class TestVerifyPostRejectsMalformedVrfId:
 
     The `vrf__id` filter in `_find_existing_ip` is only reached when an IPAddress at the posted address
     already exists, so the real IP is created first — otherwise the guard is never exercised and the
-    pre-fix code wouldn't 500 either. The snapshot is empty; `_find_existing_ip` runs for real.
+    pre-fix code wouldn't 500 either. The snapshot holds the posted row; `_find_existing_ip` runs for real.
     """
 
     def _post(self, vrf_id):
@@ -122,7 +122,7 @@ class TestVerifyPostRejectsMalformedVrfId:
 
         device = make_device("vrfsk-dev", librenms_cf={"default": 50})
         IPAddress.objects.get_or_create(address="10.0.0.1/24")  # make the vrf__id filter reachable
-        seed_ip_snapshot(device, [])
+        seed_ip_snapshot(device, [ip_address_row("10.0.0.1", 1)], [{"port_id": 1, "ifName": "eth1"}])
 
         request = _make_request(
             {"ip_address": "10.0.0.1/24", "vrf_id": vrf_id, "device_id": device.pk, "object_type": "device"}
@@ -143,7 +143,9 @@ class TestVerifyPostRejectsMalformedVrfId:
 
     def test_numeric_string_vrf_id_is_accepted(self):
         # A digit string coerces to int and flows through the real filter without 400/500.
-        assert self._post("999999").status_code == 200
+        from ipam.models import VRF
+
+        assert self._post(str(VRF.objects.create(name="vrfsk-numeric").pk)).status_code == 200
 
 
 class TestFindRowResolvesAssessedRows:

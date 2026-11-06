@@ -410,7 +410,7 @@ class BaseInterfaceTableView(
         server_key,
         cache_device,
         snapshot,
-        virtual_chassis_members,
+        chassis,
         *,
         show_ignored,
     ):
@@ -424,13 +424,13 @@ class BaseInterfaceTableView(
                 server_key,
                 cache_device,
                 assess_stored_snapshot(snapshot, interface_name_field),
-                virtual_chassis_members,
+                chassis,
                 show_ignored=show_ignored,
             )
 
         if snapshot is None:
             return compute()
-        owner_ids = [owner.pk for owner in virtual_chassis_members or [obj]]
+        owner_ids = [owner.pk for owner in chassis.attribution_members]
         owner_field = self.get_select_related_field(obj)
         interfaces = self.get_interfaces(obj).model.objects.filter(**{f"{owner_field}_id__in": owner_ids})
         owners = type(obj).objects.filter(pk__in=owner_ids)
@@ -458,7 +458,7 @@ class BaseInterfaceTableView(
         server_key,
         cache_device,
         assessment,
-        virtual_chassis_members,
+        chassis,
         *,
         show_ignored,
     ):
@@ -466,7 +466,9 @@ class BaseInterfaceTableView(
         Compute the rows of the interface table and the device-wide state around them.
 
         This reads every NetBox interface of the device (and of each Virtual Chassis member) and compares
-        it with the LibreNMS snapshot, so it is the expensive part of a render.
+        it with the LibreNMS snapshot, so it is the expensive part of a render. Rows are attributed to
+        every member of *chassis*; a row owned by a member the actor may not view carries
+        ``member_withheld`` and no member pk.
 
         Returns:
             dict: The VLAN scope, the table rows (None without a snapshot), the counts, the NetBox-only list
@@ -480,10 +482,11 @@ class BaseInterfaceTableView(
         netbox_only_interfaces = []
         ignored_count = 0
         blocked_port_ids = []
-        actionable_owner_ids = set()
         migrated = False
-        # Include every member's scope so rows owned by another member can resolve their VLANs.
-        vlan_scope_devices = virtual_chassis_members or [obj]
+        is_chassis = bool(getattr(obj, "virtual_chassis", None))
+        virtual_chassis_members = chassis.attribution_members if is_chassis else ()
+        # Include every visible member's scope so rows owned by another member can resolve their VLANs.
+        vlan_scope_devices = list(chassis.visible)
         # The tab gate checks the object's own view permission only, and the table serialises VLAN
         # ids plus each group's id and name, so read IPAM as the caller.
         vlan_scope_user = self.vlan_scope_user(request)
@@ -570,17 +573,14 @@ class BaseInterfaceTableView(
 
             interface_model = self.get_interfaces(obj).model
             owner_field = self.get_select_related_field(obj)
-            actionable_owner_ids = set(
-                obj.__class__.objects.restrict(request.user, "view")
-                .filter(pk__in=interfaces_by_device)
-                .values_list("pk", flat=True)
-            )
-            scoped_interfaces = interface_model.objects.filter(**{f"{owner_field}_id__in": interfaces_by_device})
+            actionable_owner_ids = set(chassis.visible_ids)
+            # Only interfaces on owners the user may view are shown, named or acted on.
+            scoped_interfaces = interface_model.objects.filter(**{f"{owner_field}_id__in": actionable_owner_ids})
             viewable_interface_ids = set(scoped_interfaces.restrict(request.user, "view").values_list("pk", flat=True))
-            changeable_interface_ids = set(
+            # A change grant does not show an interface: an action needs both grants.
+            changeable_interface_ids = viewable_interface_ids & set(
                 scoped_interfaces.restrict(request.user, "change").values_list("pk", flat=True)
             )
-            related_interface_ids = viewable_interface_ids | changeable_interface_ids
             can_write_relationships = self.has_write_permission()
             related_interfaces_by_port_id = {}
             related_interfaces_by_name = {}
@@ -589,14 +589,14 @@ class BaseInterfaceTableView(
                     permitted = [
                         interface
                         for interface in interfaces
-                        if interface.pk in related_interface_ids
+                        if interface.pk in viewable_interface_ids
                         and getattr(interface, f"{owner_field}_id") in actionable_owner_ids
                     ]
                     if permitted:
                         related_interfaces_by_port_id.setdefault(port_id, []).extend(permitted)
                 for interface_name, interface in interface_maps["by_name"].items():
                     if (
-                        interface.pk in related_interface_ids
+                        interface.pk in viewable_interface_ids
                         and getattr(interface, f"{owner_field}_id") in actionable_owner_ids
                     ):
                         related_interfaces_by_name.setdefault(interface_name, []).append(interface)
@@ -619,12 +619,13 @@ class BaseInterfaceTableView(
                 source_index=filter_interface_index(related_index, changeable_interface_ids),
                 actionable_owner_ids=actionable_owner_ids,
                 changeable_interface_ids=changeable_interface_ids,
+                viewable_interface_ids=viewable_interface_ids,
                 can_write=can_write_relationships,
             )
 
             rules = interface_rules_for_request(request)
-            # A row with no resolved member is decided on every member's platform.
-            member_platform_ids = sorted({member.platform_id for member in virtual_chassis_members}, key=str)
+            # A row with no resolved member is decided on the platform of every member the user can pick.
+            member_platform_ids = sorted({member.platform_id for member in chassis.visible if is_chassis}, key=str)
             target_device_ids = {}
             for port in ports_data:
                 port_id = normalize_librenms_port_id(port.get("port_id"))
@@ -690,10 +691,10 @@ class BaseInterfaceTableView(
                     relationship_maps,
                 )
                 port_id = normalize_librenms_port_id(port.get("port_id"))
-                port["selected_object_id"] = chassis_member.pk
-                port["sync_target_resolvable"] = (
-                    chassis_member.pk in actionable_owner_ids and port_id in unique_host_port_ids
-                )
+                # The owner stays attributed, but a member the user may not view is not named by its pk.
+                port["member_withheld"] = chassis_member.pk not in actionable_owner_ids
+                port["selected_object_id"] = None if port["member_withheld"] else chassis_member.pk
+                port["sync_target_resolvable"] = not port["member_withheld"] and port_id in unique_host_port_ids
                 # A bound interface is always resolved by the stable port_id -- for an OOB row
                 # too, which can own an interface on this device. It therefore counts toward the
                 # matched set used for netbox-only detection, and because no binding comes from a
@@ -733,11 +734,13 @@ class BaseInterfaceTableView(
             state_table = self.get_table([], obj, interface_name_field, vlan_groups=vlan_groups)
             for port in table_rows:
                 state_table.row_sync_state(port)
-            # Every row the write check refuses, or that has no owner: the browser walk skips them.
+            # Every row the write check refuses, or that has no owner the user may pick: the browser walk skips them.
             blocked_port_ids = [
                 normalize_librenms_port_id(port.get("port_id"))
                 for port in ports_data
-                if port["rule_decision"] is None or decision_reason(port["rule_decision"]) is not None
+                if port["rule_decision"] is None
+                or decision_reason(port["rule_decision"]) is not None
+                or port["member_withheld"]
             ]
             # Propagate donor "migrated mode" so the table suppresses per-row relationship sync
             # buttons (the bulk form is already hidden by the template; the row buttons POST
@@ -786,7 +789,6 @@ class BaseInterfaceTableView(
             "ignored_count": ignored_count,
             "blocked_port_ids": blocked_port_ids,
             "netbox_only_interfaces": netbox_only_interfaces,
-            "actionable_owner_ids": actionable_owner_ids,
             "migrated": migrated,
             "oob_incomplete": oob_incomplete,
             "oob_blockers": oob_blockers,
@@ -837,9 +839,7 @@ class BaseInterfaceTableView(
         # than the snapshot. Render empty, scoped to the requested key, instead.
         snapshot = None if unresolved or server_key is None else source_cache.read(obj, Resource.INTERFACES, server_key)
 
-        virtual_chassis_members = []
-        if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-            virtual_chassis_members = list(obj.virtual_chassis.members.all())
+        chassis = self.sync_view_scope(obj).chassis
 
         rows = self._interface_rows(
             request,
@@ -848,7 +848,7 @@ class BaseInterfaceTableView(
             server_key,
             cache_device,
             snapshot,
-            virtual_chassis_members,
+            chassis,
             show_ignored=show_ignored,
         )
         vlan_groups = rows["vlan_groups"]
@@ -858,15 +858,10 @@ class BaseInterfaceTableView(
         blocked_port_ids = rows["blocked_port_ids"]
         netbox_only_interfaces = rows["netbox_only_interfaces"]
         if rows["table_rows"] is not None:
-            table_rows, actionable_owner_ids, migrated = (
-                rows["table_rows"],
-                rows["actionable_owner_ids"],
-                rows["migrated"],
-            )
+            table_rows, migrated = rows["table_rows"], rows["migrated"]
 
             def build_table(rows):
                 built = self.get_table(rows, obj, interface_name_field, vlan_groups=vlan_groups)
-                built.allowed_vc_member_ids = actionable_owner_ids
                 built.migrated_to_marker = migrated
                 return built
 
@@ -884,7 +879,8 @@ class BaseInterfaceTableView(
             "vlan_groups": vlan_groups,
             "last_fetched": snapshot.finished_at if snapshot is not None else None,
             "cache_expiry": cache_expiry,
-            "virtual_chassis_members": virtual_chassis_members,
+            # The Bulk VC Member dialog offers only the members the user may view.
+            "virtual_chassis_members": list(chassis.visible) if getattr(obj, "virtual_chassis", None) else [],
             "interface_name_field": interface_name_field,
             "netbox_only_interfaces": netbox_only_interfaces,
             "server_key": server_key,

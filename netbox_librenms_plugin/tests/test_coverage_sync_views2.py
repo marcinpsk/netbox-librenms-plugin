@@ -23,7 +23,6 @@ from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_sto
 from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot, seed_source_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 from netbox_librenms_plugin.utils import get_librenms_cable_tag
-from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
 
 SERVER_KEY = "default"
@@ -549,11 +548,13 @@ def _snmp_post(prefix, **fields):
 
 
 @pytest.mark.django_db
-def test_match_interface_stops_on_ambiguous_port_id():
+def test_ip_interface_resolution_stops_on_ambiguous_port_id():
     """An ambiguous stable identity must not fall through to a cached name."""
+    from netbox_librenms_plugin.utils import resolve_ip_source_interface
+
     dev = make_device("ipres-ambig-name")
     named = make_interface(dev, "eth0")
-    result = SyncIPAddressesView()._match_interface(
+    result = resolve_ip_source_interface(
         {"port_id": 7, "interface_name": "eth0"}, {"7": None}, {"eth0": named}, server_key="default"
     )
     assert result is None

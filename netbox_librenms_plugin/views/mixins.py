@@ -7,6 +7,7 @@ from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import get_script_prefix
+from django.utils.functional import SimpleLazyObject
 from django.utils.html import format_html
 from django.utils.http import url_has_allowed_host_and_scheme
 from utilities.permissions import get_permission_for_model
@@ -15,7 +16,8 @@ from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGI
 from netbox_librenms_plugin.interface_sync import ApplicationResult, write_interface_row
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSIDConflictError, LibreNMSLookupError
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
-from netbox_librenms_plugin.utils import coerce_model_pk, effective_vlan_mode
+from netbox_librenms_plugin.sync_view_scope import SyncViewScope, Visible
+from netbox_librenms_plugin.utils import build_migrated_context, coerce_model_pk, effective_vlan_mode
 
 logger = logging.getLogger(__name__)
 
@@ -457,6 +459,12 @@ class NetBoxObjectPermissionMixin:
         """
         return model.objects.restrict(self.request.user, action)
 
+    def viewable_restricted_queryset(self, model, action):
+        """Return the *model* rows that the request user may *action* and also view: a hidden row answers as a missing one."""
+        return self.restricted_queryset(model, action).filter(
+            pk__in=self.restricted_queryset(model, "view").values("pk")
+        )
+
     # This is the canonical permission helper trusted by the import-disclosure rule.
     # nosemgrep: import-disclosure-sanitizer-shadow
     def restrict_object_or_404(self, model, action="view", select_related=(), **kwargs):
@@ -481,6 +489,13 @@ class NetBoxObjectPermissionMixin:
         if select_related:
             queryset = queryset.select_related(*select_related)
         return get_object_or_404(queryset, **kwargs)
+
+    def sync_view_scope(self, obj):
+        """Return the request user's :class:`SyncViewScope` on the sync subject *obj*, built once per view and subject."""
+        scope = getattr(self, "_sync_view_scope", None)
+        if scope is None or scope.subject != obj:
+            scope = self._sync_view_scope = SyncViewScope.for_request(self.request.user, obj)
+        return scope
 
     def relock_scoped_row(self, model, **lookup):
         """Re-lock a row derived from an already-resolved object. See :func:`relock_scoped_row`."""
@@ -515,6 +530,36 @@ class NetBoxObjectPermissionMixin:
         if error := self.require_write_permission_json():
             return error
         return self.require_object_permissions_json(method)
+
+
+def migrated_template_context(request, obj, server_key):
+    """
+    Return the donor "migrated mode" template context of *obj*: the marker and the winner.
+
+    The winner is a lazy proxy, read only when a template uses it. It proxies None when the actor
+    may not view the winner and when the winner no longer exists, so the two render the same.
+
+    Args:
+        request: The current request; its user is the actor.
+        obj: The donor device or VM.
+        server_key (str): The LibreNMS server key the marker is namespaced under.
+
+    Returns:
+        dict: ``{migrated_to_marker, migrated_to_winner}``; both None when *obj* is not a donor.
+
+    """
+    context = build_migrated_context(obj, server_key)
+    marker = context["migrated_to_marker"]
+    if marker is None:
+        return {**context, "migrated_to_winner": None}
+
+    def visible_winner():
+        from dcim.models import Device
+
+        winner = SyncViewScope.for_request(request.user, obj).owner(Device, marker.device_id)
+        return winner.obj if isinstance(winner, Visible) else None
+
+    return {**context, "migrated_to_winner": SimpleLazyObject(visible_winner)}
 
 
 def server_unavailable_json():
@@ -730,7 +775,7 @@ class LibreNMSAPIMixin:
         migration controls and doesn't re-expose ordinary sync buttons. Routing all exits through
         this one chokepoint makes the spread impossible to forget on a new error/success branch.
 
-        ``build_migrated_context`` returns ``migrated_to_winner`` as a lazy proxy, so the
+        :func:`migrated_template_context` returns ``migrated_to_winner`` as a lazy proxy, so the
         cable/module/VLAN partials (which render only the marker banner, never the winner) don't
         pay the winner ``Device`` lookup on every HTMX refresh.
 
@@ -745,8 +790,6 @@ class LibreNMSAPIMixin:
             HttpResponse: The rendered partial.
 
         """
-        from netbox_librenms_plugin.utils import build_migrated_context
-
         # has_write_permission gates the migrated-donor "Move to winner" controls in the shared
         # inc/_migrate_move_button.html include. Inject it at this chokepoint so EVERY partial
         # render exit (interface/IP/cable/module/VLAN success + error branches) carries it — a
@@ -757,7 +800,9 @@ class LibreNMSAPIMixin:
         merged = {"has_write_permission": self.has_write_permission(), **context}
         # Only the partial response renders the messages; the full page renders them once in base.html.
         merged["sync_partial_response"] = True
-        return render(request, self.partial_template_name, {**merged, **build_migrated_context(obj, server_key)})
+        return render(
+            request, self.partial_template_name, {**merged, **migrated_template_context(request, obj, server_key)}
+        )
 
     def rebind_api_for_posted_server(self, data):
         """

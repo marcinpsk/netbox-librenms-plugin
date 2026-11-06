@@ -5,6 +5,7 @@ import django_tables2 as tables
 from django.utils.html import format_html, mark_safe
 from netbox.tables.columns import ToggleColumn
 
+from netbox_librenms_plugin.assessment.ip_addresses import ViewBlock
 from netbox_librenms_plugin.constants import MATCHING, MISMATCHED, NOT_IN_NETBOX
 from netbox_librenms_plugin.sync_filters import FilterColumn, FilterSpec
 from netbox_librenms_plugin.sync_query import SyncQuery
@@ -19,6 +20,18 @@ CREATE_VRF_LABEL = "VRF"
 # The values a plain column shows as the table default ("—") instead of calling its render method.
 _EMPTY_VALUES = (None, "")
 
+# The status of a row that an object the actor cannot view blocks.
+_VIEW_BLOCK_STATUS = {
+    ViewBlock.ADDRESS: "An IP address you cannot view holds this address",
+    ViewBlock.HELD_ON_HIDDEN_INTERFACE: "An IP address on an interface you cannot view holds this address",
+    ViewBlock.INTERFACE: "Assigned on an interface you cannot view",
+}
+
+
+def offers_selection(record):
+    """Return whether the writer can take the row: an IP mapping or a hidden object refuses it."""
+    return not (record.get("ip_rule_block") or record.get("view_block"))
+
 
 class _StatusCell(NamedTuple):
     """The status cell of one row: its sync-state filter value, the text it shows, and its markup."""
@@ -32,8 +45,8 @@ def management_row_vrfs(rows):
     """Return the VRF that the VRF select of each management row shows, by row ID; "" is Global."""
     vrfs = {}
     for row in rows:
-        # The writer refuses an address that an IP mapping ignores, so that row is no Set Primary IP candidate.
-        if not (row.get("is_mgmt_ip") and row["row_id"]) or row.get("ip_rule_block"):
+        # The writer refuses this row, so it is no Set Primary IP candidate.
+        if not (row.get("is_mgmt_ip") and row["row_id"]) or not offers_selection(row):
             continue
         choices = {vrf.pk for vrf in row.get("vrfs") or ()}
         # The view sets vrf_id or suggested_vrf_id, never both.
@@ -95,8 +108,7 @@ class IPAddressTable(tables.Table):
         visible=True,
         attrs={
             "td": {"data-col": "selection"},
-            # The writer refuses an address an IP mapping ignores, so the row offers no selection.
-            "input": {"name": "select", "disabled": lambda record: "disabled" if record.get("ip_rule_block") else None},
+            "input": {"name": "select", "disabled": lambda record: None if offers_selection(record) else "disabled"},
         },
         accessor="row_id",
     )
@@ -125,7 +137,7 @@ class IPAddressTable(tables.Table):
     vrf = tables.TemplateColumn(
         template_code="""
         <div class="d-flex align-items-center gap-1">
-            <select id="vrf_select_{{ record.row_id }}" class="form-select vrf-select" data-ip="{{ record.ip_address }}" data-prefix="{{ record.prefix_length }}" data-row-id="{{ record.row_id }}" name="vrf_{{ record.row_id }}">
+            <select id="vrf_select_{{ record.row_id }}" class="form-select vrf-select" data-ip="{{ record.ip_address }}" data-prefix="{{ record.prefix_length }}" data-row-id="{{ record.row_id }}" name="vrf_{{ record.row_id }}"{% if record.view_block %} disabled{% endif %}>
                 <option value="">Global</option>
                 {% for vrf in record.vrfs %}
                     <option value="{{ vrf.pk }}" {% if record.vrf_id == vrf.pk or record.suggested_vrf_id == vrf.pk %}selected{% endif %}>
@@ -231,6 +243,10 @@ class IPAddressTable(tables.Table):
     @staticmethod
     def _status_cell(value, record):
         """Return the status cell of one row, which the render method and the filters both read."""
+        if (view_block := record.get("view_block")) is not None:
+            # Wins over every other state: the row carries no NetBox identity.
+            text = _VIEW_BLOCK_STATUS[view_block]
+            return _StatusCell(None, text, format_html('<span class="text-muted">{}</span>', text))
         state = _FILTER_SYNC_STATE.get(value)
         row_id = record.get("row_id", record.get("ip_with_mask"))
         if row_id is None:

@@ -18,6 +18,7 @@ from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
 from netbox_librenms_plugin.tests.test_ip_address_sync_safety import _serve_librenms_ip_rows
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+from netbox_librenms_plugin.views.sync.ip_addresses import VIEW_SCOPE_REFUSAL
 
 SERVER_KEY = "default"
 # The loopback helper serves the LibreNMS device as ID 42.
@@ -170,7 +171,7 @@ def test_the_render_and_the_sync_read_the_snapshot_only(client, live_librenms):
 
 @pytest.mark.django_db
 def test_the_sync_assesses_the_snapshot_for_the_user_who_syncs(client, live_librenms):
-    """A refreshes; B may view eth1 only, so B's table and B's sync never resolve a row to eth2."""
+    """A refreshes; B may view eth1 only, so B's table withholds the eth2 row and B's sync refuses it."""
     device, (eth1, eth2) = _device("ip-snap-two-users", "eth1", "eth2")
     rows = [_row("198.18.82.1", 7821, "eth1"), _row("198.18.82.2", 7822, "eth2")]
     _serve_librenms_ip_rows(live_librenms.server, rows, device_name=device.name)
@@ -192,9 +193,7 @@ def test_the_sync_assesses_the_snapshot_for_the_user_who_syncs(client, live_libr
     assert eth2.get_absolute_url() not in fragment
     assert sync.status_code == 302
     assert _messages(sync, messages.SUCCESS) == ["Created IP addresses: 198.18.82.1/24"]
-    assert any(
-        "Skipped (no matching NetBox interface): 198.18.82.2/24" in text for text in _messages(sync, messages.WARNING)
-    )
+    assert any(VIEW_SCOPE_REFUSAL in text for text in _messages(sync, messages.ERROR))
     assert IPAddress.objects.get(address="198.18.82.1/24").assigned_object == eth1
     assert not IPAddress.objects.filter(address="198.18.82.2/24").exists()
     assert len(live_librenms.server.requests) == requests_before

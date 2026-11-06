@@ -971,7 +971,8 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
             """Whether the queryset came from restricted_queryset(...) / .restrict(...)."""
             # Accepts the chained form too: self.restricted_queryset(Module).select_related(...).
             return any(
-                getattr(call.func, "attr", "") in ("restricted_queryset", "restrict") for call in _call_chain(node)
+                getattr(call.func, "attr", "") in ("restricted_queryset", "viewable_restricted_queryset", "restrict")
+                for call in _call_chain(node)
             )
 
         def _has_scoped_relationship_filter(call):
@@ -1131,6 +1132,8 @@ class TestGatedViewsResolveThroughRestrictedQuerysets:
             "    required_object_permissions = {'POST': []}\n"
             "    def post(self, request, pk):\n"
             "        return get_object_or_404(self.restricted_queryset(Device), pk=pk)\n"
+            "    def put(self, request, pk):\n"
+            "        return get_object_or_404(self.viewable_restricted_queryset(Device, 'change'), pk=pk)\n"
         )
         assert not self._scan_tree(ast.parse(source), "<fixture>")
 
@@ -2809,6 +2812,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             "scope-serial-view",
             [
                 (Device, "view", None),
+                (ConsoleServerPort, "view", None),
                 (ConsoleServerPort, "change", None),
                 (ConsolePort, "view", None),
                 (Cable, "add", None),

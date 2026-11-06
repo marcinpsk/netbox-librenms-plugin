@@ -605,7 +605,7 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
     """Assign serial numbers to each virtual chassis member."""
 
     required_object_permissions = {
-        "POST": [("change", Device)],
+        "POST": [("view", Device), ("change", Device)],
     }
 
     def post(self, request, pk):
@@ -614,7 +614,9 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
         if error := self.require_all_permissions("POST"):
             return error
 
-        device = self.restrict_object_or_404(Device, "change", pk=pk)
+        device = self.restrict_object_or_404(
+            Device, pk=pk, pk__in=self.restricted_queryset(Device, "change").values("pk")
+        )
         # The modal posts the tab's server scope, so return the user to that same server and tab
         # instead of the session/default one.
         active_server_key = _validated_active_server_key(request, "server_key")
@@ -677,14 +679,18 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
 
         def apply(member):
             locked.append(member)
+            # The lock reads the member's current chassis; the user may view it, so naming it is safe.
             if member.virtual_chassis_id != device.virtual_chassis_id:
                 raise _WriteRefused(f"{member.name} is not part of the same virtual chassis")
             member.serial = serial
 
+        # The member's pk comes from the POST: only a member the user may view and change is
+        # locked, and any other pk is "not found", so a constrained grant names no hidden member.
+        writable = self.restricted_queryset(Device).filter(
+            pk=member_id, pk__in=self.restricted_queryset(Device, "change").values("pk")
+        )
         try:
-            # Scoped like the page device: the member's pk comes from the POST, so the same-VC
-            # check alone would let a constrained grant write a serial onto a member it does not cover.
-            update_existing_row(self.restricted_queryset(Device, "change").filter(pk=member_id), apply)
+            update_existing_row(writable, apply)
         except _WriteRefused as exc:
             return str(exc)
         except (ValidationError, IntegrityError) as e:
@@ -720,16 +726,16 @@ def _save_mapping_fields(row, fields):
 
 
 class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
-    """Remove a single server entry from the device's (or VM's) librenms_id custom field dict."""
+    """Remove a single server entry from the librenms_id dict of a Device or VM that the user may view and change."""
 
     required_object_permissions = {
-        "POST": [("change", Device), ("change", VirtualMachine)],
+        "POST": [("view", Device), ("change", Device), ("view", VirtualMachine), ("change", VirtualMachine)],
     }
 
     def _get_object(self, object_type, pk):
         """Return the Device or VirtualMachine for the given pk."""
         model = _sync_model(object_type)
-        return self.restrict_object_or_404(model, "change", pk=pk), model
+        return get_object_or_404(self.viewable_restricted_queryset(model, "change"), pk=pk), model
 
     def post(self, request, pk):
         # Scope required permissions to the specific model being modified before checking.
@@ -738,7 +744,7 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
         if object_type is None:
             return HttpResponse(f"Invalid object_type: {escape(raw_object_type)}", status=400)
         target_model = _sync_model(object_type)
-        self.required_object_permissions = {"POST": [("change", target_model)]}
+        self.required_object_permissions = {"POST": [("view", target_model), ("change", target_model)]}
 
         if error := self.require_all_permissions("POST"):
             return error
@@ -785,7 +791,9 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
 
         with transaction.atomic():
             try:
-                obj_locked = self.restricted_queryset(model, "change").select_for_update(of=("self",)).get(pk=pk)
+                obj_locked = (
+                    self.viewable_restricted_queryset(model, "change").select_for_update(of=("self",)).get(pk=pk)
+                )
             except model.DoesNotExist:
                 messages.error(request, f"{model.__name__} no longer exists.")
                 return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
@@ -830,10 +838,10 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
 
 
 class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
-    """Store the preferred server on a Device or VirtualMachine mapping owner."""
+    """Store the preferred server on a Device or VirtualMachine mapping owner that the user may view and change."""
 
     required_object_permissions = {
-        "POST": [("change", Device), ("change", VirtualMachine)],
+        "POST": [("view", Device), ("change", Device), ("view", VirtualMachine), ("change", VirtualMachine)],
     }
 
     def _redirect(self, object_type, pk, active_server_key=None, active_sync_tab=None):
@@ -846,7 +854,7 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
             return HttpResponse(f"Invalid object_type: {escape(raw_object_type)}", status=400)
 
         model = _sync_model(object_type)
-        self.required_object_permissions = {"POST": [("change", model)]}
+        self.required_object_permissions = {"POST": [("view", model), ("change", model)]}
         if error := self.require_all_permissions("POST"):
             return error
 
@@ -862,7 +870,7 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
 
         with transaction.atomic():
             owner = get_object_or_404(
-                self.restricted_queryset(model, "change").select_for_update(of=("self",)),
+                self.viewable_restricted_queryset(model, "change").select_for_update(of=("self",)),
                 pk=pk,
             )
             mappings = build_server_mappings(owner)

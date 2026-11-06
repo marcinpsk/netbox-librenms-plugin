@@ -198,6 +198,7 @@ class TestPrimaryIPFromManagementAddress:
                         ("view", Device),
                         ("change", Device),
                         ("view", Interface),
+                        ("view", IPAddress),
                         ("add", IPAddress),
                         ("change", IPAddress),
                     ],

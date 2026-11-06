@@ -345,16 +345,16 @@ def test_a_sibling_member_the_caller_cannot_view_is_never_resolved(live_librenms
 def test_a_source_port_bound_on_a_hidden_member_is_not_named(live_librenms):
     """
     Members A (visible) and B (hidden) each have an eth0; both interfaces are viewable. B's eth0
-    holds the source port 7101, which a global rule ignores. The row falls back by name to A's
-    eth0, but port 7101's owner is B, so the refusal names nothing.
+    holds the source port 7101, which a global rule ignores. The binding wins, so the row never
+    falls back by name to A's eth0: it is withheld, and neither the cell nor the refusal names B.
     """
     from dcim.models import Device, Interface
     from django.test import Client
     from ipam.models import VRF
 
-    from netbox_librenms_plugin.interface_rules import HIDDEN_PORT_REASON
     from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
     from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+    from netbox_librenms_plugin.views.sync.ip_addresses import VIEW_SCOPE_REFUSAL
 
     rule = InterfaceTypeMapping.objects.create(action=IGNORE, name_pattern="^secret")
     member_a = _device("ip-assign-owner-a", None)
@@ -376,9 +376,9 @@ def test_a_source_port_bound_on_a_hidden_member_is_not_named(live_librenms):
     response = _sync(client, member_a, rows)
     texts = " ".join(_messages(response))
 
-    assert f"Not synced: {HIDDEN_PORT_REASON}" in cell
+    assert 'name="sync_one"' not in cell
     assert not IPAddress.objects.filter(address="198.18.83.10/24").exists()
-    assert _skipped(response, "198.18.83.10/24", HIDDEN_PORT_REASON)
+    assert any(VIEW_SCOPE_REFUSAL in text for text in _messages(response))
     for secret in (
         "port 7101",
         str(rule),

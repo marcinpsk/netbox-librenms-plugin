@@ -116,6 +116,7 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
             table = VCInterfaceTable(
                 data,
                 device=obj,
+                chassis=self.sync_view_scope(obj).chassis,
                 interface_name_field=interface_name_field,
                 vlan_groups=vlan_groups,
                 server_key=server_key,
@@ -359,9 +360,9 @@ class SingleInterfaceVerifyView(
         view = DeviceInterfaceTableView()
         view.setup(request, pk=origin_device.pk)
         view.rebind_api_for_server(server_key)
-        members = (
-            list(origin_device.virtual_chassis.members.all()) if origin_device.virtual_chassis_id else [origin_device]
-        )
+        # The names are attributed to every member, as on the table; only a visible owner's interface is named.
+        chassis = view.sync_view_scope(origin_device).chassis
+        members = chassis.attribution_members
         interfaces_by_device = {
             member.pk: view._build_interface_lookup_maps(member, metadata_only=True) for member in members
         }
@@ -390,7 +391,7 @@ class SingleInterfaceVerifyView(
             )
             target_device_ids[port_id] = target.pk
         target_device_ids[posted_port_id] = selected_device.pk
-        interfaces = Interface.objects.filter(device_id__in=interfaces_by_device)
+        interfaces = Interface.objects.filter(device_id__in=chassis.visible_ids)
         view.enrich_interface_name_metadata(
             ports,
             interface_name_field,
@@ -518,7 +519,8 @@ class SingleModuleVerifyView(
             return JsonResponse({"status": "error", "message": GrantRefusal.POLICY.message}, status=409)
 
         # A grant needs both renders: the signed page rows show the row, and the table pinned to the member shows it.
-        page_rows = [index for (index,) in grant.rows]
+        # A row the page withholds now is never signed again, also from a grant signed before it was withheld.
+        page_rows = [index for (index,) in grant.rows if index not in context["withheld_indices"]]
         row = self._pinned_row(table.data, selected_device.pk, ent_physical_index, row_depth)
         if row is None or ent_physical_index not in page_rows:
             return JsonResponse(
@@ -612,8 +614,8 @@ class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
         is_missing = vid not in available_vids
         missing_vlans = [vid] if is_missing else []
 
-        # Get NetBox interface for comparison
-        netbox_interface = device.interfaces.filter(name=interface_name).first()
+        # Compare only an interface in the view scope: a hidden one reads as a missing one.
+        netbox_interface = device.interfaces.restrict(request.user, "view").filter(name=interface_name).first()
         exists_in_netbox = bool(netbox_interface)
 
         # Get NetBox VLAN assignments (VID + group for group-aware comparison)
@@ -849,10 +851,7 @@ class DeviceCableTableView(BaseCableTableView):
     def get_table(self, data, obj):
         """Return the appropriate cable table, selecting VC variant if needed."""
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-            allowed_vc_member_ids = set(
-                self._viewable_queryset(Device).filter(virtual_chassis=obj.virtual_chassis).values_list("pk", flat=True)
-            )
-            return VCCableTable(data, device=obj, allowed_vc_member_ids=allowed_vc_member_ids)
+            return VCCableTable(data, device=obj, chassis=self.sync_view_scope(obj).chassis)
         return LibreNMSCableTable(data, device=obj)
 
 
@@ -883,11 +882,7 @@ class DeviceModuleTableView(BaseModuleTableView):
         table_class, member_kwargs = LibreNMSModuleTable, {}
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
             table_class = VCModuleTable
-            member_kwargs["allowed_vc_member_ids"] = set(
-                self.restricted_queryset(Device)
-                .filter(virtual_chassis=obj.virtual_chassis)
-                .values_list("pk", flat=True)
-            )
+            member_kwargs["chassis"] = self.sync_view_scope(obj).chassis
         table = table_class(
             data,
             device=obj,

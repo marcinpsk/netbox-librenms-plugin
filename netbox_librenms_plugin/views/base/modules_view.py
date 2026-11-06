@@ -39,6 +39,7 @@ from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     request_actor_id,
 )
+from netbox_librenms_plugin.sync_view_scope import Visible
 from netbox_librenms_plugin.utils import (
     coerce_positive_int,
     get_module_adoptable_interface_names,
@@ -881,7 +882,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             }
         if policy.member(member.pk) is None:
             return {"table": None, "object": page_device, "server_key": scoped_server}
-        return self._build_context(
+        context = self._build_context(
             request,
             page_device,
             inventory,
@@ -890,6 +891,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             policy=policy,
             pin_to=member,
         )
+        # The pinned table attributes every row to the member, so it cannot tell which rows the page withholds.
+        context["withheld_indices"] = self.withheld_indices(
+            inventory, policy, self.sync_view_scope(page_device).chassis
+        )
+        return context
 
     def _build_context(
         self,
@@ -1068,18 +1074,19 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             "install_selected_inventory_binding": self._selection_manifest(table, table_data),
         }
 
-    @staticmethod
-    def _devices_without_inventory_class(obj, ignore_rules, item_ignore_contexts):
-        """Return each device whose rows follow a policy that has no include rule, in row order."""
+    def _devices_without_inventory_class(self, obj, ignore_rules, item_ignore_contexts):
+        """Return each device the user may view whose rows follow a policy that has no include rule, in row order."""
         # A VC row follows the rules of the member it targets, so each policy that a row uses counts.
         policies = {
             context["selected_device"].pk: (context["selected_device"], context["ignore_rules"])
             for context in item_ignore_contexts.values()
         } or {obj.pk: (obj, ignore_rules)}
+        chassis = self.sync_view_scope(obj).chassis
         return [
             device
             for device, rules in policies.values()
-            if not any(rule.action == rule.ACTION_INCLUDE for rule in rules)
+            if isinstance(chassis.owner(device.pk), Visible)
+            and not any(rule.action == rule.ACTION_INCLUDE for rule in rules)
         ]
 
     @staticmethod
@@ -1110,7 +1117,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
     @staticmethod
     def _mark_verify_rows(table_data):
-        """Give each row of the page table the indices of itself and of the rows below it, in table order."""
+        """
+        Give each row of the page table the indices of itself and of the rows below it, in table order.
+
+        A row on a member the user may not view is in no list: a verify of an ancestor must not sign it
+        again for another member.
+        """
         open_rows = []
         for row in table_data:
             depth = row.get("depth", 0)
@@ -1119,9 +1131,36 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             open_rows.append(row)
             row["verify_rows"] = []
             index = coerce_positive_int(row.get("ent_physical_index"))
-            if index is not None:
+            if index is not None and not row.get("member_withheld"):
                 for owner in open_rows:
                     owner["verify_rows"].append(index)
+
+    @classmethod
+    def withheld_indices(cls, inventory, policy, chassis):
+        """
+        Return the inventory indices that the page table shows withheld for the user of *chassis*.
+
+        The page table attributes each row as here and withholds a row on a member the user may not
+        view, so a verify and every writer refuse these indices with the same rule.
+
+        Args:
+            inventory (list[dict]): The inventory snapshot.
+            policy (InventoryPolicy): The loaded rules and devices of the page device.
+            chassis (ChassisScope): The page device's chassis, split by what the user may view.
+
+        Returns:
+            frozenset[int]: The withheld indices.
+
+        """
+        _default, contexts = cls._build_inventory_ignore_contexts(
+            policy.page_device, inventory, policy.vc_members, policy
+        )
+        return frozenset(
+            index
+            for item in inventory
+            if (index := coerce_positive_int(item.get("entPhysicalIndex"))) is not None
+            and not isinstance(chassis.owner(contexts[_inventory_item_key(item)]["selected_device"].pk), Visible)
+        )
 
     def _selection_manifest(self, table, table_data):
         """Return the signed list of every rendered row a selected install may name, or None without grants."""
@@ -1130,7 +1169,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         rows = {}
         for row in table_data:
             index = coerce_positive_int(row.get("ent_physical_index"))
-            if index is not None:
+            # A row on a member the user may not view is not in the list, so a selected install refuses it.
+            if index is not None and not row.get("member_withheld"):
                 rows.setdefault(index, [index, row["selected_device_id"], row["selectable"]])
         return sign_module_grant(
             page_device_id=table.device.pk,
@@ -1405,13 +1445,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         device_identity,
         module_types,
         manufacturer=None,
-        vc_members=None,
+        *,
+        vc_members,
         ignore_contexts=None,
     ):
-        """Build table rows from top-level items and their sub-components."""
-        if vc_members is None:
-            vc_members = list(obj.virtual_chassis.members.all()) if getattr(obj, "virtual_chassis", None) else []
-
+        """Build table rows from top-level items and their sub-components, attributed to *vc_members*."""
         items = [*top_items, *(child for children in children_by_parent.values() for child in children)]
         member_contexts = self._build_member_contexts(obj, vc_members, items)
         ignore_contexts = ignore_contexts or {}
@@ -1466,7 +1504,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
     def _build_member_contexts(self, obj, vc_members, items):
         """Build per-member bay context data used for row resolution of the inventory *items*."""
-        from dcim.models import Device, Interface
+        from dcim.models import Interface
 
         server_key = getattr(self, "_active_server_key", None) or self.librenms_api.server_key
         # One lookup for every row: the writer binds a held port only to its one holder.
@@ -1486,12 +1524,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             .values_list("device_id", "pk")
         ):
             changeable_ids_by_member[member_id].add(interface_id)
-        viewable_member_ids = set(
-            self.restricted_queryset(Device).filter(pk__in=member_ids).values_list("pk", flat=True)
-        )
+        chassis = self.sync_view_scope(obj).chassis
         for member in context_members:
             # A member the user may not view contributes no bay, module or interface to its rows.
-            withheld = member.pk not in viewable_member_ids
+            withheld = not isinstance(chassis.owner(member.pk), Visible)
             device_bays, module_scoped_bays = ({}, {}) if withheld else self._get_module_bays(member)
             interfaces_by_pk, interfaces_by_name, interfaces_by_module = (
                 ({}, {}, {}) if withheld else self._build_interface_indexes(member)
@@ -1639,6 +1675,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         self._carrier_install_rules = self._carrier_install_rules_for(manufacturer)
 
     @staticmethod
+    def _stamp_row_member(row, target_context, selected_device, resolution_source):
+        """Give *row* its member, or only ``member_withheld`` when the user may not view that member."""
+        row["member_resolution_source"] = resolution_source
+        row["member_withheld"] = target_context["withheld"]
+        if not row["member_withheld"]:
+            row["selected_device_id"] = selected_device.id
+            row["selected_device_name"] = selected_device.name
+
+    @staticmethod
     def _mark_built_in_candidate(row, item, index_map, ignore_rules, device_identity, selected_device):
         """Give a top-level row the facts of its "Mark built-in" action when its unit is a candidate."""
         candidate = built_in_candidate(item, index_map, device_identity, has_bay=bool(row.get("module_bay_id")))
@@ -1692,11 +1737,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             sibling_counts=target_context["sibling_counts"],
             normalized_serial=self._normalized_item_serial(item, manufacturer),
         )
-        row["selected_device_id"] = selected_device.id
-        row["selected_device_name"] = selected_device.name
-        row["member_resolution_source"] = resolution_source
-        row["member_withheld"] = target_context["withheld"]
-        self._apply_carrier_install_rules(row, item, selected_device)
+        self._stamp_row_member(row, target_context, selected_device, resolution_source)
+        if not row["member_withheld"]:
+            self._apply_carrier_install_rules(row, item, selected_device)
         self._attach_interface_match(row, item, target_context)
         parent_row_idx = len(table_data)
         table_data.append(row)
@@ -1715,7 +1758,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 row["device_type_incomplete_name"] = str(device_type)
                 row["device_type_incomplete_target_pk"] = device_type.pk
                 row["device_type_incomplete_suggestion"] = self._derive_bay_template_suggestion(item)
-        self._mark_built_in_candidate(row, item, index_map, ignore_rules, device_identity, selected_device)
+        if not row["member_withheld"]:
+            self._mark_built_in_candidate(row, item, index_map, ignore_rules, device_identity, selected_device)
 
         # Determine child bay scope based on parent match state
         parent_module_id = None
@@ -1811,11 +1855,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 scope_empty_installed_bays=scope_empty_installed_bays,
                 normalized_serial=self._normalized_item_serial(sub_item, sub_manufacturer),
             )
-            sub_row["selected_device_id"] = sub_selected_device.id
-            sub_row["selected_device_name"] = sub_selected_device.name
-            sub_row["member_resolution_source"] = sub_resolution_source
-            sub_row["member_withheld"] = sub_target_context["withheld"]
-            self._apply_carrier_install_rules(sub_row, sub_item, sub_selected_device)
+            self._stamp_row_member(sub_row, sub_target_context, sub_selected_device, sub_resolution_source)
+            if not sub_row["member_withheld"]:
+                self._apply_carrier_install_rules(sub_row, sub_item, sub_selected_device)
             self._attach_interface_match(sub_row, sub_item, sub_target_context)
             table_data.append(sub_row)
 

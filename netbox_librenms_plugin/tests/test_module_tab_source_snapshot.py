@@ -309,7 +309,7 @@ def test_module_grant_reports_an_unusable_source_as_a_snapshot_refusal(live_libr
         cache.set(source_cache.snapshot_key(subject, Resource.MODULES, "default"), snapshot.to_payload(), 300)
 
     with pytest.raises(GrantRefused) as refusal:
-        _authorize_module_grant(subject, "default", ACTION_INSTALL_SELECTED, None)
+        _authorize_module_grant(subject, "default", ACTION_INSTALL_SELECTED, None, actor=make_superuser())
 
     assert refusal.value.refusal is GrantRefusal.SNAPSHOT
 

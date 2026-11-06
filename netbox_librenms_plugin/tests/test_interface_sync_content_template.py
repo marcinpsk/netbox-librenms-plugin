@@ -137,8 +137,8 @@ class TestInterfaceSyncContentTemplateMigratedMode:
             netbox_only=[{"id": 1, "name": "eth-only"}],
             winner=None,
         )
-        assert "migration winner is unavailable" in html
-        assert "Moving an interface reassigns it" not in html  # the move instruction is gated out
+        assert "to transfer that interface" not in html  # the move instruction is gated out
+        assert "Moving an interface reassigns it" not in html
 
     def test_normal_warning_describes_delete(self):
         html = self._render(migrated=None, netbox_only=[{"id": 1, "name": "eth-only"}])

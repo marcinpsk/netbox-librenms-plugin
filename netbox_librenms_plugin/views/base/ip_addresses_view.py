@@ -1,13 +1,13 @@
 import json
 import logging
 
-from dcim.models import Device, Interface
+from dcim.models import Device
 from django.contrib import messages
+from django.core.exceptions import BadRequest
 from django.http import Http404, JsonResponse
 from django.urls import reverse
 from django.utils import timezone
 from django.views import View
-from ipam.models import VRF, IPAddress
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin import source_cache
@@ -18,14 +18,19 @@ from netbox_librenms_plugin.ip_rules import ip_rules_for_request, row_ip_rule_bl
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.sync_filters import filter_sync_table, parse_table_filters
+from netbox_librenms_plugin.sync_view_scope import (
+    VRF_UNAVAILABLE,
+    SyncViewScope,
+    VisibleInterface,
+    address_key,
+    parse_vrf_id,
+)
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable, management_row_vrfs
 from netbox_librenms_plugin.utils import (
     get_interface_name_field,
-    index_ip_source_interfaces,
     index_ip_sync_rows,
     normalize_ip_sync_row_id,
     resolve_create_missing_interfaces,
-    resolve_ip_source_interface,
     resolve_set_primary_ip,
     rule_block_html,
 )
@@ -36,14 +41,12 @@ from netbox_librenms_plugin.views.mixins import (
     NetBoxObjectPermissionMixin,
 )
 
-from netbox_librenms_plugin.assessment.ip_addresses import assess, decide_ip_row_rule, interface_scope
+from netbox_librenms_plugin.assessment.ip_addresses import assess, decide_ip_row_rule
 
 logger = logging.getLogger(__name__)
 
-
-def ip_interface_scope(view, obj):
-    """Return the interface scope used by assessment and the writer."""
-    return interface_scope(obj, view.request.user)
+# The verify answer for an address that no current source row holds.
+STALE_ROW_MESSAGE = "Refresh the IP data and select a current source row."
 
 
 def read_ip_assessment(request, obj, snapshot, server_key, interface_name_field=None):
@@ -105,7 +108,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             "create_missing_interfaces": resolve_create_missing_interfaces(request),
             # Donor "Move IP to winner" candidates (empty unless this device carries a
             # _migrated_to marker for server_key); drives the migrated-mode action card.
-            "movable_ips": self._movable_ips_for_migration(obj, server_key),
+            "movable_ips": self._movable_ips_for_migration(request, obj, server_key),
         }
 
     def _empty_context(self, request, obj, server_key, migration_server_key):
@@ -122,41 +125,28 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             "server_key": server_key,
             "set_primary_ip": resolve_set_primary_ip(request),
             "create_missing_interfaces": resolve_create_missing_interfaces(request),
-            "movable_ips": self._movable_ips_for_migration(obj, migration_server_key),
+            "movable_ips": self._movable_ips_for_migration(request, obj, migration_server_key),
         }
 
     @staticmethod
-    def _movable_ips_for_migration(obj, server_key):
+    def _movable_ips_for_migration(request, obj, server_key):
         """
-        List the donor's interface-assigned IPs as Move-to-winner candidates (empty unless migrated).
+        List the donor's IPs that the user may move to the winner (empty unless migrated).
 
-        Only NetBox Device ``Interface`` assignments are listed: MoveIPAddressToWinnerView re-homes an
-        IP from a donor interface to the winner's same-named interface and rejects non-Interface (e.g.
-        VMInterface) assignments, so VM-owned IPs are intentionally excluded. Gated on the marker so a
-        non-migrated device pays no extra query.
+        The scope lists viewable addresses on the donor's own viewable interfaces. Gated on the
+        marker so a non-migrated device pays no extra query.
 
         Args:
+            request (HttpRequest): The request of the user who reads the tab.
             obj (Device | VirtualMachine): The candidate donor object.
             server_key (str | None): The LibreNMS server key for the migration marker.
 
         Returns:
             list[dict[str, int | str]]: The movable IP candidates, or an empty list.
         """
-        from dcim.models import Device
-        from django.contrib.contenttypes.models import ContentType
-
         if not isinstance(obj, Device) or not read_mapping(obj).migrated_to(server_key or "default"):
             return []
-        name_by_id = {iface.pk: iface.name for iface in obj.interfaces.all()}
-        if not name_by_id:
-            return []
-        iface_ct = ContentType.objects.get_for_model(Interface)
-        return [
-            {"id": ip.pk, "address": str(ip.address), "interface_name": name_by_id.get(ip.assigned_object_id, "")}
-            for ip in IPAddress.objects.filter(
-                assigned_object_type=iface_ct, assigned_object_id__in=list(name_by_id)
-            ).order_by("address")
-        ]
+        return SyncViewScope.for_request(request.user, obj).movable_ips()
 
     def get_context_data(self, request, obj):
         """Get the context data for the IP address sync view."""
@@ -365,24 +355,19 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
             return None, None, None
         return row, row.get("vrf_id"), row.get("port_id")
 
-    def _row_interface(self, obj, record, port_id, server_key):
-        """Return the interface that the row resolves to, with the table's resolver and scope."""
-        _owners, interfaces = ip_interface_scope(self, obj)
-        by_librenms_id, by_name = index_ip_source_interfaces(
-            interfaces, server_key, obj.pk if isinstance(obj, Device) else None
-        )
-        return resolve_ip_source_interface(
-            {"port_id": port_id, "interface_name": record.get("interface_name")},
-            by_librenms_id,
-            by_name,
-            server_key=server_key,
-        )
+    @staticmethod
+    def _find_existing_ip(visible, vrf_id=None):
+        """
+        Return whether the viewable addresses exist, whether one is in *vrf_id*, and the URL to show.
 
-    def _find_existing_ip(self, address_no_mask, prefix_len, vrf_id=None):
-        """Find existing IP address in NetBox, optionally with specific VRF."""
-        ip_with_mask = str(parse_address_with_prefix(address_no_mask, prefix_len))
+        Args:
+            visible (Iterable[IPAddress]): The viewable NetBox addresses equal to the row's address.
+            vrf_id (int | None): The VRF the row's select shows; None is Global.
 
-        matches = list(IPAddress.objects.filter(address=ip_with_mask).order_by("pk"))
+        Returns:
+            tuple[bool, bool, str | None]: Exists in any VRF, exists in *vrf_id*, and the address URL.
+        """
+        matches = sorted(visible, key=lambda ip: ip.pk)
         if not matches:
             return False, False, None
 
@@ -394,6 +379,17 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
         if len(matching_vrf_rows) == 1:
             return True, True, matching_vrf_rows[0].get_absolute_url()
         return True, False, matches[0].get_absolute_url() if len(matches) == 1 else None
+
+    @staticmethod
+    def _answer(ip_address, status_html, selectable):
+        """Return the verify answer: the row's status cell and whether the row may be selected."""
+        return JsonResponse(
+            {
+                "status": "success",
+                "ip_address": ip_address,
+                "formatted_row": {"status": status_html, "selectable": selectable},
+            }
+        )
 
     def _determine_status(self, exists_any_vrf, exists_specific_vrf, original_vrf_id, vrf_id):
         """Determine the status of an IP address based on existence and VRF."""
@@ -467,20 +463,10 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
                 object_id = int(object_id)
             except (TypeError, ValueError):
                 return JsonResponse({"status": "error", "message": "Invalid object ID"}, status=400)
-            if vrf_id in (None, ""):
-                vrf_id = None
-            elif isinstance(vrf_id, bool):
+            try:
+                vrf_id = parse_vrf_id(vrf_id)
+            except BadRequest:
                 return JsonResponse({"status": "error", "message": "Invalid VRF ID"}, status=400)
-            elif isinstance(vrf_id, float):
-                return JsonResponse({"status": "error", "message": "Invalid VRF ID"}, status=400)
-            else:
-                try:
-                    vrf_id = int(vrf_id)
-                except (TypeError, ValueError):
-                    return JsonResponse({"status": "error", "message": "Invalid VRF ID"}, status=400)
-                # The dropdown lists only viewable VRFs, so a VRF the user cannot view decides nothing.
-                if not self.restricted_queryset(VRF).filter(pk=vrf_id).exists():
-                    vrf_id = None
 
             # Get the object (Device or VirtualMachine)
             try:
@@ -499,87 +485,62 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
                     status=400,
                 )
 
+            scope = SyncViewScope.for_request(request.user, obj, server_key)
+            # A hidden and a missing VRF give the same answer.
+            try:
+                vrf = scope.vrf(vrf_id)
+            except Http404:
+                return JsonResponse({"status": "error", "message": VRF_UNAVAILABLE}, status=404)
+            vrf_id = vrf.pk if vrf is not None else None
+
             snapshot = source_cache.read(obj, Resource.IP_ADDRESSES, server_key)
             rows = (
                 read_ip_assessment(request, obj, snapshot, server_key, data.get("interface_name_field")).rows
                 if snapshot is not None
                 else []
             )
-
-            # Basic record with default values
-            updated_record = {
-                "ip_address": address_no_mask,
-                "prefix_length": prefix_len,
-                "ip_with_mask": str(parse_address_with_prefix(address_no_mask, prefix_len)),
-                "device": obj.name,
-                "device_url": obj.get_absolute_url(),
-                "vrf_id": vrf_id,
-                "exists": False,
-                "status": "sync",
-            }
-
-            # Try to find the IP in the assessed rows
             cache_entry, original_vrf_id, original_port_id = self._find_row(
                 rows, address_no_mask, prefix_len, data.get("row_id")
             )
+            if cache_entry is None:
+                return JsonResponse({"status": "error", "message": STALE_ROW_MESSAGE}, status=400)
 
-            if cache_entry is None and (
-                data.get("row_id") is not None
-                or sum(row["ip_with_mask"] == updated_record["ip_with_mask"] for row in rows) > 1
-            ):
-                return JsonResponse(
-                    {"status": "error", "message": "Refresh the IP data and select a current source row."}, status=400
-                )
+            table = IPAddressTable([], mgmt_row_vrfs={})
+            if cache_entry.get("view_block") is not None:
+                return self._answer(ip_address, table.render_status(cache_entry["status"], cache_entry), False)
 
-            # Update record with the assessed row if found
-            if cache_entry:
-                # Update with all fields except the ones the chosen VRF decides
-                for key, value in cache_entry.items():
-                    if key not in ["vrf_id", "status", "ip_rule_block"]:
-                        updated_record[key] = value
-
-            # If no source row was found, use first device interface
-            if original_port_id is None:
-                interface = obj.interfaces.first()
-                if interface:
-                    updated_record["interface_name"] = interface.name
-                    updated_record["interface_url"] = interface.get_absolute_url()
-
-            # Check if IP exists in NetBox
-            exists_any_vrf, exists_specific_vrf, ip_url = self._find_existing_ip(address_no_mask, prefix_len, vrf_id)
-
+            # The assessed row decides everything except what the chosen VRF decides.
+            updated_record = {
+                key: value for key, value in cache_entry.items() if key not in ("vrf_id", "status", "ip_rule_block")
+            }
+            updated_record.update({"vrf_id": vrf_id, "exists": False})
+            row_key = address_key(updated_record["ip_with_mask"])
+            visible = scope.address_states([row_key])[row_key].visible
+            exists_any_vrf, exists_specific_vrf, ip_url = self._find_existing_ip(visible, vrf_id)
             if exists_any_vrf:
                 updated_record["exists"] = True
                 updated_record["ip_url"] = ip_url
-
-            # Determine status based on existence and VRF
             updated_record["status"] = self._determine_status(
                 exists_any_vrf, exists_specific_vrf, original_vrf_id, vrf_id
             )
 
+            target = scope.resolve_ip_interface(
+                {"port_id": original_port_id, "interface_name": updated_record.get("interface_name")}
+            )
             ip_rule, held = decide_ip_row_rule(
                 ip_rules_for_request(request),
                 updated_record["ip_with_mask"],
                 vrf_id,
-                self._row_interface(obj, updated_record, original_port_id, server_key),
-                IPAddress.objects.filter(address=updated_record["ip_with_mask"]),
+                target.interface if isinstance(target, VisibleInterface) else None,
+                visible,
             )
             if held:
-                status_html = IPAddressTable([], mgmt_row_vrfs={}).render_status("matched", updated_record)
+                status_html = table.render_status("matched", updated_record)
             elif ip_rule is not None:
                 status_html = rule_block_html(row_ip_rule_block(ip_rule))
             else:
-                status_html = IPAddressTable([], mgmt_row_vrfs={}).render_status(
-                    updated_record["status"], updated_record
-                )
-
-            return JsonResponse(
-                {
-                    "status": "success",
-                    "ip_address": ip_address,
-                    "formatted_row": {"status": status_html, "selectable": ip_rule is None},
-                }
-            )
+                status_html = table.render_status(updated_record["status"], updated_record)
+            return self._answer(ip_address, status_html, ip_rule is None)
 
         except Exception:
             logger.exception("Unexpected error in IP address sync")

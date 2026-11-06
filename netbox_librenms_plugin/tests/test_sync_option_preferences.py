@@ -442,7 +442,14 @@ class TestSavedIPChoicesThroughTheSyncView:
         seed_mapping(interface, SERVER_KEY, own=7051)
         user = make_user_with_perms(
             f"{name}-user",
-            [("view", Device), ("view", Interface), ("add", IPAddress), ("change", IPAddress), *extra_perms],
+            [
+                ("view", Device),
+                ("view", Interface),
+                ("view", IPAddress),
+                ("add", IPAddress),
+                ("change", IPAddress),
+                *extra_perms,
+            ],
         )
         _store_raw(user, True, IP_PREFERENCES[saved_key])
         client.force_login(user)

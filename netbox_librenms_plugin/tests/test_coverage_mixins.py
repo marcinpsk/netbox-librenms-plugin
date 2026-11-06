@@ -114,7 +114,14 @@ class TestRenderSyncPartial:
 
 @pytest.mark.django_db
 class TestBuildMigratedContextLazyWinner:
-    """build_migrated_context defers the winner Device lookup to a lazy proxy (cable/module/VLAN partials never read it)."""
+    """migrated_template_context defers the winner Device lookup to a lazy proxy (cable/module/VLAN partials never read it)."""
+
+    @staticmethod
+    def _request():
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
+
+        return make_request("get", user=make_superuser())
 
     @staticmethod
     def _winner_lookups(cap, pk):
@@ -125,18 +132,19 @@ class TestBuildMigratedContextLazyWinner:
         from django.test.utils import CaptureQueriesContext
 
         from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.utils import build_migrated_context
         from netbox_librenms_plugin.server_mappings import mark_migrated
         from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
+        from netbox_librenms_plugin.views.mixins import migrated_template_context
 
         winner = make_device("bmc-winner")
         donor = make_device("bmc-donor")
         apply_mapping_change(donor, mark_migrated(donor, winner.pk, "default"))
         donor.save()
+        request = self._request()
 
         # Building the context must NOT fetch the winner row (the boolean-only partials never read it).
         with CaptureQueriesContext(connection) as cap_build:
-            ctx = build_migrated_context(donor, "default")
+            ctx = migrated_template_context(request, donor, "default")
         assert ctx["migrated_to_marker"].device_id == winner.pk  # banner boolean present
         assert self._winner_lookups(cap_build, winner.pk) == []  # winner Device not fetched yet
 
@@ -150,7 +158,7 @@ class TestBuildMigratedContextLazyWinner:
         from django.test.utils import CaptureQueriesContext
 
         from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.utils import build_migrated_context
+        from netbox_librenms_plugin.views.mixins import migrated_template_context
 
         donor = make_device("bmc-self")
         # A self-pointing marker (device_id == donor.pk) is corrupt: it must not flip the donor into
@@ -158,8 +166,9 @@ class TestBuildMigratedContextLazyWinner:
         seed_stored_mapping(
             donor, {"default": {"_migrated_to": {"device_id": donor.pk, "server_key": "default", "at": "x"}}}, save=True
         )
+        request = self._request()
         with CaptureQueriesContext(connection) as cap:
-            ctx = build_migrated_context(donor, "default")
+            ctx = migrated_template_context(request, donor, "default")
         assert ctx["migrated_to_marker"] is None
         assert ctx["migrated_to_winner"] is None
         assert self._winner_lookups(cap, donor.pk) == []  # suppression is in-memory
