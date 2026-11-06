@@ -42,6 +42,24 @@ def page():
             browser.close()
 
 
+@pytest.fixture
+def bfcache_page():
+    """
+    Yield a page of a browser that keeps documents in its back/forward cache, then close the browser.
+
+    Playwright turns the cache off by default, and the headless shell has none, so this page runs in the
+    full Chromium build.
+    """
+    with playwright.sync_playwright() as runtime:
+        browser = runtime.chromium.launch(
+            headless=True, channel="chromium", ignore_default_args=["--disable-back-forward-cache"]
+        )
+        try:
+            yield browser.new_page()
+        finally:
+            browser.close()
+
+
 class FetchTracker:
     """Count the page's fetches, so a test can wait until the page has handled every response."""
 
