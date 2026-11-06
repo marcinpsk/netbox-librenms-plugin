@@ -162,7 +162,7 @@ def test_another_generation_or_fingerprint_starts_an_empty_draft_and_reports_it_
 
 
 @pytest.mark.django_db
-def test_each_user_subject_tab_variant_server_and_scope_has_its_own_draft():
+def test_each_user_subject_tab_variant_and_server_has_its_own_draft():
     user, device = _user("draft-keys"), make_device("draft-keys")
     draft = _open(user, device)
     draft.assign(draft.draft_id, 0, {"ip-1": Assignment(Intent.ON, EVIDENCE)})
@@ -174,11 +174,31 @@ def test_each_user_subject_tab_variant_server_and_scope_has_its_own_draft():
         _open(user, device, tab="interfaces"),
         _open(user, device, variant="virtual-chassis"),
         _open(user, device, server_key="secondary"),
-        _open(user, device, scope="interface_name_field=ifDescr&server_key=default"),
     ]
 
     assert all(other.entries() == {} and other.draft_id != draft.draft_id for other in others)
     assert _intents(_open(user, device)) == {"ip-1": Intent.ON}
+
+
+@pytest.mark.django_db
+def test_another_scope_starts_a_new_draft_and_a_return_does_not_bring_back_the_old_one():
+    user, device = _user("draft-scope"), make_device("draft-scope")
+    other_scope = "interface_name_field=ifDescr&server_key=default"
+    draft = _open(user, device)
+    draft.assign(draft.draft_id, 0, {"ip-1": Assignment(Intent.ON, EVIDENCE), "ip-2": Assignment(Intent.ON, EVIDENCE)})
+    claim = draft.claim(draft.draft_id, 1)
+
+    rescoped = _open(user, device, scope=other_scope)
+    back = _open(user, device)
+
+    assert len({draft.draft_id, rescoped.draft_id, back.draft_id}) == 3
+    assert (back.entries(), back.cleared) == ({}, False)
+    assert _find(user, device, scope=other_scope) is None
+    # The commands and the restore of the earlier draft change nothing.
+    with pytest.raises(DraftConflict):
+        draft.assign(draft.draft_id, 2, {"ip-3": Assignment(Intent.ON, EVIDENCE)})
+    assert draft.restore(claim, ["ip-1"]) == frozenset()
+    assert _open(user, device).entries() == {}
 
 
 @pytest.mark.django_db
@@ -191,7 +211,7 @@ def test_a_draft_belongs_to_a_signed_in_user():
 def test_each_open_starts_the_draft_lifetime_again():
     user, device = _user("draft-ttl"), make_device("draft-ttl")
     _open(user, device)
-    key = draft_key(user, device, "ipaddresses", "device", "default", SCOPE)
+    key = draft_key(user, device, "ipaddresses", "device", "default")
     cache.touch(key, 60)
 
     _open(user, device)
@@ -349,7 +369,7 @@ def test_a_presentation_of_an_older_generation_keeps_the_newer_draft():
 def test_a_command_finds_only_the_draft_of_its_generation_and_never_starts_one():
     user, device = _user("draft-find"), make_device("draft-find")
     assert _find(user, device) is None
-    assert cache.get(draft_key(user, device, "ipaddresses", "device", "default", SCOPE)) is None
+    assert cache.get(draft_key(user, device, "ipaddresses", "device", "default")) is None
 
     draft = _open(user, device, generation="g2")
     draft.assign(draft.draft_id, 0, {"ip-1": Assignment(Intent.ON, EVIDENCE)})

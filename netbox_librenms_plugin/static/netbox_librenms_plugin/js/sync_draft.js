@@ -411,13 +411,28 @@
     }
 
     /**
-     * Take one user input on a draft table, or ignore it while the page waits for the fresh presentation.
+     * Return whether the writer can take input on *table*; else the page says so and reads the tab again.
+     *
+     * Input has no draft to go to on a table whose draft the writer did not take, or while the page waits
+     * for the draft that another window changed. The page never drops such input without a notice.
+     *
+     * @param {?HTMLTableElement} table - The draft table of the input.
+     * @returns {boolean} True when the input can go to the writer's draft.
+     */
+    function accepts(table) {
+        if (!writer.stale && table && table === writer.table) return true;
+        showNotice('This change was not saved. The tab now shows the saved selection; select again.', null);
+        readResults();
+        return false;
+    }
+
+    /**
+     * Take one user input on the writer's draft table.
      *
      * @param {HTMLInputElement[]} boxes - The row checkboxes the input set.
      * @returns {void}
      */
     function takeInput(boxes) {
-        if (writer.stale || !writer.draftId) return;
         bumpInputEpoch();
         boxes.forEach(setRowState);
         schedule();
@@ -426,7 +441,6 @@
     }
 
     function enqueue(command) {
-        if (writer.stale || !writer.draftId) return;
         bumpInputEpoch();
         // A choice of the same row that is the last queued write is replaced: the last choice is the one that counts.
         const tail = writer.queue.at(-1);
@@ -443,13 +457,14 @@
         if (!(control instanceof Element)) return;
         const table = control.closest(DRAFT_TABLE);
         if (table && control.matches('th input.toggle')) {
+            if (!accepts(table)) return;
             const boxes = selectableBoxes(table).filter((box) => box.checked !== control.checked);
             boxes.forEach((box) => {
                 box.checked = control.checked;
             });
             takeInput(boxes);
         } else if (table && control.matches(ROW_CHECKBOX)) {
-            takeInput([control]);
+            if (accepts(table)) takeInput([control]);
         } else if (table && control.matches('select.vrf-select')) {
             const row = control.closest('tr[data-row-key]');
             const key = row?.dataset.rowKey;
@@ -457,10 +472,11 @@
             const shown = writer.choices.get(key)
                 ?? (Array.from(control.options).find((option) => option.defaultSelected) || control.options[0])?.value;
             // TomSelect can announce the value the row shows already; only a new value is a choice.
-            if (control.value === shown) return;
+            if (control.value === shown || !accepts(table)) return;
             writer.choices.set(key, control.value);
             enqueue({ url: writer.urls.choice, row: key, fields: { row: key, value: control.value } });
         } else if (control.matches('#set-primary-ip-toggle-cb') && draftTable()) {
+            if (!accepts(draftTable())) return;
             enqueue({ url: writer.urls.management, fields: { selected: control.checked ? 'on' : 'off' } });
         }
     });
@@ -481,7 +497,7 @@
         range.forEach((other) => {
             other.checked = anchor.checked;
         });
-        takeInput(range);
+        if (accepts(table)) takeInput(range);
     });
 
     // The unload carries the row states that no batch carries yet; the server takes them only for this revision.
@@ -661,15 +677,20 @@
         writeHistory(pageUrl(read, event.detail.xhr), read.history);
     });
 
-    // A swap can bring a new draft table: a READ, a filter or a data refresh.
+    // A swap can bring a new draft table: a READ, a filter or a data refresh. The writer takes its draft when
+    // htmx inserts it, in the same task, so no input on the table comes before (htmx settles it later).
+    document.addEventListener('htmx:afterSwap', adoptPresentation);
+
     document.addEventListener('htmx:afterSettle', function (event) {
         const read = reads.get(event.detail.xhr);
-        if (read?.accepted && read.rowKey) {
-            writer.choices.delete(read.rowKey);
-            rowByKey(read.rowKey)?.dispatchEvent(new CustomEvent('librenms:row-swapped', { bubbles: true }));
-        } else {
-            adoptPresentation();
-        }
+        if (!read?.accepted || !read.rowKey) return;
+        writer.choices.delete(read.rowKey);
+        rowByKey(read.rowKey)?.dispatchEvent(new CustomEvent('librenms:row-swapped', { bubbles: true }));
+    });
+
+    // Back or Forward can restore this document from the browser's cache, with the draft as it showed it then.
+    window.addEventListener('pageshow', function (event) {
+        if (event.persisted && document.getElementById(LOADER_ID)) navigate(window.location.href, 'none');
     });
 
     // Another script can cancel a filter at htmx:configRequest, and htmx then sends nothing and fires no event.
