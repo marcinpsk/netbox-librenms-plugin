@@ -917,3 +917,61 @@ def test_set_primary_ip_sends_the_shown_evidence_and_a_submit_before_the_next_re
     }
     assert server.submits[0]["expected_revision"] == "6"
     assert server.errors == []
+
+
+def test_a_navigation_answer_from_before_a_bulk_submit_does_not_bring_back_the_claimed_rows(page):
+    server = _DraftServer(page)
+    server.open()
+    _box(page, ROWS[0]).click()
+    server.wait_for_commands(1)
+    page.wait_for_function("librenmsSyncDraft.flush().then(revision => revision === 6)")
+    # The server renders the tab click with the row selected, and its answer waits.
+    server.hold.add("page")
+    page.click("#cables-tab")
+    server.wait_until(lambda: server.held)
+
+    # The form is still on the page: the bulk submit claims the row and answers with the next revision.
+    page.click("#sync-selected")
+    server.wait_until(lambda: server.submits)
+    page.wait_for_function("librenmsSyncDraft.flush().then(revision => revision === 7)")
+    page.evaluate(
+        """() => {
+            window.__shown = [];
+            document.addEventListener('htmx:afterSwap', () => {
+                window.__shown.push(document.querySelector('#librenms-ipaddress-table')?.dataset.draftRevision);
+            });
+        }"""
+    )
+    server.hold.clear()
+    server.release("page")
+
+    page.wait_for_url(f"{PAGE_URL}?tab=cables")
+    expect(page.locator("#revision")).to_have_text("7")
+    # The answer from before the claim is never shown; the tab is read again after the claim.
+    assert page.evaluate("window.__shown") == ["7"]
+    expect(_box(page, ROWS[0])).not_to_be_checked()
+    _box(page, ROWS[1]).click()
+    server.wait_for_commands(2)
+    assert server.commands[1][1]["expected_revision"] == "7"
+    page.wait_for_timeout(300)
+    assert server.checked == {ROWS[1]}
+    expect(page.locator("#librenms-draft-notice")).to_have_count(0)
+
+
+def test_a_table_of_an_older_revision_does_not_take_the_writer_back(page):
+    server = _DraftServer(page)
+    server.open()
+    _box(page, ROWS[0]).click()
+    page.wait_for_function("librenmsSyncDraft.flush().then(revision => revision === 6)")
+    older = server.content().replace('data-draft-revision="6"', 'data-draft-revision="5"')
+    page.route(FRAGMENT_URL, lambda route: route.fulfill(status=200, content_type="text/html", body=older))
+
+    page.evaluate("document.getElementById('fragment-loader').dispatchEvent(new CustomEvent('librenms:load-fragment'))")
+
+    # The page reads the tab again, and the next input names the revision that the writer had.
+    server.wait_until(lambda: any(url.startswith(PAGE_URL) for url in server.reads))
+    expect(page.locator("#librenms-ipaddress-table")).to_have_attribute("data-draft-revision", "6")
+    _box(page, ROWS[1]).click()
+    server.wait_for_commands(2)
+    assert server.commands[1][1]["expected_revision"] == "6"
+    expect(page.locator("#librenms-draft-notice")).to_have_count(0)
