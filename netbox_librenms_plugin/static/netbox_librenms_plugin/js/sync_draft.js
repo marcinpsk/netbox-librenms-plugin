@@ -406,6 +406,27 @@
         tailBatch().set(row.dataset.rowKey, { state: checked ? 'on' : 'none', token: checked ? row.dataset.evidence : null });
     }
 
+    /**
+     * Return the evidence token of each management row as the page shows it, by row key.
+     *
+     * The table carries the tokens of every management row, also of one that no page shows; a row that
+     * the page shows gives its own token, which a row READ can have changed.
+     *
+     * @param {HTMLTableElement} table - The writer's draft table.
+     * @returns {Object<string, string>} The tokens.
+     */
+    function shownManagementEvidence(table) {
+        const evidence = JSON.parse(table.dataset.managementEvidence);
+        table.querySelectorAll('tr[data-row-key][data-mgmt-ip="true"]').forEach((row) => {
+            if (row.dataset.evidence) {
+                evidence[row.dataset.rowKey] = row.dataset.evidence;
+            } else {
+                delete evidence[row.dataset.rowKey];
+            }
+        });
+        return evidence;
+    }
+
     function selectableBoxes(table) {
         return Array.from(table.querySelectorAll(ROW_CHECKBOX)).filter((box) => !box.disabled);
     }
@@ -477,7 +498,8 @@
             enqueue({ url: writer.urls.choice, row: key, fields: { row: key, value: control.value } });
         } else if (control.matches('#set-primary-ip-toggle-cb') && draftTable()) {
             if (!accepts(draftTable())) return;
-            enqueue({ url: writer.urls.management, fields: { selected: control.checked ? 'on' : 'off' } });
+            const evidence = JSON.stringify(shownManagementEvidence(draftTable()));
+            enqueue({ url: writer.urls.management, fields: { selected: control.checked ? 'on' : 'off', evidence } });
         }
     });
 
@@ -677,14 +699,18 @@
         writeHistory(pageUrl(read, event.detail.xhr), read.history);
     });
 
-    // A swap can bring a new draft table: a READ, a filter or a data refresh. The writer takes its draft when
-    // htmx inserts it, in the same task, so no input on the table comes before (htmx settles it later).
-    document.addEventListener('htmx:afterSwap', adoptPresentation);
+    // A swap can bring a new draft table (a READ, a filter or a data refresh) or a new row (a row READ). The
+    // writer takes it when htmx inserts it, in the same task, so no input on it comes before (htmx settles it later).
+    document.addEventListener('htmx:afterSwap', function (event) {
+        const read = reads.get(event.detail.xhr);
+        // The row now shows the draft's choice: a choice after this swap compares with the row.
+        if (read?.accepted && read.rowKey) writer.choices.delete(read.rowKey);
+        adoptPresentation();
+    });
 
     document.addEventListener('htmx:afterSettle', function (event) {
         const read = reads.get(event.detail.xhr);
         if (!read?.accepted || !read.rowKey) return;
-        writer.choices.delete(read.rowKey);
         rowByKey(read.rowKey)?.dispatchEvent(new CustomEvent('librenms:row-swapped', { bubbles: true }));
     });
 
