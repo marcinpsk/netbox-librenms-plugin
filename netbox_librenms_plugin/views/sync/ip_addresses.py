@@ -331,8 +331,10 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             results = self.process_ip_sync(
                 request, selected, assessment, obj, object_type, force_intents=force_intents, approved=approved
             )
-        except CommittedFollowUpError:
-            # The rows committed, so the claim keeps them as written.
+        except CommittedFollowUpError as exc:
+            if claim is not None:
+                # The written rows committed and stay consumed; every other claimed row goes back.
+                draft.restore(claim, set(claim.entries) - exc.result["written"])
             raise
         except Exception:
             # Every other failure after the claim wrote nothing, so the claimed rows go back as the user left them.
@@ -586,7 +588,13 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         *,
         attribution_ids,
     ):
-        """Create one missing interface from the snapshot port that owns an IP row; a later row resolves to it."""
+        """
+        Resolve or create the interface of the snapshot port that owns an IP row; a later row resolves to it.
+
+        Returns:
+            tuple: ``(ResolvedInterface, interface_creation_state)``.
+
+        """
         port = ip_row_port_record(cached_ports_by_id, ip_data.get("port_id"))
         if port is None or port.get("_source") == OOB_INVENTORY_SOURCE:
             raise ValueError("The cached LibreNMS port is missing or ambiguous. Refresh the IP data.")
@@ -630,7 +638,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             interface_model = VMInterface
 
         # Raises PortSyncBlocked before any write when the rules refuse the port for this owner.
-        interface = resolve_or_create_interface_from_port(
+        resolved = resolve_or_create_interface_from_port(
             owner,
             port,
             rules=interface_rules_for_request(self.request),
@@ -642,8 +650,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         )
         interface_creation_state["interfaces_by_port_id"].setdefault(
             normalize_librenms_port_id(port.get("port_id")), []
-        ).append(interface)
-        return interface, interface_creation_state
+        ).append(resolved.interface)
+        return resolved, interface_creation_state
 
     def _lock_target_interface(self, obj, interface, interface_creation_state=None, *, attribution_ids):
         """
@@ -1179,8 +1187,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         cached_index, duplicate_cached_rows = self._cached_ip_index(assessment.rows)
         force_intents = force_intents or {}
         approved = approved or {}
-        # The interfaces that this attempt created for rows that approved no interface.
-        created_interface_ids = set()
+        # The interfaces that this attempt created or bound to a port, for rows that approved no interface.
+        batch_interface_ids = set()
         create_missing_interfaces = self._create_missing_interfaces(request)
         cached_ports_by_id = index_ip_port_records(assessment.ports_by_id)
         bound_ports_by_id = index_ip_port_records(assessment.bound_ports_by_id)
@@ -1202,7 +1210,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             row_mutations = set()
             # The row outcomes publish only when the savepoint commits.
             row_results = []
-            row_created_interface_id = None
+            row_batch_interface_id = None
             interface_creation_state_before_row = interface_creation_state
             interfaces_by_port_id_before_row = (
                 {key: list(value) for key, value in interface_creation_state["interfaces_by_port_id"].items()}
@@ -1243,12 +1251,12 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     approval = approved.get(row_id)
                     resolved_id = interface.pk if interface is not None else None
                     if approval is not None and resolved_id != approval["interface"]:
-                        # A row that approved no interface may use one that an earlier row of this batch created.
-                        if not (approval["interface"] is None and resolved_id in created_interface_ids):
+                        # A row that approved no interface may use one that an earlier row of this batch created or bound.
+                        if not (approval["interface"] is None and resolved_id in batch_interface_ids):
                             raise _ApprovedRowChanged
 
                     if interface is None and create_missing_interfaces:
-                        interface, interface_creation_state = self._create_interface_for_ip(
+                        resolved, interface_creation_state = self._create_interface_for_ip(
                             obj,
                             ip_data,
                             cached_ports_by_id,
@@ -1257,9 +1265,14 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             interface_creation_state=interface_creation_state,
                             attribution_ids=attribution_ids,
                         )
+                        interface = resolved.interface
                         row_mutations.add(row_id)
-                        row_created_interface_id = interface.pk
-                        created_interface_ids.add(interface.pk)
+                        if interface.pk not in batch_interface_ids:
+                            # Read under the port claim: a binding that the approval did not show came after it.
+                            if approval is not None and resolved.already_bound:
+                                raise _ApprovedRowChanged
+                            row_batch_interface_id = interface.pk
+                            batch_interface_ids.add(interface.pk)
 
                     if interface is not None:
                         locked_interface, owner = self._lock_target_interface(
@@ -1381,7 +1394,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 if classify_conflict(exc):
                     raise
                 # The savepoint dropped the row's interface, so the catalog drops it too.
-                created_interface_ids.discard(row_created_interface_id)
+                batch_interface_ids.discard(row_batch_interface_id)
                 interface_creation_state = interface_creation_state_before_row
                 if interface_creation_state is not None:
                     interface_creation_state["interfaces_by_port_id"].clear()

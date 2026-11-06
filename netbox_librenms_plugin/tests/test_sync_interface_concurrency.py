@@ -948,7 +948,7 @@ def test_concurrent_cross_model_port_claim_refuses_without_partial_writes(settin
                 changeable_queryset=winner_model.objects.all(),
                 viewable_queryset=winner_model.objects.all(),
                 addable_queryset=winner_model.objects.all(),
-            )
+            ).interface
             if loser_path == "module":
                 with pytest.raises(LibreNMSPortBindingBusy):
                     executor.submit(competing_write).result(timeout=10)

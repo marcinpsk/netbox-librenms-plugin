@@ -340,9 +340,10 @@ def test_a_conflict_drops_the_unsent_input_and_shows_the_draft_again(page):
     server.change_elsewhere()
 
     _box(page, ROWS[0]).click()
-    rejected = page.evaluate("librenmsSyncDraft.flush().then(() => 'resolved', () => 'rejected')")
+    # The unsent input is dropped, so the page may read the draft again: flush resolves.
+    settled = page.evaluate("librenmsSyncDraft.flush().then(() => 'resolved', () => 'rejected')")
 
-    assert rejected == "rejected"
+    assert settled == "resolved"
     expect(page.locator('[data-draft-notice="conflict"]')).to_be_visible()
     expect(page.locator("#revision")).to_have_text("6")
     expect(_box(page, ROWS[0])).not_to_be_checked()
@@ -666,3 +667,107 @@ def test_a_submit_answer_without_a_revision_reads_the_tab_before_any_more_input(
     expect(page.locator("#revision")).to_have_text("7")
     page.wait_for_timeout(300)
     assert server.commands == []
+
+
+def test_a_conflict_while_a_tab_click_waits_makes_the_tab_click_the_read_of_the_changed_draft(page):
+    server = _DraftServer(page)
+    server.open()
+    server.change_elsewhere()
+    server.hold.add("selection")
+    _box(page, ROWS[0]).click()
+    server.wait_for_commands(1)
+
+    page.click("#cables-tab")
+    server.hold.clear()
+    server.release("selection")
+
+    page.wait_for_url(f"{PAGE_URL}?tab=cables")
+    expect(page.locator('[data-draft-notice="conflict"]')).to_be_visible()
+    expect(page.locator("#revision")).to_have_text("6")
+    page.wait_for_timeout(300)
+    assert [url for url in server.reads if url.startswith(PAGE_URL)] == [f"{PAGE_URL}?tab=cables"]
+    # The page takes input again, on the draft that it shows now.
+    _box(page, ROWS[1]).click()
+    server.wait_for_commands(2)
+    assert server.commands[1][1]["expected_revision"] == "6"
+
+
+def test_a_tab_click_wins_over_a_filter_that_htmx_queued_behind_a_running_filter(page):
+    server = _DraftServer(page)
+    server.open()
+    server.hold.add("filter")
+    page.evaluate("document.getElementById('ipaddresses_filter-form').requestSubmit()")
+    server.wait_until(lambda: server.held)
+    page.evaluate(
+        """() => {
+            document.getElementById('filter-q').value = '198.18.0';
+            document.getElementById('ipaddresses_filter-form').requestSubmit();
+        }"""
+    )
+    page.wait_for_timeout(200)
+    # htmx queues the second filter behind the first one on the navigation loader.
+    assert len([url for url in server.reads if url.startswith(FILTER_URL)]) == 1
+    server.hold.clear()
+
+    page.click("#cables-tab")
+
+    page.wait_for_url(f"{PAGE_URL}?tab=cables")
+    page.wait_for_timeout(500)
+    assert page.url == f"{PAGE_URL}?tab=cables"
+    assert len([url for url in server.reads if url.startswith(FILTER_URL)]) == 1
+    assert server.errors == []
+
+
+def test_a_row_cleared_after_a_command_is_sent_after_that_command(page):
+    server = _DraftServer(page)
+    server.open()
+    _box(page, ROWS[0]).click()
+    server.wait_for_commands(1)
+    server.hold.add("selection")
+    _box(page, ROWS[1]).click()
+    server.wait_for_commands(2)
+
+    # While the second batch waits for its answer: Set Primary IP, then the first row is cleared.
+    page.check("#set-primary-ip-toggle-cb")
+    _box(page, ROWS[0]).click()
+    server.hold.clear()
+    server.release("selection")
+    server.wait_for_commands(4)
+
+    assert [kind for kind, _fields in server.commands] == ["selection", "selection", "management", "selection"]
+    assert _assignments(server.commands[3][1]) == {ROWS[0]: "none"}
+    assert server.commands[3][1]["expected_revision"] == "8"
+
+
+def test_a_queued_filter_whose_form_left_the_page_does_not_hold_back_the_read_of_the_results(page):
+    server = _DraftServer(page)
+    server.open()
+    server.hold.add("filter")
+    page.evaluate("document.getElementById('ipaddresses_filter-form').requestSubmit()")
+    server.wait_until(lambda: server.held)
+    page.evaluate("document.getElementById('ipaddresses_filter-form').requestSubmit()")
+    page.evaluate("document.getElementById('ipaddresses_filter-form').remove()")
+
+    page.check("#set-primary-ip-toggle-cb")
+
+    # The command asks for the results again; the queued filter will never go, so the page reads them itself.
+    server.wait_until(lambda: any(url.startswith(PAGE_URL) for url in server.reads))
+    expect(page.locator("#revision")).to_have_text("6")
+
+
+def test_a_filter_that_another_script_cancels_does_not_hold_back_the_read_of_the_results(page):
+    server = _DraftServer(page)
+    server.open()
+    page.evaluate(
+        """() => document.addEventListener('htmx:configRequest', (event) => {
+            if (event.detail.elt.matches('.sync-filter-form')) event.preventDefault();
+        })"""
+    )
+    page.evaluate("document.getElementById('ipaddresses_filter-form').requestSubmit()")
+    page.wait_for_timeout(200)
+    assert server.reads == []
+
+    page.check("#set-primary-ip-toggle-cb")
+
+    server.wait_until(lambda: any(url.startswith(PAGE_URL) for url in server.reads))
+    expect(page.locator("#revision")).to_have_text("6")
