@@ -28,6 +28,7 @@ SUBMIT_URL = "https://plugin.example.com/plugins/librenms_plugin/device/1/sync-i
 FRAGMENT_URL = "https://plugin.example.com/plugins/librenms_plugin/device/1/sync-cache-fragment/ipaddresses/"
 REFRESH_URL = "https://plugin.example.com/plugins/librenms_plugin/devices/1/ipaddress-sync/"
 FILTER_URL = "https://plugin.example.com/plugins/librenms_plugin/device/1/sync-tab-filter/ipaddresses/"
+MOVE_URL = "https://plugin.example.com/plugins/librenms_plugin/ip-addresses/7/move-to-winner/"
 ROWS = ("198.18.0.1/24", "198.18.0.2/24", "198.18.0.3/24", "198.18.0.4/24")
 MESSAGES = '<div id="django-messages" hx-swap-oob="true"><div class="toast">Created IP addresses</div></div>'
 # The management rows: one that the page shows and one that no page shows.
@@ -74,6 +75,8 @@ class _DraftServer:
         # The rows that a row action synced, and the rows whose row action asks for a confirmation first.
         self.synced = set()
         self.conflicts = set()
+        # A migrated device's Move moved its IP to the winner.
+        self.moved = False
         self.errors = []
         page.on("pageerror", lambda error: self.errors.append(str(error)))
         _serve_page_scripts(page)
@@ -87,6 +90,7 @@ class _DraftServer:
             FRAGMENT_URL: "fragment",
             REFRESH_URL: "refresh",
             f"{FILTER_URL}**": "filter",
+            MOVE_URL: "move",
         }
         for url, kind in routes.items():
             page.route(url, self._handler(kind))
@@ -132,6 +136,11 @@ class _DraftServer:
             return {"status": 200, "content_type": "text/html", "body": self.content()}
         if kind == "submit":
             return self._submit(_form_fields(request))
+        if kind == "move":
+            # The plugin's answer to an htmx move: the messages out of band, and the event that reads the tab again.
+            self.moved = True
+            headers = {"HX-Reswap": "none", "HX-Trigger": json.dumps({"lnms-results-stale": None})}
+            return {"status": 200, "body": MESSAGES, "headers": headers}
         return self._command(kind, _form_fields(request))
 
     def _submit(self, fields):
@@ -223,6 +232,9 @@ class _DraftServer:
                 data-draft-command="refresh">
                 Refresh</button>
               <output id="revision">{self.revision}</output>
+              <output id="moved">{"moved" if self.moved else "here"}</output>
+              <button id="move" type="button" data-draft-command="action" hx-post="{MOVE_URL}" hx-swap="none"
+                      hx-confirm="Move IP to the winner?">Move</button>
               <form id="ipaddress-sync-form" method="post" action="{SUBMIT_URL}" hx-post="{SUBMIT_URL}"
                     hx-target="#htmx-modal-content" hx-swap="innerHTML" data-draft-command="draft">
                 <input type="hidden" name="csrfmiddlewaretoken" value="csrf-test">
@@ -1127,3 +1139,49 @@ def test_a_navigation_answer_from_before_a_refresh_is_read_again_after_it(page):
     server.wait_for_commands(1)
     assert server.commands[0][1]["draft_id"] == "draft-1+"
     expect(page.locator("#librenms-draft-notice")).to_have_count(0)
+
+
+def test_a_navigation_that_waits_for_a_move_wins_over_the_move_answer(page):
+    server = _DraftServer(page)
+    server.open()
+    page.evaluate("window.__sameDocument = true")
+    server.hold.add("move")
+    page.click("#move")
+    # The move goes only after the user confirms it.
+    page.wait_for_timeout(200)
+    assert server.held == []
+    page.click("#librenms-confirm-modal [data-confirm-accept]")
+    server.wait_until(lambda: server.held)
+
+    server.hold.add("page")
+    page.click("#cables-tab")
+    page.wait_for_timeout(200)
+    server.hold.discard("move")
+    server.release("move")
+    server.wait_until(lambda: any(kind == "page" for kind, _route, _answer in server.held))
+    server.hold.clear()
+    server.release("page")
+
+    page.wait_for_url(f"{PAGE_URL}?tab=cables")
+    expect(page.locator("#moved")).to_have_text("moved")
+    page.wait_for_timeout(300)
+    assert page.url == f"{PAGE_URL}?tab=cables"
+    assert page.evaluate("window.__sameDocument") is True
+    assert server.errors == []
+
+
+def test_a_move_answer_reads_the_current_page_again_and_a_cancelled_move_sends_nothing(page):
+    server = _DraftServer(page)
+    server.open()
+    page.click("#move")
+    page.click("#librenms-confirm-modal [data-bs-dismiss='modal'].btn-secondary")
+    page.wait_for_timeout(200)
+    assert server.moved is False
+
+    page.click("#move")
+    page.click("#librenms-confirm-modal [data-confirm-accept]")
+
+    # The tab that the move answer names is not a URL: the page reads the page it shows, on any tab.
+    expect(page.locator("#moved")).to_have_text("moved")
+    assert [url for url in server.reads if url.startswith(PAGE_URL)] == [f"{PAGE_URL}?tab=ipaddresses"]
+    expect(page.locator("#django-messages .toast")).to_have_count(1)
