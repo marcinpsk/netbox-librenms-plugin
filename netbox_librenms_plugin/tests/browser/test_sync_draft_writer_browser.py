@@ -233,6 +233,13 @@ class _DraftServer:
     def content(self):
         """Render the IP tab content: the refresh button and the sync form with the draft table."""
         rows = "".join(self.row(key) for key in ROWS)
+        offpage = sorted(self.checked - set(ROWS))
+        notice = (
+            f"<div data-offpage-selection>{len(offpage)} more selected rows"
+            f'<button type="button" data-clear-offpage="{escape(json.dumps(offpage))}">Clear</button></div>'
+            if offpage
+            else ""
+        )
         # The table's token of the shown row is older than the row's own: a row READ changed the row since.
         management = {
             MANAGEMENT_ROW: "token-from-the-table",
@@ -242,6 +249,7 @@ class _DraftServer:
                 data-draft-command="refresh">
                 Refresh</button>
               <output id="revision">{self.revision}</output>
+              {notice}
               <output id="moved">{"moved" if self.moved else "here"}</output>
               <button id="move" type="button" data-draft-command="action" hx-post="{MOVE_URL}" hx-swap="none"
                       hx-confirm="Move IP to the winner?">Move</button>
@@ -1288,3 +1296,17 @@ def test_a_row_action_that_a_refresh_replaced_while_it_waited_is_refused_and_inp
     _box(page, ROWS[0]).click()
     server.wait_for_commands(1)
     assert (server.commands[0][1]["draft_id"], server.commands[0][1]["expected_revision"]) == ("draft-1+", "0")
+
+
+def test_clear_on_the_offpage_notice_clears_those_rows_and_reads_the_tab_again(page):
+    server = _DraftServer(page)
+    server.checked = {OFF_PAGE_MANAGEMENT_ROW}
+    server.open()
+
+    page.click("[data-clear-offpage]")
+
+    server.wait_for_commands(1)
+    assert _assignments(server.commands[0][1]) == {OFF_PAGE_MANAGEMENT_ROW: "none"}
+    expect(page.locator("[data-offpage-selection]")).to_have_count(0)
+    assert _page_reads(server) == [f"{PAGE_URL}?tab=ipaddresses"]
+    assert server.checked == set()

@@ -74,6 +74,13 @@
             <div class="card">
                 {% if ip_sync.filters.is_valid %}
                 {% include 'netbox_librenms_plugin/inc/paginator.html' with table=ip_sync.table placement="top" filtered_from=ip_sync.filtered_from %}
+                {% if ip_sync.offpage_selected %}{% with count=ip_sync.offpage_selected|length %}
+                <div class="alert alert-info py-1 px-2 small mx-2 mb-1 d-flex align-items-baseline gap-2" role="status" data-offpage-selection>
+                    <i class="mdi mdi-checkbox-multiple-marked-outline" aria-hidden="true"></i>
+                    <span class="flex-grow-1">{{ count }} more selected row{{ count|pluralize:" is,s are" }} not shown on this page (another page, or excluded by the filter).</span>
+                    <button type="button" class="btn btn-link btn-sm p-0" data-clear-offpage="{{ ip_sync.offpage_selected_json }}">Clear</button>
+                </div>
+                {% endwith %}{% endif %}
                 {% include 'inc/table.html' with table=ip_sync.table %}
                 {% include 'netbox_librenms_plugin/inc/paginator.html' with table=ip_sync.table filtered_from=ip_sync.filtered_from %}
                 {% else %}

@@ -268,6 +268,25 @@ def ip_table(request, obj, server_key, assessment, draft):
     return table, filters, filtered_from
 
 
+def offpage_selection(table, rows):
+    """
+    Return the keys of the selected rows that the shown page of *table* does not show.
+
+    The page states their number above the table: the submit takes them too, and the user cannot see them
+    (they are on another page, or the filter excludes them).
+
+    Args:
+        table (IPAddressTable): The configured table of :func:`ip_table`.
+        rows (list[dict]): Every row of the snapshot, as :func:`ip_table` showed them.
+
+    Returns:
+        list[str]: The row keys, in snapshot order.
+
+    """
+    shown = {bound.record["row_id"] for bound in table.page.object_list}
+    return [row["row_id"] for row in rows if row.get("selected") and row["row_id"] not in shown]
+
+
 def ip_row_html(request, obj, server_key, snapshot, draft, row_key):
     """
     Return the ``<tr>`` of one IP row as the tab's table renders it, or None when no current row has *row_key*.
