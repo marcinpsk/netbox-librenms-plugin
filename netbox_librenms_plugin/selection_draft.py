@@ -1,9 +1,10 @@
 """
 The selection draft of one sync tab: the rows a user selected or excluded, and the choices set on rows.
 
-The server keeps the draft in the Django cache, under the user, the sync subject, the tab, the table
-variant, the LibreNMS server and the selection scope. A draft is bound to the snapshot generation (and an
-optional fingerprint) it was opened for, so a data refresh starts an empty draft with a new id. Every
+The server keeps one draft in the Django cache for the user, the sync subject, the tab, the table variant
+and the LibreNMS server. A draft is bound to the selection scope, the snapshot generation and an optional
+fingerprint it was opened for: another scope or a data refresh starts an empty draft with a new id, so a
+return to an earlier scope does not bring back its rows. Every
 mutation is a compare-and-set on the draft id and its revision under one advisory lock: a stale writer
 changes nothing and gets :class:`DraftConflict`.
 
@@ -79,9 +80,9 @@ class Claim:
     fences: MappingProxyType
 
 
-def draft_key(user, subject, tab, variant, server_key, scope):
+def draft_key(user, subject, tab, variant, server_key):
     """
-    Return the cache key of one user's draft for one table of a sync tab.
+    Return the cache key of one user's draft for one table of a sync tab; the draft records its scope.
 
     Args:
         user (User): The signed-in user who owns the draft.
@@ -89,7 +90,6 @@ def draft_key(user, subject, tab, variant, server_key, scope):
         tab (str): The sync tab, a :class:`SyncTab` value.
         variant (str): The table variant of the tab.
         server_key (str): The LibreNMS server of the tab.
-        scope (str): The selection scope of the tab (``sync_filters.selection_scope``).
 
     Returns:
         str: The key.
@@ -100,7 +100,7 @@ def draft_key(user, subject, tab, variant, server_key, scope):
     """
     if user.pk is None:
         raise ValueError("A selection draft belongs to a signed-in user.")
-    parts = [user.pk, subject._meta.label_lower, subject.pk, SyncTab(tab).value, variant, server_key, scope]
+    parts = [user.pk, subject._meta.label_lower, subject.pk, SyncTab(tab).value, variant, server_key]
     return f"{_KEY_PREFIX}:{sha256(json.dumps(parts).encode()).hexdigest()}"
 
 
@@ -112,9 +112,10 @@ def _locked(key):
         yield
 
 
-def _new_record(generation, fingerprint):
+def _new_record(scope, generation, fingerprint):
     return {
         "draft_id": secrets.token_hex(16),
+        "scope": scope,
         "generation": generation,
         "fingerprint": fingerprint,
         "revision": 0,
@@ -123,8 +124,12 @@ def _new_record(generation, fingerprint):
     }
 
 
-def _is_bound(record, generation, fingerprint):
-    return record is not None and record["generation"] == generation and record["fingerprint"] == fingerprint
+def _is_bound(record, scope, generation, fingerprint):
+    return record is not None and (record["scope"], record["generation"], record["fingerprint"]) == (
+        scope,
+        generation,
+        fingerprint,
+    )
 
 
 def _entry(record, row_key):
@@ -155,12 +160,13 @@ class SelectionDraft:
     @classmethod
     def open(cls, user, subject, tab, variant, server_key, scope, generation, fingerprint=None, *, published):
         """
-        Return the user's draft for the generation that a presentation shows.
+        Return the user's draft for the scope and the generation that a presentation shows.
 
-        A stored draft of another generation is replaced by an empty one only while *generation* is the
-        published one. A presentation of an older generation gets a detached empty draft, which is never
-        stored: every command on it conflicts, so it cannot replace the newer draft. ``cleared`` is True
-        only on the open that replaced a draft that had entries, so the page can tell the user once.
+        A stored draft of another scope or generation is replaced by an empty one only while *generation*
+        is the published one. A presentation of an older generation gets a detached empty draft, which is
+        never stored: every command on it conflicts, so it cannot replace the newer draft. ``cleared`` is
+        True only on the open that replaced a draft of the same scope that had entries (a data refresh), so
+        the page can tell the user once; a scope change starts empty with no notice.
 
         Args:
             user (User): The signed-in user who owns the draft.
@@ -177,34 +183,36 @@ class SelectionDraft:
             SelectionDraft: The draft.
 
         """
-        key = draft_key(user, subject, tab, variant, server_key, scope)
+        key = draft_key(user, subject, tab, variant, server_key)
         record = cache.get(key)
-        if _is_bound(record, generation, fingerprint):
+        if _is_bound(record, scope, generation, fingerprint):
             cache.touch(key, DRAFT_TTL_SECONDS)
             return cls(key, record, cleared=False)
         with _locked(key):
             # Another request can have replaced it while this one waited for the lock.
             record = cache.get(key)
-            if _is_bound(record, generation, fingerprint):
+            if _is_bound(record, scope, generation, fingerprint):
                 cache.touch(key, DRAFT_TTL_SECONDS)
                 return cls(key, record, cleared=False)
             if published() != generation:
-                return cls(key, _new_record(generation, fingerprint), cleared=False)
-            cleared = bool(record and record["entries"])
-            record = _new_record(generation, fingerprint)
+                return cls(key, _new_record(scope, generation, fingerprint), cleared=False)
+            cleared = bool(record and record["scope"] == scope and record["entries"])
+            record = _new_record(scope, generation, fingerprint)
             cache.set(key, record, DRAFT_TTL_SECONDS)
         return cls(key, record, cleared)
 
     @classmethod
     def find(cls, user, subject, tab, variant, server_key, scope, generation, fingerprint=None):
         """
-        Return the stored draft of the generation that a command read, or None; a command never starts or replaces a draft.
+        Return the stored draft of the scope and generation that a command read, or None.
+
+        A command never starts or replaces a draft.
 
         Takes the arguments of :meth:`open`, without ``published``.
         """
-        key = draft_key(user, subject, tab, variant, server_key, scope)
+        key = draft_key(user, subject, tab, variant, server_key)
         record = cache.get(key)
-        if not _is_bound(record, generation, fingerprint):
+        if not _is_bound(record, scope, generation, fingerprint):
             return None
         cache.touch(key, DRAFT_TTL_SECONDS)
         return cls(key, record, cleared=False)
