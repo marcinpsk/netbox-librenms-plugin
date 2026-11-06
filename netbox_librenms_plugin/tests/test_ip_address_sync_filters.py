@@ -25,7 +25,7 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.test_interface_sync_filters import CELL, _visible_text
 from netbox_librenms_plugin.tests.test_ip_address_sync_safety import _serve_librenms_ip_rows
-from netbox_librenms_plugin.tests.view_test_helpers import select_ip_rows
+from netbox_librenms_plugin.tests.view_test_helpers import select_ip_rows, switch_set_primary_ip
 
 SERVER_KEY = "default"
 # The loopback helper serves the LibreNMS device as ID 42.
@@ -245,13 +245,18 @@ class TestWholeSnapshotData:
         # The selection belongs to the tab, so a filter keeps the draft of the rows already selected.
         assert _table_attr(filtered, "data-draft-id") == _table_attr(unfiltered, "data-draft-id")
         # Set Primary IP selects the management row, which the filter does not show.
-        response = client.post(
-            _table_attr(filtered, "data-management-url"),
+        response = switch_set_primary_ip(
+            client,
             {
-                "draft_id": _table_attr(filtered, "data-draft-id"),
-                "expected_revision": _table_attr(filtered, "data-draft-revision"),
-                "selected": "on",
+                name: _table_attr(filtered, name)
+                for name in (
+                    "data-management-url",
+                    "data-draft-id",
+                    "data-draft-revision",
+                    "data-management-evidence",
+                )
             },
+            "on",
         )
         assert response.status_code == 204
         selected = {row_id for row_id, row in _rows(_tab(client, device)).items() if _checked(row)}

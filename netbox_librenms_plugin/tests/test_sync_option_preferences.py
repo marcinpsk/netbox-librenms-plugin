@@ -24,7 +24,12 @@ from netbox_librenms_plugin.utils import (
     resolve_set_primary_ip,
 )
 from netbox_librenms_plugin.views.imports.actions import SaveUserPrefView
-from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms, read_ip_row, submit_ip_selection
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    make_user_with_perms,
+    read_ip_row,
+    submit_ip_selection,
+    switch_set_primary_ip,
+)
 
 PREFERENCE = "plugins.netbox_librenms_plugin.interface_sync_options"
 SERVER_KEY = "default"
@@ -637,10 +642,7 @@ class TestRenderingTheIPMenu:
         assert not [tag for tag in open_tags(html, "tr") if tag.get("data-mgmt-ip") == "true"]
         (table,) = [tag for tag in open_tags(html, "table") if tag.get("id") == "librenms-ipaddress-table"]
         # Set Primary IP selects the management row on the server, also from a page that does not render it.
-        selected = client.post(
-            table["data-management-url"],
-            {"draft_id": table["data-draft-id"], "expected_revision": table["data-draft-revision"], "selected": "on"},
-        )
+        selected = switch_set_primary_ip(client, table, "on")
         assert selected.status_code == 204
         row = read_ip_row(client, device, "198.18.41.8/24")
         assert "checked" in next(tag for tag in open_tags(row.html, "input") if tag.get("name") == "select")
