@@ -991,7 +991,7 @@
             // A tab fragment or a data refresh replaces the draft table too. A fragment is sent outside the
             // queue; a refresh is a command, which runs when nothing else does.
             const command = isCommandAnswer(event.detail);
-            reads.set(xhr, { navEpoch, inputEpoch, region: true, draft: true, sentIdle: command || !writesPending() });
+            reads.set(xhr, { navEpoch, inputEpoch, region: true, draft: true, command, sentIdle: command || !writesPending() });
         } else if (event.detail.requestConfig.verb === 'get' && event.detail.target?.closest?.('#librenms-sync-tabs')) {
             // Any other READ of a tab region, such as a tab fragment that the cache check reloads.
             reads.set(xhr, { navEpoch, inputEpoch, region: true, draft: false });
@@ -1027,7 +1027,9 @@
             // A navigation or a search that started after the READ was sent replaces it; a draft region also
             // waits for the writes. The page then reads its current destination (a navigation that waits is it).
             const draftChanged = read.draft && (read.inputEpoch !== inputEpoch || !read.sentIdle);
-            if (read.navEpoch !== navEpoch || draftChanged) {
+            // A navigation or a search that waits shows the page, so a fragment must not replace the form it reads.
+            const navigationWaits = !read.command && pendingNav !== null;
+            if (read.navEpoch !== navEpoch || draftChanged || navigationWaits) {
                 event.detail.shouldSwap = false;
                 readResults();
             }

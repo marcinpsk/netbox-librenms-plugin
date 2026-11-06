@@ -1,5 +1,6 @@
 """
-The page's required-row mirror (sync_draft.js) against the shared case file, and the commands of the interface table.
+The page's required-row mirror (sync_draft.js) against the shared case file, the commands of the interface table,
+and the rules of the page reads that a tab on the draft depends on.
 
 Each case of ``selection_rule_cases.json`` renders its page rows with the attributes that the server rule
 (``required_rows.py``, loaded from its file) gives them, then clicks as the case says. After each click the
@@ -10,10 +11,14 @@ import importlib.util
 import json
 from pathlib import Path
 
+from urllib.parse import parse_qs, urlsplit
+
 import pytest
 from playwright.sync_api import expect
 
 from test_sync_cache_browser import _navigation_loader, _serve_page_scripts, _sync_document
+from test_sync_filters_browser import TABLE, _answer, _filter_tab, _next_request, _serve_filter_tab
+from test_sync_navigation_browser import FRAGMENT_LOADER, FRAGMENT_URL
 from test_sync_draft_writer_browser import _form_fields
 
 PLUGIN_DIR = Path(__file__).resolve().parents[2]
@@ -303,3 +308,25 @@ def test_after_a_tab_change_only_the_draft_table_of_the_active_tab_takes_input(p
         (VLAN_SELECTION_URL, "vlans-draft", "3")
     ]
     assert page.locator("#librenms-draft-notice").count() == 0
+
+
+def test_a_fragment_sent_after_the_typing_does_not_drop_the_search_that_waits_for_its_delay(page):
+    """A data refresh reloads the tab's fragment after the user started to type: the search still goes."""
+    held = _serve_filter_tab(page, extra=FRAGMENT_LOADER)
+    fragments = []
+    page.route(f"{FRAGMENT_URL}**", lambda route: fragments.append(route))
+    search = page.locator("#id_interfaces_q")
+
+    search.press_sequentially("eth")
+    page.evaluate("document.getElementById('fragment-loader').dispatchEvent(new CustomEvent('librenms:load-fragment'))")
+    for _ in range(100):
+        if fragments:
+            break
+        page.wait_for_timeout(20)
+    fragments[0].fulfill(status=200, content_type="text/html", body=_filter_tab({}))
+
+    route = _next_request(page, held, 1)
+    assert parse_qs(urlsplit(route.request.url).query)["interfaces_q"] == ["eth"]
+    _answer(route)
+    expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "eth")
+    expect(search).to_have_value("eth")
