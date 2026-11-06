@@ -61,6 +61,8 @@
     let destination = window.location.href;
     // The navigation and input epochs at which each READ was sent, by its XMLHttpRequest.
     const reads = new WeakMap();
+    // True while htmx swaps the answer of a page READ, which holds the whole page.
+    let pageSwap = false;
 
     // The draft writer of this document: one writer, so its acknowledgements give the next expected revision.
     const writer = {
@@ -757,6 +759,8 @@
     }
 
     document.addEventListener('htmx:afterRequest', function (event) {
+        // A page READ whose swap did not happen leaves no flag behind for a later request.
+        pageSwap = false;
         const read = reads.get(event.detail.xhr);
         if (read && !read.rowKey && !read.region) endNavigation(read.navEpoch);
         if (isCommandAnswer(event.detail)) finishCommand(writer.running, event.detail.xhr, event.detail.successful);
@@ -824,7 +828,10 @@
             // A tab fragment or a data refresh replaces the draft table too. A fragment is sent outside the
             // queue; a refresh is a command, which runs when nothing else does.
             const command = isCommandAnswer(event.detail);
-            reads.set(xhr, { navEpoch, inputEpoch, region: true, sentIdle: command || !writesPending() });
+            reads.set(xhr, { navEpoch, inputEpoch, region: true, draft: true, sentIdle: command || !writesPending() });
+        } else if (event.detail.requestConfig.verb === 'get' && event.detail.target?.closest?.('#librenms-sync-tabs')) {
+            // Any other READ of a tab region, such as a tab fragment that the cache check reloads.
+            reads.set(xhr, { navEpoch, inputEpoch, region: true, draft: false });
         }
     });
 
@@ -854,9 +861,12 @@
         const read = reads.get(event.detail.xhr);
         if (read?.region) {
             // Decided here, not in beforeOnLoad: the fragment loader reads the request outcome, and only a swap is held.
-            if (read.navEpoch !== navEpoch || read.inputEpoch !== inputEpoch || !read.sentIdle) {
+            // A navigation or a search that started after the READ was sent replaces it; a draft region also
+            // waits for the writes. The page then reads its current destination (a navigation that waits is it).
+            const draftChanged = read.draft && (read.inputEpoch !== inputEpoch || !read.sentIdle);
+            if (read.navEpoch !== navEpoch || draftChanged) {
                 event.detail.shouldSwap = false;
-                if (read.navEpoch === navEpoch) readResults();
+                readResults();
             }
         }
         if (isCommandAnswer(event.detail) && event.detail.shouldSwap) {
@@ -865,11 +875,19 @@
         if (read?.region) return;
         if (!read?.accepted || read.rowKey || event.defaultPrevented || !event.detail.shouldSwap) return;
         writeHistory(pageUrl(read, event.detail.xhr), read.history);
+        pageSwap = Boolean(read.url);
+    });
+
+    // A page READ shows only the sync tabs: the page's own out-of-band parts (NetBox's empty messages
+    // container) would remove the messages that the last request showed.
+    document.addEventListener('htmx:oobBeforeSwap', function (event) {
+        if (pageSwap) event.detail.shouldSwap = false;
     });
 
     // A swap can bring a new draft table (a READ, a filter or a data refresh) or a new row (a row READ). The
     // writer takes it when htmx inserts it, in the same task, so no input on it comes before (htmx settles it later).
     document.addEventListener('htmx:afterSwap', function (event) {
+        pageSwap = false;
         const read = reads.get(event.detail.xhr);
         // The row now shows the draft's choice: a choice after this swap compares with the row.
         if (read?.accepted && read.rowKey) writer.choices.delete(read.rowKey);
