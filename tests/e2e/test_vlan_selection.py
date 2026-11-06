@@ -6,6 +6,7 @@ exists in group A of the device's site, group B of the site is empty, and VLAN 2
 refreshes the tab, which starts an empty draft.
 """
 
+import json
 import re
 from uuid import uuid4
 
@@ -157,3 +158,27 @@ def test_a_vlan_selection_reaches_the_vlan_draft_while_the_interfaces_pane_shows
     expect(page.locator("#librenms-draft-notice")).to_have_count(0)
     page.reload()
     expect(_box(page, 200)).to_be_checked()
+
+
+def test_an_invalid_filter_shows_the_hidden_selection_and_clear_empties_what_a_submit_writes(
+    vlan_tab: Page, netbox_api: NetBoxAPI
+):
+    page = vlan_tab
+    before = len(netbox_api.list("ipam/vlans", vid=200))
+    _box(page, 200).click()
+    page.evaluate("librenmsSyncDraft.flush()")
+
+    # The search is longer than a filter takes: the tab shows no row, and says which selected row a submit writes.
+    page.locator("#id_vlans_q").fill("x" * 300)
+    expect(page.locator("#vlan-sync-content [data-filter-invalid]")).to_be_visible()
+    notice = page.locator("#vlan-sync-content [data-offpage-selection]")
+    expect(notice).to_be_visible()
+    clear = notice.locator("[data-clear-offpage]")
+    assert json.loads(clear.get_attribute("data-clear-offpage")) == ["200"]
+
+    clear.click()
+    expect(notice).to_have_count(0)
+    with page.expect_response(lambda response: "/sync-vlans/" in response.url):
+        page.get_by_role("button", name="Sync Selected VLANs").click()
+
+    assert len(netbox_api.list("ipam/vlans", vid=200)) == before

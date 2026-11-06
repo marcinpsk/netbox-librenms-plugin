@@ -11,7 +11,14 @@ from netbox_librenms_plugin.selection_draft import DraftConflict, Intent, Select
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.sync_filters import filter_sync_table, parse_table_filters, selection_scope
 from netbox_librenms_plugin.sync_query import SyncQuery
-from netbox_librenms_plugin.sync_rows import ROW_STALE_EVENT, bind_draft, evidence_problem, render_rows, row_url
+from netbox_librenms_plugin.sync_rows import (
+    ROW_STALE_EVENT,
+    bind_draft,
+    evidence_problem,
+    hidden_selection,
+    render_rows,
+    row_url,
+)
 from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
 from netbox_librenms_plugin.utils import (
     build_migrated_context,
@@ -212,12 +219,13 @@ class BaseVLANTableView(
 
         filtered_from = None
         draft = None
+        hidden = {}
         # `is not None` (not a bare truthiness check): an empty list is a valid successful refresh
         # (a device with no VLANs) and must still render an empty table — a truthy check would skip
         # construction and make a VLAN-less device look like it never loaded.
         if cached_vlans is not None:
             draft = open_vlan_draft(request, obj, server_key, snapshot)
-            vlan_table, filters, filtered_from = self.build_vlan_table(
+            vlan_table, filters, filtered_from, hidden = self.build_vlan_table(
                 request, obj, server_key, snapshot, draft, vlan_groups, lookup_maps
             )
 
@@ -233,6 +241,8 @@ class BaseVLANTableView(
             "filtered_from": filtered_from,
             # The data refresh replaced a draft that had rows, so the page says the selection is gone.
             "selection_cleared": draft is not None and draft.cleared,
+            # The selected rows that the shown page does not show, which the submit takes too.
+            **hidden,
             "vlan_groups": vlan_groups,
             "last_fetched": last_fetched,
             "cache_expiry": cache_expiry,
@@ -255,7 +265,8 @@ class BaseVLANTableView(
         The tab and the row read call this one builder, so a row read answers the row as the table shows it.
 
         Returns:
-            tuple[LibreNMSVLANTable, SyncFilters, int | None]: The table, its filters, and the row count before them.
+            tuple[LibreNMSVLANTable, SyncFilters, int | None, dict]: The table, its filters, the row count before
+                them, and the context of the selection that the page does not show (``hidden_selection``).
 
         """
         rows = vlan_rows(obj, snapshot, draft.entries(), lookup_maps)
@@ -271,7 +282,8 @@ class BaseVLANTableView(
         vlan_table, filters, filtered_from = filter_sync_table(request, rows, build_table)
         bind_draft(vlan_table, SyncQuery.from_request(request), obj, server_key, draft, VLAN_COMMAND_URLS)
         vlan_table.configure(request)
-        return vlan_table, filters, filtered_from
+        selected = [_vlan_row_key(row) for row in rows if row.get("selected")]
+        return vlan_table, filters, filtered_from, hidden_selection(vlan_table, selected, filters, _vlan_row_key)
 
     def vlan_groups_and_maps(self, request, obj):
         """Return the VLAN groups of *obj* and their lookup maps, read as the request user."""
@@ -283,7 +295,7 @@ class BaseVLANTableView(
         """Return the ``<tr>`` of one VLAN row as the tab's table renders it, or None when no current row has *row_key*."""
         vlan_groups, lookup_maps = self.vlan_groups_and_maps(request, obj)
         draft = open_vlan_draft(request, obj, server_key, snapshot)
-        table, _filters, _filtered_from = self.build_vlan_table(
+        table, _filters, _filtered_from, _hidden = self.build_vlan_table(
             request, obj, server_key, snapshot, draft, vlan_groups, lookup_maps
         )
         row = next((row for row in table.rows if _vlan_row_key(row.record) == row_key), None)

@@ -11,6 +11,7 @@ import json
 from dataclasses import replace
 
 from django.template.loader import render_to_string
+from django_tables2.utils import AttributeDict
 from django.urls import reverse
 
 from netbox_librenms_plugin import source_cache
@@ -296,24 +297,40 @@ def ip_table(request, obj, server_key, assessment, draft):
     return table, filters, filtered_from
 
 
-def offpage_selection(table, rows, filters):
+def offpage_selection(table, selected_keys, filters, row_key):
     """
-    Return the keys of the selected rows that the shown page of *table* does not show.
+    Return the keys of *selected_keys* that the shown page of *table* does not show.
 
     The page states their number above the table: the submit takes them too, and the user cannot see them
     (they are on another page, or the filter excludes them). An invalid filter shows no row at all.
 
     Args:
-        table (IPAddressTable): The configured table of :func:`ip_table`.
-        rows (list[dict]): Every row of the snapshot, as :func:`ip_table` showed them.
-        filters (SyncFilters): The filters of :func:`ip_table`.
+        table (Table): The configured table of a tab on the draft.
+        selected_keys (list[str]): The keys of the rows that a submit takes, in snapshot order.
+        filters (SyncFilters): The filters of the table.
+        row_key (Callable[[dict], str | None]): Returns the row key of a record of the table.
 
     Returns:
-        list[str]: The row keys, in snapshot order.
+        list[str]: The row keys, in the order of *selected_keys*.
 
     """
-    shown = {bound.record["row_id"] for bound in table.page.object_list} if filters.is_valid else set()
-    return [row["row_id"] for row in rows if row.get("selected") and row["row_id"] not in shown]
+    shown = {row_key(bound.record) for bound in table.page.object_list} if filters.is_valid else set()
+    return [key for key in selected_keys if key not in shown]
+
+
+def hidden_selection(table, selected_keys, filters, row_key):
+    """
+    Return the context of the selection that a tab on the draft does not show, for ``inc/_ip_offpage_selection.html``.
+
+    ``offpage_selected`` names the rows of :func:`offpage_selection`. ``draft_attrs`` carries the draft of the
+    table without the table, for a page that shows no row (an invalid filter): Clear and the submit name it.
+    """
+    offpage = offpage_selection(table, selected_keys, filters, row_key)
+    return {
+        "offpage_selected": offpage,
+        "offpage_selected_json": json.dumps(offpage),
+        "draft_attrs": AttributeDict({name: value for name, value in table.attrs.items() if name.startswith("data-")}),
+    }
 
 
 def ip_row_html(request, obj, server_key, snapshot, draft, row_key):
