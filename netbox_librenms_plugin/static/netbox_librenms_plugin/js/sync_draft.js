@@ -210,15 +210,19 @@
      *
      * Only an idle writer takes it: an accepted READ was sent after flush() and no input came after it. A
      * table the writer took before keeps the writer's own revision, which later acknowledgements moved on.
+     * The writer never goes back to an older revision of its draft: it keeps its own and reads the tab again.
      *
      * @returns {void}
      */
     function adoptPresentation() {
         const table = draftTable();
         if (!table || table === writer.table || !idle()) return;
+        const revision = Number(table.dataset.draftRevision);
+        // A table of an older revision of this draft shows rows that a later command changed: read the tab again.
+        const older = table.dataset.draftId === writer.draftId && revision < writer.revision;
         writer.table = table;
         writer.draftId = table.dataset.draftId;
-        writer.revision = Number(table.dataset.draftRevision);
+        writer.revision = older ? writer.revision : revision;
         writer.urls = {
             selection: table.dataset.selectionUrl,
             choice: table.dataset.choiceUrl,
@@ -226,6 +230,8 @@
         };
         writer.stale = false;
         writer.choices.clear();
+        // Also while the navigation that brought the table waits for its end: that READ is the stale one.
+        if (older) navigate(destination, 'replace');
     }
 
     function rowByKey(key) {
@@ -584,6 +590,8 @@
                 return;
             }
             if (draftForm && isBulkSubmit(event)) {
+                // The claim changes the draft like an input: a READ sent before it shows rows the claim takes.
+                bumpInputEpoch();
                 writer.inFlight = true;
                 writer.submitting = elt;
             }
