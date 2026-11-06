@@ -72,6 +72,21 @@ def apply_vrf_choices(rows, choices, scope):
     return decided
 
 
+def vrf_address_ids(addresses, vrf_id):
+    """
+    Return the pks of the NetBox addresses equal to a row's address that are in *vrf_id*, in pk order.
+
+    The row's evidence and the writer, under its row locks, both name the addresses that the row acts
+    on here, so the writer can refuse a row whose addresses are not the ones the user approved.
+
+    Args:
+        addresses (Iterable[IPAddress]): The viewable NetBox addresses equal to the row's address.
+        vrf_id (int | None): The VRF of the row; None is Global.
+
+    """
+    return sorted(ip.pk for ip in addresses if ip.vrf_id == vrf_id)
+
+
 def _row_in_vrf(row, vrf_id, scope, rules):
     """
     Return *row* decided in *vrf_id*: the address exists when a viewable NetBox address equals it, and is Synced in *vrf_id*.
@@ -86,7 +101,7 @@ def _row_in_vrf(row, vrf_id, scope, rules):
         for name, value in row.items()
         if name not in ("vrf_id", "suggested_vrf_id", "status", "ip_rule_block", "exists")
     }
-    decided.update(vrf_id=vrf_id, exists=bool(visible))
+    decided.update(vrf_id=vrf_id, exists=bool(visible), netbox_addresses=visible)
     if visible:
         decided["status"] = "matched" if len(in_vrf) == 1 else "update"
         decided["netbox_ip"] = in_vrf[0] if len(in_vrf) == 1 else visible[0] if len(visible) == 1 else None
@@ -382,6 +397,7 @@ class _Assessment:
                 enriched.append((enriched_ip, None))
                 continue
             interface = target.interface if isinstance(target, VisibleInterface) else None
+            enriched_ip["netbox_addresses"] = state.visible
             ip_address = self._matching_netbox_ip(enriched_ip, source_address_counts, state.visible, interface)
             if ip_address:
                 self._enrich_existing_ip(enriched_ip, ip_address, interface)

@@ -367,7 +367,8 @@ def test_concurrent_global_ip_sync_creates_one_address(settings):
         timeout=60,
     )
 
-    assert sorted(statuses) == [200, 302]
+    # The second request finds the address that the first one created, which its user did not approve.
+    assert sorted(statuses) == [302, 302]
     assert all(wrapper.lookup_seen for wrapper in lookup_wrappers)
     assert IPAddress.objects.filter(address__net_host="198.18.20.10", vrf=None).count() == 1
 

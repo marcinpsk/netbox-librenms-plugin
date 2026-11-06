@@ -149,6 +149,8 @@ class SelectionDraft:
         self._key = key
         self._record = record
         self.cleared = cleared
+        # Set by restore(): another mutation of the draft came between the claim and the restore.
+        self.changed_since_claim = False
 
     @classmethod
     def open(cls, user, subject, tab, variant, server_key, scope, generation, fingerprint=None, *, published):
@@ -296,6 +298,8 @@ class SelectionDraft:
 
         A row is put back only into the same draft, and only while its fence is still the claim's: another
         change, claim or restore of the row moved it. Nothing is put back into a replaced draft.
+        ``changed_since_claim`` tells whether another mutation came between the claim and this restore:
+        then the revision after the restore holds a change that the submitting page did not see.
 
         Args:
             claim (Claim): The claim that took the rows.
@@ -314,7 +318,9 @@ class SelectionDraft:
         with _locked(self._key):
             record = cache.get(self._key)
             if record is None or record["draft_id"] != claim.draft_id:
+                self.changed_since_claim = True
                 return frozenset()
+            self.changed_since_claim = record["revision"] != claim.revision
             restored = [row_key for row_key in row_keys if record["fences"].get(row_key) == claim.fences[row_key]]
             if not restored:
                 return frozenset()
