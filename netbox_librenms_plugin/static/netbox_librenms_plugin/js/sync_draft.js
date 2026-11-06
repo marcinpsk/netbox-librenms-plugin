@@ -366,7 +366,16 @@
         }
     }
 
-    // Run a write: post it with the draft and the revision of the last acknowledgement, and end at its answer.
+    /**
+     * Run a write: post it with the draft and the revision of the last acknowledgement, and end at its answer.
+     *
+     * The answer decides once: a success acknowledges the write; 409 means another window changed the draft;
+     * any other 4xx is the server's final refusal of this write (never sent again); only a network error or
+     * a 5xx is a failure that the page tries again.
+     *
+     * @param {Object} op - The batch or the write.
+     * @returns {void}
+     */
     function sendWrite(op) {
         const fields = op.kind === 'batch' ? { assignments: JSON.stringify(Object.fromEntries(op.rows)) } : op.fields;
         const body = new FormData();
@@ -380,10 +389,12 @@
             headers: { 'X-CSRFToken': csrfToken() },
         })
             .then((response) => {
-                if (response.status === 204) {
+                if (response.ok) {
                     acknowledge(response);
                 } else if (response.status === 409) {
                     conflict();
+                } else if (response.status < 500) {
+                    refusal(op);
                 } else {
                     failure(op);
                 }
@@ -416,6 +427,20 @@
         clearTimeout(writer.timer);
         writer.timer = null;
         showNotice('The selection changed in another window. The tab now shows it; select again.', null);
+        readResults();
+    }
+
+    /**
+     * The server refused one write for good (a VRF that is gone, a row it no longer offers, no permission):
+     * drop it, keep every other operation, say so, and read the tab so that it shows what the server has.
+     *
+     * @param {Object} op - The refused batch or write.
+     * @returns {void}
+     */
+    function refusal(op) {
+        // The row shows the choice of the server again when the tab is read; a later choice stays.
+        if (op.row && writer.choices.get(op.row) === op.fields.value) writer.choices.delete(op.row);
+        showNotice('The server refused this change. The tab now shows the saved selection.', null);
         readResults();
     }
 
