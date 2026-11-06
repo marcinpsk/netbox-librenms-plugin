@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from dcim.models import Device
 from django.contrib import messages
+from django.core import signing
 from django.core.exceptions import BadRequest
 from django.db.models import Q
 from django.http import Http404
@@ -48,7 +49,14 @@ from netbox_librenms_plugin.interface_relationships import (
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.models import RuleConfigurationError
 from netbox_librenms_plugin.required_rows import checked_rows, off_page_requirers, requirement_edges, requirements
-from netbox_librenms_plugin.selection_draft import DraftConflict, Intent, SelectionDraft, sign_evidence
+from netbox_librenms_plugin.selection_draft import (
+    DraftConflict,
+    Intent,
+    SelectionDraft,
+    evidence_changed,
+    read_evidence,
+    sign_evidence,
+)
 from netbox_librenms_plugin.server_mappings import read_mapping, read_mappings
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
@@ -1132,9 +1140,54 @@ def _proposed_type(record):
     return planned_interface_type(interface, decision, created=False).value
 
 
+def displayed_interface_row(request, obj, server_key, snapshot, raw_port_id):
+    """
+    Return the draft and ``{row key: evidence}`` of a row action whose page shows the row as it is now.
+
+    The action posts the draft ID and revision of its page and the row's evidence token. Another
+    draft or revision, or evidence that is not the row's current evidence, gives an empty dict: the
+    action writes nothing and leaves the draft as it is.
+
+    Args:
+        request (HttpRequest): The action request; its query holds the page query of the tab.
+        obj (Device | VirtualMachine): The subject of the sync page.
+        server_key (str): The LibreNMS server of the tab.
+        snapshot (SourceSnapshot | None): The stored interfaces snapshot.
+        raw_port_id (str): The posted port ID of the row.
+
+    Returns:
+        tuple[SelectionDraft | None, dict[str, dict]]: The draft, and the row's evidence when the page showed it.
+
+    """
+    draft = find_interface_draft(request, obj, server_key, snapshot) if snapshot is not None else None
+    port_id = normalize_librenms_port_id(raw_port_id)
+    try:
+        shown = (str(request.POST.get("draft_id")), int(request.POST.get("expected_revision")))
+        payload = read_evidence(INTERFACE_TAB, request.POST.get("evidence") or "")
+    except (TypeError, ValueError, signing.BadSignature):
+        return draft, {}
+    if draft is None or port_id is None or shown != (draft.draft_id, draft.revision):
+        return draft, {}
+    _view, table, rows = current_interface_rows(request, obj, server_key, snapshot, draft.entries())
+    key = str(port_id)
+    record = next((row for row in rows["table_rows"] or () if interface_row_key(row) == key), None)
+    if (
+        record is None
+        or not interface_selectable(record)
+        or evidence_changed(payload, interface_evidence(obj, server_key, record, table))
+    ):
+        return draft, {}
+    return draft, {key: payload}
+
+
 def effective_intents(obj, server_key, table, records, entries):
     """
-    Return the intent of each draft row that the rule reads: a selection counts only while its evidence is current.
+    Return the intent of each draft row that the rule reads: the one definition of what the user's approval covers.
+
+    A selection counts (``Intent.ON``) only while its evidence is the current one. An exclusion, and a
+    selection whose evidence changed (or whose row is gone), are not covered (``Intent.OFF``): no selection
+    takes them along and no write of the submit or of its relationship pass changes them. The requirement
+    closure still goes through them, as through an exclusion. A click on such a row selects it again.
 
     Args:
         obj (Device | VirtualMachine): The subject of the sync page.
@@ -1144,7 +1197,7 @@ def effective_intents(obj, server_key, table, records, entries):
         entries (dict[str, Entry]): The draft entries.
 
     Returns:
-        dict[str, Intent]: ``Intent.ON`` for an approved selection, ``Intent.OFF`` for an exclusion.
+        dict[str, Intent]: ``Intent.ON`` for an approved selection, ``Intent.OFF`` for a row the approval does not cover.
 
     """
     intents = {}
@@ -1152,9 +1205,13 @@ def effective_intents(obj, server_key, table, records, entries):
         record = records.get(row_key)
         if entry.intent is Intent.OFF:
             intents[row_key] = Intent.OFF
-        elif entry.intent is Intent.ON and record is not None and interface_selectable(record):
-            if evidence_problem(entry, interface_evidence(obj, server_key, record, table)) is None:
-                intents[row_key] = Intent.ON
+        elif entry.intent is Intent.ON:
+            current = (
+                interface_evidence(obj, server_key, record, table)
+                if record is not None and interface_selectable(record)
+                else None
+            )
+            intents[row_key] = Intent.ON if evidence_problem(entry, current) is None else Intent.OFF
     return intents
 
 

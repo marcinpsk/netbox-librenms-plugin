@@ -47,7 +47,7 @@ from netbox_librenms_plugin.interface_sync import (
 )
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.required_rows import requirement_edges
-from netbox_librenms_plugin.selection_draft import DraftConflict, Intent, evidence_changed, read_evidence
+from netbox_librenms_plugin.selection_draft import DraftConflict, Intent, read_evidence
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
     LibreNMSPortBindingConflict,
@@ -66,7 +66,7 @@ from netbox_librenms_plugin.sync_cache import (
     schedule_request_cache_mutation,
 )
 from netbox_librenms_plugin.sync_query import page_query_url
-from netbox_librenms_plugin.sync_rows import RESULTS_STALE_EVENT, REVISION_HEADER, evidence_problem
+from netbox_librenms_plugin.sync_rows import RESULTS_STALE_EVENT, REVISION_HEADER
 from netbox_librenms_plugin.sync_view_scope import Withheld
 from netbox_librenms_plugin.transactions import CommittedFollowUpError, classify_conflict, run_transaction
 from netbox_librenms_plugin import source_cache
@@ -91,9 +91,9 @@ from netbox_librenms_plugin.views.base.interfaces_view import (
     InterfaceChoices,
     assess_stored_snapshot,
     current_interface_rows,
+    displayed_interface_row,
+    effective_intents,
     find_interface_draft,
-    interface_evidence,
-    interface_selectable,
     read_interface_assessment,
 )
 from netbox_librenms_plugin.views.mixins import (
@@ -272,8 +272,8 @@ class _BulkRelationshipContext:
     unique_host_port_ids: set
     unambiguous_name_port_ids: set
     excluded_columns: set
-    # The port IDs that the user excluded: no edge may write them.
-    excluded_port_ids: set
+    # The port IDs that the user's approval does not cover (see effective_intents): no edge may write them.
+    uncovered_port_ids: set
 
 
 class _HostInterfaceNameConflict(Exception):
@@ -369,7 +369,7 @@ class SyncInterfacesView(
                 messages.error(request, ROW_CHANGED)
                 return self._tab_response(request, object_type, interface_name_field, server_key)
             choices = InterfaceChoices.of(draft.entries())
-            excluded = changed = set()
+            uncovered = set()
         else:
             draft = find_interface_draft(request, obj, server_key, self._snapshot)
             try:
@@ -380,16 +380,14 @@ class SyncInterfacesView(
                 messages.error(request, SELECTION_CHANGED)
                 return self._tab_response(request, object_type, interface_name_field, server_key)
             choices = InterfaceChoices.of(claim.entries)
-            approved, changed = self._approved_rows(request, obj, server_key, claim)
-            excluded = {int(key) for key, entry in claim.entries.items() if entry.intent is Intent.OFF}
+            approved, uncovered = self._approved_rows(request, obj, server_key, claim)
 
         # The answer names the revision after a claim only.
         claimed = draft if claim is not None else None
         self._row_choices = choices
         self._approved = {int(key): payload for key, payload in approved.items()}
-        self._excluded_port_ids = excluded
-        # A selected row that the evidence check refused stays refused: the related-row walk never adds it.
-        self._changed_port_ids = changed
+        # The rows that the user's approval does not cover: the walk never adds them and no edge writes them.
+        self._uncovered_port_ids = uncovered
         visible_port_ids = set(self._approved)
         # The related-row walk runs under the owner locks (_lock_sync_scope), with the writer's state.
         self._related_walk = (
@@ -498,63 +496,34 @@ class SyncInterfacesView(
         )
 
     def _displayed_row(self, request, obj, server_key, raw_port_id):
-        """
-        Return the draft and ``{row key: evidence}`` of a row action whose page shows the row as it is now.
-
-        The action posts the draft ID and revision of its page and the row's evidence token. Another
-        draft or revision, or evidence that is not the row's current evidence, gives an empty dict: the
-        action writes nothing and leaves the draft as it is.
-        """
-        draft = find_interface_draft(request, obj, server_key, self._snapshot)
-        port_id = normalize_librenms_port_id(raw_port_id)
-        try:
-            shown = (str(request.POST.get("draft_id")), int(request.POST.get("expected_revision")))
-            payload = read_evidence(INTERFACE_TAB, request.POST.get("evidence") or "")
-        except (TypeError, ValueError, signing.BadSignature):
-            return draft, {}
-        if draft is None or port_id is None or shown != (draft.draft_id, draft.revision):
-            return draft, {}
-        _view, table, rows = current_interface_rows(request, obj, server_key, self._snapshot, draft.entries())
-        key = str(port_id)
-        record = next((row for row in rows["table_rows"] or () if interface_row_key(row) == key), None)
-        if (
-            record is None
-            or not interface_selectable(record)
-            or evidence_changed(payload, interface_evidence(obj, server_key, record, table))
-        ):
-            return draft, {}
-        return draft, {key: payload}
+        """Return the draft and ``{row key: evidence}`` of a row action whose page shows the row as it is now."""
+        return displayed_interface_row(request, obj, server_key, self._snapshot, raw_port_id)
 
     def _approved_rows(self, request, obj, server_key, claim):
         """
-        Return the approved evidence of each claimed selected row whose evidence is still the current one.
+        Return the approved evidence of the claimed rows, and the rows that the user's approval does not cover.
 
-        A row that changed after the user selected it is refused with one message; the restore puts it back.
+        The rule is the one of the tab (``effective_intents``): a selection counts only while its evidence is
+        the current one. A selection that changed after the user selected it is refused with one message; the
+        restore puts it back.
 
         Returns:
-            tuple[dict[str, dict], set[int]]: The approved evidence by row key, and the port IDs of the refused rows.
+            tuple[dict[str, dict], set[int]]: The approved evidence by row key, and the port IDs of the
+                excluded rows and of the refused selections.
 
         """
         _view, table, rows = current_interface_rows(request, obj, server_key, self._snapshot, claim.entries)
         records = {key: row for row in rows["table_rows"] or () if (key := interface_row_key(row)) is not None}
-        approved, changed, refused = {}, [], set()
-        for key, entry in claim.entries.items():
-            if entry.intent is not Intent.ON:
-                continue
-            record = records.get(key)
-            current = (
-                interface_evidence(obj, server_key, record, table)
-                if record is not None and interface_selectable(record)
-                else None
-            )
-            if evidence_problem(entry, current) is None:
-                approved[key] = entry.evidence
-            else:
-                changed.append(str((record or {}).get(self.interface_name_field) or key))
-                refused.add(int(key))
+        intents = effective_intents(obj, server_key, table, records, claim.entries)
+        approved = {key: claim.entries[key].evidence for key, intent in intents.items() if intent is Intent.ON}
+        changed = [
+            str((records.get(key) or {}).get(self.interface_name_field) or key)
+            for key, entry in claim.entries.items()
+            if entry.intent is Intent.ON and key not in approved
+        ]
         if changed:
             messages.warning(request, CHANGED_ROWS.format(", ".join(changed)))
-        return approved, refused
+        return approved, {int(key) for key, intent in intents.items() if intent is Intent.OFF}
 
     def _sync_attempt(
         self,
@@ -772,8 +741,9 @@ class SyncInterfacesView(
         Add the rows that the selected rows require to the selection, deciding each one as the writer will.
 
         This is the required-row rule of the tab (``required_rows``) under the owner locks: the walk goes
-        from each selected row through the rows it requires, transitively. A row that the user excluded
-        is walked through but not added. A selected row that the evidence check refused is neither. A row is walked only when ``_row_owner`` gives it an owner and
+        from each selected row through the rows it requires, transitively. A row that the user's approval
+        does not cover (an exclusion, or a selection whose evidence changed) is walked through but never
+        added, as on the page. A row is walked only when ``_row_owner`` gives it an owner and
         ``check_interface_write`` allows the write; a required row that the writer refuses is reported
         with the writer's reason. The caller holds the owner locks and passes their state.
 
@@ -791,7 +761,7 @@ class SyncInterfacesView(
         edges = getattr(self, "_related_walk", None)
         if edges is None:
             return
-        excluded = getattr(self, "_excluded_port_ids", set())
+        uncovered = getattr(self, "_uncovered_port_ids", set())
         rules = interface_rules_for_request(self.request)
         duplicated = _duplicated_port_ids(ports_data)
         ports_by_id = {
@@ -820,8 +790,7 @@ class SyncInterfacesView(
 
         frontier = {port_id for port_id in visible_port_ids if refusal(port_id, auto_added=False) is None}
         walked = set(frontier)
-        # The evidence check reported these rows already.
-        refused = set(getattr(self, "_changed_port_ids", set()))
+        refused = set()
         while frontier:
             required = {
                 port_id
@@ -838,11 +807,11 @@ class SyncInterfacesView(
                     frontier.add(port_id)
                     continue
                 refused.add(port_id)
-                if port_id not in excluded:
+                if port_id not in uncovered:
                     name = (ports_by_id.get(port_id) or {}).get(interface_name_field) or port_id
                     self._skipped_conflicts.append(f"related row {name} not synced: {reason}")
             walked |= frontier
-            taken = frontier - excluded
+            taken = frontier - uncovered
             self._selected_port_ids.update(taken)
             self._auto_selected_port_ids.update(taken)
 
@@ -936,7 +905,7 @@ class SyncInterfacesView(
                     unique_host_port_ids=unique_host_port_ids,
                     unambiguous_name_port_ids=unambiguous_name_port_ids,
                     excluded_columns=set(excluded_columns),
-                    excluded_port_ids=set(getattr(self, "_excluded_port_ids", set())),
+                    uncovered_port_ids=set(getattr(self, "_uncovered_port_ids", set())),
                 )
                 self._apply_bulk_relationships(context, selected_edge_source_ids)
         except IntegrityError:
@@ -1061,9 +1030,11 @@ class SyncInterfacesView(
         if decisions is None:
             return
         promotes = _lag_aggregate_needs_promotion(aggregate)
-        if promotes and normalize_librenms_port_id(raw_lag) in context.excluded_port_ids:
+        if promotes and normalize_librenms_port_id(raw_lag) in context.uncovered_port_ids:
             shown = self._shown(aggregate)
-            self._record_skipped_conflict(self._shown(member), f"LAG link to {shown} not synced; {shown} is excluded")
+            self._record_skipped_conflict(
+                self._shown(member), f"LAG link to {shown} not synced; the selection does not cover {shown}"
+            )
             return
         if promotes and (conflict := _promotion_conflict(decisions[1], "lag")):
             shown = self._shown(aggregate)
@@ -2911,6 +2882,8 @@ class _BaseRelationshipSyncView(
         if not port_id or not related_port_id:
             return JsonResponse({"error": f"port_id and {self.related_port_param} are required"}, status=400)
 
+        if error := self._shown_row_error(request, obj, server_key, port_id):
+            return error
         current_edge = self._get_current_edge(obj, server_key, request, port_id, related_port_id)
         if current_edge is None:
             return JsonResponse(
@@ -2965,7 +2938,32 @@ class _BaseRelationshipSyncView(
                 "message": f"Linked {self._attempt_texts[0]} to {self.relation_label} {self._attempt_texts[1]}",
             }
         )
+        # The page reads the tab again, which shows the link.
+        response["HX-Trigger"] = json.dumps({RESULTS_STALE_EVENT: None})
         return apply_request_cache_transition(request, response)
+
+    def _shown_row_error(self, request, obj, server_key, port_id):
+        """
+        Return a conflict answer unless the action names its row as the page shows it now, owned by *obj*.
+
+        The button is a draft command (sync_draft.js): it posts the draft ID and revision of its page and
+        the row's evidence token, which names the page's subject. A member choice or another change of the
+        row after the page showed it, and an action without that binding, write nothing.
+        """
+        try:
+            label, subject_pk = read_evidence(INTERFACE_TAB, request.POST.get("evidence") or "")["subject"]
+        except (TypeError, ValueError, KeyError, signing.BadSignature):
+            return JsonResponse({"error": ROW_CHANGED}, status=409)
+        model = {Device._meta.label_lower: Device, VirtualMachine._meta.label_lower: VirtualMachine}.get(label)
+        subject = self.restricted_queryset(model).filter(pk=subject_pk).first() if model is not None else None
+        if subject is None:
+            return JsonResponse({"error": ROW_CHANGED}, status=409)
+        snapshot = source_cache.read(subject, Resource.INTERFACES, server_key)
+        _draft, shown = displayed_interface_row(request, subject, server_key, snapshot, port_id)
+        evidence = next(iter(shown.values()), None)
+        if evidence is None or evidence.get("member") != obj.pk:
+            return JsonResponse({"error": ROW_CHANGED}, status=409)
+        return None
 
     def _link_attempt(self, request, obj, server_key, port_id, related_port_id, current_edge):
         """

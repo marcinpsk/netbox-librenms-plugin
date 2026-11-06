@@ -2,7 +2,6 @@
 
 import json
 from pathlib import Path
-from urllib.parse import parse_qs
 
 import pytest
 
@@ -10,7 +9,6 @@ import pytest
 SCRIPT_PATH = Path(__file__).parents[2] / "static" / "netbox_librenms_plugin" / "js" / "librenms_sync.js"
 PAGE_URL = "https://plugin.example.com/dcim/devices/1/librenms-sync/"
 CABLE_VERIFY_URL = "https://plugin.example.com/verify-cable/"
-LAG_SYNC_URL = "https://plugin.example.com/sync-lag/"
 
 # The server panel renders a "make preferred" form for each other server before the sync tabs.
 PAGE_HTML = f"""<!doctype html><html><body>
@@ -22,12 +20,6 @@ PAGE_HTML = f"""<!doctype html><html><body>
       <form id="sync-form" method="post">
         <input type="hidden" name="csrfmiddlewaretoken" value="test-token">
         <input type="hidden" name="server_key" value="secondary">
-        <table id="librenms-interface-table"><tbody>
-          <tr data-port-id="10">
-            <td><button class="lag-sync-btn" data-port-id="10" data-lag-port-id="20"
-                        data-sync-url="{LAG_SYNC_URL}" data-object-id="1">LAG</button></td>
-          </tr>
-        </tbody></table>
       </form>
       <div data-cable-verify-url="{CABLE_VERIFY_URL}" data-cable-origin-device-id="1">
         <table id="librenms-cable-table-vc"><tbody><tr><td><select id="cable-select" data-interface="row-1">
@@ -53,18 +45,13 @@ def _json_server_key(request):
     return json.loads(request.post_data)["server_key"]
 
 
-def _form_server_key(request):
-    return parse_qs(request.post_data)["server_key"][0]
-
-
 @pytest.mark.parametrize(
     ("url", "action", "read"),
     [
         (CABLE_VERIFY_URL, "handleCableChange(document.getElementById('cable-select'), '2')", _json_server_key),
         ("**/verify-module/", "handleModuleChange(document.getElementById('module-select'), '1')", _json_server_key),
-        (LAG_SYNC_URL, "document.querySelector('.lag-sync-btn').click()", _form_server_key),
     ],
-    ids=["cable-verify", "module-verify", "relationship-sync"],
+    ids=["cable-verify", "module-verify"],
 )
 def test_a_request_posts_the_server_key_of_the_sync_page(page, url, action, read):
     """Another server's form earlier in the page does not decide the server of a tab request."""

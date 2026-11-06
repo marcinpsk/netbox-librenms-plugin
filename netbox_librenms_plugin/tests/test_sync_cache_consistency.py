@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 from dcim.models import Cable, Module, ModuleBay, ModuleBayTemplate, ModuleType
 from django.apps import apps as django_apps
-from django.contrib.auth import get_user_model
+from django.contrib.auth import get_user, get_user_model
 from django.contrib.messages import get_messages
 from django.core.cache import cache, caches
 from django.db import transaction
@@ -61,6 +61,7 @@ from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     stored_source_value,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import (
+    relationship_binding,
     render_module_tab,
     rendered_module_form,
     select_rows,
@@ -948,6 +949,7 @@ def test_htmx_mutation_does_not_repeat_cache_notice_on_next_navigation(client, s
             "server_key": "primary",
             "port_id": "7112",
             "parent_port_id": "7111",
+            **relationship_binding(get_user(client), device, 7112, server_key="primary"),
         },
         HTTP_HX_REQUEST="true",
     )
@@ -1717,6 +1719,7 @@ def test_inline_relationship_noop_preserves_other_snapshots(
                 "server_key": "primary",
                 "port_id": "7442",
                 "parent_port_id": "7441",
+                **relationship_binding(get_user(client), device, 7442, server_key="primary"),
             },
         )
 

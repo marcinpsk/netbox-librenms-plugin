@@ -28,7 +28,7 @@ from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
     select_interface_rows,
 )
 from netbox_librenms_plugin.tests.source_snapshot_helpers import port_pair, port_vlans, seed_interfaces_snapshot
-from netbox_librenms_plugin.tests.view_test_helpers import messages_on
+from netbox_librenms_plugin.tests.view_test_helpers import bind_relationship, messages_on
 from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
 
 
@@ -555,7 +555,7 @@ def test_relationship_write_locks_virtual_chassis_members_through_validation():
             view._prepare_related = pause_before_validation
             response = post(
                 view,
-                request,
+                bind_relationship(request, aggregate_device, server_key=server_key),
                 object_type="device",
                 object_id=member_device.pk,
             )
@@ -619,8 +619,12 @@ def test_inline_relationship_rechecks_migrated_donor_after_lock():
     child.save()
     parent.save()
     user = make_superuser("relationship-migrated-user")
-    # The child name is the parent name plus ".100", which makes it a sub-interface.
-    ports = [{"port_id": 10, "ifName": child.name}, {"port_id": 20, "ifName": parent.name}]
+    # The child name is the parent name plus ".100", which makes it a sub-interface. The rows are complete
+    # records, so the page offers the inline action whose binding the request carries.
+    ports = [
+        {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": child.name},
+        {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": parent.name},
+    ]
     seed_interfaces_snapshot(donor, ports, [port_pair(10, 20)], server_key=server_key)
     cache_key = source_cache.snapshot_key(donor, Resource.INTERFACES, server_key)
     donor_locked = Event()
@@ -658,7 +662,9 @@ def test_inline_relationship_rechecks_migrated_donor_after_lock():
             )
             view = PausingSyncInterfaceParentView()
             view._librenms_api = LibreNMSAPI(server_key=server_key)
-            return post(view, request, object_type="device", object_id=donor.pk)
+            return post(
+                view, bind_relationship(request, donor, server_key=server_key), object_type="device", object_id=donor.pk
+            )
         finally:
             close_old_connections()
 
@@ -729,7 +735,12 @@ def test_inline_relationship_does_not_lock_unrelated_interfaces():
                 assert release_relationship.wait(5), "test did not release the relationship transaction"
 
             view._prepare_related = pause_before_validation
-            response = post(view, request, object_type="device", object_id=device.pk)
+            response = post(
+                view,
+                bind_relationship(request, device, server_key=server_key),
+                object_type="device",
+                object_id=device.pk,
+            )
             assert response.status_code == 200, response.content
         finally:
             close_old_connections()

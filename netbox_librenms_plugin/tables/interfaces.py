@@ -1,4 +1,5 @@
 import copy
+import json
 from itertools import repeat
 from typing import Callable, NamedTuple
 
@@ -536,7 +537,7 @@ class LibreNMSInterfaceTable(tables.Table):
             return ""
         return format_html(
             '<button type="button" class="btn btn-sm btn-link p-0 ms-1 vlan-edit-btn" hx-get="{}"'
-            ' hx-target="#vlanDetailModalContent" hx-swap="innerHTML" hx-sync="this:replace"'
+            ' hx-target="#vlanDetailModalContent" hx-swap="innerHTML" hx-sync="#vlanDetailModalContent:replace"'
             ' data-bs-toggle="modal" data-bs-target="#vlanDetailModal" title="Edit VLAN group assignments">'
             '<i class="mdi mdi-pencil"></i></button>',
             record["vlan_modal_url"],
@@ -676,7 +677,7 @@ class LibreNMSInterfaceTable(tables.Table):
                     sync_status=sync_status,
                     record=record,
                     btn_class=f"{relation}-sync-btn",
-                    data_related_key=f"data-{relation}-port-id",
+                    related_param=f"{relation}_port_id",
                     target_resolvable=record.get(f"{relation}_target_resolvable", True),
                 )
             )
@@ -734,11 +735,10 @@ class LibreNMSInterfaceTable(tables.Table):
         """
         Resolve the id of the device/VM that owns this row's interface.
 
-        The relationship sync button (``data-object-id``) and the VC member dropdown
-        (:meth:`VCInterfaceTable.render_device_selection`) must agree on the owner: the JS posts
-        the dropdown's value as the object id, so if the button resolved a different device the
-        sync POSTs to the wrong member and 404s (a non-ethernet sub-interface owned by another
-        member is the classic case). Both call this. The view attributes every row to its owner, so
+        The relationship sync button (the owner in its URL) and the VC member dropdown
+        (:meth:`VCInterfaceTable.render_device_selection`) must agree on the owner: the action
+        refuses a row whose evidence names another member than its URL (a non-ethernet
+        sub-interface owned by another member is the classic case). Both call this. The view attributes every row to its owner, so
         the table never re-attributes one. Preference, most to least authoritative: (1) the matched
         NetBox interface's device, (2) the row-selected object stamped during enrichment or the
         cross-page verify path, (3) the viewed device. A row owned by a member the user may not
@@ -812,7 +812,7 @@ class LibreNMSInterfaceTable(tables.Table):
         sync_status,
         record,
         btn_class,
-        data_related_key,
+        related_param,
         type_label="",
         target_resolvable=True,
     ):
@@ -835,7 +835,7 @@ class LibreNMSInterfaceTable(tables.Table):
                 missing_lnms), or None to render nothing.
             record (dict): The table row, read for port/interface context.
             btn_class (str): The sync-button CSS class.
-            data_related_key (str): The data attribute carrying the related port_id.
+            related_param (str): The POST field of the related port ID.
             type_label (str): The short relationship label ("LAG" / "Parent").
             target_resolvable: Whether the relationship target can be resolved for synchronization.
 
@@ -874,8 +874,8 @@ class LibreNMSInterfaceTable(tables.Table):
         # set) and NetBox either lacks it (missing_nb) or holds a DIFFERENT one (mismatch) —
         # in both cases the row can be reconciled to the LibreNMS value from here. missing_lnms
         # is excluded by the lnms_port_id guard (nothing to sync to), and a migrated donor page
-        # suppresses the control entirely: the per-row relationship buttons POST
-        # directly via librenms_sync.js, so leaving it active would let a migrated donor mutate
+        # suppresses the control entirely: each per-row relationship button posts its own
+        # command, so leaving it active would let a migrated donor mutate
         # parent/LAG state despite the bulk form being hidden.
         if (
             sync_status in ("missing_nb", "mismatch")
@@ -887,9 +887,7 @@ class LibreNMSInterfaceTable(tables.Table):
             and not self._row_rule_state(record)
         ):
             port_id = record.get("port_id") or ""
-            # Resolve the owning member the same way the VC member dropdown does, so the button's
-            # data-object-id and the dropdown agree (the JS posts the dropdown value, so a
-            # disagreement would 404). See _resolve_row_member_id.
+            # Resolve the owning member the same way the VC member dropdown does. See _resolve_row_member_id.
             object_id = self._resolve_row_member_id(record)
             if not object_id:
                 # No resolvable owner. reverse() would raise NoReverseMatch and take down the
@@ -912,20 +910,17 @@ class LibreNMSInterfaceTable(tables.Table):
                 if sync_status == "mismatch"
                 else "Sync relationship"
             )
+            # A draft command of the page (sync_draft.js), bound to the row's draft revision and evidence.
+            values = {"port_id": str(port_id), related_param: str(lnms_port_id), "server_key": self.server_key}
             btn = format_html(
-                ' <button type="button" class="btn btn-sm btn-link p-0 {}" '
-                'data-port-id="{}" {}="{}" '
-                'data-object-type="{}" data-object-id="{}" '
-                'data-sync-url="{}" '
+                ' <button type="button" class="btn btn-sm btn-link p-0 {}" data-draft-command="action" '
+                'hx-post="{}" hx-vals="{}" hx-params="{}" hx-swap="none" '
                 'title="{}" aria-label="{}">'
                 '<i class="mdi mdi-sync"></i></button>',
                 btn_class,
-                port_id,
-                data_related_key,
-                lnms_port_id,
-                object_type,
-                object_id,
-                sync_url,
+                self.sync_query.url(sync_url, {"interface_name_field": self.interface_name_field}),
+                json.dumps(values),
+                ",".join(values),
                 sync_title,
                 sync_title,
             )

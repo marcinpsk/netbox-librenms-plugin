@@ -63,12 +63,23 @@ def _port(port_id=42, **overrides):
 def _interface_table(device=None, *, data=None, server_key="default", interface_name_field="ifName"):
     from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
 
-    return LibreNMSInterfaceTable(
+    table = LibreNMSInterfaceTable(
         data=data or [],
         device=device,
         interface_name_field=interface_name_field,
         server_key=server_key,
     )
+    return _with_page_query(table)
+
+
+def _with_page_query(table):
+    """Give *table* the empty page query that configure() reads from a request, for its row action URLs."""
+    from django.http import QueryDict
+
+    from netbox_librenms_plugin.sync_query import SyncQuery
+
+    table.sync_query = SyncQuery(QueryDict())
+    return table
 
 
 @pytest.mark.django_db
@@ -1400,7 +1411,6 @@ class TestInterfaceRelationships:
         assert "Parent Ethernet1.100" in html
         assert "lag-sync-btn" in html
         assert "parent-sync-btn" in html
-        assert f'data-object-id="{device.pk}"' in html
         assert (
             reverse(
                 "plugins:netbox_librenms_plugin:sync_interface_lag",
@@ -1437,7 +1447,7 @@ class TestInterfaceRelationships:
 
         vm = make_vm("relationship-vm")
         interface = VMInterface.objects.create(virtual_machine=vm, name="eth0.100")
-        table = LibreNMSVMInterfaceTable(data=[], device=vm, interface_name_field="ifName")
+        table = _with_page_query(LibreNMSVMInterfaceTable(data=[], device=vm, interface_name_field="ifName"))
         record = _port(
             netbox_interface=interface,
             lag_sync_status="missing_nb",
@@ -1452,8 +1462,13 @@ class TestInterfaceRelationships:
 
         assert "lag-sync-btn" not in html
         assert "parent-sync-btn" in html
-        assert 'data-object-type="virtualmachine"' in html
-        assert f'data-object-id="{vm.pk}"' in html
+        assert (
+            reverse(
+                "plugins:netbox_librenms_plugin:sync_interface_parent",
+                kwargs={"object_type": "virtualmachine", "object_id": vm.pk},
+            )
+            in html
+        )
 
 
 @pytest.mark.django_db
@@ -1564,8 +1579,8 @@ class TestVirtualChassisInterfaceTable:
         from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
 
         kwargs.setdefault("data", [])
-        return VCInterfaceTable(
-            device=device, chassis=superuser_chassis(device), interface_name_field="ifName", **kwargs
+        return _with_page_query(
+            VCInterfaceTable(device=device, chassis=superuser_chassis(device), interface_name_field="ifName", **kwargs)
         )
 
     def test_each_header_names_its_column_for_the_table_fit_script(self):
@@ -1623,7 +1638,14 @@ class TestVirtualChassisInterfaceTable:
         relationship = str(table.render_parent(None, record))
 
         assert f'value="{second.pk}" selected' in dropdown
-        assert f'data-object-id="{second.pk}"' in relationship
+        # The button posts to the member that the dropdown shows.
+        assert (
+            reverse(
+                "plugins:netbox_librenms_plugin:sync_interface_parent",
+                kwargs={"object_type": "device", "object_id": second.pk},
+            )
+            in relationship
+        )
 
     def test_rows_read_no_member_from_the_database(self, django_assert_num_queries):
         """The chassis scope holds the members, so a row never reads one."""
@@ -1694,7 +1716,7 @@ class TestVMInterfaceTable:
         from netbox_librenms_plugin.tables.interfaces import LibreNMSVMInterfaceTable
 
         vm = make_vm("vm-table-columns")
-        table = LibreNMSVMInterfaceTable(data=[], device=vm, interface_name_field="ifName")
+        table = _with_page_query(LibreNMSVMInterfaceTable(data=[], device=vm, interface_name_field="ifName"))
 
         assert "type" not in table.columns
         assert "speed" not in table.columns

@@ -257,16 +257,16 @@ VLAN_GROUPS_URL = (
 VLAN_PREVIEW_URL = "https://plugin.example.com/plugins/librenms_plugin/device/1/interface-row/10/vlan-groups/"
 
 
-def _vlan_dialog(group_id, *, apply_to_all, css="text-success", missing=False):
-    """Return the VLAN groups dialog of row 10 with VLAN 100 in group *group_id*, as the server renders it."""
+def _vlan_dialog(group_id, *, apply_to_all, css="text-success", missing=False, row_key="10"):
+    """Return the VLAN groups dialog of row *row_key* with VLAN 100 in group *group_id*, as the server renders it."""
     from django.template import Context, Engine
 
     engine = Engine(dirs=[str(TEMPLATE_DIR.parent)])
     return engine.get_template("netbox_librenms_plugin/htmx/interface_vlan_groups.html").render(
         Context(
             {
-                "row_key": "10",
-                "interface_name": "eth0",
+                "row_key": row_key,
+                "interface_name": f"eth{row_key}",
                 "vlans": [{"vid": 100, "type": "T", "css": css, "missing": missing, "group_id": group_id}],
                 "groups": [
                     SimpleNamespace(pk=7, name="group-7", scope=None),
@@ -316,6 +316,117 @@ def test_a_late_vlan_dialog_preview_keeps_a_newer_apply_to_all_and_save_sends_it
     page.click("#saveVlanGroups")
     _flush(page)
     assert [(fields["row"], fields["group_100"], fields.get("apply_to_all")) for fields in writes] == [("10", "8", "1")]
+
+
+RELATIONSHIP_URL = (
+    "https://plugin.example.com/plugins/librenms_plugin/device/1/sync-interface-lag/?interface_name_field=ifName"
+)
+
+
+def test_a_relationship_action_after_a_member_choice_goes_after_it_bound_to_the_row_it_showed(page):
+    """The action waits for the member choice; it then names the new revision and the evidence that its row showed."""
+    held, actions, order = [], [], []
+    _serve_page_scripts(page)
+    values = json.dumps({"port_id": "10", "lag_port_id": "20", "server_key": "default"})
+    body = _sync_document(
+        f"""<div id="librenms-sync-tabs"><form id="interface-sync-form">
+            <input type="hidden" name="csrfmiddlewaretoken" value="csrf-test">
+            <table id="librenms-interface-table" data-draft-id="draft-1" data-draft-revision="1"
+                   data-selection-url="{SELECTION_URL}" data-choice-url="{CHOICE_URL}">
+              <tbody><tr data-row-key="10" data-evidence="token-10">
+                <td><input type="checkbox" name="select" value="10"></td>
+                <td><select data-draft-choice="member"><option value="" selected>Select</option>
+                    <option value="7">member-7</option></select></td>
+                <td><button type="button" class="lag-sync-btn" data-draft-command="action" hx-post="{RELATIONSHIP_URL}"
+                    hx-vals='{values}' hx-params="port_id,lag_port_id,server_key" hx-swap="none">Sync</button></td>
+              </tr></tbody>
+            </table></form></div>"""
+    )
+
+    def choose(route):
+        order.append("choice")
+        held.append(route)
+
+    def act(route):
+        order.append("action")
+        actions.append(_form_fields(route.request))
+        route.fulfill(status=409, content_type="application/json", body=json.dumps({"error": "row changed"}))
+
+    page.route(f"{PAGE_URL}**", lambda route: route.fulfill(status=200, content_type="text/html", body=body))
+    page.route(CHOICE_URL, choose)
+    page.route(RELATIONSHIP_URL, act)
+    page.goto(PAGE_URL)
+    page.wait_for_function("() => window.librenmsSyncDraft !== undefined")
+
+    page.locator('tr[data-row-key="10"] select').select_option("7")
+    _wait_for(page, lambda: held)
+    page.click(".lag-sync-btn")
+    page.wait_for_timeout(200)
+    assert actions == []
+    held[0].fulfill(
+        status=204, headers={"X-Draft-Revision": "2", "HX-Trigger": json.dumps({"lnms-row-stale": {"key": "10"}})}
+    )
+
+    _wait_for(page, lambda: actions)
+    assert order == ["choice", "action"]
+    fields = actions[0]
+    assert (
+        fields["port_id"],
+        fields["lag_port_id"],
+        fields["draft_id"],
+        fields["expected_revision"],
+        fields["evidence"],
+    ) == (
+        "10",
+        "20",
+        "draft-1",
+        "2",
+        "token-10",
+    )
+
+
+def test_a_late_answer_of_an_earlier_vlan_dialog_opening_never_replaces_the_dialog(page):
+    """Two rows open the dialog in turn; the answer of the first one comes last, and Save sends the second row's form."""
+    dialogs, writes = {}, []
+    _serve_page_scripts(page)
+    buttons = "".join(
+        f"""<button type="button" class="vlan-edit-btn" id="edit-{key}" hx-get="{VLAN_PREVIEW_URL}?row={key}"
+            hx-target="#vlanDetailModalContent" hx-swap="innerHTML" hx-sync="#vlanDetailModalContent:replace">{key}</button>"""
+        for key in ("10", "11")
+    )
+    body = _sync_document(
+        f"""<div id="librenms-sync-tabs"><input type="hidden" name="csrfmiddlewaretoken" value="csrf-test">
+            <table id="librenms-interface-table" data-draft-id="draft-1" data-draft-revision="1"
+                   data-selection-url="{SELECTION_URL}" data-choice-url="{CHOICE_URL}"><tbody></tbody></table>
+            {buttons}<div id="vlanDetailModalContent"></div></div>"""
+    )
+
+    def write(route):
+        writes.append(_form_fields(route.request))
+        route.fulfill(status=204, headers={"X-Draft-Revision": "2"})
+
+    page.route(f"{PAGE_URL}**", lambda route: route.fulfill(status=200, content_type="text/html", body=body))
+    page.route(f"{VLAN_PREVIEW_URL}**", lambda route: dialogs.setdefault(route.request.url.rsplit("=", 1)[1], route))
+    page.route(VLAN_GROUPS_URL, write)
+    page.goto(PAGE_URL)
+    page.wait_for_function("() => window.librenmsSyncDraft !== undefined")
+
+    page.click("#edit-10")
+    _wait_for(page, lambda: "10" in dialogs)
+    page.click("#edit-11")
+    _wait_for(page, lambda: "11" in dialogs)
+    dialogs["11"].fulfill(
+        status=200, content_type="text/html", body=_vlan_dialog("7", apply_to_all=False, row_key="11")
+    )
+    page.check("#applyVlanGroupToAll")
+    dialogs["10"].fulfill(status=200, content_type="text/html", body=_vlan_dialog("7", apply_to_all=False))
+    page.wait_for_timeout(300)
+
+    expect(page.locator('#vlanDetailModalContent input[name="row"]')).to_have_value("11")
+    expect(page.locator("#applyVlanGroupToAll")).to_be_checked()
+    page.click("#saveVlanGroups")
+    _flush(page)
+    assert [(fields["row"], fields.get("apply_to_all")) for fields in writes] == [("11", "1")]
 
 
 VLAN_SELECTION_URL = "https://plugin.example.com/plugins/librenms_plugin/device/1/vlan-selection/?server_key=default"

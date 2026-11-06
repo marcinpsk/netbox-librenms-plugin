@@ -159,6 +159,22 @@ class TestTheTab:
         assert [key for key in ("10", "11", "20", "21", "22") if _checked(shown, key)] == ["20", "21", "22"]
         assert (shown.rows["21"]["data-intent"], shown.rows["20"]["data-intent"]) == ("on", "none")
 
+    def test_a_stale_selected_member_renders_unchecked_and_one_selection_approves_it_again(self, client, device):
+        _select(client, device, [20, 21])
+        # eth21 appears in NetBox after the selection, so the page no longer shows what the user approved.
+        bound_interface(device, "eth21", 21)
+
+        stale = _tab(client, device)
+
+        # The selected aggregate requires eth21, but a stale selection is not taken along.
+        assert not _checked(stale, "21")
+        assert stale.rows["21"]["data-intent"] == "off"
+        assert stale.rows["21"]["data-evidence-changed"] == "true"
+        draft = _select(client, device, [21])
+        assert _checked(_tab(client, device), "21")
+        _post(client, device, {**draft, "auto_select_lag_members": "on", "exclude_columns": ["mac_address"]})
+        assert Interface.objects.filter(device=device, name="eth21", mtu=1500).exists()
+
     def test_an_excluded_required_row_renders_unchecked(self, client, device):
         _select(client, device, [21], states={"22": "off"})
 
@@ -453,6 +469,89 @@ class TestTheRowAction:
 
         assert not Interface.objects.filter(device=device, name="eth1").exists()
         assert all(any("changed after the page showed it" in text for text in _messages(r)) for r in (stale, forged))
+
+
+class TestTheRelationshipAction:
+    """A relationship button is a draft command: it acts on the row as its page shows it, or writes nothing."""
+
+    @pytest.fixture
+    def lag_chassis(self, client, settings):
+        """Return a chassis whose first member has Ethernet1/1 (3101), a LAG member of Port-channel1 (3100) in LibreNMS only."""
+        configure_default_librenms_server(settings)
+        client.force_login(make_superuser("iface-draft-relation-user"))
+        _vc, (first, second) = make_virtual_chassis_members("iface-draft-relation", 2)
+        seed_stored_mapping(first, {SERVER_KEY: {"id": 4320}}, save=True)
+        member = bound_interface(first, "Ethernet1/1", 3101, iface_type="1000base-t")
+        aggregate = bound_interface(first, "Port-channel1", 3100, iface_type="lag")
+        seed_interfaces_snapshot(
+            first,
+            [sync_port(3100, "Port-channel1", if_type="ieee8023adLag"), sync_port(3101, "Ethernet1/1")],
+            [port_pair(3101, 3100)],
+            server_key=SERVER_KEY,
+        )
+        return first, second, member, aggregate
+
+    @staticmethod
+    def _button(shown, key):
+        (button,) = [
+            attrs
+            for attrs in open_tags(_row_html(shown.html, key), "button")
+            if "lag-sync-btn" in attrs.get("class", "")
+        ]
+        return button
+
+    def _act(self, client, shown, key, **fields):
+        """Post the row's LAG button as the page does: its values, and the draft binding of the row it shows."""
+        button = self._button(shown, key)
+        binding = {
+            "draft_id": shown.table["data-draft-id"],
+            "expected_revision": shown.table["data-draft-revision"],
+            "evidence": shown.rows[key]["data-evidence"],
+        }
+        return client.post(unescape(button["hx-post"]), {**json.loads(button["hx-vals"]), **binding, **fields}, **HTMX)
+
+    def test_the_button_links_the_row_that_its_page_shows(self, client, lag_chassis):
+        first, _second, member, aggregate = lag_chassis
+        shown = _tab(client, first)
+        assert self._button(shown, "3101")["data-draft-command"] == "action"
+
+        response = self._act(client, shown, "3101")
+
+        assert response.status_code == 200
+        member.refresh_from_db()
+        assert member.lag_id == aggregate.pk
+
+    def test_an_action_after_a_member_change_writes_nothing_on_the_member_it_showed(self, client, lag_chassis):
+        first, second, member, _aggregate = lag_chassis
+        shown = _tab(client, first)
+        chosen = draft_command(client, shown, "data-choice-url", row="3101", field="member", value=str(second.pk))
+
+        # The page sends the action after the choice: the new revision, and the evidence that the row showed.
+        response = self._act(client, shown, "3101", expected_revision=chosen["X-Draft-Revision"])
+
+        assert response.status_code == 409
+        member.refresh_from_db()
+        assert member.lag_id is None
+
+    def test_an_action_without_the_row_evidence_writes_nothing(self, client, lag_chassis):
+        first, _second, member, _aggregate = lag_chassis
+
+        response = self._act(client, _tab(client, first), "3101", evidence="")
+
+        assert response.status_code == 409
+        member.refresh_from_db()
+        assert member.lag_id is None
+
+    def test_each_vlan_dialog_opening_syncs_on_the_shared_dialog(self, client, vlan_device):
+        owner, _groups = vlan_device
+        (button,) = [
+            attrs
+            for attrs in open_tags(_row_html(_tab(client, owner).html, "41"), "button")
+            if "vlan-edit-btn" in attrs.get("class", "")
+        ]
+
+        # A later opening of any row aborts an earlier one, so a late answer never replaces the dialog.
+        assert button["hx-sync"] == "#vlanDetailModalContent:replace"
 
 
 @pytest.fixture

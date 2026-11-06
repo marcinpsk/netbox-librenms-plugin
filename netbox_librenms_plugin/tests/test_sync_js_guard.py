@@ -37,7 +37,6 @@ SYNC_SCRIPT_ALLOWED = {
     "fetch": {
         "checkSyncCacheStatus",
         "deleteSelectedInterfaces",
-        "document:click .lag-sync-btn, .parent-sync-btn, .bridge-sync-btn",
         "handleCableChange",
         "handleModuleChange",
         "initializeVCReportButtons",
@@ -53,7 +52,6 @@ SYNC_SCRIPT_ALLOWED = {
     },
     "html": {
         "deleteSelectedInterfaces",
-        "document:click .lag-sync-btn, .parent-sync-btn, .bridge-sync-btn",
         "handleCableChange",
         "handleModuleChange",
         "initializeSyncFormSpinners",

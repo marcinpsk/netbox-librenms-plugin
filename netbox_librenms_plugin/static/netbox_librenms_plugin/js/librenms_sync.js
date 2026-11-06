@@ -3765,90 +3765,32 @@ document.body.addEventListener('htmx:timeout', function (event) {
     showHtmxModalError('The request timed out before the server answered.');
 });
 
-// Event delegation for interface relationship sync buttons.
-// Buttons are rendered inline in the interface table's data-col="parent" cell
-// (render_parent in tables/interfaces.py renders every relationship button there)
-// and carry the source and related LibreNMS port ids plus the NetBox owner.
-document.addEventListener('click', function (e) {
-    const btn = e.target.closest('.lag-sync-btn, .parent-sync-btn, .bridge-sync-btn');
-    if (!btn) return;
-    e.preventDefault();
-
-    const relation = btn.classList.contains('lag-sync-btn')
-        ? 'lag'
-        : (btn.classList.contains('bridge-sync-btn') ? 'bridge' : 'parent');
-    const portId = btn.dataset.portId || '';
-    const relatedPortId = relation === 'lag'
-        ? (btn.dataset.lagPortId || '')
-        : (relation === 'bridge' ? (btn.dataset.bridgePortId || '') : (btn.dataset.parentPortId || ''));
-    const url = btn.dataset.syncUrl || '';
-    // The server renders the button for the member that the row shows, which follows the user's draft.
-    const objectId = btn.dataset.objectId || '';
-    const relatedKey = `${relation}_port_id`;
-
-    if (!portId || !relatedPortId || !objectId || !url) {
-        btn.innerHTML = '<i class="mdi mdi-alert text-danger"></i>';
-        btn.title = 'Required relationship data is unavailable.';
-        return;
+// A relationship button is a draft command (sync_draft.js sends it in the page's order, bound to its row).
+// A success reads the tab again; a refusal marks the button with the server's reason.
+document.addEventListener('htmx:afterRequest', function (event) {
+    const btn = event.detail.elt;
+    if (!(btn instanceof Element) || !btn.matches('.lag-sync-btn, .parent-sync-btn, .bridge-sync-btn')) return;
+    if (event.detail.successful) return;
+    let reason = 'Request failed';
+    try {
+        reason = JSON.parse(event.detail.xhr.responseText).error || reason;
+    } catch (_) {
+        reason = event.detail.xhr.statusText || reason;
     }
+    const icon = document.createElement('i');
+    icon.className = 'mdi mdi-alert text-danger';
+    btn.replaceChildren(icon);
+    btn.title = reason;
+});
 
-    // Fail fast: a missing input OR an empty value both POST X-CSRFToken: "" → a guaranteed
-    // 403. Surface the cause instead of firing a state-changing request that can't succeed.
-    const csrf = getCsrfToken();
-    if (!csrf) {
-        btn.title = 'CSRF token not found. Please refresh the page and try again.';
-        return;
-    }
-
-    const serverKey = syncServerKey();
-
-    const body = new URLSearchParams({
-        csrfmiddlewaretoken: csrf,
-        port_id: portId,
-        [relatedKey]: relatedPortId,
-        interface_name_field: document.querySelector('input[name="interface_name_field"]:checked')?.value || '',
-        server_key: serverKey,
-    });
-
-    btn.disabled = true;
-    btn.innerHTML = '<i class="mdi mdi-loading mdi-spin"></i>';
-
-    fetch(url, {
-        method: 'POST',
-        headers: { 'X-CSRFToken': csrf, 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: body.toString(),
-    })
-        .then(function (r) {
-            if (!r.ok) {
-                // Surface the backend error text (403/500/HTML page) instead of a
-                // generic JSON parse failure.
-                return fetchErrorMessage(r).then(function (msg) {
-                    throw new Error(msg);
-                });
-            }
-            const transition = r.headers.get('X-LibreNMS-Cache-Transition');
-            if (transition) {
-                try {
-                    document.dispatchEvent(new CustomEvent('librenmsCacheChanged', { detail: JSON.parse(transition) }));
-                } catch (_) {
-                    document.dispatchEvent(new CustomEvent('librenmsCacheChanged'));
-                }
-            }
-            return r.json();
-        })
-        .then(function (data) {
-            if (data.status === 'success') {
-                btn.innerHTML = '<i class="mdi mdi-check text-success"></i>';
-                btn.title = data.message || 'Synced';
-            } else {
-                btn.disabled = false;
-                btn.innerHTML = '<i class="mdi mdi-alert text-danger"></i>';
-                btn.title = data.error || 'Sync failed';
-            }
-        })
-        .catch(function (e) {
-            btn.disabled = false;
-            btn.innerHTML = '<i class="mdi mdi-alert text-danger"></i>';
-            btn.title = e.message || 'Request failed';
-        });
+// Each opening of the VLAN groups dialog shows only its own row: the form of an earlier opening goes at once.
+document.addEventListener('htmx:beforeRequest', function (event) {
+    const content = document.getElementById('vlanDetailModalContent');
+    if (!content || !event.detail.elt.matches?.('.vlan-edit-btn')) return;
+    const loading = document.createElement('div');
+    loading.className = 'modal-body text-center text-muted';
+    const spinner = document.createElement('i');
+    spinner.className = 'mdi mdi-loading mdi-spin';
+    loading.appendChild(spinner);
+    content.replaceChildren(loading);
 });

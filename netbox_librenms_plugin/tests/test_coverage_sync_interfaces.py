@@ -33,8 +33,11 @@ from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     port_vlans,
     seed_interfaces_snapshot,
 )
+from django.contrib.auth import get_user
 from netbox_librenms_plugin.tests.view_test_helpers import (
+    bind_relationship,
     draft_command,
+    relationship_binding,
     draft_tab,
     grant,
     make_request,
@@ -312,7 +315,7 @@ class TestSyncInterfaceParentViewPermissions:
         view = make_view(SyncInterfaceParentView)
         _seed_relationship(vm, "sub_interfaces", 10, 11, child.name, parent.name)
 
-        response = _post(view, request, object_type="virtualmachine", object_id=vm.pk)
+        response = _post(view, bind_relationship(request, vm), object_type="virtualmachine", object_id=vm.pk)
 
         assert response.status_code == 200, response.content
         child.refresh_from_db()
@@ -359,17 +362,6 @@ def _js_block(source, start_anchor, end_anchor=None):
     return source[start : source.index(end_anchor, start)]
 
 
-def test_relationship_handler_reuses_shared_csrf_helper():
-    import re
-
-    handler = _js_block(_js_source(), "// Event delegation for interface relationship sync buttons.")
-    # Regexes tolerate spacing/quote reformatting; the tokens themselves are the contract.
-    assert re.search(r"const\s+csrf\s*=\s*getCsrfToken\(\)", handler), "handler must use the shared getCsrfToken()"
-    assert not re.search(r"querySelector\(\s*['\"]\[name=csrfmiddlewaretoken\]", handler), (
-        "handler must not re-query the raw csrf input"
-    )
-
-
 def test_interface_preference_save_checks_csrf_and_http_status():
     """Preference persistence must report missing CSRF and rejected HTTP responses."""
     handler = _js_block(
@@ -394,17 +386,6 @@ def test_cable_verify_application_failure_is_reported():
 
     assert rejection_log in handler
     assert handler.index(rejection_log) < handler.index("rollbackToLastVerified();", handler.index(rejection_log))
-
-
-def test_relationship_sync_missing_data_shows_alert_icon():
-    """A relationship button with incomplete data must show a visible failure state."""
-    rejected = _js_block(
-        _js_source(),
-        "if (!portId || !relatedPortId || !objectId || !url)",
-        "// Fail fast: a missing input",
-    )
-    assert "btn.innerHTML = '<i class=\"mdi mdi-alert text-danger\"></i>'" in rejected
-    assert "Required relationship data is unavailable." in rejected
 
 
 def test_interface_select_all_has_one_change_handler():
@@ -810,7 +791,12 @@ class TestInterfaceContextOOBRows:
                 "parent_name": "Ethernet1",
             }
         )
-        response = _post(make_view(SyncInterfaceParentView), request, object_type="device", object_id=device.pk)
+        response = _post(
+            make_view(SyncInterfaceParentView),
+            bind_relationship(request, device),
+            object_type="device",
+            object_id=device.pk,
+        )
 
         assert response.status_code == 200, response.content
         child.refresh_from_db()
@@ -841,7 +827,9 @@ class TestInterfaceContextOOBRows:
 
         response = _post(
             make_view(SyncInterfaceParentView),
-            _make_request({"port_id": "10", "interface_name_field": "ifName", "parent_port_id": "20"}),
+            bind_relationship(
+                _make_request({"port_id": "10", "interface_name_field": "ifName", "parent_port_id": "20"}), device
+            ),
             object_type="device",
             object_id=device.pk,
         )
@@ -888,9 +876,15 @@ class TestInterfaceContextOOBRows:
                 "parent_name": "Parent1",
             }
         )
-        response = _post(make_view(SyncInterfaceParentView), request, object_type="device", object_id=device.pk)
+        response = _post(
+            make_view(SyncInterfaceParentView),
+            bind_relationship(request, device),
+            object_type="device",
+            object_id=device.pk,
+        )
 
-        assert response.status_code == 404
+        # The page offers no action for the row, so a post carries no binding and writes nothing.
+        assert response.status_code == 409
         source.refresh_from_db()
         assert source.parent_id is None
 
@@ -925,7 +919,12 @@ class TestInterfaceContextOOBRows:
             }
         )
 
-        response = _post(make_view(SyncInterfaceParentView), request, object_type="device", object_id=device.pk)
+        response = _post(
+            make_view(SyncInterfaceParentView),
+            bind_relationship(request, device),
+            object_type="device",
+            object_id=device.pk,
+        )
 
         assert response.status_code == 409
         child.refresh_from_db()
@@ -954,7 +953,12 @@ class TestInterfaceContextOOBRows:
         assert interface_rows(device)["port_stack_relationships"]["sub_interfaces"] == {}
         request = _make_request({"port_id": "10", "interface_name_field": "ifName", "parent_port_id": "20"})
 
-        response = _post(make_view(SyncInterfaceParentView), request, object_type="device", object_id=device.pk)
+        response = _post(
+            make_view(SyncInterfaceParentView),
+            bind_relationship(request, device),
+            object_type="device",
+            object_id=device.pk,
+        )
 
         assert response.status_code == 409
         child.refresh_from_db()
@@ -982,9 +986,15 @@ class TestInterfaceContextOOBRows:
         assert "lag-sync-btn" not in str(context["table"].render_parent(None, _row(rows, 10)))
 
         request = _make_request({"port_id": "10", "interface_name_field": "ifName", "lag_port_id": "20"})
-        response = _post(make_view(SyncInterfaceLagView), request, object_type="device", object_id=member1.pk)
+        response = _post(
+            make_view(SyncInterfaceLagView),
+            bind_relationship(request, member1),
+            object_type="device",
+            object_id=member1.pk,
+        )
 
-        assert response.status_code == 404
+        # The page offers no action for the row, so a post carries no binding and writes nothing.
+        assert response.status_code == 409
         source.refresh_from_db()
         first_aggregate.refresh_from_db()
         second_aggregate.refresh_from_db()
@@ -1015,9 +1025,15 @@ class TestInterfaceContextOOBRows:
         assert "lag-sync-btn" not in str(context["table"].render_parent(None, _row(rows, 10)))
 
         request = _make_request({"port_id": "10", "interface_name_field": "ifName", "lag_port_id": "20"})
-        response = _post(make_view(SyncInterfaceLagView), request, object_type="device", object_id=member1.pk)
+        response = _post(
+            make_view(SyncInterfaceLagView),
+            bind_relationship(request, member1),
+            object_type="device",
+            object_id=member1.pk,
+        )
 
-        assert response.status_code == 404
+        # The page offers no action for the row, so a post carries no binding and writes nothing.
+        assert response.status_code == 409
         source.refresh_from_db()
         assert source.lag_id is None
 
@@ -1044,7 +1060,12 @@ class TestInterfaceContextOOBRows:
         assert "parent-sync-btn" not in str(context["table"].render_parent(None, _row(rows, 10)))
 
         request = _make_request({"port_id": "10", "interface_name_field": "ifName", "parent_port_id": "20"})
-        response = _post(make_view(SyncInterfaceParentView), request, object_type="device", object_id=device.pk)
+        response = _post(
+            make_view(SyncInterfaceParentView),
+            bind_relationship(request, device),
+            object_type="device",
+            object_id=device.pk,
+        )
 
         assert response.status_code == 409
         source.refresh_from_db()
@@ -1124,9 +1145,15 @@ class TestInterfaceContextOOBRows:
         assert "lag-sync-btn" not in str(context["table"].render_parent(None, _row(rows, 10)))
 
         request = _make_request({"port_id": "10", "interface_name_field": "ifName", "lag_port_id": "20"})
-        response = _post(make_view(SyncInterfaceLagView), request, object_type="device", object_id=device.pk)
+        response = _post(
+            make_view(SyncInterfaceLagView),
+            bind_relationship(request, device),
+            object_type="device",
+            object_id=device.pk,
+        )
 
-        assert response.status_code == 404
+        # The page offers no action for the row, so a post carries no binding and writes nothing.
+        assert response.status_code == 409
         source.refresh_from_db()
         duplicate_source.refresh_from_db()
         assert source.lag_id is None
@@ -1161,9 +1188,15 @@ class TestInterfaceContextOOBRows:
             {"port_id": "10", "interface_name_field": "ifName", "parent_port_id": "20"},
             user=user,
         )
-        response = _post(make_view(SyncInterfaceParentView), request, object_type="device", object_id=device.pk)
+        response = _post(
+            make_view(SyncInterfaceParentView),
+            bind_relationship(request, device),
+            object_type="device",
+            object_id=device.pk,
+        )
 
-        assert response.status_code == 404
+        # The page offers no action for the row, so a post carries no binding and writes nothing.
+        assert response.status_code == 409
         child.refresh_from_db()
         assert child.parent_id is None
 
@@ -1232,7 +1265,12 @@ class TestInterfaceContextOOBRows:
             user=user,
         )
         with pytest.raises(Http404):
-            _post(make_view(SyncInterfaceParentView), request, object_type="device", object_id=hidden_member.pk)
+            _post(
+                make_view(SyncInterfaceParentView),
+                bind_relationship(request, hidden_member),
+                object_type="device",
+                object_id=hidden_member.pk,
+            )
 
         source.refresh_from_db()
         assert source.parent_id is None
@@ -4362,7 +4400,7 @@ class TestSyncInterfaceLagViewRealDB:
         view = self._make_view()
         _seed_relationship(device, "lag_members", 10, 20, member.name, agg.name)
         req = _make_request({"port_id": "10", "lag_port_id": "20"})
-        resp = _post(view, req, object_type="device", object_id=device.pk)
+        resp = _post(view, bind_relationship(req, device), object_type="device", object_id=device.pk)
 
         assert resp.status_code == 200, resp.content
         member.refresh_from_db()
@@ -4384,7 +4422,7 @@ class TestSyncInterfaceLagViewRealDB:
         _seed_relationship(device, "lag_members", 30, 31, member.name, aggregate.name)
         # NetBox's real Interface.clean() rejects a virtual LAG member with a 409, and nothing persists.
         req = _make_request({"port_id": "30", "lag_port_id": "31"})
-        resp = _post(view, req, object_type="device", object_id=device.pk)
+        resp = _post(view, bind_relationship(req, device), object_type="device", object_id=device.pk)
 
         assert resp.status_code == 409
         body = json.loads(resp.content)
@@ -4404,7 +4442,7 @@ class TestSyncInterfaceLagViewRealDB:
         view = self._make_view()
         _seed_relationship(member1, "lag_members", 40, 50, local.name, aggregate.name)
         req = _make_request({"port_id": "40", "lag_port_id": "50"})
-        resp = _post(view, req, object_type="device", object_id=member1.pk)
+        resp = _post(view, bind_relationship(req, member1), object_type="device", object_id=member1.pk)
 
         assert resp.status_code == 200, resp.content
         local.refresh_from_db()
@@ -4436,7 +4474,7 @@ class TestSyncInterfaceParentViewRealPermissions:
         _seed_relationship(donor, "sub_interfaces", 10, 11, child.name, parent.name)
         assert interface_rows(donor)["port_stack_relationships"]["sub_interfaces"] == {10: 11}
 
-        response = _post(view, request, object_type="device", object_id=donor.pk)
+        response = _post(view, bind_relationship(request, donor), object_type="device", object_id=donor.pk)
 
         assert response.status_code == 409
         assert b"migrated" in response.content.lower()
@@ -4472,7 +4510,7 @@ class TestSyncInterfaceParentViewRealPermissions:
         view = make_view(SyncInterfaceParentView)
         _seed_relationship(device, "sub_interfaces", 10, 11, child.name, parent.name)
 
-        response = _post(view, request, object_type="device", object_id=device.pk)
+        response = _post(view, bind_relationship(request, device), object_type="device", object_id=device.pk)
 
         assert response.status_code == 200, response.content
         child.refresh_from_db()
@@ -4505,7 +4543,7 @@ class TestSyncInterfaceParentViewRealPermissions:
 
         monkeypatch.setattr(Interface, "clean", rejecting_clean)
 
-        response = _post(view, request, object_type="device", object_id=device.pk)
+        response = _post(view, bind_relationship(request, device), object_type="device", object_id=device.pk)
 
         assert response.status_code == 409
         body = json.loads(response.content)
@@ -4528,7 +4566,7 @@ class TestSyncInterfaceParentViewRealPermissions:
         view = make_view(SyncInterfaceParentView)
         _seed_relationship(device, "sub_interfaces", 10, 20, child.name, wrong_parent.name)
 
-        response = _post(view, request, object_type="device", object_id=device.pk)
+        response = _post(view, bind_relationship(request, device), object_type="device", object_id=device.pk)
 
         assert response.status_code == 404, response.content
         child.refresh_from_db()
@@ -4554,7 +4592,7 @@ class TestSyncInterfaceParentViewRealPermissions:
         )
         view = make_view(SyncInterfaceParentView)
 
-        response = _post(view, request, object_type="device", object_id=device.pk)
+        response = _post(view, bind_relationship(request, device), object_type="device", object_id=device.pk)
 
         assert response.status_code == 400
         child.refresh_from_db()
@@ -4640,7 +4678,7 @@ class TestRelationshipSyncObjectScope:
         request.user = user
         view = make_view(SyncInterfaceLagView)
         _seed_relationship(device, "lag_members", port_id, lag_port_id)
-        return _post(view, request, object_type="device", object_id=device.pk)
+        return _post(view, bind_relationship(request, device), object_type="device", object_id=device.pk)
 
     def test_lag_sync_refuses_an_out_of_scope_interface(self):
         from dcim.models import Device, Interface
@@ -4732,7 +4770,7 @@ class TestRelationshipSyncObjectScope:
             is not None
         )
 
-        response = _post(view, request, object_type="device", object_id=device.pk)
+        response = _post(view, bind_relationship(request, device), object_type="device", object_id=device.pk)
 
         assert response.status_code == 409
         assert b"interface owner changed concurrently" in response.content
@@ -4777,7 +4815,7 @@ class TestRelationshipSyncObjectScope:
 
         monkeypatch.setattr(sync_interfaces, "build_interface_index", revoke_before_lock)
 
-        response = _post(view, request, object_type="device", object_id=device.pk)
+        response = _post(view, bind_relationship(request, device), object_type="device", object_id=device.pk)
 
         assert permission_revoked
         assert response.status_code == 404
@@ -4827,7 +4865,10 @@ class TestRelationshipSyncObjectScope:
             user=user,
         )
         inline_response = _post(
-            make_view(SyncInterfaceParentView), inline_request, object_type="device", object_id=device.pk
+            make_view(SyncInterfaceParentView),
+            bind_relationship(inline_request, device),
+            object_type="device",
+            object_id=device.pk,
         )
 
         bulk_response = post_interface_sync(
@@ -4883,7 +4924,10 @@ class TestRelationshipSyncObjectScope:
             user=user,
         )
         inline_response = _post(
-            make_view(SyncInterfaceParentView), inline_request, object_type="device", object_id=member1.pk
+            make_view(SyncInterfaceParentView),
+            bind_relationship(inline_request, member1),
+            object_type="device",
+            object_id=member1.pk,
         )
 
         bulk_response = post_interface_sync(
@@ -4926,7 +4970,9 @@ def test_relinking_repairs_an_aggregate_edited_back_to_a_non_lag_type(settings):
         {"port_id": "10", "lag_port_id": "20", "server_key": server_key},
         user=make_superuser("lag-type-repair-user"),
     )
-    response = _post(make_view(SyncInterfaceLagView), request, object_type="device", object_id=device.pk)
+    response = _post(
+        make_view(SyncInterfaceLagView), bind_relationship(request, device), object_type="device", object_id=device.pk
+    )
 
     assert response.status_code == 200, response.content
     member.refresh_from_db()
@@ -4965,7 +5011,13 @@ def test_relationship_name_fallback_checks_host_and_oob_rows(client, settings, e
                 "plugins:netbox_librenms_plugin:sync_interface_parent",
                 kwargs={"object_type": "device", "object_id": device.pk},
             ),
-            {"port_id": "10", "parent_port_id": "20", "interface_name_field": "ifName", "server_key": "default"},
+            {
+                "port_id": "10",
+                "parent_port_id": "20",
+                "interface_name_field": "ifName",
+                "server_key": "default",
+                **relationship_binding(get_user(client), device, 10, interface_name_field="ifName"),
+            },
         )
     else:
         response = post_interface_sync(
@@ -4976,7 +5028,7 @@ def test_relationship_name_fallback_checks_host_and_oob_rows(client, settings, e
             exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
         )
     allowed = bound_parent or not same_oob_name
-    assert response.status_code == (302 if endpoint == "bulk" else 200 if allowed else 404)
+    assert response.status_code == (302 if endpoint == "bulk" else 200 if allowed else 404), response.content
     if endpoint == "bulk":
         _assert_snapshot_read(response.wsgi_request)
     child.refresh_from_db()

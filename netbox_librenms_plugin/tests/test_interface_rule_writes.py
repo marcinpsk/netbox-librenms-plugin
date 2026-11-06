@@ -44,6 +44,7 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     draft_tab,
     grant,
     make_user_with_perms,
+    relationship_binding,
     row_action_fields,
     submit_ip_selection,
 )
@@ -467,13 +468,7 @@ class TestRelationshipEdges:
     def test_the_single_row_endpoint_refuses_an_ignored_end(self, superuser_client):
         device, member, _aggregate, other_lag = _lag_scenario("rule-edge-single", "^Po")
 
-        response = superuser_client.post(
-            reverse(
-                "plugins:netbox_librenms_plugin:sync_interface_lag",
-                kwargs={"object_type": "device", "object_id": device.pk},
-            ),
-            {"port_id": "10", "lag_port_id": "20", "server_key": SERVER_KEY},
-        )
+        response = _relink(superuser_client, device, "lag", 10, 20)
 
         assert response.status_code == 409
         assert "Po1: ignored by interface rule" in response.json()["error"]
@@ -504,13 +499,20 @@ class TestRelationshipEdges:
 
 
 def _relink(client, device, relation, port_id, related_port_id):
-    """POST one single-row relationship sync, the way the row's inline button does."""
+    """POST one single-row relationship sync, the way the row's inline button does: bound to the row it shows."""
+    from django.contrib.auth import get_user
+
     return client.post(
         reverse(
             f"plugins:netbox_librenms_plugin:sync_interface_{relation}",
             kwargs={"object_type": "device", "object_id": device.pk},
         ),
-        {"port_id": str(port_id), f"{relation}_port_id": str(related_port_id), "server_key": SERVER_KEY},
+        {
+            "port_id": str(port_id),
+            f"{relation}_port_id": str(related_port_id),
+            "server_key": SERVER_KEY,
+            **relationship_binding(get_user(client), device, port_id),
+        },
     )
 
 
@@ -626,6 +628,24 @@ class TestASubmitWritesOnlyWhatTheUserApproved:
         assert not Interface.objects.filter(device=device, name="Gi0/1").exists()
         # The refused selection stays in the draft and shows as changed.
         assert draft_tab(superuser_client, device, "interfaces", **QUERY).rows["10"]["data-evidence-changed"] == "true"
+
+    def test_an_aggregate_refused_by_evidence_is_not_promoted_by_the_link_of_its_approved_member(
+        self, superuser_client
+    ):
+        device = _device("approved-aggregate-promotion")
+        member = _bound(device, "Gi0/1", 10, iface_type="1000base-t")
+        _seed(device, [_port(10, "Gi0/1"), _port(20, "Po1", if_type="ieee8023adLag")], [port_pair(10, 20)])
+        draft = _select(superuser_client, device, [10, 20])
+        # After the selection the aggregate appears in NetBox as a physical port, so its approval is stale.
+        aggregate = _bound(device, "Po1", 20, iface_type="1000base-t")
+
+        _sync(
+            superuser_client, device, draft=draft, extra={"exclude_columns": ["vlans"], "auto_select_lag_members": "on"}
+        )
+
+        member.refresh_from_db()
+        aggregate.refresh_from_db()
+        assert (member.lag_id, aggregate.type) == (None, "1000base-t")
 
     def test_a_type_mapping_change_after_the_selection_refuses_the_row(self, superuser_client):
         platform = _platform("approved-type-mapping")
