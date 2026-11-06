@@ -20,7 +20,9 @@
  * Every element of a tab or its dialogs that posts carries data-draft-command, and that marker alone makes
  * its request a command of the writer. The value says what else the command does: "draft" names the user's
  * draft (a bulk submit claims it), "refresh" answers with new tab content, "action" does neither. An
- * element with hx-confirm asks first: its command is admitted when the user confirms.
+ * "action" in a row of the draft table (a relationship button) names the draft, its revision and the
+ * row's evidence, so the server refuses it when the row changed. An element with hx-confirm asks first:
+ * its command is admitted when the user confirms.
  *
  * Every operation runs in ONE queue, one at a time in admission order (see admit()): the writes, the
  * commands and the READs. So a READ never shows a state from before an operation admitted ahead of it.
@@ -963,6 +965,13 @@
                 if (control.type === 'submit' && control.name) parameters.delete(control.name);
             });
             if (op.submitter) parameters.set(op.submitter.name, op.submitter.value);
+        }
+        const actionRow = elt.matches?.('[data-draft-command="action"]') ? elt.closest('tr[data-row-key]') : null;
+        if (actionRow && writer.table?.contains(actionRow) && writer.draftId) {
+            // An action of a row acts on the row that the page shows: its evidence names the row's member.
+            parameters.set('draft_id', writer.draftId);
+            parameters.set('expected_revision', String(writer.revision));
+            parameters.set('evidence', actionRow.dataset.evidence || '');
         }
         if (elt.matches?.('[data-draft-command="draft"]') && writer.draftId) {
             parameters.set('draft_id', writer.draftId);
