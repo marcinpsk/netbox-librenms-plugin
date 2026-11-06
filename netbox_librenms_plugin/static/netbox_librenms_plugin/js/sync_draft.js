@@ -152,6 +152,8 @@
     function done(op) {
         if (writer.running !== op) return;
         writer.running = null;
+        // A table that came while this operation wrote could not be taken then.
+        if (writes(op)) adoptPresentation();
         queueMicrotask(pump);
     }
 
@@ -643,6 +645,12 @@
             submitter: submitter?.name ? { name: submitter.name, value: submitter.value } : null,
             xhr: null,
             run: (op) => {
+                if (!elt.isConnected) {
+                    // An operation before it (a refresh) replaced its element: it never goes with new evidence.
+                    showNotice('The tab changed; the action was not sent. Check the row and try again.', null);
+                    done(op);
+                    return;
+                }
                 if (command === 'draft' && writer.stale) {
                     // The page waits for the draft that another window changed, so it writes nothing.
                     refuse();
