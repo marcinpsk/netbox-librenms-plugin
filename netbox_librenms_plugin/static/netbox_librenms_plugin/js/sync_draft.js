@@ -66,7 +66,8 @@
         failed: false,
         // Another window changed the draft: input waits for the fresh presentation, which this page reads.
         stale: false,
-        // The sync form whose bulk submit is the command in flight.
+        // The sync submit that is the command in flight: its form, and whether it claims the draft (the bulk
+        // submit) or acts on one row (a row action).
         submitting: null,
         waiters: [],
         // The last choice this page sent per row, until a row READ shows the row again.
@@ -558,8 +559,8 @@
         return name !== 'sync_one' && name !== 'create_vrf';
     }
 
-    // A filter request reads the draft, so it waits for the writer. A sync submit waits for the writer and
-    // names the draft; the bulk submit claims the draft, so it is the writer's command in flight.
+    // A filter request reads the draft, so it waits for the writer. A sync submit (the bulk submit or a row
+    // action) is the writer's command in flight: it waits for the writer and names the draft.
     document.addEventListener('htmx:confirm', function (event) {
         const elt = event.detail.elt;
         const draftForm = elt instanceof HTMLFormElement && elt.querySelector(DRAFT_TABLE);
@@ -590,11 +591,11 @@
                 refuse();
                 return;
             }
-            if (draftForm && isBulkSubmit(event)) {
-                // The claim changes the draft like an input: a READ sent before it shows rows the claim takes.
+            if (draftForm) {
+                // The submit changes the tab like an input: a READ sent before it is read again after it.
                 bumpInputEpoch();
                 writer.inFlight = true;
-                writer.submitting = elt;
+                writer.submitting = { form: elt, claims: isBulkSubmit(event) };
             }
             event.detail.issueRequest(true);
         }, () => {
@@ -612,20 +613,22 @@
         filterEpochs.set(event, reserveNavigation(field.form));
     });
 
-    // The claim answers with the revision it left, and the input made during the submit goes with it.
+    // A claim answers with the revision it left, and the input made during the submit goes with it. A row
+    // action leaves the draft as it is. Each answer asks for the tab's results again (RESULTS_STALE_EVENT).
     document.addEventListener('htmx:afterRequest', function (event) {
         const read = reads.get(event.detail.xhr);
         if (read && !read.rowKey && !read.region) endNavigation(read.navEpoch);
-        if (!writer.submitting || event.detail.elt !== writer.submitting) return;
+        if (!writer.submitting || event.detail.elt !== writer.submitting.form) return;
+        const { claims } = writer.submitting;
         writer.submitting = null;
         writer.inFlight = false;
         const revision = event.detail.successful ? event.detail.xhr.getResponseHeader(REVISION_HEADER) : null;
-        if (revision === null) {
+        if (claims && revision === null) {
             // No claim, or its answer is lost: the input made during the submit cannot go, and the page reads the draft.
             writer.stale = true;
             writer.queue = [];
             readResults();
-        } else {
+        } else if (claims) {
             writer.revision = Number(revision);
         }
         pump();

@@ -1,5 +1,6 @@
 """End-to-end safety tests for LibreNMS IP address synchronization."""
 
+import json
 from contextlib import contextmanager
 from copy import deepcopy
 from functools import partial
@@ -42,6 +43,7 @@ from netbox_librenms_plugin.tests.source_snapshot_helpers import (
 from netbox_librenms_plugin.utils import advisory_lock_key
 from netbox_librenms_plugin.views.sync.ip_addresses import _ip_host_lock_identity
 from netbox_librenms_plugin.tests.view_test_helpers import (
+    answers_in_place,
     assert_update_logged,
     grant,
     ip_tab,
@@ -1650,8 +1652,9 @@ def test_force_reassigns_only_the_matching_vrf_row(client, settings, live_libren
         HTTP_HX_REQUEST="true",
     )
 
-    assert force_response.status_code == 200
-    assert force_response.headers["HX-Redirect"]
+    assert answers_in_place(force_response)
+    # The confirmation came from the dialog, and its answer closes it.
+    assert "closeModal" in json.loads(force_response["HX-Trigger"])
     blue_ip.refresh_from_db()
     red_ip.refresh_from_db()
     assert blue_ip.assigned_object == target
@@ -1941,8 +1944,7 @@ def test_same_host_with_a_different_prefix_requires_confirmation_before_update(
         HTTP_HX_REQUEST="true",
     )
 
-    assert force_response.status_code == 200
-    assert force_response.headers["HX-Redirect"]
+    assert answers_in_place(force_response)
     existing.refresh_from_db()
     other_vrf_ip.refresh_from_db()
     device.refresh_from_db()

@@ -411,17 +411,17 @@ class TestRedirectsKeepThePageQuery:
     """Every answer that sends the browser back to the sync page keeps every tab's filters and page."""
 
     @pytest.mark.parametrize("kind", ["device", "virtual_machine"])
-    def test_hx_redirect_after_a_sync_keeps_the_filters_and_page(self, client, settings, librenms_server, kind):
+    def test_a_plain_sync_redirect_keeps_the_filters_and_page(self, client, settings, librenms_server, kind):
         bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
         client = _client(client, f"redirect-{kind}")
         owner = _mixed_owner(kind, f"redirect-{kind}", client, librenms_server)
         action = _rendered_sync_action(client, owner)
 
-        # The row action of the form redirects; a bulk submit answers in place.
-        response = client.post(action, {"server_key": SERVER_KEY, "sync_one": "198.18.7.3/24"}, HTTP_HX_REQUEST="true")
+        # A plain POST of the form goes back to the page; the page's htmx requests answer in place.
+        response = client.post(action, {"server_key": SERVER_KEY, "sync_one": "198.18.7.3/24"})
 
-        assert response.status_code == 200
-        target = response.headers["HX-Redirect"]
+        assert response.status_code == 302
+        target = response.url
         _assert_keeps_the_page_query(target, _sync_page_url(owner))
         # The page the browser loads shows the IP tab with the same filter.
         page = client.get(target)

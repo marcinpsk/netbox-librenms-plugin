@@ -32,6 +32,7 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     make_user_with_perms,
     select_ip_rows,
     submit_ip_selection,
+    answers_in_place,
     switch_set_primary_ip,
 )
 
@@ -396,7 +397,7 @@ class TestTheRowAction:
 
         response = _row_action(client, tab, ip_tab(client, tab), CREATE_ROW)
 
-        assert response["HX-Redirect"]
+        assert answers_in_place(response)
         assert IPAddress.objects.get(address=CREATE_ROW).vrf == blue
         assert _checked(ip_tab(client, tab), NO_INTERFACE_ROW)
 
@@ -408,7 +409,7 @@ class TestTheRowAction:
 
         response = _row_action(client, tab, shown, CREATE_ROW)
 
-        assert response["HX-Redirect"]
+        assert answers_in_place(response)
         assert not IPAddress.objects.filter(address=CREATE_ROW).exists()
         after = ip_tab(client, tab)
         assert re.search(rf'<option value="{blue.pk}"\s+selected>', _row_html(after.html, CREATE_ROW))

@@ -9,7 +9,7 @@ from django.core import signing
 from django.core.exceptions import BadRequest, ValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import Q
-from django.http import Http404, HttpResponse
+from django.http import Http404
 from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views import View
@@ -247,12 +247,29 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             self.request, reverse(url_name, args=[obj.pk]), {"tab": "ipaddresses", "server_key": server_key}
         )
 
-    def redirect_to_ip_tab(self, request, obj):
-        """Reload the full sync page for HTMX requests, or redirect a normal request."""
-        url = self.get_ip_tab_url(obj)
-        if request.htmx:
-            return HttpResponse("", headers={"HX-Redirect": url})
-        return redirect(url)
+    def tab_answer(self, request, obj, draft=None):
+        """
+        Answer an action of the IP tab: the messages, and the event that makes the page read the tab again.
+
+        The answer names no URL: the page reads its current destination through its navigation scheduler,
+        so a late answer never takes the browser back over a newer navigation. After a claim of *draft*,
+        ``X-Draft-Revision`` names the revision that the claim and the restore left, which the page's draft
+        writer sends with the input made during the submit; without one after a claim (another window
+        changed the draft meanwhile) the page's draft is stale. A plain POST is redirected to the tab.
+        """
+        if not request.htmx:
+            return redirect(self.get_ip_tab_url(obj))
+        response = render(request, "inc/messages.html")
+        # Only the out-of-band messages swap; the target of the posting form stays as it is.
+        response["HX-Reswap"] = "none"
+        trigger = {RESULTS_STALE_EVENT: None}
+        if request.POST.get("force_all") or request.POST.getlist("force_conflict"):
+            # A confirmation posts from the dialog, which its answer closes.
+            trigger["closeModal"] = None
+        response["HX-Trigger"] = json.dumps(trigger)
+        if draft is not None and not draft.changed_since_claim:
+            response[REVISION_HEADER] = str(draft.revision)
+        return response
 
     def post(self, request, object_type, pk):  # noqa: C901
         """
@@ -274,7 +291,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         post_server_key = self.rebind_api_for_posted_server(request.POST)
         if post_server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
-            return self.redirect_to_ip_tab(request, obj)
+            return self.tab_answer(request, obj)
         self._post_server_key = post_server_key
 
         # The draft, the evidence check and the writer read this one snapshot. A refresh that finds
@@ -288,7 +305,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             ):
                 return response
             messages.error(request, "Cache has expired. Please refresh the IP data.")
-            return self.redirect_to_ip_tab(request, obj)
+            return self.tab_answer(request, obj)
 
         force_intents, intent_errors = self._load_force_intents(request, obj, object_type, post_server_key)
         draft = claim = approved = None
@@ -299,7 +316,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             assessment, approved = self._displayed_row(request, obj, post_server_key, snapshot, sync_one)
             if not approved:
                 messages.error(request, ROW_CHANGED)
-                return self.redirect_to_ip_tab(request, obj)
+                return self.tab_answer(request, obj)
             selected = {row_id: payload["vrf"] for row_id, payload in approved.items()}
         else:
             draft = find_ip_draft(request, obj, post_server_key, snapshot)
@@ -309,7 +326,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 claim = draft.claim(str(request.POST.get("draft_id")), int(request.POST.get("expected_revision")))
             except (DraftConflict, TypeError, ValueError):
                 messages.error(request, SELECTION_CHANGED)
-                return self.draft_answer(request, obj)
+                return self.tab_answer(request, obj)
 
         try:
             if claim is not None:
@@ -321,13 +338,13 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     draft.restore(claim, claim.entries)
                     if not any(entry.intent is Intent.ON for entry in claim.entries.values()):
                         messages.error(request, "No IP addresses selected for synchronization.")
-                    return self.draft_answer(request, obj, draft)
+                    return self.tab_answer(request, obj, draft)
                 if intent_errors:
                     for error in dict.fromkeys(intent_errors.values()):
                         messages.error(request, error)
-                    return self.redirect_to_ip_tab(request, obj)
+                    return self.tab_answer(request, obj)
                 messages.error(request, "No IP addresses selected for synchronization.")
-                return self.redirect_to_ip_tab(request, obj)
+                return self.tab_answer(request, obj)
             results = self.process_ip_sync(
                 request, selected, assessment, obj, object_type, force_intents=force_intents, approved=approved
             )
@@ -388,29 +405,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         response[REVISION_HEADER] = str(draft.revision)
             return apply_request_cache_transition(request, response)
 
-        if claim is not None:
-            return apply_request_cache_transition(request, self.draft_answer(request, obj, draft))
-        return apply_request_cache_transition(request, self.redirect_to_ip_tab(request, obj))
-
-    def draft_answer(self, request, obj, draft=None):
-        """
-        Answer a bulk submit: the messages, and the event that makes the page read the tab's results again.
-
-        The answer carries no table: the page reads the results from the draft after the claim. After a
-        claim, ``X-Draft-Revision`` names the revision that the claim and the restore left, which the
-        page's draft writer sends with the input made during the submit. Without one (no claim, or another
-        window changed the draft meanwhile) the page's draft is stale. A plain POST goes back to the tab.
-        """
-        if not request.htmx:
-            return self.redirect_to_ip_tab(request, obj)
-        response = render(request, "inc/messages.html")
-        # Only the out-of-band messages swap; the sync form's target stays as it is.
-        response["HX-Reswap"] = "none"
-        response["HX-Trigger"] = json.dumps({RESULTS_STALE_EVENT: None})
-        # After another window's change the page must read the draft before it writes again.
-        if draft is not None and not draft.changed_since_claim:
-            response[REVISION_HEADER] = str(draft.revision)
-        return response
+        return apply_request_cache_transition(request, self.tab_answer(request, obj, draft))
 
     @staticmethod
     def _confirmed_rows(request, force_intents):
@@ -1533,29 +1528,29 @@ class CreateVRFFromIPRowView(SyncIPAddressesView):
         server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
-            return self.redirect_to_ip_tab(request, obj)
+            return self.tab_answer(request, obj)
         self._post_server_key = server_key
         if isinstance(obj, Device) and build_migrated_context(obj, server_key).get("migrated_to_marker"):
             messages.error(request, "This LibreNMS source has been migrated and is read-only.")
-            return self.redirect_to_ip_tab(request, obj)
+            return self.tab_answer(request, obj)
         assessment = self.assess_cached_snapshot(obj)
         if assessment is None:
             messages.error(request, "Cache has expired. Please refresh the IP data.")
-            return self.redirect_to_ip_tab(request, obj)
+            return self.tab_answer(request, obj)
         try:
             identity = self._creatable_vrf_identity(assessment, request.POST.get("create_vrf"))
             with transaction.atomic():
                 vrf = self._create_vrf(request, identity)
         except _VRFCreateRefusedError as refusal:
             messages.error(request, str(refusal))
-            return self.redirect_to_ip_tab(request, obj)
+            return self.tab_answer(request, obj)
         rd_text = f"route distinguisher {vrf.rd}" if vrf.rd else "no route distinguisher"
         messages.success(
             request,
             f"Created NetBox VRF '{vrf.name}' with {rd_text}. The IP rows on this VRF now select it; "
             "sync them to assign the addresses.",
         )
-        return self.redirect_to_ip_tab(request, obj)
+        return self.tab_answer(request, obj)
 
     def _creatable_vrf_identity(self, assessment, raw_row_id):
         """
