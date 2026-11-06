@@ -608,6 +608,62 @@ class TestPromotionFollowsTheSetType:
             assert (source.parent_id, source.type) == (target.pk, "virtual")
 
 
+@pytest.mark.django_db
+class TestASubmitWritesOnlyWhatTheUserApproved:
+    """The submit writes a selected row only with the evidence the user approved, also through the related rows."""
+
+    def test_a_selected_member_whose_evidence_changed_is_not_written_through_the_aggregate(self, superuser_client):
+        device = _device("approved-member-expansion")
+        _bound(device, "Po1", 20, iface_type="lag")
+        member = _bound(device, "Gi0/1", 10, iface_type="1000base-t")
+        _seed(device, [_port(10, "Gi0/1"), _port(20, "Po1", if_type="ieee8023adLag")], [port_pair(10, 20)])
+        draft = _select(superuser_client, device, [10, 20])
+        # The member's NetBox interface is gone, so the user approved a row that is not there now.
+        member.delete()
+
+        _sync(superuser_client, device, draft=draft, extra={"auto_select_lag_members": "on"})
+
+        assert not Interface.objects.filter(device=device, name="Gi0/1").exists()
+        # The refused selection stays in the draft and shows as changed.
+        assert draft_tab(superuser_client, device, "interfaces", **QUERY).rows["10"]["data-evidence-changed"] == "true"
+
+    def test_a_type_mapping_change_after_the_selection_refuses_the_row(self, superuser_client):
+        platform = _platform("approved-type-mapping")
+        device = _device("approved-type-mapping", platform)
+        rule = InterfaceTypeMapping.objects.create(platform=platform, name_pattern="^Gi", netbox_type="1000base-t")
+        interface = _bound(device, "Gi0/1", 10, iface_type="other")
+        _seed(device, [_port(10, "Gi0/1")])
+        draft = _select(superuser_client, device, [10])
+        # The row still differs from NetBox, but now the sync would write another type than the page showed.
+        rule.netbox_type = "10gbase-t"
+        rule.save()
+
+        _sync(superuser_client, device, draft=draft)
+
+        interface.refresh_from_db()
+        assert interface.type == "other"
+        assert draft_tab(superuser_client, device, "interfaces", **QUERY).rows["10"]["data-evidence-changed"] == "true"
+
+    def test_an_excluded_aggregate_is_not_promoted_by_the_link_of_its_member(self, superuser_client):
+        device, _rule, member, aggregate = _promotion_scenario("excluded-aggregate", relation="lag", rule_type="lag")
+
+        response = post_interface_sync(
+            superuser_client,
+            device,
+            [10],
+            htmx=False,
+            exclude_columns=("vlans",),
+            states={20: "off"},
+            extra={"auto_select_lag_members": "on"},
+        )
+
+        member.refresh_from_db()
+        aggregate.refresh_from_db()
+        # The link would write the excluded aggregate, so the sync refuses the link and says so.
+        assert (member.lag_id, aggregate.type) == (None, "other")
+        assert any("Po1" in text for text in _messages(response))
+
+
 def _planning_rule(tag, platform, name, rule, netbox_type):
     """Plan *netbox_type* on port *name*: a legacy ifType mapping, or a platform Set type rule on its name."""
     if rule == "legacy":

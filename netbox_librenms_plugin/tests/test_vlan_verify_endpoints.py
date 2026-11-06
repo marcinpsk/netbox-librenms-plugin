@@ -55,7 +55,7 @@ def _dialog_vlans(client, device, row_key, **groups):
     response = client.get(_url("interface_vlan_modal", device, groups, row_key=row_key))
     assert response.status_code == 200, response.content
     rows = re.findall(
-        r'<tr data-vid="(\d+)">\s*<td><span class="([^"]*)">\d+</span>(.*?)</td>', response.content.decode(), re.S
+        r'<tr data-vid="(\d+)">\s*<td[^>]*><span class="([^"]*)">\d+</span>(.*?)</td>', response.content.decode(), re.S
     )
     return {int(vid): (css, "mdi-alert" in tail) for vid, css, tail in rows}
 

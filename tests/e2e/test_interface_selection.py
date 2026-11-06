@@ -151,17 +151,19 @@ def test_the_vlan_dialog_saves_a_group_and_the_row_reads_again(interface_tab: Pa
     dialog = page.locator("#vlanDetailModalContent")
     select = dialog.locator('select[name="group_100"]')
     expect(select).to_have_count(1)
-    page.evaluate(
-        """(group) => {
-            const select = document.querySelector('#vlanDetailModalContent select[name="group_100"]');
-            if (select.tomselect) select.tomselect.setValue(group); else {
-                select.value = group;
-                select.dispatchEvent(new Event('change', {bubbles: true}));
-            }
-        }""",
-        str(second["id"]),
-    )
-    expect(dialog.locator(f'select[name="group_100"] option[value="{second["id"]}"][selected]')).to_have_count(1)
+    # The preview recolours the VID cells only, so the select keeps the group that the user chose.
+    with page.expect_response(lambda response: "/interface-row/" in response.url and "/vlan-groups/" in response.url):
+        page.evaluate(
+            """(group) => {
+                const select = document.querySelector('#vlanDetailModalContent select[name="group_100"]');
+                if (select.tomselect) select.tomselect.setValue(group); else {
+                    select.value = group;
+                    select.dispatchEvent(new Event('change', {bubbles: true}));
+                }
+            }""",
+            str(second["id"]),
+        )
+    expect(select).to_have_value(str(second["id"]))
 
     with page.expect_response(lambda response: "/interface-row/" in response.url):
         dialog.get_by_role("button", name="Save").click()
