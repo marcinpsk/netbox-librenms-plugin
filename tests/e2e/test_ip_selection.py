@@ -7,6 +7,7 @@ fixture creates in NetBox, so each row can be created. The tab shows three rows 
 Each test refreshes the tab, which starts an empty draft.
 """
 
+import json
 import re
 from uuid import uuid4
 
@@ -185,6 +186,51 @@ def test_a_submit_syncs_the_rows_of_every_page(ip_tab: Page, netbox_api: NetBoxA
     assert created == {ROWS[0], ROWS[PER_PAGE]}
     # The tab reads its results again: the written rows are no longer selected.
     expect(_box(page, ROWS[PER_PAGE])).not_to_be_checked()
+
+
+def test_an_invalid_filter_shows_the_hidden_selection_and_clear_empties_what_a_submit_writes(
+    ip_tab: Page, netbox_api: NetBoxAPI, ip_device: dict
+):
+    page = ip_tab
+    _box(page, ROWS[0]).click()
+    _box(page, ROWS[1]).click()
+    _settled(page)
+
+    # The search is longer than a filter takes: the tab shows no row, and says which selected rows a submit writes.
+    page.locator("#id_ipaddresses_q").fill("x" * 300)
+    expect(page.locator(f"{CONTENT} [data-filter-invalid]")).to_be_visible()
+    notice = page.locator(f"{CONTENT} [data-offpage-selection]")
+    expect(notice).to_be_visible()
+    clear = notice.locator("[data-clear-offpage]")
+    assert sorted(json.loads(clear.get_attribute("data-clear-offpage"))) == sorted(ROWS[:2])
+
+    clear.click()
+    expect(notice).to_have_count(0)
+    with page.expect_response(lambda response: "/sync-ip-addresses/" in response.url):
+        page.get_by_role("button", name="Sync Selected IP Addresses").click()
+
+    assert netbox_api.list("ipam/ip-addresses", device_id=ip_device["device"]["id"]) == []
+
+
+def test_a_submit_with_an_invalid_filter_writes_the_rows_that_the_notice_names(
+    ip_tab: Page, netbox_api: NetBoxAPI, ip_device: dict
+):
+    page = ip_tab
+    _box(page, ROWS[0]).click()
+    _box(page, ROWS[1]).click()
+    _settled(page)
+    page.locator("#id_ipaddresses_q").fill("x" * 300)
+    clear = page.locator(f"{CONTENT} [data-offpage-selection] [data-clear-offpage]")
+    expect(clear).to_be_visible()
+    named = set(json.loads(clear.get_attribute("data-clear-offpage")))
+
+    with page.expect_response(lambda response: "/sync-ip-addresses/" in response.url):
+        page.get_by_role("button", name="Sync Selected IP Addresses").click()
+
+    created = {
+        address["address"] for address in netbox_api.list("ipam/ip-addresses", device_id=ip_device["device"]["id"])
+    }
+    assert created == named == set(ROWS[:2])
 
 
 def test_a_vrf_choice_repaints_the_row_and_create_vrf_adds_the_missing_vrf(ip_tab: Page, ip_device: dict):
