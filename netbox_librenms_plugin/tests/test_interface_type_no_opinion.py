@@ -42,7 +42,7 @@ def _sync(device, port):
         addable_queryset=Interface.objects.all(),
         changeable_queryset=Interface.objects.all(),
         viewable_queryset=Interface.objects.all(),
-    )
+    ).interface
     interface.refresh_from_db()
     return interface
 
