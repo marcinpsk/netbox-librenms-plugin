@@ -1,10 +1,14 @@
+from itertools import repeat
+
 import django_tables2 as tables
 from django.utils.html import format_html, format_html_join
 from django.utils.safestring import mark_safe
 from netbox.tables.columns import ToggleColumn
 
+from netbox_librenms_plugin.assessment.vlans import shown_group_id
 from netbox_librenms_plugin.constants import LIBRENMS_VLAN_STATE_ACTIVE
 from netbox_librenms_plugin.sync_filters import EMPTY_CELL_VALUES, FilterColumn, FilterSpec, cell_text
+from netbox_librenms_plugin.tables.draft_rows import draft_row_attrs, with_changed_marker
 from netbox_librenms_plugin.utils import (
     get_vlan_sync_css_class,
     note_icon,
@@ -22,9 +26,10 @@ class _VLANSelectionColumn(ToggleColumn):
     """Render a selection control only for rows with a usable VLAN identity."""
 
     def render(self, value, bound_column, record):
+        """Render the row checkbox, with a marker when the row changed after the user selected it."""
         if record.get("vid_error"):
             return ""
-        return super().render(value, bound_column, record)
+        return with_changed_marker(super().render(value, bound_column, record), record)
 
 
 class LibreNMSVLANTable(tables.Table):
@@ -51,10 +56,13 @@ class LibreNMSVLANTable(tables.Table):
         }
         row_attrs = {
             "data-vlan-id": lambda record: None if record.get("vid_error") else record.get("vlan_id"),
+            **draft_row_attrs(lambda record: None if record.get("vid_error") else str(record.get("vlan_id"))),
         }
 
     def __init__(self, *args, vlan_groups=None, **kwargs):
         super().__init__(*args, **kwargs)
+        # A row renders the same on every page and in a row read: no position-dependent even/odd class.
+        self._counter = repeat(0)
         self.tab = "vlans"
         self.prefix = "vlans_"
         self.vlan_groups = vlan_groups or []
@@ -66,6 +74,7 @@ class LibreNMSVLANTable(tables.Table):
         visible=True,
         attrs={"td": {"data-col": "selection"}, "input": {"name": "select"}},
         accessor="vlan_id",
+        checked=lambda value, record: record.get("selected"),
     )
 
     vlan_id = tables.Column(
@@ -188,13 +197,11 @@ class LibreNMSVLANTable(tables.Table):
         """
         Return the VLAN group the row's dropdown selects, or None for no group.
 
-        The dropdown selects the existing NetBox VLAN's group first, then a unique VID match. A group
-        that is not in the dropdown selects no option, so the dropdown shows no group.
+        The dropdown selects the user's choice, else the existing NetBox VLAN's group, else a unique VID
+        match (``shown_group_id``). A group that is not in the dropdown selects no option, so the
+        dropdown shows no group.
         """
-        if record.get("exists_in_netbox") and record.get("netbox_vlan_group_id"):
-            selected_group_id = record["netbox_vlan_group_id"]
-        else:
-            selected_group_id = record.get("auto_selected_group_id")
+        selected_group_id = shown_group_id(record)
         return next((group for group in self.vlan_groups if group.pk == selected_group_id), None)
 
     @staticmethod
@@ -274,14 +281,10 @@ class LibreNMSVLANTable(tables.Table):
             ],
         )
 
-        # The writer refuses a row whose proposed name is not the name this page shows.
+        # sync_draft.js sends a new group as the row's draft choice; the row's evidence names the group and the name.
         select_html = format_html(
-            '<input type="hidden" name="expected_vlan_name_{}" value="{}">'
-            '<select name="vlan_group_{}" class="form-select form-select-sm vlan-sync-group-select"'
+            '<select class="form-select form-select-sm vlan-sync-group-select" data-draft-choice="group"'
             ' data-vlan-id="{}" data-vlan-name="{}">{}</select>',
-            vlan_id,
-            record.get("name") or "",
-            vlan_id,
             vlan_id,
             record.get("name", ""),
             options_html,

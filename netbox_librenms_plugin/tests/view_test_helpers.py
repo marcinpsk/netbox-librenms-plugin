@@ -548,6 +548,150 @@ def read_ip_row(client, owner, row_id, *, server_key="default", vrf=None, **quer
     )
 
 
+# =============================================================================
+# Every tab on the selection draft, through its real endpoints
+# =============================================================================
+
+
+def draft_tab(client, owner, tab, *, server_key="default", **query):
+    """
+    Render one sync tab as the user's page shows it, from the cached snapshot and the user's draft.
+
+    Args:
+        client (Client): A signed-in client.
+        owner (Device | VirtualMachine): The subject of the sync page.
+        tab (str): The tab, for example ``interfaces`` or ``vlans``.
+        server_key (str): The LibreNMS server of the tab.
+        **query: More page query parameters, for example ``interface_name_field``.
+
+    Returns:
+        SimpleNamespace: ``html``, ``table`` (the draft table's attributes) and ``rows`` (each row's attributes by row key).
+
+    """
+    from types import SimpleNamespace
+
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests._html_helpers import open_tags
+
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_fragment",
+        kwargs={"object_type": owner._meta.model_name, "pk": owner.pk, "tab": tab},
+    )
+    response = client.get(url, {"server_key": server_key, f"{tab}_per_page": "1000", **query})
+    assert response.status_code == 200, response.content
+    html = response.content.decode()
+    tables = [attrs for attrs in open_tags(html, "table") if attrs.get("data-draft-id")]
+    assert len(tables) == 1, f"the {tab} tab renders no draft table"
+    rows = {attrs["data-row-key"]: attrs for attrs in open_tags(html, "tr") if attrs.get("data-row-key")}
+    return SimpleNamespace(html=html, table=tables[0], rows=rows)
+
+
+def draft_command(client, shown, attribute, revision=None, **fields):
+    """
+    Post one draft command of a rendered tab: the URL of the table *attribute*, with the draft the tab shows.
+
+    Returns:
+        HttpResponse: The command's response.
+
+    """
+    return client.post(
+        shown.table[attribute],
+        {
+            "draft_id": shown.table["data-draft-id"],
+            "expected_revision": shown.table["data-draft-revision"] if revision is None else revision,
+            **fields,
+        },
+    )
+
+
+def select_rows(client, owner, tab, row_ids, *, server_key="default", choices=(), states=None, **query):
+    """
+    Choose, then select *row_ids* in the user's draft of *tab* as the page does.
+
+    Each choice command goes first, then one batch of checks: each check carries the evidence token that
+    the tab renders for the row with its choices.
+
+    Args:
+        client (Client): A signed-in client.
+        owner (Device | VirtualMachine): The subject of the sync page.
+        tab (str): The tab, for example ``interfaces`` or ``vlans``.
+        row_ids (Iterable): The row keys to select.
+        server_key (str): The LibreNMS server of the tab.
+        choices (Iterable[tuple[str, dict]]): Commands to send first: the table attribute of the URL and the fields.
+        states (dict | None): Other intents to assign by row key, for example ``{"12": "off"}``.
+        **query: More page query parameters, for example ``interface_name_field``.
+
+    Returns:
+        dict[str, str]: The ``draft_id`` and ``expected_revision`` that a bulk submit posts.
+
+    """
+    shown = draft_tab(client, owner, tab, server_key=server_key, **query)
+    revision = int(shown.table["data-draft-revision"])
+    for attribute, fields in choices:
+        response = draft_command(client, shown, attribute, revision, **fields)
+        assert response.status_code == 204, (response.status_code, response.content)
+        revision = int(response["X-Draft-Revision"])
+    if choices:
+        shown = draft_tab(client, owner, tab, server_key=server_key, **query)
+    row_ids = [str(row_id) for row_id in row_ids]
+    missing = [row_id for row_id in row_ids if not shown.rows.get(row_id, {}).get("data-evidence")]
+    assert not missing, f"the tab offers no selection of {missing}"
+    assignments = {row_id: {"state": "on", "token": shown.rows[row_id]["data-evidence"]} for row_id in row_ids}
+    assignments.update({str(row_id): {"state": state, "token": None} for row_id, state in (states or {}).items()})
+    if assignments:
+        response = draft_command(client, shown, "data-selection-url", revision, assignments=json.dumps(assignments))
+        assert response.status_code == 204, (response.status_code, response.content)
+        revision = int(response["X-Draft-Revision"])
+    return {"draft_id": shown.table["data-draft-id"], "expected_revision": str(revision)}
+
+
+def submit_with_draft(
+    client,
+    owner,
+    tab,
+    url,
+    row_ids,
+    *,
+    server_key="default",
+    choices=(),
+    states=None,
+    query=None,
+    headers=None,
+    **fields,
+):
+    """
+    Select *row_ids* through the tab's draft (see :func:`select_rows`), then post the bulk submit *url* with the draft.
+
+    Args:
+        query (dict | None): More page query parameters for the tab and the submit URL.
+        headers (dict | None): Extra request headers of the submit, for example ``HTTP_HX_REQUEST``.
+        **fields: More submit fields, for example ``exclude_columns``.
+
+    Returns:
+        HttpResponse: The submit's response.
+
+    """
+    from urllib.parse import urlencode
+
+    draft = select_rows(
+        client, owner, tab, row_ids, server_key=server_key, choices=choices, states=states, **(query or {})
+    )
+    if query:
+        url = f"{url}{'&' if '?' in url else '?'}{urlencode(query)}"
+    return client.post(url, {"server_key": server_key, **draft, **fields}, **(headers or {}))
+
+
+def row_action_fields(client, owner, tab, row_id, *, server_key="default", **query):
+    """Return the fields that a row action of the tab posts: the draft, its revision and the row's evidence."""
+    shown = draft_tab(client, owner, tab, server_key=server_key, **query)
+    return {
+        "draft_id": shown.table["data-draft-id"],
+        "expected_revision": shown.table["data-draft-revision"],
+        "evidence": shown.rows.get(str(row_id), {}).get("data-evidence", ""),
+    }
+
+
 def _message_level(name):
     """Map a message name to its level constant because NetBox remaps error tags to ``danger``."""
     from django.contrib import messages

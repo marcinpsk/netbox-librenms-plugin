@@ -130,6 +130,55 @@ def compare_rows(librenms_vlans, *, lookup_maps, subject):
     return compared
 
 
+def shown_group_id(row):
+    """
+    Return the VLAN group pk that a row's group select shows: the user's choice, the existing VLAN's group, or the automatic one.
+
+    Returns:
+        int | None: The group pk, or None for no group (Global).
+
+    """
+    if "group_choice" in row:
+        return int(row["group_choice"]) if row["group_choice"] else None
+    if row.get("exists_in_netbox") and row.get("netbox_vlan_group_id"):
+        return row["netbox_vlan_group_id"]
+    return row.get("auto_selected_group_id")
+
+
+def apply_group_choices(rows, choices, lookup_maps):
+    """
+    Return the rows, each row with a chosen VLAN group compared again in that group.
+
+    Args:
+        rows (list[dict]): The rows of :func:`compare_rows`.
+        choices (dict[str, str]): The chosen group pk text of each VID text; "" is Global.
+        lookup_maps (dict): The VLAN lookup maps of the device, which hold each chosen group.
+
+    Returns:
+        list[dict]: The rows; a chosen row is a new dict with ``group_choice`` set.
+
+    """
+    by_vid_group = (lookup_maps or {}).get("vid_group_to_vlan", {})
+    chosen_rows = []
+    for row in rows:
+        choice = choices.get(str(row["vlan_id"])) if row["vlan_id"] is not None else None
+        if choice is None:
+            chosen_rows.append(row)
+            continue
+        netbox_vlan = by_vid_group.get((row["vlan_id"], int(choice) if choice else None))
+        chosen_rows.append(
+            {
+                **row,
+                **compare_vlan(netbox_vlan, row["name"]),
+                "netbox_vlan_id": netbox_vlan.pk if netbox_vlan else None,
+                "netbox_vlan_group": netbox_vlan.group.name if netbox_vlan and netbox_vlan.group else None,
+                "netbox_vlan_group_id": netbox_vlan.group.pk if netbox_vlan and netbox_vlan.group else None,
+                "group_choice": choice,
+            }
+        )
+    return chosen_rows
+
+
 def select_most_specific_group(groups, device):
     """
     Select the most specific VLAN group based on device context.

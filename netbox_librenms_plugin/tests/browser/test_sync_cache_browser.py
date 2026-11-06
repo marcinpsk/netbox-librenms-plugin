@@ -147,39 +147,24 @@ def test_the_platform_row_opens_the_create_platform_modal_without_bootstrap(page
 
 
 # ===========================================================================
-# Interface selection: the requirement cascade and cross-page state
+# Cross-page selection of the cable and module tables
 # ===========================================================================
 SELECTION_PAGE_URL = "https://plugin.example.com/device/1/sync"
 MODULE_VERIFY_ROUTE = "**/plugins/librenms_plugin/verify-module/"
 
-# Verbatim relationship shape of a live Junos MX304 (LibreNMS device 20): et-0/0/6.0 is a unit of
-# et-0/0/6, et-0/0/6 is a member of ae2, and ae2.0 is a unit of ae2.
-JUNOS_ROWS = [
-    {"port_id": "4303", "name": "ae2"},
-    {"port_id": "4304", "name": "ae2.0", "parent": "4303"},
-    {"port_id": "4301", "name": "et-0/0/6", "lag": "4303"},
-    {"port_id": "4302", "name": "et-0/0/6.0", "parent": "4301", "parent_name": "et-0/0/6"},
+SELECTION_ROWS = [
+    {"row_id": "4303", "name": "ae2"},
+    {"row_id": "4304", "name": "ae2.0"},
+    {"row_id": "4301", "name": "et-0/0/6"},
+    {"row_id": "4302", "name": "et-0/0/6.0"},
 ]
 
 
 def _selection_row_markup(row):
     esc = escape
-    attrs = [f'data-port-id="{esc(row["port_id"])}"']
-    if row.get("parent"):
-        attrs.append(f'data-parent-port-id="{esc(row["parent"])}"')
-    if row.get("parent_name"):
-        attrs.append(f'data-parent-name="{esc(row["parent_name"])}"')
-    if row.get("lag"):
-        attrs.append(f'data-member-of-lag="{esc(row["lag"])}"')
-    if row.get("lag_name"):
-        attrs.append(f'data-lag-name="{esc(row["lag_name"])}"')
-    if row.get("bridge"):
-        attrs.append(f'data-bridge-port-id="{esc(row["bridge"])}"')
-    if row.get("bridge_name"):
-        attrs.append(f'data-bridge-name="{esc(row["bridge_name"])}"')
+    row_id = esc(row["row_id"])
     companion = (
-        f'<select name="device_selection_{esc(row["port_id"])}">'
-        '<option value="7">m7</option><option value="9">m9</option></select>'
+        f'<select name="device_selection_{row_id}"><option value="7">m7</option><option value="9">m9</option></select>'
         if row.get("companion")
         else ""
     )
@@ -187,39 +172,21 @@ def _selection_row_markup(row):
         f'<input type="hidden" name="{esc(name)}" value="{esc(value)}">'
         for name, value in row.get("hidden_fields", {}).items()
     )
-    # A port id is not always usable as a DOM id, so a row can name its own checkbox.
-    dom_id = row.get("dom_id", row["port_id"])
-    # The table renders an ignored row without a checkbox.
-    checkbox = (
-        ""
-        if row.get("ignored")
-        else f'<input type="checkbox" name="select" value="{esc(row["port_id"])}" id="cb-{esc(dom_id)}">'
-    )
-    if row.get("ignored"):
-        attrs.append('data-rule-state="ignored"')
+    # A row key is not always usable as a DOM id, so a row can name its own checkbox.
+    dom_id = esc(row.get("dom_id", row["row_id"]))
     return (
-        f"<tr {' '.join(attrs)}>"
-        f'<td data-col="selection">{checkbox}</td>'
+        f'<tr data-interface="{row_id}">'
+        f'<td data-col="selection"><input type="checkbox" name="select" value="{row_id}" id="cb-{dom_id}"></td>'
         f"<td>{row['name']}{companion}{hidden_fields}</td></tr>"
     )
 
 
-def _selection_page_html(
-    rows,
-    *,
-    auto_select=True,
-    table_id="librenms-interface-table",
-    selection_snapshot="",
-    blocked_port_ids=(),
-):
-    checked = "checked" if auto_select else ""
+def _selection_page_html(rows, *, table_id, selection_snapshot):
     body = "".join(_selection_row_markup(row) for row in rows)
     snapshot_attr = f' data-selection-snapshot="{escape(selection_snapshot)}"' if selection_snapshot else ""
-    blocked_attr = escape(json.dumps(list(blocked_port_ids)))
     return f"""<!doctype html><html><body>
-        <input type="checkbox" id="autoSelectLagMembers" {checked}>
         <input type="hidden" name="csrfmiddlewaretoken" value="selection-csrf-token">
-        <form id="sync-form" method="post" action="{SELECTION_PAGE_URL}/submit" data-blocked-port-ids="{blocked_attr}">
+        <form id="sync-form" method="post" action="{SELECTION_PAGE_URL}/submit">
           <input type="hidden" name="server_key" value="production">
           <table id="{escape(table_id)}"{snapshot_attr}>
             <thead><tr><th><input type="checkbox" class="toggle"></th><th>Name</th></tr></thead>
@@ -230,24 +197,9 @@ def _selection_page_html(
         </body></html>"""
 
 
-def _load_selection_page(
-    page,
-    rows,
-    *,
-    url=SELECTION_PAGE_URL,
-    auto_select=True,
-    table_id="librenms-interface-table",
-    selection_snapshot="",
-    blocked_port_ids=(),
-):
+def _load_selection_page(page, rows, *, url=SELECTION_PAGE_URL, table_id="librenms-cable-table", selection_snapshot=""):
     """Serve the fixture page from a real origin so sessionStorage behaves as it does in NetBox."""
-    html = _selection_page_html(
-        rows,
-        auto_select=auto_select,
-        table_id=table_id,
-        selection_snapshot=selection_snapshot,
-        blocked_port_ids=blocked_port_ids,
-    )
+    html = _selection_page_html(rows, table_id=table_id, selection_snapshot=selection_snapshot)
     page.route(
         f"{SELECTION_PAGE_URL}**",
         lambda route: route.fulfill(status=200, content_type="text/html", body=html),
@@ -261,343 +213,9 @@ def _checked_values(page):
     return set(page.evaluate("Array.from(document.querySelectorAll('input[name=select]:checked')).map(cb => cb.value)"))
 
 
-VERIFY_CELLS = (
-    "name",
-    "type",
-    "speed",
-    "mac_address",
-    "mtu",
-    "enabled",
-    "description",
-    "vlans",
-    "librenms_id",
-    "parent",
-)
-
-
-def _checkbox_markup(port_id):
-    """The selection cell's checkbox, as the table renders it for a row a sync may write."""
-    return f'<input type="checkbox" name="select" value="{escape(port_id)}" id="cb-{escape(port_id)}">'
-
-
-def _verify_row_markup(row):
-    esc = escape
-    rule_state = row.get("rule_state", "ignored" if row.get("ignored") else "")
-    attrs = [f'data-port-id="{esc(row["port_id"])}"', f'data-rule-state="{rule_state}"']
-    for key, data_attr in (("parent", "data-parent-port-id"), ("lag", "data-member-of-lag")):
-        if row.get(key):
-            attrs.append(f'{data_attr}="{esc(row[key])}"')
-    options = "".join(
-        f'<option value="{member}"{" selected" if member == row["member"] else ""}>m{member}</option>'
-        for member in ("1", "2")
-    )
-    cells = "".join(f'<td data-col="{col}"></td>' for col in VERIFY_CELLS)
-    # The table renders no checkbox on a row the write check refuses; an unresolved owner keeps one.
-    checkbox = "" if rule_state in ("ignored", "ambiguous", "incomplete") else _checkbox_markup(row["port_id"])
-    return (
-        f"<tr {' '.join(attrs)}>"
-        f'<td data-col="selection">{checkbox}</td>'
-        f'<td><select name="device_selection_{esc(row["port_id"])}" class="vc-member-select"'
-        f' data-interface="{esc(row["name"])}">{options}</select></td>{cells}</tr>'
-    )
-
-
-def _serve_verify(page, formatted_rows):
-    """Answer the verify endpoint per posted port ID with that row's repaint."""
-
-    def _answer(route):
-        port_id = str(json.loads(route.request.post_data)["port_id"])
-        route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps({"status": "success", "formatted_row": formatted_rows[port_id]}),
-        )
-
-    page.route("**/plugins/librenms_plugin/verify-interface/", _answer)
-
-
-def _verify_form_markup(rows):
-    """Render the interface tab's sync form around *rows*, as the server renders it."""
-    body = "".join(_verify_row_markup(row) for row in rows)
-    blocked = escape(json.dumps([row["port_id"] for row in rows if row.get("ignored") or row.get("rule_state")]))
-    return f"""<form id="sync-form" method="post" action="{SELECTION_PAGE_URL}/submit"
-              data-interface-origin-device-id="1" data-blocked-port-ids="{blocked}">
-          <input type="hidden" name="csrfmiddlewaretoken" value="test-token">
-          <input type="hidden" name="server_key" value="production">
-          <table id="librenms-interface-table"><tbody>{body}</tbody></table>
-          <button type="submit" id="do-sync">Sync</button>
-        </form>"""
-
-
-def _load_verify_page(page, rows, *, url=SELECTION_PAGE_URL, verify=None, bulk=False):
-    """Serve a chassis interface tab whose rows the verify endpoint can repaint."""
-    bulk_markup = (
-        '<select id="bulk-vc-member-select"><option value="2">m2</option></select>'
-        '<button type="button" id="apply-bulk-vc-member">Apply</button>'
-        if bulk
-        else ""
-    )
-    html = f"""<!doctype html><html><body>
-        <input type="checkbox" id="autoSelectLagMembers" checked>
-        <input type="radio" name="interface_name_field" value="ifName" checked>
-        {bulk_markup}
-        <div id="interface-sync-content">{_verify_form_markup(rows)}</div>
-        </body></html>"""
-    page.route(
-        f"{SELECTION_PAGE_URL}**",
-        lambda route: route.fulfill(status=200, content_type="text/html", body=html),
-    )
-    if verify is not None:
-        _serve_verify(page, verify)
-    page.goto(url)
-    _add_page_scripts(page)
-    if bulk:
-        # NetBox wraps the member selects in TomSelect; this stands in for its setValue contract.
-        page.evaluate(
-            """() => document.querySelectorAll('.vc-member-select').forEach((select) => {
-                select.tomselect = {setValue(value, silent) {
-                    select.value = value;
-                    if (!silent) handleInterfaceChange(select, value);
-                }};
-            })"""
-        )
-        page.evaluate("initializeBulkEditApply()")
-    page.evaluate("initializeCheckboxes()")
-
-
-def _verified_row(*, rule_state, selection, lag=None, parent=None):
-    """Return the verify endpoint's repaint for one row."""
-    row = {col: "" for col in VERIFY_CELLS}
-    row.update(
-        {
-            "selection": selection,
-            "rule_state": rule_state,
-            "librenms_lag_port_id": lag,
-            "librenms_lag_name": None,
-            "librenms_parent_port_id": parent,
-            "librenms_parent_name": None,
-            "librenms_bridge_port_id": None,
-            "librenms_bridge_name": None,
-        }
-    )
-    return row
-
-
-def _wait_for_verified_member(page, port_id, member):
-    """Wait until the row's verify has settled on *member*."""
-    page.wait_for_function(
-        """([portId, member]) => {
-            const select = document.querySelector(`tr[data-port-id="${portId}"] .vc-member-select`);
-            return select && select._lastVerifiedMember === member;
-        }""",
-        arg=[port_id, member],
-    )
-
-
-def _verify_row(page, port_id, member, formatted_row):
-    """Switch one row to another chassis member and wait for the verify repaint."""
-    _serve_verify(page, {port_id: formatted_row})
-    page.evaluate(
-        """([portId, member]) => {
-            const select = document.querySelector(`tr[data-port-id="${portId}"] .vc-member-select`);
-            select.value = member;
-            handleInterfaceChange(select, member);
-        }""",
-        [port_id, member],
-    )
-    _wait_for_verified_member(page, port_id, member)
-
-
-def _submitted_selects(page):
-    """Submit the sync form and return the posted row selections."""
-    with page.expect_request(f"{SELECTION_PAGE_URL}/submit") as request_info:
-        page.click("#do-sync")
-    return sorted(value for key, value in _selection_form_pairs(request_info.value.post_data) if key == "select")
-
-
-# A (10) is an aggregate, I (20) is its member, and C (30) is a unit of I.
-CHAIN_ROWS = [
-    {"port_id": "10", "name": "ae0", "member": "1"},
-    {"port_id": "20", "name": "et-0/0/0", "member": "1", "lag": "10"},
-    {"port_id": "30", "name": "et-0/0/0.0", "member": "1", "parent": "20"},
-]
-OTHER_PAGE_ROWS = [{"port_id": "40", "name": "et-0/0/9", "member": "1"}]
-
-
-class TestTheWalkSkipsEveryBlockedRow:
-    """The browser walk reads one blocked set: every row the writer's check refuses."""
-
-    @pytest.mark.parametrize("rule_state", ["ambiguous", "incomplete", "owner_unresolved"])
-    def test_a_blocked_middle_row_is_neither_selected_nor_walked_through(self, page, rule_state):
-        rows = [dict(row, rule_state=rule_state) if row["port_id"] == "20" else row for row in CHAIN_ROWS]
-        _load_verify_page(page, rows)
-
-        page.check("#cb-30")
-
-        assert _checked_values(page) == {"30"}
-
-    def test_an_aggregate_never_pulls_in_a_blocked_member(self, page):
-        rows = [
-            {"port_id": "10", "name": "ae0", "member": "1"},
-            {"port_id": "20", "name": "et-0/0/0", "member": "1", "lag": "10", "rule_state": "owner_unresolved"},
-            {"port_id": "30", "name": "et-0/0/1", "member": "1", "lag": "10"},
-        ]
-        _load_verify_page(page, rows)
-
-        page.check("#cb-10")
-
-        # The unresolved-owner member keeps its checkbox for the bulk member action, yet no cascade selects it.
-        assert _checked_values(page) == {"10", "30"}
-
-    def test_a_blocked_aggregate_never_pulls_in_its_members(self, page):
-        rows = [
-            {"port_id": "10", "name": "ae0", "member": "1", "rule_state": "owner_unresolved"},
-            {"port_id": "20", "name": "Gi1/0/1", "member": "1", "lag": "10"},
-        ]
-        _load_verify_page(page, rows)
-        errors = []
-        page.on("pageerror", lambda error: errors.append(error))
-
-        page.check("#cb-10")
-
-        # The server refuses the aggregate and expands nothing from it, so the browser starts no cascade from it.
-        assert _checked_values(page) == {"10"}
-        assert "20" not in _stored_selection(page)
-
-        page.uncheck("#cb-10")
-
-        assert _checked_values(page) == set()
-        assert _stored_selection(page) == {}
-        assert errors == []
-
-    def test_a_member_pulled_in_before_the_aggregate_was_blocked_is_released(self, page):
-        rows = [
-            {"port_id": "10", "name": "ae0", "member": "1"},
-            {"port_id": "20", "name": "Gi1/0/1", "member": "1", "lag": "10"},
-        ]
-        _load_verify_page(page, rows)
-        page.check("#cb-10")
-        _verify_row(page, "10", "2", _verified_row(rule_state="owner_unresolved", selection=_checkbox_markup("10")))
-        assert page.evaluate("() => _blockedPortIds().has('10')")
-
-        page.uncheck("#cb-10")
-
-        assert _checked_values(page) == set()
-        assert _stored_selection(page) == {}
-
-    def test_a_row_the_verify_makes_ambiguous_joins_the_blocked_set(self, page):
-        _load_verify_page(page, CHAIN_ROWS)
-
-        _verify_row(page, "20", "2", _verified_row(rule_state="ambiguous", selection="", lag="10"))
-        page.check("#cb-30")
-
-        assert _checked_values(page) == {"30"}
-
-
-def _store_member_choice(page, port_id, member):
-    """Leave a stored selection of one row on another member, as an earlier visit does."""
-    page.evaluate(
-        """([portId, member]) => writeStoredSelection(
-            document.getElementById('librenms-interface-table'),
-            {[portId]: {inputs: {[`device_selection_${portId}`]: member}, auto: ''}},
-        )""",
-        [port_id, member],
-    )
-
-
-def _hold_verify(page):
-    """Hold every verify request until the test answers it; return the held routes."""
-    held = []
-
-    def _hold(route):
-        held.append(route)
-
-    page.route("**/plugins/librenms_plugin/verify-interface/", _hold)
-    return held
-
-
-def _answer(route, formatted_row):
-    route.fulfill(
-        status=200,
-        content_type="application/json",
-        body=json.dumps({"status": "success", "formatted_row": formatted_row}),
-    )
-
-
 def _stored_selection(page):
-    """Return the interface table's stored selection."""
-    return page.evaluate("() => readStoredSelection(document.getElementById('librenms-interface-table'))")
-
-
-class TestAMovedMemberIsNotRestored:
-    """A stored selection for another member than the page renders is cleared, never verified or restored."""
-
-    ROW = [{"port_id": "10", "name": "et-0/0/0", "member": "1"}]
-
-    def _restore(self, page, member):
-        verify_requests = []
-        page.on("request", lambda request: "verify-interface" in request.url and verify_requests.append(request))
-        _load_verify_page(page, OTHER_PAGE_ROWS)
-        _store_member_choice(page, "10", member)
-        _load_verify_page(page, self.ROW)
-        return verify_requests
-
-    def test_a_differing_member_is_cleared_with_a_notice_and_no_verify(self, page):
-        verify_requests = self._restore(page, "2")
-
-        expect(page.locator("#librenms-interface-table-cleared-selections")).to_have_text(
-            "1 saved selection(s) on another Virtual Chassis member were cleared; select them again."
-        )
-        assert verify_requests == []
-        assert _checked_values(page) == set()
-        assert page.locator("tr[data-port-id='10'] .vc-member-select").input_value() == "1"
-        assert "10" not in _stored_selection(page)
-        with page.expect_request(f"{SELECTION_PAGE_URL}/submit") as request_info:
-            page.click("#do-sync")
-        pairs = _selection_form_pairs(request_info.value.post_data)
-        assert ("select", "10") not in pairs
-        assert [value for key, value in pairs if key == "device_selection_10"] == ["1"]
-
-    def test_an_equal_member_restores(self, page):
-        verify_requests = self._restore(page, "1")
-
-        assert verify_requests == []
-        assert _checked_values(page) == {"10"}
-        assert page.locator("#librenms-interface-table-cleared-selections").count() == 0
-
-    def test_an_off_page_selection_still_submits_with_its_member(self, page):
-        _load_verify_page(page, OTHER_PAGE_ROWS)
-        _store_member_choice(page, "10", "2")
-        _load_verify_page(page, OTHER_PAGE_ROWS, url=f"{SELECTION_PAGE_URL}?page=2")
-
-        with page.expect_request(f"{SELECTION_PAGE_URL}/submit") as request_info:
-            page.click("#do-sync")
-        pairs = _selection_form_pairs(request_info.value.post_data)
-
-        assert ("select", "10") in pairs
-        assert ("device_selection_10", "2") in pairs
-
-
-def test_a_refused_member_check_shows_the_server_reason_and_keeps_the_member(page):
-    """The middleware answers a broken rule with a 409 JSON error, and the operator must see its text."""
-    reason = 'Interface type mapping "Gi" (ID 7) stores an invalid name_pattern: (. Fix the rule, then try again.'
-    _load_verify_page(page, OTHER_PAGE_ROWS)
-    page.evaluate("document.body.insertAdjacentHTML('afterbegin', '<div id=\"django-messages\"></div>')")
-    page.route(
-        "**/plugins/librenms_plugin/verify-interface/",
-        lambda route: route.fulfill(status=409, content_type="application/json", body=json.dumps({"error": reason})),
-    )
-
-    page.evaluate(
-        """() => {
-            const select = document.querySelector('tr[data-port-id="40"] .vc-member-select');
-            select.value = '2';
-            handleInterfaceChange(select, '2');
-        }"""
-    )
-
-    expect(page.locator("#django-messages .toast-body")).to_have_text(f"{reason} The row keeps its previous member.")
-    expect(page.locator('tr[data-port-id="40"] .vc-member-select')).to_have_value("1")
+    """Return the stored selection of the page's table."""
+    return page.evaluate("() => readStoredSelection(document.querySelector('table'))")
 
 
 CABLE_VERIFY_URL = "https://plugin.example.com/verify-cable/"
@@ -753,473 +371,35 @@ class TestTheCableVerifyAnswerSetsTheCheckbox:
             expect(checkbox).to_be_disabled()
 
 
-class TestADetachedVerifyChangesNothing:
-    """A verify answer for a row the tab swap replaced must not touch the new page or storage."""
-
-    def test_an_old_answer_after_a_tab_swap_changes_neither_storage_nor_the_blocked_set(self, page, fetches):
-        rows = [
-            {"port_id": "10", "name": "et-0/0/0", "member": "1"},
-            {"port_id": "20", "name": "et-0/0/1", "member": "1"},
-        ]
-        _load_verify_page(page, rows)
-        fetches.install()
-        page.check("#cb-20")
-        held = _hold_verify(page)
-        page.evaluate(
-            """() => {
-                const select = document.querySelector('tr[data-port-id="10"] .vc-member-select');
-                select.value = '2';
-                handleInterfaceChange(select, '2');
-            }"""
-        )
-        expect(page.locator("tr[data-port-id='10'] .vc-member-select")).to_have_value("2")
-
-        # The sync swaps the tab in, and the user then clears the row the swap restored.
-        page.evaluate(
-            """(markup) => {
-                document.getElementById('interface-sync-content').innerHTML = markup;
-                initializeCheckboxes();
-            }""",
-            _verify_form_markup(rows),
-        )
-        page.uncheck("#cb-20")
-        _answer(held[0], _verified_row(rule_state="ignored", selection=""))
-        fetches.wait_until_settled()
-
-        assert _stored_selection(page) == {}
-        assert page.evaluate("() => document.querySelector('[data-blocked-port-ids]').dataset.blockedPortIds") == "[]"
-
-
-class TestTheOrderedSelectionCommit:
-    """A member, eligibility or checkbox change ends in one order: eligibility, closure, then storage."""
-
-    def test_a_row_the_verify_ignores_releases_its_chain_in_storage_too(self, page):
-        _load_verify_page(page, CHAIN_ROWS)
-        page.check("#cb-30")
-        assert _checked_values(page) == {"10", "20", "30"}
-
-        _verify_row(page, "20", "2", _verified_row(rule_state="ignored", selection="", lag="10"))
-        assert _checked_values(page) == {"30"}
-        _load_verify_page(page, OTHER_PAGE_ROWS, url=f"{SELECTION_PAGE_URL}?page=2")
-
-        # A was held only for I, so once I is ignored the stored selection must not submit it.
-        assert _submitted_selects(page) == ["30"]
-
-    def test_a_member_switch_keeps_the_row_a_requirement(self, page):
-        rows = [{"port_id": "10", "name": "et-0/0/0", "member": "1"}, CHAIN_ROWS[2] | {"parent": "10"}]
-        _load_verify_page(page, rows)
-        page.check("#cb-30")
-        assert _checked_values(page) == {"10", "30"}
-
-        _verify_row(page, "10", "2", _verified_row(rule_state="", selection=_checkbox_markup("10")))
-        page.uncheck("#cb-30")
-
-        # The row was held for C, so it is released with C, not kept as a choice of the user's.
-        assert _checked_values(page) == set()
-
-    def test_a_checkbox_the_verify_adds_takes_part_in_a_shift_click_range(self, page):
-        rows = [
-            {"port_id": "10", "name": "Gi1/0/1", "member": "1", "rule_state": "ignored"},
-            {"port_id": "20", "name": "Gi1/0/2", "member": "1"},
-            {"port_id": "30", "name": "Gi1/0/3", "member": "1"},
-        ]
-        _load_verify_page(page, rows)
-        _verify_row(page, "10", "2", _verified_row(rule_state="", selection=_checkbox_markup("10")))
-
-        page.click("#cb-10")
-        page.click("#cb-30", modifiers=["Shift"])
-
-        assert _checked_values(page) == {"10", "20", "30"}
-
-    def test_the_bulk_member_apply_commits_every_verified_row(self, page):
-        verify = {
-            "10": _verified_row(rule_state="", selection=_checkbox_markup("10")),
-            "20": _verified_row(rule_state="ignored", selection="", lag="10"),
-            "30": _verified_row(rule_state="", selection=_checkbox_markup("30"), parent="20"),
-        }
-        _load_verify_page(page, CHAIN_ROWS, verify=verify, bulk=True)
-        page.check("#cb-30")
-
-        page.click("#apply-bulk-vc-member")
-        for port_id in ("10", "30"):
-            _wait_for_verified_member(page, port_id, "2")
-        expect(page.locator("tr[data-port-id='20']")).to_have_attribute("data-rule-state", "ignored")
-        _load_verify_page(page, OTHER_PAGE_ROWS, url=f"{SELECTION_PAGE_URL}?page=2")
-
-        assert _submitted_selects(page) == ["30"]
-
-
-class TestRequirementCascade:
-    """Selecting a row must select everything that row depends on, all the way up."""
-
-    def test_sub_interface_pulls_in_its_parent_and_that_parent_s_aggregate(self, page):
-        _load_selection_page(page, JUNOS_ROWS)
-
-        page.check("#cb-4302")
-
-        # et-0/0/6.0 needs et-0/0/6, which needs ae2. Stopping at the parent leaves the
-        # aggregate unsynced, and the LAG assignment is then silently dropped.
-        assert _checked_values(page) == {"4302", "4301", "4303"}
-
-    def test_an_ignored_parent_is_neither_selected_nor_walked_through(self, page):
-        rows = [dict(row, ignored=True) if row["port_id"] == "4301" else row for row in JUNOS_ROWS]
-        _load_selection_page(page, rows, blocked_port_ids=["4301"])
-
-        page.check("#cb-4302")
-
-        # et-0/0/6 is ignored, so neither it nor ae2 behind it is selected.
-        assert _checked_values(page) == {"4302"}
-
-    def test_an_ignored_parent_on_another_page_raises_no_notice(self, page):
-        _load_selection_page(page, [JUNOS_ROWS[3]], blocked_port_ids=["4301"])
-
-        page.check("#cb-4302")
-
-        assert _checked_values(page) == {"4302"}
-        assert page.locator("#parent-cross-page-notices").count() == 0
-
-    def test_a_row_the_verify_makes_ignored_leaves_the_selection_and_its_member_choice(self, page):
-        _load_verify_page(page, [{"port_id": "10", "name": "Vlan10", "member": "1"}])
-        page.check("#cb-10")
-
-        _verify_row(page, "10", "2", _verified_row(rule_state="ignored", selection=""))
-        with page.expect_request(f"{SELECTION_PAGE_URL}/submit") as request_info:
-            page.click("#do-sync")
-        pairs = _selection_form_pairs(request_info.value.post_data)
-
-        # The ignored row is not submitted, and member 1 never follows member 2's visible choice.
-        assert ("select", "10") not in pairs
-        assert [value for key, value in pairs if key == "device_selection_10"] == ["2"]
-
-    def test_a_parent_the_verify_makes_ignored_is_not_walked_through(self, page):
-        # C (30) is a unit of I (20), and I is a member of A (10).
-        rows = [
-            {"port_id": "10", "name": "ae0", "member": "1"},
-            {"port_id": "20", "name": "et-0/0/0", "member": "1", "lag": "10"},
-            {"port_id": "30", "name": "et-0/0/0.0", "member": "1", "parent": "20"},
-        ]
-        _load_verify_page(page, rows)
-
-        _verify_row(page, "20", "2", _verified_row(rule_state="ignored", selection="", lag="10"))
-        page.check("#cb-30")
-
-        assert _checked_values(page) == {"30"}
-
-    def test_aggregate_unit_pulls_in_its_aggregate(self, page):
-        _load_selection_page(page, JUNOS_ROWS)
-
-        page.check("#cb-4304")
-
-        assert _checked_values(page) == {"4304", "4303"}
-
-    def test_bridge_member_pulls_in_its_bridge(self, page):
-        rows = [
-            {"port_id": "100", "name": "vmbr0"},
-            {"port_id": "103", "name": "nic0", "bridge": "100"},
-        ]
-        _load_selection_page(page, rows)
-
-        page.check("#cb-103")
-
-        assert _checked_values(page) == {"100", "103"}
-
-    def test_member_verification_replaces_relationship_metadata(self, page):
-        """Use the selected VC member's dependencies after its row is verified."""
-        html = """<!doctype html><html><body>
-            <input name="csrfmiddlewaretoken" value="test-token">
-            <input name="server_key" value="stub">
-            <input type="radio" name="interface_name_field" value="ifName" checked>
-            <input type="checkbox" id="autoSelectLagMembers" checked>
-            <table id="librenms-interface-table" data-interface-origin-device-id="1"><tbody>
-              <tr data-port-id="10" data-parent-port-id="20" data-parent-name="old-parent"
-                  data-member-of-lag="30" data-lag-name="old-lag"
-                  data-bridge-port-id="40" data-bridge-name="old-bridge">
-                <td><input type="checkbox" name="select" value="10" checked></td>
-                <td><select class="vc-member-select" data-interface="Ethernet1.100">
-                  <option value="1" selected>member-1</option><option value="2">member-2</option>
-                </select></td>
-                <td data-col="name"></td><td data-col="type"></td><td data-col="speed"></td>
-                <td data-col="mac_address"></td><td data-col="mtu"></td><td data-col="enabled"></td>
-                <td data-col="description"></td><td data-col="vlans"></td>
-                <td data-col="librenms_id"></td><td data-col="parent"></td>
-              </tr>
-              <tr data-port-id="20"><td><input type="checkbox" name="select" value="20"></td></tr>
-              <tr data-port-id="21"><td><input type="checkbox" name="select" value="21"></td></tr>
-              <tr data-port-id="30"><td><input type="checkbox" name="select" value="30"></td></tr>
-              <tr data-port-id="40"><td><input type="checkbox" name="select" value="40"></td></tr>
-              <tr data-port-id="41"><td><input type="checkbox" name="select" value="41"></td></tr>
-            </tbody></table>
-        </body></html>"""
-        page.set_content(html)
-        page.route(
-            "**/plugins/librenms_plugin/verify-interface/",
-            lambda route: route.fulfill(
-                status=200,
-                content_type="application/json",
-                body=json.dumps(
-                    {
-                        "status": "success",
-                        "formatted_row": {
-                            "name": "Ethernet1.100",
-                            "type": "virtual",
-                            "speed": "1 Gbps",
-                            "mac_address": "",
-                            "mtu": "1500",
-                            "enabled": "yes",
-                            "description": "",
-                            "vlans": "",
-                            "librenms_id": "10",
-                            "parent": "relationships",
-                            "librenms_parent_port_id": 21,
-                            "librenms_parent_name": "new-parent",
-                            "librenms_lag_port_id": None,
-                            "librenms_lag_name": None,
-                            "librenms_bridge_port_id": 41,
-                            "librenms_bridge_name": "new-bridge",
-                        },
-                    }
-                ),
-            ),
-        )
-        _add_page_scripts(page)
-        page.evaluate("initializeCheckboxes()")
-        page.evaluate("refreshRequiredSelections()")
-
-        assert _checked_values(page) == {"10", "20", "30", "40"}
-
-        with page.expect_response("**/plugins/librenms_plugin/verify-interface/"):
-            page.evaluate(
-                """() => {
-                    const select = document.querySelector('.vc-member-select');
-                    handleInterfaceChange(select, '2');
-                }"""
-            )
-
-        row = page.locator("tr[data-port-id='10']")
-        # The response event occurs before response.json() updates the row.
-        expect(row).to_have_attribute("data-bridge-name", "new-bridge")
-        relationship_data = row.evaluate(
-            """row => ({
-                parentPortId: row.dataset.parentPortId,
-                parentName: row.dataset.parentName,
-                memberOfLag: row.dataset.memberOfLag,
-                lagName: row.dataset.lagName,
-                bridgePortId: row.dataset.bridgePortId,
-                bridgeName: row.dataset.bridgeName,
-            })"""
-        )
-        assert relationship_data == {
-            "parentPortId": "21",
-            "parentName": "new-parent",
-            "memberOfLag": "",
-            "lagName": "",
-            "bridgePortId": "41",
-            "bridgeName": "new-bridge",
-        }
-        assert _checked_values(page) == {"10", "21", "41"}
-
-    def test_clearing_the_last_dependent_releases_the_whole_chain(self, page):
-        _load_selection_page(page, JUNOS_ROWS)
-
-        page.check("#cb-4302")
-        page.uncheck("#cb-4302")
-
-        assert _checked_values(page) == set()
-
-    def test_a_chain_held_by_another_row_is_not_released(self, page):
-        _load_selection_page(page, JUNOS_ROWS)
-
-        page.check("#cb-4302")
-        page.check("#cb-4304")
-        page.uncheck("#cb-4302")
-
-        # ae2 is still required by ae2.0; only et-0/0/6 goes.
-        assert _checked_values(page) == {"4304", "4303"}
-
-    def test_an_aggregate_the_user_chose_survives_its_dependents(self, page):
-        _load_selection_page(page, JUNOS_ROWS)
-
-        page.check("#cb-4303")
-        page.check("#cb-4302")
-        page.uncheck("#cb-4302")
-
-        # ae2 pulled et-0/0/6 in as a member, and ae2 was the user's own choice, so both stay.
-        assert _checked_values(page) == {"4303", "4301"}
-
-    def test_a_member_the_user_clears_stays_cleared(self, page):
-        _load_selection_page(page, JUNOS_ROWS)
-
-        page.check("#cb-4303")
-        page.uncheck("#cb-4301")
-
-        assert _checked_values(page) == {"4303"}
-
-    def test_a_required_row_the_user_clears_is_not_re_added(self, page):
-        _load_selection_page(page, JUNOS_ROWS)
-        page.check("#cb-4302")
-
-        page.uncheck("#cb-4303")
-
-        # ae2 was pulled in for et-0/0/6.0, but a missing aggregate only leaves the LAG unset,
-        # so the box must stay where the user put it instead of snapping back.
-        assert _checked_values(page) == {"4302", "4301"}
-
-    def test_a_cleared_row_is_offered_again_once_nothing_needs_it(self, page):
-        _load_selection_page(page, JUNOS_ROWS)
-        page.check("#cb-4302")
-        page.uncheck("#cb-4303")
-        page.uncheck("#cb-4302")
-
-        page.check("#cb-4302")
-
-        assert _checked_values(page) == {"4302", "4301", "4303"}
-
-    def test_the_cascade_is_off_when_the_toggle_is_off(self, page):
-        _load_selection_page(page, JUNOS_ROWS, auto_select=False)
-
-        page.check("#cb-4302")
-
-        assert _checked_values(page) == {"4302"}
-
-    def test_turning_the_toggle_off_releases_only_what_the_cascade_added(self, page):
-        _load_selection_page(page, JUNOS_ROWS)
-        # ae2 first: clicking it once et-0/0/6.0 has already pulled it in would be a no-op,
-        # so it would stay a row the cascade owns rather than one the user chose.
-        page.check("#cb-4303")
-        page.check("#cb-4302")
-
-        page.uncheck("#autoSelectLagMembers")
-
-        # ae2 pulled et-0/0/6 in and et-0/0/6.0 required both; only the two rows the user
-        # clicked survive turning the cascade off.
-        assert _checked_values(page) == {"4302", "4303"}
-
-    def test_a_parent_on_another_page_raises_a_notice(self, page):
-        # et-0/0/6.0 is rendered without its parent row, as it is when they straddle a page break.
-        _load_selection_page(page, [JUNOS_ROWS[3]])
-
-        page.check("#cb-4302")
-
-        notice = page.locator("#parent-cross-page-notices").inner_text()
-        assert "Parent interface" in notice
-        assert "et-0/0/6" in notice
-
-    def test_an_aggregate_on_another_page_is_named_as_a_lag(self, page):
-        # et-0/0/6 without its ae2 row: the notice has to say LAG, not Parent.
-        rows = [dict(JUNOS_ROWS[2], lag_name="ae2")]
-        _load_selection_page(page, rows)
-
-        page.check("#cb-4301")
-
-        notice = page.locator("#parent-cross-page-notices").inner_text()
-        assert "LAG interface" in notice
-        assert "ae2" in notice
-
-    def test_a_bridge_on_another_page_is_named_as_a_bridge(self, page):
-        rows = [{"port_id": "103", "name": "nic0", "bridge": "100", "bridge_name": "vmbr0"}]
-        _load_selection_page(page, rows)
-
-        page.check("#cb-103")
-
-        notice = page.locator("#parent-cross-page-notices").inner_text()
-        assert "Bridge interface" in notice
-        assert "vmbr0" in notice
-
-    def test_turning_the_toggle_back_on_re_derives_the_chain(self, page):
-        _load_selection_page(page, JUNOS_ROWS)
-        page.check("#cb-4302")
-        page.uncheck("#autoSelectLagMembers")
-
-        page.check("#autoSelectLagMembers")
-
-        assert _checked_values(page) == {"4302", "4301", "4303"}
-
-    def test_a_port_id_with_selector_metacharacters_still_cascades(self, page):
-        # port_id values are integers today, so this only guards the escaping: an unescaped
-        # quote would abort the member selector and silently select nothing.
-        rows = [
-            {"port_id": 'a"b', "name": "ae9", "dom_id": "ae9"},
-            {"port_id": "5001", "name": "et-0/0/9", "lag": 'a"b'},
-        ]
-        _load_selection_page(page, rows)
-
-        page.check("#cb-ae9")
-
-        assert _checked_values(page) == {'a"b', "5001"}
-
-    def test_select_all_pulls_in_requirements_once(self, page):
-        _load_selection_page(page, JUNOS_ROWS)
-
-        page.check("input.toggle")
-
-        assert _checked_values(page) == {"4301", "4302", "4303", "4304"}
-
-    def test_a_shift_range_pulls_in_the_members_of_an_aggregate_it_covers(self, page):
-        # ae2 sits inside the range and its member et-0/0/6 outside it; a click on ae2 pulls
-        # that member in, so the range has to as well.
-        rows = [
-            {"port_id": "4001", "name": "et-0/0/1"},
-            JUNOS_ROWS[0],
-            {"port_id": "4002", "name": "et-0/0/2"},
-            JUNOS_ROWS[2],
-        ]
-        _load_selection_page(page, rows)
-        page.click("#cb-4001")
-
-        page.click("#cb-4002", modifiers=["Shift"])
-
-        assert _checked_values(page) == {"4001", "4303", "4002", "4301"}
-
-        page.uncheck("#autoSelectLagMembers")
-
-        # The ranged rows are the user's own, so turning the cascade off gives back exactly the
-        # member the range pulled in.
-        assert _checked_values(page) == {"4001", "4303", "4002"}
-
-    def test_a_shift_range_that_clears_an_aggregate_releases_its_members(self, page):
-        # A click that clears ae2 gives et-0/0/6 back and keeps ae2 cleared, so a range must too.
-        rows = [
-            {"port_id": "4001", "name": "et-0/0/1"},
-            JUNOS_ROWS[0],
-            {"port_id": "4002", "name": "et-0/0/2"},
-            JUNOS_ROWS[2],
-            JUNOS_ROWS[1],
-        ]
-        _load_selection_page(page, rows)
-        page.check("#cb-4303")
-        page.check("#cb-4304")
-        # Anchor on a row the user just cleared, so the range clears everything it covers.
-        page.click("#cb-4001")
-        page.click("#cb-4001")
-
-        page.click("#cb-4002", modifiers=["Shift"])
-
-        # et-0/0/6 is released with its aggregate, and ae2 stays cleared although ae2.0 requires it.
-        assert _checked_values(page) == {"4304"}
-
-    def test_a_shift_range_across_a_selected_aggregate_keeps_a_cleared_member_cleared(self, page):
-        # ae2 does not change state here, so crossing it must not undo the user's clear.
-        rows = [
-            {"port_id": "4001", "name": "et-0/0/1"},
-            JUNOS_ROWS[0],
-            {"port_id": "4002", "name": "et-0/0/2"},
-            JUNOS_ROWS[2],
-        ]
-        _load_selection_page(page, rows)
-        page.check("#cb-4303")
-        page.uncheck("#cb-4301")
-        page.click("#cb-4001")
-
-        page.click("#cb-4002", modifiers=["Shift"])
-
-        assert _checked_values(page) == {"4001", "4303", "4002"}
+def test_a_refused_cable_member_check_shows_the_server_reason_and_keeps_the_member(page):
+    """The middleware answers a broken rule with a 409 JSON error, and the operator must see its text."""
+    reason = 'Interface type mapping "Gi" (ID 7) stores an invalid name_pattern: (. Fix the rule, then try again.'
+    _load_cable_member_page(page, ["cable-10"])
+    page.evaluate("document.body.insertAdjacentHTML('afterbegin', '<div id=\"django-messages\"></div>')")
+    page.route(
+        f"{CABLE_VERIFY_URL}**",
+        lambda route: route.fulfill(status=409, content_type="application/json", body=json.dumps({"error": reason})),
+    )
+
+    page.evaluate(
+        """() => {
+            const select = document.getElementById('device_selection_cable-10');
+            // initializeVCMemberSelect keeps the rendered member as the verified one.
+            select._lastVerifiedMember = '1';
+            select.value = '2';
+            handleCableChange(select, '2');
+        }"""
+    )
+
+    expect(page.locator("#django-messages .toast-body")).to_have_text(f"{reason} The row keeps its previous member.")
+    expect(page.locator("#device_selection_cable-10")).to_have_value("1")
 
 
 class TestCrossPageSelection:
-    """A selection must survive paging, and reach the server when it is submitted."""
+    """A cable or module table selection must survive paging, and reach the server when it is submitted."""
 
     def test_selection_is_restored_when_the_row_comes_back(self, page):
-        _load_selection_page(page, JUNOS_ROWS, url=f"{SELECTION_PAGE_URL}?page=1")
+        _load_selection_page(page, SELECTION_ROWS, url=f"{SELECTION_PAGE_URL}?page=1")
         page.check("#cb-4304")
 
         page.goto(f"{SELECTION_PAGE_URL}?page=2")
@@ -1228,55 +408,51 @@ class TestCrossPageSelection:
 
         assert "4304" in _checked_values(page)
 
+    def test_select_all_stores_and_clears_every_row_of_the_page(self, page):
+        _load_selection_page(page, SELECTION_ROWS)
+
+        page.check("input.toggle")
+
+        assert set(_stored_selection(page)) == {"4301", "4302", "4303", "4304"}
+        page.uncheck("input.toggle")
+        assert _stored_selection(page) == {}
+
     def test_rows_selected_on_another_page_are_counted_on_this_one(self, page):
-        _load_selection_page(page, JUNOS_ROWS, url=f"{SELECTION_PAGE_URL}?page=1")
+        _load_selection_page(page, SELECTION_ROWS, url=f"{SELECTION_PAGE_URL}?page=1")
         page.check("#cb-4304")
+        page.check("#cb-4303")
 
-        # Page 2 renders a different slice, so the ae2.0 row is not in the DOM any more.
-        _load_selection_page(page, [JUNOS_ROWS[2]], url=f"{SELECTION_PAGE_URL}?page=2")
+        # Page 2 renders a different slice, so the two rows are not in the DOM any more.
+        _load_selection_page(page, [SELECTION_ROWS[2]], url=f"{SELECTION_PAGE_URL}?page=2")
 
-        notice = page.locator("#librenms-interface-table-offpage-selection")
+        notice = page.locator("#librenms-cable-table-offpage-selection")
         assert notice.inner_text().split()[0] == "2"
 
     def test_rows_selected_on_another_page_are_submitted(self, page):
-        _load_selection_page(page, JUNOS_ROWS, url=f"{SELECTION_PAGE_URL}?page=1")
+        _load_selection_page(page, SELECTION_ROWS, url=f"{SELECTION_PAGE_URL}?page=1")
         page.check("#cb-4304")
-        _load_selection_page(page, [JUNOS_ROWS[2]], url=f"{SELECTION_PAGE_URL}?page=2")
+        page.check("#cb-4303")
+        _load_selection_page(page, [SELECTION_ROWS[2]], url=f"{SELECTION_PAGE_URL}?page=2")
         page.check("#cb-4301")
 
         with page.expect_request(f"{SELECTION_PAGE_URL}/submit") as request_info:
             page.click("#do-sync")
         posted = request_info.value.post_data
 
-        # The visible row serializes itself; ae2.0 and the ae2 it required come from the store.
+        # The visible row serializes itself; the two rows of page 1 come from the store.
         assert sorted(value for key, value in _selection_form_pairs(posted) if key == "select") == [
             "4301",
             "4303",
             "4304",
         ]
 
-    def test_a_restored_row_keeps_the_standing_it_had(self, page):
-        _load_selection_page(page, JUNOS_ROWS, url=f"{SELECTION_PAGE_URL}?page=1")
-        page.check("#cb-4302")
-
-        # Page away and back: et-0/0/6 and ae2 were pulled in by the cascade, not chosen, so
-        # clearing et-0/0/6.0 must still release them.
-        _load_selection_page(page, [JUNOS_ROWS[2]], url=f"{SELECTION_PAGE_URL}?page=2")
-        _load_selection_page(page, JUNOS_ROWS, url=f"{SELECTION_PAGE_URL}?page=1")
-        assert _checked_values(page) == {"4302", "4301", "4303"}
-
-        page.uncheck("#cb-4302")
-
-        assert _checked_values(page) == set()
-
     def test_a_row_key_that_collides_with_an_object_property_survives(self, page):
-        # port_id values are integers today; this pins that the store holds row keys as data,
-        # so a key like __proto__ is kept rather than swallowed by the prototype setter.
-        rows = [{"port_id": "__proto__", "name": "ae9", "dom_id": "proto"}, JUNOS_ROWS[2]]
+        # The store must hold row keys as data, so a key like __proto__ is kept rather than swallowed by the setter.
+        rows = [{"row_id": "__proto__", "name": "ae9", "dom_id": "proto"}, SELECTION_ROWS[2]]
         _load_selection_page(page, rows, url=f"{SELECTION_PAGE_URL}?page=1")
         page.check("#cb-proto")
 
-        _load_selection_page(page, [JUNOS_ROWS[1]], url=f"{SELECTION_PAGE_URL}?page=2")
+        _load_selection_page(page, [SELECTION_ROWS[1]], url=f"{SELECTION_PAGE_URL}?page=2")
         with page.expect_request(f"{SELECTION_PAGE_URL}/submit") as request_info:
             page.click("#do-sync")
 
@@ -1284,16 +460,16 @@ class TestCrossPageSelection:
 
     def test_clearing_the_notice_drops_only_the_off_page_selection(self, page):
         """The notice counts other pages, so Clear must not take this page's rows with it."""
-        _load_selection_page(page, JUNOS_ROWS, url=f"{SELECTION_PAGE_URL}?page=1")
+        _load_selection_page(page, SELECTION_ROWS, url=f"{SELECTION_PAGE_URL}?page=1")
         page.check("#cb-4304")
-        _load_selection_page(page, [JUNOS_ROWS[2]], url=f"{SELECTION_PAGE_URL}?page=2")
+        _load_selection_page(page, [SELECTION_ROWS[2]], url=f"{SELECTION_PAGE_URL}?page=2")
         page.check("#cb-4301")
         visible = _checked_values(page)
         assert visible
 
-        page.click("#librenms-interface-table-offpage-selection button")
+        page.click("#librenms-cable-table-offpage-selection button")
 
-        assert page.locator("#librenms-interface-table-offpage-selection").count() == 0
+        assert page.locator("#librenms-cable-table-offpage-selection").count() == 0
         assert _checked_values(page) == visible
 
         with page.expect_request(f"{SELECTION_PAGE_URL}/submit") as request_info:
@@ -1303,11 +479,11 @@ class TestCrossPageSelection:
         assert ("select", "4301") in pairs
 
     def test_a_companion_input_travels_with_its_row(self, page):
-        rows = [dict(JUNOS_ROWS[0], companion=True), JUNOS_ROWS[2]]
+        rows = [dict(SELECTION_ROWS[0], companion=True), SELECTION_ROWS[2]]
         _load_selection_page(page, rows, url=f"{SELECTION_PAGE_URL}?page=1")
         page.check("#cb-4303")
 
-        _load_selection_page(page, [JUNOS_ROWS[1]], url=f"{SELECTION_PAGE_URL}?page=2")
+        _load_selection_page(page, [SELECTION_ROWS[1]], url=f"{SELECTION_PAGE_URL}?page=2")
         with page.expect_request(f"{SELECTION_PAGE_URL}/submit") as request_info:
             page.click("#do-sync")
 
@@ -1315,22 +491,22 @@ class TestCrossPageSelection:
 
     def test_module_selection_is_discarded_when_the_inventory_snapshot_changes(self, page):
         """Discard an off-page selection when a module inventory snapshot changes."""
-        options = {"table_id": "librenms-module-table", "auto_select": False}
+        table = "librenms-module-table"
         _load_selection_page(
             page,
-            [JUNOS_ROWS[0]],
+            [SELECTION_ROWS[0]],
             url=f"{SELECTION_PAGE_URL}?page=1",
             selection_snapshot="snapshot-a",
-            **options,
+            table_id=table,
         )
         page.check("#cb-4303")
 
         _load_selection_page(
             page,
-            [JUNOS_ROWS[2]],
+            [SELECTION_ROWS[2]],
             url=f"{SELECTION_PAGE_URL}?page=2",
             selection_snapshot="snapshot-b",
-            **options,
+            table_id=table,
         )
 
         assert page.locator("#librenms-module-table-offpage-selection").count() == 0
@@ -1343,11 +519,11 @@ class TestCrossPageSelection:
             "expected_remote_id_4303": "7402",
             "expected_remote_device_id_4303": "6402",
         }
-        rows = [dict(JUNOS_ROWS[0], hidden_fields=expected_fields), JUNOS_ROWS[2]]
+        rows = [dict(SELECTION_ROWS[0], hidden_fields=expected_fields), SELECTION_ROWS[2]]
         _load_selection_page(page, rows, url=f"{SELECTION_PAGE_URL}?page=1")
         page.check("#cb-4303")
 
-        _load_selection_page(page, [JUNOS_ROWS[1]], url=f"{SELECTION_PAGE_URL}?page=2")
+        _load_selection_page(page, [SELECTION_ROWS[1]], url=f"{SELECTION_PAGE_URL}?page=2")
         with page.expect_request(f"{SELECTION_PAGE_URL}/submit") as request_info:
             page.click("#do-sync")
 
@@ -1357,13 +533,13 @@ class TestCrossPageSelection:
     def test_a_restored_module_member_is_verified_again(self, page):
         # The module table verifies a restored member again; the member-verified tables clear it instead.
         page.route(MODULE_VERIFY_ROUTE, lambda route: None)
-        rows = [dict(JUNOS_ROWS[0], companion=True), JUNOS_ROWS[2]]
+        rows = [dict(SELECTION_ROWS[0], companion=True), SELECTION_ROWS[2]]
         table = "librenms-module-table"
         _load_selection_page(page, rows, url=f"{SELECTION_PAGE_URL}?page=1", table_id=table)
         page.select_option('[name="device_selection_4303"]', "9")
         page.check("#cb-4303")
 
-        _load_selection_page(page, [JUNOS_ROWS[1]], url=f"{SELECTION_PAGE_URL}?page=2", table_id=table)
+        _load_selection_page(page, [SELECTION_ROWS[1]], url=f"{SELECTION_PAGE_URL}?page=2", table_id=table)
         with page.expect_request(MODULE_VERIFY_ROUTE) as verify:
             _load_selection_page(page, rows, url=f"{SELECTION_PAGE_URL}?page=1", table_id=table)
 
@@ -1373,7 +549,7 @@ class TestCrossPageSelection:
 
     def test_restoring_a_selection_does_not_restore_stale_action_fields(self, page):
         old_row = dict(
-            JUNOS_ROWS[0],
+            SELECTION_ROWS[0],
             companion=True,
             hidden_fields={
                 "csrfmiddlewaretoken": "old-csrf",
@@ -1385,11 +561,11 @@ class TestCrossPageSelection:
         table = "librenms-module-table"
         # The restored member is verified again; the request stays open so the row keeps what the restore set.
         page.route(MODULE_VERIFY_ROUTE, lambda route: None)
-        _load_selection_page(page, [old_row, JUNOS_ROWS[2]], url=f"{SELECTION_PAGE_URL}?page=1", table_id=table)
+        _load_selection_page(page, [old_row, SELECTION_ROWS[2]], url=f"{SELECTION_PAGE_URL}?page=1", table_id=table)
         page.select_option('[name="device_selection_4303"]', "9")
         page.check("#cb-4303")
 
-        _load_selection_page(page, [JUNOS_ROWS[1]], url=f"{SELECTION_PAGE_URL}?page=2", table_id=table)
+        _load_selection_page(page, [SELECTION_ROWS[1]], url=f"{SELECTION_PAGE_URL}?page=2", table_id=table)
         new_row = dict(
             old_row,
             hidden_fields={
@@ -1399,33 +575,30 @@ class TestCrossPageSelection:
                 "inventory_binding": "new-binding",
             },
         )
-        _load_selection_page(page, [new_row, JUNOS_ROWS[2]], url=f"{SELECTION_PAGE_URL}?page=1", table_id=table)
+        _load_selection_page(page, [new_row, SELECTION_ROWS[2]], url=f"{SELECTION_PAGE_URL}?page=1", table_id=table)
 
         assert "4303" in _checked_values(page)
         assert page.locator('[name="device_selection_4303"]').input_value() == "9"
-        row = page.locator('tr[data-port-id="4303"]')
+        row = page.locator('tr[data-interface="4303"]')
         for name, expected in new_row["hidden_fields"].items():
             assert row.locator(f'[name="{name}"]').input_value() == expected
 
 
-def test_vlan_row_submit_keeps_another_page_selection_and_group(page):
-    """A per-row VLAN action must not consume the bulk selection stored on another page."""
+def test_a_native_row_submit_keeps_another_page_selection_and_its_companions(page):
+    """A per-row action must not consume the bulk selection stored on another page."""
     page_one = f"""
         <input name="server_key" value="production">
         <form id="sync-form" method="post" action="{SELECTION_PAGE_URL}/submit">
-          <table id="librenms-vlan-table"><tbody><tr>
-            <td><input id="vlan-101" type="checkbox" name="select" value="101"></td>
-            <td><input type="hidden" name="expected_vlan_name_101" value="users">
-              <select name="vlan_group_101">
-              <option value="1">Group A</option><option value="2">Group B</option>
-            </select></td>
+          <table id="librenms-cable-table"><tbody><tr>
+            <td><input id="cable-101" type="checkbox" name="select" value="101"></td>
+            <td><input type="hidden" name="expected_remote_id_101" value="7402"></td>
           </tr></tbody></table>
         </form>
     """
     page_two = f"""
         <input name="server_key" value="production">
         <form id="sync-form" method="post" action="{SELECTION_PAGE_URL}/submit">
-          <table id="librenms-vlan-table"><tbody><tr>
+          <table id="librenms-cable-table"><tbody><tr>
             <td><input type="checkbox" name="select" value="201"></td>
             <td><button id="sync-one" type="submit" name="sync_one" value="201">Create</button></td>
           </tr></tbody></table>
@@ -1439,8 +612,7 @@ def test_vlan_row_submit_keeps_another_page_selection_and_group(page):
     page.route(f"{SELECTION_PAGE_URL}**", serve_page)
     page.goto(f"{SELECTION_PAGE_URL}?page=1")
     _add_page_scripts(page)
-    page.select_option('[name="vlan_group_101"]', "2")
-    page.check("#vlan-101")
+    page.check("#cable-101")
 
     page.goto(f"{SELECTION_PAGE_URL}?page=2")
     _add_page_scripts(page)
@@ -1450,18 +622,15 @@ def test_vlan_row_submit_keeps_another_page_selection_and_group(page):
     posted = page.locator("#sync-form").evaluate(
         """form => Array.from(new FormData(form, document.getElementById('sync-one')).entries())"""
     )
-    stored = page.evaluate("readStoredSelection(document.getElementById('librenms-vlan-table'))")
+    stored = page.evaluate("readStoredSelection(document.getElementById('librenms-cable-table'))")
     assert [pair for pair in posted if pair[0] == "sync_one"] == [["sync_one", "201"]]
     assert [pair for pair in posted if pair == ["select", "101"]] == []
-    assert stored["101"]["inputs"]["vlan_group_101"] == "2"
-    assert stored["101"]["inputs"]["expected_vlan_name_101"] == "users"
+    assert stored["101"]["inputs"]["expected_remote_id_101"] == "7402"
 
 
 @pytest.mark.parametrize(
     ("table_id", "field", "selected_value", "shown_value"),
     [
-        # A VLAN name rule changed the name.
-        ("librenms-vlan-table", "expected_vlan_name_300", "web+300", "web"),
         # The far end of the cable now resolves to another NetBox interface.
         ("librenms-cable-table", "expected_remote_id_300", "100", "200"),
         ("librenms-cable-table-vc", "expected_remote_id_300", "100", "200"),
@@ -1523,7 +692,7 @@ def _rebind_form_page(page, message="Move the binding?"):
         MODAL_CSS
         + f"""
         <form id="sync-form" method="post" action="/sync">
-          <table id="librenms-interface-table"><tbody><tr>
+          <table id="librenms-cable-table"><tbody><tr>
             <td><input type="checkbox" name="select" value="201"></td>
             <td><input type="hidden" name="rebind_expected_port_201" value="8679">
                 <button id="rebind" type="submit" name="rebind_one" value="201"
@@ -1836,19 +1005,15 @@ def test_a_standalone_confirmation_leaves_no_backdrop_or_scroll_lock(page):
     assert _modal_state(page) == {"open": [], "backdrops": 0, "locked": False}
 
 
-@pytest.mark.parametrize(
-    "table_id",
-    ["librenms-interface-table", "librenms-cable-table"],
-)
-def test_bulk_submit_still_consumes_off_page_selection_for_other_row_action_tabs(page, table_id):
-    """Bulk actions still submit and clear off-page rows for every other row-action tab."""
+def test_bulk_submit_still_consumes_off_page_selection_for_other_row_action_tabs(page):
+    """Bulk actions still submit and clear off-page rows for a row-action tab on the selection store."""
     bulk_url = "https://plugin.example.com/bulk"
     page.route(bulk_url, lambda route: route.fulfill(body="", content_type="text/html"))
     page.set_content(
         f"""
         <input name="server_key" value="production">
         <form id="sync-form" method="post" action="{bulk_url}">
-          <table id="{table_id}"><tbody><tr>
+          <table id="librenms-cable-table"><tbody><tr>
             <td><input type="checkbox" name="select" value="201"></td>
           </tr></tbody></table>
           <button id="bulk-submit" type="submit">Sync selected</button>
@@ -1875,13 +1040,13 @@ def test_bulk_submit_still_consumes_off_page_selection_for_other_row_action_tabs
 HTMX_SYNC_URL = "https://plugin.example.com/htmx-sync"
 
 
-def _htmx_sync_form(table_id="librenms-interface-table"):
+def _htmx_sync_form():
     return f"""
         <div id="tab-content">
           <form id="sync-form" method="post" action="{HTMX_SYNC_URL}"
                 hx-post="{HTMX_SYNC_URL}" hx-target="#tab-content" hx-swap="innerHTML"
                 hx-sync="#tab-content:drop">
-            <table id="{table_id}"><tbody><tr>
+            <table id="librenms-cable-table"><tbody><tr>
               <td><input type="checkbox" name="select" value="201" checked></td>
               <td><button id="row-sync" type="submit" name="sync_one" value="201">Sync</button></td>
             </tr></tbody></table>
@@ -1893,8 +1058,7 @@ def _htmx_sync_form(table_id="librenms-interface-table"):
         """
 
 
-@pytest.mark.parametrize("table_id", ["librenms-interface-table", "librenms-cable-table"])
-def test_an_htmx_submit_carries_the_off_page_selection(page, table_id):
+def test_an_htmx_submit_carries_the_off_page_selection(page):
     """The off-page rows are in the form before htmx serializes it in the form's own submit listener."""
     bodies = []
 
@@ -1903,7 +1067,7 @@ def test_an_htmx_submit_carries_the_off_page_selection(page, table_id):
         route.fulfill(status=200, content_type="text/html", body='<span id="swapped">Synced</span>')
 
     page.route(HTMX_SYNC_URL, answer)
-    page.set_content(_htmx_sync_form(table_id))
+    page.set_content(_htmx_sync_form())
     _add_page_scripts(page)
     page.evaluate("writeStoredSelection(document.querySelector('table'), {'101': {inputs: {}, auto: ''}})")
 
@@ -1974,7 +1138,7 @@ def test_a_retry_after_a_failed_htmx_submit_still_carries_the_off_page_selection
     )
 
     page.click("#bulk-submit")
-    expect(page.locator("#librenms-interface-table-offpage-selection")).to_contain_text("1 more")
+    expect(page.locator("#librenms-cable-table-offpage-selection")).to_contain_text("1 more")
     page.click("#bulk-submit")
     page.locator("#swapped").wait_for()
 
@@ -2003,7 +1167,7 @@ def test_a_dropped_row_submit_keeps_the_pending_bulk_submit_recoverable(page):
         page.click("#bulk-submit")
     page.click("#row-sync")
     held[0].fulfill(status=500, content_type="text/html", body="Server error")
-    expect(page.locator("#librenms-interface-table-offpage-selection")).to_contain_text("1 more")
+    expect(page.locator("#librenms-cable-table-offpage-selection")).to_contain_text("1 more")
     page.click("#bulk-submit")
     page.locator("#swapped").wait_for()
 
@@ -2975,313 +2139,6 @@ def test_the_search_line_shares_the_sync_row_and_clears_the_refresh_controls(pag
     assert diagnostics["y"] >= refresh["y"] + refresh["height"]
     page.set_viewport_size({"width": 390, "height": 900})
     assert page.evaluate("document.documentElement.scrollWidth") <= 390
-
-
-def test_vlan_group_verification_ignores_a_late_response_for_an_old_selection(page):
-    """A late group response must not replace the selected group's row state."""
-    page.set_content(
-        """
-        <input name="csrfmiddlewaretoken" value="test-token">
-        <form>
-          <table id="librenms-vlan-table"><tbody><tr>
-            <td data-col="vlan_id"><span class="text-danger">501</span></td>
-            <td data-col="name"><span class="text-danger">Users</span></td>
-            <td data-col="vlan_group_selection">
-              <select class="vlan-sync-group-select" name="vlan_group_501"
-                      data-vlan-id="501" data-vlan-name="Users">
-                <option value="" selected>Global</option>
-                <option value="1">Group A</option>
-                <option value="2">Group B</option>
-              </select>
-            </td>
-            <td data-col="status">Not in NetBox</td>
-          </tr></tbody></table>
-        </form>
-        """
-    )
-    held_routes = {}
-
-    def hold_verification(route):
-        group_id = json.loads(route.request.post_data)["vlan_group_id"]
-        held_routes[str(group_id)] = route
-
-    page.route("**/plugins/librenms_plugin/verify-vlan-sync-group/", hold_verification)
-    _add_page_scripts(page)
-    page.evaluate("initializeVlanSyncGroupSelects()")
-
-    with page.expect_request("**/plugins/librenms_plugin/verify-vlan-sync-group/"):
-        page.locator(".vlan-sync-group-select").select_option("1")
-    with page.expect_request("**/plugins/librenms_plugin/verify-vlan-sync-group/"):
-        page.locator(".vlan-sync-group-select").select_option("2")
-    for _attempt in range(40):
-        if held_routes.keys() >= {"1", "2"}:
-            break
-        page.wait_for_timeout(25)
-    assert held_routes.keys() >= {"1", "2"}
-
-    held_routes["2"].fulfill(
-        status=200,
-        content_type="application/json",
-        body=json.dumps(
-            {
-                "status": "success",
-                "css_class": "text-warning",
-                "exists_in_netbox": True,
-                "name_matches": False,
-                "netbox_vlan_name": "Group B name",
-                "status_html": '<button id="group-b-action">Update B</button>',
-            }
-        ),
-    )
-    page.locator("#group-b-action").wait_for()
-    held_routes["1"].fulfill(
-        status=200,
-        content_type="application/json",
-        body=json.dumps(
-            {
-                "status": "success",
-                "css_class": "text-success",
-                "exists_in_netbox": True,
-                "name_matches": True,
-                "netbox_vlan_name": "Users",
-                "status_html": '<span id="group-a-status">Synced A</span>',
-            }
-        ),
-    )
-    page.wait_for_timeout(100)
-
-    assert page.locator(".vlan-sync-group-select").input_value() == "2"
-    assert page.locator("#group-a-status").count() == 0
-    assert page.locator('td[data-col="status"]').inner_text() == "Update B"
-    assert page.locator('td[data-col="vlan_id"] span').get_attribute("class") == "text-warning"
-
-
-VLAN_GROUP_ROW_PAGE = """
-<input name="csrfmiddlewaretoken" value="test-token">
-<form>
-  <table id="librenms-vlan-table"><tbody><tr>
-    <td data-col="vlan_id"><span class="text-danger">501</span></td>
-    <td data-col="name"><span class="text-danger">Users</span></td>
-    <td data-col="vlan_group_selection">
-      <select class="vlan-sync-group-select" name="vlan_group_501" data-vlan-id="501" data-vlan-name="Users">
-        <option value="" selected>Global</option>
-        <option value="1">Group A</option>
-        <option value="2">Group B</option>
-      </select>
-    </td>
-    <td data-col="status">Not in NetBox</td>
-  </tr></tbody></table>
-</form>
-"""
-
-
-@pytest.mark.parametrize("http_status", [500, 200], ids=["http-error", "rejected"])
-def test_a_failed_vlan_group_verification_restores_the_last_verified_group(page, http_status):
-    """The row shows the verdict of the last verified group, so a failed verify selects that group again."""
-    page.set_content(VLAN_GROUP_ROW_PAGE)
-    answers = [
-        (200, {"status": "success", "css_class": "text-success", "status_html": '<span id="in-a">In A</span>'}),
-        (http_status, {"status": "error", "message": "x"}),
-    ]
-
-    def answer(route):
-        status, body = answers.pop(0)
-        route.fulfill(status=status, content_type="application/json", body=json.dumps(body))
-
-    page.route("**/plugins/librenms_plugin/verify-vlan-sync-group/", answer)
-    _add_page_scripts(page)
-    page.evaluate("initializeVlanSyncGroupSelects()")
-    select = page.locator(".vlan-sync-group-select")
-
-    select.select_option("1")
-    page.locator("#in-a").wait_for()
-    select.select_option("2")
-    page.wait_for_function("document.querySelector('.vlan-sync-group-select').value === '1'", timeout=5000)
-
-    assert not answers
-    assert page.locator("#in-a").count() == 1
-
-
-def test_a_failed_verification_of_a_superseded_group_neither_rolls_back_nor_hides_the_latest(page):
-    """A, then B, then A again: the first A request fails late, and the latest A request still decides the row."""
-    page.set_content(VLAN_GROUP_ROW_PAGE)
-    held = []
-    page.route("**/plugins/librenms_plugin/verify-vlan-sync-group/", lambda route: held.append(route))
-    _add_page_scripts(page)
-    page.evaluate("initializeVlanSyncGroupSelects()")
-    select = page.locator(".vlan-sync-group-select")
-
-    def answer(route, status, body):
-        route.fulfill(status=status, content_type="application/json", body=json.dumps(body))
-
-    def wait_for_requests(count):
-        for _attempt in range(200):
-            if len(held) == count:
-                return
-            page.wait_for_timeout(10)
-        raise AssertionError(f"expected {count} verify requests, got {len(held)}")
-
-    select.select_option("1")
-    wait_for_requests(1)
-    select.select_option("2")
-    wait_for_requests(2)
-    answer(held[1], 200, {"status": "success", "css_class": "text-success", "status_html": '<span id="in-b">B</span>'})
-    page.locator("#in-b").wait_for()
-    select.select_option("1")
-    wait_for_requests(3)
-    # The first answer settles before the latest one, as a slow failure does.
-    answer(held[0], 500, {"status": "error", "message": "x"})
-    # The answer arrives, or the request was aborted; either way the page handles it before the next answer.
-    held[0].request.response()
-    page.evaluate("() => new Promise((resolve) => setTimeout(resolve))")
-    answer(held[2], 200, {"status": "success", "css_class": "text-success", "status_html": '<span id="in-a">A</span>'})
-    page.locator("#in-a").wait_for(timeout=3000)
-
-    assert select.input_value() == "1"
-
-
-def test_vlan_modal_group_verification_ignores_a_late_response_for_an_old_selection(page):
-    """A late modal response must not replace the selected group's saved row state."""
-    page.set_content(
-        """
-        <input name="csrfmiddlewaretoken" value="test-token">
-        <button id="saveVlanGroups">Save</button>
-        <div id="vlanDetailModal" data-current-row-key="port-1">
-          <table><tbody><tr id="modal-vlan-row">
-            <td><span class="text-danger">501</span></td>
-            <td><select id="modal-vlan-group" data-interface="Ethernet1">
-              <option value="" selected>Global</option>
-              <option value="1">Group A</option>
-              <option value="2">Group B</option>
-            </select></td>
-          </tr></tbody></table>
-        </div>
-        <button class="vlan-edit-btn" data-row-key="port-1"
-                data-vlans='[{"vid": 501, "css": "text-danger", "missing": true}]'>Edit</button>
-        """
-    )
-    held_routes = {}
-
-    def hold_verification(route):
-        group_id = json.loads(route.request.post_data)["vlan_group_id"]
-        held_routes[str(group_id)] = route
-
-    page.route("**/plugins/librenms_plugin/verify-vlan-group/", hold_verification)
-    _add_page_scripts(page)
-    select = page.locator("#modal-vlan-group")
-
-    select.select_option("1")
-    page.evaluate("verifyVlanInGroup(document.getElementById('modal-vlan-group'), '7', 501, 'T', '1')")
-    select.select_option("2")
-    page.evaluate("verifyVlanInGroup(document.getElementById('modal-vlan-group'), '7', 501, 'T', '2')")
-    for _attempt in range(40):
-        if held_routes.keys() >= {"1", "2"}:
-            break
-        page.wait_for_timeout(25)
-    assert held_routes.keys() >= {"1", "2"}
-
-    held_routes["2"].fulfill(
-        status=200,
-        content_type="application/json",
-        body=json.dumps({"status": "success", "css_class": "text-warning", "is_missing": True}),
-    )
-    page.wait_for_function("document.getElementById('modal-vlan-row').dataset.resolvedCss === 'text-warning'")
-    held_routes["1"].fulfill(
-        status=200,
-        content_type="application/json",
-        body=json.dumps({"status": "success", "css_class": "text-success", "is_missing": False}),
-    )
-    page.wait_for_timeout(100)
-
-    row = page.locator("#modal-vlan-row")
-    button_vlans = json.loads(page.locator('.vlan-edit-btn[data-row-key="port-1"]').get_attribute("data-vlans"))
-    assert select.input_value() == "2"
-    assert row.get_attribute("data-resolved-css") == "text-warning"
-    assert row.locator("td:first-child span").get_attribute("class") == "text-warning"
-    assert button_vlans == [{"vid": 501, "css": "text-warning", "missing": True}]
-    assert not page.locator("#saveVlanGroups").is_disabled()
-
-
-def test_restored_vlan_group_selection_reverifies_only_a_changed_group(page):
-    """A restored group must repaint its row without rechecking an unchanged row."""
-    page.set_content(
-        """
-        <input name="csrfmiddlewaretoken" value="test-token">
-        <input name="server_key" value="default">
-        <form>
-          <table id="librenms-vlan-table"><tbody>
-            <tr>
-              <td data-col="selection"><input type="checkbox" name="select" value="501"></td>
-              <td data-col="vlan_id"><span class="text-success">501</span></td>
-              <td data-col="name"><span class="text-success">Users</span></td>
-              <td data-col="vlan_group_selection">
-                <select class="vlan-sync-group-select" name="vlan_group_501"
-                        data-vlan-id="501" data-vlan-name="Users">
-                  <option value="1" selected>Group A</option>
-                  <option value="2">Group B</option>
-                </select>
-              </td>
-              <td data-col="status">Synced in A</td>
-            </tr>
-            <tr>
-              <td data-col="selection"><input type="checkbox" name="select" value="502"></td>
-              <td data-col="vlan_id"><span class="text-success">502</span></td>
-              <td data-col="name"><span class="text-success">Servers</span></td>
-              <td data-col="vlan_group_selection">
-                <select class="vlan-sync-group-select" name="vlan_group_502"
-                        data-vlan-id="502" data-vlan-name="Servers">
-                  <option value="1" selected>Group A</option>
-                  <option value="2">Group B</option>
-                </select>
-              </td>
-              <td data-col="status">Synced in A</td>
-            </tr>
-          </tbody></table>
-        </form>
-        """
-    )
-    requests = []
-
-    def answer_verification(route):
-        payload = json.loads(route.request.post_data)
-        requests.append((payload["vid"], str(payload["vlan_group_id"])))
-        route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps(
-                {
-                    "status": "success",
-                    "css_class": "text-danger",
-                    "exists_in_netbox": False,
-                    "name_matches": False,
-                    "status_html": '<button id="restored-group-action">Create in B</button>',
-                }
-            ),
-        )
-
-    page.route("**/plugins/librenms_plugin/verify-vlan-sync-group/", answer_verification)
-    _add_page_scripts(page)
-    page.evaluate(
-        """() => {
-            const table = document.getElementById('librenms-vlan-table');
-            writeStoredSelection(table, {
-                '501': {inputs: {vlan_group_501: '2'}, auto: ''},
-                '502': {inputs: {vlan_group_502: '1'}, auto: ''}
-            });
-            restoreTableSelection(table);
-        }"""
-    )
-    for _attempt in range(40):
-        if requests:
-            break
-        page.wait_for_timeout(25)
-
-    assert requests == [("501", "2")]
-    page.locator("#restored-group-action").wait_for()
-    assert page.locator('[name="vlan_group_501"]').input_value() == "2"
-    assert page.locator('[name="vlan_group_502"]').input_value() == "1"
-    assert page.locator('tr:has([name="vlan_group_501"]) td[data-col="status"]').inner_text() == "Create in B"
-    assert page.locator('tr:has([name="vlan_group_502"]) td[data-col="status"]').inner_text() == "Synced in A"
 
 
 def test_filter_disclosure_state_survives_fragment_replacement(page):
@@ -5246,100 +4103,64 @@ def test_netbox_only_select_all_uses_only_the_current_rows_after_reinitializatio
 DEVICE_SYNC_PAGE_URL = "https://plugin.example.com/dcim/devices/1/librenms-sync/"
 
 
-def _vlan_table(row_id):
-    return f"""<table id="librenms-vlan-table"><tbody><tr>
+def _module_table(row_id):
+    return f"""<table id="librenms-module-table"><tbody><tr data-ent-index="{row_id}" data-depth="0">
       <td data-col="selection"><input type="checkbox" name="select" value="{row_id}"></td>
-      <td data-col="vlan_id"><span>501</span></td><td data-col="name"><span>Users</span></td>
-      <td data-col="vlan_group_selection"><select class="vlan-sync-group-select" name="vlan_group_{row_id}"
-          data-vlan-id="501" data-vlan-name="Users"><option value="" selected>Global</option>
-          <option value="2">Group B</option></select></td>
-      <td data-col="status">Not in NetBox</td></tr></tbody></table>"""
+      <td data-col="device_selection"><select class="vc-member-select" name="device_selection_{row_id}"
+          data-module="{row_id}"><option value="1" selected>m1</option><option value="2">m2</option></select></td>
+      <td data-col="name">Linecard</td><td data-col="model"></td><td data-col="serial"></td>
+      <td data-col="description"></td><td data-col="item_class"></td></tr></tbody></table>"""
 
 
-@pytest.mark.parametrize(
-    ("table_of", "table_id", "select_name", "verify_route"),
-    [
-        (_vlan_table, "librenms-vlan-table", "vlan_group_row-1", "**/plugins/librenms_plugin/verify-vlan-sync-group/"),
-    ],
-    ids=["vlan-group"],
-)
+# The verify answer of the old row: its checkbox stays selectable, so a stored answer would select the row again.
+MODULE_VERIFY_ROW = {
+    "selection": '<input type="checkbox" name="select" value="row-1">',
+    **{column: "" for column in ("device_selection", "name", "model", "serial", "description", "item_class")},
+}
+
+
 @pytest.mark.parametrize(
     "answer",
     [
         (500, {"status": "error"}),
-        (200, {"status": "success", "formatted_row": {"status": "Create", "selectable": True}, "status_html": "x"}),
+        (200, {"status": "success", "formatted_row": MODULE_VERIFY_ROW}),
     ],
     ids=["failure", "success"],
 )
-def test_a_late_verify_answer_for_a_swapped_out_row_leaves_the_cleared_selection_alone(
-    page, table_of, table_id, select_name, verify_route, answer
-):
+def test_a_late_verify_answer_for_a_swapped_out_row_leaves_the_cleared_selection_alone(page, answer):
     """The user pages away and clears the selection; the answer for the old page must not store its row again."""
     held = []
-    page.route(verify_route, lambda route: held.append(route))
-    page.route("**/page-2", lambda route: route.fulfill(status=200, content_type="text/html", body=table_of("row-2")))
+    page.route(MODULE_VERIFY_ROUTE, lambda route: held.append(route))
+    page.route(
+        "**/page-2", lambda route: route.fulfill(status=200, content_type="text/html", body=_module_table("row-2"))
+    )
     _serve_sync_page(
         page,
         '<input type="hidden" name="csrfmiddlewaretoken" value="test-csrf-token">'
-        f'<form><input type="hidden" name="server_key" value="default">{table_of("row-1")}</form>',
+        f'<input type="hidden" name="server_key" value="default">{_module_table("row-1")}',
         url=DEVICE_SYNC_PAGE_URL,
     )
     page.evaluate("initializeScripts()")
-    stored = f"() => Object.keys(readStoredSelection(document.getElementById('{table_id}')))"
+    stored = "() => Object.keys(readStoredSelection(document.getElementById('librenms-module-table')))"
     page.check('input[value="row-1"]')
     assert page.evaluate(stored) == ["row-1"]
 
+    # The member select is bound after the TomSelect delay.
     page.wait_for_timeout(200)
-    page.select_option(f'select[name="{select_name}"]', "2")
+    page.select_option('select[name="device_selection_row-1"]', "2")
     for _attempt in range(200):
         if held:
             break
         page.wait_for_timeout(10)
     assert len(held) == 1
-    page.evaluate(f"() => htmxTest.ajax('GET', '/page-2', {{target: '#{table_id}', swap: 'outerHTML'}})")
+    page.evaluate("() => htmxTest.ajax('GET', '/page-2', {target: '#librenms-module-table', swap: 'outerHTML'})")
     page.wait_for_selector('input[value="row-2"]')
-    page.evaluate(f"() => writeStoredSelection(document.getElementById('{table_id}'), {{}})")
-    with page.expect_response(verify_route):
+    page.evaluate("() => writeStoredSelection(document.getElementById('librenms-module-table'), {})")
+    with page.expect_response(MODULE_VERIFY_ROUTE):
         held[0].fulfill(status=answer[0], content_type="application/json", body=json.dumps(answer[1]))
     page.evaluate("() => new Promise((resolve) => setTimeout(resolve))")
 
     assert page.evaluate(stored) == []
-
-
-def test_vlan_modal_warning_icons_are_named_by_their_titles(page):
-    """The missing-VLAN warnings carry their text only in the title, so it is also their accessible name."""
-    vlans = [{"vid": 501, "type": "T", "missing": True}, {"vid": 502, "type": "T", "missing": False, "group_id": ""}]
-    groups = [{"id": "", "name": "Global"}, {"id": 1, "name": "Group A"}]
-    page.set_content(
-        f"""
-        <input name="csrfmiddlewaretoken" value="test-token">
-        <span id="vlanModalInterfaceName"></span>
-        <div id="vlanDetailModal"><table><tbody id="vlanDetailTableBody"></tbody></table></div>
-        <button id="edit" data-interface="Ethernet1" data-row-key="port-1" data-device-id="7"
-                data-vlans='{escape(json.dumps(vlans))}' data-vlan-groups='{escape(json.dumps(groups))}'>Edit</button>
-        """
-    )
-    page.route(
-        "**/plugins/librenms_plugin/verify-vlan-group/",
-        lambda route: route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps({"status": "success", "css_class": "text-danger", "is_missing": True}),
-        ),
-    )
-    _add_page_scripts(page)
-
-    page.evaluate("openVlanDetailModal(document.getElementById('edit'))")
-    second = page.locator("#vlanDetailTableBody tr").nth(1)
-    second.locator("select").select_option("1")
-    expect(second.locator("i.mdi-alert")).to_have_count(1)
-
-    icons = page.locator("#vlanDetailTableBody i[title]")
-    expect(icons).to_have_count(2)
-    for index in range(2):
-        icon = icons.nth(index)
-        assert icon.get_attribute("role") == "img"
-        assert icon.get_attribute("aria-label") == icon.get_attribute("title")
 
 
 NETBOX_ONLY_URL = "https://plugin.example.com/netbox-only-interfaces/?server_key=primary"
