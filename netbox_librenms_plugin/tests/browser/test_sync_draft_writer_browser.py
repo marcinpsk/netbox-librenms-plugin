@@ -204,7 +204,8 @@ class _DraftServer:
     def confirmation(key):
         """Render the dialog that asks to confirm the change of one row."""
         return f"""<div class="modal-header"><h5 class="modal-title">Confirm IP address changes</h5></div>
-            <form hx-post="{SUBMIT_URL}" hx-target="#htmx-modal-content" hx-swap="innerHTML">
+            <form hx-post="{SUBMIT_URL}" hx-target="#htmx-modal-content" hx-swap="innerHTML"
+                  data-draft-command="action">
               <input type="hidden" name="csrfmiddlewaretoken" value="csrf-test">
               <input type="checkbox" name="force_conflict" value="{key}" checked>
               <button id="confirm-change" type="submit">Sync confirmed changes</button>
@@ -218,11 +219,12 @@ class _DraftServer:
             MANAGEMENT_ROW: "token-from-the-table",
             OFF_PAGE_MANAGEMENT_ROW: f"token-{OFF_PAGE_MANAGEMENT_ROW}-",
         }
-        return f"""<button id="refresh" type="button" hx-post="{REFRESH_URL}" hx-target="#ipaddress-sync-content">
+        return f"""<button id="refresh" type="button" hx-post="{REFRESH_URL}" hx-target="#ipaddress-sync-content"
+                data-draft-command="refresh">
                 Refresh</button>
               <output id="revision">{self.revision}</output>
               <form id="ipaddress-sync-form" method="post" action="{SUBMIT_URL}" hx-post="{SUBMIT_URL}"
-                    hx-target="#htmx-modal-content" hx-swap="innerHTML">
+                    hx-target="#htmx-modal-content" hx-swap="innerHTML" data-draft-command="draft">
                 <input type="hidden" name="csrfmiddlewaretoken" value="csrf-test">
                 <table id="librenms-ipaddress-table" data-draft-id="{self.draft_id}"
                        data-draft-revision="{self.revision}" data-selection-url="{escape(SELECTION_URL)}"
@@ -615,11 +617,14 @@ def test_a_refresh_answer_before_a_later_input_reads_the_tab_again(page):
     server.wait_until(lambda: server.held)
 
     _box(page, ROWS[0]).click()
-    server.wait_for_commands(1)
+    page.wait_for_timeout(300)
+    # The refresh is the command in flight, so the click waits for it.
+    assert server.commands == []
     server.hold.clear()
     server.release("refresh")
 
     # The click went to the replaced draft and conflicts; the page shows the new draft.
+    server.wait_for_commands(1)
     server.wait_until(lambda: any(url.startswith(PAGE_URL) for url in server.reads))
     expect(page.locator("#librenms-ipaddress-table")).to_have_attribute("data-draft-id", "draft-1+")
     _box(page, ROWS[1]).click()
@@ -1080,3 +1085,45 @@ def test_a_confirmation_in_the_dialog_closes_it_and_reads_the_tab_again(page):
     expect(page.locator(f'tr[data-row-key="{ROWS[1]}"] td[data-col="status"]')).to_have_text("Synced")
     assert page.url == f"{PAGE_URL}?tab=ipaddresses"
     assert server.errors == []
+
+
+def test_a_navigation_answer_from_before_a_confirmation_is_read_again_after_it(page):
+    server = _DraftServer(page)
+    server.conflicts.add(ROWS[1])
+    server.open()
+    _row_action(page, ROWS[1])
+    expect(page.locator("#htmx-modal")).to_be_visible()
+    # A navigation starts while the dialog is open; the server renders it before the confirmation.
+    server.hold.add("page")
+    page.evaluate("document.getElementById('cables-tab').click()")
+    server.wait_until(lambda: server.held)
+
+    page.click("#confirm-change")
+    server.wait_until(lambda: len(server.submits) == 2)
+    expect(page.locator("#htmx-modal")).to_be_hidden()
+    server.hold.clear()
+    server.release("page")
+
+    page.wait_for_url(f"{PAGE_URL}?tab=cables")
+    expect(page.locator(f'tr[data-row-key="{ROWS[1]}"] td[data-col="status"]')).to_have_text("Synced")
+    assert server.errors == []
+
+
+def test_a_navigation_answer_from_before_a_refresh_is_read_again_after_it(page):
+    server = _DraftServer(page)
+    server.open()
+    server.hold.add("page")
+    page.click("#cables-tab")
+    server.wait_until(lambda: server.held)
+
+    page.evaluate("document.getElementById('refresh').click()")
+    page.wait_for_function("librenmsSyncDraft.flush().then(() => true)")
+    server.hold.clear()
+    server.release("page")
+
+    page.wait_for_url(f"{PAGE_URL}?tab=cables")
+    expect(page.locator("#librenms-ipaddress-table")).to_have_attribute("data-draft-id", "draft-1+")
+    _box(page, ROWS[1]).click()
+    server.wait_for_commands(1)
+    assert server.commands[0][1]["draft_id"] == "draft-1+"
+    expect(page.locator("#librenms-draft-notice")).to_have_count(0)

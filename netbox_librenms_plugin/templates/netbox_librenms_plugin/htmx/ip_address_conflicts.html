@@ -12,7 +12,7 @@
   {% endif %}
 </div>
 {% url 'plugins:netbox_librenms_plugin:sync_device_ip_addresses' object_type=object_type pk=object.pk as ip_sync_url_path %}{% sync_tab_url ip_sync_url_path as ip_sync_url %}
-<form method="post"
+<form method="post" data-draft-command="action"
       action="{{ ip_sync_url }}"
       {% if not full_page %}
       hx-post="{{ ip_sync_url }}"
