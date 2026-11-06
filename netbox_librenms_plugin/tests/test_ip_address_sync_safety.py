@@ -1,7 +1,6 @@
 """End-to-end safety tests for LibreNMS IP address synchronization."""
 
 import json
-
 from contextlib import contextmanager
 from copy import deepcopy
 from functools import partial
@@ -11,6 +10,7 @@ from unittest.mock import patch
 import netaddr
 import pytest
 from django.apps import apps
+from django.contrib.auth import get_user_model
 from django.contrib.messages import get_messages
 from django.core.cache import cache
 from django.db import close_old_connections, connection
@@ -40,13 +40,24 @@ from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     seed_interfaces_snapshot,
     seed_ip_snapshot,
 )
+from netbox_librenms_plugin.utils import advisory_lock_key
+from netbox_librenms_plugin.views.sync.ip_addresses import _ip_host_lock_identity
 from netbox_librenms_plugin.tests.view_test_helpers import (
+    answers_in_place,
     assert_update_logged,
     grant,
+    ip_tab,
     make_request,
     make_user_with_perms,
     make_view,
+    read_ip_row,
+    select_ip_rows,
+    submit_ip_selection,
+    sync_ip_row,
+    write_ip_rows,
 )
+
+HTMX = {"HTTP_HX_REQUEST": "true"}
 
 
 @pytest.mark.django_db
@@ -65,7 +76,7 @@ class TestIPAddressTableSelectionColumn:
         from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
         from netbox_librenms_plugin.utils import identify_ip_sync_rows
 
-        table = IPAddressTable(identify_ip_sync_rows(rows), mgmt_row_vrfs={})
+        table = IPAddressTable(identify_ip_sync_rows(rows))
         return [row.get_cell("selection") for row in table.rows]
 
     @staticmethod
@@ -268,14 +279,15 @@ class _IPHostLookupBarrier:
 
 
 class _FirstHostAdvisoryBarrier:
-    """Rendezvous concurrent bulk syncs before each request's first host lock."""
+    """Rendezvous concurrent bulk syncs before each request's first host lock; the draft's own lock does not count."""
 
-    def __init__(self, barrier):
+    def __init__(self, barrier, host_lock_keys):
         self.barrier = barrier
+        self.host_lock_keys = host_lock_keys
         self.lock_seen = False
 
     def __call__(self, execute, sql, params, many, context):
-        if not self.lock_seen and "pg_advisory_xact_lock" in sql:
+        if not self.lock_seen and "pg_advisory_xact_lock" in sql and params[0] in self.host_lock_keys:
             self.lock_seen = True
             try:
                 self.barrier.wait(timeout=1)
@@ -284,10 +296,8 @@ class _FirstHostAdvisoryBarrier:
         return execute(sql, params, many, context)
 
 
-def _sync_cached_ip(device_pk, user_pk, row_id, lookup_wrapper):
-    """Submit one cached IP row through the public sync endpoint."""
-    from django.contrib.auth import get_user_model
-
+def _sync_cached_ip(device_pk, user_pk, draft, lookup_wrapper):
+    """Submit the user's draft, which selects one cached IP row, through the public sync endpoint."""
     close_old_connections()
     try:
         with connection.cursor() as cursor:
@@ -300,23 +310,14 @@ def _sync_cached_ip(device_pk, user_pk, row_id, lookup_wrapper):
             kwargs={"object_type": "device", "pk": device_pk},
         )
         with connection.execute_wrapper(lookup_wrapper):
-            response = thread_client.post(
-                url,
-                {
-                    "server_key": "default",
-                    "select": row_id,
-                    f"vrf_{row_id}": "",
-                },
-            )
+            response = thread_client.post(url, {"server_key": "default", **draft})
         return response.status_code
     finally:
         connection.close()
 
 
-def _sync_cached_ips(device_pk, user_pk, row_ids, lock_wrapper):
-    """Submit one bulk cached-IP request through the public sync endpoint."""
-    from django.contrib.auth import get_user_model
-
+def _sync_cached_ips(device_pk, user_pk, draft, lock_wrapper):
+    """Submit the user's draft of cached IP rows as one bulk request through the public sync endpoint."""
     close_old_connections()
     try:
         with connection.cursor() as cursor:
@@ -328,10 +329,8 @@ def _sync_cached_ips(device_pk, user_pk, row_ids, lock_wrapper):
             "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
             kwargs={"object_type": "device", "pk": device_pk},
         )
-        data = {"server_key": "default", "select": row_ids}
-        data.update({f"vrf_{row_id}": "" for row_id in row_ids})
         with connection.execute_wrapper(lock_wrapper):
-            response = thread_client.post(url, data)
+            response = thread_client.post(url, {"server_key": "default", **draft})
         return response.status_code, _message_texts(response)
     finally:
         connection.close()
@@ -356,18 +355,22 @@ def test_concurrent_global_ip_sync_creates_one_address(settings):
         seed_mapping(interface, own=port_id)
         _seed_ip_rows(device, [_ip_row("198.18.20.10", port_id, "Ethernet1")])
 
+    selecting_client = Client()
+    selecting_client.force_login(user)
+    drafts = [select_ip_rows(selecting_client, device, [row_id]) for device in devices]
     lookup_barrier = Barrier(2, timeout=10)
     lookup_wrappers = [_IPHostLookupBarrier(lookup_barrier) for _device in devices]
     statuses = run_in_threads(
         *(
-            partial(_sync_cached_ip, device.pk, user.pk, row_id, wrapper)
-            for device, wrapper in zip(devices, lookup_wrappers, strict=True)
+            partial(_sync_cached_ip, device.pk, user.pk, draft, wrapper)
+            for device, draft, wrapper in zip(devices, drafts, lookup_wrappers, strict=True)
         ),
         barriers=(lookup_barrier,),
         timeout=60,
     )
 
-    assert sorted(statuses) == [200, 302]
+    # The second request finds the address that the first one created, which its user did not approve.
+    assert sorted(statuses) == [302, 302]
     assert all(wrapper.lookup_seen for wrapper in lookup_wrappers)
     assert IPAddress.objects.filter(address__net_host="198.18.20.10", vrf=None).count() == 1
 
@@ -380,7 +383,11 @@ def test_concurrent_bulk_ip_sync_orders_host_locks_before_interface_scope(settin
     """Opposite bulk orders must not deadlock on host and Device locks."""
 
     _configure_test_server(settings)
-    user = make_superuser("bulk-ip-lock-order-user")
+    # One draft per user, so each request claims its own selection order.
+    users = [
+        get_user_model().objects.create(username=f"bulk-ip-lock-order-user-{index}", is_superuser=True, is_active=True)
+        for index in range(2)
+    ]
     device = make_device("bulk-ip-lock-order-device", librenms_cf={"default": {"id": 42}})
     interfaces = [
         make_interface(device, "Ethernet1", iface_type="1000base-t"),
@@ -392,12 +399,18 @@ def test_concurrent_bulk_ip_sync_orders_host_locks_before_interface_scope(settin
     _seed_ip_rows(device, [_ip_row("198.18.22.10", 7041, "Ethernet1"), _ip_row("198.18.22.11", 7042, "Ethernet2")])
 
     barrier = Barrier(2, timeout=10)
-    wrappers = [_FirstHostAdvisoryBarrier(barrier) for _ in range(2)]
     row_ids = ["198.18.22.10/24", "198.18.22.11/24"]
+    host_lock_keys = {advisory_lock_key(_ip_host_lock_identity(netaddr.IPNetwork(row_id), None)) for row_id in row_ids}
+    wrappers = [_FirstHostAdvisoryBarrier(barrier, host_lock_keys) for _ in range(2)]
+    drafts = []
+    for user, selected in zip(users, (row_ids, list(reversed(row_ids))), strict=True):
+        selecting_client = Client()
+        selecting_client.force_login(user)
+        drafts.append(select_ip_rows(selecting_client, device, selected))
     outcomes = run_in_threads(
         *(
-            partial(_sync_cached_ips, device.pk, user.pk, selected, wrapper)
-            for selected, wrapper in zip((row_ids, list(reversed(row_ids))), wrappers, strict=True)
+            partial(_sync_cached_ips, device.pk, user.pk, draft, wrapper)
+            for user, draft, wrapper in zip(users, drafts, wrappers, strict=True)
         ),
         barriers=(barrier,),
         timeout=60,
@@ -516,18 +529,7 @@ def test_refresh_and_sync_accepts_an_already_prefixed_address(
     assert state is not None
     assert state["state"] == "ready"
 
-    sync_url = reverse(
-        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-        kwargs={"object_type": "device", "pk": device.pk},
-    )
-    sync_response = client.post(
-        sync_url,
-        {
-            "server_key": "default",
-            "select": expected_address,
-            f"vrf_{expected_address}": "",
-        },
-    )
+    sync_response = submit_ip_selection(client, device, [expected_address])
 
     assert sync_response.status_code == 302
     synced = IPAddress.objects.get(address=expected_address, vrf=None)
@@ -562,13 +564,7 @@ def test_a_same_name_interface_bound_to_another_port_does_not_take_the_ip(
     table = render_response.context["ip_sync"]["table"]
     (row,) = list(table.data)
     table_html = table.as_html(render_response.wsgi_request)
-    sync_response = client.post(
-        reverse(
-            "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-            kwargs={"object_type": "device", "pk": device.pk},
-        ),
-        {"server_key": "default", "select": "198.18.40.10/24", "vrf_198.18.40.10/24": ""},
-    )
+    sync_response = submit_ip_selection(client, device, ["198.18.40.10/24"])
 
     assert sync_response.status_code == 302
     synced = IPAddress.objects.filter(address="198.18.40.10/24").first()
@@ -626,19 +622,7 @@ def test_sync_requires_confirmation_before_reassigning_an_ip_in_the_same_vrf(cli
 
     assert refresh_response.status_code == 200
 
-    sync_url = reverse(
-        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-        kwargs={"object_type": "device", "pk": device.pk},
-    )
-    sync_response = client.post(
-        sync_url,
-        {
-            "server_key": "default",
-            "select": "198.18.2.10/24",
-            "vrf_198.18.2.10/24": "",
-        },
-        HTTP_HX_REQUEST="true",
-    )
+    sync_response = submit_ip_selection(client, device, ["198.18.2.10/24"], headers=HTMX)
 
     assert sync_response.status_code == 200
     assert b"Confirm IP address changes" in sync_response.content
@@ -659,17 +643,7 @@ def test_native_ip_conflict_response_renders_a_complete_page(client, settings, l
     client.force_login(make_superuser("native-ip-conflict-user"))
     assert _refresh_ip_snapshot(client, device, "198.18.2.20", 24, live_librenms).status_code == 200
 
-    response = client.post(
-        reverse(
-            "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-            kwargs={"object_type": "device", "pk": device.pk},
-        ),
-        {
-            "server_key": "default",
-            "select": "198.18.2.20/24",
-            "vrf_198.18.2.20/24": "",
-        },
-    )
+    response = submit_ip_selection(client, device, ["198.18.2.20/24"])
 
     assert response.status_code == 200
     assert any(
@@ -714,16 +688,8 @@ def test_bulk_sync_applies_safe_rows_and_forces_only_selected_conflicts(client, 
         "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
         kwargs={"object_type": "device", "pk": device.pk},
     )
-    conflict_response = client.post(
-        sync_url,
-        {
-            "server_key": "default",
-            "select": ["198.18.5.10/24", "198.18.5.11/24", "198.18.5.12/24"],
-            "vrf_198.18.5.10/24": "",
-            "vrf_198.18.5.11/24": "",
-            "vrf_198.18.5.12/24": "",
-        },
-        HTTP_HX_REQUEST="true",
+    conflict_response = submit_ip_selection(
+        client, device, ["198.18.5.10/24", "198.18.5.11/24", "198.18.5.12/24"], headers=HTMX
     )
 
     assert conflict_response.status_code == 200
@@ -791,15 +757,8 @@ def test_confirmation_replays_create_missing_when_the_target_name_turns_ambiguou
         "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
         kwargs={"object_type": "device", "pk": page_device.pk},
     )
-    conflict_response = client.post(
-        sync_url,
-        {
-            "server_key": "default",
-            "create-missing-interfaces-toggle": "on",
-            "select": "198.18.31.10/24",
-            "vrf_198.18.31.10/24": "",
-        },
-        HTTP_HX_REQUEST="true",
+    conflict_response = submit_ip_selection(
+        client, page_device, ["198.18.31.10/24"], headers=HTMX, **{"create-missing-interfaces-toggle": "on"}
     )
     assert conflict_response.status_code == 200
     conflicts = conflict_response.context["conflicts"]
@@ -860,20 +819,9 @@ def test_row_action_syncs_only_its_ip_when_another_row_is_checked(client, settin
     assert refresh_response.status_code == 200
     rendered = refresh_response.content.decode()
     assert 'name="sync_one" value="198.18.31.10/24"' in rendered
-    sync_url = reverse(
-        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-        kwargs={"object_type": "device", "pk": device.pk},
-    )
-    response = client.post(
-        sync_url,
-        {
-            "server_key": "default",
-            "select": "198.18.30.10/24",
-            "sync_one": "198.18.31.10/24",
-            "vrf_198.18.30.10/24": "",
-            "vrf_198.18.31.10/24": "",
-        },
-    )
+    # The other row is selected in the draft; the row action leaves it there.
+    select_ip_rows(client, device, ["198.18.30.10/24"])
+    response = sync_ip_row(client, device, "198.18.31.10/24")
 
     assert response.status_code == 302
     assert not IPAddress.objects.filter(address="198.18.30.10/24").exists()
@@ -921,19 +869,12 @@ def test_create_missing_interfaces_materializes_one_interface_for_bulk_ip_rows(c
     assert 'name="create-missing-interfaces-toggle"' in refresh_response.content.decode()
     assert not Interface.objects.filter(device=device, name="Ethernet1").exists()
 
-    sync_url = reverse(
-        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-        kwargs={"object_type": "device", "pk": device.pk},
-    )
-    response = client.post(
-        sync_url,
-        {
-            "server_key": "default",
-            "create-missing-interfaces-toggle": "on",
-            "select": ["198.18.12.10/24", "2001:db8:12::10/64"],
-            "vrf_198.18.12.10/24": str(blue.pk),
-            "vrf_2001:db8:12::10/64": "",
-        },
+    response = submit_ip_selection(
+        client,
+        device,
+        ["198.18.12.10/24", "2001:db8:12::10/64"],
+        vrfs={"198.18.12.10/24": str(blue.pk)},
+        **{"create-missing-interfaces-toggle": "on"},
     )
 
     assert response.status_code == 302
@@ -965,13 +906,7 @@ def test_an_empty_snapshot_is_not_reported_as_an_expired_cache(client, settings)
     _seed_ip_rows(device, [])
     client.force_login(make_superuser("ip-empty-snapshot-user"))
 
-    response = client.post(
-        reverse(
-            "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-            kwargs={"object_type": "device", "pk": device.pk},
-        ),
-        {"server_key": "default"},
-    )
+    response = submit_ip_selection(client, device, [])
 
     emitted = _message_texts(response)
     assert response.status_code == 302
@@ -1011,12 +946,7 @@ def test_create_missing_interfaces_rejects_legacy_snapshot_before_processing_row
             "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
             kwargs={"object_type": "device", "pk": device.pk},
         ),
-        {
-            "server_key": "default",
-            "create-missing-interfaces-toggle": "on",
-            "select": row_id,
-            f"vrf_{row_id}": "",
-        },
+        {"server_key": "default", "create-missing-interfaces-toggle": "on"},
     )
 
     assert response.status_code == 302
@@ -1081,17 +1011,9 @@ def test_create_missing_interfaces_reuses_interface_catalog_for_bulk_rows(client
         "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
         kwargs={"object_type": "device", "pk": device.pk},
     )
+    draft = select_ip_rows(client, device, ["198.18.12.21/24", "198.18.12.22/24"])
     with connection.execute_wrapper(CatalogReadCounter()):
-        response = client.post(
-            sync_url,
-            {
-                "server_key": "default",
-                "create-missing-interfaces-toggle": "on",
-                "select": ["198.18.12.21/24", "198.18.12.22/24"],
-                "vrf_198.18.12.21/24": "",
-                "vrf_198.18.12.22/24": "",
-            },
-        )
+        response = client.post(sync_url, {"server_key": "default", "create-missing-interfaces-toggle": "on", **draft})
 
     assert response.status_code == 302
     # Upper bound, not an exact count: the counter matches generated SQL text, and a NetBox
@@ -1119,21 +1041,13 @@ def test_failed_create_missing_row_does_not_leak_interface_catalog(settings):
             _ip_row("198.18.12.24", 7023, "Ethernet23", ifType="ethernetCsmacd"),
         ],
     )
-    request = make_request(
-        "post",
-        {
-            "create-missing-interfaces-toggle": "on",
-            "select": [first_row, second_row],
-            f"vrf_{first_row}": "",
-            f"vrf_{second_row}": "",
-        },
-    )
+    request = make_request("post", {"create-missing-interfaces-toggle": "on"})
     view = make_view(SyncIPAddressesView, request)
     view._post_server_key = "default"
 
     results = view.process_ip_sync(
         request,
-        [first_row, second_row],
+        {first_row: None, second_row: None},
         view.assess_cached_snapshot(device),
         device,
         "device",
@@ -1188,18 +1102,8 @@ def test_create_missing_interface_resolves_the_virtual_chassis_member(client, se
         == 200
     )
 
-    sync_url = reverse(
-        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-        kwargs={"object_type": "device", "pk": page_device.pk},
-    )
-    response = client.post(
-        sync_url,
-        {
-            "server_key": "default",
-            "create-missing-interfaces-toggle": "on",
-            "select": "198.18.13.10/24",
-            "vrf_198.18.13.10/24": "",
-        },
+    response = submit_ip_selection(
+        client, page_device, ["198.18.13.10/24"], **{"create-missing-interfaces-toggle": "on"}
     )
 
     assert response.status_code == 302
@@ -1237,18 +1141,8 @@ def test_create_missing_interface_supports_virtual_machine_ip_sync(client, setti
         == 200
     )
 
-    sync_url = reverse(
-        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-        kwargs={"object_type": "virtualmachine", "pk": virtual_machine.pk},
-    )
-    response = client.post(
-        sync_url,
-        {
-            "server_key": "default",
-            "create-missing-interfaces-toggle": "on",
-            "select": "2001:db8:14::10/64",
-            "vrf_2001:db8:14::10/64": "",
-        },
+    response = submit_ip_selection(
+        client, virtual_machine, ["2001:db8:14::10/64"], **{"create-missing-interfaces-toggle": "on"}
     )
 
     assert response.status_code == 302
@@ -1291,16 +1185,9 @@ def test_create_missing_interface_measures_the_name_against_the_vm_writer_model(
         kwargs={"object_type": "virtualmachine", "pk": virtual_machine.pk},
     )
     vm_name_field = VMInterface._meta.get_field("name")
+    draft = select_ip_rows(client, virtual_machine, ["2001:db8:14::10/64"])
     with patch.object(vm_name_field, "max_length", 3):
-        response = client.post(
-            sync_url,
-            {
-                "server_key": "default",
-                "create-missing-interfaces-toggle": "on",
-                "select": "2001:db8:14::10/64",
-                "vrf_2001:db8:14::10/64": "",
-            },
-        )
+        response = client.post(sync_url, {"server_key": "default", "create-missing-interfaces-toggle": "on", **draft})
 
     assert response.status_code == 302
     message_texts = _message_texts(response)
@@ -1347,19 +1234,8 @@ def test_create_missing_interfaces_rejects_ambiguous_cached_port_names(client, s
         == 200
     )
 
-    sync_url = reverse(
-        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-        kwargs={"object_type": "device", "pk": device.pk},
-    )
-    response = client.post(
-        sync_url,
-        {
-            "server_key": "default",
-            "create-missing-interfaces-toggle": "on",
-            "select": ["198.18.15.10/24", "198.18.15.11/24"],
-            "vrf_198.18.15.10/24": "",
-            "vrf_198.18.15.11/24": "",
-        },
+    response = submit_ip_selection(
+        client, device, ["198.18.15.10/24", "198.18.15.11/24"], **{"create-missing-interfaces-toggle": "on"}
     )
 
     assert response.status_code == 302
@@ -1470,23 +1346,12 @@ def test_create_missing_interfaces_does_not_adopt_a_hidden_existing_interface(cl
     user = grant(user, "change", IPAddress)
     client.force_login(user)
     _seed_ip_rows(device, [_ip_row("198.18.18.10", 7018, "Ethernet1", ifType="ethernetCsmacd")])
-    sync_url = reverse(
-        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-        kwargs={"object_type": "device", "pk": device.pk},
-    )
 
-    response = client.post(
-        sync_url,
-        {
-            "server_key": "default",
-            "create-missing-interfaces-toggle": "on",
-            "select": "198.18.18.10/24",
-            "vrf_198.18.18.10/24": "",
-        },
-    )
+    assert "data-evidence" not in ip_tab(client, device).rows["198.18.18.10/24"]
+    # The tab offers no selection of the row, so the writer's own refusal is driven directly.
+    written = write_ip_rows(device, user, {"198.18.18.10/24": None}, **{"create-missing-interfaces-toggle": "on"})
 
-    assert response.status_code == 302
-    assert any("outside your view scope" in message for message in _message_texts(response))
+    assert any("outside your view scope" in message for message in written.messages)
     hidden_interface.refresh_from_db()
     assert hidden_interface.name == "Ethernet1"
     assert not IPAddress.objects.filter(address="198.18.18.10/24").exists()
@@ -1523,14 +1388,11 @@ def test_direct_ip_sync_post_does_not_mutate_a_migrated_donor(client, settings, 
         kwargs={"object_type": "device", "pk": page.pk},
     )
 
-    response = client.post(
-        sync_url,
-        {
-            "server_key": "default",
-            "select": "198.18.19.10/24",
-            "vrf_198.18.19.10/24": "",
-        },
-    )
+    if migrated == "page":
+        # The page has no snapshot, so it has no draft either: the sync answers the cache miss first.
+        response = client.post(sync_url, {"server_key": "default"})
+    else:
+        response = submit_ip_selection(client, page, ["198.18.19.10/24"])
 
     assert response.status_code == 302
     assert any(refusal in message for message in _message_texts(response))
@@ -1574,18 +1436,7 @@ def test_invalid_confirmation_is_not_reported_as_an_ip_address(client, settings)
     _seed_ip_rows(device, [_ip_row("198.18.19.21", 7021, "Ethernet1")])
     client.force_login(make_superuser("mixed-invalid-confirmation-user"))
 
-    response = client.post(
-        reverse(
-            "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-            kwargs={"object_type": "device", "pk": device.pk},
-        ),
-        {
-            "server_key": "default",
-            "select": row_id,
-            f"vrf_{row_id}": "",
-            "conflict_intent": "invalid-token",
-        },
-    )
+    response = submit_ip_selection(client, device, [row_id], conflict_intent="invalid-token")
 
     assert response.status_code == 302
     assert _message_texts(response) == [
@@ -1627,17 +1478,14 @@ def test_interface_scope_change_during_lock_is_reported_as_a_failure(client, set
             return execute(sql, params, many, context)
 
     scope_change = RestrictInterfaceBeforeLock()
+    draft = select_ip_rows(client, device, ["198.18.19.30/24"])
     with connection.execute_wrapper(scope_change):
         response = client.post(
             reverse(
                 "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
                 kwargs={"object_type": "device", "pk": device.pk},
             ),
-            {
-                "server_key": "default",
-                "select": "198.18.19.30/24",
-                "vrf_198.18.19.30/24": "",
-            },
+            {"server_key": "default", **draft},
         )
 
     assert response.status_code == 302
@@ -1672,13 +1520,14 @@ def test_a_name_match_bound_to_another_port_before_the_lock_is_refused(client, s
             return execute(sql, params, many, context)
 
     rebind = BindInterfaceBeforeLock()
+    draft = select_ip_rows(client, device, ["198.18.19.31/24"])
     with connection.execute_wrapper(rebind):
         response = client.post(
             reverse(
                 "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
                 kwargs={"object_type": "device", "pk": device.pk},
             ),
-            {"server_key": "default", "select": "198.18.19.31/24", "vrf_198.18.19.31/24": ""},
+            {"server_key": "default", **draft},
         )
 
     assert response.status_code == 302
@@ -1711,20 +1560,7 @@ def test_existing_ip_outside_change_scope_is_reported_without_mutation(client, s
     user = grant(user, "change", IPAddress, constraints={"pk": changeable_ip.pk})
     client.force_login(user)
     _seed_ip_rows(device, [_ip_row("198.18.20.10", 7020, "Ethernet1")])
-    sync_url = reverse(
-        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-        kwargs={"object_type": "device", "pk": device.pk},
-    )
-
-    response = client.post(
-        sync_url,
-        {
-            "server_key": "default",
-            "select": "198.18.20.10/24",
-            "vrf_198.18.20.10/24": "",
-        },
-        HTTP_HX_REQUEST="true",
-    )
+    response = submit_ip_selection(client, device, ["198.18.20.10/24"], headers=HTMX)
 
     assert response.status_code == 200
     assert b"outside your change scope" in response.content
@@ -1768,15 +1604,9 @@ def test_ip_sync_does_not_write_after_interface_owner_disappears(client, setting
             return execute(sql, params, many, context)
 
     delete_owner = DeleteOwnerBeforeLock(device.pk)
+    draft = select_ip_rows(client, device, ["198.18.21.10/24"])
     with connection.execute_wrapper(delete_owner):
-        response = client.post(
-            sync_url,
-            {
-                "server_key": "default",
-                "select": "198.18.21.10/24",
-                "vrf_198.18.21.10/24": "",
-            },
-        )
+        response = client.post(sync_url, {"server_key": "default", **draft})
 
     assert response.status_code == 302
     assert delete_owner.fired
@@ -1803,14 +1633,8 @@ def test_force_reassigns_only_the_matching_vrf_row(client, settings, live_libren
         "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
         kwargs={"object_type": "device", "pk": device.pk},
     )
-    conflict_response = client.post(
-        sync_url,
-        {
-            "server_key": "default",
-            "select": "198.18.3.10/24",
-            "vrf_198.18.3.10/24": str(blue.pk),
-        },
-        HTTP_HX_REQUEST="true",
+    conflict_response = submit_ip_selection(
+        client, device, ["198.18.3.10/24"], vrfs={"198.18.3.10/24": str(blue.pk)}, headers=HTMX
     )
 
     assert conflict_response.status_code == 200
@@ -1828,8 +1652,9 @@ def test_force_reassigns_only_the_matching_vrf_row(client, settings, live_libren
         HTTP_HX_REQUEST="true",
     )
 
-    assert force_response.status_code == 200
-    assert force_response.headers["HX-Redirect"]
+    assert answers_in_place(force_response)
+    # The confirmation came from the dialog, and its answer closes it.
+    assert "closeModal" in json.loads(force_response["HX-Trigger"])
     blue_ip.refresh_from_db()
     red_ip.refresh_from_db()
     assert blue_ip.assigned_object == target
@@ -1862,14 +1687,8 @@ def test_a_force_checkbox_without_a_valid_intent_syncs_nothing(client, settings,
         "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
         kwargs={"object_type": "device", "pk": device.pk},
     )
-    conflict_response = client.post(
-        sync_url,
-        {
-            "server_key": "default",
-            "select": "198.18.4.10/24",
-            "vrf_198.18.4.10/24": str(blue.pk),
-        },
-        HTTP_HX_REQUEST="true",
+    conflict_response = submit_ip_selection(
+        client, device, ["198.18.4.10/24"], vrfs={"198.18.4.10/24": str(blue.pk)}, headers=HTMX
     )
 
     assert conflict_response.status_code == 200
@@ -1913,22 +1732,10 @@ def test_sync_creates_an_independent_global_row_when_other_vrfs_are_ambiguous(cl
     client.force_login(make_superuser("ip-vrf-independent-create-user"))
     assert _refresh_ip_snapshot(client, device, "198.18.11.10", 24, live_librenms).status_code == 200
 
-    sync_url = reverse(
-        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-        kwargs={"object_type": "device", "pk": device.pk},
-    )
-    response = client.post(
-        sync_url,
-        {
-            "server_key": "default",
-            "select": "198.18.11.10/24",
-            "vrf_198.18.11.10/24": "",
-        },
-        HTTP_HX_REQUEST="true",
-    )
+    response = submit_ip_selection(client, device, ["198.18.11.10/24"], vrfs={"198.18.11.10/24": ""}, headers=HTMX)
 
     assert response.status_code == 200
-    assert response.headers["HX-Redirect"]
+    assert response["HX-Reswap"] == "none"
     global_ip = IPAddress.objects.get(address="198.18.11.10/24", vrf=None)
     assert global_ip.assigned_object == target
     blue_ip.refresh_from_db()
@@ -1958,14 +1765,7 @@ def test_ip_sync_gives_a_created_ip_a_netaddr_address(client, settings, live_lib
     )
 
     with _receiver_parses_the_saved_ip_address():
-        response = client.post(
-            reverse(
-                "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-                kwargs={"object_type": "device", "pk": device.pk},
-            ),
-            {"server_key": "default", "select": row_id, f"vrf_{row_id}": ""},
-            HTTP_HX_REQUEST="true",
-        )
+        response = submit_ip_selection(client, device, [row_id], headers=HTMX)
 
     assert response.status_code == 200
     assert not [text for text in _message_texts(response) if "Failed" in text]
@@ -1984,9 +1784,7 @@ def test_confirmed_prefix_change_gives_the_ip_a_netaddr_address(client, settings
         "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
         kwargs={"object_type": "device", "pk": device.pk},
     )
-    response = client.post(
-        sync_url, {"server_key": "default", "select": row_id, f"vrf_{row_id}": ""}, HTTP_HX_REQUEST="true"
-    )
+    response = submit_ip_selection(client, device, [row_id], headers=HTMX)
     conflict = response.context["conflicts"][0]
     assert "different prefix length" in conflict["reason"]
 
@@ -2026,10 +1824,8 @@ def test_vrf_change_requires_confirmation_and_moves_the_identified_row(
     sync_url = reverse(
         "plugins:netbox_librenms_plugin:sync_device_ip_addresses", kwargs={"object_type": "device", "pk": device.pk}
     )
-    conflict_response = client.post(
-        sync_url,
-        {"server_key": "default", "select": row_id, f"vrf_{row_id}": str(destination_vrf.pk)},
-        HTTP_HX_REQUEST="true",
+    conflict_response = submit_ip_selection(
+        client, device, [row_id], vrfs={row_id: str(destination_vrf.pk)}, headers=HTMX
     )
     assert conflict_response.status_code == 200
     conflict = conflict_response.context["conflicts"][0]
@@ -2071,14 +1867,8 @@ def test_confirmed_vrf_move_fails_when_the_destination_changes(client, settings,
         "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
         kwargs={"object_type": "device", "pk": device.pk},
     )
-    conflict_response = client.post(
-        sync_url,
-        {
-            "server_key": "default",
-            "select": "198.18.6.10/24",
-            "vrf_198.18.6.10/24": str(destination_vrf.pk),
-        },
-        HTTP_HX_REQUEST="true",
+    conflict_response = submit_ip_selection(
+        client, device, ["198.18.6.10/24"], vrfs={"198.18.6.10/24": str(destination_vrf.pk)}, headers=HTMX
     )
     conflict = conflict_response.context["conflicts"][0]
 
@@ -2134,15 +1924,7 @@ def test_same_host_with_a_different_prefix_requires_confirmation_before_update(
         "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
         kwargs={"object_type": "device", "pk": device.pk},
     )
-    response = client.post(
-        sync_url,
-        {
-            "server_key": "default",
-            "select": row_id,
-            f"vrf_{row_id}": str(vrf.pk),
-        },
-        HTTP_HX_REQUEST="true",
-    )
+    response = submit_ip_selection(client, device, [row_id], vrfs={row_id: str(vrf.pk)}, headers=HTMX)
 
     assert response.status_code == 200
     conflict = response.context["conflicts"][0]
@@ -2162,8 +1944,7 @@ def test_same_host_with_a_different_prefix_requires_confirmation_before_update(
         HTTP_HX_REQUEST="true",
     )
 
-    assert force_response.status_code == 200
-    assert force_response.headers["HX-Redirect"]
+    assert answers_in_place(force_response)
     existing.refresh_from_db()
     other_vrf_ip.refresh_from_db()
     device.refresh_from_db()
@@ -2208,13 +1989,7 @@ def test_sync_without_a_selection_reports_the_empty_selection_error(client, sett
     _seed_ip_rows(device, [_ip_row("198.18.32.10", 7001, "Ethernet1")])
     client.force_login(make_superuser("ip-empty-selection-user"))
 
-    response = client.post(
-        reverse(
-            "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-            kwargs={"object_type": "device", "pk": device.pk},
-        ),
-        {"server_key": "default"},
-    )
+    response = submit_ip_selection(client, device, [])
 
     assert response.status_code == 302
     assert "No IP addresses selected for synchronization." in _message_texts(response)
@@ -2245,20 +2020,7 @@ def test_create_missing_interfaces_requires_change_scope_for_the_new_interface(c
             )
         ],
     )
-    sync_url = reverse(
-        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-        kwargs={"object_type": "device", "pk": device.pk},
-    )
-
-    response = client.post(
-        sync_url,
-        {
-            "server_key": "default",
-            "create-missing-interfaces-toggle": "on",
-            "select": "198.18.30.10/24",
-            "vrf_198.18.30.10/24": "",
-        },
-    )
+    response = submit_ip_selection(client, device, ["198.18.30.10/24"], **{"create-missing-interfaces-toggle": "on"})
 
     assert response.status_code == 302
     # The row runs inside transaction.atomic(), so failing closed rolls the creation back.
@@ -2284,18 +2046,7 @@ def test_create_missing_interfaces_is_refused_without_add_and_change_grants(clie
     client.force_login(user)
     _seed_ip_rows(device, [_ip_row("198.18.32.10", 7032, "Ethernet1", ifType="ethernetCsmacd")])
 
-    response = client.post(
-        reverse(
-            "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-            kwargs={"object_type": "device", "pk": device.pk},
-        ),
-        {
-            "server_key": "default",
-            "create-missing-interfaces-toggle": "on",
-            "select": "198.18.32.10/24",
-            "vrf_198.18.32.10/24": "",
-        },
-    )
+    response = submit_ip_selection(client, device, ["198.18.32.10/24"], **{"create-missing-interfaces-toggle": "on"})
 
     assert response.status_code in (302, 403)
     assert not Interface.objects.filter(device=device, name="Ethernet1").exists()
@@ -2307,18 +2058,7 @@ def test_create_missing_interfaces_is_refused_without_add_and_change_grants(clie
     user = grant(user, "change", Interface)
     client.force_login(user)
 
-    allowed = client.post(
-        reverse(
-            "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-            kwargs={"object_type": "device", "pk": device.pk},
-        ),
-        {
-            "server_key": "default",
-            "create-missing-interfaces-toggle": "on",
-            "select": "198.18.32.10/24",
-            "vrf_198.18.32.10/24": "",
-        },
-    )
+    allowed = submit_ip_selection(client, device, ["198.18.32.10/24"], **{"create-missing-interfaces-toggle": "on"})
 
     assert allowed.status_code == 302
     created = Interface.objects.get(device=device, name="Ethernet1")
@@ -2371,12 +2111,7 @@ def test_ambiguous_port_identity_cannot_bind_an_unrelated_named_interface(
         interface.save()
     _seed_ip_rows(device, [_ip_row("198.18.21.10", cached_port_id, "eth0")])
     client.force_login(make_superuser("ambiguous-ip-port-user"))
-    response = client.post(
-        reverse(
-            "plugins:netbox_librenms_plugin:sync_device_ip_addresses", kwargs={"object_type": "device", "pk": device.pk}
-        ),
-        {"server_key": "default", "select": ["198.18.21.10/24"], "vrf_198.18.21.10/24": ""},
-    )
+    response = submit_ip_selection(client, device, ["198.18.21.10/24"])
     assert response.status_code == 302
     assert not IPAddress.objects.filter(address="198.18.21.10/24").exists()
     assert any(
@@ -2420,9 +2155,10 @@ def test_the_sync_creates_the_interface_name_that_the_table_shows(
     )
     # Post where the rendered form posts, as a browser does.
     (action,) = set(re.findall(rf'action="({re.escape(sync_path)}[^"]*)"', page.content.decode()))
+    draft = select_ip_rows(client, device, ["198.18.23.1/24"], interface_name_field=name_field)
     response = client.post(
         html.unescape(action),
-        {"server_key": "default", "select": "198.18.23.1/24", "create-missing-interfaces-toggle": "on"},
+        {"server_key": "default", "create-missing-interfaces-toggle": "on", **draft},
     )
     assert response.status_code == 302
     interface = Interface.objects.get(device=device, name=shown_name)
@@ -2478,43 +2214,25 @@ def test_duplicate_source_addresses_have_independent_vrf_controls_and_writes(
     assert len(set(keys)) == 2
     html = refreshed.content.decode()
     for key in keys:
-        assert f'name="vrf_{key}"' in html
+        assert f'id="vrf_select_{key}"' in html
         assert f'value="{key}"' in html
     assert rows[1].get("netbox_ip_id") is None
     if existing is not None:
         assert rows[0].get("netbox_ip_id") == existing.pk
         assert rows[0]["vrf_id"] == vrfs[0].pk
-    verified = client.post(
-        reverse("plugins:netbox_librenms_plugin:verify_ipaddress"),
-        data=json.dumps(
-            {
-                "device_id": device.pk,
-                "object_type": "device",
-                "server_key": "default",
-                "ip_address": "198.18.22.1/24",
-                "row_id": keys[1],
-                "vrf_id": vrfs[1].pk,
-            }
-        ),
-        content_type="application/json",
-    )
-    assert verified.status_code == 200
-    assert f'value="{keys[1]}"' in verified.json()["formatted_row"]["status"]
-    sync_url = reverse(
-        "plugins:netbox_librenms_plugin:sync_device_ip_addresses", kwargs={"object_type": "device", "pk": device.pk}
-    )
-    response = client.post(
-        sync_url,
-        {
-            "server_key": "default",
-            "select": keys,
-            "set_primary_ip": "on" if set_primary else "off",
-            **{f"vrf_{key}": vrf.pk for key, vrf in zip(keys, vrfs, strict=True)},
-        },
-        HTTP_HX_REQUEST="true",
+    chosen = read_ip_row(client, device, keys[1], vrf=str(vrfs[1].pk))
+    assert f'value="{keys[1]}"' in chosen.status
+    assert chosen.shown_vrf == str(vrfs[1].pk)
+    response = submit_ip_selection(
+        client,
+        device,
+        keys,
+        vrfs={key: str(vrf.pk) for key, vrf in zip(keys, vrfs, strict=True)},
+        headers=HTMX,
+        set_primary_ip="on" if set_primary else "off",
     )
     assert response.status_code == 200
-    assert response.headers.get("HX-Redirect")
+    assert response["HX-Reswap"] == "none"
     for interface, vrf in zip(interfaces, vrfs, strict=True):
         assert IPAddress.objects.get(address="198.18.22.1/24", vrf=vrf).assigned_object == interface
     if existing is not None:
@@ -2562,36 +2280,33 @@ def test_unchanged_compatible_ipv6_address_has_no_prefix_conflict(client, settin
     existing = IPAddress.objects.create(address="::198.18.0.1/128", assigned_object=interface)
     client.force_login(make_superuser("compatible-ipv6-user"))
     assert _refresh_ip_snapshot(client, device, "::198.18.0.1", 128, live_librenms).status_code == 200
-    sync_url = reverse(
-        "plugins:netbox_librenms_plugin:sync_device_ip_addresses", kwargs={"object_type": "device", "pk": device.pk}
-    )
-    response = client.post(sync_url, {"server_key": "default", "select": "::c612:1/128"}, HTTP_HX_REQUEST="true")
+    response = submit_ip_selection(client, device, ["::c612:1/128"], headers=HTMX)
     assert response.status_code == 200
-    assert response.headers.get("HX-Redirect")
+    assert response["HX-Reswap"] == "none"
     assert IPAddress.objects.filter(address="::198.18.0.1/128").count() == 1
     existing.refresh_from_db()
     assert existing.assigned_object == interface
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("row_id", [True, 7, [], {}, "bad", "198.18.22.1/24@bad"])
-def test_verify_rejects_malformed_source_row_identity(client, settings, row_id, live_librenms):
-    """Invalid source selectors must return a client error, without a server crash."""
+@pytest.mark.parametrize("row_id", ["", "bad", "198.18.22.1/24@bad"])
+def test_a_vrf_choice_rejects_a_malformed_source_row_identity(client, settings, row_id):
+    """An invalid row key in the VRF choice command must return a client error, without a server crash."""
     _configure_test_server(settings)
     device = make_device("invalid-source-selector", librenms_cf={"default": {"id": 42}})
     client.force_login(make_superuser("invalid-source-selector-user"))
     _seed_ip_rows(device, [_ip_row("198.18.22.1", 7001, "Ethernet1")])
+    table = ip_tab(client, device).table
+
     response = client.post(
-        reverse("plugins:netbox_librenms_plugin:verify_ipaddress"),
-        data=json.dumps(
-            {
-                "device_id": device.pk,
-                "object_type": "device",
-                "server_key": "default",
-                "ip_address": "198.18.22.1/24",
-                "row_id": row_id,
-            }
-        ),
-        content_type="application/json",
+        table["data-choice-url"],
+        {
+            "draft_id": table["data-draft-id"],
+            "expected_revision": table["data-draft-revision"],
+            "row": row_id,
+            "value": "",
+        },
     )
+
     assert response.status_code == 400
+    assert ip_tab(client, device).table["data-draft-revision"] == table["data-draft-revision"]

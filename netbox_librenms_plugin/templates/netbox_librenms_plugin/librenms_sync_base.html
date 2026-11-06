@@ -14,6 +14,7 @@
 {% block javascript %}
 {{ block.super }}
 <script src="{% static 'netbox_librenms_plugin/js/librenms_sync.js' %}"></script>
+<script src="{% static 'netbox_librenms_plugin/js/sync_draft.js' %}"></script>
 <script src="{% static 'netbox_librenms_plugin/js/toasts.js' %}"></script>
 {% endblock %}
 
@@ -805,6 +806,9 @@ that may well be correct.
 {{ sync_cache_status|json_script:"librenms-sync-cache-initial" }}
 {{ sync_cache_contract|json_script:"librenms-sync-cache-contract" }}
 {% endif %}
+{# sync_draft.js sends every READ of the tabs through this loader; hx-history keeps htmx from storing page snapshots. #}
+<span class="d-none" id="librenms-sync-nav" hx-get="" hx-trigger="librenms:navigate" hx-sync="this:replace"
+    hx-target="#librenms-sync-tabs" hx-select="#librenms-sync-tabs" hx-swap="outerHTML" hx-history="false"></span>
 <div id="librenms-sync-tabs" data-active-tab="{{ active_sync_tab }}" data-server-key="{{ server_key|default:'' }}">
 {{ sync_cache_status|json_script:"librenms-sync-rendered-status" }}
 <!-- Tab Navigation -->

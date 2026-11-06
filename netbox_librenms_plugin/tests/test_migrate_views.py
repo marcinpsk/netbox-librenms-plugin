@@ -17,6 +17,7 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change, seed_stored_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import (
+    answers_in_place,
     assert_update_logged,
     grant,
     make_request,
@@ -140,7 +141,7 @@ class TestMoveInterfaceToWinner:
         response = _move_interface(client, interface)
 
         assert response.status_code == 200
-        assert response.headers["HX-Refresh"] == "true"
+        assert answers_in_place(response)
         interface.refresh_from_db()
         assert interface.device == winner
 
@@ -184,7 +185,7 @@ class TestMoveInterfaceToWinner:
 
         response = _move_interface(client, lag)
 
-        assert response.headers["HX-Refresh"] == "true"
+        assert answers_in_place(response)
         lag.refresh_from_db()
         member.refresh_from_db()
         assert lag.device == winner
@@ -208,7 +209,7 @@ class TestMoveInterfaceToWinner:
 
         response = _move_interface(client, parent)
 
-        assert response.headers["HX-Refresh"] == "true"
+        assert answers_in_place(response)
         for interface in (parent, child, bridged):
             interface.refresh_from_db()
             assert interface.device == winner
@@ -246,7 +247,7 @@ class TestMoveInterfaceToWinner:
 
         response = _move_interface(client, interface)
 
-        assert response.headers["HX-Refresh"] == "true"
+        assert answers_in_place(response)
         termination = CableTermination.objects.get(
             termination_type__model="interface",
             termination_id=interface.pk,
@@ -301,7 +302,7 @@ class TestMoveIPAddressToWinner:
 
         response = _move_ip(client, address)
 
-        assert response.headers["HX-Refresh"] == "true"
+        assert answers_in_place(response)
         address.refresh_from_db()
         assert address.assigned_object == winner_interface
 
@@ -800,7 +801,7 @@ class TestMoveEndpointsViewScope:
 
         response = _move_interface(client, interface)
 
-        assert response.headers["HX-Refresh"] == "true"
+        assert answers_in_place(response)
         interface.refresh_from_db()
         assert interface.device == winner
 

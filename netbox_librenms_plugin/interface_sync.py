@@ -48,6 +48,14 @@ class InterfaceWrite(NamedTuple):
     changed: bool
 
 
+class ResolvedInterface(NamedTuple):
+    """The interface that :func:`resolve_or_create_interface_from_port` returns."""
+
+    interface: Interface | VMInterface
+    # True when the port was bound to it before the call; False when the call created it or bound it by name.
+    already_bound: bool
+
+
 class ApplicationResult(NamedTuple):
     """What an ``apply`` callback of ``write_interface_row`` did to its row."""
 
@@ -471,6 +479,9 @@ def resolve_or_create_interface_from_port(  # noqa: C901
     """
     Resolve or create one interface from an unambiguous LibreNMS port row.
 
+    Returns:
+        ResolvedInterface: The interface as written, and whether the port was bound to it before the call.
+
     Raises:
         PortSyncBlocked: Before any lookup or write, when ``rules`` block the port for ``owner``.
         NewInterfaceOutsideScope: The created row, as written, is outside the add or change scope.
@@ -560,4 +571,4 @@ def resolve_or_create_interface_from_port(  # noqa: C901
             raise NewInterfaceOutsideScope(refused[interface.pk])
     if not viewable_queryset.filter(pk=interface.pk).exists():
         raise ValueError("The synchronized NetBox interface is outside your view scope.")
-    return interface
+    return ResolvedInterface(interface, already_bound=by_id is not None)

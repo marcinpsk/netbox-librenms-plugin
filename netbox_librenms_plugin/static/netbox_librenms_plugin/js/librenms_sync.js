@@ -4,7 +4,7 @@
  * Handles LibreNMS data synchronization for devices/VMs:
  * - Interface, cable, and IP address comparison tables
  * - Virtual chassis member selection and verification
- * - VRF assignment and verification
+ * - The Global option of the IP table's VRF dropdowns (sync_draft.js writes the IP table's selection)
  * - Bulk operations and filtering
  * - Cache countdown timers
  *
@@ -1343,65 +1343,6 @@ function initializeSyncOptionMenus() {
     );
 }
 
-/**
- * Keep the management-IP row selected while "Set Primary IP" is on.
- *
- * Runs after the menu is restored, so the row follows the user's latest choice.
- */
-function initializePrimaryIpToggle() {
-    const toggle = document.getElementById('set-primary-ip-toggle-cb');
-    if (!toggle || toggle.dataset.mgmtRowBound === 'true') return;
-    toggle.dataset.mgmtRowBound = 'true';
-    // Each render runs this again, so a row is selected once per stored selection and the user can clear it.
-    const selectManagementRows = (again) => {
-        const table = document.getElementById('librenms-ipaddress-table');
-        if (!table || !toggle.checked) return;
-        const seeded = again ? new Set() : readSeededManagementRows(table);
-        const visible = new Set(Array.from(table.querySelectorAll('td input[name="select"]'), (box) => box.value));
-        // An IP mapping disables the row of an ignored address, and the writer refuses it.
-        table.querySelectorAll('tr[data-mgmt-ip="true"] input[name="select"]:not(:disabled)').forEach((box) => {
-            if (!seeded.has(box.value)) box.checked = true;
-            seeded.add(box.value);
-        });
-        // A management row on another page has no checkbox, so it goes into the stored selection with the VRF it shows.
-        const selection = readStoredSelection(table);
-        const vrfs = JSON.parse(table.dataset.mgmtRowVrfs || '{}');
-        JSON.parse(table.dataset.mgmtRows || '[]').forEach((key) => {
-            if (visible.has(key)) return;
-            const name = 'vrf_' + key;
-            const entry = selection[key];
-            // A VRF the user chose stays; any other follows the VRF that the page shows now, for example after Create VRF.
-            if (entry && Object.hasOwn(vrfs, key) && !(entry.chosen || []).includes(name)) {
-                entry.inputs = {...(entry.inputs || {}), [name]: vrfs[key]};
-            }
-            if (seeded.has(key)) return;
-            seeded.add(key);
-            if (!entry) selection[key] = {inputs: {[name]: vrfs[key] ?? ''}, auto: ''};
-        });
-        writeStoredSelection(table, selection);
-        writeSeededManagementRows(table, seeded);
-    };
-    selectManagementRows(false);
-    toggle.addEventListener('change', () => {
-        const table = document.getElementById('librenms-ipaddress-table');
-        if (table && !toggle.checked) {
-            table.querySelectorAll('tr[data-mgmt-ip="true"] input[name="select"]').forEach((box) => {
-                box.checked = false;
-            });
-            // The management row can be selected on another page, where no checkbox can clear it.
-            const selection = readStoredSelection(table);
-            JSON.parse(table.dataset.mgmtRows || '[]').forEach((key) => {
-                delete selection[key];
-            });
-            writeStoredSelection(table, selection);
-            writeSeededManagementRows(table, new Set());
-        }
-        selectManagementRows(true);
-        // Store the change too, or the next swap restores the row from the old selection.
-        commitSelectionChange(table);
-    });
-}
-
 // ============================================
 // TABLE CHECKBOX HANDLING
 // ============================================
@@ -1491,7 +1432,6 @@ function initializeCheckboxes() {
     initializeTableCheckboxes('librenms-interface-table-vm');
     initializeTableCheckboxes('librenms-cable-table');
     initializeTableCheckboxes('librenms-cable-table-vc');
-    initializeTableCheckboxes('librenms-ipaddress-table');
     initializeTableCheckboxes('librenms-vlan-table');
     initializeTableCheckboxes('librenms-port-vlan-table');
     initializeTableCheckboxes('librenms-module-table');
@@ -1790,6 +1730,8 @@ function applyRowSelection(checkbox, membersByLag, changed) {
 document.addEventListener('change', function (e) {
     const checkbox = e.target;
     if (!checkbox.matches('input[name="select"]') || checkbox.disabled) return;
+    // A converted table keeps its selection in the server draft, which sync_draft.js writes.
+    if (checkbox.closest('table[data-draft-id]')) return;
 
     applyRowSelection(checkbox, _membersByLag(), true);
     commitSelectionChange(checkbox.closest('table'));
@@ -1869,7 +1811,6 @@ const SELECTABLE_TABLE_TABS = {
     'librenms-interface-table-vm': 'interfaces',
     'librenms-cable-table': 'cables',
     'librenms-cable-table-vc': 'cables',
-    'librenms-ipaddress-table': 'ipaddresses',
     'librenms-vlan-table': 'vlans',
     'librenms-port-vlan-table': 'vlans',
     'librenms-module-table': 'modules',
@@ -1907,7 +1848,7 @@ function _selectionStoreBase(tableId) {
  * Forget the stored selections of the table's other selection scopes on this server.
  *
  * A scope change starts with no rows selected, and a return to an earlier scope must not restore
- * its old selection. Each scope store has a ':mgmt' companion, which goes with it.
+ * its old selection.
  *
  * @param {string} tableId - The table element ID.
  * @param {string|undefined} scope - The selection scope of the current render.
@@ -1920,8 +1861,7 @@ function pruneOtherSelectionScopes(tableId, scope) {
         const stale = [];
         for (let i = 0; i < window.sessionStorage.length; i++) {
             const key = window.sessionStorage.key(i);
-            const owner = key.endsWith(':mgmt') ? key.slice(0, -':mgmt'.length) : key;
-            const rest = owner === base ? '' : owner.startsWith(base + ':') ? owner.slice(base.length + 1) : null;
+            const rest = key === base ? '' : key.startsWith(base + ':') ? key.slice(base.length + 1) : null;
             // The scope is URL-encoded and has no colon, so a colon in the rest names another server's key.
             if (rest !== null && rest !== scope && !rest.includes(':')) stale.push(key);
         }
@@ -1951,7 +1891,7 @@ function _selectionSnapshot(table) {
  * row restored after paging keeps the same standing it had before.
  *
  * @param {HTMLElement} table - The table element.
- * @returns {Object<string, {inputs: Object<string, string>, auto: string, chosen: string[]}>} Selected rows by key.
+ * @returns {Object<string, {inputs: Object<string, string>, auto: string}>} Selected rows by key.
  */
 function readStoredSelection(table) {
     try {
@@ -2043,7 +1983,6 @@ function _isSelectionCompanionName(name) {
         (name.startsWith('device_selection_') ||
             name.startsWith('selection_grant_') ||
             name.startsWith('vlan_group_') ||
-            name.startsWith('vrf_') ||
             _isShownStateName(name))
     );
 }
@@ -2086,7 +2025,6 @@ function persistTableSelection(table) {
                     : checkbox.dataset[MEMBER_MARKER]
                       ? 'member'
                       : '',
-                chosen: _chosenVrfNames(row),
             };
         } else {
             // Only the visible page can retract a row: an absent checkbox means "another page",
@@ -2115,7 +2053,6 @@ function restoreTableSelection(table) {
     const selection = readStoredSelection(table);
     const blocked = _blockedPortIds();
     let cleared = 0;
-    const restoredVrfs = [];
     const reverified = [];
     table.querySelectorAll('td input[name="select"]').forEach(function (checkbox) {
         const entry = selection[checkbox.value];
@@ -2124,11 +2061,10 @@ function restoreTableSelection(table) {
         // A row whose member verify is in flight belongs to that request, which stores the row when it settles.
         if (row.dataset.verifyPending) return;
         const companionInputs = (entry && entry.inputs) || {};
-        const chosen = (entry && entry.chosen) || [];
         // The rendered module row holds the controls of its rendered member, so another member is verified again.
         const reverify = _restoredModuleMemberSelect(table, row, checkbox.value, companionInputs);
-        // A disabled row is decided in its rendered VRF or member, so only another one, verified again below, can enable it.
-        if (checkbox.disabled && !reverify && !_restoresAnotherChosenVrf(row, companionInputs, chosen)) return;
+        // A disabled row is decided in its rendered member, so only another member, verified again below, can enable it.
+        if (checkbox.disabled && !reverify) return;
         // The commit below drops a cleared row from storage, with its member value.
         if (_storedMemberDiffers(table, row, checkbox.value, companionInputs)) {
             cleared += 1;
@@ -2136,10 +2072,8 @@ function restoreTableSelection(table) {
         }
         // A row the cascade added is re-derived by the closure; it is never restored onto a blocked row.
         if (entry.auto && blocked.has(row.dataset.portId)) return;
-        // A stored VRF or group that the row no longer offers would fall back to another one, so the row is cleared.
-        if (_storedChoiceIsGone(row, companionInputs, chosen)) {
-            // Set Primary IP can have checked the row already; the commit below drops it only when unchecked.
-            checkbox.checked = false;
+        // A stored group that the row no longer offers would fall back to another one, so the row is cleared.
+        if (_storedChoiceIsGone(row, companionInputs)) {
             cleared += 1;
             return;
         }
@@ -2147,8 +2081,6 @@ function restoreTableSelection(table) {
         row.querySelectorAll('select[name], input[type="hidden"][name]').forEach(function (input) {
             if (!_isSelectionCompanionName(input.name)) return;
             if (!Object.hasOwn(companionInputs, input.name)) return;
-            // Only a VRF the user chose comes back; a stored default follows the page, for example a new suggestion.
-            if (input.matches('select.vrf-select') && !chosen.includes(input.name)) return;
             // A grant names the render it was signed for: the row keeps its own, and a restored member gets one from its verify.
             if (input.name.startsWith('selection_grant_')) return;
             // A rendered row posts the state it shows now; only an off-page row posts its stored state.
@@ -2162,8 +2094,6 @@ function restoreTableSelection(table) {
             if (input.matches('select.vlan-sync-group-select') && input.value !== renderedValue) {
                 verifyVlanSyncGroup(input, input.dataset.vlanId, input.dataset.vlanName, input.value);
             }
-            // The row status belongs to the rendered VRF, so a restored VRF is verified again.
-            if (input.matches('select.vrf-select') && input.value !== renderedValue) restoredVrfs.push(input);
         });
         checkbox.checked = true;
         _applySelectionMarker(checkbox, entry.auto);
@@ -2173,7 +2103,6 @@ function restoreTableSelection(table) {
     reverified.forEach((select) => handleModuleChange(select, select.value, {restored: true}));
     commitSelectionChange(table);
     _showClearedSelectionNotice(table, cleared);
-    restoredVrfs.forEach((select) => handleVRFChange(select, select.value));
 }
 
 /**
@@ -2198,61 +2127,24 @@ function _restoredModuleMemberSelect(table, row, rowKey, companionInputs) {
 }
 
 /**
- * Return the VRF fields of a row whose value differs from the VRF that the page rendered.
- *
- * Only such a VRF is the user's choice. TomSelect sets the selected property, not the attribute,
- * so defaultSelected keeps the rendered VRF.
- *
- * @param {HTMLTableRowElement} row - The rendered row.
- * @returns {string[]} Field names.
- */
-function _chosenVrfNames(row) {
-    return Array.from(row.querySelectorAll('select.vrf-select[name]'))
-        .filter((select) => {
-            const rendered = Array.from(select.options).find((option) => option.defaultSelected) || select.options[0];
-            return select.value !== (rendered ? rendered.value : '');
-        })
-        .map((select) => select.name);
-}
-
-/**
- * Return whether the row no longer offers a stored VRF or VLAN group.
+ * Return whether the row no longer offers a stored VLAN group.
  *
  * Setting a select to a value it does not offer selects its first option, so the row would post another
- * VRF or group than the user chose. Global, the empty value, is always offered.
+ * group than the user chose. The empty value is always offered.
  *
  * @param {HTMLTableRowElement} row - The rendered row.
  * @param {Object<string, string>} companionInputs - The stored companion values of the row.
- * @param {string[]} chosen - The VRF fields that the user chose.
  * @returns {boolean}
  */
-function _storedChoiceIsGone(row, companionInputs, chosen) {
-    return Array.from(row.querySelectorAll('select.vrf-select[name], select.vlan-sync-group-select[name]')).some(
+function _storedChoiceIsGone(row, companionInputs) {
+    return Array.from(row.querySelectorAll('select.vlan-sync-group-select[name]')).some(
         (select) => {
             if (!Object.hasOwn(companionInputs, select.name) || companionInputs[select.name] === '') return false;
-            if (select.matches('.vrf-select') && !chosen.includes(select.name)) return false;
             const stored = companionInputs[select.name];
             return select.tomselect
                 ? !Object.hasOwn(select.tomselect.options, stored)
                 : !Array.from(select.options).some((option) => option.value === stored);
         }
-    );
-}
-
-/**
- * Return whether a stored row restores a VRF the user chose that differs from the rendered VRF.
- *
- * @param {HTMLTableRowElement} row - The rendered row.
- * @param {Object<string, string>} companionInputs - The stored companion values of the row.
- * @param {string[]} chosen - The names of the selects the user changed.
- * @returns {boolean}
- */
-function _restoresAnotherChosenVrf(row, companionInputs, chosen) {
-    return Array.from(row.querySelectorAll('select.vrf-select[name]')).some(
-        (select) =>
-            chosen.includes(select.name) &&
-            Object.hasOwn(companionInputs, select.name) &&
-            companionInputs[select.name] !== select.value
     );
 }
 
@@ -2427,46 +2319,7 @@ function updateOffPageSelectionNotice(table) {
 function clearStoredSelection(table) {
     // Lifecycle write, no closure: a submit consumed the selection, and it changes no row on the page.
     writeStoredSelection(table, {});
-    writeSeededManagementRows(table, new Set());
     updateOffPageSelectionNotice(table);
-}
-
-/**
- * Return the management rows that Set Primary IP already selected for the table's stored selection.
- *
- * @param {HTMLElement} table - The IP table.
- * @returns {Set<string>} Row keys.
- */
-function readSeededManagementRows(table) {
-    try {
-        const stored = JSON.parse(window.sessionStorage.getItem(_selectionStorageKey(table) + ':mgmt') || 'null');
-        if (stored && stored.snapshot === _selectionSnapshot(table) && Array.isArray(stored.rows)) {
-            return new Set(stored.rows);
-        }
-    } catch (_) {
-        // Without storage, each render selects the management rows again.
-    }
-    return new Set();
-}
-
-/**
- * Store the management rows that Set Primary IP selected for the table's stored selection.
- *
- * @param {HTMLElement} table - The IP table.
- * @param {Set<string>} rows - Row keys.
- * @returns {void}
- */
-function writeSeededManagementRows(table, rows) {
-    try {
-        const key = _selectionStorageKey(table) + ':mgmt';
-        if (rows.size) {
-            window.sessionStorage.setItem(key, JSON.stringify({snapshot: _selectionSnapshot(table), rows: [...rows]}));
-        } else {
-            window.sessionStorage.removeItem(key);
-        }
-    } catch (_) {
-        // Storage is a convenience here, as for the stored selection.
-    }
 }
 
 /**
@@ -2514,7 +2367,7 @@ function injectOffPageSelections(form) {
 }
 
 // A single-row action submits one row, so it must not consume the stored bulk selection.
-const SINGLE_ROW_SUBMITTERS = ['sync_one', 'rebind_one', 'create_vrf'];
+const SINGLE_ROW_SUBMITTERS = ['sync_one', 'rebind_one'];
 
 /**
  * Give the off-page rows of a failed submit back to their tables' stores.
@@ -2532,8 +2385,7 @@ function restoreOffPageSelections(form) {
         const table = document.getElementById(tableId);
         if (!table) return;
         // Lifecycle write, no closure: it gives back off-page rows a failed submit consumed, as they were.
-        writeStoredSelection(table, Object.assign(readStoredSelection(table), consumed[tableId].rows));
-        writeSeededManagementRows(table, new Set([...readSeededManagementRows(table), ...consumed[tableId].seeded]));
+        writeStoredSelection(table, Object.assign(readStoredSelection(table), consumed[tableId]));
         // The consume also cleared the rows of this page, which still shows them checked.
         persistTableSelection(table);
         updateOffPageSelectionNotice(table);
@@ -2554,7 +2406,7 @@ HTMX_FAILURE_EVENTS.forEach(function (eventName) {
  *
  * @param {HTMLElement[]} tables - The tables whose stored rows the request submits.
  * @param {FormData} params - The request parameters.
- * @returns {Object<string, {rows: Object, seeded: string[]}>} By table id: the consumed records by row key, and the seeded management rows.
+ * @returns {Object<string, Object>} By table id: the consumed records by row key.
  */
 function consumeOffPageSelections(tables, params) {
     const consumed = {};
@@ -2567,8 +2419,8 @@ function consumeOffPageSelections(tables, params) {
                 .filter(_isSelectionCompanionName)
                 .forEach(function (name) { params.append(name, companions[name]); });
         });
-        // A failed submit gives back the rows and the management rows that Set Primary IP already selected.
-        consumed[table.id] = {rows: records, seeded: Array.from(readSeededManagementRows(table))};
+        // A failed submit gives back the rows.
+        consumed[table.id] = records;
         clearStoredSelection(table);
     });
     return consumed;
@@ -2810,41 +2662,17 @@ function initializeVCMemberSelect() {
 }
 
 /**
- * Initialize VRF assignment dropdowns for IP addresses.
- * Handles both TomSelect-enhanced and standard select elements.
+ * Keep the Global option of each VRF dropdown of the IP table, which sync_draft.js sends as the row's VRF choice.
  */
 function initializeVRFSelects() {
     setTimeout(() => {
-        const ipAddressTable = document.getElementById('librenms-ipaddress-table');
-
-        if (ipAddressTable) {
-            // Find VRF dropdowns - look for both plain selects and TomSelect-enhanced ones
-            const vrfSelects = ipAddressTable.querySelectorAll('.vrf-select');
-
-            vrfSelects.forEach(select => {
-                // Skip already initialized selects by checking the data attribute
-                if (select.tomselect && !select.dataset.vrfSelectInitialized) {
-                    select.dataset.vrfSelectInitialized = 'true';
-                    // NetBox's TomSelect drops the empty Global option, so read the options again and keep it.
-                    select.tomselect.settings.allowEmptyOption = true;
-                    select.tomselect.sync();
-
-                    // Add TomSelect listener
-                    select.tomselect.on('change', function (value) {
-                        handleVRFChange(select, value);
-                    });
-                }
-                // For standard selects without TomSelect (fallback)
-                else if (!select.tomselect && !select.dataset.vrfSelectInitialized) {
-                    select.dataset.vrfSelectInitialized = 'true';
-
-                    // Add direct event listener for regular selects
-                    select.addEventListener('change', function (event) {
-                        handleVRFChange(select, this.value);
-                    });
-                }
-            });
-        }
+        document.querySelectorAll('#librenms-ipaddress-table select.vrf-select').forEach((select) => {
+            if (!select.tomselect || select.dataset.vrfSelectInitialized) return;
+            select.dataset.vrfSelectInitialized = 'true';
+            // NetBox's TomSelect drops the empty Global option, so read the options again and keep it.
+            select.tomselect.settings.allowEmptyOption = true;
+            select.tomselect.sync();
+        });
     }, TOMSELECT_INIT_DELAY_MS);
 }
 
@@ -3294,7 +3122,7 @@ function initializeVlanSyncGroupSelects() {
 function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
     const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]');
     if (!csrfToken) return;
-    // Only the latest group choice may repaint or roll back the row, as in handleVRFChange.
+    // Only the latest group choice may repaint or roll back the row.
     if (select._vlanGroupVerifyController) {
         select._vlanGroupVerifyController.abort();
     }
@@ -3379,107 +3207,6 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
             console.error('VLAN sync group verification error:', error);
             rollbackToLastVerified();
             showErrorToast(withFullStop(`The VLAN group check failed: ${error.refusal || error.message}`));
-        });
-}
-
-/**
- * Handle VRF selection change and verify IP address assignment.
- * Sends verification request to backend and updates row status.
- *
- * @param {HTMLSelectElement} select - The VRF dropdown element
- * @param {string} value - Selected VRF ID
- */
-function handleVRFChange(select, value) {
-    // A selected row takes its new VRF into the stored selection, which an off-page submit posts.
-    commitSelectionChange(select.closest('table'));
-    const ipAddress = select.dataset.ip;
-    const prefixLength = select.dataset.prefix || "";  // Get prefix length if present
-    const fullIpAddress = prefixLength ? `${ipAddress}/${prefixLength}` : ipAddress;
-
-    // Extract device ID from URL
-    const deviceInfo = getDeviceIdFromUrl();
-    if (!deviceInfo) {
-        return;
-    }
-    const deviceId = deviceInfo.id;
-
-    const csrfToken = getCsrfToken();
-    if (!csrfToken) return;  // missing token → abort rather than throw on `.value`
-    // Only the latest VRF choice may repaint the row, as in handleInterfaceChange.
-    if (select._vrfVerifyController) {
-        select._vrfVerifyController.abort();
-    }
-    const controller = new AbortController();
-    select._vrfVerifyController = controller;
-    // The row's status and checkbox show the verdict of the last verified VRF; the rendered VRF comes first.
-    if (typeof select._lastVerifiedVrf === 'undefined') {
-        const rendered = Array.from(select.options).find((option) => option.defaultSelected);
-        select._lastVerifiedVrf = rendered ? rendered.value : '';
-    }
-    const rollbackToLastVerified = () => {
-        if (select.tomselect && typeof select.tomselect.setValue === 'function') {
-            select.tomselect.setValue(select._lastVerifiedVrf, true);
-        } else {
-            select.value = select._lastVerifiedVrf;
-        }
-        const row = select.closest('tr');
-        const checkbox = row?.querySelector('input[name="select"]');
-        // A restored selection can check a disabled row before its verify answers.
-        if (checkbox?.disabled) checkbox.checked = false;
-        if (row) commitSelectionChange(row.closest('table'));
-    };
-
-    fetch('/plugins/librenms_plugin/verify-ipaddress/', {
-        method: 'POST',
-        signal: controller.signal,
-        headers: {
-            'Content-Type': 'application/json',
-            'X-CSRFToken': csrfToken
-        },
-        body: JSON.stringify({
-            device_id: deviceId,
-            ip_address: fullIpAddress,  // Use full IP address with prefix
-            row_id: select.dataset.rowId,
-            vrf_id: value,
-            interface_name_field: document.querySelector('input[name="interface_name_field"]:checked')?.value || null,
-            server_key: syncServerKey() || null
-        })
-    })
-        .then(response => {
-            if (!response.ok) {
-                return rejectWithRefusal(response, 'HTTP');
-            }
-            return response.json();
-        })
-        .then(data => {
-            const row = select.closest('tr');
-            // A tab swap replaced this row, and its table no longer owns the stored selection.
-            if (controller.signal.aborted || !_isLiveRow(row)) return;
-
-            if (data.status === 'success' && row && data.formatted_row) {
-                const statusCell = row.querySelector('td[data-col="status"]');
-                if (statusCell) {
-                    statusCell.innerHTML = data.formatted_row.status;
-                }
-                markFilterStaleRow(row);
-                // An IP mapping can ignore the address in the chosen VRF, so the selection follows the verdict.
-                const checkbox = row.querySelector('input[name="select"]');
-                if (checkbox) {
-                    checkbox.disabled = !data.formatted_row.selectable;
-                    if (checkbox.disabled) checkbox.checked = false;
-                    commitSelectionChange(row.closest('table'));
-                }
-                select._lastVerifiedVrf = value;
-            } else {
-                console.error('VRF verification rejected:', data.message || 'Unknown error');
-                rollbackToLastVerified();
-            }
-        })
-        .catch(error => {
-            if (error.name === 'AbortError' || !_isLiveRow(select.closest('tr'))) return;
-            console.error('VRF verification failed:', error.message);
-            rollbackToLastVerified();
-            showErrorToast(withFullStop(`The VRF check failed: ${error.refusal || error.message}`));
         });
 }
 
@@ -4230,6 +3957,9 @@ function markFilterStaleRow(row) {
     showFilterStaleNotice(table);
 }
 
+// A converted table's row READ (sync_draft.js) repaints a row from the server, which can now be outside the filter.
+document.addEventListener('librenms:row-swapped', (event) => markFilterStaleRow(event.target));
+
 /**
  * Show, once per table, the polite notice that the filtered rows reflect the last load.
  *
@@ -4308,35 +4038,7 @@ document.addEventListener('submit', function (event) {
     if (event.target.matches('.sync-filter-form')) pendingFilterApplies.add(event.target);
 }, true);
 
-// Restored HTML has initial control values; the restored URL names the displayed filters.
-// A cached snapshot keeps the binding markers of its controls but not their listeners; the swap binds them again.
-document.addEventListener('htmx:historyCacheHit', function (event) {
-    const snapshot = document.createElement('template');
-    snapshot.innerHTML = event.detail.item.content;
-    snapshot.content.querySelectorAll('*').forEach(element => {
-        Object.keys(element.dataset).filter(key => /(^initialized|Initialized|Bound)$/.test(key)).forEach(key => {
-            delete element.dataset[key];
-        });
-    });
-    // TomSelect markup stays without its instance, and NetBox enhances only a plain select: undo it as destroy() does.
-    snapshot.content.querySelectorAll('.ts-wrapper').forEach(wrapper => wrapper.remove());
-    snapshot.content.querySelectorAll('select.tomselected').forEach(select => {
-        select.classList.remove('tomselected', 'ts-hidden-accessible');
-        select.removeAttribute('tabindex');
-    });
-    event.detail.item.content = snapshot.innerHTML;
-});
-
-document.addEventListener('htmx:historyRestore', function () {
-    const parameters = new URLSearchParams(window.location.search);
-    document.querySelectorAll('.sync-filter-form').forEach(form => {
-        [...form.elements].filter(control => control.id && control.name).forEach(control => {
-            control.value = parameters.get(control.name) ?? '';
-        });
-    });
-});
-
-// An empty field means no filter, so it stays out of the page URL that the response pushes.
+// An empty field means no filter, so it stays out of the page URL that the response names.
 document.addEventListener('htmx:configRequest', function (event) {
     if (event.detail.elt instanceof HTMLFormElement && event.detail.elt.matches('.sync-filter-form')) {
         const form = event.detail.elt;
@@ -5137,7 +4839,6 @@ document.body.addEventListener('closeModal', closeHtmxModal);
 function initializeScripts() {
     // The row selection restore reads the menu switches, so the menu is restored first.
     initializeSyncOptionMenus();
-    initializePrimaryIpToggle();
     initializeCheckboxes();
     initializeVCMemberSelect();
     initializeVRFSelects();

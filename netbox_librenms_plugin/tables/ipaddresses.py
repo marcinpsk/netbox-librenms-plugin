@@ -1,14 +1,13 @@
-import json
+from itertools import repeat
 from typing import NamedTuple
 
 import django_tables2 as tables
 from django.utils.html import format_html, mark_safe
 from netbox.tables.columns import ToggleColumn
 
-from netbox_librenms_plugin.assessment.ip_addresses import ViewBlock
+from netbox_librenms_plugin.assessment.ip_addresses import ViewBlock, shown_vrf_id
 from netbox_librenms_plugin.constants import MATCHING, MISMATCHED, NOT_IN_NETBOX
 from netbox_librenms_plugin.sync_filters import FilterColumn, FilterSpec
-from netbox_librenms_plugin.sync_query import SyncQuery
 from netbox_librenms_plugin.utils import paginate_sync_table, rule_block_html, rule_block_label
 
 # The sync-state filter value of each row status; every other status is unclassified.
@@ -41,37 +40,38 @@ class _StatusCell(NamedTuple):
     markup: str
 
 
-def management_row_vrfs(rows):
-    """Return the VRF that the VRF select of each management row shows, by row ID; "" is Global."""
-    vrfs = {}
-    for row in rows:
-        # The writer refuses this row, so it is no Set Primary IP candidate.
-        if not (row.get("is_mgmt_ip") and row["row_id"]) or not offers_selection(row):
-            continue
-        choices = {vrf.pk for vrf in row.get("vrfs") or ()}
-        # The view sets vrf_id or suggested_vrf_id, never both.
-        shown = next((vrf_id for vrf_id in (row.get("vrf_id"), row.get("suggested_vrf_id")) if vrf_id in choices), None)
-        vrfs[row["row_id"]] = "" if shown is None else str(shown)
-    return vrfs
+# The marker of a selected row whose evidence changed since the user selected it.
+_CHANGED_MARKER = format_html(
+    '<i class="mdi mdi-alert-circle-outline text-warning ms-1" role="img" title="{0}" aria-label="{0}"></i>',
+    "Changed since you selected it: select it again",
+)
+
+
+def _row_read_attribute(value):
+    """Return a row read attribute for a row with a read URL, and leave a row without one bare."""
+    return lambda record: value if record.get("row_read_url") else None
 
 
 class IPAddressTable(tables.Table):
-    """Table for displaying LibreNMS IP address data."""
+    """
+    Table for displaying LibreNMS IP address data.
 
-    def __init__(self, data, *, mgmt_row_vrfs, **kwargs):
+    Each row reads its checkbox state, its evidence token and its row read URL from the record, which
+    ``sync_rows`` prepares from the selection draft.
+    """
+
+    def __init__(self, data, **kwargs):
         """
         Initialize IP address table.
 
         Args:
             data (list[dict]): The rows, which ``assess_snapshot`` identified over the whole snapshot.
-            mgmt_row_vrfs (dict[str, str]): The VRF that each management row of the whole snapshot shows, by row ID.
             **kwargs: Other ``tables.Table`` options.
 
         """
         super().__init__(data, **kwargs)
-        # Set Primary IP selects the management row also from a page or a filter that does not show it, with its VRF.
-        self.attrs["data-mgmt-rows"] = json.dumps(list(mgmt_row_vrfs))
-        self.attrs["data-mgmt-row-vrfs"] = json.dumps(mgmt_row_vrfs)
+        # A row renders the same on every page and in a row read: no position-dependent even/odd class.
+        self._counter = repeat(0)
         # The paginator links state table.tab, so paging keeps the user on the IP Addresses tab.
         self.tab = "ipaddresses"
         # Give this table its own pagination namespace. configure() passes self.prefix to
@@ -101,6 +101,16 @@ class IPAddressTable(tables.Table):
             "data-interface": lambda record: record["row_id"],
             "data-name": lambda record: record["ip_with_mask"],
             "data-mgmt-ip": lambda record: "true" if record.get("is_mgmt_ip") else "",
+            "data-row-key": lambda record: record["row_id"],
+            "data-evidence": lambda record: record.get("evidence_token") or None,
+            "data-evidence-changed": lambda record: "true" if record.get("evidence_changed") else None,
+            # sync_draft.js reads the row again with this request; the attributes stop the form's hx-* from applying.
+            "hx-get": lambda record: record.get("row_read_url") or None,
+            "hx-trigger": _row_read_attribute("librenms:row-read"),
+            "hx-target": _row_read_attribute("this"),
+            "hx-swap": _row_read_attribute("outerHTML"),
+            "hx-sync": _row_read_attribute("this:replace"),
+            "hx-params": _row_read_attribute("none"),
         }
 
     selection = ToggleColumn(
@@ -111,6 +121,7 @@ class IPAddressTable(tables.Table):
             "input": {"name": "select", "disabled": lambda record: None if offers_selection(record) else "disabled"},
         },
         accessor="row_id",
+        checked=lambda value, record: record.get("selected"),
     )
 
     address = tables.Column(
@@ -137,10 +148,10 @@ class IPAddressTable(tables.Table):
     vrf = tables.TemplateColumn(
         template_code="""
         <div class="d-flex align-items-center gap-1">
-            <select id="vrf_select_{{ record.row_id }}" class="form-select vrf-select" data-ip="{{ record.ip_address }}" data-prefix="{{ record.prefix_length }}" data-row-id="{{ record.row_id }}" name="vrf_{{ record.row_id }}"{% if record.view_block %} disabled{% endif %}>
+            <select id="vrf_select_{{ record.row_id }}" class="form-select vrf-select" data-row-id="{{ record.row_id }}"{% if record.view_block %} disabled{% endif %}>
                 <option value="">Global</option>
                 {% for vrf in record.vrfs %}
-                    <option value="{{ vrf.pk }}" {% if record.vrf_id == vrf.pk or record.suggested_vrf_id == vrf.pk %}selected{% endif %}>
+                    <option value="{{ vrf.pk }}" {% if record.shown_vrf_id == vrf.pk %}selected{% endif %}>
                         {{ vrf.name }}
                     </option>
                 {% endfor %}
@@ -211,10 +222,8 @@ class IPAddressTable(tables.Table):
 
     def text_vrf(self, record):
         """Return the visible text of the VRF cell: the option its select shows, and the create button label."""
-        chosen = record.get("vrf_id"), record.get("suggested_vrf_id")
-        names = [vrf.name for vrf in record.get("vrfs") or () if vrf.pk in chosen]
-        # The template marks each matching option selected, and a browser shows the last one.
-        selected = names[-1] if names else "Global"
+        shown = shown_vrf_id(record)
+        selected = next((vrf.name for vrf in record.get("vrfs") or () if vrf.pk == shown), "Global")
         return f"{selected} {CREATE_VRF_LABEL}" if self.offers_vrf_create(record) else selected
 
     @staticmethod
@@ -225,15 +234,25 @@ class IPAddressTable(tables.Table):
     def render_vrf(self, column, record, table, value, bound_column, bound_row):
         """Render the VRF cell; the create button follows the rule that the text function reads."""
         offers = self.offers_vrf_create(record)
-        # Built here: django-tables2 before 2.8 does not give a TemplateColumn the request.
-        action = SyncQuery.from_request(table.request).url(record["vrf_create_url"]) if offers else ""
+        # sync_rows builds the action with the page query that the row read carries, so both render one URL.
+        action = record["vrf_create_action"] if offers else ""
         return column.render(
-            record={**record, "offers_vrf_create": offers, "vrf_create_action": action},
+            record={
+                **record,
+                "offers_vrf_create": offers,
+                "vrf_create_action": action,
+                "shown_vrf_id": shown_vrf_id(record),
+            },
             table=table,
             value=value,
             bound_column=bound_column,
             bound_row=bound_row,
         )
+
+    def render_selection(self, value, bound_column, record):
+        """Render the row checkbox, with a marker when the row changed after the user selected it."""
+        checkbox = bound_column.column.render(value, bound_column, record)
+        return format_html("{}{}", checkbox, _CHANGED_MARKER) if record.get("evidence_changed") else checkbox
 
     def text_status(self, record):
         """Return the visible text of the status cell: the action, the rule pill or the row state."""

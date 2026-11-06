@@ -8,6 +8,7 @@ checks each one. A URL the test does not know fails, so a new hop must be classi
 
 import json
 import re
+from html import unescape
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, urlsplit
 
@@ -256,6 +257,29 @@ def test_every_interface_tab_hop_keeps_the_page_query_or_applies_its_reset(clien
 
 
 @pytest.mark.django_db
+def test_the_page_links_of_a_tab_load_through_the_navigation_scheduler(client, settings, librenms_server):
+    """Each paging, page size, sort and Clear filters link is one that sync_draft.js loads into the tabs."""
+    owner, object_type = _contract_owner("device")
+    _seed(owner, _contract_ports())
+    serve_sync_page(client, settings, librenms_server, owner)
+
+    page_path, html = _render_page(client, owner)
+    hops = _hops(html, "interfaces")
+    routes = _routes(owner, object_type)
+    links = [hop for hop in hops.urls if _classify(hop, page_path, routes) in ("page link", "clear")]
+    # NetBox renders the sort links (inc/table.html); the scheduler takes every query link of a table head.
+    sort_links = {unescape(url) for url in re.findall(r'<th[^>]*>\s*<a href="(\?[^"]*)"', html)}
+
+    marked = [hop for hop in links if "data-sync-nav" in hop["attrs"]]
+    assert sort_links and len(marked) >= 4
+    assert all(hop in marked or hop["url"] in sort_links for hop in links), links
+    assert not [hop for hop in hops.urls if "hx-push-url" in hop["attrs"]]
+    (filter_form,) = [form for form in hops.get_forms if "sync-filter-form" in (form["attrs"].get("class") or "")]
+    # A search waits for the running READ of the same loader, so a tab switch can stop it.
+    assert filter_form["attrs"]["hx-sync"] == "#librenms-sync-nav:queue last"
+
+
+@pytest.mark.django_db
 def test_the_tab_links_keep_every_tab_state(client, settings, librenms_server):
     owner, _object_type = _contract_owner("device")
     _seed(owner, _contract_ports())
@@ -304,6 +328,7 @@ def test_a_filters_reset_drops_exactly_the_keys_the_filter_parser_owns():
     }
 
 
+@pytest.mark.django_db
 def test_the_module_paginator_keeps_the_interface_filters():
     """The Modules tab shares the paginator, so its links carry the other tabs' state too."""
     rows = [{"ent_physical_index": index, "name": f"module {index}", "depth": 0} for index in range(60)]
@@ -411,7 +436,17 @@ def _classify_tab_hop(hop, page_path, tab, owner, page_query):
         # A refresh, sync or VRF create comes back to the same filters and page, clamped to the last page.
         _assert_keeps(query, tuple(page_query), url, page_query)
         return posts[path]
+    if tab == "ipaddresses" and path.startswith(_ip_row_prefix(owner)):
+        # A row read answers the row as the page shows it, so it states the whole page query.
+        _assert_keeps(query, tuple(page_query), url, page_query)
+        return "row read"
     pytest.fail(f"An unclassified hop in the {tab} pane: <{hop['tag']}> {url}")
+
+
+def _ip_row_prefix(owner):
+    """Return the path that every row read URL of the owner's IP rows starts with."""
+    kwargs = {"object_type": owner._meta.model_name, "pk": owner.pk, "row_key": "0.0.0.0/0"}
+    return reverse("plugins:netbox_librenms_plugin:ip_row", kwargs=kwargs).removesuffix("0.0.0.0/0/")
 
 
 def _check_tab_filter_form(hops, tab, page_query):
@@ -563,13 +598,22 @@ def _four_tab_owner(client, settings, librenms_server):
 
 
 def _signatures(client, owner, field):
-    """Return the selection scope of each tab that the full sync page renders, by tab."""
+    """
+    Return the selection scope of each tab that the full sync page renders, by tab.
+
+    The IP tab keeps its selection in a server-side draft, so its scope is the draft of its table.
+    """
     response = client.get(
         reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[owner.pk]),
         {"server_key": SERVER_KEY, "interface_name_field": field},
     )
     assert response.status_code == 200
-    return dict(re.findall(r'data-sync-filter-tab="([^"]+)" data-selection-scope="([^"]*)"', response.content.decode()))
+    html = response.content.decode()
+    signatures = dict(re.findall(r'data-sync-filter-tab="([^"]+)" data-selection-scope="([^"]*)"', html))
+    ip_table = re.search(r'<table[^>]*id="librenms-ipaddress-table"[^>]*data-draft-id="([^"]+)"', html)
+    if ip_table:
+        signatures["ipaddresses"] = ip_table.group(1)
+    return signatures
 
 
 @pytest.mark.django_db
@@ -583,9 +627,12 @@ def test_every_tab_signs_its_selection_with_the_interface_name_field(client, set
 
     signatures = {field: _signatures(client, owner, field) for field in ("ifName", "ifDescr")}
 
-    assert set(signatures["ifName"]) == set(TAB_TABLES)
-    for tab in TAB_TABLES:
-        assert f"server_key={SERVER_KEY}" in signatures["ifName"][tab], tab
+    # With no snapshot the IP tab renders no table, so it holds no draft to keep.
+    expected = set(TAB_TABLES) if snapshot else set(TAB_TABLES) - {"ipaddresses"}
+    assert set(signatures["ifName"]) == expected
+    for tab in expected:
+        if tab != "ipaddresses":
+            assert f"server_key={SERVER_KEY}" in signatures["ifName"][tab], tab
         assert signatures["ifName"][tab] != signatures["ifDescr"][tab], tab
 
 

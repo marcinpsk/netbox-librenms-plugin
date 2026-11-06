@@ -172,8 +172,8 @@ class SyncTabFilterView(SyncCacheFragmentView):
     Render one filtered sync tab for its filter form, from the cache only.
 
     The tab content includes its Refresh toolbar. The tab links carry the page query outside it,
-    so the response renders those links out of band. ``HX-Push-Url`` puts the sync page URL with the
-    new query in the address bar.
+    so the response renders those links out of band. ``X-Sync-Page-Url`` names the sync page URL with
+    the new query, which the page's navigation scheduler (sync_draft.js) writes to the browser history.
     """
 
     def get(self, request, object_type, pk, tab):
@@ -205,6 +205,6 @@ class SyncTabFilterView(SyncCacheFragmentView):
             request=request,
         )
         response.content += out_of_band.encode()
-        response["HX-Push-Url"] = f"{page_path}?{request.GET.urlencode()}"
+        response["X-Sync-Page-Url"] = f"{page_path}?{request.GET.urlencode()}"
         response["Cache-Control"] = "no-store"
         return response

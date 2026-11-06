@@ -239,7 +239,7 @@ def test_the_text_of_a_driver_error_is_the_generic_answer():
 def test_a_failure_after_a_commit_is_never_a_conflict():
     """A committed attempt must not be retried, whatever failed after it."""
     try:
-        raise CommittedFollowUpError("follow-up failed") from wrapped_database_error("40P01")
+        raise CommittedFollowUpError("follow-up failed", result=None) from wrapped_database_error("40P01")
     except CommittedFollowUpError as exc:
         error = exc
 
@@ -917,6 +917,7 @@ def test_a_failing_commit_callback_is_not_retried_and_keeps_the_committed_events
     site = Site.objects.get(name="runner-follow-up")
     assert calls == [1]
     assert isinstance(caught.value.__cause__, RuntimeError)
+    assert caught.value.result == site.pk
     assert queued == {f"dcim.site:{site.pk}"}, "a committed attempt keeps its events"
 
 

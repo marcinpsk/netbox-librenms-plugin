@@ -8,7 +8,14 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from playwright.sync_api import expect
 
-from test_sync_cache_browser import _add_page_scripts, _page_html, _state
+from test_sync_cache_browser import (
+    _add_page_scripts,
+    _navigation_loader,
+    _page_html,
+    _serve_page_scripts,
+    _state,
+    _sync_document,
+)
 
 PAGE_URL = "https://plugin.example.com/dcim/devices/1/librenms-sync/"
 VERIFY_ROUTE = "**/plugins/librenms_plugin/verify-interface/*"
@@ -268,52 +275,41 @@ def test_a_cache_restore_loads_the_fragment_for_the_page_query(page):
 
 def _ip_row_page(filter_active):
     return f"""<!doctype html><html><body>
-        <input type="hidden" name="csrfmiddlewaretoken" value="token">
-        <form method="post"><input type="hidden" name="server_key" value="default">
-          <table id="librenms-ipaddress-table" data-filter-active="{"true" if filter_active else "false"}"><tbody>
-            <tr data-interface="198.18.0.1/24">
+        <form method="post">
+          <table id="librenms-ipaddress-table" data-draft-id="d" data-filter-active="{"true" if filter_active else "false"}"><tbody>
+            <tr data-row-key="198.18.0.1/24">
               <td data-col="selection"><input type="checkbox" name="select" value="198.18.0.1/24"></td>
               <td data-col="address"><a href="/ipam/ip-addresses/1/">198.18.0.1</a></td>
-              <td data-col="vrf"><select class="form-select vrf-select" data-ip="198.18.0.1" data-prefix="24"
-                  data-row-id="198.18.0.1/24" name="vrf_198.18.0.1/24">
-                <option value="" selected>Global</option><option value="1">blue</option></select></td>
               <td data-col="status">Synced</td>
             </tr>
-            <tr data-interface="198.18.0.2/24"><td data-col="address">198.18.0.2</td></tr>
+            <tr data-row-key="198.18.0.2/24"><td data-col="address">198.18.0.2</td></tr>
           </tbody></table>
         </form></body></html>"""
 
 
-def _verify_vrf(page):
-    page.route(
-        "**/plugins/librenms_plugin/verify-ipaddress/",
-        lambda route: route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps(
-                {"status": "success", "formatted_row": {"status": "<span>Update</span>", "selectable": True}}
-            ),
-        ),
+def _swap_ip_row(page):
+    # sync_draft.js announces a row that its row READ swapped in.
+    page.evaluate(
+        """() => document.querySelector('tr[data-row-key="198.18.0.1/24"]')
+            .dispatchEvent(new CustomEvent('librenms:row-swapped', {bubbles: true}))"""
     )
-    page.evaluate("handleVRFChange(document.querySelector('.vrf-select'), '1')")
-    page.locator('td[data-col="status"]', has_text="Update").wait_for()
 
 
-def test_a_vrf_verification_of_a_filtered_ip_row_marks_it_stale(page):
+def test_a_row_read_of_a_filtered_ip_row_marks_it_stale(page):
     _serve(page, _ip_row_page(filter_active=True))
 
-    _verify_vrf(page)
+    _swap_ip_row(page)
 
-    expect(page.locator('tr[data-interface="198.18.0.1/24"][data-filter-stale="true"]')).to_have_count(1)
+    expect(page.locator('tr[data-row-key="198.18.0.1/24"][data-filter-stale="true"]')).to_have_count(1)
     expect(page.locator('td[data-col="address"] .filter-stale-badge')).to_have_count(1)
-    assert page.locator('tr[data-interface="198.18.0.2/24"][data-filter-stale]').count() == 0
+    assert page.locator('tr[data-row-key="198.18.0.2/24"][data-filter-stale]').count() == 0
     expect(page.locator('#librenms-ipaddress-table-filter-stale-notice[role="status"]')).to_have_count(1)
 
 
-def test_a_vrf_verification_without_a_filter_marks_nothing(page):
+def test_a_row_read_without_a_filter_marks_nothing(page):
     _serve(page, _ip_row_page(filter_active=False))
 
-    _verify_vrf(page)
+    _swap_ip_row(page)
 
     assert page.locator("[data-filter-stale]").count() == 0
     assert page.locator("#librenms-ipaddress-table-filter-stale-notice").count() == 0
@@ -401,105 +397,6 @@ def test_apply_to_all_on_a_filtered_table_saves_the_groups_for_the_whole_device(
     page.wait_for_function("document.querySelectorAll('.filter-stale-badge').length === 1")
     assert saved == [{"device_id": "1", "vid_group_map": {"100": "7"}, "server_key": None}]
     expect(page.locator('tr[data-port-id="101"][data-filter-stale="true"]')).to_have_count(1)
-
-
-IP_TABLE = "librenms-ipaddress-table"
-IP_SUBMIT_PATH = "https://plugin.example.com/plugins/librenms_plugin/sync-ip/"
-
-
-def _ip_selection_page(signature, row_ids):
-    rows = "".join(
-        f'<tr data-interface="{row_id}"><td data-col="selection">'
-        f'<input type="checkbox" name="select" value="{row_id}" id="cb-{row_id.replace(".", "-").replace("/", "-")}"></td></tr>'
-        for row_id in row_ids
-    )
-    return f"""<!doctype html><html><body>
-        <input type="hidden" name="server_key" value="default">
-        <div data-sync-filter-tab="ipaddresses" data-selection-scope="{signature}">
-        <form method="post" action="{IP_SUBMIT_PATH}">
-          <table id="{IP_TABLE}" data-mgmt-rows="[]"><tbody>{rows}</tbody></table>
-          <button type="submit" id="sync">Sync</button>
-        </form></div></body></html>"""
-
-
-def _submitted(page):
-    posted = []
-    page.route(
-        IP_SUBMIT_PATH,
-        lambda route: (posted.append(route.request.post_data), route.fulfill(status=200, body="ok")),
-    )
-    page.click("#sync")
-    page.wait_for_function("document.body.textContent.trim() === 'ok'")
-    return sorted(parse_qs(posted[0]).get("select", []))
-
-
-def test_a_name_field_change_drops_the_ip_selection_from_the_next_bulk_sync(page):
-    # The server signs the IP table with its filter and name field (views/base/ip_addresses_view.py).
-    _serve(page, _ip_selection_page("interface_name_field=ifName&ipaddresses_q=eth", ["198.18.0.1/24"]))
-    page.evaluate("initializeCheckboxes()")
-    page.check("#cb-198-18-0-1-24")
-
-    # Under ifDescr the row's interface no longer matches the filter, so another row shows.
-    _serve(page, _ip_selection_page("interface_name_field=ifDescr&ipaddresses_q=eth", ["198.18.0.2/24"]))
-    page.evaluate("initializeCheckboxes()")
-    page.check("#cb-198-18-0-2-24")
-
-    assert _submitted(page) == ["198.18.0.2/24"]
-
-
-def test_a_return_to_the_earlier_name_field_does_not_restore_its_selection(page):
-    ip_table = f"document.getElementById('{IP_TABLE}')"
-    other_server = f"lnmsSelection:{urlsplit(PAGE_URL).path}:{IP_TABLE}:other:interface_name_field=ifName"
-    _serve(page, _ip_selection_page("interface_name_field=ifName", ["198.18.0.1/24", "198.18.0.2/24"]))
-    page.evaluate(f"sessionStorage.setItem('{other_server}', JSON.stringify({{'7': {{inputs: {{}}, auto: ''}}}}))")
-    page.evaluate("initializeCheckboxes()")
-    page.check("#cb-198-18-0-1-24")
-    page.evaluate(f"writeSeededManagementRows({ip_table}, new Set(['198.18.0.1/24']))")
-
-    _serve(page, _ip_selection_page("interface_name_field=ifDescr", ["198.18.0.1/24"]))
-    page.evaluate("initializeCheckboxes()")
-    expect(page.locator("#cb-198-18-0-1-24")).not_to_be_checked()
-
-    # Back under ifName the old row is on another page, and nothing of its old selection comes back.
-    _serve(page, _ip_selection_page("interface_name_field=ifName", ["198.18.0.2/24"]))
-    page.evaluate("initializeCheckboxes()")
-    assert page.evaluate(f"offPageSelectionKeys({ip_table})") == []
-    assert page.evaluate(f"readSeededManagementRows({ip_table}).size") == 0
-    assert page.locator(f"#{IP_TABLE}-offpage-selection").count() == 0
-    # Another server keeps its own selection.
-    assert page.evaluate(f"sessionStorage.getItem('{other_server}')") is not None
-    assert _submitted(page) == []
-
-
-def _tab_without_table_page(signature, body):
-    return f"""<!doctype html><html><body>
-        <input type="hidden" name="server_key" value="default">
-        <div data-sync-filter-tab="ipaddresses" data-selection-scope="{signature}">{body}</div></body></html>"""
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        pytest.param('<div data-filter-invalid="true">Correct the filters.</div>', id="invalid-filter"),
-        pytest.param("<p>No IP address data loaded.</p>", id="no-data"),
-    ],
-)
-def test_a_name_field_change_without_a_table_does_not_restore_the_earlier_selection(page, body):
-    _serve(page, _ip_selection_page("interface_name_field=ifName", ["198.18.0.1/24", "198.18.0.2/24"]))
-    page.evaluate("initializeCheckboxes()")
-    page.check("#cb-198-18-0-1-24")
-
-    # The tab shows no table while the user switches to ifDescr and back.
-    for signature in ("interface_name_field=ifName", "interface_name_field=ifDescr", "interface_name_field=ifName"):
-        _serve(page, _tab_without_table_page(signature, body))
-        page.evaluate("initializeCheckboxes()")
-
-    # The table shows again under ifName, with no row of the old selection.
-    _serve(page, _ip_selection_page("interface_name_field=ifName", ["198.18.0.2/24"]))
-    page.evaluate("initializeCheckboxes()")
-    assert page.evaluate(f"offPageSelectionKeys(document.getElementById('{IP_TABLE}'))") == []
-    assert page.locator(f"#{IP_TABLE}-offpage-selection").count() == 0
-    assert _submitted(page) == []
 
 
 CABLE_TABLE = "librenms-cable-table-vc"
@@ -645,6 +542,70 @@ def test_a_name_field_change_drops_the_cable_selection_from_the_next_bulk_sync(p
     assert sorted(parse_qs(posted[0]).get("select", [])) == ["7302"]
 
 
+def _submitted_cables(page):
+    posted = []
+    page.route(
+        CABLE_SUBMIT_PATH,
+        lambda route: (posted.append(route.request.post_data), route.fulfill(status=200, body="ok")),
+    )
+    page.click("#sync")
+    page.wait_for_function("document.body.textContent.trim() === 'ok'")
+    return sorted(parse_qs(posted[0]).get("select", []))
+
+
+def test_a_return_to_the_earlier_name_field_does_not_restore_its_selection(page):
+    cable_table = "document.getElementById('librenms-cable-table')"
+    other_server = f"lnmsSelection:{urlsplit(PAGE_URL).path}:librenms-cable-table:other:interface_name_field=ifName"
+    _serve(page, _cable_selection_page("interface_name_field=ifName", ["7301", "7302"]))
+    page.evaluate(f"sessionStorage.setItem('{other_server}', JSON.stringify({{'7': {{inputs: {{}}, auto: ''}}}}))")
+    page.evaluate("initializeCheckboxes()")
+    page.check("#cb-7301")
+
+    _serve(page, _cable_selection_page("interface_name_field=ifDescr", ["7301"]))
+    page.evaluate("initializeCheckboxes()")
+    expect(page.locator("#cb-7301")).not_to_be_checked()
+
+    # Back under ifName the old row is on another page, and nothing of its old selection comes back.
+    _serve(page, _cable_selection_page("interface_name_field=ifName", ["7302"]))
+    page.evaluate("initializeCheckboxes()")
+    assert page.evaluate(f"offPageSelectionKeys({cable_table})") == []
+    assert page.locator("#librenms-cable-table-offpage-selection").count() == 0
+    # Another server keeps its own selection.
+    assert page.evaluate(f"sessionStorage.getItem('{other_server}')") is not None
+    assert _submitted_cables(page) == []
+
+
+def _tab_without_table_page(signature, body):
+    return f"""<!doctype html><html><body>
+        <input type="hidden" name="server_key" value="default">
+        <div data-sync-filter-tab="cables" data-selection-scope="{signature}">{body}</div></body></html>"""
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param('<div data-filter-invalid="true">Correct the filters.</div>', id="invalid-filter"),
+        pytest.param("<p>No cable data loaded.</p>", id="no-data"),
+    ],
+)
+def test_a_name_field_change_without_a_table_does_not_restore_the_earlier_selection(page, body):
+    _serve(page, _cable_selection_page("interface_name_field=ifName", ["7301", "7302"]))
+    page.evaluate("initializeCheckboxes()")
+    page.check("#cb-7301")
+
+    # The tab shows no table while the user switches to ifDescr and back.
+    for signature in ("interface_name_field=ifName", "interface_name_field=ifDescr", "interface_name_field=ifName"):
+        _serve(page, _tab_without_table_page(signature, body))
+        page.evaluate("initializeCheckboxes()")
+
+    # The table shows again under ifName, with no row of the old selection.
+    _serve(page, _cable_selection_page("interface_name_field=ifName", ["7302"]))
+    page.evaluate("initializeCheckboxes()")
+    assert page.evaluate("offPageSelectionKeys(document.getElementById('librenms-cable-table'))") == []
+    assert page.locator("#librenms-cable-table-offpage-selection").count() == 0
+    assert _submitted_cables(page) == []
+
+
 def test_apply_clears_the_stale_marks_and_a_later_repaint_marks_again(page):
     page.route(
         VERIFY_ROUTE, lambda route: route.fulfill(status=200, content_type="application/json", body=_formatted_row())
@@ -769,20 +730,27 @@ def _filter_tab(query):
         </form></div></div>"""
 
 
-def _filter_page(query):
+def _filter_page(query, extra=""):
     tab = f'<div id="librenms-sync-tabs"><div id="interface-sync-content">{_filter_tab(query)}</div></div>'
-    return f"<!doctype html><html><body>{tab}</body></html>"
+    return _sync_document(f"{_navigation_loader()}{tab}{extra}")
 
 
-def _serve_filter_tab(page):
-    """Serve the tab, and hold each filter request until the test answers it with the tab for its query."""
+def _route_query(route):
+    return {key: values[0] for key, values in parse_qs(urlsplit(route.request.url).query).items()}
+
+
+def _serve_filter_tab(page, extra=""):
+    """Serve the sync page for its query, and hold each filter request until the test answers it."""
     held = []
+    _serve_page_scripts(page)
     page.route(
-        f"{PAGE_URL}**", lambda route: route.fulfill(status=200, content_type="text/html", body=_filter_page({}))
+        f"{PAGE_URL}**",
+        lambda route: route.fulfill(
+            status=200, content_type="text/html", body=_filter_page(_route_query(route), extra)
+        ),
     )
     page.route(f"{FILTER_ENDPOINT}**", lambda route: held.append(route))
     page.goto(f"{PAGE_URL}?tab=interfaces&server_key=primary&cables_q=keep")
-    _add_page_scripts(page)
     return held
 
 
@@ -795,14 +763,13 @@ def _next_request(page, held, count):
 
 
 def _answer(route):
-    """Answer like the filter endpoint: the tab content, and the page URL with the request query to push."""
+    """Answer like the filter endpoint: the tab content, and the path of the page URL that shows it."""
     split = urlsplit(route.request.url)
-    query = {key: values[0] for key, values in parse_qs(split.query).items()}
     route.fulfill(
         status=200,
         content_type="text/html",
-        headers={"HX-Push-Url": f"{PAGE_URL}?{split.query}"},
-        body=_filter_tab(query),
+        headers={"X-Sync-Page-Url": f"{urlsplit(PAGE_URL).path}?{split.query}"},
+        body=_filter_tab(_route_query(route)),
     )
 
 
@@ -1139,7 +1106,7 @@ def test_an_applied_column_survives_a_cancelled_queued_state_change(page):
     assert len(held) == 2
 
 
-def test_history_restores_the_filter_controls_with_the_results(page):
+def test_back_and_forward_load_the_filter_controls_with_the_results(page):
     held = _serve_filter_tab(page)
     for count, value in enumerate(("eth", "xe"), start=1):
         page.fill("#id_interfaces_q", value)
@@ -1156,58 +1123,13 @@ def test_history_restores_the_filter_controls_with_the_results(page):
     expect(page.locator("#id_interfaces_q")).to_have_value("xe")
 
 
-def test_history_restore_binds_the_restored_select_all_control_again(page):
-    held = _serve_filter_tab(page)
-    page.evaluate(
-        f"""() => {{
-            const table = document.getElementById('{TABLE}');
-            table.innerHTML = '<thead><tr><th><input type="checkbox" class="toggle" id="toggle-all"></th></tr></thead>'
-                + '<tbody><tr data-port-id="1"><td data-col="selection"><input type="checkbox" name="select" value="1"></td></tr>'
-                + '<tr data-port-id="2"><td data-col="selection"><input type="checkbox" name="select" value="2"></td></tr></tbody>';
-            document.body.insertAdjacentHTML('beforeend', `<div id="vlanDetailModal" data-current-row-key="r1">
-                <table><tbody id="vlanDetailTableBody"><tr><td><select class="vlan-modal-group-select" data-vid="10">
-                <option value="5" selected>g</option></select></td></tr></tbody></table>
-                <button type="button" id="saveVlanGroups">Save</button></div>
-                <span></span><button type="button" class="vlan-edit-btn" data-row-key="r1"
-                    data-vlans='[{{"vid": 10, "type": "U"}}]' data-vlan-groups='[{{"id": 5, "name": "g"}}]'></button>
-                <input type="hidden" class="vlan-group-hidden" name="vlan_group_r1_10" value="">
-                <select id="ts-member" class="form-select tomselected ts-hidden-accessible" tabindex="-1">
-                <option value="1">1</option></select><div class="ts-wrapper form-select single">
-                <div class="ts-control"></div><div class="ts-dropdown single"></div></div>`);
-            initializeScripts();
-        }}"""
-    )
-    page.fill("#id_interfaces_q", "eth")
-    _answer(_next_request(page, held, 1))
-    expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "eth")
-
-    page.go_back()
-    expect(page.locator("#toggle-all")).to_be_attached()
-    page.check("#toggle-all")
-
-    expect(page.locator(f'#{TABLE} td input[name="select"]:checked')).to_have_count(2)
-    # The VLAN modal Save button marks itself with a plain data-initialized.
-    page.click("#saveVlanGroups")
-    expect(page.locator('input[name="vlan_group_r1_10"]')).to_have_value("5")
-    # TomSelect markup without its instance: NetBox enhances only a select that matches its selector.
-    assert page.locator(".ts-wrapper").count() == 0
-    assert page.evaluate(
-        "document.getElementById('ts-member').matches("
-        "'select:not(.tomselected):not(.no-ts):not([size]):not(.api-select):not(.color-select)')"
-    )
-    assert page.evaluate("document.getElementById('ts-member').getAttribute('tabindex')") is None
-
-
-def test_a_history_cache_miss_binds_each_control_once(page):
+def test_back_loads_the_tabs_again_and_binds_each_control_once(page):
     vlan_modal = """<div id="vlanDetailModal" data-current-row-key="r1" data-current-device-id="1">
         <div class="modal-body"></div><table><tbody id="vlanDetailTableBody"><tr><td>
         <select class="vlan-modal-group-select" data-vid="10"><option value="5" selected>g</option></select>
         </td></tr></tbody></table><input type="checkbox" id="applyVlanGroupToAll" checked>
         <button type="button" id="saveVlanGroups">Save</button></div>"""
-    html = _filter_page({}).replace("</body>", f"{vlan_modal}</body>")
-    held, saves = [], []
-    page.route(f"{PAGE_URL}**", lambda route: route.fulfill(status=200, content_type="text/html", body=html))
-    page.route(f"{FILTER_ENDPOINT}**", lambda route: held.append(route))
+    saves = []
     page.route(
         "**/save-vlan-group-overrides/",
         lambda route: (
@@ -1215,10 +1137,7 @@ def test_a_history_cache_miss_binds_each_control_once(page):
             route.fulfill(status=200, content_type="application/json", body="{}"),
         ),
     )
-    page.goto(f"{PAGE_URL}?tab=interfaces&server_key=primary")
-    _add_page_scripts(page)
-    # Without a history cache, Back loads the page from the server again.
-    page.evaluate("htmxTest.config.historyCacheSize = 0")
+    held = _serve_filter_tab(page, extra=vlan_modal)
     page.fill("#id_interfaces_q", "eth")
     _answer(_next_request(page, held, 1))
     expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "eth")

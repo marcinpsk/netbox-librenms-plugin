@@ -39,7 +39,7 @@ from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
 )
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, port_pair, port_vlans, seed_ip_snapshot
-from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, messages_on
+from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, messages_on, submit_ip_selection
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
 IN_SCOPE = {"name__startswith": "eth"}
@@ -800,16 +800,9 @@ def _post_ip_sync_creating_the_interface(client, device, address, port_id, name)
         [sync_port(port_id, name, alias="secret uplink")],
         server_key=SERVER_KEY,
     )
-    url = reverse(
-        "plugins:netbox_librenms_plugin:sync_device_ip_addresses", kwargs={"object_type": "device", "pk": device.pk}
+    return submit_ip_selection(
+        client, device, [f"{address}/24"], server_key=SERVER_KEY, **{"create-missing-interfaces-toggle": "on"}
     )
-    data = {
-        "server_key": SERVER_KEY,
-        "create-missing-interfaces-toggle": "on",
-        "select": [f"{address}/24"],
-        f"vrf_{address}/24": "",
-    }
-    return client.post(url, data)
 
 
 @pytest.mark.django_db

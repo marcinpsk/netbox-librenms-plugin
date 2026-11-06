@@ -121,6 +121,7 @@ def test_the_ip_address_sync(client, settings, live_librenms, superuser):
     from ipam.models import IPAddress
 
     from netbox_librenms_plugin.tests.test_ip_address_sync_safety import _configure_test_server, _refresh_ip_snapshot
+    from netbox_librenms_plugin.tests.view_test_helpers import submit_ip_selection
 
     _configure_test_server(settings)
     tag = f"vetext-ipsync-{int(superuser)}"
@@ -135,13 +136,7 @@ def test_the_ip_address_sync(client, settings, live_librenms, superuser):
 
     disconnect = _refuse(IPAddress, hidden)
     try:
-        response = client.post(
-            reverse(
-                "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-                kwargs={"object_type": "device", "pk": device.pk},
-            ),
-            {"server_key": "default", "select": "198.18.0.10/24", "vrf_198.18.0.10/24": ""},
-        )
+        response = submit_ip_selection(client, device, ["198.18.0.10/24"])
     finally:
         disconnect()
 

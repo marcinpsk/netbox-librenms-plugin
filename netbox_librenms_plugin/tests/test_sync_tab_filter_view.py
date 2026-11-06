@@ -2,8 +2,8 @@
 The tab filter endpoint: a filter form swaps only its tab, and the response updates the rest of the page.
 
 Every test sends a real request to the endpoint, renders the real tab from a seeded snapshot, and reads
-the response as htmx does: the tab content and Refresh toolbar, the out-of-band tab links, and the
-``HX-Push-Url`` header.
+the response as the page does: the tab content and Refresh toolbar, the out-of-band tab links, and the
+``X-Sync-Page-Url`` header that the navigation scheduler writes to the browser history.
 """
 
 import re
@@ -57,9 +57,11 @@ def test_a_filter_answers_with_its_tab_the_tab_links_and_the_refresh_button(clie
     html = response.content.decode()
     assert list(_rows(html)) == [1002]
     page_path = reverse("dcim:device_librenms_sync", args=[device.pk])
-    assert response["HX-Push-Url"] == f"{page_path}?{urlencode(QUERY)}"
+    assert response["X-Sync-Page-Url"] == f"{page_path}?{urlencode(QUERY)}"
+    # htmx writes no history for this response: the scheduler is the only history writer of the page.
+    assert not any(header.startswith("HX-") for header in response.headers)
     # Every tab link opens its tab with the new filters; the Refresh button keeps them.
-    links = re.findall(r'hx-get="([^"]+)"', _out_of_band(html, "librenmsSync"))
+    links = re.findall(r'<a [^>]*href="([^"]+)"[^>]*data-sync-nav', _out_of_band(html, "librenmsSync"))
     assert {_query(link)["tab"][0] for link in links} == {"interfaces", "cables", "ipaddresses", "vlans", "modules"}
     assert all(urlsplit(unescape(link)).path == page_path for link in links)
     assert all(_query(link)["interfaces_q"] == ["eth1"] and _query(link)["cables_q"] == ["keep"] for link in links)
@@ -75,10 +77,12 @@ def test_a_virtual_machine_filter_pushes_the_virtual_machine_page(client, settin
 
     assert response.status_code == 200
     assert list(_rows(response.content.decode())) == [3002]
-    assert urlsplit(response["HX-Push-Url"]).path == reverse(
+    assert urlsplit(response["X-Sync-Page-Url"]).path == reverse(
         "virtualization:virtualmachine_librenms_sync", args=[vm.pk]
     )
-    links = re.findall(r'hx-get="([^"]+)"', _out_of_band(response.content.decode(), "librenmsSync"))
+    links = re.findall(
+        r'<a [^>]*href="([^"]+)"[^>]*data-sync-nav', _out_of_band(response.content.decode(), "librenmsSync")
+    )
     assert {_query(link)["tab"][0] for link in links} == {"interfaces", "ipaddresses"}
 
 

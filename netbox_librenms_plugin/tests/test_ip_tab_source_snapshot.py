@@ -17,7 +17,14 @@ from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
 from netbox_librenms_plugin.tests.test_ip_address_sync_safety import _serve_librenms_ip_rows
-from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    grant,
+    ip_tab,
+    make_user_with_perms,
+    message_texts,
+    submit_ip_selection,
+    write_ip_rows,
+)
 from netbox_librenms_plugin.views.sync.ip_addresses import VIEW_SCOPE_REFUSAL
 
 SERVER_KEY = "default"
@@ -52,10 +59,7 @@ def _fragment(client, device):
 
 
 def _sync(client, device, row_ids, **extra):
-    url = reverse(
-        "plugins:netbox_librenms_plugin:sync_device_ip_addresses", kwargs={"object_type": "device", "pk": device.pk}
-    )
-    return client.post(url, {"server_key": SERVER_KEY, "select": row_ids, **extra})
+    return submit_ip_selection(client, device, row_ids, server_key=SERVER_KEY, **extra)
 
 
 def _messages(response, level):
@@ -155,10 +159,11 @@ def test_the_render_and_the_sync_read_the_snapshot_only(client, live_librenms):
     requests_before = len(live_librenms.server.requests)
 
     fragment = _fragment(client, device)
+    management_row = ip_tab(client, device, server_key=SERVER_KEY).rows["198.18.81.1/24"]
     sync = _sync(client, device, ["198.18.81.1/24"], **{"set-primary-ip-toggle": "on"})
 
     assert fragment.status_code == 200
-    assert 'data-mgmt-rows="[&quot;198.18.81.1/24&quot;]"' in fragment.content.decode()
+    assert management_row["data-mgmt-ip"] == "true"
     assert sync.status_code == 302
     assert _messages(sync, messages.SUCCESS) == [
         "Created IP addresses: 198.18.81.1/24",
@@ -187,13 +192,19 @@ def test_the_sync_assesses_the_snapshot_for_the_user_who_syncs(client, live_libr
     requests_before = len(live_librenms.server.requests)
 
     fragment = _fragment(client, device).content.decode()
-    sync = _sync(client, device, ["198.18.82.1/24", "198.18.82.2/24"])
+    offered = {
+        row_id for row_id, row in ip_tab(client, device, server_key=SERVER_KEY).rows.items() if "data-evidence" in row
+    }
+    sync = _sync(client, device, ["198.18.82.1/24"])
+    # B's tab offers no selection of the withheld row, so the writer's own refusal is driven directly.
+    refused = write_ip_rows(device, user_b, {"198.18.82.2/24": None}, server_key=SERVER_KEY)
 
     assert eth1.get_absolute_url() in fragment
     assert eth2.get_absolute_url() not in fragment
+    assert offered == {"198.18.82.1/24"}
     assert sync.status_code == 302
     assert _messages(sync, messages.SUCCESS) == ["Created IP addresses: 198.18.82.1/24"]
-    assert any(VIEW_SCOPE_REFUSAL in text for text in _messages(sync, messages.ERROR))
+    assert any(VIEW_SCOPE_REFUSAL in text for text in message_texts(refused.request, "error"))
     assert IPAddress.objects.get(address="198.18.82.1/24").assigned_object == eth1
     assert not IPAddress.objects.filter(address="198.18.82.2/24").exists()
     assert len(live_librenms.server.requests) == requests_before

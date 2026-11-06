@@ -491,7 +491,7 @@ class TestIPAddressHTTPAndORM:
     def _assessed(self, view, device):
         snapshot = source_cache.read(device, Resource.IP_ADDRESSES, "default")
         assert snapshot is not None
-        from netbox_librenms_plugin.views.base.ip_addresses_view import read_ip_assessment
+        from netbox_librenms_plugin.sync_rows import read_ip_assessment
 
         return read_ip_assessment(view.request, device, snapshot, "default")
 

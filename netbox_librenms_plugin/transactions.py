@@ -65,6 +65,11 @@ class ConcurrentRowChange(Exception):
 class CommittedFollowUpError(Exception):
     """The attempt committed, then a commit callback failed; ``__cause__`` is that failure."""
 
+    def __init__(self, message, *, result):
+        super().__init__(message)
+        # The value that the work returned in the committed attempt.
+        self.result = result
+
 
 class _SwallowedConflict(Exception):
     """The work caught a lock conflict or a recorded conflict, and did not raise it."""
@@ -176,7 +181,8 @@ def run_transaction(work):
 
     Raises:
         TransactionConflict: Both attempts met a lock conflict.
-        CommittedFollowUpError: The attempt committed, and then a commit callback failed.
+        CommittedFollowUpError: The attempt committed, and then a commit callback failed. Its
+            ``result`` is the value that ``work`` returned.
         RuntimeError: The runner was called inside an atomic block (Django's durable check).
         TransactionManagementError: The connection is in manual transaction management, or
             ``work`` left the attempt marked for rollback with no recorded conflict (rule 2).
@@ -238,7 +244,9 @@ def _run_attempt(work, connection):
         return result
     except Exception as exc:
         if committed:
-            raise CommittedFollowUpError("The transaction committed, but a commit callback failed.") from exc
+            raise CommittedFollowUpError(
+                "The transaction committed, but a commit callback failed.", result=result
+            ) from exc
         raise
     finally:
         _active_recorder.reset(recorder_token)

@@ -1,6 +1,6 @@
 {% load helpers librenms_sync_query %}
 {% if has_librenms_id or sync_partial_response %}
-<form method="post" class="sync-tab-refresh-toolbar">
+<form method="post" class="sync-tab-refresh-toolbar" data-draft-command="refresh">
     {% csrf_token %}
     {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
     {% with model_name=object|meta:"model_name" %}
@@ -10,7 +10,8 @@
             {% url 'plugins:netbox_librenms_plugin:vm_ipaddress_sync' pk=object.pk as refresh_path %}
         {% endif %}
         {% if refresh_path %}
-            <button type="button" {% if server_key %}hx-post="{% sync_tab_url refresh_path %}"{% else %}disabled{% endif %}
+            <button type="button" data-draft-command="refresh"
+                    {% if server_key %}hx-post="{% sync_tab_url refresh_path %}"{% else %}disabled{% endif %}
                     hx-target="#ipaddress-sync-content" hx-sync="#ipaddress-sync-content:drop"
                     hx-include="[name='interface_name_field'], #ipaddress-sync-content [name='set-primary-ip-toggle'], #ipaddress-sync-content [name='create-missing-interfaces-toggle']"
                     class="btn btn-outline-primary">

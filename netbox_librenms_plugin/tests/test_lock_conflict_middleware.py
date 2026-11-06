@@ -151,7 +151,7 @@ def test_a_conflict_in_a_plugin_api_view_is_left_alone():
     [
         pytest.param(ValueError("not a conflict"), id="value-error"),
         pytest.param(wrapped_database_error("23505"), id="unique-violation"),
-        pytest.param(CommittedFollowUpError("follow-up failed"), id="follow-up-without-a-cause"),
+        pytest.param(CommittedFollowUpError("follow-up failed", result=None), id="follow-up-without-a-cause"),
     ],
 )
 def test_an_error_that_is_not_a_conflict_propagates_from_a_plugin_view(exception):
@@ -161,7 +161,7 @@ def test_an_error_that_is_not_a_conflict_propagates_from_a_plugin_view(exception
 @pytest.mark.django_db
 def test_a_follow_up_failure_whose_cause_is_not_a_conflict_propagates():
     try:
-        raise CommittedFollowUpError("follow-up failed") from RuntimeError("callback bug")
+        raise CommittedFollowUpError("follow-up failed", result=None) from RuntimeError("callback bug")
     except CommittedFollowUpError as exc:
         error = exc
 

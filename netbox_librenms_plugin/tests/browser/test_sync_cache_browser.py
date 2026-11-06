@@ -26,6 +26,43 @@ def _add_page_scripts(page):
     page.add_script_tag(path=str(SCRIPT_PATH))
 
 
+DRAFT_SCRIPT_PATH = SCRIPT_PATH.with_name("sync_draft.js")
+STATIC_URL = "https://plugin.example.com/static/"
+
+
+def _serve_page_scripts(page):
+    """Serve HTMX and the plugin scripts at the URLs that ``_sync_document`` loads them from."""
+    scripts = {"htmx.js": {"body": HTMX_SCRIPT}, "librenms_sync.js": {"path": SCRIPT_PATH}}
+    scripts["sync_draft.js"] = {"path": DRAFT_SCRIPT_PATH}
+
+    def serve(source):
+        # Playwright passes the request as a second argument to a handler that takes two.
+        return lambda route: route.fulfill(status=200, content_type="application/javascript", **source)
+
+    for name, source in scripts.items():
+        page.route(f"{STATIC_URL}{name}", serve(source))
+
+
+def _sync_document(body):
+    """
+    Return a sync page that loads its scripts where NetBox and librenms_sync_base.html put them.
+
+    HTMX and its config meta are in the head and the plugin scripts end the body, so sync_draft.js runs before
+    HTMX reads the config and sees the body's first htmx:load. Serve the scripts with ``_serve_page_scripts``.
+    """
+    return f"""<!doctype html><html><head>
+        <meta name="htmx-config" content='{{"scrollBehavior": "auto"}}'>
+        <script src="{STATIC_URL}htmx.js"></script></head>
+        <body>{body}<script src="{STATIC_URL}librenms_sync.js"></script>
+        <script src="{STATIC_URL}sync_draft.js"></script></body></html>"""
+
+
+def _navigation_loader():
+    """Cut the navigation loader out of librenms_sync_base.html, so the page carries its exact markup."""
+    source = (TEMPLATE_DIR / "librenms_sync_base.html").read_text(encoding="utf-8")
+    return re.search(r'<span[^>]*id="librenms-sync-nav".*?</span>', source, flags=re.S).group(0)
+
+
 def test_relationship_diagnostics_modal_opens_without_bootstrap(page):
     from django.template import Context, Engine, Library
 
@@ -1801,7 +1838,7 @@ def test_a_standalone_confirmation_leaves_no_backdrop_or_scroll_lock(page):
 
 @pytest.mark.parametrize(
     "table_id",
-    ["librenms-interface-table", "librenms-ipaddress-table", "librenms-cable-table"],
+    ["librenms-interface-table", "librenms-cable-table"],
 )
 def test_bulk_submit_still_consumes_off_page_selection_for_other_row_action_tabs(page, table_id):
     """Bulk actions still submit and clear off-page rows for every other row-action tab."""
@@ -2102,6 +2139,7 @@ def _page_html(
              data-server-key="primary"></div>
         <script id="librenms-sync-cache-initial" type="application/json">{state}</script>
         <script id="librenms-sync-cache-contract" type="application/json">{contract_json}</script>
+        {_navigation_loader()}
         <div id="librenms-sync-tabs" data-active-tab="{active_tab}">
           <ul id="librenmsSync">
             <li><a id="interfaces-tab" class="nav-link {"active" if active_tab == "interfaces" else ""}"
@@ -2414,7 +2452,7 @@ def test_cache_reads_carry_the_browser_url(page):
 SAVE_PREF_URL = "https://plugin.example.com/save-pref"
 
 
-def _ipaddress_toggle_fragment(extra_rows=""):
+def _ipaddress_toggle_fragment():
     """Build an IP address fragment around the template's own "Sync options" menu."""
     from django.template import Context, Engine, Library
 
@@ -2431,9 +2469,7 @@ def _ipaddress_toggle_fragment(extra_rows=""):
     return (
         menu.render(Context({"ip_sync": {"set_primary_ip": True}}, use_l10n=False))
         + '<table id="librenms-ipaddress-table"><tbody>'
-        '<tr data-mgmt-ip="true"><td><input type="checkbox" name="select" value="10.0.0.1"></td></tr>'
-        '<tr><td><input type="checkbox" name="select" value="10.0.0.2"></td></tr>'
-        f"{extra_rows}</tbody></table>"
+        '<tr><td><input type="checkbox" name="select" value="10.0.0.2"></td></tr></tbody></table>'
     )
 
 
@@ -2459,40 +2495,12 @@ def test_a_cache_fragment_binds_the_primary_ip_toggle(page):
     )
     page.evaluate("async () => { initializeSyncCacheConsistency(); await loadSyncCacheFragment('ipaddresses'); }")
 
-    mgmt_row = page.locator('tr[data-mgmt-ip="true"] input[name="select"]')
-    plain_row = page.locator('tr:not([data-mgmt-ip]) input[name="select"]')
-    assert mgmt_row.is_checked()
-    assert not plain_row.is_checked()
-
     with page.expect_request(SAVE_PREF_URL):
         page.uncheck("#set-primary-ip-toggle-cb")
 
-    assert not mgmt_row.is_checked()
     assert [{"key": body["key"], "value": body["value"]} for body in map(json.loads, saved_prefs)] == [
         {"key": "set_primary_ip", "value": False}
     ]
-
-    page.check("#set-primary-ip-toggle-cb")
-
-    assert mgmt_row.is_checked()
-
-
-def test_set_primary_ip_leaves_an_ignored_management_row_unselected(page):
-    """The writer refuses an address that an IP mapping ignores, so its disabled row is never selected."""
-    ignored = '<tr data-mgmt-ip="true"><td><input type="checkbox" name="select" value="fe80::1/64" disabled></td></tr>'
-    page.route(
-        "https://plugin.example.com/fragment/ipaddresses*",
-        lambda route: route.fulfill(body=_ipaddress_toggle_fragment(ignored), content_type="text/html"),
-    )
-    page.route(SAVE_PREF_URL, lambda route: route.fulfill(json={"status": "ok"}))
-    initial = {"interfaces": _state("interfaces-ready"), "ipaddresses": _state("ipaddresses-ready")}
-    _serve_sync_page(
-        page, '<input type="hidden" name="csrfmiddlewaretoken" value="test-csrf-token">' + _page_html(initial)
-    )
-    page.evaluate("async () => { initializeSyncCacheConsistency(); await loadSyncCacheFragment('ipaddresses'); }")
-
-    assert page.locator('input[name="select"][value="10.0.0.1"]').is_checked()
-    assert not page.locator('input[name="select"][value="fe80::1/64"]').is_checked()
 
 
 def test_a_cache_fragment_load_does_not_recheck_the_cache_status(page):
@@ -4771,7 +4779,7 @@ def test_refreshed_cable_picker_uses_the_persistent_htmx_loader(page):
     expect(page.locator("#htmx-modal")).to_have_class(re.compile(r"(?:^|\s)show(?:\s|$)"))
 
 
-@pytest.mark.parametrize("action", ["sync_one", "rebind_one", "create_vrf"])
+@pytest.mark.parametrize("action", ["sync_one", "rebind_one"])
 def test_programmatic_single_row_submit_keeps_off_page_selection(page, action):
     """A real HTMX request with a row action needs no SubmitEvent to preserve bulk rows."""
     bodies = []
@@ -5238,15 +5246,6 @@ def test_netbox_only_select_all_uses_only_the_current_rows_after_reinitializatio
 DEVICE_SYNC_PAGE_URL = "https://plugin.example.com/dcim/devices/1/librenms-sync/"
 
 
-def _vrf_table(row_id):
-    return f"""<table id="librenms-ipaddress-table"><tbody><tr data-interface="{row_id}" data-name="fe80::1/64">
-      <td data-col="selection"><input type="checkbox" name="select" value="{row_id}"></td>
-      <td data-col="vrf"><select class="form-select vrf-select" data-ip="fe80::1" data-prefix="64"
-          data-row-id="{row_id}" name="vrf_{row_id}"><option value="" selected>Global</option>
-          <option value="2">blue</option></select></td>
-      <td data-col="status">rendered</td></tr></tbody></table>"""
-
-
 def _vlan_table(row_id):
     return f"""<table id="librenms-vlan-table"><tbody><tr>
       <td data-col="selection"><input type="checkbox" name="select" value="{row_id}"></td>
@@ -5260,10 +5259,9 @@ def _vlan_table(row_id):
 @pytest.mark.parametrize(
     ("table_of", "table_id", "select_name", "verify_route"),
     [
-        (_vrf_table, "librenms-ipaddress-table", "vrf_row-1", "**/plugins/librenms_plugin/verify-ipaddress/"),
         (_vlan_table, "librenms-vlan-table", "vlan_group_row-1", "**/plugins/librenms_plugin/verify-vlan-sync-group/"),
     ],
-    ids=["vrf", "vlan-group"],
+    ids=["vlan-group"],
 )
 @pytest.mark.parametrize(
     "answer",

@@ -546,7 +546,6 @@ class TestRequiredObjectPermissionsWiring:
 
     def test_verify_views_have_object_permission_mixin_and_perms(self):
         """Read-only verify endpoints must wire NetBoxObjectPermissionMixin so their declared gate enforces instead of raising AttributeError (a missing mixin 500s; mock-based perm tests mask it)."""
-        from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
         from netbox_librenms_plugin.views.object_sync.devices import (
             SingleInterfaceVerifyView,
             SingleModuleVerifyView,
@@ -559,22 +558,23 @@ class TestRequiredObjectPermissionsWiring:
             SingleModuleVerifyView,
             SingleVlanGroupVerifyView,
             VerifyVlanSyncGroupView,
-            SingleIPAddressVerifyView,
         ):
             self._assert_has_mixins(view_class)
             assert "POST" in view_class.required_object_permissions, (
                 f"{view_class.__name__} must declare a POST object-permission requirement"
             )
 
-    def test_single_ipaddress_verify_has_object_permission_gate(self):
-        """The read-only verify-ipaddress endpoint resolves an arbitrary device_id and returns its data, so it must gate on dcim.view_device like the other verify views."""
-        from dcim.models import Device
+    def test_the_ip_draft_views_have_the_permission_mixins(self):
+        """The IP row read and the draft commands set the subject's view gate per request, so both permission mixins must enforce it."""
+        from netbox_librenms_plugin.views.base.ip_addresses_view import (
+            IPChoiceView,
+            IPManagementView,
+            IPRowView,
+            IPSelectionView,
+        )
 
-        from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
-        from netbox_librenms_plugin.views.mixins import NetBoxObjectPermissionMixin
-
-        assert NetBoxObjectPermissionMixin in SingleIPAddressVerifyView.__mro__
-        assert ("view", Device) in SingleIPAddressVerifyView.required_object_permissions.get("POST", [])
+        for view_class in (IPSelectionView, IPChoiceView, IPManagementView, IPRowView):
+            self._assert_has_mixins(view_class)
 
     def test_capture_data_shape_has_required_object_permissions(self):
         # GET-gated (not POST): the capture view reads a device's LibreNMS data, so it must carry
@@ -650,7 +650,7 @@ class TestTemplateSyntax:
 class TestHtmxSwapConvention:
     """The frontend guideline allows one outerHTML swap, so the templates must match it."""
 
-    EXCEPTION = _TEMPLATE_DIR / "inc" / "_sync_tab_link.html"
+    EXCEPTION = _TEMPLATE_DIR / "librenms_sync_base.html"
 
     def test_only_the_recorded_exception_swaps_outerhtml(self):
         """A second outerHTML swap has to be argued in the guideline, not added quietly."""

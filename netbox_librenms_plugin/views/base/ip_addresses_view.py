@@ -1,38 +1,44 @@
 import json
-import logging
 
 from dcim.models import Device
 from django.contrib import messages
+from django.core import signing
 from django.core.exceptions import BadRequest
-from django.http import Http404, JsonResponse
-from django.urls import reverse
+from django.http import Http404, HttpResponse
 from django.utils import timezone
 from django.views import View
+from django_tables2.utils import AttributeDict
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
-from netbox_librenms_plugin.constants import is_supported_interface_name_field
-from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix
-from netbox_librenms_plugin.ip_rules import ip_rules_for_request, row_ip_rule_block
-from netbox_librenms_plugin.server_mappings import read_mapping
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+from netbox_librenms_plugin.selection_draft import Assignment, DraftConflict, Intent, read_evidence
+from netbox_librenms_plugin.server_mappings import mapped_device_servers, read_mapping
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
-from netbox_librenms_plugin.sync_filters import filter_sync_table, parse_table_filters
-from netbox_librenms_plugin.sync_view_scope import (
-    VRF_UNAVAILABLE,
-    SyncViewScope,
-    VisibleInterface,
-    address_key,
-    parse_vrf_id,
+from netbox_librenms_plugin.sync_filters import parse_table_filters
+from netbox_librenms_plugin.sync_rows import (
+    IP_TAB,
+    RESULTS_STALE_EVENT,
+    REVISION_HEADER,
+    ROW_STALE_EVENT,
+    VRF_CHOICE,
+    find_ip_draft,
+    ip_row_html,
+    ip_rows,
+    ip_table,
+    management_assignments,
+    offpage_selection,
+    open_ip_draft,
+    read_ip_assessment,
+    seed_management_rows,
 )
-from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable, management_row_vrfs
+from netbox_librenms_plugin.sync_view_scope import VRF_UNAVAILABLE, SyncViewScope, parse_vrf_id
+from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
 from netbox_librenms_plugin.utils import (
-    get_interface_name_field,
-    index_ip_sync_rows,
     normalize_ip_sync_row_id,
     resolve_create_missing_interfaces,
     resolve_set_primary_ip,
-    rule_block_html,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -41,31 +47,7 @@ from netbox_librenms_plugin.views.mixins import (
     NetBoxObjectPermissionMixin,
 )
 
-from netbox_librenms_plugin.assessment.ip_addresses import assess, decide_ip_row_rule
-
-logger = logging.getLogger(__name__)
-
-# The verify answer for an address that no current source row holds.
-STALE_ROW_MESSAGE = "Refresh the IP data and select a current source row."
-
-
-def read_ip_assessment(request, obj, snapshot, server_key, interface_name_field=None):
-    """Assess source facts and add the URLs used by the web readers."""
-    if not is_supported_interface_name_field(interface_name_field):
-        interface_name_field = get_interface_name_field(request, obj)
-    result = assess(snapshot, subject=obj, actor=request.user, interface_name_field=interface_name_field)
-    for row in result.rows:
-        row["device_url"] = obj.get_absolute_url()
-        if ip := row.pop("netbox_ip", None):
-            row["ip_url"] = ip.get_absolute_url()
-        if interface := row.pop("netbox_interface", None):
-            row["interface_url"] = interface.get_absolute_url()
-        if row.get("can_create_vrf"):
-            row["vrf_create_url"] = reverse(
-                "plugins:netbox_librenms_plugin:create_ip_row_vrf",
-                kwargs={"object_type": obj._meta.model_name, "pk": obj.pk},
-            )
-    return result
+from netbox_librenms_plugin.assessment.ip_addresses import shown_vrf_id
 
 
 class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
@@ -84,23 +66,33 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         return self._snapshot_context(request, obj, snapshot, server_key)
 
     def _snapshot_context(self, request, obj, snapshot, server_key):
-        """Return the tab context of one snapshot, assessed for the request user."""
-        ip_data = read_ip_assessment(request, obj, snapshot, server_key).rows
+        """Return the tab context of one snapshot, assessed for the request user and selected by the user's draft."""
+        draft = open_ip_draft(request, obj, server_key, snapshot)
+        cleared = draft.cleared
+        assessment = ip_rows(request, obj, server_key, snapshot, draft.entries())
+        if not seed_management_rows(request, assessment, draft):
+            # Another request changed the new draft first, so the tab shows the draft as it is now.
+            draft = open_ip_draft(request, obj, server_key, snapshot)
+            assessment = ip_rows(request, obj, server_key, snapshot, draft.entries())
         cache_ttl = source_cache.remaining_ttl(obj, Resource.IP_ADDRESSES, server_key)
         cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl else None
-
-        # The management rows and the row identities describe the whole snapshot, so they come before the filter.
-        mgmt_row_vrfs = management_row_vrfs(ip_data)
-        table, filters, filtered_from = filter_sync_table(
-            request, ip_data, lambda rows: IPAddressTable(rows, mgmt_row_vrfs=mgmt_row_vrfs)
-        )
-        table.configure(request)
+        table, filters, filtered_from = ip_table(request, obj, server_key, assessment, draft)
+        offpage = offpage_selection(table, assessment.rows, filters)
 
         return {
             "table": table,
             "filters": filters,
             # The row count before the filter, shown only while a filter narrows the table.
             "filtered_from": filtered_from,
+            # The data refresh replaced a draft that had rows, so the page says the selection is gone.
+            "selection_cleared": cleared,
+            # The selected rows that the shown page does not show, which the submit takes too.
+            "offpage_selected": offpage,
+            "offpage_selected_json": json.dumps(offpage),
+            # The draft of the table without the table, for a page that shows no row (an invalid filter).
+            "draft_attrs": AttributeDict(
+                {name: value for name, value in table.attrs.items() if name.startswith("data-")}
+            ),
             "object": obj,
             "cache_expiry": cache_expiry,
             "server_key": server_key,
@@ -151,7 +143,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
     def get_context_data(self, request, obj):
         """Get the context data for the IP address sync view."""
         # The filters show their errors also when no snapshot is cached.
-        filters = parse_table_filters(request.GET, lambda rows: IPAddressTable(rows, mgmt_row_vrfs={}))
+        filters = parse_table_filters(request.GET, IPAddressTable)
         # Read the snapshot of ?server_key; a key that no longer resolves renders an empty table, never the default's.
         scoped, unresolved = self.resolve_get_render_server_key(request)
         server_key = None if unresolved else scoped or self._render_server_key()
@@ -225,325 +217,256 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         )
 
 
-class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionMixin, CacheMixin, View):
-    """View for verifying single IP address data with different VRF."""
+def _owner_model(object_type):
+    """Return the model of a sync subject URL's ``object_type``."""
+    if object_type == "device":
+        return Device
+    if object_type == "virtualmachine":
+        return VirtualMachine
+    raise Http404("Unsupported sync object type.")
 
-    # A fetch() caller reads the answer, so the middleware answers with a JSON error.
+
+def _canonical_row_key(value):
+    """Return *value* when it is the canonical ID of an IP row."""
+    try:
+        if normalize_ip_sync_row_id(value) == value:
+            return value
+    except ValueError:
+        pass
+    raise BadRequest("The request names no valid IP row.")
+
+
+def _parse_assignments(raw, obj, server_key):
+    """
+    Return the assignments that a selection request posts: ``{row_key: {"state", "token"}}`` as JSON.
+
+    A selection carries the row's evidence token, and the token must be one that the IP tab of this
+    subject and server signed for this row.
+
+    Raises:
+        BadRequest: The body is not such a JSON object.
+
+    """
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        raise BadRequest("The assignments are not JSON.") from None
+    if not isinstance(data, dict) or not data:
+        raise BadRequest("The assignments name no row.")
+    assignments = {}
+    for row_key, value in data.items():
+        _canonical_row_key(row_key)
+        try:
+            intent = Intent(value["state"])
+            token = value["token"] if intent is Intent.ON else None
+        except (KeyError, TypeError, ValueError):
+            raise BadRequest(f"The assignment of IP row {row_key} is not valid.") from None
+        assignments[row_key] = (
+            Assignment(intent, _row_evidence(row_key, token, obj, server_key))
+            if intent is Intent.ON
+            else Assignment(intent)
+        )
+    return assignments
+
+
+def _parse_shown_evidence(raw, obj, server_key):
+    """
+    Return the evidence payload of each management row that the page showed: ``{row_key: token}`` as JSON.
+
+    Raises:
+        BadRequest: The body is not such a JSON object, or a token is not one of its row.
+
+    """
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        raise BadRequest("The shown evidence is not JSON.") from None
+    if not isinstance(data, dict):
+        raise BadRequest("The shown evidence is not a JSON object.")
+    return {_canonical_row_key(key): _row_evidence(key, token, obj, server_key) for key, token in data.items()}
+
+
+def _row_evidence(row_key, token, obj, server_key):
+    """
+    Return the payload of *token* when the IP tab of this subject and server signed it for the row *row_key*.
+
+    Raises:
+        BadRequest: The token is not such a token.
+
+    """
+    try:
+        payload = read_evidence(IP_TAB, token) if isinstance(token, str) else None
+    except signing.BadSignature:
+        payload = None
+    if isinstance(payload, dict) and (payload.get("row"), payload.get("subject"), payload.get("server")) == (
+        row_key,
+        [obj._meta.label_lower, obj.pk],
+        server_key,
+    ):
+        return payload
+    raise BadRequest(f"The request carries no evidence of IP row {row_key}.")
+
+
+class _IPDraftView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
+    """
+    Resolve the subject, the server and the IP snapshot of one request on the user's IP selection draft.
+
+    The draft holds only the user's own selection, so the tab's view permissions are enough; the
+    submit checks the write permissions. The URL query names the server and the page query.
+    """
+
+    def subject(self, request, object_type, pk):
+        """
+        Return the subject, its server key and its IP snapshot (None when there is none), or an error response.
+
+        Raises:
+            Http404: The subject is outside the view scope, or the server is not mapped to it.
+
+        """
+        model = _owner_model(object_type)
+        self.required_object_permissions = {request.method: [("view", model)]}
+        if error := self.require_object_permissions_json(request.method):
+            return None, None, None, error
+        obj = self.restrict_object_or_404(model, pk=pk)
+        server_key = request.GET.get("server_key")
+        # A key that names no configured server reads no cache namespace, also when a mapping names it.
+        if (
+            not isinstance(server_key, str)
+            or server_key not in LibreNMSAPI.get_available_servers()
+            or server_key not in mapped_device_servers(obj, active_server=server_key)
+        ):
+            raise Http404("LibreNMS server is not mapped to this object.")
+        return obj, server_key, source_cache.read(obj, Resource.IP_ADDRESSES, server_key), None
+
+
+class _IPDraftCommandView(_IPDraftView):
+    """
+    A command on the user's IP draft: a compare-and-set on the draft ID and revision that the client acknowledged.
+
+    It answers 204 with the new revision in ``X-Draft-Revision``, or 409 when the draft is not the one
+    the client names (another window changed it, or a data refresh replaced it); then nothing changed.
+    """
+
+    # The draft writer of the page reads only the status and the headers.
     answers_json = True
 
-    # Read-only verify endpoint: require object-view permission (mirrors the interface/module/
-    # cable verify views). Without it any user with mere plugin-view rights could POST an
-    # arbitrary device id and read back that object's name/url/IP rows. The effective
-    # requirement is narrowed per-request in post() to the model the request actually targets
-    # (Device vs VirtualMachine); this class-level default (both) is the fail-closed fallback the
-    # permission-wiring test asserts.
-    required_object_permissions = {"POST": [("view", Device), ("view", VirtualMachine)]}
-
-    def require_object_permissions_json(self, method, *, object_id=None, object_type=None):
-        """
-        Resolve the per-object view permission for this verify request, then run the base gate.
-
-        Computing the requirement here (rather than inline in :meth:`post`) keeps the DB
-        model-resolution behind the same method the post-flow tests mock out — so those tests
-        exercise the request flow without a DB hit, while the real gate path resolves Device vs
-        VirtualMachine and checks the matching view permission.
-
-        Args:
-            method: HTTP method to gate (``"POST"``).
-            object_id: The posted object id, used to resolve the model when no type is given.
-            object_type: The posted ``object_type`` (``"device"``/``"virtualmachine"``), if any.
-
-        Returns:
-            None if permitted, or a 403 JsonResponse if denied.
-        """
-        self.required_object_permissions = {method: self._required_perms_for_object(object_id, object_type)}
-        return super().require_object_permissions_json(method)
-
-    def _required_perms_for_object(self, object_id, object_type):
-        """
-        Object-view perms a verify POST must hold for the object it targets.
-
-        Mirrors :meth:`_get_object`'s resolution so the gate matches the model whose name/url/cache
-        the response would expose: an explicit ``object_type`` gates on exactly that model; with no
-        type, resolve the id to its model (an existence check that reads no object data), Device
-        first, then VirtualMachine. Fall back to requiring BOTH view perms (fail closed) when the id
-        is unusable or resolves to neither, so a Device-only (or VM-only) caller can never read the
-        other model's data through this endpoint.
-
-        Args:
-            object_id (int | str | None): The posted object ID.
-            object_type (str | None): The posted object type, if provided.
-
-        Returns:
-            list[tuple[str, type]]: The required model permissions.
-        """
-        if object_type == "device":
-            return [("view", Device)]
-        if object_type == "virtualmachine":
-            return [("view", VirtualMachine)]
+    @staticmethod
+    def draft_version(data):
+        """Return the draft ID and the expected revision that a command names."""
         try:
-            if Device.objects.filter(pk=object_id).exists():
-                return [("view", Device)]
-            if VirtualMachine.objects.filter(pk=object_id).exists():
-                return [("view", VirtualMachine)]
-        except (ValueError, TypeError):
-            pass
-        return [("view", Device), ("view", VirtualMachine)]
-
-    def _get_object(self, object_id, object_type=None):
-        """
-        Retrieve the object (Device or VirtualMachine) based on ID and optional type.
-
-        Resolves through permission-restricted querysets: the POST gate only checks model-level
-        view perms, so a constrained grant must not resolve an out-of-scope id here. It returns a 404
-        instead of exposing the object's assessed IP rows.
-
-        Args:
-            object_id (int): The object ID.
-            object_type (str | None): The object type, if provided.
-
-        Returns:
-            Device | VirtualMachine: The permitted object.
-
-        Raises:
-            Http404: If no permitted Device or VirtualMachine matches the request.
-        """
-        if object_type == "device":
-            return self.restrict_object_or_404(Device, pk=object_id)
-        elif object_type == "virtualmachine":
-            return self.restrict_object_or_404(VirtualMachine, pk=object_id)
-        else:
-            # Try to find object without knowing its type (scoped to the caller's viewable objects).
-            obj = self.restricted_queryset(Device).filter(pk=object_id).first()
-            if obj:
-                return obj
-
-            obj = self.restricted_queryset(VirtualMachine).filter(pk=object_id).first()
-            if obj:
-                return obj
-
-            raise Http404(f"Object with ID {object_id} not found in Device or VirtualMachine models")
-
-    def _parse_ip_address(self, ip_address):
-        """
-        Parse IP address string into address and prefix length.
-
-        Works with both IPv4 and IPv6 addresses.
-
-        Args:
-            ip_address (str): The IP address with its prefix length.
-
-        Returns:
-            tuple[str, int]: The host address and prefix length.
-
-        Raises:
-            ValueError: If the IP address or prefix length is invalid.
-        """
-        parsed = parse_address_with_prefix(ip_address)
-        return str(parsed.ip), parsed.network.prefixlen
+            return str(data["draft_id"]), int(data["expected_revision"])
+        except (KeyError, TypeError, ValueError):
+            raise BadRequest("A draft command names its draft and revision.") from None
 
     @staticmethod
-    def _find_row(rows, address, prefix_len, row_id=None):
-        """Resolve one assessed source row without guessing among equal addresses."""
-        target = str(parse_address_with_prefix(address, prefix_len))
-        key = normalize_ip_sync_row_id(row_id) if row_id is not None else target
-        if key.partition("@")[0] != target:
-            return None, None, None
-        index, duplicates = index_ip_sync_rows(rows)
-        row = index.get(key) if key not in duplicates else None
-        if row is None:
-            return None, None, None
-        return row, row.get("vrf_id"), row.get("port_id")
+    def acknowledge(revision, trigger=None):
+        """Return the answer of an applied command."""
+        response = HttpResponse(status=204)
+        response[REVISION_HEADER] = str(revision)
+        if trigger is not None:
+            response["HX-Trigger"] = json.dumps(trigger)
+        return response
 
     @staticmethod
-    def _find_existing_ip(visible, vrf_id=None):
-        """
-        Return whether the viewable addresses exist, whether one is in *vrf_id*, and the URL to show.
-
-        Args:
-            visible (Iterable[IPAddress]): The viewable NetBox addresses equal to the row's address.
-            vrf_id (int | None): The VRF the row's select shows; None is Global.
-
-        Returns:
-            tuple[bool, bool, str | None]: Exists in any VRF, exists in *vrf_id*, and the address URL.
-        """
-        matches = sorted(visible, key=lambda ip: ip.pk)
-        if not matches:
-            return False, False, None
-
-        if vrf_id is not None:
-            matching_vrf_rows = [row for row in matches if row.vrf_id == vrf_id]
-        else:
-            matching_vrf_rows = [row for row in matches if row.vrf_id is None]
-
-        if len(matching_vrf_rows) == 1:
-            return True, True, matching_vrf_rows[0].get_absolute_url()
-        return True, False, matches[0].get_absolute_url() if len(matches) == 1 else None
+    def conflict():
+        """Return the answer of a command that named another draft or revision."""
+        return HttpResponse(status=409)
 
     @staticmethod
-    def _answer(ip_address, status_html, selectable):
-        """Return the verify answer: the row's status cell and whether the row may be selected."""
-        return JsonResponse(
-            {
-                "status": "success",
-                "ip_address": ip_address,
-                "formatted_row": {"status": status_html, "selectable": selectable},
-            }
-        )
+    def draft(request, obj, server_key, snapshot):
+        """Return the stored draft of the snapshot that the command read; None (a conflict) when a newer one replaced it."""
+        return find_ip_draft(request, obj, server_key, snapshot) if snapshot is not None else None
 
-    def _determine_status(self, exists_any_vrf, exists_specific_vrf, original_vrf_id, vrf_id):
-        """Determine the status of an IP address based on existence and VRF."""
-        if exists_any_vrf:
-            # IP exists in NetBox
-            if exists_specific_vrf:
-                return "matched"
-            else:
-                return "update"
-        else:
-            # IP doesn't exist in NetBox, check if restoring to original VRF
-            if original_vrf_id is not None and original_vrf_id == vrf_id:
-                return "matched"
-            else:
-                return "sync"
 
-    def post(self, request):  # noqa: C901
-        """POST request to return json response with formatted IP address status."""
-        # Parse the (caller-supplied) body first — this reads no object data — so the permission
-        # gate can target the model the request actually addresses. _get_object() resolves a Device
-        # OR a VirtualMachine, so a static Device-only gate would let a user with only
-        # dcim.view_device read VM name/url/cache data (and vice versa). Gate BELOW still runs
-        # before any object is resolved or any cached row is read.
-        try:
-            data = json.loads(request.body)
-        except json.JSONDecodeError:
-            return JsonResponse({"status": "error", "message": "Invalid JSON payload"}, status=400)
-        # json.loads accepts a bare list/string/number; calling .get() on those raises before the
-        # permission gate and the broad handler below, so 500s on a non-object body. Reject it.
-        if not isinstance(data, dict):
-            return JsonResponse({"status": "error", "message": "JSON payload must be an object"}, status=400)
-        object_id = data.get("device_id")
-        object_type = data.get("object_type")
-        if error := self.require_object_permissions_json("POST", object_id=object_id, object_type=object_type):
+class IPSelectionView(_IPDraftCommandView):
+    """Set the absolute selection state of IP rows in the user's draft; the page's unload beacon posts here too."""
+
+    def post(self, request, object_type, pk):
+        """Apply one batch of row states: ``draft_id``, ``expected_revision`` and ``assignments`` (JSON)."""
+        obj, server_key, snapshot, error = self.subject(request, object_type, pk)
+        if error:
             return error
+        draft_id, expected_revision = self.draft_version(request.POST)
+        assignments = _parse_assignments(request.POST.get("assignments"), obj, server_key)
+        if (draft := self.draft(request, obj, server_key, snapshot)) is None:
+            return self.conflict()
         try:
-            from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+            revision = draft.assign(draft_id, expected_revision, assignments)
+        except DraftConflict:
+            return self.conflict()
+        return self.acknowledge(revision)
 
-            ip_address = data.get("ip_address")
-            vrf_id = data.get("vrf_id")
-            # Validate the requested server key before using it as a cache namespace: an
-            # unconfigured/forged key would otherwise let a caller probe arbitrary server-key cache
-            # namespaces via get_cache_key(). Mirror the sync/cable membership check; anything
-            # unrecognized falls back to "default" (the prior missing-key behaviour), so a caller
-            # can only ever address a configured key or the fixed default — never an arbitrary one.
-            requested_server_key = data.get("server_key")
-            if isinstance(requested_server_key, str) and requested_server_key in LibreNMSAPI.get_available_servers():
-                server_key = requested_server_key
-            else:
-                server_key = "default"
 
-            if not ip_address:
-                return JsonResponse({"status": "error", "message": "No IP address provided"}, status=400)
+class IPChoiceView(_IPDraftCommandView):
+    """Store the VRF that the user chose for one IP row, then name the row for the page to read again."""
 
-            # Reject JSON booleans explicitly before the falsy check: bool is an int
-            # subclass, so True/False would otherwise pass int() and validate as IDs 1/0,
-            # and object_id=False would be misreported as "No object ID provided".
-            if isinstance(object_id, bool):
-                return JsonResponse({"status": "error", "message": "Invalid object ID"}, status=400)
-            # Reject JSON floats too: int(1.9) silently truncates to 1, so a fractional id
-            # would coerce to a different object instead of returning a clean 400.
-            if isinstance(object_id, float):
-                return JsonResponse({"status": "error", "message": "Invalid object ID"}, status=400)
+    def post(self, request, object_type, pk):
+        """Store ``value`` ("" is Global, else a VRF pk) as the VRF of the IP row ``row``."""
+        obj, server_key, snapshot, error = self.subject(request, object_type, pk)
+        if error:
+            return error
+        draft_id, expected_revision = self.draft_version(request.POST)
+        row_key = _canonical_row_key(request.POST.get("row"))
+        vrf_id = parse_vrf_id(request.POST.get("value"))
+        if (draft := self.draft(request, obj, server_key, snapshot)) is None:
+            return self.conflict()
+        rows = read_ip_assessment(request, obj, snapshot, server_key).rows
+        row = next((row for row in rows if row["row_id"] == row_key), None)
+        if row is None or row.get("view_block") is not None:
+            raise Http404("No current IP row with a VRF choice has this key.")
+        # A hidden and a missing VRF give the same answer.
+        if vrf_id is not None and vrf_id not in {vrf.pk for vrf in row["vrfs"]}:
+            raise Http404(VRF_UNAVAILABLE)
+        # The VRF that the row shows without a choice is no choice: the row then follows a later suggestion.
+        value = None if vrf_id == shown_vrf_id(row) else "" if vrf_id is None else str(vrf_id)
+        try:
+            revision = draft.choose(draft_id, expected_revision, row_key, VRF_CHOICE, value)
+        except DraftConflict:
+            return self.conflict()
+        return self.acknowledge(revision, {ROW_STALE_EVENT: {"key": row_key}})
 
-            if not object_id:
-                return JsonResponse({"status": "error", "message": "No object ID provided"}, status=400)
 
-            # Validate the client-supplied numeric IDs up front so a bad value returns a
-            # clean 400 instead of raising deep in the ORM and being caught as a generic 500.
-            try:
-                object_id = int(object_id)
-            except (TypeError, ValueError):
-                return JsonResponse({"status": "error", "message": "Invalid object ID"}, status=400)
-            try:
-                vrf_id = parse_vrf_id(vrf_id)
-            except BadRequest:
-                return JsonResponse({"status": "error", "message": "Invalid VRF ID"}, status=400)
+class IPManagementView(_IPDraftCommandView):
+    """Select the management rows that Set Primary IP takes in the user's draft, or clear them."""
 
-            # Get the object (Device or VirtualMachine)
-            try:
-                obj = self._get_object(object_id, object_type)
-            except Http404:
-                return JsonResponse({"status": "error", "message": f"Object with ID {object_id} not found"}, status=404)
+    def post(self, request, object_type, pk):
+        """Select the management rows with the shown ``evidence`` when ``selected`` is ``on``; else clear them."""
+        obj, server_key, snapshot, error = self.subject(request, object_type, pk)
+        if error:
+            return error
+        draft_id, expected_revision = self.draft_version(request.POST)
+        selected = request.POST.get("selected")
+        if selected not in ("on", "off"):
+            raise BadRequest("Set Primary IP is on or off.")
+        # The page sends the evidence it showed for the management rows; only that evidence is approved.
+        shown = _parse_shown_evidence(request.POST.get("evidence"), obj, server_key) if selected == "on" else {}
+        if (draft := self.draft(request, obj, server_key, snapshot)) is None:
+            return self.conflict()
+        rows = ip_rows(request, obj, server_key, snapshot, draft.entries()).rows
+        try:
+            revision = draft.assign(draft_id, expected_revision, management_assignments(rows, selected == "on", shown))
+        except DraftConflict:
+            return self.conflict()
+        return self.acknowledge(revision, {RESULTS_STALE_EVENT: None})
 
-            # Validate both address and source selector before reading the snapshot.
-            try:
-                address_no_mask, prefix_len = self._parse_ip_address(ip_address)
-                if data.get("row_id") is not None:
-                    normalize_ip_sync_row_id(data["row_id"])
-            except ValueError:
-                return JsonResponse(
-                    {"status": "error", "message": "Invalid IP address or source row identity"},
-                    status=400,
-                )
 
-            scope = SyncViewScope.for_request(request.user, obj, server_key)
-            # A hidden and a missing VRF give the same answer.
-            try:
-                vrf = scope.vrf(vrf_id)
-            except Http404:
-                return JsonResponse({"status": "error", "message": VRF_UNAVAILABLE}, status=404)
-            vrf_id = vrf.pk if vrf is not None else None
+class IPRowView(_IPDraftView):
+    """Answer one IP row as the tab's table renders it, for the page's row read."""
 
-            snapshot = source_cache.read(obj, Resource.IP_ADDRESSES, server_key)
-            rows = (
-                read_ip_assessment(request, obj, snapshot, server_key, data.get("interface_name_field")).rows
-                if snapshot is not None
-                else []
-            )
-            cache_entry, original_vrf_id, original_port_id = self._find_row(
-                rows, address_no_mask, prefix_len, data.get("row_id")
-            )
-            if cache_entry is None:
-                return JsonResponse({"status": "error", "message": STALE_ROW_MESSAGE}, status=400)
-
-            table = IPAddressTable([], mgmt_row_vrfs={})
-            if cache_entry.get("view_block") is not None:
-                return self._answer(ip_address, table.render_status(cache_entry["status"], cache_entry), False)
-
-            # The assessed row decides everything except what the chosen VRF decides.
-            updated_record = {
-                key: value for key, value in cache_entry.items() if key not in ("vrf_id", "status", "ip_rule_block")
-            }
-            updated_record.update({"vrf_id": vrf_id, "exists": False})
-            row_key = address_key(updated_record["ip_with_mask"])
-            visible = scope.address_states([row_key])[row_key].visible
-            exists_any_vrf, exists_specific_vrf, ip_url = self._find_existing_ip(visible, vrf_id)
-            if exists_any_vrf:
-                updated_record["exists"] = True
-                updated_record["ip_url"] = ip_url
-            updated_record["status"] = self._determine_status(
-                exists_any_vrf, exists_specific_vrf, original_vrf_id, vrf_id
-            )
-
-            target = scope.resolve_ip_interface(
-                {"port_id": original_port_id, "interface_name": updated_record.get("interface_name")}
-            )
-            ip_rule, held = decide_ip_row_rule(
-                ip_rules_for_request(request),
-                updated_record["ip_with_mask"],
-                vrf_id,
-                target.interface if isinstance(target, VisibleInterface) else None,
-                visible,
-            )
-            if held:
-                status_html = table.render_status("matched", updated_record)
-            elif ip_rule is not None:
-                status_html = rule_block_html(row_ip_rule_block(ip_rule))
-            else:
-                status_html = table.render_status(updated_record["status"], updated_record)
-            return self._answer(ip_address, status_html, ip_rule is None)
-
-        except Exception:
-            logger.exception("Unexpected error in IP address sync")
-            return JsonResponse(
-                {"status": "error", "message": "An internal error occurred. Please check server logs."}, status=500
-            )
+    def get(self, request, object_type, pk, row_key):
+        """Render the ``<tr>`` of the IP row *row_key* from the stored snapshot and the user's draft."""
+        obj, server_key, snapshot, error = self.subject(request, object_type, pk)
+        if error:
+            return error
+        if snapshot is None:
+            raise Http404("The IP snapshot is not available.")
+        # A row read is a presentation: like the tab render, it opens the draft of the published snapshot.
+        html = ip_row_html(
+            request, obj, server_key, snapshot, open_ip_draft(request, obj, server_key, snapshot), row_key
+        )
+        if html is None:
+            raise Http404("No current IP row has this key.")
+        response = HttpResponse(html)
+        # Per-viewer selection state.
+        response["Cache-Control"] = "no-store"
+        return response

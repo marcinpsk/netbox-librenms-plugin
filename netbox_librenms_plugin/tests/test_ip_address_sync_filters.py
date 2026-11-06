@@ -6,7 +6,6 @@ request: the fragment that the sync page loads, the full sync page, or a sync PO
 interfaces, IP addresses and VRFs are real rows.
 """
 
-import json
 import re
 from html import unescape
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -26,6 +25,7 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.test_interface_sync_filters import CELL, _visible_text
 from netbox_librenms_plugin.tests.test_ip_address_sync_safety import _serve_librenms_ip_rows
+from netbox_librenms_plugin.tests.view_test_helpers import select_ip_rows, switch_set_primary_ip
 
 SERVER_KEY = "default"
 # The loopback helper serves the LibreNMS device as ID 42.
@@ -94,8 +94,9 @@ def _table_attr(html, name):
     return unescape(re.search(rf'{name}="([^"]*)"', table).group(1))
 
 
-def _selection_scope(html):
-    return unescape(re.search(r'data-sync-filter-tab="ipaddresses" data-selection-scope="([^"]*)"', html).group(1))
+def _checked(row):
+    (box,) = re.findall(r'<input[^>]*name="select"[^>]*>', row)
+    return "checked" in box
 
 
 def _mixed_owner(kind, tag, client, server):
@@ -235,32 +236,44 @@ class TestWholeSnapshotData:
 
         filtered = _tab(client, device, ipaddresses_q="eth6")
 
-        # The one shown duplicate keeps its source-port key, so its checkbox and VRF field still name that row.
+        # The one shown duplicate keeps its source-port key, so its checkbox and VRF select still name that row.
         assert list(_rows(filtered)) == ["198.18.7.9/24@7506"]
         assert 'value="198.18.7.9/24@7506"' in filtered
-        assert 'name="vrf_198.18.7.9/24@7506"' in filtered
-        # Set Primary IP selects the management row, which the filter does not show.
-        assert json.loads(_table_attr(filtered, "data-mgmt-rows")) == ["198.18.7.9/24@7505"]
-        assert _table_attr(filtered, "data-mgmt-rows") == _table_attr(unfiltered, "data-mgmt-rows")
+        assert 'id="vrf_select_198.18.7.9/24@7506"' in filtered
         assert _table_attr(filtered, "data-filter-active") == "true"
         assert _table_attr(unfiltered, "data-filter-active") == "false"
-        # The selection belongs to the tab, so a filter keeps the rows already selected.
-        assert _selection_scope(filtered) == "interface_name_field=ifName&server_key=default"
-        assert _selection_scope(filtered) == _selection_scope(unfiltered)
+        # The selection belongs to the tab, so a filter keeps the draft of the rows already selected.
+        assert _table_attr(filtered, "data-draft-id") == _table_attr(unfiltered, "data-draft-id")
+        # Set Primary IP selects the management row, which the filter does not show.
+        response = switch_set_primary_ip(
+            client,
+            {
+                name: _table_attr(filtered, name)
+                for name in (
+                    "data-management-url",
+                    "data-draft-id",
+                    "data-draft-revision",
+                    "data-management-evidence",
+                )
+            },
+            "on",
+        )
+        assert response.status_code == 204
+        selected = {row_id for row_id, row in _rows(_tab(client, device)).items() if _checked(row)}
+        assert selected == {"198.18.7.9/24@7505"}
 
     def test_the_selection_signature_changes_with_the_interface_name_field(self, client, settings, librenms_server):
         bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
         client = _client(client, "signature")
         device = _mixed_owner("device", "signature", client, librenms_server)
 
-        signatures = {
-            field: _selection_scope(_tab(client, device, ipaddresses_q="eth", interface_name_field=field))
+        drafts = {
+            field: _table_attr(_tab(client, device, ipaddresses_q="eth", interface_name_field=field), "data-draft-id")
             for field in ("ifName", "ifDescr")
         }
 
         # The interface column follows the name field, so one filter can hold other rows under each field.
-        assert signatures["ifName"] != signatures["ifDescr"]
-        assert all(f"interface_name_field={field}" in signature for field, signature in signatures.items())
+        assert drafts["ifName"] != drafts["ifDescr"]
 
 
 def _sync_page_url(owner):
@@ -301,8 +314,6 @@ class TestInvalidFilters:
         assert _rows(html) == {}
         assert 'id="ipaddresses_filter-errors"' in html
         assert 'data-filter-invalid="true"' in html
-        # The tab names its selection scope also with no table, so the browser can drop other scopes.
-        assert re.search(r'data-sync-filter-tab="ipaddresses" data-selection-scope="[^"]*interface_name_field=', html)
         field = next(iter(params))
         if field in ("ipaddresses_sync_state", "ipaddresses_q"):
             assert re.search(rf'id="id_{field}"[^>]*aria-invalid="true"', html, re.S)
@@ -361,16 +372,14 @@ class TestInvalidFilters:
         client = _client(client, "sync-action")
         device = _mixed_owner("device", "sync-action", client, librenms_server)
         query = urlencode({"tab": "ipaddresses", "ipaddresses_sync_state": "bogus"})
+        # The selection is made while the table shows; the filter turns invalid before the submit.
+        draft = select_ip_rows(client, device, ["198.18.7.3/24"])
 
-        response = client.post(
-            f"{_sync_url(device)}?{query}",
-            {"server_key": SERVER_KEY, "select": ["198.18.7.3/24"], "vrf_198.18.7.3/24": ""},
-            HTTP_HX_REQUEST="true",
-        )
+        response = client.post(f"{_sync_url(device)}?{query}", {"server_key": SERVER_KEY, **draft})
 
-        assert response.status_code == 200
+        assert response.status_code == 302
         assert IPAddress.objects.get(address="198.18.7.3/24").assigned_object.name == "eth3"
-        assert parse_qs(urlsplit(response.headers["HX-Redirect"]).query)["ipaddresses_sync_state"] == ["bogus"]
+        assert parse_qs(urlsplit(response["Location"]).query)["ipaddresses_sync_state"] == ["bogus"]
 
 
 # The page query of the tests below: the IP tab's filters and page, and another tab's filter.
@@ -402,20 +411,17 @@ class TestRedirectsKeepThePageQuery:
     """Every answer that sends the browser back to the sync page keeps every tab's filters and page."""
 
     @pytest.mark.parametrize("kind", ["device", "virtual_machine"])
-    def test_hx_redirect_after_a_sync_keeps_the_filters_and_page(self, client, settings, librenms_server, kind):
+    def test_a_plain_sync_redirect_keeps_the_filters_and_page(self, client, settings, librenms_server, kind):
         bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
         client = _client(client, f"redirect-{kind}")
         owner = _mixed_owner(kind, f"redirect-{kind}", client, librenms_server)
         action = _rendered_sync_action(client, owner)
 
-        response = client.post(
-            action,
-            {"server_key": SERVER_KEY, "select": ["198.18.7.3/24"], "vrf_198.18.7.3/24": ""},
-            HTTP_HX_REQUEST="true",
-        )
+        # A plain POST of the form goes back to the page; the page's htmx requests answer in place.
+        response = client.post(action, {"server_key": SERVER_KEY, "sync_one": "198.18.7.3/24"})
 
-        assert response.status_code == 200
-        target = response.headers["HX-Redirect"]
+        assert response.status_code == 302
+        target = response.url
         _assert_keeps_the_page_query(target, _sync_page_url(owner))
         # The page the browser loads shows the IP tab with the same filter.
         page = client.get(target)
@@ -433,8 +439,9 @@ class TestRedirectsKeepThePageQuery:
             address="198.18.7.3/24", assigned_object=Interface.objects.create(device=device, name="eth9", type="other")
         )
         action = _rendered_sync_action(client, device)
+        draft = select_ip_rows(client, device, ["198.18.7.3/24"])
 
-        response = client.post(action, {"server_key": SERVER_KEY, "select": ["198.18.7.3/24"], "vrf_198.18.7.3/24": ""})
+        response = client.post(action, {"server_key": SERVER_KEY, **draft})
 
         assert response.status_code == 200
         html = response.content.decode()

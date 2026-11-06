@@ -172,11 +172,14 @@ from .views import (
     SetPreferredServerView,
     SingleCableVerifyView,
     SingleInterfaceVerifyView,
-    SingleIPAddressVerifyView,
     SingleModuleVerifyView,
     SingleVlanGroupVerifyView,
     CableRemoteCreateView,
     CreateVRFFromIPRowView,
+    IPChoiceView,
+    IPManagementView,
+    IPRowView,
+    IPSelectionView,
     SyncCablesView,
     SyncCacheFragmentView,
     NetBoxOnlyInterfacesView,
@@ -340,12 +343,6 @@ urlpatterns = [
         SingleModuleVerifyView.as_view(),
         name="verify_module",
     ),
-    # Path for single IP address verify javascript call
-    path(
-        "verify-ipaddress/",
-        SingleIPAddressVerifyView.as_view(),
-        name="verify_ipaddress",
-    ),
     # Path for VLAN group verify javascript call (interface VLAN coloring)
     path(
         "verify-vlan-group/",
@@ -455,6 +452,28 @@ urlpatterns = [
         "<str:object_type>/<int:pk>/ip-row-vrf/",
         CreateVRFFromIPRowView.as_view(),
         name="create_ip_row_vrf",
+    ),
+    # The user's IP selection draft: row states (also the unload beacon), a row's VRF, Set Primary IP's rows
+    path(
+        "<str:object_type>/<int:pk>/ip-selection/",
+        IPSelectionView.as_view(),
+        name="ip_selection",
+    ),
+    path(
+        "<str:object_type>/<int:pk>/ip-selection/choice/",
+        IPChoiceView.as_view(),
+        name="ip_selection_choice",
+    ),
+    path(
+        "<str:object_type>/<int:pk>/ip-selection/management/",
+        IPManagementView.as_view(),
+        name="ip_selection_management",
+    ),
+    # One IP row as the tab renders it; the row key is an address with its prefix length
+    path(
+        "<str:object_type>/<int:pk>/ip-row/<path:row_key>/",
+        IPRowView.as_view(),
+        name="ip_row",
     ),
     # VLAN sync URLs
     path(
