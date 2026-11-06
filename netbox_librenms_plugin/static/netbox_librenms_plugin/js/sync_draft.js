@@ -5,8 +5,9 @@
  * link, Clear filters, a filter or search request, and Back or Forward. navigate() sends its READ through
  * the page's #librenms-sync-nav loader (hx-sync="this:replace"), so a newer navigation aborts an older one.
  * The filter form keeps its own htmx trigger (the search delay and queue last on the same loader). A filter takes
- * its identity at its first htmx:confirm, before htmx queues it, so a filter that a later navigation replaced
- * never goes. The answer of a filter still shows while only later filters of its form came after it.
+ * its identity at its first htmx:confirm, before htmx queues it, and a search already when the user types,
+ * before its delay; so a filter that a later navigation replaced never goes, and an earlier navigation never
+ * replaces it. The answer of a filter still shows while only later filters of its form came after it.
  * A response is accepted only while its navigation is the current one and no input came after it was
  * sent; a later input drops it and starts one new READ of its page URL after flush().
  * This script is the only writer of the page's browser history, and it handles every popstate itself.
@@ -42,7 +43,7 @@
     // The filter form whose filters took every navigation epoch from first to navEpoch, or null.
     let filterRun = null;
     // The navigation epoch of each filter request, by its triggering event: htmx confirms a queued request
-    // again with the same event when it sends it.
+    // again with the same event when it sends it, and a delayed search with the input event that started it.
     const filterEpochs = new WeakMap();
     // The page URL that the last navigation shows, or will show when its READ is accepted.
     let destination = window.location.href;
@@ -572,7 +573,7 @@
                 epoch = reserveNavigation(elt);
                 filterEpochs.set(event.detail.triggeringEvent, epoch);
             } else if (epoch !== navEpoch) {
-                // htmx sends a queued filter that a newer navigation replaced.
+                // htmx sends a delayed or queued filter that a newer navigation replaced.
                 event.preventDefault();
                 return;
             }
@@ -600,6 +601,15 @@
             if (draftForm) refuse();
             else endNavigation(epoch);
         });
+    });
+
+    // A search takes its identity when the user types, before the search delay: a navigation sent before then
+    // cannot replace the search field, and a later one replaces the search.
+    document.addEventListener('input', function (event) {
+        const field = event.target;
+        if (!(field instanceof HTMLInputElement) || !field.matches('.sync-filter-search')) return;
+        if (!field.form?.matches('.sync-filter-form')) return;
+        filterEpochs.set(event, reserveNavigation(field.form));
     });
 
     // The claim answers with the revision it left, and the input made during the submit goes with it.
