@@ -516,6 +516,61 @@ class TestTheVlanGroups:
         assert interface.untagged_vlan.group_id == second.pk
 
 
+def _hidden_selection(html):
+    """Return the row keys that the off-page notice of *html* names, or None when the page has no notice."""
+    clears = [attrs for attrs in open_tags(html, "button") if "data-clear-offpage" in attrs]
+    if not [attrs for attrs in open_tags(html, "div") if "data-offpage-selection" in attrs]:
+        return None
+    (clear,) = clears
+    return sorted(json.loads(clear["data-clear-offpage"]))
+
+
+def _fragment(client, owner, **query):
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_fragment",
+        kwargs={"object_type": owner._meta.model_name, "pk": owner.pk, "tab": "interfaces"},
+    )
+    return client.get(url, {"server_key": SERVER_KEY, **QUERY, **query}).content.decode()
+
+
+class TestTheHiddenSelection:
+    """The page states the selected rows that it does not show, because the submit writes them too."""
+
+    def test_the_selected_rows_that_the_page_does_not_show_are_counted_above_the_table(self, client, device):
+        _select(client, device, [10, 11])
+
+        # The filter shows only the LAG rows, so both selected rows are on no shown page.
+        assert _hidden_selection(_tab(client, device, interfaces_q="po1").html) == ["10", "11"]
+        # A page that shows every selected row has no such notice.
+        assert _hidden_selection(_tab(client, device).html) is None
+
+    def test_an_invalid_filter_counts_every_selected_row_as_hidden_and_keeps_the_draft_on_the_page(
+        self, client, device
+    ):
+        _select(client, device, [10, 11])
+
+        # The search is longer than a filter takes, so the tab shows no row.
+        html = _fragment(client, device, interfaces_q="x" * 300)
+
+        assert "data-filter-invalid" in html
+        assert not [attrs for attrs in open_tags(html, "tr") if attrs.get("data-row-key")]
+        assert _hidden_selection(html) == ["10", "11"]
+        # The page keeps the draft that Clear and the submit name.
+        (table,) = [attrs for attrs in open_tags(html, "table") if attrs.get("data-draft-id")]
+        assert table["data-draft-id"] == _tab(client, device).table["data-draft-id"]
+        assert table["data-selection-url"]
+
+    def test_a_virtual_machine_tab_counts_its_hidden_selection(self, client, settings):
+        configure_default_librenms_server(settings)
+        client.force_login(make_superuser("iface-hidden-vm-user"))
+        vm = map_device_to_librenms(make_vm("iface-hidden-vm"), 4501, server_key=SERVER_KEY)
+        seed_interfaces_snapshot(vm, [sync_port(51, "ens3"), sync_port(52, "ens4")], server_key=SERVER_KEY)
+        _select(client, vm, [52])
+
+        assert _hidden_selection(_tab(client, vm, interfaces_q="ens3").html) == ["52"]
+        assert _hidden_selection(_fragment(client, vm, interfaces_q="x" * 300)) == ["52"]
+
+
 def test_a_virtual_machine_tab_selects_and_syncs_through_its_draft(client, settings):
     configure_default_librenms_server(settings)
     client.force_login(make_superuser("iface-draft-vm-user"))

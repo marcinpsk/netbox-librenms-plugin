@@ -928,6 +928,47 @@ class TestTheTab:
             assert _normalized_row(response.content.decode()) == _normalized_row(_row_html(shown.html, row_key))
 
 
+def _hidden_selection(html):
+    """Return the row keys that the off-page notice of *html* names, or None when the page has no notice."""
+    clears = [attrs for attrs in open_tags(html, "button") if "data-clear-offpage" in attrs]
+    if not [attrs for attrs in open_tags(html, "div") if "data-offpage-selection" in attrs]:
+        return None
+    (clear,) = clears
+    return sorted(json.loads(clear["data-clear-offpage"]))
+
+
+@pytest.mark.django_db
+class TestTheHiddenSelection:
+    """The page states the selected rows that it does not show, because the submit writes them too."""
+
+    def test_the_selected_rows_that_the_page_does_not_show_are_counted_above_the_table(self, client, device):
+        select_rows(client, device, "vlans", [300, 310])
+
+        # The filter shows only VLAN 310, so the selected VLAN 300 is on no shown page.
+        assert _hidden_selection(_tab(client, device, vlans_q="Voice").html) == ["300"]
+        assert _hidden_selection(_tab(client, device).html) is None
+
+    def test_an_invalid_filter_counts_every_selected_row_as_hidden_and_keeps_the_draft_on_the_page(
+        self, client, device
+    ):
+        select_rows(client, device, "vlans", [300, 310])
+        url = reverse(
+            "plugins:netbox_librenms_plugin:sync_cache_fragment",
+            kwargs={"object_type": "device", "pk": device.pk, "tab": "vlans"},
+        )
+
+        # The search is longer than a filter takes, so the tab shows no row.
+        html = client.get(url, {"server_key": SERVER_KEY, "vlans_q": "x" * 300}).content.decode()
+
+        assert "data-filter-invalid" in html
+        assert not [attrs for attrs in open_tags(html, "tr") if attrs.get("data-row-key")]
+        assert _hidden_selection(html) == ["300", "310"]
+        # The page keeps the draft that Clear and the submit name.
+        (table,) = [attrs for attrs in open_tags(html, "table") if attrs.get("data-draft-id")]
+        assert table["data-draft-id"] == _tab(client, device).table["data-draft-id"]
+        assert table["data-selection-url"]
+
+
 @pytest.mark.django_db
 class TestTheGroupChoice:
     """A group choice is a draft command; the row read shows the row compared in that group."""

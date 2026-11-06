@@ -62,6 +62,7 @@ from netbox_librenms_plugin.sync_rows import (
     ROW_STALE_EVENT,
     bind_draft,
     evidence_problem,
+    hidden_selection,
     render_rows,
     row_url,
 )
@@ -900,6 +901,8 @@ class BaseInterfaceTableView(
             "selection_cleared": built.draft is not None and built.draft.cleared,
             # The Bulk VC Member dialog sends its member to this draft command.
             "member_command_url": draft_urls.get("data-member-url", ""),
+            # The selected rows that the shown page does not show, which the submit takes too.
+            **built.hidden_selection,
         }
 
     def build_table(self, request, obj, interface_name_field, server_key=None, *, snapshot=None, extra_keys=()):
@@ -923,6 +926,7 @@ class BaseInterfaceTableView(
         """
         table = None
         filtered_from = None
+        hidden = {}
         # Every hop of the tab carries the page query, so the toggle is read from it only.
         show_ignored = show_ignored_interfaces(request)
         # The filters show their errors also when no snapshot is cached.
@@ -984,7 +988,7 @@ class BaseInterfaceTableView(
             table, filters, filtered_from = filter_sync_table(request, table_rows, build)
             table.configure(request)
             if draft is not None:
-                show_interface_selection(
+                selected = show_interface_selection(
                     request,
                     obj,
                     server_key,
@@ -994,6 +998,7 @@ class BaseInterfaceTableView(
                     enabled=interface_sync_options_menu(request)["auto_select_lag_members"],
                     extra_keys=extra_keys,
                 )
+                hidden = hidden_selection(table, selected, filters, interface_row_key)
         return BuiltInterfaceTable(
             table=table,
             filters=filters,
@@ -1003,6 +1008,7 @@ class BaseInterfaceTableView(
             snapshot=snapshot,
             server_key=server_key,
             show_ignored=show_ignored,
+            hidden_selection=hidden,
         )
 
     def row_html(self, request, obj, server_key, row_key):
@@ -1032,6 +1038,8 @@ class BuiltInterfaceTable:
     snapshot: object
     server_key: str | None
     show_ignored: bool
+    # The context of hidden_selection(); empty without a draft.
+    hidden_selection: dict
 
 
 # =============================================================================
@@ -1158,6 +1166,10 @@ def show_interface_selection(request, obj, server_key, table, rows, draft, *, en
     The rule reads the draft over the whole snapshot: a row on the page shows checked when the user
     selected it, or when a selected row (on any page) requires it while *enabled*. The table is bound to
     the draft and the URLs of its commands.
+
+    Returns:
+        list[str]: The keys of the rows that the user selected, in snapshot order, which the submit takes.
+
     """
     entries = draft.entries()
     records = {key: record for record in rows["table_rows"] if (key := interface_row_key(record)) is not None}
@@ -1189,6 +1201,7 @@ def show_interface_selection(request, obj, server_key, table, rows, draft, *, en
         record["row_read_url"] = row_url(query, obj, server_key, "interface_row", key)
         record["vlan_modal_url"] = row_url(query, obj, server_key, "interface_vlan_modal", key)
     bind_draft(table, query, obj, server_key, draft, INTERFACE_COMMAND_URLS)
+    return [key for key, record in records.items() if intents.get(key) is Intent.ON and interface_selectable(record)]
 
 
 # The draft commands of the interface table, by the table attribute that names each URL.
