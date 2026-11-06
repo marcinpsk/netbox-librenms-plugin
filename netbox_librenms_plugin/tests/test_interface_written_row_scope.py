@@ -12,6 +12,8 @@ and refuses only that address.
 
 import ast
 import inspect
+import itertools
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from core.models import ObjectChange
@@ -26,6 +28,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_interface,
     make_vm,
+    map_device_to_librenms,
     transactional_db_with_all_apps,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
@@ -33,6 +36,7 @@ from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
     SERVER_KEY,
     SYNCED,
     bound_interface,
+    post_interface_sync,
     seed_ports,
     sync_port,
     synced_interface,
@@ -88,8 +92,18 @@ def _user(username, owner_model, interface_model, *, view=None, add=None, change
     return user
 
 
+_LIBRENMS_IDS = itertools.count(7000)
+
+
+def _device(name):
+    """Return a device mapped to its own LibreNMS device, as the sync tab needs."""
+    return make_device(name, librenms_cf={SERVER_KEY: {"id": next(_LIBRENMS_IDS)}})
+
+
 def _owner(object_type, name):
-    return make_device(name) if object_type == "device" else make_vm(name)
+    if object_type == "device":
+        return _device(name)
+    return map_device_to_librenms(make_vm(name), next(_LIBRENMS_IDS), server_key=SERVER_KEY)
 
 
 def _interfaces(owner):
@@ -100,19 +114,8 @@ def _interfaces(owner):
 
 
 def _post_sync(client, owner, object_type, port_ids, *, exclude_columns=(), htmx=False):
-    """Post the interface sync of *owner* for *port_ids*; every column is synced unless excluded."""
-    url = reverse(
-        "plugins:netbox_librenms_plugin:sync_selected_interfaces",
-        kwargs={"object_type": object_type, "object_id": owner.pk},
-    )
-    data = {
-        "server_key": SERVER_KEY,
-        "interface_name_field": "ifName",
-        "select": [str(port_id) for port_id in port_ids],
-        "exclude_columns": list(exclude_columns),
-    }
-    headers = {"HTTP_HX_REQUEST": "true"} if htmx else {}
-    return client.post(url, data, **headers)
+    """Select *port_ids* through the draft and post the interface sync of *owner*; every column is synced unless excluded."""
+    return post_interface_sync(client, owner, port_ids, htmx=htmx, exclude_columns=exclude_columns)
 
 
 def _written_change_records():
@@ -192,7 +195,7 @@ def test_a_new_row_outside_a_constrained_scope_refuses_the_whole_sync(
 @pytest.mark.parametrize("member_exists", [False, True], ids=["new", "existing"])
 def test_the_relationship_pass_cannot_move_a_row_out_of_the_scope(client, attempts, flushed_events, member_exists):
     """The relationship pass sets the LAG after the attribute pass wrote the member, so the check reads the row after it."""
-    device = make_device(f"written-scope-lag-{member_exists}")
+    device = _device(f"written-scope-lag-{member_exists}")
     bound_interface(device, "Po1", 100, iface_type="lag")
     if member_exists:
         synced_interface(device, "eth1", 1)
@@ -221,7 +224,7 @@ def test_the_relationship_pass_cannot_move_a_row_out_of_the_scope(client, attemp
 @pytest.mark.django_db
 def test_a_row_that_only_the_relationship_pass_wrote_is_checked_and_named(client):
     """The pass promotes the aggregate ``Po1``, which the user did not select, to ``type=lag``."""
-    device = make_device("written-scope-aggregate")
+    device = _device("written-scope-aggregate")
     bound_interface(device, "Po1", 100)
     seed_ports(
         device,
@@ -240,7 +243,7 @@ def test_a_row_that_only_the_relationship_pass_wrote_is_checked_and_named(client
 @pytest.mark.django_db
 def test_the_relationship_pass_uses_the_selection_read_at_the_start_of_the_attempt(client):
     """After the attribute write, ``eth1`` is outside the scope until the relationship pass sets its LAG."""
-    device = make_device("written-scope-lag-final-state")
+    device = _device("written-scope-lag-final-state")
     member = synced_interface(device, "eth1", 1, description="old")
     aggregate = bound_interface(device, "Po1", 100, iface_type="lag")
     seed_ports(
@@ -265,7 +268,7 @@ def test_the_relationship_pass_uses_the_selection_read_at_the_start_of_the_attem
 @pytest.mark.django_db
 def test_the_relationship_pass_takes_the_owner_visibility_from_the_selection(client):
     """The Device view scope follows the member: after the attribute write, it matches the device only with the LAG."""
-    device = make_device("written-scope-owner-view")
+    device = _device("written-scope-owner-view")
     member = synced_interface(device, "eth1", 1, description="old")
     aggregate = bound_interface(device, "Po1", 100, iface_type="lag")
     seed_ports(
@@ -295,7 +298,7 @@ def test_a_relationship_pass_that_cannot_lock_its_owner_is_not_a_silent_success(
     """Error injection: the owner lock of the relationship pass finds no owner."""
     from netbox_librenms_plugin.views.sync import interfaces as interfaces_view
 
-    device = make_device("written-scope-no-relationship-owner")
+    device = _device("written-scope-no-relationship-owner")
     synced_interface(device, "eth1", 1)
     bound_interface(device, "Po1", 100, iface_type="lag")
     seed_ports(
@@ -381,7 +384,7 @@ def test_a_port_bound_to_another_owner_is_refused_in_every_change_scope(
 @transactional_db_with_all_apps()
 def test_a_sync_whose_rows_are_all_in_scope_syncs_every_row(client, attempts, flushed_events):
     """The check refuses no row that is in the scope, also a row that the relationship pass wrote."""
-    device = make_device("written-scope-inside")
+    device = _device("written-scope-inside")
     aggregate = bound_interface(device, "Po1", 100, iface_type="lag")
     existing = synced_interface(device, "eth1", 11)
     VLAN.objects.create(vid=100, name="written-scope-inside")
@@ -414,7 +417,7 @@ def test_a_sync_whose_rows_are_all_in_scope_syncs_every_row(client, attempts, fl
 @pytest.mark.parametrize("htmx", [False, True], ids=["plain", "htmx"])
 def test_the_refusal_reaches_the_user_on_a_plain_and_an_htmx_submit(client, htmx):
     """The refusal publishes one error, and no success banner or skipped-row counter."""
-    device = make_device(f"written-scope-answer-{htmx}")
+    device = _device(f"written-scope-answer-{htmx}")
     seed_ports(device, [sync_port(10, "eth0"), sync_port(11, "private0")])
     client.force_login(_user(f"written-scope-answer-{htmx}-user", Device, Interface, add=IN_SCOPE))
 
@@ -427,15 +430,16 @@ def test_the_refusal_reaches_the_user_on_a_plain_and_an_htmx_submit(client, htmx
         assert refusal[1] in response.content.decode()
     else:
         assert response.status_code == 302
-        tab = reverse("dcim:device_librenms_sync", kwargs={"pk": device.pk}) + "?tab=interfaces"
-        assert response["Location"].startswith(tab)
+        location = urlsplit(response["Location"])
+        assert location.path == reverse("dcim:device_librenms_sync", kwargs={"pk": device.pk})
+        assert parse_qs(location.query)["tab"] == ["interfaces"]
     assert _interfaces(device) == {}
 
 
 @pytest.mark.django_db
 def test_the_add_scope_is_checked_on_the_row_as_the_sync_wrote_it(client):
     """The new rows are empty before the write and match no constraint, so a check of the empty rows would name ``eth0`` too."""
-    device = make_device("written-scope-written-row")
+    device = _device("written-scope-written-row")
     seed_ports(device, [sync_port(10, "eth0", alias="uplink"), sync_port(11, "eth1", alias="other")])
     client.force_login(
         _user("written-scope-written-row-user", Device, Interface, add={"description": "uplink", "mtu": 1500})
@@ -450,7 +454,7 @@ def test_the_add_scope_is_checked_on_the_row_as_the_sync_wrote_it(client):
 @pytest.mark.django_db
 def test_the_add_scope_is_checked_after_the_vlan_write(client):
     """Only the VLAN write sets the mode, so a check before it would name ``eth0`` too."""
-    device = make_device("written-scope-vlan")
+    device = _device("written-scope-vlan")
     VLAN.objects.create(vid=100, name="written-scope-vlan")
     seed_ports(device, [sync_port(10, "eth0", **port_vlans("access", 100, [])), sync_port(11, "eth1")])
     client.force_login(_user("written-scope-vlan-user", Device, Interface, add={"mode": "access"}))
@@ -464,7 +468,7 @@ def test_the_add_scope_is_checked_after_the_vlan_write(client):
 @pytest.mark.django_db
 def test_a_change_of_only_the_tagged_vlans_is_checked(client):
     """The sync saves no column of ``eth0``; only its new tagged VLAN takes it out of the change scope."""
-    device = make_device("written-scope-tagged")
+    device = _device("written-scope-tagged")
     interface = synced_interface(device, "eth0", 10, mode="tagged")
     VLAN.objects.create(vid=100, name="written-scope-tagged")
     seed_ports(device, [sync_port(10, "eth0", **port_vlans(None, None, [100]))])
@@ -479,7 +483,7 @@ def test_a_change_of_only_the_tagged_vlans_is_checked(client):
 @pytest.mark.django_db
 def test_a_write_that_takes_a_row_out_of_the_change_scope_gets_the_refusal_not_a_retry(client, attempts):
     """The VLAN write reads the row after the attribute write took it out of the scope; only the final check decides."""
-    device = make_device("written-scope-description")
+    device = _device("written-scope-description")
     interface = synced_interface(device, "eth0", 1, description="old")
     seed_ports(device, [sync_port(1, "eth0", alias="new")])
     client.force_login(_user("written-scope-description-user", Device, Interface, change={"description": "old"}))
@@ -495,7 +499,7 @@ def test_a_write_that_takes_a_row_out_of_the_change_scope_gets_the_refusal_not_a
 @pytest.mark.django_db
 def test_a_final_state_in_the_change_scope_is_saved_through_an_intermediate_state_outside_it(client):
     """The attribute write sets the description first, so the row is outside the scope until the VLAN write sets the mode."""
-    device = make_device("written-scope-final-state")
+    device = _device("written-scope-final-state")
     interface = synced_interface(device, "eth0", 1, description="old", mode="access")
     vlan = VLAN.objects.create(vid=100, name="written-scope-final-state")
     seed_ports(device, [sync_port(1, "eth0", alias="new", **port_vlans(None, None, [100]))])
@@ -517,7 +521,7 @@ def test_a_final_state_in_the_change_scope_is_saved_through_an_intermediate_stat
 @pytest.mark.django_db
 def test_the_attribute_pass_names_a_refused_row_only_when_the_user_may_view_it(client):
     """The user may change ``private0`` but not view it, so the refusal counts it and does not name it."""
-    device = make_device("written-scope-hidden-row")
+    device = _device("written-scope-hidden-row")
     synced_interface(device, "eth0", 10, description="old")
     synced_interface(device, "private0", 11, description="old")
     seed_ports(device, [sync_port(10, "eth0", alias="new"), sync_port(11, "private0", alias="new")])
@@ -533,7 +537,7 @@ def test_the_attribute_pass_names_a_refused_row_only_when_the_user_may_view_it(c
 @pytest.mark.django_db
 def test_the_relationship_pass_names_a_refused_row_only_when_the_user_may_view_it(client):
     """The pass finds the aggregate through its port and may change it, but the user may not view it."""
-    device = make_device("written-scope-hidden-aggregate")
+    device = _device("written-scope-hidden-aggregate")
     aggregate = bound_interface(device, "private-current", 100)
     seed_ports(
         device,
@@ -616,7 +620,7 @@ def _hidden_child_whose_type_is_excluded(device):
 def test_no_text_of_the_sync_names_a_row_that_the_user_may_change_but_not_view(client, scenario):
     """Each scenario drives one warning path of the sync to a row whose name starts with ``private``."""
     name = scenario.__name__.strip("_")[:60]
-    device = make_device(name)
+    device = _device(name)
     port_ids, exclude_columns = scenario(device)
     user = _user(f"{name}-user", Device, Interface, view=IN_SCOPE)
     private = Interface.objects.filter(device=device, name__startswith="private")
@@ -710,7 +714,7 @@ def test_no_text_of_the_sync_view_takes_an_interface_name_past_the_display_rule(
 )
 def test_the_channel_children_that_netbox_renames_must_be_in_the_change_scope(client, flushed_events, scope, refused):
     """The sync renames ``eth-old``; NetBox renames ``eth-old:1`` after the commit, but not ``breakout-2``."""
-    device = make_device(f"written-scope-channels-{scope}")
+    device = _device(f"written-scope-channels-{scope}")
     parent = bound_interface(device, "eth-old", 1, iface_type="1000base-t")
     parent.channels = 4
     parent.save()
@@ -745,7 +749,7 @@ def test_a_model_with_channels_but_without_the_channel_rename_of_netbox_fails_th
     """The check mirrors NetBox's rename rule, so a NetBox that renames the channel children in another way stops it."""
     from dcim.models import mixins
 
-    device = make_device("written-scope-channel-rule")
+    device = _device("written-scope-channel-rule")
     parent = bound_interface(device, "eth-old", 1, iface_type="1000base-t")
     parent.channels = 4
     parent.save()
@@ -769,7 +773,7 @@ def test_a_model_with_channels_but_without_the_channel_rename_of_netbox_fails_th
 def test_the_collection_records_a_change_of_the_tagged_vlans_from_the_vlan_side():
     from netbox_librenms_plugin.interface_sync import collect_interface_writes
 
-    device = make_device("written-scope-reverse")
+    device = _device("written-scope-reverse")
     added, cleared = make_interface(device, "eth0"), make_interface(device, "eth1")
     vlan = VLAN.objects.create(vid=100, name="written-scope-reverse")
     vlan.interfaces_as_tagged.add(cleared)

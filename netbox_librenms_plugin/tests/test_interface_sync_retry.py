@@ -33,6 +33,7 @@ from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
     count_sync_attempts,
     post_interface_sync,
     seed_ports,
+    select_interface_rows,
     sync_port,
 )
 from netbox_librenms_plugin.tests.lock_conflict_helpers import (
@@ -58,14 +59,15 @@ LOCK_TIMEOUT_MS = 200
 PLAIN_AND_HTMX = pytest.mark.parametrize("htmx", [False, True], ids=["plain", "htmx"])
 
 
-def _outcome(*, synced_count, skipped_conflicts=(), kept_name_conflicts=(), warnings=()):
-    """The outcome of a committed attempt that changed NetBox."""
+def _outcome(*, synced_count, written, skipped_conflicts=(), kept_name_conflicts=(), warnings=()):
+    """The outcome of a committed attempt that changed NetBox and wrote the port IDs *written*."""
     return _InterfaceSyncOutcome(
         skipped_conflicts=skipped_conflicts,
         kept_name_conflicts=kept_name_conflicts,
         synced_count=synced_count,
         mutated=True,
         warnings=warnings,
+        written=frozenset(written),
     )
 
 
@@ -102,14 +104,16 @@ def test_a_lock_conflict_on_the_first_attempt_is_retried_once(client, attempts, 
     seed_ports(device, [sync_port(10, "eth10")])
     client.force_login(make_superuser("sync-retry-once-user"))
 
+    # Selected first, so only the sync POST meets the lock.
+    draft = select_interface_rows(client, device, [10])
     with second_connection() as other:
         lock_row(other, Device, device.pk)
         attempts.before_retry = other.rollback
         with lock_timeout(LOCK_TIMEOUT_MS):
-            response = post_interface_sync(client, device, [10], htmx=htmx)
+            response = post_interface_sync(client, device, [10], htmx=htmx, draft=draft)
 
     assert attempts.count == 2
-    assert committed_outcomes == [_outcome(synced_count=1)]
+    assert committed_outcomes == [_outcome(synced_count=1, written={10})]
     assert response.status_code == (200 if htmx else 302)
     assert Interface.objects.filter(device=device, name="eth10").exists()
     assert [text for level, text in messages_on(response.wsgi_request) if level == "success"] == [SYNCED]
@@ -122,10 +126,12 @@ def test_conflicts_on_both_attempts_give_one_try_again_answer_and_change_nothing
     seed_ports(device, [sync_port(10, "eth10")])
     client.force_login(make_superuser("sync-retry-exhausted-user"))
 
+    # Selected first, so only the sync POST meets the lock.
+    draft = select_interface_rows(client, device, [10])
     with second_connection() as other:
         lock_row(other, Device, device.pk)
         with lock_timeout(LOCK_TIMEOUT_MS):
-            response = post_interface_sync(client, device, [10], htmx=htmx)
+            response = post_interface_sync(client, device, [10], htmx=htmx, draft=draft)
 
     assert attempts.count == 2
     assert_try_again_answer(response, device, htmx, TRY_AGAIN_MESSAGE)
@@ -139,13 +145,15 @@ def test_a_busy_port_claim_on_the_first_attempt_is_retried_once(client, attempts
     seed_ports(device, [sync_port(10, "eth10")])
     client.force_login(make_superuser("sync-busy-port-user"))
 
+    # Selected first, so only the sync POST meets the lock.
+    draft = select_interface_rows(client, device, [10])
     with second_connection() as other:
         hold_port_claim(other, 10, SERVER_KEY)
         attempts.before_retry = other.rollback
-        response = post_interface_sync(client, device, [10], htmx=False)
+        response = post_interface_sync(client, device, [10], htmx=False, draft=draft)
 
     assert attempts.count == 2
-    assert committed_outcomes == [_outcome(synced_count=1)]
+    assert committed_outcomes == [_outcome(synced_count=1, written={10})]
     assert Interface.objects.filter(device=device, name="eth10").exists()
     assert messages_on(response.wsgi_request) == [("success", SYNCED)]
 
@@ -171,14 +179,16 @@ def test_a_real_deadlock_on_the_first_attempt_is_retried_once(client, attempts, 
             lock_row(other, Device, device.pk)
             other.commit()
 
+    # Selected first, so only the sync POST meets the lock.
+    draft = select_interface_rows(client, device, [10])
     with bounded_executor(max_workers=1) as executor:
         holder = executor.submit(hold_the_interface_then_lock_the_device)
         assert interface_held.wait(5), "the second session did not lock the interface"
-        response = post_interface_sync(client, device, [10], htmx=False)
+        response = post_interface_sync(client, device, [10], htmx=False, draft=draft)
         holder.result(timeout=10)
 
     assert attempts.count == 2
-    assert committed_outcomes == [_outcome(synced_count=1)]
+    assert committed_outcomes == [_outcome(synced_count=1, written={10})]
     assert response.status_code == 302
     assert [text for level, text in messages_on(response.wsgi_request) if level == "success"] == [SYNCED]
     interface.refresh_from_db()
@@ -208,12 +218,16 @@ def test_a_retried_sync_reports_its_warnings_skips_and_success_once(client, atte
         device, [sync_port(7, "eth7"), sync_port(11, "eth12", alias="kept"), sync_port(10, "eth10", alias="uplink")]
     )
 
+    # Selected first, so only the sync POST meets the lock.
+    draft = select_interface_rows(client, device, [7, 11, 10])
     with second_connection() as other:
         # The first attempt warns, skips and keeps a name, then waits for this row at its write.
         lock_row(other, Interface, interface.pk)
         attempts.before_retry = other.rollback
         with lock_timeout(LOCK_TIMEOUT_MS):
-            response = post_interface_sync(client, device, [7, 11, 10], htmx=False, exclude_columns=("mac_address",))
+            response = post_interface_sync(
+                client, device, [7, 11, 10], htmx=False, exclude_columns=("mac_address",), draft=draft
+            )
 
     vlan_warning = (
         "VLANs were not synced for the selected interfaces: your account is missing ipam.view_vlan. "
@@ -223,6 +237,7 @@ def test_a_retried_sync_reports_its_warnings_skips_and_success_once(client, atte
     assert committed_outcomes == [
         _outcome(
             synced_count=2,
+            written={10, 11},
             skipped_conflicts=("eth7 (reported name belongs to a different LibreNMS port 8)",),
             kept_name_conflicts=(("old11", "eth12", None),),
             warnings=(vlan_warning,),
@@ -307,18 +322,21 @@ def test_a_relationship_conflict_after_a_written_attribute_pass_leaves_one_sync_
     attempts.count = 0
     relationship_passes.clear()
 
+    # Selected first, so only the sync POST meets the lock.
+    draft = select_interface_rows(client, device, ports)
     with second_connection() as other:
         # Only the relationship pass locks the aggregate: the attribute pass does not write it.
         lock_row(other, Interface, aggregate.pk)
         attempts.before_retry = other.rollback
         with lock_timeout(LOCK_TIMEOUT_MS):
-            response = post_interface_sync(client, device, ports, htmx=False, exclude_columns=("vlans",))
+            response = post_interface_sync(client, device, ports, htmx=False, exclude_columns=("vlans",), draft=draft)
 
     assert attempts.count == 2
     assert relationship_passes == [True, True], "each attempt wrote the member before its relationship pass"
     assert committed_outcomes == [
         _outcome(
             synced_count=2,
+            written={base + 1, base + 11},
             skipped_conflicts=(f"eth7 (reported name belongs to a different LibreNMS port {base + 8})",),
             kept_name_conflicts=(("old11", "eth12", None),),
         )
@@ -365,9 +383,11 @@ def test_a_follow_up_conflict_after_the_commit_is_reported_and_not_retried(clien
         return real_relationships(self, *args, **kwargs)
 
     monkeypatch.setattr(SyncInterfacesView, "_sync_interface_relationships", with_follow_up)
+    # Selected first, so only the sync POST meets the lock.
+    draft = select_interface_rows(client, device, [10])
     with second_connection() as other:
         lock_row(other, Device, locked.pk)
-        response = post_interface_sync(client, device, [10], htmx=htmx)
+        response = post_interface_sync(client, device, [10], htmx=htmx, draft=draft)
 
     assert attempts.count == 1
     assert_try_again_answer(response, device, htmx, FOLLOW_UP_FAILED_MESSAGE)
@@ -392,9 +412,11 @@ def test_an_integrity_error_after_a_swallowed_conflict_reaches_the_sync_handler(
         Interface.objects.create(device=obj, name="eth10")
 
     monkeypatch.setattr(SyncInterfacesView, "_sync_interface_relationships", swallow_then_violate)
+    # Selected first, so only the sync POST meets the lock.
+    draft = select_interface_rows(client, device, [10])
     with second_connection() as other:
         lock_row(other, ContentType, locked_pk)
-        response = post_interface_sync(client, device, [10], htmx=False)
+        response = post_interface_sync(client, device, [10], htmx=False, draft=draft)
 
     assert attempts.count == 1
     assert response.status_code == 302
@@ -495,5 +517,5 @@ def test_only_the_steps_outside_the_transaction_add_messages():
         and node.func.value.id == "messages"
     }
 
-    # post() adds messages before run_transaction() and after it returns; the other two run before it.
-    assert adders == {"post", "get_selected_port_ids", "read_assessment"}
+    # post() adds messages before run_transaction() and after it ends; the other two run before it.
+    assert adders == {"post", "read_assessment", "_approved_rows"}

@@ -105,7 +105,6 @@ TAB_SPECS = {
 }
 
 # Web-transport state that a tab keeps next to its snapshot, and that goes with the snapshot.
-_VLAN_OVERRIDE_TABS = frozenset({SyncTab.INTERFACES})
 _CABLE_PICK_TABS = frozenset({SyncTab.CABLES})
 
 
@@ -297,11 +296,6 @@ def _cache_namespace(obj, server_key):
 def sync_snapshot_key(obj, data_type, server_key):
     """Scope the shared snapshot to the object, server, plugin version and NetBox release."""
     return f"librenms_{data_type}_{_cache_namespace(obj, server_key)}"
-
-
-def sync_vlan_overrides_key(obj, server_key):
-    """Return the VLAN override key for one object and configured server."""
-    return f"librenms_vlan_group_overrides_{obj._meta.model_name}_{obj.pk}_{require_server_key(server_key)}"
 
 
 def _state_key(subject, server_key, tab):
@@ -543,10 +537,7 @@ class SyncCacheConsistency:
         spec = TAB_SPECS[tab]
         for owner in self._candidate_owners(tab, server_key):
             snapshot_key = sync_snapshot_key(owner, spec.source.data_type, server_key)
-            keys = {snapshot_key}
-            if tab in _VLAN_OVERRIDE_TABS:
-                keys.add(sync_vlan_overrides_key(owner, server_key))
-            if any(cache.has_key(key) for key in keys):
+            if cache.has_key(snapshot_key):
                 return True
             if tab in _CABLE_PICK_TABS and self._pattern_has_values(f"{snapshot_key}:manual-remote:*"):
                 return True
@@ -560,8 +551,6 @@ class SyncCacheConsistency:
             snapshot_key = sync_snapshot_key(owner, spec.source.data_type, server_key)
             if snapshot_key != preserve_key:
                 keys.add(snapshot_key)
-                if tab in _VLAN_OVERRIDE_TABS:
-                    keys.add(sync_vlan_overrides_key(owner, server_key))
                 if tab in _CABLE_PICK_TABS:
                     patterns.add(f"{snapshot_key}:manual-remote:*")
 

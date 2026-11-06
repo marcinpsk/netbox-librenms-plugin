@@ -18,6 +18,7 @@ from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
 from netbox_librenms_plugin.tests.test_interface_sync_filters import CELL, _visible_text, serve_sync_page
+from netbox_librenms_plugin.tests.view_test_helpers import row_action_fields, select_rows
 
 SERVER_KEY = "default"
 LIBRENMS_ID = 4242
@@ -118,8 +119,8 @@ class TestMatching:
 
         html = _tab(client, device, vlans_per_page="25", vlans_q="VLAN-057")
         assert list(_rows(html)) == ["vlan-057"]
-        # The browser keys the selection on this text, so a selection never carries to another server.
-        assert re.search(r'data-sync-filter-tab="vlans" data-selection-scope="[^"]*server_key=default', html)
+        # The draft commands name the server, so a selection never carries to another server.
+        assert re.search(r'data-selection-url="[^"]*server_key=default', html)
         assert re.search(r"Showing 1-1 of 1\s*\(filtered from 60\)", html)
 
         first_page = _tab(client, device, vlans_per_page="25", vlans_filter_name="vlan-0")
@@ -235,8 +236,6 @@ class TestInvalidFilters:
         assert _rows(html) == {}
         assert 'id="vlans_filter-errors"' in html
         assert 'data-filter-invalid="true"' in html
-        # The tab names its selection scope also with no table, so the browser can drop other scopes.
-        assert re.search(r'data-sync-filter-tab="vlans" data-selection-scope="[^"]*interface_name_field=', html)
         field = next(iter(params))
         if field in ("vlans_sync_state", "vlans_q"):
             assert re.search(rf'id="id_{field}"[^>]*aria-invalid="true"', html, re.S)
@@ -312,23 +311,16 @@ class TestInvalidFilters:
     def test_invalid_filter_does_not_refuse_the_sync_action(self, client, settings):
         client = _client(client, settings, "sync-action")
         device = _mixed_device("sync-action")
+        draft = select_rows(client, device, "vlans", [30])
         query = urlencode({"tab": "vlans", "vlans_sync_state": "bogus"})
 
         response = client.post(
-            f"{_sync_url(device)}?{query}",
-            {
-                "server_key": SERVER_KEY,
-                "action": "create_vlans",
-                "select": ["30"],
-                "vlan_group_30": "",
-                "expected_vlan_name_30": "voice",
-            },
-            HTTP_HX_REQUEST="true",
+            f"{_sync_url(device)}?{query}", {"server_key": SERVER_KEY, "action": "create_vlans", **draft}
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 302
         assert VLAN.objects.filter(vid=30, name="voice", group__isnull=True).exists()
-        assert parse_qs(urlsplit(response.headers["HX-Redirect"]).query)["vlans_sync_state"] == ["bogus"]
+        assert parse_qs(urlsplit(response["Location"]).query)["vlans_sync_state"] == ["bogus"]
 
 
 # The page query of the tests below: the VLAN tab's filters and page, and another tab's filter.
@@ -358,7 +350,7 @@ def _rendered_sync_action(client, device):
 class TestRedirectsKeepThePageQuery:
     """Every answer that sends the browser back to the sync page keeps every tab's filters and page."""
 
-    def test_hx_redirect_after_a_sync_keeps_the_filters_and_page(self, client, settings, librenms_server):
+    def test_a_plain_sync_redirect_keeps_the_filters_and_page(self, client, settings, librenms_server):
         device = serve_sync_page(client, settings, librenms_server, _mixed_device("redirect"))
         action = _rendered_sync_action(client, device)
 
@@ -367,15 +359,14 @@ class TestRedirectsKeepThePageQuery:
             {
                 "server_key": SERVER_KEY,
                 "action": "create_vlans",
-                "select": ["30"],
-                "vlan_group_30": "",
-                "expected_vlan_name_30": "voice",
+                "sync_one": "30",
+                **row_action_fields(client, device, "vlans", 30),
             },
-            HTTP_HX_REQUEST="true",
         )
 
-        assert response.status_code == 200
-        target = response.headers["HX-Redirect"]
+        # A plain POST of the form goes back to the page; the page's htmx requests answer in place.
+        assert response.status_code == 302
+        target = response.url
         _assert_keeps_the_page_query(target, _vlan_tab_url(device))
         page = client.get(target)
         assert page.status_code == 200
@@ -386,21 +377,12 @@ class TestRedirectsKeepThePageQuery:
     @pytest.mark.parametrize("htmx", [True, False])
     def test_the_rename_confirmation_keeps_the_filters_and_page(self, client, settings, librenms_server, htmx):
         device = serve_sync_page(client, settings, librenms_server, _mixed_device(f"rename-{htmx}"))
-        group = VLANGroup.objects.get(name=f"campus-rename-{htmx}")
         action = _rendered_sync_action(client, device)
         headers = {"HTTP_HX_REQUEST": "true"} if htmx else {}
+        # VLAN 20 exists in the campus group, so the row writes there without a choice.
+        draft = select_rows(client, device, "vlans", [20])
 
-        response = client.post(
-            action,
-            {
-                "server_key": SERVER_KEY,
-                "action": "create_vlans",
-                "select": ["20"],
-                "vlan_group_20": str(group.pk),
-                "expected_vlan_name_20": "guests",
-            },
-            **headers,
-        )
+        response = client.post(action, {"server_key": SERVER_KEY, "action": "create_vlans", **draft}, **headers)
 
         assert response.status_code == 200
         html = response.content.decode()

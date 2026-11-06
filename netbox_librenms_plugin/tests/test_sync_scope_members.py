@@ -445,9 +445,20 @@ def _interface_tab(client, device):
     return unescape(response.content.decode())
 
 
+def _evidence_payloads(html):
+    """Replace each evidence token by its payload, because a token also carries the time it was signed."""
+    from netbox_librenms_plugin.selection_draft import read_evidence
+    from netbox_librenms_plugin.views.base.interfaces_view import INTERFACE_TAB
+
+    def payload(match):
+        return f"data-evidence='{json.dumps(read_evidence(INTERFACE_TAB, match.group(1)), sort_keys=True)}'"
+
+    return re.sub(r'data-evidence="([^"]+)"', payload, html)
+
+
 def _table_rows(html, attribute):
     return {
-        int(match.group(1)): match.group(0)
+        int(match.group(1)): _evidence_payloads(match.group(0))
         for match in re.finditer(rf'<tr[^>]*{attribute}="([^"]+)"[^>]*>.*?</tr>', html, flags=re.S)
         if match.group(1).isdigit()
     }
@@ -511,12 +522,11 @@ def test_an_interface_row_on_a_hidden_member_names_no_member_and_offers_no_actio
         assert "data-device-id" not in row
         (checkbox,) = re.findall(r'<input[^>]*name="select"[^>]*>', row)
         assert "disabled" in checkbox
-    blocked = json.loads(re.search(r'data-blocked-port-ids="(\[[^\]]*\])"', html).group(1))
-    assert {"701", "702", "703"} <= set(blocked)
-    assert "700" not in blocked
+        assert "data-evidence=" not in row
+    assert "data-evidence=" in rows[700]
 
 
-def test_the_interface_verify_of_a_hidden_member_row_returns_no_hidden_identity(client, default_server):
+def test_the_row_read_of_a_hidden_member_row_returns_no_hidden_identity(client, default_server):
     from dcim.models import Interface
 
     from netbox_librenms_plugin.tests.conftest import make_interface
@@ -530,34 +540,30 @@ def test_the_interface_verify_of_a_hidden_member_row_returns_no_hidden_identity(
     seed_interfaces_snapshot(page, [_interface_port(712, "Ethernet9")], server_key="default")
     client.force_login(_page_only_user("iface-verify-scope-user", page, extra=[("view", Interface, None)]))
 
-    response = client.post(
-        reverse("plugins:netbox_librenms_plugin:verify_interface"),
-        data=json.dumps({"device_id": page.pk, "origin_device_id": page.pk, "port_id": 712, "server_key": "default"}),
-        content_type="application/json",
-    )
+    body = _read_row(client, page, 712)
 
-    body = json.dumps(response.json())
-    assert response.status_code == 200
     assert hidden.name not in body
     assert hidden.get_absolute_url() not in body
     assert bound.get_absolute_url() not in body
-    assert f'\\"{hidden.pk}\\"' not in body
+    assert f'value="{hidden.pk}"' not in body
+    assert f'data-device-id="{hidden.pk}"' not in body
+    assert "data-evidence=" not in body
 
 
-def _verify_port(client, device, port_id):
-    response = client.post(
-        reverse("plugins:netbox_librenms_plugin:verify_interface"),
-        data=json.dumps(
-            {"device_id": device.pk, "origin_device_id": device.pk, "port_id": port_id, "server_key": "default"}
-        ),
-        content_type="application/json",
-    )
+def _read_row(client, device, port_id):
+    """Return the row read of *port_id*, through the ``hx-get`` URL that the tab renders for the row."""
+    from html import unescape
+
+    from netbox_librenms_plugin.tests.view_test_helpers import draft_tab
+
+    shown = draft_tab(client, device, "interfaces", interface_name_field="ifName")
+    response = client.get(unescape(shown.rows[str(port_id)]["hx-get"]))
     assert response.status_code == 200
-    return json.dumps(response.json(), sort_keys=True)
+    return _evidence_payloads(unescape(response.content.decode()))
 
 
-def test_an_interface_the_user_may_change_but_not_view_is_absent_from_the_tab_and_the_verify(client, default_server):
-    """A change grant does not show an interface: the row and the verify read as if it did not exist."""
+def test_an_interface_the_user_may_change_but_not_view_is_absent_from_the_tab_and_the_row_read(client, default_server):
+    """A change grant does not show an interface: the row and its row read read as if it did not exist."""
     from dcim.models import Device, Interface
 
     from netbox_librenms_plugin.tests.conftest import make_interface
@@ -574,19 +580,19 @@ def test_an_interface_the_user_may_change_but_not_view_is_absent_from_the_tab_an
     hidden_marks = (hidden.name, hidden.get_absolute_url(), hidden.type, f'"{hidden.pk}"')
 
     hidden_html = _interface_tab(client, owner)
-    hidden_verify = _verify_port(client, owner, 905)
+    hidden_read = _read_row(client, owner, 905)
     hidden.delete()
     absent_html = _interface_tab(client, owner)
-    absent_verify = _verify_port(client, owner, 905)
+    absent_read = _read_row(client, owner, 905)
 
     for mark in hidden_marks:
         assert mark not in hidden_html
-        assert mark not in hidden_verify
-    assert hidden_verify == absent_verify
+        assert mark not in hidden_read
+    assert hidden_read == absent_read
     assert _table_rows(hidden_html, "data-port-id")[905] == _table_rows(absent_html, "data-port-id")[905]
 
 
-def test_a_visible_cross_member_lag_reads_the_same_in_the_table_and_the_verify(client, default_server):
+def test_a_visible_cross_member_lag_reads_the_same_in_the_table_and_the_row_read(client, default_server):
     """Interface A on member 1 is in LAG B on member 2, and LibreNMS reports no LAG: both show the NetBox-only LAG."""
     from netbox_librenms_plugin.tests.conftest import make_interface, make_superuser
     from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
@@ -603,15 +609,15 @@ def test_a_visible_cross_member_lag_reads_the_same_in_the_table_and_the_verify(c
 
     row = _table_rows(_interface_tab(client, page), "data-port-id")[901]
     table_cell = re.search(r'<td data-col="parent">(.*?)</td>', row, re.S).group(1)
-    verify_cell = json.loads(_verify_port(client, page, 901))["formatted_row"]["parent"]
+    read_cell = re.search(r'<td data-col="parent">(.*?)</td>', _read_row(client, page, 901), re.S).group(1)
 
     assert table_cell
-    assert verify_cell == table_cell
+    assert read_cell == table_cell
 
 
 @pytest.mark.parametrize("relation", ["lag", "parent", "bridge"])
 def test_a_hidden_relationship_target_renders_the_same_as_no_target(client, default_server, relation):
-    """A visible interface whose LAG, parent or bridge the user cannot view: table and verify read as no target."""
+    """A visible interface whose LAG, parent or bridge the user cannot view: table and row read show no target."""
     from dcim.models import Device, Interface
 
     from netbox_librenms_plugin.tests.conftest import make_interface
@@ -630,14 +636,14 @@ def test_a_hidden_relationship_target_renders_the_same_as_no_target(client, defa
     setattr(visible, relation, target)
     visible.save()
     hidden_row = _table_rows(_interface_tab(client, owner), "data-port-id")[801]
-    hidden_verify = _verify_port(client, owner, 801)
+    hidden_read = _read_row(client, owner, 801)
     setattr(visible, relation, None)
     visible.save()
     absent_row = _table_rows(_interface_tab(client, owner), "data-port-id")[801]
-    absent_verify = _verify_port(client, owner, 801)
+    absent_read = _read_row(client, owner, 801)
 
     assert hidden_row == absent_row
-    assert hidden_verify == absent_verify
+    assert hidden_read == absent_read
 
 
 # =============================================================================

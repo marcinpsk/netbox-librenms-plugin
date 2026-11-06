@@ -384,14 +384,14 @@ class TestSyncInterfacesIpamScoping:
     """SyncInterfacesView writes VLANs, so its lookup maps must be the caller's."""
 
     def _sync(self, user, device, server_key):
-        from netbox_librenms_plugin.tests.view_test_helpers import post as call_post
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+        from django.test import Client
 
-        request = make_request("post", {"select": ["99"], "server_key": server_key}, user=user)
-        view = make_view(SyncInterfacesView, request)
+        from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync
+
+        client = Client()
+        client.force_login(user)
         _seed_port(device, server_key)
-        call_post(view, request, object_type="device", object_id=device.pk)
-        return request
+        return post_interface_sync(client, device, [99], htmx=False, exclude_columns=()).wsgi_request
 
     @staticmethod
     def _writer(username, *, ipam=False):
@@ -412,7 +412,7 @@ class TestSyncInterfacesIpamScoping:
         from dcim.models import Interface
 
         server_key = configure_default_librenms_server(settings)
-        device = make_device("sync-ipam-scope")
+        device = make_device("sync-ipam-scope", librenms_cf={"default": {"id": 42}})
         _site_group_with_vlan(device, "sync-scope")
 
         request = self._sync(self._writer("sync-no-ipam"), device, server_key)
@@ -427,7 +427,7 @@ class TestSyncInterfacesIpamScoping:
         from dcim.models import Interface
 
         server_key = configure_default_librenms_server(settings)
-        device = make_device("sync-ipam-allowed")
+        device = make_device("sync-ipam-allowed", librenms_cf={"default": {"id": 43}})
         _group, vlan = _site_group_with_vlan(device, "sync-allowed")
 
         request = self._sync(self._writer("sync-ipam", ipam=True), device, server_key)

@@ -7,7 +7,15 @@ reading as unused here.
 """
 
 from .base.cables_view import BaseCableTableView, CableRemotePickerView, SingleCableVerifyView
-from .base.interfaces_view import BaseInterfaceTableView
+from .base.interfaces_view import (
+    BaseInterfaceTableView,
+    InterfaceChoiceView,
+    InterfaceMemberView,
+    InterfaceRowView,
+    InterfaceSelectionView,
+    InterfaceVlanGroupsView,
+    InterfaceVlanModalView,
+)
 from .base.ip_addresses_view import (
     BaseIPAddressTableView,
     IPChoiceView,
@@ -16,7 +24,7 @@ from .base.ip_addresses_view import (
     IPSelectionView,
 )
 from .base.librenms_sync_view import BaseLibreNMSSyncView
-from .base.vlan_table_view import BaseVLANTableView
+from .base.vlan_table_view import BaseVLANTableView, VLANChoiceView, VLANRowView, VLANSelectionView
 from .data_shapes import CaptureDataShapeView
 from .imports import (
     BulkImportConfirmView,
@@ -162,15 +170,11 @@ from .object_sync import (
     DeviceLibreNMSSyncView,
     DeviceModuleTableView,
     DeviceVLANTableView,
-    SaveVlanGroupOverridesView,
-    SingleInterfaceVerifyView,
     SingleModuleVerifyView,
-    SingleVlanGroupVerifyView,
     NetBoxOnlyInterfacesView,
     SyncCacheFragmentView,
     SyncTabFilterView,
     SyncCacheStatusView,
-    VerifyVlanSyncGroupView,
     VMInterfaceTableView,
     VMIPAddressTableView,
     VMLibreNMSSyncView,

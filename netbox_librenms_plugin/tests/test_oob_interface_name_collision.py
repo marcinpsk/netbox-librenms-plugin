@@ -1,5 +1,8 @@
 """Host and OOB interface name collision behavior."""
 
+import re
+from html import unescape
+
 import pytest
 from dcim.models import Interface
 from django.contrib.messages import get_messages
@@ -16,8 +19,10 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_virtual_chassis_members,
 )
+from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_interfaces_snapshot
+from netbox_librenms_plugin.tests.view_test_helpers import draft_tab, row_action_fields
 
 
 SERVER_KEY = "default"
@@ -60,20 +65,14 @@ def _sync(
     target_devices=None,
 ):
     _seed(device, ports, oob_ports)
-    post_data = {
-        "server_key": SERVER_KEY,
-        "interface_name_field": name_field,
-        "select": [str(port_id) for port_id in selected],
-        "exclude_columns": exclude_columns or ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-    }
-    for port_id, target in (target_devices or {}).items():
-        post_data[f"device_selection_{port_id}"] = str(target.pk)
-    return client.post(
-        reverse(
-            "plugins:netbox_librenms_plugin:sync_selected_interfaces",
-            kwargs={"object_type": "device", "object_id": device.pk},
-        ),
-        post_data,
+    return post_interface_sync(
+        client,
+        device,
+        selected,
+        htmx=False,
+        exclude_columns=exclude_columns or ["vlans", "mac_address", "description", "mtu", "speed", "type"],
+        interface_name_field=name_field,
+        members={port_id: target.pk for port_id, target in (target_devices or {}).items()},
     )
 
 
@@ -117,12 +116,22 @@ def test_cross_source_duplicate_port_id_is_rejected_before_writes(client, settin
     configure_default_librenms_server(settings)
     device = make_device("oob-cross-source-port-id", librenms_cf={SERVER_KEY: {"id": 80}})
     client.force_login(make_superuser("oob-cross-source-port-id-user"))
-    response = _sync(client, device, [_port("1", "eth0")], [1], oob_ports=[_port(1, "eth0")])
+    _seed(device, [_port("1", "eth0")], [_port(1, "eth0")])
+    # The tab offers no selection of a duplicated port ID, so a row action of it carries no evidence.
+    fields = row_action_fields(client, device, "interfaces", 1, interface_name_field="ifName")
+    assert fields["evidence"] == ""
+
+    response = client.post(
+        reverse(
+            "plugins:netbox_librenms_plugin:sync_selected_interfaces",
+            kwargs={"object_type": "device", "object_id": device.pk},
+        )
+        + "?interface_name_field=ifName",
+        {"server_key": SERVER_KEY, "sync_one": "1", **fields},
+    )
 
     assert response.status_code == 302
     assert not Interface.objects.filter(device=device).exists()
-    response_messages = [str(message) for message in get_messages(response.wsgi_request)]
-    assert any("duplicated in the cached interface data" in message for message in response_messages)
 
 
 @pytest.mark.django_db
@@ -502,16 +511,20 @@ def test_cross_page_host_row_reserves_its_inferred_member_name(client, settings)
     assert not Interface.objects.filter(device=viewed_member, name__in=["Ethernet2/1", "Ethernet2/1-oob"]).exists()
 
 
+def _row_markup(html, row_key):
+    """Return the ``<tr>`` of *row_key* in *html*, with its whitespace collapsed and without its signed evidence token."""
+    for match in re.finditer(r"<tr\b[^>]*>.*?</tr>", html, re.S):
+        if f'data-row-key="{row_key}"' in match.group(0):
+            return re.sub(r"\s+", " ", re.sub(r'data-evidence="[^"]*"', "", match.group(0))).strip()
+    raise AssertionError(f"no row {row_key}")
+
+
 @pytest.mark.django_db
 @pytest.mark.parametrize("case", ["derived", "contested", "rebind"])
-def test_verify_preserves_the_full_table_name_and_action_metadata(client, settings, case):
-    from netbox_librenms_plugin.tests.view_test_helpers import make_request
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
-
+def test_the_row_read_keeps_the_full_table_name_and_action_metadata(client, settings, case):
     configure_default_librenms_server(settings)
-    device = make_device("verify-name-metadata", librenms_cf={SERVER_KEY: {"id": 71}})
-    user = make_superuser("verify-name-metadata-user")
-    client.force_login(user)
+    device = make_device("row-read-name-metadata", librenms_cf={SERVER_KEY: {"id": 71}})
+    client.force_login(make_superuser("row-read-name-metadata-user"))
     if case == "rebind":
         interface = make_interface(device, "eth0")
         seed_mapping(interface, SERVER_KEY, own=8501, save=False)
@@ -522,21 +535,12 @@ def test_verify_preserves_the_full_table_name_and_action_metadata(client, settin
         if case == "contested":
             ports.append(_port(8503, "eth0-oob"))
     _seed(device, ports, oob_ports)
-    request = make_request("get", {"server_key": SERVER_KEY}, user=user)
-    view = DeviceInterfaceTableView()
-    view.setup(request, pk=device.pk)
-    context = view.get_context_data(request, device, "ifName", server_key=SERVER_KEY)
-    record = next(row for row in context["table"].data if row["port_id"] == 8502)
-    expected = context["table"].format_interface_data(record, device)
-    # The browser sends the verify request with the page query, as the table render had it.
-    response = client.post(
-        reverse("plugins:netbox_librenms_plugin:verify_interface") + f"?server_key={SERVER_KEY}",
-        {"device_id": device.pk, "port_id": 8502, "server_key": SERVER_KEY, "interface_name_field": "ifName"},
-        content_type="application/json",
-    )
+    shown = draft_tab(client, device, "interfaces", interface_name_field="ifName")
+
+    response = client.get(unescape(shown.rows["8502"]["hx-get"]))
+
     assert response.status_code == 200
-    actual = response.json()["formatted_row"]
-    for key in ("parent", "actions"):
-        assert actual[key] == expected[key]
+    row = _row_markup(response.content.decode(), "8502")
+    assert row == _row_markup(shown.html, "8502")
     marker = {"derived": "Will sync as eth0-oob", "contested": "Name conflict", "rebind": "Rebind"}[case]
-    assert marker in expected["parent"] + expected["actions"]
+    assert marker in row

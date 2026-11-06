@@ -1,15 +1,28 @@
 from django.contrib import messages
+from django.core.exceptions import BadRequest
+from django.http import Http404
 from django.utils import timezone
 from django.views import View
 
 from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
-from netbox_librenms_plugin.assessment.vlans import assess
+from netbox_librenms_plugin.assessment.vlans import apply_group_choices, assess, shown_group_id
+from netbox_librenms_plugin.selection_draft import DraftConflict, Intent, SelectionDraft, sign_evidence
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
-from netbox_librenms_plugin.sync_filters import filter_sync_table, parse_table_filters
+from netbox_librenms_plugin.sync_filters import filter_sync_table, parse_table_filters, selection_scope
+from netbox_librenms_plugin.sync_query import SyncQuery
+from netbox_librenms_plugin.sync_rows import ROW_STALE_EVENT, bind_draft, evidence_problem, render_rows, row_url
 from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
 from netbox_librenms_plugin.utils import (
     build_migrated_context,
+    coerce_model_pk,
+    normalize_vlan_vid,
+)
+from netbox_librenms_plugin.views.base.draft_views import (
+    DraftCommandView,
+    DraftView,
+    parse_assignments,
+    row_response,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -198,22 +211,15 @@ class BaseVLANTableView(
         lookup_maps = self._build_vlan_lookup_maps(vlan_groups, user=vlan_scope_user)
 
         filtered_from = None
+        draft = None
         # `is not None` (not a bare truthiness check): an empty list is a valid successful refresh
         # (a device with no VLANs) and must still render an empty table — a truthy check would skip
         # construction and make a VLAN-less device look like it never loaded.
         if cached_vlans is not None:
-            # Compare VLANs with NetBox (against all device-available VLANs)
-            compared_vlans = assess(snapshot, subject=obj, lookup_maps=lookup_maps).rows
-            migrated = bool(build_migrated_context(obj, server_key).get("migrated_to_marker"))
-
-            def build_table(rows):
-                table = LibreNMSVLANTable(rows, vlan_groups=vlan_groups)
-                table.migrated_to_marker = migrated
-                return table
-
-            # The comparison ran over every row, so duplicate and invalid VIDs describe the whole device.
-            vlan_table, filters, filtered_from = filter_sync_table(request, compared_vlans, build_table)
-            vlan_table.configure(request)
+            draft = open_vlan_draft(request, obj, server_key, snapshot)
+            vlan_table, filters, filtered_from = self.build_vlan_table(
+                request, obj, server_key, snapshot, draft, vlan_groups, lookup_maps
+            )
 
         # Calculate cache TTL
         cache_ttl = source_cache.remaining_ttl(obj, Resource.VLANS, server_key)
@@ -225,6 +231,8 @@ class BaseVLANTableView(
             "filters": filters,
             # The row count before the filter, shown only while a filter narrows the table.
             "filtered_from": filtered_from,
+            # The data refresh replaced a draft that had rows, so the page says the selection is gone.
+            "selection_cleared": draft is not None and draft.cleared,
             "vlan_groups": vlan_groups,
             "last_fetched": last_fetched,
             "cache_expiry": cache_expiry,
@@ -239,6 +247,47 @@ class BaseVLANTableView(
                 unscoped_groups=unscoped_groups,
             ),
         }
+
+    def build_vlan_table(self, request, obj, server_key, snapshot, draft, vlan_groups, lookup_maps):
+        """
+        Return the VLAN table of the whole snapshot as the user's draft selects it and chooses its groups.
+
+        The tab and the row read call this one builder, so a row read answers the row as the table shows it.
+
+        Returns:
+            tuple[LibreNMSVLANTable, SyncFilters, int | None]: The table, its filters, and the row count before them.
+
+        """
+        rows = vlan_rows(obj, snapshot, draft.entries(), lookup_maps)
+        migrated = bool(build_migrated_context(obj, server_key).get("migrated_to_marker"))
+
+        def build_table(rows):
+            table = LibreNMSVLANTable(rows, vlan_groups=vlan_groups)
+            table.migrated_to_marker = migrated
+            return table
+
+        _show_vlan_selection(request, obj, server_key, rows, draft, vlan_groups)
+        # The comparison ran over every row, so duplicate and invalid VIDs describe the whole device.
+        vlan_table, filters, filtered_from = filter_sync_table(request, rows, build_table)
+        bind_draft(vlan_table, SyncQuery.from_request(request), obj, server_key, draft, VLAN_COMMAND_URLS)
+        vlan_table.configure(request)
+        return vlan_table, filters, filtered_from
+
+    def vlan_groups_and_maps(self, request, obj):
+        """Return the VLAN groups of *obj* and their lookup maps, read as the request user."""
+        vlan_scope_user = self.vlan_scope_user(request)
+        vlan_groups = self.get_vlan_groups_for_device(obj, user=vlan_scope_user)
+        return vlan_groups, self._build_vlan_lookup_maps(vlan_groups, user=vlan_scope_user)
+
+    def row_html(self, request, obj, server_key, snapshot, row_key):
+        """Return the ``<tr>`` of one VLAN row as the tab's table renders it, or None when no current row has *row_key*."""
+        vlan_groups, lookup_maps = self.vlan_groups_and_maps(request, obj)
+        draft = open_vlan_draft(request, obj, server_key, snapshot)
+        table, _filters, _filtered_from = self.build_vlan_table(
+            request, obj, server_key, snapshot, draft, vlan_groups, lookup_maps
+        )
+        row = next((row for row in table.rows if _vlan_row_key(row.record) == row_key), None)
+        return render_rows(request, [row]) if row is not None else None
 
     def _get_error_context(self, obj, error_message, server_key=_SERVER_KEY_UNSET):
         """
@@ -286,3 +335,219 @@ class BaseVLANTableView(
                 unscoped_groups=unscoped_groups,
             ),
         }
+
+
+# =============================================================================
+# The VLANs tab on the user's selection draft
+# =============================================================================
+
+VLAN_TAB = SyncTab.VLANS
+VLAN_TABLE_VARIANT = "vlans"
+# The draft choice of a row: the VLAN group pk text that the row writes to; "" is Global.
+GROUP_CHOICE = "group"
+# The draft commands of the VLAN table, by the table attribute that names each URL.
+VLAN_COMMAND_URLS = {"data-selection-url": "vlan_selection", "data-choice-url": "vlan_selection_choice"}
+
+
+def _vlan_row_key(record):
+    """Return the row key of a VLAN row: its canonical VID as text, or None for a row with an invalid or duplicate VID."""
+    return None if record.get("vid_error") or record.get("vlan_id") is None else str(record["vlan_id"])
+
+
+def _vlan_draft_identity(request, obj, server_key, snapshot):
+    scope = selection_scope(request, obj, server_key, VLAN_TAB.value)
+    return (request.user, obj, VLAN_TAB, VLAN_TABLE_VARIANT, server_key, scope, snapshot.snapshot_id)
+
+
+def open_vlan_draft(request, obj, server_key, snapshot):
+    """Return the request user's VLAN draft for a presentation of the snapshot; only the published snapshot starts one."""
+
+    def published():
+        current = source_cache.read(obj, Resource.VLANS, server_key)
+        return current.snapshot_id if current is not None else None
+
+    return SelectionDraft.open(*_vlan_draft_identity(request, obj, server_key, snapshot), published=published)
+
+
+def find_vlan_draft(request, obj, server_key, snapshot):
+    """Return the request user's stored VLAN draft of the snapshot that a command read, or None."""
+    return SelectionDraft.find(*_vlan_draft_identity(request, obj, server_key, snapshot))
+
+
+def vlan_rows(obj, snapshot, entries, lookup_maps):
+    """Return the compared rows of the snapshot, each row with the group that the draft *entries* chose for it."""
+    choices = {key: entry.choices[GROUP_CHOICE] for key, entry in entries.items() if GROUP_CHOICE in entry.choices}
+    rows = assess(snapshot, subject=obj, lookup_maps=lookup_maps).rows
+    return apply_group_choices(rows, choices, lookup_maps)
+
+
+def written_group_id(row, vlan_groups):
+    """Return the group pk that the row writes to: the shown group when its select offers it, else None (Global)."""
+    group_id = shown_group_id(row)
+    return group_id if group_id in {group.pk for group in vlan_groups} else None
+
+
+def vlan_evidence(obj, server_key, row, vlan_groups):
+    """
+    Return the facts that selecting one VLAN row approves: the group it writes to, the proposed name and the VLAN it finds.
+
+    A change of any of them asks the user to select the row again. The subject and the server bind the
+    token to its tab.
+    """
+    return {
+        "subject": [obj._meta.label_lower, obj.pk],
+        "server": server_key,
+        "row": _vlan_row_key(row),
+        "group": written_group_id(row, vlan_groups),
+        "name": row.get("name"),
+        "vlan": row.get("netbox_vlan_id"),
+    }
+
+
+def approved_vlan_rows(obj, server_key, rows, vlan_groups, entries):
+    """
+    Return the approved evidence of each selected draft row whose evidence is still current, and the changed row keys.
+
+    Returns:
+        tuple[dict[str, dict], list[str]]: The approved evidence by row key, and the row keys that changed.
+
+    """
+    records = {key: row for row in rows if (key := _vlan_row_key(row)) is not None}
+    approved, changed = {}, []
+    for key, entry in entries.items():
+        if entry.intent is not Intent.ON:
+            continue
+        record = records.get(key)
+        current = vlan_evidence(obj, server_key, record, vlan_groups) if record is not None else None
+        if evidence_problem(entry, current) is None:
+            approved[key] = entry.evidence
+        else:
+            changed.append(key)
+    return approved, changed
+
+
+def _show_vlan_selection(request, obj, server_key, rows, draft, vlan_groups):
+    """Add to each row its checkbox state, its evidence token and its row read URL."""
+    entries = draft.entries()
+    approved, _changed = approved_vlan_rows(obj, server_key, rows, vlan_groups, entries)
+    query = SyncQuery.from_request(request)
+    for row in rows:
+        key = _vlan_row_key(row)
+        entry = entries.get(key)
+        row["selected"] = key in approved
+        row["evidence_changed"] = entry is not None and entry.intent is Intent.ON and key not in approved
+        row["evidence_token"] = sign_evidence(VLAN_TAB, vlan_evidence(obj, server_key, row, vlan_groups)) if key else ""
+        row["row_read_url"] = row_url(query, obj, server_key, "vlan_row", key) if key else ""
+
+
+def vlan_tab_view(request, obj, server_key):
+    """Return the VLAN tab view of *obj* for *request*, bound to *server_key*."""
+    # Imported here: the object_sync views import this module.
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceVLANTableView
+
+    view = DeviceVLANTableView()
+    view.setup(request, pk=obj.pk)
+    view.rebind_api_for_server(server_key)
+    return view
+
+
+def _canonical_vid_key(value):
+    """Return *value* when it is the row key of a VLAN row: a canonical VID as text."""
+    vid = normalize_vlan_vid(value) if isinstance(value, str) else None
+    if vid is None or str(vid) != value:
+        raise BadRequest("The request names no valid VLAN row.")
+    return value
+
+
+class _VLANDraftView(DraftView):
+    """Resolve the subject, the server and the VLAN snapshot of one request on the user's VLAN draft."""
+
+    resource = Resource.VLANS
+
+    def subject(self, request, object_type, pk):
+        """Resolve the request as :meth:`DraftView.subject` does; only a device has a VLAN tab."""
+        if object_type != "device":
+            raise Http404("Only a device has a VLAN tab.")
+        return super().subject(request, object_type, pk)
+
+
+class _VLANDraftCommandView(DraftCommandView, _VLANDraftView):
+    """A command on the user's VLAN draft."""
+
+    @staticmethod
+    def draft(request, obj, server_key, snapshot):
+        """Return the stored draft of the snapshot that the command read; None (a conflict) when a newer one replaced it."""
+        return find_vlan_draft(request, obj, server_key, snapshot) if snapshot is not None else None
+
+
+class VLANSelectionView(_VLANDraftCommandView):
+    """Set the absolute selection state of VLAN rows in the user's draft; the page's unload beacon posts here too."""
+
+    def post(self, request, object_type, pk):
+        """Apply one batch of row states: ``draft_id``, ``expected_revision`` and ``assignments`` (JSON)."""
+        obj, server_key, snapshot, error = self.subject(request, object_type, pk)
+        if error:
+            return error
+        draft_id, expected_revision = self.draft_version(request.POST)
+        assignments = parse_assignments(request.POST.get("assignments"), VLAN_TAB, obj, server_key, _canonical_vid_key)
+        if (draft := self.draft(request, obj, server_key, snapshot)) is None:
+            return self.conflict()
+        try:
+            revision = draft.assign(draft_id, expected_revision, assignments)
+        except DraftConflict:
+            return self.conflict()
+        return self.acknowledge(revision)
+
+
+class VLANChoiceView(_VLANDraftCommandView):
+    """Store the VLAN group that the user chose for one VLAN row, then name the row for the page to read again."""
+
+    def post(self, request, object_type, pk):
+        """Store ``value`` ("" is Global, else a VLAN group pk) as the group of the row ``row`` (``field`` is ``group``)."""
+        obj, server_key, snapshot, error = self.subject(request, object_type, pk)
+        if error:
+            return error
+        draft_id, expected_revision = self.draft_version(request.POST)
+        row_key = _canonical_vid_key(request.POST.get("row"))
+        if request.POST.get("field") != GROUP_CHOICE:
+            raise BadRequest("A VLAN row has a group choice only.")
+        raw = request.POST.get("value")
+        group_id = coerce_model_pk(raw) if raw else None
+        if raw and group_id is None:
+            raise BadRequest("The VLAN group is not valid.")
+        if (draft := self.draft(request, obj, server_key, snapshot)) is None:
+            return self.conflict()
+        view = vlan_tab_view(request, obj, server_key)
+        vlan_groups, lookup_maps = view.vlan_groups_and_maps(request, obj)
+        # A hidden and a missing group give the same answer.
+        if group_id is not None and group_id not in {group.pk for group in vlan_groups}:
+            raise Http404("No VLAN group you can view has this ID.")
+        entries = {key: entry for key, entry in draft.entries().items() if key != row_key}
+        row = next(
+            (row for row in vlan_rows(obj, snapshot, entries, lookup_maps) if _vlan_row_key(row) == row_key), None
+        )
+        if row is None:
+            raise Http404("No current VLAN row has this key.")
+        # The group that the row shows without a choice is no choice: the row then follows a later match.
+        value = None if group_id == written_group_id(row, vlan_groups) else "" if group_id is None else str(group_id)
+        try:
+            revision = draft.choose(draft_id, expected_revision, row_key, GROUP_CHOICE, value)
+        except DraftConflict:
+            return self.conflict()
+        return self.acknowledge(revision, {ROW_STALE_EVENT: {"key": row_key}})
+
+
+class VLANRowView(_VLANDraftView):
+    """Answer one VLAN row as the tab's table renders it, for the page's row read."""
+
+    def get(self, request, object_type, pk, row_key):
+        """Render the ``<tr>`` of the VLAN row *row_key* from the stored snapshot and the user's draft."""
+        obj, server_key, snapshot, error = self.subject(request, object_type, pk)
+        if error:
+            return error
+        if snapshot is None:
+            raise Http404("The VLAN snapshot is not available.")
+        html = vlan_tab_view(request, obj, server_key).row_html(request, obj, server_key, snapshot, row_key)
+        if html is None:
+            raise Http404("No current VLAN row has this key.")
+        return row_response(html)

@@ -1,11 +1,18 @@
 import json
 import logging
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 
+from dcim.models import Device
 from django.contrib import messages
-from django.core.cache import cache
+from django.core.exceptions import BadRequest
+from django.db.models import Q
+from django.http import Http404
+from django.shortcuts import render
+from django.urls import reverse
 from django.utils import timezone
 from django.views import View
+from ipam.models import VLAN
 
 from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
@@ -15,7 +22,13 @@ from netbox_librenms_plugin.constants import (
     OOB_INVENTORY_SOURCE,
     REPORTED_NAME_PORT_COLLISION_REASON,
 )
-from netbox_librenms_plugin.interface_diff import interface_enabled_from_port
+from netbox_librenms_plugin.interface_diff import (
+    ROW_AMBIGUOUS,
+    ROW_IGNORED,
+    ROW_INCOMPLETE,
+    blocked_row_state,
+    interface_enabled_from_port,
+)
 from netbox_librenms_plugin.interface_rules import RuleDecisionKind, decision_reason, interface_rules_for_request
 from netbox_librenms_plugin.interface_rows_cache import (
     cached_rows,
@@ -32,18 +45,42 @@ from netbox_librenms_plugin.interface_relationships import (
     resolve_relationship_row,
 )
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
+from netbox_librenms_plugin.required_rows import checked_rows, off_page_requirers, requirement_edges, requirements
+from netbox_librenms_plugin.selection_draft import DraftConflict, Intent, SelectionDraft, sign_evidence
 from netbox_librenms_plugin.server_mappings import read_mapping, read_mappings
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
-from netbox_librenms_plugin.sync_filters import filter_sync_table, parse_table_filters, show_ignored_interfaces
+from netbox_librenms_plugin.sync_filters import (
+    filter_sync_table,
+    parse_table_filters,
+    selection_scope,
+    show_ignored_interfaces,
+)
+from netbox_librenms_plugin.sync_query import SyncQuery
+from netbox_librenms_plugin.tables.interfaces import interface_row_key
+from netbox_librenms_plugin.sync_rows import (
+    RESULTS_STALE_EVENT,
+    ROW_STALE_EVENT,
+    bind_draft,
+    evidence_problem,
+    render_rows,
+    row_url,
+)
 from netbox_librenms_plugin.utils import (
     build_migrated_context,
+    coerce_model_pk,
     get_interface_name_field,
     get_interface_port_identity_sets,
     interface_sync_options_menu,
     reported_name_owners,
     resolve_interface_row_device,
     synced_interface_names,
+)
+from netbox_librenms_plugin.views.base.draft_views import (
+    DraftCommandView,
+    DraftView,
+    parse_assignments,
+    row_response,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -407,8 +444,14 @@ class BaseInterfaceTableView(
         chassis,
         *,
         show_ignored,
+        choices=None,
     ):
-        """Return the computed rows, reused while the snapshot, the viewer and the NetBox rows they read are unchanged."""
+        """
+        Return the computed rows, reused while the snapshot, the viewer, the choices and the NetBox rows they read are unchanged.
+
+        *choices* is the :class:`InterfaceChoices` of the user's draft; None chooses nothing.
+        """
+        choices = choices or InterfaceChoices()
 
         def compute():
             return self._compute_interface_rows(
@@ -420,6 +463,7 @@ class BaseInterfaceTableView(
                 assess_stored_snapshot(snapshot, interface_name_field),
                 chassis,
                 show_ignored=show_ignored,
+                choices=choices,
             )
 
         if snapshot is None:
@@ -439,7 +483,7 @@ class BaseInterfaceTableView(
             permission_scope(request.user, owners, interfaces),
             interface_name_field,
             show_ignored,
-            cache.get(self.get_vlan_overrides_key(cache_device, server_key)),
+            choices.digest(),
             netbox_fingerprint(owners, interfaces),
         )
         return cached_rows(key, compute)
@@ -455,6 +499,7 @@ class BaseInterfaceTableView(
         chassis,
         *,
         show_ignored,
+        choices,
     ):
         """
         Compute the rows of the interface table and the device-wide state around them.
@@ -462,11 +507,12 @@ class BaseInterfaceTableView(
         This reads every NetBox interface of the device (and of each Virtual Chassis member) and compares
         it with the LibreNMS snapshot, so it is the expensive part of a render. Rows are attributed to
         every member of *chassis*; a row owned by a member the actor may not view carries
-        ``member_withheld`` and no member pk.
+        ``member_withheld`` and no member pk. A row's member choice of *choices* replaces the inferred
+        member when the user may view that member, and its VLAN group choices replace the automatic groups.
 
         Returns:
-            dict: The VLAN scope, the table rows (None without a snapshot), the counts, the NetBox-only list
-                and the snapshot state the tab reports.
+            dict: The VLAN scope, the table rows (None without a snapshot), the counts, the NetBox-only list,
+                the requirements of each row, and the snapshot state the tab reports.
 
         """
         table_rows = None
@@ -517,13 +563,7 @@ class BaseInterfaceTableView(
                 )
             return restricted_lookup_maps[device_id]
 
-        # Load any user VLAN group overrides from cache (set by "apply to all")
-        # Read overrides under the same VC-scoped key SaveVlanGroupOverridesView writes
-        # (the sync device, not the viewed member) — otherwise an "apply to all" made on a VC
-        # member is lost on the next render/member switch. cache_device mirrors that writer.
-        vlan_group_overrides = {}
-        if server_key is not None:
-            vlan_group_overrides = cache.get(self.get_vlan_overrides_key(cache_device, server_key)) or {}
+        requirement_edges_by_row = {}
 
         if assessment is not None:
             ports_data = assessment["ports"]
@@ -534,6 +574,12 @@ class BaseInterfaceTableView(
             matched_interface_ids = set()
 
             relationship_maps = build_relationship_maps(assessment)
+            requirement_edges_by_row = {
+                row_key: sorted(required)
+                for row_key, required in requirement_edges(
+                    relationship_maps.lag_members, relationship_maps.sub_interfaces, relationship_maps.bridge_members
+                ).items()
+            }
             unique_host_port_ids, unambiguous_name_port_ids = get_interface_port_identity_sets(
                 ports_data, interface_name_field
             )
@@ -620,20 +666,30 @@ class BaseInterfaceTableView(
             rules = interface_rules_for_request(request)
             # A row with no resolved member is decided on the platform of every member the user can pick.
             member_platform_ids = sorted({member.platform_id for member in chassis.visible if is_chassis}, key=str)
+            visible_members = {member.pk: member for member in chassis.visible} if is_chassis else {}
+
+            def row_member(port, port_id, *, return_device_on_failure):
+                """Return the member the user chose for the row when it is visible, else the inferred member."""
+                chosen = visible_members.get(choices.members.get(str(port_id)))
+                if chosen is not None:
+                    return chosen
+                return resolve_interface_row_device(
+                    obj,
+                    port,
+                    interface_name_field,
+                    interfaces_by_port_id=interfaces_by_port_id,
+                    members_by_position=members_by_position,
+                    members_by_id=members_by_id,
+                    return_device_on_failure=return_device_on_failure,
+                )
+
             target_device_ids = {}
             for port in ports_data:
                 port_id = normalize_librenms_port_id(port.get("port_id"))
                 if port_id is None:
                     continue
                 if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-                    target_device = resolve_interface_row_device(
-                        obj,
-                        port,
-                        interface_name_field,
-                        interfaces_by_port_id=interfaces_by_port_id,
-                        members_by_position=members_by_position,
-                        members_by_id=members_by_id,
-                    )
+                    target_device = row_member(port, port_id, return_device_on_failure=True)
                 else:
                     target_device = obj
                 target_device_ids[port_id] = target_device.pk
@@ -654,15 +710,9 @@ class BaseInterfaceTableView(
 
                 if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                     # The rules read the owner's platform. An OOB row belongs to the page device, as the writer holds.
-                    rule_owner = resolve_interface_row_device(
-                        obj,
-                        port,
-                        interface_name_field,
-                        interfaces_by_port_id=interfaces_by_port_id,
-                        members_by_position=members_by_position,
-                        members_by_id=members_by_id,
-                        return_device_on_failure=False,
-                    ) or (obj if port.get("_source") == OOB_INVENTORY_SOURCE else None)
+                    rule_owner = row_member(port, port_id, return_device_on_failure=False) or (
+                        obj if port.get("_source") == OOB_INVENTORY_SOURCE else None
+                    )
                     chassis_member = rule_owner or obj
                 else:
                     rule_owner = chassis_member = obj
@@ -707,7 +757,9 @@ class BaseInterfaceTableView(
                     row_vlan_groups = []
                     row_lookup_maps = {}
                 port["vlan_groups"] = row_vlan_groups
-                self._add_vlan_group_selection(port, row_lookup_maps, chassis_member, vlan_group_overrides)
+                self._add_vlan_group_selection(
+                    port, row_lookup_maps, chassis_member, choices.vlan_groups.get(str(port_id))
+                )
 
                 # Add missing VLANs info for warning display
                 self._add_missing_vlans_info(port, row_lookup_maps)
@@ -787,11 +839,12 @@ class BaseInterfaceTableView(
             "oob_incomplete": oob_incomplete,
             "oob_blockers": oob_blockers,
             "relationship_diagnostics": relationship_diagnostics,
+            "requirement_edges": requirement_edges_by_row,
         }
 
     def get_context_data(self, request, obj, interface_name_field, server_key=None, sync_device=None):
         """
-        Build the context data for the interface sync view, from the stored interfaces snapshot.
+        Build the context data for the interface sync view, from the stored interfaces snapshot and the user's draft.
 
         Args:
             request: The current HTTP request.
@@ -807,13 +860,68 @@ class BaseInterfaceTableView(
                 oob_incomplete and related render state).
 
         """
+        if interface_name_field is None:
+            interface_name_field = get_interface_name_field(request, obj)
+        built = self.build_table(request, obj, interface_name_field, server_key, sync_device=sync_device)
+        rows, snapshot, server_key = built.rows, built.snapshot, built.server_key
+        cache_ttl = source_cache.remaining_ttl(obj, Resource.INTERFACES, server_key) if snapshot is not None else None
+        cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl else None
+        chassis = self.sync_view_scope(obj).chassis
+        draft_urls = (
+            interface_command_urls(SyncQuery.from_request(request), obj, server_key) if built.draft is not None else {}
+        )
+
+        return {
+            "object": obj,
+            "table": built.table,
+            "vlan_groups": rows["vlan_groups"],
+            "last_fetched": snapshot.finished_at if snapshot is not None else None,
+            "cache_expiry": cache_expiry,
+            # The Bulk VC Member dialog offers only the members the user may view.
+            "virtual_chassis_members": list(chassis.visible) if getattr(obj, "virtual_chassis", None) else [],
+            "interface_name_field": interface_name_field,
+            "netbox_only_interfaces": rows["netbox_only_interfaces"],
+            "server_key": server_key,
+            "oob_incomplete": rows["oob_incomplete"],
+            "oob_blockers": rows["oob_blockers"],
+            "relationship_diagnostics": rows["relationship_diagnostics"],
+            "hidden_ipam_permissions": rows["hidden_ipam_permissions"],
+            "vlan_scope_incomplete": rows["vlan_scope_incomplete"],
+            "show_ignored": built.show_ignored,
+            "ignored_count": rows["ignored_count"],
+            "filters": built.filters,
+            # The row count before the filter, shown only while a filter narrows the table.
+            "filtered_from": built.filtered_from,
+            "sync_options": interface_sync_options_menu(request),
+            # The data refresh replaced a draft that had rows, so the page says the selection is gone.
+            "selection_cleared": built.draft is not None and built.draft.cleared,
+            # The Bulk VC Member dialog sends its member to this draft command.
+            "member_command_url": draft_urls.get("data-member-url", ""),
+        }
+
+    def build_table(self, request, obj, interface_name_field, server_key=None, *, sync_device=None, extra_keys=()):
+        """
+        Build the interface table of the whole snapshot, as the user's draft selects it and chooses its rows.
+
+        The tab and the row read call this one builder, so a row read answers the row as the table shows it.
+
+        Args:
+            request (HttpRequest): The request; its query holds the filters, the page and the sort.
+            obj (Device | VirtualMachine): The object of the sync page.
+            interface_name_field (str): The interface name field.
+            server_key (str | None): The LibreNMS server key; None resolves it from the request query.
+            sync_device (Device | None): The device that owns the snapshot; None resolves it.
+            extra_keys (Iterable[str]): Row keys off the page that get the selection state of a page row too.
+
+        Returns:
+            BuiltInterfaceTable: The table (None without a snapshot), its filters, the computed rows, the
+                draft (None without a snapshot), the snapshot, the server key and the ignored toggle.
+
+        """
         table = None
         filtered_from = None
         # Every hop of the tab carries the page query, so the toggle is read from it only.
         show_ignored = show_ignored_interfaces(request)
-
-        if interface_name_field is None:
-            interface_name_field = get_interface_name_field(request, obj)
         # The filters show their errors also when no snapshot is cached.
         filters = parse_table_filters(request.GET, lambda rows: self.get_table(rows, obj, interface_name_field))
 
@@ -832,9 +940,10 @@ class BaseInterfaceTableView(
         # per-interface librenms_id index (_get_object_librenms_ids) would be keyed on another server
         # than the snapshot. Render empty, scoped to the requested key, instead.
         snapshot = None if unresolved or server_key is None else source_cache.read(obj, Resource.INTERFACES, server_key)
+        draft = open_interface_draft(request, obj, server_key, snapshot) if snapshot is not None else None
+        choices = InterfaceChoices.of(draft.entries()) if draft is not None else None
 
         chassis = self.sync_view_scope(obj).chassis
-
         rows = self._interface_rows(
             request,
             obj,
@@ -844,51 +953,544 @@ class BaseInterfaceTableView(
             snapshot,
             chassis,
             show_ignored=show_ignored,
+            choices=choices,
         )
-        vlan_groups = rows["vlan_groups"]
-        hidden_ipam_permissions = rows["hidden_ipam_permissions"]
-        vlan_scope_incomplete = rows["vlan_scope_incomplete"]
-        ignored_count = rows["ignored_count"]
-        blocked_port_ids = rows["blocked_port_ids"]
-        netbox_only_interfaces = rows["netbox_only_interfaces"]
         if rows["table_rows"] is not None:
-            table_rows, migrated = rows["table_rows"], rows["migrated"]
+            table_rows, migrated, vlan_groups = rows["table_rows"], rows["migrated"], rows["vlan_groups"]
 
-            def build_table(rows):
+            def build(rows):
                 built = self.get_table(rows, obj, interface_name_field, vlan_groups=vlan_groups)
                 built.migrated_to_marker = migrated
                 return built
 
             # The filter runs after every whole-snapshot step above, so the counts, the ignored
             # split and the blocked IDs describe the whole device.
-            table, filters, filtered_from = filter_sync_table(request, table_rows, build_table)
+            table, filters, filtered_from = filter_sync_table(request, table_rows, build)
             table.configure(request)
+            if draft is not None:
+                show_interface_selection(
+                    request,
+                    obj,
+                    server_key,
+                    table,
+                    rows,
+                    draft,
+                    enabled=interface_sync_options_menu(request)["auto_select_lag_members"],
+                    extra_keys=extra_keys,
+                )
+        return BuiltInterfaceTable(
+            table=table,
+            filters=filters,
+            filtered_from=filtered_from,
+            rows=rows,
+            draft=draft,
+            snapshot=snapshot,
+            server_key=server_key,
+            show_ignored=show_ignored,
+        )
 
-        cache_ttl = source_cache.remaining_ttl(obj, Resource.INTERFACES, server_key) if snapshot is not None else None
-        cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl else None
+    def row_html(self, request, obj, server_key, row_key):
+        """
+        Return the ``<tr>`` of one interface row as the tab's table renders it, or None when no shown row has *row_key*.
 
-        return {
-            "object": obj,
-            "table": table,
-            "vlan_groups": vlan_groups,
-            "last_fetched": snapshot.finished_at if snapshot is not None else None,
-            "cache_expiry": cache_expiry,
-            # The Bulk VC Member dialog offers only the members the user may view.
-            "virtual_chassis_members": list(chassis.visible) if getattr(obj, "virtual_chassis", None) else [],
-            "interface_name_field": interface_name_field,
-            "netbox_only_interfaces": netbox_only_interfaces,
-            "server_key": server_key,
-            "oob_incomplete": rows["oob_incomplete"],
-            "oob_blockers": rows["oob_blockers"],
-            "relationship_diagnostics": rows["relationship_diagnostics"],
-            "hidden_ipam_permissions": hidden_ipam_permissions,
-            "vlan_scope_incomplete": vlan_scope_incomplete,
-            "show_ignored": show_ignored,
-            "ignored_count": ignored_count,
-            "filters": filters,
-            # The row count before the filter, shown only while a filter narrows the table.
-            "filtered_from": filtered_from,
-            "sync_options": interface_sync_options_menu(request),
-            # The browser's related-row walk skips these, on this page and on every other.
-            "blocked_port_ids_json": json.dumps([str(port_id) for port_id in blocked_port_ids if port_id is not None]),
+        The row is built with the whole snapshot, the draft and the page query of the request, as in the tab.
+        """
+        built = self.build_table(
+            request, obj, get_interface_name_field(request, obj), server_key, extra_keys=(row_key,)
+        )
+        if built.table is None:
+            return None
+        row = next((row for row in built.table.rows if interface_row_key(row.record) == row_key), None)
+        return render_rows(request, [row]) if row is not None else None
+
+
+@dataclass(frozen=True)
+class BuiltInterfaceTable:
+    """The interface table of one render, and the state it was built from."""
+
+    table: object
+    filters: object
+    filtered_from: int | None
+    rows: dict
+    draft: SelectionDraft | None
+    snapshot: object
+    server_key: str | None
+    show_ignored: bool
+
+
+# =============================================================================
+# The Interfaces tab on the user's selection draft
+# =============================================================================
+
+INTERFACE_TAB = SyncTab.INTERFACES
+# A device, a chassis member and a virtual machine show one interface table; the draft key names the subject.
+INTERFACE_TABLE_VARIANT = "interfaces"
+# The draft choices of a row: its Virtual Chassis member (a Device pk), and the VLAN group pk of each VID ("" is Global).
+MEMBER_CHOICE = "member"
+VLAN_GROUPS_CHOICE = "vlan_groups"
+
+
+@dataclass(frozen=True)
+class InterfaceChoices:
+    """The member and the VLAN groups that the user chose for interface rows, by row key."""
+
+    members: dict = field(default_factory=dict)
+    vlan_groups: dict = field(default_factory=dict)
+
+    @classmethod
+    def of(cls, entries):
+        """Return the choices of the draft *entries*."""
+        return cls(
+            members={
+                key: entry.choices[MEMBER_CHOICE] for key, entry in entries.items() if MEMBER_CHOICE in entry.choices
+            },
+            vlan_groups={
+                key: dict(entry.choices[VLAN_GROUPS_CHOICE])
+                for key, entry in entries.items()
+                if VLAN_GROUPS_CHOICE in entry.choices
+            },
+        )
+
+    def digest(self):
+        """Return a stable text of the choices, for the key of the computed rows."""
+        return json.dumps([self.members, self.vlan_groups], sort_keys=True)
+
+
+def _interface_draft_identity(request, obj, server_key, snapshot):
+    scope = selection_scope(request, obj, server_key, INTERFACE_TAB.value)
+    return (request.user, obj, INTERFACE_TAB, INTERFACE_TABLE_VARIANT, server_key, scope, snapshot.snapshot_id)
+
+
+def open_interface_draft(request, obj, server_key, snapshot):
+    """Return the request user's interface draft for a presentation of the snapshot; only the published snapshot starts one."""
+
+    def published():
+        current = source_cache.read(obj, Resource.INTERFACES, server_key)
+        return current.snapshot_id if current is not None else None
+
+    return SelectionDraft.open(*_interface_draft_identity(request, obj, server_key, snapshot), published=published)
+
+
+def find_interface_draft(request, obj, server_key, snapshot):
+    """Return the request user's stored interface draft of the snapshot that a command read, or None."""
+    return SelectionDraft.find(*_interface_draft_identity(request, obj, server_key, snapshot))
+
+
+def interface_selectable(record):
+    """Return whether the user can select the row: it has an enabled checkbox."""
+    return record.get("sync_target_resolvable", True) and blocked_row_state(record["rule_decision"]) not in (
+        ROW_IGNORED,
+        ROW_AMBIGUOUS,
+        ROW_INCOMPLETE,
+    )
+
+
+def interface_evidence(obj, server_key, record, table):
+    """
+    Return the facts that selecting one interface row approves.
+
+    The writer writes the row to its member, onto the NetBox interface the row resolves to, with its
+    relationship targets and VLAN groups; the row's sync state says what the page showed. A change of
+    any of them asks the user to select the row again, and the writer compares the member and the
+    interface again under its locks. The subject and the server bind the token to its tab.
+    """
+    interface = record.get("netbox_interface")
+    return {
+        "subject": [obj._meta.label_lower, obj.pk],
+        "server": server_key,
+        "row": interface_row_key(record),
+        "member": record.get("selected_object_id"),
+        "interface": interface.pk if interface is not None else None,
+        "state": table.row_sync_state(record).state,
+        "relations": [record.get(f"librenms_{relation}_port_id") for relation in ("lag", "parent", "bridge")],
+        "vlan_groups": {
+            str(vid): group.get("group_id", "") for vid, group in (record.get("vlan_group_map") or {}).items()
+        },
+    }
+
+
+def effective_intents(obj, server_key, table, records, entries):
+    """
+    Return the intent of each draft row that the rule reads: a selection counts only while its evidence is current.
+
+    Args:
+        obj (Device | VirtualMachine): The subject of the sync page.
+        server_key (str): The LibreNMS server of the tab.
+        table (LibreNMSInterfaceTable): A table of the tab, which decides each row's sync state.
+        records (dict[str, dict]): The rows of the whole snapshot by row key.
+        entries (dict[str, Entry]): The draft entries.
+
+    Returns:
+        dict[str, Intent]: ``Intent.ON`` for an approved selection, ``Intent.OFF`` for an exclusion.
+
+    """
+    intents = {}
+    for row_key, entry in entries.items():
+        record = records.get(row_key)
+        if entry.intent is Intent.OFF:
+            intents[row_key] = Intent.OFF
+        elif entry.intent is Intent.ON and record is not None and interface_selectable(record):
+            if evidence_problem(entry, interface_evidence(obj, server_key, record, table)) is None:
+                intents[row_key] = Intent.ON
+    return intents
+
+
+def show_interface_selection(request, obj, server_key, table, rows, draft, *, enabled, extra_keys=()):
+    """
+    Add to each page row its checkbox state, its intent, its requirements, its evidence token and its row read URL.
+
+    The rule reads the draft over the whole snapshot: a row on the page shows checked when the user
+    selected it, or when a selected row (on any page) requires it while *enabled*. The table is bound to
+    the draft and the URLs of its commands.
+    """
+    entries = draft.entries()
+    records = {key: record for record in rows["table_rows"] if (key := interface_row_key(record)) is not None}
+    edges = rows["requirement_edges"]
+    blocked = {str(port_id) for port_id in rows["blocked_port_ids"] if port_id is not None}
+    intents = effective_intents(obj, server_key, table, records, entries)
+    checked = checked_rows(edges, intents, blocked, enabled=enabled)
+    page_records = [row.record for row in table.page.object_list] if table.page else list(table.data)
+    page_keys = {interface_row_key(record) for record in page_records}
+    off_page = off_page_requirers(edges, intents, blocked, page_keys)
+    query = SyncQuery.from_request(request)
+    shown = page_records + [records[key] for key in extra_keys if key in records and key not in page_keys]
+    for record in shown:
+        key = interface_row_key(record)
+        if key is None:
+            continue
+        selectable = interface_selectable(record)
+        entry = entries.get(key)
+        record["selected"] = selectable and key in checked
+        record["evidence_changed"] = (
+            entry is not None and entry.intent is Intent.ON and intents.get(key) is not Intent.ON
+        )
+        record["intent"] = intents.get(key, Intent.NONE).value
+        record["requires"] = json.dumps([] if key in blocked else sorted(requirements(edges, key, blocked)))
+        record["offpage_requirers"] = off_page.get(key, 0)
+        record["evidence_token"] = (
+            sign_evidence(INTERFACE_TAB, interface_evidence(obj, server_key, record, table)) if selectable else ""
+        )
+        record["row_read_url"] = row_url(query, obj, server_key, "interface_row", key)
+        record["vlan_modal_url"] = row_url(query, obj, server_key, "interface_vlan_modal", key)
+    bind_draft(table, query, obj, server_key, draft, INTERFACE_COMMAND_URLS)
+
+
+# The draft commands of the interface table, by the table attribute that names each URL.
+INTERFACE_COMMAND_URLS = {
+    "data-selection-url": "interface_selection",
+    "data-choice-url": "interface_selection_choice",
+    "data-member-url": "interface_selection_member",
+    "data-vlan-groups-url": "interface_selection_vlan_groups",
+}
+
+
+def interface_command_urls(query, obj, server_key):
+    """Return the URL of each interface draft command by its table attribute, with the page query and the server."""
+    kwargs = {"object_type": obj._meta.model_name, "pk": obj.pk}
+    return {
+        attribute: query.url(
+            reverse(f"plugins:netbox_librenms_plugin:{name}", kwargs=kwargs), {"server_key": server_key}
+        )
+        for attribute, name in INTERFACE_COMMAND_URLS.items()
+    }
+
+
+def current_interface_rows(request, obj, server_key, snapshot, entries):
+    """
+    Return the tab view, a table of the tab and the computed rows of the whole *snapshot* with the draft's choices.
+
+    Args:
+        request (HttpRequest): The request; its query holds the name field and the ignored toggle.
+        obj (Device | VirtualMachine): The subject of the sync page.
+        server_key (str): The LibreNMS server of the snapshot.
+        snapshot (SourceSnapshot): The stored interfaces snapshot.
+        entries (dict[str, Entry]): The draft entries whose choices the rows take.
+
+    Returns:
+        tuple: The tab view, a table that decides each row's sync state, and the rows of ``_interface_rows``.
+
+    """
+    view = interface_tab_view(request, obj, server_key)
+    name_field = get_interface_name_field(request, obj)
+    rows = view._interface_rows(
+        request,
+        obj,
+        name_field,
+        server_key,
+        get_librenms_sync_device(obj, server_key=server_key) or obj,
+        snapshot,
+        view.sync_view_scope(obj).chassis,
+        show_ignored=show_ignored_interfaces(request),
+        choices=InterfaceChoices.of(entries),
+    )
+    return view, view.get_table([], obj, name_field, vlan_groups=rows["vlan_groups"]), rows
+
+
+def interface_tab_view(request, obj, server_key):
+    """Return the interfaces tab view of *obj* for *request*, bound to *server_key*."""
+    # Imported here: the object_sync views import this module.
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+    from netbox_librenms_plugin.views.object_sync.vms import VMInterfaceTableView
+
+    view = DeviceInterfaceTableView() if isinstance(obj, Device) else VMInterfaceTableView()
+    view.setup(request, pk=obj.pk)
+    view.rebind_api_for_server(server_key)
+    return view
+
+
+def _canonical_port_key(value):
+    """Return *value* when it is the row key of an interface row: a canonical LibreNMS port ID as text."""
+    port_id = normalize_librenms_port_id(value) if isinstance(value, str) else None
+    if port_id is None or str(port_id) != value:
+        raise BadRequest("The request names no valid interface row.")
+    return value
+
+
+class _InterfaceDraftView(DraftView):
+    """Resolve the subject, the server and the interfaces snapshot of one request on the user's interface draft."""
+
+    resource = Resource.INTERFACES
+
+    def current_rows(self, request, obj, server_key, entries):
+        """Return the tab view and the computed rows of the whole snapshot with the choices of the draft *entries*."""
+        snapshot = source_cache.read(obj, Resource.INTERFACES, server_key)
+        view, _table, rows = current_interface_rows(request, obj, server_key, snapshot, entries)
+        return view, rows
+
+
+class _InterfaceDraftCommandView(DraftCommandView, _InterfaceDraftView):
+    """A command on the user's interface draft."""
+
+    @staticmethod
+    def draft(request, obj, server_key, snapshot):
+        """Return the stored draft of the snapshot that the command read; None (a conflict) when a newer one replaced it."""
+        return find_interface_draft(request, obj, server_key, snapshot) if snapshot is not None else None
+
+    def row(self, request, obj, server_key, draft, row_key):
+        """Return the tab view and the current row *row_key* with the draft's choices; Http404 when no shown row has it."""
+        view, rows = self.current_rows(request, obj, server_key, draft.entries())
+        record = next(
+            (record for record in rows["table_rows"] or () if interface_row_key(record) == row_key),
+            None,
+        )
+        if record is None:
+            raise Http404("No current interface row has this key.")
+        return view, rows, record
+
+
+class InterfaceSelectionView(_InterfaceDraftCommandView):
+    """Set the absolute selection state of interface rows in the user's draft; the page's unload beacon posts here too."""
+
+    def post(self, request, object_type, pk):
+        """Apply one batch of row states: ``draft_id``, ``expected_revision`` and ``assignments`` (JSON)."""
+        obj, server_key, snapshot, error = self.subject(request, object_type, pk)
+        if error:
+            return error
+        draft_id, expected_revision = self.draft_version(request.POST)
+        assignments = parse_assignments(
+            request.POST.get("assignments"), INTERFACE_TAB, obj, server_key, _canonical_port_key
+        )
+        if (draft := self.draft(request, obj, server_key, snapshot)) is None:
+            return self.conflict()
+        try:
+            revision = draft.assign(draft_id, expected_revision, assignments)
+        except DraftConflict:
+            return self.conflict()
+        return self.acknowledge(revision)
+
+
+class InterfaceChoiceView(_InterfaceDraftCommandView):
+    """Store the Virtual Chassis member that the user chose for one interface row, then name the row for the page to read again."""
+
+    def post(self, request, object_type, pk):
+        """Store ``value`` (a member pk; "" removes the choice) as the member of the row ``row`` (``field`` is ``member``)."""
+        obj, server_key, snapshot, error = self.subject(request, object_type, pk)
+        if error:
+            return error
+        draft_id, expected_revision = self.draft_version(request.POST)
+        row_key = _canonical_port_key(request.POST.get("row"))
+        if request.POST.get("field") != MEMBER_CHOICE:
+            raise BadRequest("An interface row has a member choice only.")
+        value = _member_value(self, obj, request.POST.get("value"))
+        if (draft := self.draft(request, obj, server_key, snapshot)) is None:
+            return self.conflict()
+        if row_key not in _snapshot_row_keys(obj, server_key):
+            raise Http404("No current interface row has this key.")
+        try:
+            revision = draft.choose(draft_id, expected_revision, row_key, MEMBER_CHOICE, value)
+        except DraftConflict:
+            return self.conflict()
+        return self.acknowledge(revision, {ROW_STALE_EVENT: {"key": row_key}})
+
+
+class InterfaceMemberView(_InterfaceDraftCommandView):
+    """Choose one Virtual Chassis member for every selected interface row of the user's draft (Bulk Edit VC Member)."""
+
+    def post(self, request, object_type, pk):
+        """Store ``value`` (a member pk) as the member of each row that the draft selects."""
+        obj, server_key, snapshot, error = self.subject(request, object_type, pk)
+        if error:
+            return error
+        draft_id, expected_revision = self.draft_version(request.POST)
+        value = _member_value(self, obj, request.POST.get("value"))
+        if value is None:
+            raise BadRequest("Name the member for the selected rows.")
+        if (draft := self.draft(request, obj, server_key, snapshot)) is None:
+            return self.conflict()
+        keys = _snapshot_row_keys(obj, server_key)
+        values = {key: value for key, entry in draft.entries().items() if entry.intent is Intent.ON and key in keys}
+        try:
+            revision = draft.choose_rows(draft_id, expected_revision, MEMBER_CHOICE, values)
+        except DraftConflict:
+            return self.conflict()
+        return self.acknowledge(revision, {RESULTS_STALE_EVENT: None})
+
+
+class InterfaceVlanGroupsView(_InterfaceDraftCommandView):
+    """Store the VLAN group of each VID of one interface row, or of every row with that VID ("apply to all")."""
+
+    def post(self, request, object_type, pk):
+        """Store ``group_<vid>`` (a VLAN group pk; "" is Global) for the row ``row``, and ``apply_to_all`` for every row."""
+        obj, server_key, snapshot, error = self.subject(request, object_type, pk)
+        if error:
+            return error
+        draft_id, expected_revision = self.draft_version(request.POST)
+        row_key = _canonical_port_key(request.POST.get("row"))
+        if (draft := self.draft(request, obj, server_key, snapshot)) is None:
+            return self.conflict()
+        _view, rows, record = self.row(request, obj, server_key, draft, row_key)
+        chosen = _posted_vlan_groups(request.POST, record)
+        targets = rows["table_rows"] if request.POST.get("apply_to_all") else [record]
+        entries = draft.entries()
+        values = {}
+        for target in targets:
+            key = interface_row_key(target)
+            groups = {vid: group for vid, group in chosen.items() if _offers_vlan_group(target, vid, group)}
+            if key is None or not groups:
+                continue
+            stored = dict(entries[key].choices.get(VLAN_GROUPS_CHOICE, {})) if key in entries else {}
+            values[key] = {**stored, **groups}
+        try:
+            revision = draft.choose_rows(draft_id, expected_revision, VLAN_GROUPS_CHOICE, values)
+        except DraftConflict:
+            return self.conflict()
+        trigger = (
+            {RESULTS_STALE_EVENT: None} if request.POST.get("apply_to_all") else {ROW_STALE_EVENT: {"key": row_key}}
+        )
+        return self.acknowledge(revision, trigger)
+
+
+class InterfaceRowView(_InterfaceDraftView):
+    """Answer one interface row as the tab's table renders it, for the page's row read."""
+
+    def get(self, request, object_type, pk, row_key):
+        """Render the ``<tr>`` of the interface row *row_key* from the stored snapshot and the user's draft."""
+        obj, server_key, snapshot, error = self.subject(request, object_type, pk)
+        if error:
+            return error
+        if snapshot is None:
+            raise Http404("The interfaces snapshot is not available.")
+        html = interface_tab_view(request, obj, server_key).row_html(request, obj, server_key, row_key)
+        if html is None:
+            raise Http404("No current interface row has this key.")
+        return row_response(html)
+
+
+class InterfaceVlanModalView(_InterfaceDraftView):
+    """Render the VLAN groups dialog of one interface row; a ``group_<vid>`` query previews that group's colours."""
+
+    template_name = "netbox_librenms_plugin/htmx/interface_vlan_groups.html"
+
+    def get(self, request, object_type, pk, row_key):
+        """Render the dialog content of the row *row_key*, with the draft's groups or the previewed ones."""
+        obj, server_key, snapshot, error = self.subject(request, object_type, pk)
+        if error:
+            return error
+        if snapshot is None:
+            raise Http404("The interfaces snapshot is not available.")
+        draft = open_interface_draft(request, obj, server_key, snapshot)
+        view, rows = self.current_rows(request, obj, server_key, draft.entries())
+        record = next((r for r in rows["table_rows"] or () if interface_row_key(r) == row_key), None)
+        if record is None or record.get("member_withheld") or not record.get("sync_target_resolvable", True):
+            raise Http404("No current interface row with VLAN groups has this key.")
+        # A preview shows the groups that the dialog shows now, without a change to the draft.
+        groups = {
+            str(vid): group.get("group_id", "") for vid, group in (record.get("vlan_group_map") or {}).items()
+        } | _posted_vlan_groups(request.GET, record)
+        table = view.get_table([record], obj, get_interface_name_field(request, obj), vlan_groups=rows["vlan_groups"])
+        # The dialog's own fields ride on its preview request, never on the URLs it renders.
+        page_query = request.GET.copy()
+        for key in [key for key in page_query if key in ("row", "apply_to_all") or key.startswith("group_")]:
+            page_query.pop(key)
+        query = SyncQuery(page_query)
+        context = {
+            "row_key": row_key,
+            "interface_name": record.get(table.interface_name_field) or "",
+            "vlans": table.vlan_modal_rows(record, groups, _vids_missing_in_groups(request.user, groups)),
+            "groups": record.get("vlan_groups") or [],
+            "command_url": interface_command_urls(query, obj, server_key)["data-vlan-groups-url"],
+            "preview_url": row_url(query, obj, server_key, "interface_vlan_modal", row_key),
+            "apply_to_all": bool(request.GET.get("apply_to_all")),
         }
+        response = render(request, self.template_name, context)
+        response["Cache-Control"] = "no-store"
+        return response
+
+
+def _vids_missing_in_groups(user, groups):
+    """Return the VIDs of ``{vid text: group pk text}`` whose group ("" is Global) holds no VLAN the user can view, and no global one."""
+    vids = [int(vid) for vid in groups]
+    group_ids = {coerce_model_pk(group) for group in groups.values() if group}
+    available = set(
+        VLAN.objects.restrict(user, "view")
+        .filter(Q(group__isnull=True) | Q(group_id__in=group_ids), vid__in=vids)
+        .values_list("vid", "group_id")
+    )
+    return {
+        vid
+        for vid, group in groups.items()
+        if (int(vid), coerce_model_pk(group) if group else None) not in available and (int(vid), None) not in available
+    }
+
+
+def _member_value(view, obj, raw):
+    """Return the member pk text that a command names, None for "", or raise when it names no visible member."""
+    if raw == "":
+        return None
+    if not getattr(obj, "virtual_chassis", None):
+        raise BadRequest("Only a Virtual Chassis member has a member choice.")
+    member_id = coerce_model_pk(raw)
+    if member_id is None or member_id not in set(view.sync_view_scope(obj).chassis.visible_ids):
+        raise Http404("No Virtual Chassis member you can view has this ID.")
+    return member_id
+
+
+def _snapshot_row_keys(obj, server_key):
+    """Return the row keys of the stored interfaces snapshot."""
+    assessment = read_interface_assessment(obj, server_key, "ifName")
+    if assessment is None:
+        return set()
+    return {key for port in assessment["ports"] if (key := interface_row_key(port)) is not None}
+
+
+def _posted_vlan_groups(data, record):
+    """Return the ``group_<vid>`` values of *data* for the VIDs of *record*, as ``{vid text: group pk text}``."""
+    vids = [str(vid) for vid in ([record.get("untagged_vlan")] if record.get("untagged_vlan") else [])]
+    vids += [str(vid) for vid in record.get("tagged_vlans") or ()]
+    groups = {}
+    for vid in vids:
+        value = data.get(f"group_{vid}")
+        if value is None:
+            continue
+        if value != "" and coerce_model_pk(value) is None:
+            raise BadRequest(f"The VLAN group of VLAN {vid} is not valid.")
+        groups[vid] = value
+    return groups
+
+
+def _offers_vlan_group(record, vid, group):
+    """Return whether the row has VLAN *vid* and offers the group *group* ("" is Global) for it."""
+    vids = {str(record.get("untagged_vlan"))} | {str(tagged) for tagged in record.get("tagged_vlans") or ()}
+    if vid not in vids or record.get("member_withheld") or not record.get("sync_target_resolvable", True):
+        return False
+    return group == "" or coerce_model_pk(group) in {candidate.pk for candidate in record.get("vlan_groups") or ()}

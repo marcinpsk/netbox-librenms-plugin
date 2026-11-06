@@ -1,5 +1,6 @@
 """End-to-end checks for confirmation-required VLAN synchronization changes."""
 
+import json
 import re
 
 import pytest
@@ -9,6 +10,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_superuser,
 )
+from netbox_librenms_plugin.tests.view_test_helpers import answers_in_place
 
 
 def _seed_vlan_snapshot(device, rows, server_key="default"):
@@ -29,6 +31,20 @@ def _sync_url(device):
     )
 
 
+def _submit(client, device, vids, *, htmx=True, groups=None):
+    """Choose the group of each VID in *groups*, select *vids* through the VLAN tab's draft, then submit them."""
+    from netbox_librenms_plugin.tests.view_test_helpers import submit_with_draft
+
+    choices = [
+        ("data-choice-url", {"row": str(vid), "field": "group", "value": str(group.pk)})
+        for vid, group in (groups or {}).items()
+    ]
+    headers = {"HTTP_HX_REQUEST": "true"} if htmx else None
+    return submit_with_draft(
+        client, device, "vlans", _sync_url(device), vids, choices=choices, headers=headers, action="create_vlans"
+    )
+
+
 @pytest.mark.django_db
 def test_selected_grouped_vlan_requires_confirmation_before_rename(client, settings):
     """A selected VID must not silently replace an existing VLAN name in its group."""
@@ -41,17 +57,7 @@ def test_selected_grouped_vlan_requires_confirmation_before_rename(client, setti
     _seed_vlan_snapshot(device, [{"vlan_vlan": 100, "vlan_name": "Proposed name"}])
     client.force_login(make_superuser("vlan-conflict-user"))
 
-    response = client.post(
-        _sync_url(device),
-        {
-            "server_key": "default",
-            "action": "create_vlans",
-            "select": "100",
-            "vlan_group_100": str(group.pk),
-            "expected_vlan_name_100": "Proposed name",
-        },
-        HTTP_HX_REQUEST="true",
-    )
+    response = _submit(client, device, [100])
 
     assert response.status_code == 200
     assert b"Confirm VLAN changes" in response.content
@@ -77,17 +83,7 @@ def test_confirmed_grouped_vlan_rename_applies_the_disclosed_name(client, settin
     client.force_login(make_superuser("vlan-confirm-user"))
     url = _sync_url(device)
 
-    conflict_response = client.post(
-        url,
-        {
-            "server_key": "default",
-            "action": "create_vlans",
-            "select": "101",
-            "vlan_group_101": str(group.pk),
-            "expected_vlan_name_101": "Confirmed name",
-        },
-        HTTP_HX_REQUEST="true",
-    )
+    conflict_response = _submit(client, device, [101])
     conflict = conflict_response.context["conflicts"][0]
 
     response = client.post(
@@ -97,16 +93,14 @@ def test_confirmed_grouped_vlan_rename_applies_the_disclosed_name(client, settin
             "action": "create_vlans",
             "confirm_conflicts": "1",
             "force_conflict": "101",
-            "select": "101",
-            "vlan_group_101": str(group.pk),
-            "expected_vlan_name_101": "Confirmed name",
             "conflict_intent": conflict["intent"],
         },
         HTTP_HX_REQUEST="true",
     )
 
-    assert response.status_code == 200
-    assert response.headers["HX-Redirect"]
+    assert answers_in_place(response)
+    # The confirmation came from the dialog, and its answer closes it.
+    assert "closeModal" in json.loads(response["HX-Trigger"])
     existing.refresh_from_db()
     assert existing.name == "Confirmed name"
     change = ObjectChange.objects.get(
@@ -130,17 +124,7 @@ def test_stale_vlan_confirmation_fails_closed(client, settings):
     client.force_login(make_superuser("vlan-stale-user"))
     url = _sync_url(device)
 
-    conflict_response = client.post(
-        url,
-        {
-            "server_key": "default",
-            "action": "create_vlans",
-            "select": "102",
-            "vlan_group_102": str(group.pk),
-            "expected_vlan_name_102": "Proposed name",
-        },
-        HTTP_HX_REQUEST="true",
-    )
+    conflict_response = _submit(client, device, [102])
     conflict = conflict_response.context["conflicts"][0]
     VLAN.objects.filter(pk=existing.pk).update(name="Concurrent name")
 
@@ -151,16 +135,14 @@ def test_stale_vlan_confirmation_fails_closed(client, settings):
             "action": "create_vlans",
             "confirm_conflicts": "1",
             "force_conflict": "102",
-            "select": "102",
-            "vlan_group_102": str(group.pk),
-            "expected_vlan_name_102": "Proposed name",
             "conflict_intent": conflict["intent"],
         },
         HTTP_HX_REQUEST="true",
     )
 
-    assert response.status_code == 200
-    assert response.headers["HX-Redirect"]
+    assert answers_in_place(response)
+    # The confirmation came from the dialog, and its answer closes it.
+    assert "closeModal" in json.loads(response["HX-Trigger"])
     assert any("changed after confirmation" in str(message) for message in response.wsgi_request._messages)
     existing.refresh_from_db()
     assert existing.name == "Concurrent name"
@@ -185,16 +167,14 @@ def test_tampered_vlan_confirmation_syncs_nothing(client, settings):
             "action": "create_vlans",
             "confirm_conflicts": "1",
             "force_conflict": "103",
-            "select": "103",
-            "vlan_group_103": str(group.pk),
-            "expected_vlan_name_103": "Proposed name",
             "conflict_intent": "invalid-token",
         },
         HTTP_HX_REQUEST="true",
     )
 
-    assert response.status_code == 200
-    assert response.headers["HX-Redirect"]
+    assert answers_in_place(response)
+    # The confirmation came from the dialog, and its answer closes it.
+    assert "closeModal" in json.loads(response["HX-Trigger"])
     assert [str(message) for message in response.wsgi_request._messages] == [
         "VLAN confirmation is invalid or has expired. Refresh the VLAN data and try again."
     ]
@@ -214,16 +194,7 @@ def test_native_vlan_conflict_renders_a_complete_page(client, settings):
     _seed_vlan_snapshot(device, [{"vlan_vlan": 104, "vlan_name": "Proposed name"}])
     client.force_login(make_superuser("vlan-native-user"))
 
-    response = client.post(
-        _sync_url(device),
-        {
-            "server_key": "default",
-            "action": "create_vlans",
-            "select": "104",
-            "vlan_group_104": str(group.pk),
-            "expected_vlan_name_104": "Proposed name",
-        },
-    )
+    response = _submit(client, device, [104], htmx=False)
 
     assert response.status_code == 200
     assert any(template.name == "netbox_librenms_plugin/vlan_conflicts_page.html" for template in response.templates)
@@ -257,16 +228,7 @@ def test_native_vlan_conflict_page_marks_the_sync_tab_active(client, settings):
     _seed_vlan_snapshot(device, [{"vlan_vlan": 112, "vlan_name": "Proposed name"}])
     client.force_login(make_superuser("vlan-tabbar-user"))
 
-    response = client.post(
-        _sync_url(device),
-        {
-            "server_key": "default",
-            "action": "create_vlans",
-            "select": "112",
-            "vlan_group_112": str(group.pk),
-            "expected_vlan_name_112": "Proposed name",
-        },
-    )
+    response = _submit(client, device, [112], htmx=False)
 
     assert response.status_code == 200
     assert _active_tab_urls(response) == [reverse("dcim:device_librenms_sync", kwargs={"pk": device.pk})]
@@ -296,19 +258,7 @@ def test_bulk_vlan_sync_commits_safe_rows_before_confirmation(
     client.force_login(make_superuser("vlan-bulk-user"))
 
     with django_capture_on_commit_callbacks(execute=True):
-        response = client.post(
-            _sync_url(device),
-            {
-                "server_key": "default",
-                "action": "create_vlans",
-                "select": ["105", "106"],
-                "vlan_group_105": str(group.pk),
-                "expected_vlan_name_105": "Proposed name",
-                "vlan_group_106": str(group.pk),
-                "expected_vlan_name_106": "Safe name",
-            },
-            HTTP_HX_REQUEST="true",
-        )
+        response = _submit(client, device, [105, 106], groups={106: group})
 
     assert response.status_code == 200
     assert b"Confirm VLAN changes" in response.content
@@ -329,7 +279,8 @@ def test_bulk_vlan_sync_commits_safe_rows_before_confirmation(
         HTTP_HX_REQUEST="true",
     )
 
-    assert confirm_response.status_code == 200
-    assert confirm_response.headers["HX-Redirect"]
+    assert answers_in_place(confirm_response)
+    # The confirmation came from the dialog, and its answer closes it.
+    assert "closeModal" in json.loads(confirm_response["HX-Trigger"])
     existing.refresh_from_db()
     assert existing.name == "Proposed name"

@@ -1,5 +1,6 @@
 """Authorization and failure-path integration tests for synchronization writes."""
 
+import json
 from decimal import Decimal
 
 import pytest
@@ -21,7 +22,14 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot, seed_source_snapshot
-from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms, submit_ip_selection
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    draft_command,
+    draft_tab,
+    make_user_with_perms,
+    select_rows,
+    submit_ip_selection,
+    submit_with_draft,
+)
 from netbox_librenms_plugin.utils import get_librenms_cable_tag
 
 
@@ -318,7 +326,7 @@ class TestVLANWriteFailures:
 
         response = client.post(
             _vlan_url(device),
-            {"server_key": posted_keys, "action": "create_vlans", "select": "3132", "vlan_group_3132": ""},
+            {"server_key": posted_keys, "action": "create_vlans", "draft_id": "any", "expected_revision": "0"},
         )
 
         assert response.status_code == 302
@@ -334,15 +342,14 @@ class TestVLANWriteFailures:
         )
         _login(client, "vlan-group-user")
 
-        response = client.post(
+        response = submit_with_draft(
+            client,
+            device,
+            "vlans",
             _vlan_url(device),
-            {
-                "server_key": SERVER_KEY,
-                "action": "create_vlans",
-                "select": "3131",
-                "vlan_group_3131": group.pk,
-                "expected_vlan_name_3131": "Application",
-            },
+            [3131],
+            choices=[("data-choice-url", {"row": "3131", "field": "group", "value": str(group.pk)})],
+            action="create_vlans",
         )
 
         assert response.status_code == 302
@@ -364,16 +371,7 @@ class TestVLANWriteFailures:
         user = grant(user, "add", VLAN, constraints={"vid": 3137})
         client.force_login(user)
 
-        response = client.post(
-            _vlan_url(device),
-            {
-                "server_key": SERVER_KEY,
-                "action": "create_vlans",
-                "select": "3136",
-                "vlan_group_3136": "",
-                "expected_vlan_name_3136": "Outside add scope",
-            },
-        )
+        response = submit_with_draft(client, device, "vlans", _vlan_url(device), [3136], action="create_vlans")
 
         assert response.status_code == 302
         assert not VLAN.objects.filter(vid=3136).exists()
@@ -383,25 +381,26 @@ class TestVLANWriteFailures:
 
     def test_missing_group_fails_closed_instead_of_creating_global_vlan(self, client, live_librenms):
         device = make_device("vlan-group-missing", librenms_cf={SERVER_KEY: {"id": 132}})
+        group = VLANGroup.objects.create(name="Missing Group", slug="missing-group")
         seed_source_snapshot(
             device, Resource.VLANS, SERVER_KEY, vlans=[{"vlan_vlan": 3132, "vlan_name": "Application"}]
         )
         _login(client, "vlan-group-missing-user")
-
-        response = client.post(
-            _vlan_url(device),
-            {
-                "server_key": SERVER_KEY,
-                "action": "create_vlans",
-                "select": "3132",
-                "vlan_group_3132": 2_147_483_647,
-                "expected_vlan_name_3132": "Application",
-            },
+        draft = select_rows(
+            client,
+            device,
+            "vlans",
+            [3132],
+            choices=[("data-choice-url", {"row": "3132", "field": "group", "value": str(group.pk)})],
         )
+        # The chosen group goes away after the user selected the row in it.
+        group.delete()
+
+        response = client.post(_vlan_url(device), {"server_key": SERVER_KEY, "action": "create_vlans", **draft})
 
         assert response.status_code == 302
         assert not VLAN.objects.filter(vid=3132).exists()
-        assert any("no longer exists" in text for text in _response_messages(response, "error"))
+        assert any("3132" in text and "changed" in text for text in _response_messages(response))
 
     def test_invalid_rows_do_not_abort_a_valid_vlan_in_the_batch(self, client, live_librenms):
         device = make_device("vlan-invalid-batch", librenms_cf={SERVER_KEY: {"id": 133}})
@@ -417,26 +416,23 @@ class TestVLANWriteFailures:
             ],
         )
         _login(client, "vlan-invalid-batch-user")
-
-        response = client.post(
-            _vlan_url(device),
-            {
-                "server_key": SERVER_KEY,
-                "action": "create_vlans",
-                "select": ["not-a-vid", "0", "3133", "3134"],
-                "vlan_group_3133": "",
-                "vlan_group_3134": "",
-                "expected_vlan_name_3134": "Valid VLAN",
-            },
+        shown = draft_tab(client, device, "vlans")
+        # A row with an invalid VID has no row key, so no selection can name it.
+        assert set(shown.rows) == {"3133", "3134"}
+        refused = draft_command(
+            client,
+            shown,
+            "data-selection-url",
+            assignments=json.dumps({"0": {"state": "on", "token": shown.rows["3134"]["data-evidence"]}}),
         )
+        assert refused.status_code == 400
+
+        response = submit_with_draft(client, device, "vlans", _vlan_url(device), [3133, 3134], action="create_vlans")
 
         assert response.status_code == 302
         assert not VLAN.objects.filter(vid__in=[0, 3133]).exists()
         assert VLAN.objects.filter(vid=3134, name="Valid VLAN").exists()
-        errors = _response_messages(response, "error")
-        assert "VLAN not-a-vid: the LibreNMS VID is invalid; skipped." in errors
-        assert "VLAN 0: the LibreNMS VID is invalid; skipped." in errors
-        assert any("name is invalid" in text for text in errors)
+        assert any("name is invalid" in text for text in _response_messages(response, "error"))
 
     def test_unchanged_vlan_is_not_rewritten(self, client, live_librenms):
         device = make_device("vlan-unchanged", librenms_cf={SERVER_KEY: {"id": 134}})
@@ -447,16 +443,7 @@ class TestVLANWriteFailures:
         )
         _login(client, "vlan-unchanged-user")
 
-        response = client.post(
-            _vlan_url(device),
-            {
-                "server_key": SERVER_KEY,
-                "action": "create_vlans",
-                "select": "3135",
-                "vlan_group_3135": "",
-                "expected_vlan_name_3135": "Stable VLAN",
-            },
-        )
+        response = submit_with_draft(client, device, "vlans", _vlan_url(device), [3135], action="create_vlans")
 
         assert response.status_code == 302
         vlan.refresh_from_db()

@@ -66,16 +66,15 @@ class TestVlanCachedPayloadShape:
         assert cache.get(vlans_key) == bad
 
     def test_empty_cached_vlans_render_an_empty_table(self):
-        from django.contrib.auth.models import AnonymousUser
-        from django.test import RequestFactory
-
         from netbox_librenms_plugin.acquisition.registry import Resource
+        from netbox_librenms_plugin.tests.conftest import make_superuser
         from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
 
         device = make_device("vlan-empty-render")
         view = self._view()
-        request = RequestFactory().get("/")
-        request.user = AnonymousUser()
+        # The draft of the tab is per user, so the render needs a signed-in user.
+        request = make_request("get", user=make_superuser("vlan-empty-render-user"))
         server_key = view.librenms_api.server_key
         seed_source_snapshot(device, Resource.VLANS, server_key, vlans=[])
 

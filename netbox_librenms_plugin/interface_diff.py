@@ -445,9 +445,8 @@ def row_sync_state(record, *, interface_name_field, server_key):
     Return how one interface table row compares to the NetBox interface it resolved to.
 
     Computed once per row and kept on the row as ``_sync_state``, because every coloured column, the
-    row's sync button and the sync-state filter read the same verdict. ``format_interface_data`` drops
-    the cached value when it re-resolves a row, so a member switch cannot repaint against the
-    previous member.
+    row's sync button and the sync-state filter read the same verdict. A member choice computes the
+    rows again, so a member switch cannot repaint against the previous member.
 
     Args:
         record (dict): The interface table row, with its ``rule_decision``.

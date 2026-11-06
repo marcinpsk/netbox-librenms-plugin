@@ -6,10 +6,9 @@ the sync page loads, the full sync page, or the sync POST. NetBox interfaces, ru
 Chassis members are real rows.
 """
 
-import json
 import re
 from html import unescape
-from urllib.parse import parse_qs, urlencode
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import pytest
 from dcim.models import Interface
@@ -21,6 +20,7 @@ from virtualization.models import VMInterface
 
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.sync_filters import normalize_filter_text
+from netbox_librenms_plugin.tests._html_helpers import open_tags
 from netbox_librenms_plugin.tests.conftest import (
     bind_librenms_server,
     configure_default_librenms_server,
@@ -31,6 +31,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
     map_device_to_librenms,
 )
+from netbox_librenms_plugin.tests.interface_sync_post_helpers import select_interface_rows
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import port_pair, port_vlans, seed_interfaces_snapshot
 
@@ -216,8 +217,9 @@ class TestMatching:
 
         html = _tab(client, device, interfaces_per_page="25", interfaces_q="ETH117")
         assert list(_rows(html)) == [5117]
-        # The browser keys the selection on this text, so a selection never carries to another server.
-        assert re.search(r'data-sync-filter-tab="interfaces" data-selection-scope="[^"]*server_key=default', html)
+        # The draft commands name the server, so a selection never carries to another server.
+        (table,) = [attrs for attrs in open_tags(html, "table") if attrs.get("data-draft-id")]
+        assert parse_qs(urlsplit(table["data-selection-url"]).query)["server_key"] == [SERVER_KEY]
         assert re.search(r"Showing 1-1 of 1\s*\(filtered from 120\)", html)
 
         first_page = _tab(client, device, interfaces_per_page="25", interfaces_q="eth0")
@@ -344,7 +346,6 @@ class TestWholeDeviceData:
             return (
                 int(re.search(r'id="interfaces-show-ignored-toggle".*?(\d+) ignored', html, re.S).group(1)),
                 int(re.search(r"(\d+) NetBox only interfaces", html).group(1)),
-                json.loads(unescape(re.search(r'data-blocked-port-ids="([^"]*)"', html).group(1))),
             )
 
         unfiltered = _tab(client, device)
@@ -352,9 +353,17 @@ class TestWholeDeviceData:
 
         assert list(_rows(filtered)) == [1001]
         assert whole_device(filtered) == whole_device(unfiltered)
-        ignored, netbox_only, blocked = whole_device(unfiltered)
-        assert (ignored, "1008" in blocked) == (1, True)
+        ignored, netbox_only = whole_device(unfiltered)
+        assert ignored == 1
         assert netbox_only >= 1
+        # The ignored row is blocked: it requires no row and offers no selection.
+        (ignored_row,) = [
+            attrs
+            for attrs in open_tags(_tab(client, device, interfaces_show_ignored="1"), "tr")
+            if attrs.get("data-row-key") == "1008"
+        ]
+        assert ignored_row["data-requires"] == "[]"
+        assert "data-evidence" not in ignored_row
 
 
 @pytest.mark.django_db
@@ -382,8 +391,6 @@ class TestInvalidFilters:
         assert _rows(html) == {}
         assert 'id="interfaces_filter-errors"' in html
         assert 'data-filter-invalid="true"' in html
-        # The tab names its selection scope also with no table, so the browser can drop other scopes.
-        assert re.search(r'data-sync-filter-tab="interfaces" data-selection-scope="[^"]*interface_name_field=', html)
         field = next(iter(params))
         if field in ("interfaces_sync_state", "interfaces_q"):
             assert re.search(rf'id="id_{field}"[^>]*aria-invalid="true"', html, re.S)
@@ -445,18 +452,18 @@ class TestInvalidFilters:
             kwargs={"object_type": "device", "object_id": device.pk},
         )
         query = urlencode({"interface_name_field": "ifName", "interfaces_sync_state": "bogus"})
+        # The tab shows no table under the invalid filter, so the user selected the row before the filter changed.
+        draft = select_interface_rows(client, device, [1003])
 
         response = client.post(
             f"{url}?{query}",
-            {"server_key": SERVER_KEY, "select": ["1003"], "exclude_columns": ["vlans"]},
+            {"server_key": SERVER_KEY, **draft, "exclude_columns": ["vlans"]},
             HTTP_HX_REQUEST="true",
         )
 
         assert response.status_code == 200
+        assert response["HX-Reswap"] == "none"
         assert Interface.objects.filter(device=device, name="eth2").exists()
-        html = response.content.decode()
-        assert 'id="interfaces_filter-errors"' in html
-        assert _rows(html) == {}
 
 
 def _sync_url(obj):

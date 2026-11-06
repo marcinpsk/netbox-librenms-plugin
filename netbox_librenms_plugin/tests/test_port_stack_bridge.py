@@ -621,7 +621,7 @@ def test_bulk_sync_applies_parent_and_bridge_to_the_same_interface(client, setti
 
     configure_default_librenms_server(settings)
     client.force_login(make_superuser("bulk-parent-bridge-sync-user"))
-    device = make_device("bulk-parent-bridge-sync")
+    device = make_device("bulk-parent-bridge-sync", librenms_cf={"default": {"id": 42}})
     child = make_interface(device, "bond0.110", iface_type="1000base-t")
     parent = make_interface(device, "bond0", iface_type="lag")
     bridge = make_interface(device, "vmbr0", iface_type="virtual")
@@ -744,20 +744,33 @@ def test_default_linux_bridge_pattern_is_seeded():
     )
 
 
-def test_interface_selection_and_inline_action_include_bridge_dependencies():
-    """Keep bridge selection and inline POST wiring in the shared relationship JavaScript."""
-    from pathlib import Path
+def test_the_tab_renders_the_bridge_as_a_required_row_and_offers_the_inline_bridge_action(client, settings):
+    """A bridged port requires its bridge row, and its relationship cell posts the bridge port ID."""
+    import json
 
-    import netbox_librenms_plugin
+    from netbox_librenms_plugin.tests._html_helpers import open_tags
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+    from netbox_librenms_plugin.tests.view_test_helpers import draft_tab
 
-    source = (
-        Path(netbox_librenms_plugin.__file__).parent / "static" / "netbox_librenms_plugin" / "js" / "librenms_sync.js"
-    ).read_text(encoding="utf-8")
+    configure_default_librenms_server(settings)
+    client.force_login(make_superuser("bridge-requirement-tab-user"))
+    device = make_device("bridge-requirement-tab", librenms_cf={"default": {"id": 42}})
+    for name, port_id in (("nic0", 103), ("vmbr0", 100)):
+        interface = make_interface(device, name)
+        seed_mapping(interface, own=port_id, save=False)
+        interface.save()
+    ports = [
+        {**_PORT_KEYS_UNSET, "port_id": 103, "ifName": "nic0"},
+        {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": "vmbr0"},
+    ]
+    seed_ports(device, ports, [port_pair(103, 100)], device={"os": "linux"})
 
-    assert "row.dataset.bridgePortId" in source
-    assert ".lag-sync-btn, .parent-sync-btn, .bridge-sync-btn" in source
-    assert "btn.dataset.bridgePortId" in source
-    assert "`${relation}_port_id`" in source
+    shown = draft_tab(client, device, "interfaces", interface_name_field="ifName")
+
+    assert json.loads(shown.rows["103"]["data-requires"]) == ["100"]
+    assert json.loads(shown.rows["100"]["data-requires"]) == []
+    buttons = [attrs for attrs in open_tags(shown.html, "button") if "bridge-sync-btn" in attrs.get("class", "")]
+    assert [(attrs.get("data-port-id"), attrs.get("data-bridge-port-id")) for attrs in buttons] == [("103", "100")]
 
 
 def test_device_interface_lookup_prefetches_bridge(db, django_assert_num_queries, settings):

@@ -8,7 +8,6 @@ guard that keeps rule selection in ``interface_rules``.
 """
 
 import ast
-import json
 import re
 from html import unescape
 from pathlib import Path
@@ -39,7 +38,15 @@ from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     seed_interfaces_snapshot,
     seed_ip_snapshot,
 )
-from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, submit_ip_selection
+from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, select_interface_rows
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    draft_command,
+    draft_tab,
+    grant,
+    make_user_with_perms,
+    row_action_fields,
+    submit_ip_selection,
+)
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
 SERVER_KEY = "default"
@@ -47,6 +54,7 @@ IGNORE = InterfaceTypeMapping.ACTION_IGNORE
 RULE_TABLE = "netbox_librenms_plugin_interfacetypemapping"
 PACKAGE = Path(__file__).resolve().parents[1]
 PO_LAG_OS = "rule-writes-po-lag"
+QUERY = {"interface_name_field": "ifName"}
 
 
 def _port(port_id, name, *, if_type="ethernetCsmacd", descr=None, speed=10_000_000_000):
@@ -91,10 +99,22 @@ def _po_lag_os():
     return PO_LAG_OS
 
 
-def _sync(client, owner, *, select=(), sync_one=None, extra=None, htmx=False):
-    data = {"server_key": SERVER_KEY, "select": [str(port_id) for port_id in select], **(extra or {})}
-    if sync_one is not None:
-        data["sync_one"] = str(sync_one)
+def _sync(client, owner, *, select=(), sync_one=None, extra=None, htmx=False, members=None, draft=None, fields=None):
+    """
+    Post the interface sync of *owner* as the page does: a bulk submit of *select* through the draft, or ``sync_one``.
+
+    Args:
+        members (dict | None): The member pk to choose for each port ID before the selection.
+        draft (dict | None): The draft fields of an earlier selection; then nothing is selected now.
+        fields (dict | None): The row action fields of ``sync_one`` that the page showed earlier.
+
+    """
+    if sync_one is None:
+        return post_interface_sync(
+            client, owner, select, htmx=htmx, exclude_columns=(), members=members, draft=draft, extra=extra
+        )
+    if fields is None:
+        fields = row_action_fields(client, owner, "interfaces", sync_one, **QUERY)
     url = (
         reverse(
             "plugins:netbox_librenms_plugin:sync_selected_interfaces",
@@ -102,7 +122,21 @@ def _sync(client, owner, *, select=(), sync_one=None, extra=None, htmx=False):
         )
         + "?interface_name_field=ifName"
     )
+    data = {"server_key": SERVER_KEY, "sync_one": str(sync_one), **fields, **(extra or {})}
     return client.post(url, data, **({"HTTP_HX_REQUEST": "true"} if htmx else {}))
+
+
+def _select(client, owner, port_ids, **kwargs):
+    """Select *port_ids* in the user's interface draft now; return the draft fields that a later submit posts."""
+    return select_interface_rows(client, owner, port_ids, **kwargs)
+
+
+def _read_row(client, owner, port_id, **query):
+    """Return the row read of *port_id*: the ``<tr>`` that the row's ``hx-get`` answers."""
+    shown = draft_tab(client, owner, "interfaces", **QUERY, **query)
+    response = client.get(unescape(shown.rows[str(port_id)]["hx-get"]))
+    assert response.status_code == 200, response.content
+    return unescape(response.content.decode())
 
 
 def _messages(response):
@@ -111,19 +145,6 @@ def _messages(response):
 
 def _messages_of(request):
     return [str(message) for message in get_messages(request)]
-
-
-class _PlatformMovesAfterTheRead(SyncInterfacesView):
-    """The real sync view, with a concurrent platform change right after it reads the page device."""
-
-    def __init__(self, *, moved_to, **kwargs):
-        super().__init__(**kwargs)
-        self.moved_to = moved_to
-
-    def get_object(self, object_type, object_id):
-        obj = super().get_object(object_type, object_id)
-        type(obj).objects.filter(pk=obj.pk).update(platform=self.moved_to)
-        return obj
 
 
 def _tab_row(client, owner, port_id):
@@ -166,27 +187,29 @@ def superuser_client(client, settings):
     return client
 
 
-def _ignore_vlans(tag):
-    platform = _platform(tag)
-    rule = InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform, name_pattern="^Vlan")
-    return _device(tag, platform), rule
+def _ignore_vlans_on(device):
+    """Create the rule that ignores ``Vlan`` ports on the platform of *device*."""
+    return InterfaceTypeMapping.objects.create(action=IGNORE, platform=device.platform, name_pattern="^Vlan")
 
 
 @pytest.mark.django_db
 class TestAnIgnoredPortIsNeverWritten:
-    """Acceptance 2: a forged POST that names an ignored port creates and changes nothing."""
+    """Acceptance 2: a port that a rule ignores is never offered, and a selection made before the rule writes nothing."""
 
-    def test_a_bulk_post_does_not_create_a_missing_interface(self, superuser_client):
-        device, rule = _ignore_vlans("rule-write-bulk")
+    def test_a_bulk_submit_does_not_create_a_port_ignored_after_its_selection(self, superuser_client):
+        device = _device("rule-write-bulk", _platform("rule-write-bulk"))
         _seed(device, [_port(100, "eth0"), _port(101, "Vlan10", if_type="propVirtual")])
+        draft = _select(superuser_client, device, [100, 101])
+        _ignore_vlans_on(device)
 
-        response = _sync(superuser_client, device, select=[100, 101])
+        response = _sync(superuser_client, device, draft=draft)
 
         assert list(Interface.objects.filter(device=device).values_list("name", flat=True)) == ["eth0"]
-        assert any(f"Vlan10 (ignored by interface rule {rule.pk} ({rule}))" in text for text in _messages(response))
+        # The ignored row is not shown any more, so the message names its port ID.
+        assert any("101" in text and "changed" in text for text in _messages(response))
 
-    def test_a_sync_one_post_does_not_change_an_existing_interface(self, superuser_client):
-        device, rule = _ignore_vlans("rule-write-one")
+    def test_a_sync_one_post_does_not_change_an_interface_ignored_after_the_render(self, superuser_client):
+        device = _device("rule-write-one", _platform("rule-write-one"))
         existing = _bound(device, "Vlan10", 101, iface_type="virtual")
         existing.description = "keep"
         existing.mtu = 9000
@@ -194,31 +217,36 @@ class TestAnIgnoredPortIsNeverWritten:
         existing.save()
         before = _state(existing)
         _seed(device, [_port(101, "Vlan10", if_type="propVirtual")])
+        fields = row_action_fields(superuser_client, device, "interfaces", 101, **QUERY)
+        _ignore_vlans_on(device)
 
-        response = _sync(superuser_client, device, sync_one=101)
+        response = _sync(superuser_client, device, sync_one=101, fields=fields)
 
         assert _state(existing) == before
-        assert any(f"Vlan10 (ignored by interface rule {rule.pk}" in text for text in _messages(response))
+        assert any("changed after the page showed it" in text for text in _messages(response))
 
     def test_column_exclusions_do_not_bypass_the_rules(self, superuser_client):
-        device, _rule = _ignore_vlans("rule-write-excluded")
+        device = _device("rule-write-excluded", _platform("rule-write-excluded"))
         _seed(device, [_port(101, "Vlan10", if_type="propVirtual")])
         excluded = ["name", "type", "speed", "vlans", "mac_address", "mtu", "enabled", "description"]
+        draft = _select(superuser_client, device, [101])
+        _ignore_vlans_on(device)
 
-        _sync(superuser_client, device, select=[101], extra={"exclude_columns": excluded})
+        _sync(superuser_client, device, draft=draft, extra={"exclude_columns": excluded})
 
         assert not Interface.objects.filter(device=device).exists()
 
-    def test_an_incomplete_port_record_asks_for_a_refresh(self, superuser_client):
+    def test_an_incomplete_required_port_record_asks_for_a_refresh(self, superuser_client):
         device = _device("rule-write-incomplete", _platform("rule-write-incomplete"))
-        port = _port(100, "eth0")
+        parent = _port(100, "eth0")
         # The assessment fills a missing ifName or ifDescr with "", so only another key stays missing.
-        del port["ifSpeed"]
-        _seed(device, [port])
+        del parent["ifSpeed"]
+        _seed(device, [parent, _port(101, "eth0.100", if_type="l2vlan")], [port_pair(101, 100)])
 
-        response = _sync(superuser_client, device, select=[100])
+        response = _sync(superuser_client, device, select=[101], extra={"auto_select_lag_members": "1"})
 
-        assert not Interface.objects.filter(device=device).exists()
+        assert list(Interface.objects.filter(device=device).values_list("name", flat=True)) == ["eth0.100"]
+        assert any("related row eth0 not synced" in text for text in _messages(response))
         assert any("record has no ifSpeed; refresh the data" in text for text in _messages(response))
 
 
@@ -235,11 +263,17 @@ class TestAnAmbiguousPortIsNeverWritten:
         device = _device(f"rule-write-tie-{int(reverse_order)}", platform)
         existing = _bound(device, "Te2/1/1", 401, iface_type="10gbase-t")
         before = _state(existing)
-        _seed(device, [_port(400, "Te1/1"), _port(401, "Te2/1/1")])
+        # The two tied ports are members of the selected aggregate, so the walk decides them as the writer does.
+        _seed(
+            device,
+            [_port(400, "Te1/1"), _port(401, "Te2/1/1"), _port(402, "Po1", if_type="ieee8023adLag")],
+            [port_pair(400, 402), port_pair(401, 402)],
+        )
 
-        response = _sync(superuser_client, device, select=[400, 401])
+        response = _sync(superuser_client, device, select=[402], extra={"auto_select_lag_members": "1"})
 
         assert not Interface.objects.filter(device=device, name="Te1/1").exists()
+        assert Interface.objects.filter(device=device, name="Po1").exists()
         assert _state(existing) == before
         (skipped,) = [text for text in _messages(response) if "skipped" in text]
         assert skipped.count("match with equal rank") == 2
@@ -311,33 +345,16 @@ class TestAChassisRowNeedsItsOwner:
         _seed(first, [_port(700, "Vlan10", if_type="propVirtual")])
 
         refused = _sync(superuser_client, first, select=[700])
-        _sync(superuser_client, first, select=[700], extra={"device_selection_700": str(second.pk)})
+        _sync(superuser_client, first, select=[700], members={700: second.pk})
 
         assert any("Vlan10 (select the Virtual Chassis member that owns it)" in text for text in _messages(refused))
         assert list(Interface.objects.filter(name="Vlan10").values_list("device_id", flat=True)) == [second.pk]
 
-    def test_two_members_posted_for_one_row_refuse_the_row(self, superuser_client):
-        _vc, (first, second) = make_virtual_chassis_members("rule-write-vc-twice")
-        seed_stored_mapping(first, {SERVER_KEY: {"id": 67}})
-        first.save()
-        _seed(first, [_port(702, "Vlan10", if_type="propVirtual")])
-
-        response = _sync(
-            superuser_client, first, select=[702], extra={"device_selection_702": [str(second.pk), str(first.pk)]}
-        )
-
-        assert not Interface.objects.filter(name="Vlan10").exists()
-        assert any(
-            "Vlan10 (the request names more than one Virtual Chassis member for it)" in text
-            for text in _messages(response)
-        )
-
-    @pytest.mark.parametrize("posted_parent_member", ["other-member", "both-members"])
-    def test_auto_select_decides_an_added_row_with_the_owner_the_writer_uses(
-        self, superuser_client, posted_parent_member
-    ):
-        _vc, (first, second) = make_virtual_chassis_members(f"rule-walk-owner-{posted_parent_member}")
-        platform = _platform(f"rule-walk-owner-{posted_parent_member}")
+    @pytest.mark.parametrize("parent_member", ["inferred", "chosen"])
+    def test_auto_select_decides_an_added_row_with_the_owner_the_writer_uses(self, superuser_client, parent_member):
+        """An added row takes the draft's member choice for it, else the inferred member; the walk and the writer agree."""
+        _vc, (first, second) = make_virtual_chassis_members(f"rule-walk-owner-{parent_member}")
+        platform = _platform(f"rule-walk-owner-{parent_member}")
         InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform, name_pattern="^Po1$")
         seed_stored_mapping(first, {SERVER_KEY: {"id": 69}})
         first.platform = platform
@@ -353,21 +370,11 @@ class TestAChassisRowNeedsItsOwner:
             ],
             [port_pair(10, 20), port_pair(30, 20)],
         )
-        # A forged member for the auto-added parent: the writer never reads it for that row.
-        forged = [str(second.pk)] if posted_parent_member == "other-member" else [str(first.pk), str(second.pk)]
+        members = {30: second.pk, **({20: first.pk} if parent_member == "chosen" else {})}
 
-        _sync(
-            superuser_client,
-            first,
-            select=[30],
-            extra={
-                "auto_select_lag_members": "1",
-                "device_selection_30": str(second.pk),
-                "device_selection_20": forged,
-            },
-        )
+        _sync(superuser_client, first, select=[30], members=members, extra={"auto_select_lag_members": "1"})
 
-        # Po1 is ignored on its inferred member, so neither it nor its member behind it is walked to.
+        # Po1 is ignored on its member, so neither it nor its member behind it is walked to.
         assert set(Interface.objects.filter(device__in=[first, second]).values_list("name", "device_id")) == {
             ("Po1", first.pk),
             ("Po1.100", second.pk),
@@ -386,10 +393,7 @@ class TestAChassisRowNeedsItsOwner:
         )
 
         response = _sync(
-            superuser_client,
-            first,
-            select=[21],
-            extra={"auto_select_lag_members": "1", "device_selection_21": str(second.pk)},
+            superuser_client, first, select=[21], members={21: second.pk}, extra={"auto_select_lag_members": "1"}
         )
 
         # No member can be inferred for the logical parent, so the walk refuses it, and says so.
@@ -400,7 +404,7 @@ class TestAChassisRowNeedsItsOwner:
             "related row Vlan100 not synced: selected target unavailable" in text for text in _messages(response)
         )
 
-    def test_the_selected_members_platform_decides(self, superuser_client):
+    def test_the_chosen_members_platform_decides(self, superuser_client):
         _vc, (first, second) = make_virtual_chassis_members("rule-write-vc-platform")
         platform = _platform("rule-write-vc-platform")
         InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform, name_pattern="^Vlan")
@@ -408,10 +412,14 @@ class TestAChassisRowNeedsItsOwner:
         first.platform = platform
         first.save()
         _seed(first, [_port(701, "Vlan10", if_type="propVirtual")])
+        shown = draft_tab(superuser_client, first, "interfaces", **QUERY, interfaces_show_ignored="1")
+        chosen = draft_command(superuser_client, shown, "data-choice-url", row="701", field="member", value=first.pk)
+        assert chosen.status_code == 204
 
-        _sync(superuser_client, first, select=[701], extra={"device_selection_701": str(first.pk)})
-        _sync(superuser_client, first, select=[701], extra={"device_selection_701": str(second.pk)})
+        on_first = _read_row(superuser_client, first, 701, interfaces_show_ignored="1")
+        _sync(superuser_client, first, select=[701], members={701: second.pk})
 
+        assert 'data-rule-state="ignored"' in on_first and "data-evidence=" not in on_first
         assert list(Interface.objects.filter(name="Vlan10").values_list("device_id", flat=True)) == [second.pk]
 
 
@@ -450,10 +458,11 @@ class TestRelationshipEdges:
     def test_an_ignored_member_is_not_linked(self, superuser_client):
         device, member, _aggregate, other_lag = _lag_scenario("rule-edge-member", "^Gi")
 
-        _sync(superuser_client, device, select=[10, 20])
+        response = _sync(superuser_client, device, select=[20], extra={"auto_select_lag_members": "1"})
 
         member.refresh_from_db()
         assert member.lag_id == other_lag.pk
+        assert any("related row Gi0/1 not synced: ignored by interface rule" in text for text in _messages(response))
 
     def test_the_single_row_endpoint_refuses_an_ignored_end(self, superuser_client):
         device, member, _aggregate, other_lag = _lag_scenario("rule-edge-single", "^Po")
@@ -599,19 +608,6 @@ class TestPromotionFollowsTheSetType:
             assert (source.parent_id, source.type) == (target.pk, "virtual")
 
 
-def _verify_row(client, device, port_id):
-    """Return the cells the verify repaint renders for one row."""
-    response = client.post(
-        reverse("plugins:netbox_librenms_plugin:verify_interface"),
-        json.dumps(
-            {"device_id": device.pk, "port_id": port_id, "interface_name_field": "ifName", "server_key": SERVER_KEY}
-        ),
-        content_type="application/json",
-    )
-    assert response.status_code == 200, response.content
-    return {column: unescape(str(cell)) for column, cell in response.json()["formatted_row"].items()}
-
-
 def _planning_rule(tag, platform, name, rule, netbox_type):
     """Plan *netbox_type* on port *name*: a legacy ifType mapping, or a platform Set type rule on its name."""
     if rule == "legacy":
@@ -662,7 +658,7 @@ class TestATypeTheLinksRefuseIsKept:
 
     @pytest.mark.parametrize("rule", ["legacy", "set"], ids=["legacy-mapping", "set-type-rule"])
     @pytest.mark.parametrize("link", list(_KEPT_LINKS))
-    def test_the_table_the_sync_and_the_repaint_keep_the_type(self, superuser_client, link, rule):
+    def test_the_table_the_sync_and_the_row_read_keep_the_type(self, superuser_client, link, rule):
         tag = f"kept{link.replace('-', '')}{rule}"
         device, planned, partner, created_rule = _kept_link_scenario(tag, link, rule)
         planned_type, rule_type, refusal = _KEPT_LINKS[link][1], _KEPT_LINKS[link][2], _KEPT_LINKS[link][5]
@@ -672,19 +668,19 @@ class TestATypeTheLinksRefuseIsKept:
         before = _tab_row(superuser_client, device, 10)
         _sync(superuser_client, device, select=[10, 20])
         after = _tab_row(superuser_client, device, 10)
-        repaint = _verify_row(superuser_client, device, 10)
+        read = _read_row(superuser_client, device, 10)
 
         planned_after, partner_after = _state(planned), _state(partner)
         assert planned_after["type"] == planned_type
         for field in ("lag_id", "parent_id"):
             assert (planned_after[field], partner_after[field]) == (before_links[0][field], before_links[1][field])
-        for cell in (_type_cell(before), _type_cell(after), repaint["type"]):
+        for cell in (_type_cell(before), _type_cell(after), _type_cell(read)):
             assert note in cell and refusal in cell, cell
         assert _shown_type(after) == planned_type
-        # A kept type is not a difference: the synced row is in sync, in the tab and in the repaint.
+        # A kept type is not a difference: the synced row is in sync, in the tab and in the row read.
         assert "text-success" in _type_cell(after)
         assert 'name="sync_one"' not in after
-        assert 'name="sync_one"' not in repaint["actions"]
+        assert 'name="sync_one"' not in read
 
     def test_an_unrelated_netbox_error_holds_the_type_change(self, superuser_client):
         from netbox_librenms_plugin.tests.conftest import make_required_interface_custom_field
@@ -752,8 +748,8 @@ def _netbox_refusal(interface, new_type):
 
 
 def _kept_cells(client, device, port_id):
-    """Return the Type cell of the tab and of the verify repaint for one row."""
-    return _type_cell(_tab_row(client, device, port_id)), _verify_row(client, device, port_id)["type"]
+    """Return the Type cell of the tab and of the row read for one row."""
+    return _type_cell(_tab_row(client, device, port_id)), _type_cell(_read_row(client, device, port_id))
 
 
 class _RuleKeyedByThePeer(CustomValidator):
@@ -787,13 +783,13 @@ class TestAKeptNoteShowsNetBoxsMessageOnlyToASuperuser:
         client.force_login(_viewer_of(f"{tag}-viewer", *((device, peer) if sees_peer else (device,))))
 
         row = _tab_row(client, device, 10)
-        repaint = _verify_row(client, device, 10)
+        read = _read_row(client, device, 10)
 
         note = f"type kept: interface rule {rule.pk} ({rule}) sets 10gbase-t: NetBox refuses the bridge field"
-        for cell in (_type_cell(row), repaint["type"]):
+        for cell in (_type_cell(row), _type_cell(read)):
             assert note in cell, cell
-        for rendered in (row, *repaint.values()):
-            assert peer.name not in str(rendered) and bridge.name not in str(rendered), rendered
+        for rendered in (row, read):
+            assert peer.name not in rendered and bridge.name not in rendered, rendered
 
     def test_a_superuser_is_shown_netboxs_message(self, superuser_client):
         device, interface, _peer, _bridge, rule = _stale_cross_device_bridge("keptnotesuper")
@@ -838,13 +834,13 @@ class TestAKeptNoteShowsNetBoxsMessageOnlyToASuperuser:
         client.force_login(_viewer_of("keptnotekey-viewer", device))
 
         row = _tab_row(client, device, 10)
-        repaint = _verify_row(client, device, 10)
+        read = _read_row(client, device, 10)
 
         note = f"type kept: interface rule {rule.pk} ({rule}) sets 10gbase-t: NetBox refuses the interface ("
-        for cell in (_type_cell(row), repaint["type"]):
+        for cell in (_type_cell(row), _type_cell(read)):
             assert note in cell, cell
-        for rendered in (row, *repaint.values()):
-            assert peer.name not in str(rendered) and bridge.name not in str(rendered), rendered
+        for rendered in (row, read):
+            assert peer.name not in rendered and bridge.name not in rendered, rendered
 
     @pytest.mark.parametrize("superuser", [False, True], ids=["restricted", "superuser"])
     def test_a_custom_validator_message_is_shown_only_to_a_superuser(self, client, settings, superuser):
@@ -856,85 +852,56 @@ class TestAKeptNoteShowsNetBoxsMessageOnlyToASuperuser:
         client.force_login(make_superuser(f"{tag}-user") if superuser else _viewer_of(f"{tag}-viewer", device))
 
         row = _tab_row(client, device, 10)
-        repaint = _verify_row(client, device, 10)
+        read = _read_row(client, device, 10)
 
         note = f"type kept: interface rule {rule.pk} ({rule}) sets 10gbase-t: "
         shown = f"Bridged to {bridge} on {peer}." if superuser else "NetBox refuses the type field"
-        for cell in (_type_cell(row), repaint["type"]):
+        for cell in (_type_cell(row), _type_cell(read)):
             assert note + shown in cell, cell
         if not superuser:
-            for rendered in (row, *repaint.values()):
-                assert peer.name not in str(rendered) and bridge.name not in str(rendered), rendered
+            for rendered in (row, read):
+                assert peer.name not in rendered and bridge.name not in rendered, rendered
 
 
 @pytest.mark.django_db
-def test_the_walk_decides_with_the_platform_read_under_the_lock(settings):
+def test_the_walk_decides_with_the_platform_read_under_the_lock(superuser_client, monkeypatch):
     """A platform change after the request read the device, and before the lock, must not split the walk and the writer."""
     from dcim.models import Device
-
-    from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
 
     platform_p, platform_q = _platform("rule-walk-lock-p"), _platform("rule-walk-lock-q")
     InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform_q, name_pattern="^Po1$")
     device = _device("rule-walk-lock", platform_p)
-    configure_default_librenms_server(settings)
-    view = _PlatformMovesAfterTheRead(moved_to=platform_q)
     _seed(
         device,
         [_port(10, "Gi0/1"), _port(20, "Po1", if_type="ieee8023adLag"), _port(30, "Po1.100", if_type="l2vlan")],
         [port_pair(10, 20), port_pair(30, 20)],
     )
-    request = make_request("post", {"server_key": SERVER_KEY, "select": ["30"], "auto_select_lag_members": "1"})
-    request.GET = request.GET.copy()
-    request.GET["interface_name_field"] = "ifName"
+    draft = _select(superuser_client, device, [30])
+    real_get_object = SyncInterfacesView.get_object
 
-    post(view, request, object_type="device", object_id=device.pk)
+    def platform_moves_after_the_read(self, object_type, object_id):
+        obj = real_get_object(self, object_type, object_id)
+        type(obj).objects.filter(pk=obj.pk).update(platform=platform_q)
+        return obj
+
+    monkeypatch.setattr(SyncInterfacesView, "get_object", platform_moves_after_the_read)
+
+    response = _sync(superuser_client, device, draft=draft, extra={"auto_select_lag_members": "1"})
 
     assert Device.objects.get(pk=device.pk).platform_id == platform_q.pk
     # Under the lock the device is on Q, where Po1 is ignored: neither Po1 nor its member behind it is synced.
     assert set(Interface.objects.filter(device=device).values_list("name", flat=True)) == {"Po1.100"}
-    assert any("related row Po1 not synced: ignored by interface rule" in text for text in _messages_of(request))
+    assert any("related row Po1 not synced: ignored by interface rule" in text for text in _messages(response))
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("object_type", ["device", "virtualmachine"])
-def test_the_swapped_tab_renders_the_platform_the_writer_read(settings, object_type):
-    """The htmx response is rendered from the object as the sync locked it, not as the request first read it."""
-    from netbox_librenms_plugin.tests.conftest import make_vm
-    from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
-
-    platform_p, platform_q = _platform(f"rule-swap-{object_type}-p"), _platform(f"rule-swap-{object_type}-q")
-    InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform_q, name_pattern="^Vlan")
-    if object_type == "device":
-        owner = _device("rule-swap-device", platform_p)
-    else:
-        owner = make_vm("rule-swap-vm")
-        owner.platform = platform_p
-        seed_stored_mapping(owner, {SERVER_KEY: {"id": 71}})
-        owner.save()
-    configure_default_librenms_server(settings)
-    view = _PlatformMovesAfterTheRead(moved_to=platform_q)
-    _seed(owner, [_port(40, "eth0"), _port(41, "Vlan10", if_type="propVirtual")])
-    request = make_request("post", {"server_key": SERVER_KEY, "select": ["40"]}, HTTP_HX_REQUEST="true")
-    request.GET = request.GET.copy()
-    request.GET["interface_name_field"] = "ifName"
-
-    response = post(view, request, object_type=object_type, object_id=owner.pk)
-
-    html = unescape(response.content.decode())
-    assert response.status_code == 200
-    # Under the lock the owner is on Q, where Vlan10 is ignored: the fragment hides it and counts it.
-    assert "1 ignored" in html
-    assert 'data-port-id="41"' not in html
-
-
-@pytest.mark.django_db
-def test_rebind_refuses_an_ignored_port(superuser_client):
+def test_rebind_refuses_a_port_ignored_after_the_render(superuser_client):
     platform = _platform("rule-rebind")
-    rule = InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform, name_pattern="^eth")
     device = _device("rule-rebind", platform)
     holder = _bound(device, "eth0", 8679)
     _seed(device, [_port(9001, "eth0")])
+    fields = row_action_fields(superuser_client, device, "interfaces", 9001, **QUERY)
+    InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform, name_pattern="^eth")
 
     response = superuser_client.post(
         reverse(
@@ -942,15 +909,12 @@ def test_rebind_refuses_an_ignored_port(superuser_client):
             kwargs={"object_type": "device", "object_id": device.pk},
         )
         + "?interface_name_field=ifName",
-        {"server_key": SERVER_KEY, "rebind_one": "9001", "rebind_expected_port_9001": "8679"},
+        {"server_key": SERVER_KEY, "rebind_one": "9001", "rebind_expected_port_9001": "8679", **fields},
     )
 
     holder.refresh_from_db()
     assert read_mapping(holder).own_id(SERVER_KEY) == 8679
-    assert any(
-        f"Rebind is refused for LibreNMS port 9001: ignored by interface rule {rule.pk}" in text
-        for text in _messages(response)
-    )
+    assert any("changed after the page showed it" in text for text in _messages(response))
 
 
 @pytest.mark.django_db
@@ -1075,19 +1039,19 @@ class TestTheCableFarEndCreate:
 
 
 @pytest.mark.django_db
-def test_a_sync_post_and_the_tab_it_renders_read_the_rules_once(superuser_client):
+def test_a_sync_post_reads_the_rules_once(superuser_client):
     platform = _platform("rule-write-queries")
     InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform, name_pattern="^Vlan")
     InterfaceTypeMapping.objects.create(platform=platform, name_pattern="^eth", netbox_type="1000base-t")
     device = _device("rule-write-queries", platform)
     ports = [_port(800 + index, f"eth{index}") for index in range(10)] + [_port(900, "Vlan10", if_type="propVirtual")]
     _seed(device, ports)
+    draft = _select(superuser_client, device, [800, 801])
 
     with CaptureQueriesContext(connection) as queries:
-        response = _sync(superuser_client, device, select=[800, 801, 900], htmx=True)
+        response = _sync(superuser_client, device, draft=draft, htmx=True)
 
     assert response.status_code == 200
-    assert "Showing 1-10 of 10" in response.content.decode()
     # The rows cache key counts the rule table with an aggregate; that query reads no rule.
     rule_reads = [q for q in queries.captured_queries if RULE_TABLE in q["sql"] and "rows_cache_count" not in q["sql"]]
     assert len(rule_reads) == 1

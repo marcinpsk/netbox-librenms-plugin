@@ -2,8 +2,8 @@
 Row rebuild coverage for the verify endpoints in ``views/object_sync/devices.py``.
 
 ``SingleModuleVerifyView`` re-derives one module row from the cached inventory snapshot the
-modules tab wrote, and ``SingleInterfaceVerifyView`` normalises a chassis member to its sync
-device first. The primary home for both is ``test_verify_views.py``; these cases live in their
+modules tab wrote. The interface row read normalises a chassis member to its sync device first.
+The primary home of the module verify is ``test_verify_views.py``; these cases live in their
 own file because higher branches of the PR stack grow that file's tail.
 """
 
@@ -298,11 +298,11 @@ class TestSingleModuleVerifyRow:
 
 
 @pytest.mark.django_db
-class TestSingleInterfaceVerifyChassisGuard:
+class TestInterfaceRowReadChassisGuard:
     """A chassis member with no resolvable sync device stops before any cache read."""
 
     def test_unresolvable_chassis_sync_device_returns_404(self, client, librenms_server):
-        """A virtual chassis whose members resolve to no sync device returns the named 404."""
+        """The interface row read of a virtual chassis whose members resolve to no sync device answers 404."""
         from django.urls import reverse
         from netbox_librenms_plugin.tests.conftest import make_superuser, make_virtual_chassis_members
         from netbox_librenms_plugin.server_selection import get_librenms_sync_device
@@ -313,14 +313,15 @@ class TestSingleInterfaceVerifyChassisGuard:
         assert get_librenms_sync_device(device, server_key=SERVER_KEY) is None
         client.force_login(make_superuser("iface-verify-vc-user"))
 
-        response = client.post(
-            reverse("plugins:netbox_librenms_plugin:verify_interface"),
-            data=json.dumps({"device_id": device.pk, "port_id": 101, "server_key": SERVER_KEY}),
-            content_type="application/json",
+        response = client.get(
+            reverse(
+                "plugins:netbox_librenms_plugin:interface_row",
+                kwargs={"object_type": "device", "pk": device.pk, "row_key": "101"},
+            ),
+            {"server_key": SERVER_KEY},
         )
 
         assert response.status_code == 404
-        assert response.json() == {"status": "error", "message": "No sync device found for virtual chassis"}
 
 
 @pytest.mark.django_db(transaction=True)

@@ -544,25 +544,37 @@ class TestRequiredObjectPermissionsWiring:
         assert ("delete", Interface) in perms_device
         assert ("delete", VMInterface) in perms_vm
 
-    def test_verify_views_have_object_permission_mixin_and_perms(self):
-        """Read-only verify endpoints must wire NetBoxObjectPermissionMixin so their declared gate enforces instead of raising AttributeError (a missing mixin 500s; mock-based perm tests mask it)."""
-        from netbox_librenms_plugin.views.object_sync.devices import (
-            SingleInterfaceVerifyView,
-            SingleModuleVerifyView,
-            SingleVlanGroupVerifyView,
-            VerifyVlanSyncGroupView,
+    def test_the_module_verify_view_has_object_permission_mixin_and_perms(self):
+        """The read-only module verify endpoint must wire NetBoxObjectPermissionMixin so its declared gate enforces instead of raising AttributeError (a missing mixin 500s; mock-based perm tests mask it)."""
+        from netbox_librenms_plugin.views.object_sync.devices import SingleModuleVerifyView
+
+        self._assert_has_mixins(SingleModuleVerifyView)
+        assert "POST" in SingleModuleVerifyView.required_object_permissions
+
+    def test_the_interface_and_vlan_draft_views_have_the_permission_mixins(self):
+        """The interface and VLAN row reads, the VLAN groups dialog and the draft commands set the subject's view gate per request."""
+        from netbox_librenms_plugin.views.base.interfaces_view import (
+            InterfaceChoiceView,
+            InterfaceMemberView,
+            InterfaceRowView,
+            InterfaceSelectionView,
+            InterfaceVlanGroupsView,
+            InterfaceVlanModalView,
         )
+        from netbox_librenms_plugin.views.base.vlan_table_view import VLANChoiceView, VLANRowView, VLANSelectionView
 
         for view_class in (
-            SingleInterfaceVerifyView,
-            SingleModuleVerifyView,
-            SingleVlanGroupVerifyView,
-            VerifyVlanSyncGroupView,
+            InterfaceSelectionView,
+            InterfaceChoiceView,
+            InterfaceMemberView,
+            InterfaceVlanGroupsView,
+            InterfaceRowView,
+            InterfaceVlanModalView,
+            VLANSelectionView,
+            VLANChoiceView,
+            VLANRowView,
         ):
             self._assert_has_mixins(view_class)
-            assert "POST" in view_class.required_object_permissions, (
-                f"{view_class.__name__} must declare a POST object-permission requirement"
-            )
 
     def test_the_ip_draft_views_have_the_permission_mixins(self):
         """The IP row read and the draft commands set the subject's view gate per request, so both permission mixins must enforce it."""
@@ -3007,7 +3019,7 @@ class TestCacheKeysAreServerScoped:
     """Production cache-key calls include server_key so every LibreNMS server uses its own namespace."""
 
     # helper name -> number of positional args needed to reach server_key
-    HELPERS = {"get_cache_key": 3, "get_vlan_overrides_key": 2}
+    HELPERS = {"get_cache_key": 3}
 
     @classmethod
     def _scan(cls):

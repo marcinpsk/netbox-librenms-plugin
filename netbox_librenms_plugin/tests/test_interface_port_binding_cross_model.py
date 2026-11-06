@@ -3,7 +3,6 @@
 import pytest
 from dcim.models import Interface
 from django.contrib.messages import get_messages
-from django.urls import reverse
 from virtualization.models import VMInterface
 
 from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
@@ -20,13 +19,14 @@ from netbox_librenms_plugin.tests.conftest import (
     make_interface,
     make_superuser,
     make_vm,
+    map_device_to_librenms,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import (
     custom_fields_without_mapping,
     seed_mapping,
     stored_mapping_for_test,
 )
-from netbox_librenms_plugin.tests.interface_sync_post_helpers import seed_ports
+from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, seed_ports
 from netbox_librenms_plugin.tests.source_snapshot_helpers import interface_rows, port_pair
 
 
@@ -76,20 +76,8 @@ def _vm_interface(name, port_id):
     return _bind(VMInterface.objects.create(virtual_machine=vm, name="eth0"), port_id)
 
 
-def _sync(client, owner, object_type, port_id):
-    seed_ports(owner, [_port(port_id, "eth0")])
-    return client.post(
-        reverse(
-            "plugins:netbox_librenms_plugin:sync_selected_interfaces",
-            kwargs={"object_type": object_type, "object_id": owner.pk},
-        ),
-        {
-            "server_key": SERVER_KEY,
-            "interface_name_field": "ifName",
-            "select": [str(port_id)],
-            "exclude_columns": ["vlans", "mac_address"],
-        },
-    )
+def _sync(client, owner, port_ids):
+    return post_interface_sync(client, owner, port_ids, htmx=False)
 
 
 def _warnings(response):
@@ -131,7 +119,9 @@ class TestTheSyncWriter:
             model = Interface
             owner_filter = {"device": owner}
         else:
-            owner = make_vm("requested-port-owner", make_cluster("requested-port-cluster"))
+            owner = map_device_to_librenms(
+                make_vm("requested-port-owner", make_cluster("requested-port-cluster")), 71, server_key=SERVER_KEY
+            )
             model = VMInterface
             owner_filter = {"virtual_machine": owner}
         existing = (
@@ -143,7 +133,9 @@ class TestTheSyncWriter:
         before_existing = model.objects.filter(pk=existing.pk).values().get() if existing else None
         client.force_login(make_superuser("foreign-port-request-user"))
 
-        response = _sync(client, owner, object_type, PORT)
+        seed_ports(owner, [_port(PORT, "eth0")])
+
+        response = _sync(client, owner, [PORT])
 
         assert response.status_code == 302
         assert _warnings(response) == [
@@ -361,22 +353,13 @@ def test_a_persistent_foreign_binding_skips_only_its_row(client, settings, objec
         owner = make_device("bulk-conflict-owner", librenms_cf={SERVER_KEY: {"id": 71}})
         model, owner_filter = Interface, {"device": owner}
     else:
-        owner = make_vm("bulk-conflict-owner", make_cluster("bulk-conflict-cluster"))
+        owner = map_device_to_librenms(
+            make_vm("bulk-conflict-owner", make_cluster("bulk-conflict-cluster")), 71, server_key=SERVER_KEY
+        )
         model, owner_filter = VMInterface, {"virtual_machine": owner}
     client.force_login(make_superuser("bulk-conflict-user"))
     seed_ports(owner, [_port(PORT + 1, "clean-port"), _port(PORT, "conflicting-port")])
-    response = client.post(
-        reverse(
-            "plugins:netbox_librenms_plugin:sync_selected_interfaces",
-            kwargs={"object_type": object_type, "object_id": owner.pk},
-        ),
-        {
-            "server_key": SERVER_KEY,
-            "interface_name_field": "ifName",
-            "select": [str(PORT + 1), str(PORT)],
-            "exclude_columns": ["vlans", "mac_address"],
-        },
-    )
+    response = _sync(client, owner, [PORT + 1, PORT])
     assert response.status_code == 302
     clean = model.objects.get(**owner_filter, name="clean-port")
     assert _binding(clean) == PORT + 1
@@ -414,18 +397,7 @@ def test_a_foreign_bound_related_row_cannot_use_a_local_name_fallback(client, se
     seed_ports(owner, [member_port, related_port], [port_pair(PORT + 1, PORT)], device=device_record)
     relationship_key = {"lag": "lag_members", "parent": "sub_interfaces", "bridge": "bridge_members"}[relation]
     assert interface_rows(owner)["port_stack_relationships"][relationship_key] == {PORT + 1: PORT}
-    response = client.post(
-        reverse(
-            "plugins:netbox_librenms_plugin:sync_selected_interfaces",
-            kwargs={"object_type": "device", "object_id": owner.pk},
-        ),
-        {
-            "server_key": SERVER_KEY,
-            "interface_name_field": "ifName",
-            "select": [str(PORT + 1), str(PORT)],
-            "exclude_columns": ["vlans", "mac_address"],
-        },
-    )
+    response = _sync(client, owner, [PORT + 1, PORT])
     assert response.status_code == 302
     assert _binding(member) == PORT + 1
     assert getattr(member, f"{relation}_id") is None

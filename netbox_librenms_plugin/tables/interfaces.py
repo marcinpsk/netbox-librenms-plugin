@@ -1,10 +1,10 @@
 import copy
-import json as json_module
+from itertools import repeat
 from typing import Callable, NamedTuple
 
 import django_tables2 as tables
 from django.urls import reverse
-from django.utils.html import escape, format_html
+from django.utils.html import format_html
 from django.utils.safestring import mark_safe
 from netbox.tables.columns import BooleanColumn, ToggleColumn
 from utilities.templatetags.helpers import humanize_speed
@@ -35,6 +35,7 @@ from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.constants import MATCHING, MISMATCHED, NOT_IN_NETBOX
 from netbox_librenms_plugin.sync_filters import EMPTY_CELL_VALUES, FilterColumn, FilterSpec, cell_text
 from netbox_librenms_plugin.sync_query import SyncQuery
+from netbox_librenms_plugin.tables.draft_rows import draft_row_attrs, with_changed_marker
 from netbox_librenms_plugin.utils import (
     SYNC_TABLE_HEADER_ATTRS,
     check_vlan_group_matches,
@@ -117,6 +118,12 @@ _FILTER_COLUMNS = (
 )
 
 
+def interface_row_key(record):
+    """Return the row key of an interface row: its canonical LibreNMS port ID as text, or None."""
+    port_id = normalize_librenms_port_id(record.get("port_id"))
+    return str(port_id) if port_id is not None else None
+
+
 class _Pill(NamedTuple):
     """One pill or button of a cell: the text it shows, and a function that returns its markup."""
 
@@ -191,6 +198,13 @@ class LibreNMSInterfaceTable(tables.Table):
             *args,
             extra_columns=[("selection", selection_column), ("name", name_column)],
             row_attrs={
+                **draft_row_attrs(interface_row_key),
+                # The selection rule of sync_draft.js reads the row's intent, its requirements and its off-page requirers.
+                "data-intent": lambda record: record.get("intent"),
+                "data-requires": lambda record: record.get("requires"),
+                "data-offpage-requirers": lambda record: (
+                    str(record["offpage_requirers"]) if "offpage_requirers" in record else None
+                ),
                 "data-interface": lambda record: record.get(self.interface_name_field),
                 "data-name": lambda record: record.get(self.interface_name_field),
                 "data-enabled": lambda record: (
@@ -209,6 +223,8 @@ class LibreNMSInterfaceTable(tables.Table):
         )
         self.tab = "interfaces"
         self.prefix = "interfaces_"
+        # A row renders the same on every page and in a row read: no position-dependent even/odd class.
+        self._counter = repeat(0)
 
     selection = ToggleColumn(
         orderable=False,
@@ -220,6 +236,7 @@ class LibreNMSInterfaceTable(tables.Table):
                 "disabled": lambda record: None if record.get("sync_target_resolvable", True) else "disabled",
             },
         },
+        checked=lambda value, record: record.get("selected"),
     )
     name = tables.Column(verbose_name="Name", attrs={"td": {"data-col": "name"}})
     type = tables.Column(
@@ -355,7 +372,9 @@ class LibreNMSInterfaceTable(tables.Table):
         # An owner-unresolved row keeps its checkbox, so the bulk VC member action can reach it.
         if self._row_rule_state(record) in (ROW_IGNORED, ROW_AMBIGUOUS, ROW_INCOMPLETE):
             return ""
-        return bound_column.column.render(value=value, bound_column=bound_column, record=record)
+        return with_changed_marker(
+            bound_column.column.render(value=value, bound_column=bound_column, record=record), record
+        )
 
     def render_vlans(self, value, record):
         """
@@ -370,8 +389,7 @@ class LibreNMSInterfaceTable(tables.Table):
         - Green: Matching (VLAN matches NetBox assignment)
 
         Compact display: shows up to 3 VLANs inline, then summarizes.
-        An edit button opens the VLAN detail modal.
-        Hidden inputs store per-VLAN group assignments for form submission.
+        An edit button opens the VLAN groups dialog, which the server renders for the row.
 
         Args:
             value (object): The column value.
@@ -395,15 +413,12 @@ class LibreNMSInterfaceTable(tables.Table):
         if not record.get("sync_target_resolvable", True) or self._row_rule_state(record):
             return format_html("{}{}", summary, inherited)
 
-        interface_name = record.get(self.interface_name_field, "")
-        row_key = self._vlan_row_key(record)
         return format_html(
-            '<span title="{}">{}</span>{}{}{}',
+            '<span title="{}">{}</span>{}{}',
             self._render_vlan_tooltip(all_vlans, context),
             summary,
             inherited,
-            self._render_vlan_edit_button(record, all_vlans, context, interface_name, row_key),
-            self._render_vlan_hidden_inputs(all_vlans, context, interface_name, row_key),
+            self._render_vlan_edit_button(record),
         )
 
     @staticmethod
@@ -424,14 +439,6 @@ class LibreNMSInterfaceTable(tables.Table):
             all_vlans.append(("U", untagged))
         all_vlans.extend(("T", vid) for vid in sorted(record.get("tagged_vlans", [])))
         return all_vlans
-
-    @staticmethod
-    def _vlan_row_key(record):
-        """Return the port id the sync view reads back out of the rendered form field names."""
-        # _sync_interface_vlans() reads vlan_group_<canonical port id>_<vid>, so a raw value such
-        # as "010" would render a key the view never looks up and the override would be dropped.
-        canonical_port_id = normalize_librenms_port_id(record.get("port_id"))
-        return str(canonical_port_id) if canonical_port_id is not None else str(record.get("port_id") or "")
 
     def _vlan_css_class(self, context, vlan_type, vid):
         """Return one VLAN's colour class. The inline summary and the modal must agree on it."""
@@ -495,70 +502,44 @@ class LibreNMSInterfaceTable(tables.Table):
                 tooltip_lines.append(format_html("VLAN {}({}) → {}", vid, vlan_type, group_name))
         return mark_safe("&#10;".join(str(line) for line in tooltip_lines))
 
-    @staticmethod
-    def _render_vlan_hidden_inputs(all_vlans, context, interface_name, row_key):
-        """Render the per-VLAN group inputs the sync view reads on submit."""
-        hidden_inputs = [
-            format_html(
-                '<input type="hidden" name="vlan_group_{}_{}" '
-                'value="{}" class="vlan-group-hidden" '
-                'data-interface="{}" data-vid="{}">',
-                row_key,
-                vid,
-                context.group_map.get(vid, {}).get("group_id", ""),
-                interface_name,
-                vid,
-            )
-            for _vlan_type, vid in all_vlans
+    def vlan_modal_rows(self, record, groups, missing):
+        """
+        Return the rows of the VLAN groups dialog of one row: one per VLAN, untagged first.
+
+        Args:
+            record (dict): The interface row.
+            groups (dict[str, str]): The group pk text ("" is Global) that the dialog selects for each VID.
+            missing (set[str]): The VIDs whose selected group holds no such VLAN.
+
+        Returns:
+            list[dict]: The ``vid``, ``type`` ("U" or "T"), ``group_id``, ``css`` and ``missing`` of each VLAN.
+
+        """
+        context = vlan_row_context(record)
+        # The colour compares the selected group with NetBox, as the summary does for the groups it shows.
+        shown = context._replace(group_map={int(vid): {"group_id": group} for vid, group in groups.items()})
+        return [
+            {
+                "vid": vid,
+                "type": vlan_type,
+                "group_id": groups.get(str(vid), ""),
+                "missing": str(vid) in missing,
+                "css": "text-danger" if str(vid) in missing else self._vlan_css_class(shown, vlan_type, vid),
+            }
+            for vlan_type, vid in self._collect_row_vlans(record)
         ]
-        return mark_safe("".join(str(field) for field in hidden_inputs))
 
-    def _vlan_modal_json(self, all_vlans, context):
-        """Serialize the per-VLAN state the edit modal renders."""
-        vlan_json_items = []
-        for vlan_type, vid in all_vlans:
-            group_info = context.group_map.get(vid, {})
-            is_missing = vid in context.missing
-            vlan_json_items.append(
-                {
-                    "vid": vid,
-                    "type": vlan_type,
-                    "group_id": group_info.get("group_id", ""),
-                    "group_name": "Not in NetBox" if is_missing else group_info.get("group_name", "Global"),
-                    "css": self._vlan_css_class(context, vlan_type, vid),
-                    "missing": is_missing,
-                }
-            )
-        return json_module.dumps(vlan_json_items)
-
-    def _vlan_group_options_json(self, record):
-        """Serialize the group dropdown options, global first."""
-        group_options = [{"id": "", "name": "-- No Group (Global) --", "scope": ""}]
-        for group in record.get("vlan_groups", self.vlan_groups):
-            scope_info = str(group.scope) if hasattr(group, "scope") and group.scope else ""
-            group_options.append({"id": str(group.pk), "name": group.name, "scope": scope_info})
-        return json_module.dumps(group_options)
-
-    def _render_vlan_edit_button(self, record, all_vlans, context, interface_name, row_key):
-        """Render the button that opens the VLAN group modal for this row; a withheld row has none."""
-        if record.get("member_withheld"):
+    @staticmethod
+    def _render_vlan_edit_button(record):
+        """Render the button that opens the VLAN groups dialog of this row; a row without the dialog has none."""
+        if record.get("member_withheld") or not record.get("vlan_modal_url"):
             return ""
-        device_id = record.get("selected_object_id") or (self.device.pk if self.device else "")
         return format_html(
-            '<button type="button" class="btn btn-sm btn-link p-0 ms-1 vlan-edit-btn" '
-            'data-interface="{}" '
-            'data-row-key="{}" '
-            'data-device-id="{}" '
-            "data-vlans='{}' "
-            "data-vlan-groups='{}' "
-            'title="Edit VLAN group assignments">'
+            '<button type="button" class="btn btn-sm btn-link p-0 ms-1 vlan-edit-btn" hx-get="{}"'
+            ' hx-target="#vlanDetailModalContent" hx-swap="innerHTML" hx-sync="this:replace"'
+            ' data-bs-toggle="modal" data-bs-target="#vlanDetailModal" title="Edit VLAN group assignments">'
             '<i class="mdi mdi-pencil"></i></button>',
-            interface_name,
-            row_key,
-            device_id,
-            # Escape the JSON for safe embedding in the HTML attributes.
-            escape(self._vlan_modal_json(all_vlans, context)),
-            escape(self._vlan_group_options_json(record)),
+            record["vlan_modal_url"],
         )
 
     # Each render method below shows its column's text function, so a filter matches what the cell shows.
@@ -1105,57 +1086,6 @@ class LibreNMSInterfaceTable(tables.Table):
             return "text-danger", text, note
         return self._field_css_class(record, "type"), text, note
 
-    def format_interface_data(self, port_data, device):
-        """Format one interface row whose netbox_interface the caller resolved by port_id."""
-        interface_name = port_data.get(self.interface_name_field)
-        # This row has just been re-resolved against a different member, so any verdict cached
-        # from the previous render is stale.
-        port_data.pop("_sync_state", None)
-
-        # Stamp the row's actual object so the relationship sync button targets it even when the
-        # row has no matching NetBox interface yet (missing_nb). This is set here, where the
-        # caller passes the row-selected device (e.g. the cross-page VC member switch), so the
-        # missing_nb branch in _render_relationship_column can prefer it over the
-        # name-based VC heuristic, which would otherwise post to the wrong device.
-        port_data["selected_object_id"] = getattr(device, "pk", None)
-        port_data["selected_object_type"] = self.sync_object_type
-
-        # Clear description if it matches interface name. A cached record can lack a key; the
-        # write check then blocks the row, and the repaint must still render it.
-        if port_data.get("ifAlias") in (port_data.get("ifName"), port_data.get("ifDescr")):
-            port_data["ifAlias"] = ""
-
-        formatted_data = {
-            # The member decides the rules, so the checkbox and the greyed state follow it.
-            "selection": self.render_selection(port_data.get("port_id"), self.columns["selection"], port_data),
-            "rule_state": self._row_rule_state(port_data),
-            "name": self.render_name(interface_name, port_data),
-            "type": self.render_type(port_data.get("ifType"), port_data),
-            "speed": self.render_speed(port_data.get("ifSpeed"), port_data),
-            "mac_address": self.render_mac_address(port_data.get("ifPhysAddress"), port_data),
-            "mtu": self.render_mtu(port_data.get("ifMtu"), port_data),
-            "enabled": self.render_enabled(port_data.get("ifAdminStatus"), port_data),
-            "description": self.render_description(port_data.get("ifAlias"), port_data),
-            "vlans": self.render_vlans(None, port_data),
-            # The librenms_id badge's colour is member-specific (it compares this port_id
-            # against the resolved NetBox interface's device librenms_id), so a VC member
-            # switch must repaint it too — otherwise it keeps the previous member's
-            # match/mismatch state. The column accessor is "port_id" (see the column def).
-            "librenms_id": self.render_librenms_id(port_data.get("port_id"), port_data),
-            # Render from the relationship enrichment keys the caller stamps onto
-            # port_data; absent enrichment it returns "" (safe empty cell).
-            "parent": self.render_parent(None, port_data),
-            # The row's own sync button: its visibility follows the re-resolved member's diff,
-            # so a member switch that brings the row into sync must clear it.
-            "actions": self.render_actions(None, port_data),
-        }
-        for relation in ("lag", "parent", "bridge"):
-            for attribute in ("port_id", "name"):
-                key = f"librenms_{relation}_{attribute}"
-                formatted_data[key] = port_data.get(key)
-
-        return formatted_data
-
     def configure(self, request):
         """Order and paginate the table from the page query, which every hop of the tab carries."""
         self.sync_query = SyncQuery.from_request(request)
@@ -1209,8 +1139,9 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
         base_id = f"device_selection_{port_id}"
         disabled = mark_safe(' disabled="disabled"') if not record.get("sync_target_resolvable", True) else ""
 
+        # sync_draft.js sends a new member as the row's draft choice; the form posts no member.
         return format_html(
-            '<select name="device_selection_{0}" id="{1}" class="form-select vc-member-select" '
+            '<select id="{1}" class="form-select vc-member-select" data-draft-choice="member" '
             'data-interface="{2}" data-row-id="{0}"{4}>{3}</select>',
             port_id,
             base_id,
@@ -1243,12 +1174,6 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
         """Return the label of the option the member dropdown shows as selected."""
         selected = selected_vc_member(self._vc_members, self._selected_member_id(record))
         return str(selected.name) if selected is not None else VC_MEMBER_PLACEHOLDER
-
-    def format_interface_data(self, port_data, device):
-        """Format interface data including VC device selection column."""
-        formatted_data = super().format_interface_data(port_data, device)
-        formatted_data["device_selection"] = self.render_device_selection(None, port_data)
-        return formatted_data
 
     class Meta:
         """Meta options for VCInterfaceTable."""

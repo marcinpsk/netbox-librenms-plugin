@@ -24,15 +24,13 @@ PAGE_HTML = f"""<!doctype html><html><body>
         <input type="hidden" name="server_key" value="secondary">
         <table id="librenms-interface-table"><tbody>
           <tr data-port-id="10">
-            <td><select class="vc-member-select" data-interface="et-0/0/0">
-              <option value="1" selected>m1</option><option value="2">m2</option></select></td>
             <td><button class="lag-sync-btn" data-port-id="10" data-lag-port-id="20"
                         data-sync-url="{LAG_SYNC_URL}" data-object-id="1">LAG</button></td>
           </tr>
         </tbody></table>
       </form>
       <div data-cable-verify-url="{CABLE_VERIFY_URL}" data-cable-origin-device-id="1">
-        <table><tbody><tr><td><select id="cable-select" data-interface="row-1">
+        <table id="librenms-cable-table-vc"><tbody><tr><td><select id="cable-select" data-interface="row-1">
           <option value="1" selected>m1</option><option value="2">m2</option></select></td></tr></tbody></table>
       </div>
       <table><tbody><tr data-ent-index="5" data-depth="0"><td>
@@ -62,16 +60,11 @@ def _form_server_key(request):
 @pytest.mark.parametrize(
     ("url", "action", "read"),
     [
-        (
-            "**/verify-interface/",
-            "handleInterfaceChange(document.querySelector('.vc-member-select'), '2')",
-            _json_server_key,
-        ),
         (CABLE_VERIFY_URL, "handleCableChange(document.getElementById('cable-select'), '2')", _json_server_key),
         ("**/verify-module/", "handleModuleChange(document.getElementById('module-select'), '1')", _json_server_key),
         (LAG_SYNC_URL, "document.querySelector('.lag-sync-btn').click()", _form_server_key),
     ],
-    ids=["interface-verify", "cable-verify", "module-verify", "relationship-sync"],
+    ids=["cable-verify", "module-verify", "relationship-sync"],
 )
 def test_a_request_posts_the_server_key_of_the_sync_page(page, url, action, read):
     """Another server's form earlier in the page does not decide the server of a tab request."""
@@ -91,31 +84,9 @@ def test_the_netbox_only_delete_posts_the_server_key_of_the_sync_page(page):
 
 def test_the_selection_store_is_scoped_to_the_server_of_the_sync_page(page):
     _load(page)
-    key = page.evaluate("_selectionStorageKey(document.getElementById('librenms-interface-table'))")
+    key = page.evaluate("_selectionStorageKey(document.getElementById('librenms-cable-table-vc'))")
     assert key.endswith(":secondary")
 
 
 def _matches(request_url, pattern):
     return request_url.endswith(pattern.removeprefix("**")) if pattern.startswith("**") else request_url == pattern
-
-
-def test_vlan_overrides_post_the_server_key_of_the_sync_page(page):
-    _load(page)
-    page.evaluate(
-        """() => document.getElementById('librenms-sync-tabs').insertAdjacentHTML('beforeend', `
-          <div id="vlanDetailModal" data-current-device-id="1" data-current-row-key="10">
-            <div class="modal-body"><table><tbody id="vlanDetailTableBody"><tr><td>
-              <select class="vlan-modal-group-select" data-vid="100"><option value="2" selected>group</option></select>
-            </td></tr></tbody></table></div>
-            <input type="checkbox" id="applyVlanGroupToAll" checked>
-            <button id="saveVlanGroups">Save</button>
-          </div>`)
-        """
-    )
-    page.evaluate("initializeVlanModalSave()")
-
-    with page.expect_request("**/save-vlan-group-overrides/") as info:
-        page.locator("#saveVlanGroups").click()
-
-    assert _json_server_key(info.value) == "secondary"
-    assert info.value.post_data_json["vid_group_map"] == {"100": "2"}

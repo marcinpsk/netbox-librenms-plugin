@@ -160,7 +160,6 @@ from .views import (
     RemoveServerMappingView,
     ReplaceModuleView,
     SaveUserPrefView,
-    SaveVlanGroupOverridesView,
     SerialSensorTypePatternBulkDeleteView,
     SerialSensorTypePatternBulkExportYAMLView,
     SerialSensorTypePatternBulkImportView,
@@ -172,11 +171,15 @@ from .views import (
     SerialSensorTypePatternView,
     SetPreferredServerView,
     SingleCableVerifyView,
-    SingleInterfaceVerifyView,
     SingleModuleVerifyView,
-    SingleVlanGroupVerifyView,
     CableRemoteCreateView,
     CreateVRFFromIPRowView,
+    InterfaceChoiceView,
+    InterfaceMemberView,
+    InterfaceRowView,
+    InterfaceSelectionView,
+    InterfaceVlanGroupsView,
+    InterfaceVlanModalView,
     IPChoiceView,
     IPManagementView,
     IPRowView,
@@ -204,7 +207,9 @@ from .views import (
     UpdateModuleSerialView,
     UpdateVMPlatformView,
     VCNormalizationReportView,
-    VerifyVlanSyncGroupView,
+    VLANChoiceView,
+    VLANRowView,
+    VLANSelectionView,
     VMInterfaceTableView,
     VMIPAddressTableView,
     VMLibreNMSSyncView,
@@ -337,12 +342,6 @@ urlpatterns = [
         DeviceIPAddressTableView.as_view(),
         name="device_ipaddress_sync",
     ),
-    # Path for single interface verify javascript call
-    path(
-        "verify-interface/",
-        SingleInterfaceVerifyView.as_view(),
-        name="verify_interface",
-    ),
     path(
         "verify-cable/",
         SingleCableVerifyView.as_view(),
@@ -352,24 +351,6 @@ urlpatterns = [
         "verify-module/",
         SingleModuleVerifyView.as_view(),
         name="verify_module",
-    ),
-    # Path for VLAN group verify javascript call (interface VLAN coloring)
-    path(
-        "verify-vlan-group/",
-        SingleVlanGroupVerifyView.as_view(),
-        name="verify_vlan_group",
-    ),
-    # Verify VLAN existence in a group (VLAN sync tab coloring)
-    path(
-        "verify-vlan-sync-group/",
-        VerifyVlanSyncGroupView.as_view(),
-        name="verify_vlan_sync_group",
-    ),
-    # Save VLAN group overrides to cache ("apply to all" persistence)
-    path(
-        "save-vlan-group-overrides/",
-        SaveVlanGroupOverridesView.as_view(),
-        name="save_vlan_group_overrides",
     ),
     # Virtual machine sync URLs
     path(
@@ -402,6 +383,39 @@ urlpatterns = [
         "<str:object_type>/<int:object_id>/sync-interfaces/",
         SyncInterfacesView.as_view(),
         name="sync_selected_interfaces",
+    ),
+    # The user's interface selection draft: row states (also the unload beacon), a row's member,
+    # one member for every selected row, and a row's VLAN groups
+    path(
+        "<str:object_type>/<int:pk>/interface-selection/",
+        InterfaceSelectionView.as_view(),
+        name="interface_selection",
+    ),
+    path(
+        "<str:object_type>/<int:pk>/interface-selection/choice/",
+        InterfaceChoiceView.as_view(),
+        name="interface_selection_choice",
+    ),
+    path(
+        "<str:object_type>/<int:pk>/interface-selection/member/",
+        InterfaceMemberView.as_view(),
+        name="interface_selection_member",
+    ),
+    path(
+        "<str:object_type>/<int:pk>/interface-selection/vlan-groups/",
+        InterfaceVlanGroupsView.as_view(),
+        name="interface_selection_vlan_groups",
+    ),
+    # One interface row as the tab renders it, and its VLAN groups dialog; the row key is a LibreNMS port ID
+    path(
+        "<str:object_type>/<int:pk>/interface-row/<str:row_key>/",
+        InterfaceRowView.as_view(),
+        name="interface_row",
+    ),
+    path(
+        "<str:object_type>/<int:pk>/interface-row/<str:row_key>/vlan-groups/",
+        InterfaceVlanModalView.as_view(),
+        name="interface_vlan_modal",
     ),
     # Sync interface LAG membership URL
     path(
@@ -495,6 +509,23 @@ urlpatterns = [
         "<str:object_type>/<int:object_id>/sync-vlans/",
         SyncVLANsView.as_view(),
         name="sync_selected_vlans",
+    ),
+    # The user's VLAN selection draft: row states (also the unload beacon) and a row's VLAN group
+    path(
+        "<str:object_type>/<int:pk>/vlan-selection/",
+        VLANSelectionView.as_view(),
+        name="vlan_selection",
+    ),
+    path(
+        "<str:object_type>/<int:pk>/vlan-selection/choice/",
+        VLANChoiceView.as_view(),
+        name="vlan_selection_choice",
+    ),
+    # One VLAN row as the tab renders it; the row key is a VID
+    path(
+        "<str:object_type>/<int:pk>/vlan-row/<str:row_key>/",
+        VLANRowView.as_view(),
+        name="vlan_row",
     ),
     # Add Device to LibreNMS URLs
     path(

@@ -151,13 +151,11 @@ class TestVlanTabDegradesOnUnbuildableClient:
 @pytest.mark.parametrize(
     ("route_name", "body"),
     [
-        ("verify_interface", {"port_id": 4001}),
         ("verify_cable", {"row_id": "row-1"}),
         ("verify_module", {"ent_physical_index": 100, "depth": 0}),
-        ("save_vlan_group_overrides", {"vid_group_map": {"10": "1"}}),
     ],
 )
-def test_a_verify_or_override_post_without_a_usable_server_answers_unavailable(client, route_name, body):
+def test_a_verify_post_without_a_usable_server_answers_unavailable(client, route_name, body):
     import json
 
     from django.urls import reverse
@@ -178,3 +176,34 @@ def test_a_verify_or_override_post_without_a_usable_server_answers_unavailable(c
     # No usable server has no snapshot namespace to read or write.
     assert response.status_code == 503
     assert response.json() == {"status": "error", "message": "No usable LibreNMS server is configured."}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("route_name", "method", "extra"),
+    [
+        ("interface_row", "get", {"row_key": "4001"}),
+        ("interface_selection_vlan_groups", "post", {}),
+        ("vlan_row", "get", {"row_key": "10"}),
+        ("vlan_selection_choice", "post", {}),
+    ],
+)
+def test_a_draft_endpoint_without_a_usable_server_answers_404(client, route_name, method, extra):
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+
+    device = _make_device(f"degrade-{route_name}")
+    client.force_login(make_superuser(f"degrade-{route_name}-user"))
+    url = reverse(
+        f"plugins:netbox_librenms_plugin:{route_name}", kwargs={"object_type": "device", "pk": device.pk, **extra}
+    )
+
+    with _patch_unbuildable_config():
+        if method == "get":
+            response = client.get(url, {"server_key": "default"})
+        else:
+            response = client.post(f"{url}?server_key=default", {"draft_id": "x", "expected_revision": "0"})
+
+    # No usable server has no snapshot namespace to read or write.
+    assert response.status_code == 404

@@ -145,34 +145,31 @@ class TestSyncInterface:
     """Verify which real device or virtual chassis member receives each LibreNMS interface row."""
 
     def test_device_vc_target_not_in_valid_ids_is_skipped(self, client, settings):
-        """An explicit device outside the chassis is refused without a fallback write."""
+        """A member choice of a device outside the chassis is refused, and the row writes nowhere."""
         from dcim.models import Interface
 
-        from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
+        from netbox_librenms_plugin.tests.view_test_helpers import draft_command, draft_tab, make_superuser
 
         _vc, (host, _sibling) = make_virtual_chassis_members("sync-vc-outsider")
+        seed_stored_mapping(host, {"default": {"id": 1470}}, save=True)
         outsider = make_device("sync-vc-outsider-x")
+        configure_default_librenms_server(settings)
+        client.force_login(make_superuser("sync-vc-outsider-user"))
+        seed_ports(host, [_record(ifName="eth0", port_id=10)])
+        shown = draft_tab(client, host, "interfaces", interface_name_field="ifName")
 
-        response = _post_sync(
-            client,
-            settings,
-            make_superuser("sync-vc-outsider-user"),
-            host,
-            _record(ifName="eth0", port_id=10),
-            extra={"device_selection_10": str(outsider.pk)},
-        )
+        refused = draft_command(client, shown, "data-choice-url", row="10", field="member", value=str(outsider.pk))
 
-        assert not Interface.objects.filter(device=host, name="eth0").exists()
+        assert refused.status_code == 404
+        assert draft_tab(client, host, "interfaces", interface_name_field="ifName").table["data-draft-revision"] == "0"
         assert not Interface.objects.filter(device=outsider, name="eth0").exists()
-        assert message_texts(response.wsgi_request, "warning") == [
-            "1 interface(s) skipped: eth0 (selected target unavailable)."
-        ]
 
     def test_existing_interface_outside_the_change_grant_is_skipped(self, client, settings):
         """A natural-key match must not bypass the caller's constrained change grant."""
         from dcim.models import Device, Interface
 
-        device = make_device("sync-interface-change-scope")
+        device = make_device("sync-interface-change-scope", librenms_cf={"default": {"id": 1471}})
         hidden = make_interface(device, "eth0")
         allowed = make_interface(device, "eth1")
         user = make_user_with_perms(
@@ -191,7 +188,7 @@ class TestSyncInterface:
         """The permission-scoped skip must disappear when the existing interface is changeable."""
         from dcim.models import Device, Interface
 
-        device = make_device("sync-interface-change-control")
+        device = make_device("sync-interface-change-control", librenms_cf={"default": {"id": 1472}})
         existing = make_interface(device, "eth0")
         make_interface(device, "eth1")
         user = make_user_with_perms(
@@ -499,54 +496,50 @@ class TestDeleteNetBoxInterfacesPost:
 
 
 class TestVlansGroupedUpdateAndSkip:
-    def _setup(self, tag, cached_name, existing_name):
-        """A real grouped VLAN plus a request selecting it; returns (view, request, device, vlan)."""
+    def _submit(self, client, settings, tag, cached_name, existing_name):
+        """Submit the selection of a real grouped VLAN through the tab's draft; return the response and the VLAN."""
+        from django.urls import reverse
         from ipam.models import VLAN, VLANGroup
 
         from netbox_librenms_plugin.acquisition.registry import Resource
         from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
-        from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
+        from netbox_librenms_plugin.tests.view_test_helpers import make_superuser, submit_with_draft
 
+        configure_default_librenms_server(settings)
+        client.force_login(make_superuser(f"vlan-{tag}-user"))
         group = VLANGroup.objects.create(name=f"grp-{tag}", slug=f"grp-{tag}")
         vlan = VLAN.objects.create(vid=100, group=group, name=existing_name, status="active")
-        dev = make_device(f"vlan-{tag}")
-        req = make_request(
-            "post", {"select": ["100"], "vlan_group_100": str(group.pk), "expected_vlan_name_100": cached_name}
-        )
-        view = make_view(SyncVLANsView, req)
-        view._post_server_key = "default"
+        dev = make_device(f"vlan-{tag}", librenms_cf={"default": {"id": 1480}})
         seed_source_snapshot(dev, Resource.VLANS, "default", vlans=[{"vlan_vlan": 100, "vlan_name": cached_name}])
-        cache_key = view.get_cache_key(dev, "vlans", "default")
-        return view, req, dev, vlan, cache_key
+        url = reverse(
+            "plugins:netbox_librenms_plugin:sync_selected_vlans", kwargs={"object_type": "device", "object_id": dev.pk}
+        )
+        response = submit_with_draft(
+            client,
+            dev,
+            "vlans",
+            url,
+            [100],
+            choices=[("data-choice-url", {"row": "100", "field": "group", "value": str(group.pk)})],
+            action="create_vlans",
+        )
+        return response, vlan
 
-    def test_grouped_vlan_with_different_name_requires_confirmation(self):
+    def test_grouped_vlan_with_different_name_requires_confirmation(self, client, settings):
         """A grouped VLAN whose LibreNMS name differs is disclosed without a write."""
-        from django.core.cache import cache
         from ipam.models import VLAN
 
-        view, req, dev, vlan, cache_key = self._setup("update", cached_name="NewName", existing_name="OldName")
+        response, vlan = self._submit(client, settings, "update", cached_name="NewName", existing_name="OldName")
 
-        try:
-            response = view._handle_create_vlans(req, dev, "device", dev.pk)
+        assert response.status_code == 200
+        assert b"Confirm VLAN changes" in response.content
+        assert VLAN.objects.get(pk=vlan.pk).name == "OldName"
 
-            assert response.status_code == 200
-            assert b"Confirm VLAN changes" in response.content
-            assert VLAN.objects.get(pk=vlan.pk).name == "OldName"
-        finally:
-            cache.delete(cache_key)
-
-    def test_grouped_vlan_with_matching_name_is_unchanged(self):
+    def test_grouped_vlan_with_matching_name_is_unchanged(self, client, settings):
         """A grouped VLAN already carrying the LibreNMS name is left untouched."""
-        from django.core.cache import cache
         from ipam.models import VLAN
 
-        view, req, dev, vlan, cache_key = self._setup("skip", cached_name="Same", existing_name="Same")
-        last_updated = VLAN.objects.get(pk=vlan.pk).last_updated
+        response, vlan = self._submit(client, settings, "skip", cached_name="Same", existing_name="Same")
 
-        try:
-            view._handle_create_vlans(req, dev, "device", dev.pk)
-
-            assert VLAN.objects.get(pk=vlan.pk).last_updated == last_updated
-            assert any("unchanged" in t for t in message_texts(req, "success"))
-        finally:
-            cache.delete(cache_key)
+        assert VLAN.objects.get(pk=vlan.pk).last_updated == vlan.last_updated
+        assert any("unchanged" in t for t in message_texts(response.wsgi_request, "success"))
