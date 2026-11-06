@@ -1362,3 +1362,31 @@ def test_a_refused_choice_is_dropped_and_the_input_after_it_still_goes(page):
     page.click("#refresh")
     expect(page.locator("#librenms-ipaddress-table")).to_have_attribute("data-draft-id", "draft-1+")
     assert [kind for kind, _fields in server.commands].count("choice") == 2
+
+
+def test_a_refused_choice_refuses_the_submit_queued_behind_it_until_the_tab_is_read_again(page):
+    server = _DraftServer(page)
+    server.open()
+    server.deleted_vrfs = {"9"}
+    row = f'tr[data-row-key="{ROWS[1]}"]'
+    server.hold.add("choice")
+    # Red is gone; the same row is checked and a bulk submit waits behind the refused choice.
+    page.select_option(f"{row} select", "9")
+    server.wait_for_commands(1)
+    _box(page, ROWS[1]).click()
+    page.click("#sync-selected")
+    page.wait_for_timeout(200)
+    server.hold.clear()
+    server.release("choice")
+
+    expect(page.locator("#librenms-draft-notice")).to_be_visible()
+    server.wait_until(lambda: _page_reads(server))
+    page.wait_for_timeout(300)
+    # No submit wrote the row in the VRF that the page no longer showed.
+    assert server.submits == []
+    expect(page.locator(f"{row} select")).to_have_value("")
+    expect(_box(page, ROWS[1])).to_be_checked()
+
+    page.click("#sync-selected")
+    server.wait_until(lambda: server.submits)
+    assert server.submits[0]["expected_revision"] == str(server.revision - 1)

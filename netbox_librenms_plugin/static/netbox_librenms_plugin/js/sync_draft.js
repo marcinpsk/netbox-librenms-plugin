@@ -80,6 +80,9 @@
         failed: false,
         // Another window changed the draft: input waits for the fresh presentation, which this page reads.
         stale: false,
+        // The server refused a write: the page can show a state it does not have, so no command goes until a
+        // fresh presentation comes; row input still goes.
+        refused: false,
         // The last choice this page sent per row, until a row READ shows the row again.
         choices: new Map(),
     };
@@ -107,7 +110,8 @@
      * navigation removes the queued navigations, filters and row READs (reserveNavigation()); row states join
      * only the batch at the tail of the queue (tailBatch()); a choice replaces only a choice of its row at the
      * tail (enqueue()); a failed write drops every queued operation that is not a write (failure()); a
-     * conflict drops the queued writes (conflict()).
+     * refused write drops the queued commands but a refresh, and refuses new ones until a fresh presentation
+     * (refusal()); a conflict drops the queued writes (conflict()).
      *
      * @param {Object} op - The operation: its kind, run(op) that calls done(op) when it ends, and drop(error).
      * @returns {void}
@@ -321,6 +325,7 @@
             management: table.dataset.managementUrl,
         };
         writer.stale = false;
+        writer.refused = false;
         writer.choices.clear();
         // Also while the navigation that brought the table waits for its end: that READ is the stale one.
         if (older) navigate(destination, 'replace');
@@ -440,7 +445,10 @@
     function refusal(op) {
         // The row shows the choice of the server again when the tab is read; a later choice stays.
         if (op.row && writer.choices.get(op.row) === op.fields.value) writer.choices.delete(op.row);
+        writer.refused = true;
         showNotice('The server refused this change. The tab now shows the saved selection.', null);
+        // A queued action would act on what the page shows; the user acts again on the fresh presentation.
+        dropQueued((other) => other.kind === 'command' && other.command !== 'refresh', null);
         readResults();
     }
 
@@ -675,17 +683,23 @@
         // No request goes, so the page treats it as a request without an answer: the submit button works again.
         const refuse = () => elt.dispatchEvent(new CustomEvent('librenmsRequestFailed', { bubbles: true, detail: { elt } }));
         const submitter = event.detail.triggeringEvent?.submitter;
+        const notSent = () => {
+            refuse();
+            showNotice('The tab changed; the action was not sent. Check the row and try again.', null);
+        };
         admit({
             kind: 'command',
+            command,
             elt,
             claims: command === 'draft' && isBulkSubmit(event),
             path: event.detail.path,
             submitter: submitter?.name ? { name: submitter.name, value: submitter.value } : null,
             xhr: null,
             run: (op) => {
-                if (!elt.isConnected) {
-                    // An operation before it (a refresh) replaced its element: it never goes with new evidence.
-                    showNotice('The tab changed; the action was not sent. Check the row and try again.', null);
+                // An operation before it replaced its element (a refresh), or the server refused a write and
+                // the fresh presentation has not come: it never goes with what the page shows now.
+                if (!elt.isConnected || (writer.refused && command !== 'refresh')) {
+                    notSent();
                     done(op);
                     return;
                 }
@@ -699,7 +713,7 @@
                 // htmx sends a command at once, or drops it (hx-sync, validation) with no event: then it ends here.
                 if (!op.xhr) finishCommand(op, null, false);
             },
-            drop: refuse,
+            drop: (error) => (error ? refuse() : notSent()),
         });
     }
 
@@ -914,6 +928,8 @@
     document.addEventListener('htmx:afterSwap', function (event) {
         pageSwap = false;
         const read = reads.get(event.detail.xhr);
+        // An accepted READ of the page or of a filter is the fresh presentation that a refusal waits for.
+        if (read?.accepted && !read.rowKey) writer.refused = false;
         // The row now shows the draft's choice: a choice after this swap compares with the row.
         if (read?.accepted && read.rowKey) writer.choices.delete(read.rowKey);
         adoptPresentation();
