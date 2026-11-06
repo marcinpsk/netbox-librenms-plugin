@@ -590,6 +590,17 @@
         if (accepts(table)) takeInput(range);
     });
 
+    // Clear on the off-page notice clears the rows that the notice counts; the tab then shows the draft again.
+    document.addEventListener('click', function (event) {
+        const clear = event.target instanceof Element ? event.target.closest('[data-clear-offpage]') : null;
+        if (!clear || !accepts(draftTable())) return;
+        bumpInputEpoch();
+        const rows = tailBatch();
+        JSON.parse(clear.dataset.clearOffpage).forEach((key) => rows.set(key, { state: 'none', token: null }));
+        schedule();
+        readResults();
+    });
+
     // The unload carries the row states that no batch carries yet; the server takes them only for this revision.
     // A write or command that waits is lost with the page (the unload prompt asks), so the rows go without it.
     window.addEventListener('pagehide', function () {

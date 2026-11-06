@@ -27,6 +27,7 @@ from netbox_librenms_plugin.sync_rows import (
     ip_rows,
     ip_table,
     management_assignments,
+    offpage_selection,
     open_ip_draft,
     read_ip_assessment,
     seed_management_rows,
@@ -75,6 +76,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         cache_ttl = source_cache.remaining_ttl(obj, Resource.IP_ADDRESSES, server_key)
         cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl else None
         table, filters, filtered_from = ip_table(request, obj, server_key, assessment, draft)
+        offpage = offpage_selection(table, assessment.rows)
 
         return {
             "table": table,
@@ -83,6 +85,9 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             "filtered_from": filtered_from,
             # The data refresh replaced a draft that had rows, so the page says the selection is gone.
             "selection_cleared": cleared,
+            # The selected rows that the shown page does not show, which the submit takes too.
+            "offpage_selected": offpage,
+            "offpage_selected_json": json.dumps(offpage),
             "object": obj,
             "cache_expiry": cache_expiry,
             "server_key": server_key,

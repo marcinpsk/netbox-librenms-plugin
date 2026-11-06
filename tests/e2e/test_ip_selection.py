@@ -148,6 +148,8 @@ def test_the_selection_survives_pagination_filters_search_and_per_page(ip_tab: P
     _box(page, ROWS[0]).click()
     _page_link(page, 2).click()
     expect(_row(page, ROWS[PER_PAGE])).to_have_count(1)
+    # The page states the selected row that it does not show, which a submit takes too.
+    expect(page.locator(f"{CONTENT} [data-offpage-selection]")).to_be_visible()
     _box(page, ROWS[PER_PAGE]).click()
 
     page.go_back()
