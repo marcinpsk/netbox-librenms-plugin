@@ -69,6 +69,8 @@ class _DraftServer:
         self.reads = []
         self.submits = []
         self.answers = {}
+        # The VRFs that another window deleted: a choice of one is refused (404) every time.
+        self.deleted_vrfs = set()
         # The submit answer names no revision, as after another window's change during the submit.
         self.changed_during_submit = False
         # False renders the page of a tab without a draft table.
@@ -175,6 +177,8 @@ class _DraftServer:
 
     def _command(self, kind, fields):
         status = (self.answers.get(kind) or [204]).pop(0)
+        if kind == "choice" and fields["value"] in self.deleted_vrfs:
+            status = 404
         if status == 204 and int(fields["expected_revision"]) != self.revision:
             status = 409
         if status != 204:
@@ -1325,3 +1329,36 @@ def test_a_page_read_keeps_the_messages_that_the_last_request_showed(page):
     page.wait_for_url(f"{PAGE_URL}?tab=cables")
     expect(page.locator("#django-messages #shown")).to_have_count(1)
     expect(page.locator("#cables-tab")).to_have_count(1)
+
+
+def test_a_refused_choice_is_dropped_and_the_input_after_it_still_goes(page):
+    server = _DraftServer(page)
+    server.open()
+    server.deleted_vrfs = {"9"}
+    row = f'tr[data-row-key="{ROWS[1]}"]'
+    server.hold.add("choice")
+    # Red is chosen after another window deleted it; a click and a valid choice wait behind it.
+    page.select_option(f"{row} select", "9")
+    server.wait_for_commands(1)
+    _box(page, ROWS[0]).click()
+    page.select_option(f"{row} select", "5")
+    server.hold.clear()
+    server.release("choice")
+
+    expect(page.locator("#librenms-draft-notice")).to_be_visible()
+    server.wait_until(lambda: _page_reads(server))
+    # The refused choice is never sent again; the input after it is saved and the page shows the server state.
+    assert [(kind, fields.get("value")) for kind, fields in server.commands] == [
+        ("choice", "9"),
+        ("selection", None),
+        ("choice", "5"),
+    ]
+    expect(page.locator(f"{row} select")).to_have_value("5")
+    expect(_box(page, ROWS[0])).to_be_checked()
+    assert server.checked == {ROWS[0]}
+
+    page.click("#cables-tab")
+    page.wait_for_url(f"{PAGE_URL}?tab=cables")
+    page.click("#refresh")
+    expect(page.locator("#librenms-ipaddress-table")).to_have_attribute("data-draft-id", "draft-1+")
+    assert [kind for kind, _fields in server.commands].count("choice") == 2
