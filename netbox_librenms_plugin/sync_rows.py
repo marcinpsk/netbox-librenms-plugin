@@ -268,22 +268,23 @@ def ip_table(request, obj, server_key, assessment, draft):
     return table, filters, filtered_from
 
 
-def offpage_selection(table, rows):
+def offpage_selection(table, rows, filters):
     """
     Return the keys of the selected rows that the shown page of *table* does not show.
 
     The page states their number above the table: the submit takes them too, and the user cannot see them
-    (they are on another page, or the filter excludes them).
+    (they are on another page, or the filter excludes them). An invalid filter shows no row at all.
 
     Args:
         table (IPAddressTable): The configured table of :func:`ip_table`.
         rows (list[dict]): Every row of the snapshot, as :func:`ip_table` showed them.
+        filters (SyncFilters): The filters of :func:`ip_table`.
 
     Returns:
         list[str]: The row keys, in snapshot order.
 
     """
-    shown = {bound.record["row_id"] for bound in table.page.object_list}
+    shown = {bound.record["row_id"] for bound in table.page.object_list} if filters.is_valid else set()
     return [row["row_id"] for row in rows if row.get("selected") and row["row_id"] not in shown]
 
 

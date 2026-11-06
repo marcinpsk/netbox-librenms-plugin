@@ -7,6 +7,7 @@ from django.core.exceptions import BadRequest
 from django.http import Http404, HttpResponse
 from django.utils import timezone
 from django.views import View
+from django_tables2.utils import AttributeDict
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin import source_cache
@@ -76,7 +77,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         cache_ttl = source_cache.remaining_ttl(obj, Resource.IP_ADDRESSES, server_key)
         cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl else None
         table, filters, filtered_from = ip_table(request, obj, server_key, assessment, draft)
-        offpage = offpage_selection(table, assessment.rows)
+        offpage = offpage_selection(table, assessment.rows, filters)
 
         return {
             "table": table,
@@ -88,6 +89,10 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             # The selected rows that the shown page does not show, which the submit takes too.
             "offpage_selected": offpage,
             "offpage_selected_json": json.dumps(offpage),
+            # The draft of the table without the table, for a page that shows no row (an invalid filter).
+            "draft_attrs": AttributeDict(
+                {name: value for name, value in table.attrs.items() if name.startswith("data-")}
+            ),
             "object": obj,
             "cache_expiry": cache_expiry,
             "server_key": server_key,
