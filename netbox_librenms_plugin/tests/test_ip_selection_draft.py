@@ -18,7 +18,12 @@ from ipam.models import VRF, IPAddress
 from netbox_librenms_plugin.selection_draft import Assignment, Intent, read_evidence
 from netbox_librenms_plugin.sync_rows import IP_TAB
 from netbox_librenms_plugin.tests._html_helpers import open_tags
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
+from netbox_librenms_plugin.tests.conftest import (
+    make_device,
+    make_interface,
+    make_superuser,
+    transactional_db_with_all_apps,
+)
 from netbox_librenms_plugin.tests.test_ip_address_sync_safety import _ip_row, _serve_librenms_ip_rows
 from netbox_librenms_plugin.tests import test_ip_row_vrf_create
 from netbox_librenms_plugin.tests.view_test_helpers import (
@@ -639,6 +644,93 @@ class TestTheWriterChecksTheApprovedRow:
         assert tab.primary_ip4_id is None
         assert any("198.18.60.12" in text and "changed" in text for text in _messages(response))
         assert IPAddress.objects.get(pk=replacement["ip"].pk).assigned_object == interface
+
+
+@transactional_db_with_all_apps()
+def test_an_interface_that_another_sync_binds_before_the_create_is_not_taken_for_an_approved_missing_one(
+    client, settings, monkeypatch
+):
+    from dcim.models import Interface
+    from psycopg.types.json import Jsonb
+
+    from netbox_librenms_plugin.server_mappings import read_mapping
+    from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server
+    from netbox_librenms_plugin.tests.interface_sync_post_helpers import sync_port
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change, second_connection
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot
+    from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
+
+    configure_default_librenms_server(settings)
+    device = seed_stored_mapping(make_device("ip-draft-reuse"), {SERVER_KEY: {"id": 42}}, save=True)
+    other = make_interface(device, "eth3/9", iface_type="1000base-t")
+    seed_ip_snapshot(device, [ip_address_row("198.18.23.10", 7023)], [sync_port(7023, "eth3/1", alias="uplink")])
+    client.force_login(make_superuser("ip-draft-reuse-user"))
+    real_create = SyncIPAddressesView._create_interface_for_ip
+
+    with second_connection() as connection:
+
+        def bind_then_create(self, *args, **kwargs):
+            # Another interface sync binds the port after the writer found no interface, before the owner lock.
+            bound = Interface.objects.get(pk=other.pk)
+            seed_mapping(bound, SERVER_KEY, own=7023, save=False)
+            commit_row_change(connection, Interface, other.pk, {"custom_field_data": Jsonb(bound.custom_field_data)})
+            return real_create(self, *args, **kwargs)
+
+        monkeypatch.setattr(SyncIPAddressesView, "_create_interface_for_ip", bind_then_create)
+        response = submit_ip_selection(
+            client, device, ["198.18.23.10/24"], **{"create-missing-interfaces-toggle": "on"}
+        )
+
+    assert not IPAddress.objects.filter(address="198.18.23.10/24").exists()
+    assert any("198.18.23.10" in text and "changed" in text for text in _messages(response))
+    other.refresh_from_db()
+    # The helper's update of the reused interface rolled back with the row.
+    assert (other.name, other.description) == ("eth3/9", "")
+    assert read_mapping(other).own_id(SERVER_KEY) == 7023
+    assert not Interface.objects.filter(device=device, name="eth3/1").exists()
+
+
+@transactional_db_with_all_apps()
+def test_a_failing_commit_callback_keeps_the_written_row_and_puts_back_the_other_claimed_rows(
+    client, settings, before_the_writer
+):
+    from django.db import transaction
+
+    from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server
+    from netbox_librenms_plugin.tests.interface_sync_post_helpers import bound_interface, sync_port
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot
+    from netbox_librenms_plugin.tests.view_test_helpers import read_ip_row
+    from netbox_librenms_plugin.transactions import CommittedFollowUpError
+
+    configure_default_librenms_server(settings)
+    device = seed_stored_mapping(make_device("ip-draft-follow-up"), {SERVER_KEY: {"id": 42}}, save=True)
+    bound_interface(device, "eth5/1", 7051)
+    bound_interface(device, "eth5/3", 7053)
+    seed_ip_snapshot(
+        device,
+        [ip_address_row(f"198.18.25.{host}", 7050 + host) for host in (1, 2, 3)],
+        [sync_port(7050 + host, f"eth5/{host}") for host in (1, 2, 3)],
+    )
+    blue = VRF.objects.create(name="follow-up-blue")
+    client.force_login(make_superuser("ip-draft-follow-up-user"))
+    # 25.1 writes, 25.2 has no interface, and 25.3 holds only a VRF choice.
+    draft = select_ip_rows(client, device, ["198.18.25.1/24", "198.18.25.2/24"], vrfs={"198.18.25.3/24": str(blue.pk)})
+
+    def fail():
+        raise RuntimeError("A commit callback failed.")
+
+    before_the_writer.append(lambda: transaction.on_commit(fail))
+
+    with pytest.raises(CommittedFollowUpError):
+        _submit(client, device, draft)
+
+    assert IPAddress.objects.filter(address="198.18.25.1/24").exists()
+    after = ip_tab(client, device)
+    assert not _checked(after, "198.18.25.1/24")
+    assert _checked(after, "198.18.25.2/24")
+    assert read_ip_row(client, device, "198.18.25.3/24").shown_vrf == str(blue.pk)
 
 
 def test_a_submit_answer_names_no_revision_when_another_window_changed_the_draft_meanwhile(
