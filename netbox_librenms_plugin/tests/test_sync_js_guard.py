@@ -72,7 +72,7 @@ SYNC_SCRIPT_ALLOWED = {
     },
 }
 # The draft writer sends its commands from one function.
-DRAFT_SCRIPT_ALLOWED = {"fetch": {"send"}, "storage": set(), "html": set()}
+DRAFT_SCRIPT_ALLOWED = {"fetch": {"sendWrite"}, "storage": set(), "html": set()}
 
 
 def _statement_key(lines, start, indent):

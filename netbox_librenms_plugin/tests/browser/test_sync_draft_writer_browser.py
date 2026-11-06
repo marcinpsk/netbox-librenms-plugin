@@ -1185,3 +1185,71 @@ def test_a_move_answer_reads_the_current_page_again_and_a_cancelled_move_sends_n
     expect(page.locator("#moved")).to_have_text("moved")
     assert [url for url in server.reads if url.startswith(PAGE_URL)] == [f"{PAGE_URL}?tab=ipaddresses"]
     expect(page.locator("#django-messages .toast")).to_have_count(1)
+
+
+def _page_reads(server):
+    return [url for url in server.reads if url.startswith(PAGE_URL)]
+
+
+def test_an_action_and_a_navigation_that_wait_for_one_write_run_in_order(page):
+    server = _DraftServer(page)
+    server.open()
+    server.hold.add("selection")
+    _box(page, ROWS[0]).click()
+    server.wait_for_commands(1)
+    server.hold.update({"submit", "page"})
+
+    # Both wait for the write: the row action first, then the tab click.
+    _row_action(page, ROWS[1])
+    page.click("#cables-tab")
+    page.wait_for_timeout(200)
+    assert server.submits == [] and _page_reads(server) == []
+    server.hold.discard("selection")
+    server.release("selection")
+
+    server.wait_until(lambda: server.submits)
+    page.wait_for_timeout(300)
+    # The tab click waits for the answer of the row action.
+    assert _page_reads(server) == []
+    server.hold.discard("submit")
+    server.release("submit")
+    server.wait_until(lambda: _page_reads(server))
+    server.hold.clear()
+    server.release("page")
+
+    page.wait_for_url(f"{PAGE_URL}?tab=cables")
+    expect(page.locator(f'tr[data-row-key="{ROWS[1]}"] td[data-col="status"]')).to_have_text("Synced")
+    expect(_box(page, ROWS[0])).to_be_checked()
+    assert server.errors == []
+
+
+def test_two_commands_that_wait_for_one_write_go_one_after_the_other(page):
+    server = _DraftServer(page)
+    server.open()
+    server.hold.add("selection")
+    _box(page, ROWS[0]).click()
+    server.wait_for_commands(1)
+    server.hold.add("submit")
+    _row_action(page, ROWS[1])
+    _row_action(page, ROWS[2])
+    server.hold.discard("selection")
+    server.release("selection")
+
+    server.wait_until(lambda: server.submits)
+    # While the first command runs, the second one and a later tab click wait for it.
+    page.click("#cables-tab")
+    page.wait_for_timeout(300)
+    assert [fields["sync_one"] for fields in server.submits] == [ROWS[1]]
+    assert _page_reads(server) == []
+    server.release("submit")
+    server.wait_until(lambda: len(server.submits) == 2)
+    assert [fields["sync_one"] for fields in server.submits] == [ROWS[1], ROWS[2]]
+    page.wait_for_timeout(300)
+    assert _page_reads(server) == []
+    server.hold.clear()
+    server.release("submit")
+
+    page.wait_for_url(f"{PAGE_URL}?tab=cables")
+    for key in ROWS[1:3]:
+        expect(page.locator(f'tr[data-row-key="{key}"] td[data-col="status"]')).to_have_text("Synced")
+    assert server.errors == []
