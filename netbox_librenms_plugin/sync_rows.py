@@ -14,7 +14,7 @@ from django.urls import reverse
 
 from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
-from netbox_librenms_plugin.assessment.ip_addresses import apply_vrf_choices, assess, shown_vrf_id
+from netbox_librenms_plugin.assessment.ip_addresses import apply_vrf_choices, assess, shown_vrf_id, vrf_address_ids
 from netbox_librenms_plugin.selection_draft import (
     Assignment,
     DraftConflict,
@@ -72,8 +72,8 @@ def read_ip_assessment(request, obj, snapshot, server_key, vrf_choices=None):
         row["device_url"] = obj.get_absolute_url()
         if ip := row.pop("netbox_ip", None):
             row["ip_url"] = ip.get_absolute_url()
-            # The address the row links to; a VRF choice can make it another one than netbox_ip_id.
-            row["shown_ip_id"] = ip.pk
+        # The addresses in the VRF that the row shows: the ones that the writer acts on.
+        row["vrf_address_ids"] = vrf_address_ids(row.pop("netbox_addresses", ()), shown_vrf_id(row))
         if interface := row.pop("netbox_interface", None):
             row["interface_url"] = interface.get_absolute_url()
             row["interface_id"] = interface.pk
@@ -109,9 +109,9 @@ def ip_evidence(obj, server_key, row):
     """
     Return the facts that selecting one IP row approves.
 
-    The writer acts on the row, its VRF, its NetBox address and interface and its state, so a change of
-    any of them asks the user to select the row again. The address is the one that the row shows in its
-    VRF. The subject and the server bind the token to its tab.
+    The writer acts on the row, its VRF, its NetBox addresses in that VRF, its interface and its state, so
+    a change of any of them asks the user to select the row again; the writer compares the interface and
+    the addresses again under its row locks. The subject and the server bind the token to its tab.
     """
     return {
         "subject": [obj._meta.label_lower, obj.pk],
@@ -119,7 +119,7 @@ def ip_evidence(obj, server_key, row):
         "row": row["row_id"],
         "vrf": shown_vrf_id(row),
         "status": row.get("status"),
-        "ip": row.get("shown_ip_id"),
+        "addresses": row["vrf_address_ids"],
         "interface": row.get("interface_id"),
         "selectable": offers_selection(row),
     }

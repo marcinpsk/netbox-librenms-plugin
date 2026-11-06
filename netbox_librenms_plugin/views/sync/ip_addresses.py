@@ -18,7 +18,7 @@ from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
-from netbox_librenms_plugin.assessment.ip_addresses import ip_assignment_ports
+from netbox_librenms_plugin.assessment.ip_addresses import ip_assignment_ports, vrf_address_ids
 from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.interface_rules import PortSyncBlocked, interface_rules_for_request
 from netbox_librenms_plugin.interface_sync import resolve_or_create_interface_from_port
@@ -96,6 +96,8 @@ STALE_INTERFACE_REFUSAL = (
 SELECTION_CHANGED = (
     "The selection changed in another window, or the IP data was refreshed. Review the tab and sync again."
 )
+# Selected rows whose evidence is not the evidence that the user approved; they are put back to select again.
+CHANGED_ROWS = "These IP addresses changed after you selected them, so they were not synced. Select them again: {}."
 # A row action of a page that does not show the row as it is now.
 ROW_CHANGED = "The IP address changed after the page showed it, so it was not synced. Review the row and sync it again."
 
@@ -118,6 +120,10 @@ def vrf_create_lock_identity(name):
 
 class _PrimaryIPNotEligible(Exception):
     """NetBox would refuse the matched interface as the owner's primary IP interface."""
+
+
+class _ApprovedRowChanged(Exception):
+    """Under the row's locks, the interface or the address of the row is not the one that the user approved."""
 
 
 def _primary_ip_interface_is_eligible(owner, interface):
@@ -287,15 +293,16 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             return self.redirect_to_ip_tab(request, obj)
 
         force_intents, intent_errors = self._load_force_intents(request, obj, object_type, post_server_key)
-        draft = claim = None
+        draft = claim = approved = None
         if request.POST.get("force_all") or request.POST.getlist("force_conflict"):
             assessment = read_ip_assessment(request, obj, snapshot, post_server_key)
             selected = dict.fromkeys(self._confirmed_rows(request, force_intents))
         elif sync_one := request.POST.get("sync_one"):
-            assessment, selected = self._displayed_row(request, obj, post_server_key, snapshot, sync_one)
-            if not selected:
+            assessment, approved = self._displayed_row(request, obj, post_server_key, snapshot, sync_one)
+            if not approved:
                 messages.error(request, ROW_CHANGED)
                 return self.redirect_to_ip_tab(request, obj)
+            selected = {row_id: payload["vrf"] for row_id, payload in approved.items()}
         else:
             draft = find_ip_draft(request, obj, post_server_key, snapshot)
             try:
@@ -305,29 +312,32 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             except (DraftConflict, TypeError, ValueError):
                 messages.error(request, SELECTION_CHANGED)
                 return self.draft_answer(request, obj)
-            assessment = ip_rows(request, obj, post_server_key, snapshot, claim.entries)
-            selected = self._approved_rows(request, claim, assessment)
-
-        if not selected:
-            if claim is not None:
-                draft.restore(claim, claim.entries)
-                if not any(entry.intent is Intent.ON for entry in claim.entries.values()):
-                    messages.error(request, "No IP addresses selected for synchronization.")
-                return self.draft_answer(request, obj, draft)
-            if intent_errors:
-                for error in dict.fromkeys(intent_errors.values()):
-                    messages.error(request, error)
-                return self.redirect_to_ip_tab(request, obj)
-            messages.error(request, "No IP addresses selected for synchronization.")
-            return self.redirect_to_ip_tab(request, obj)
 
         try:
-            results = self.process_ip_sync(request, selected, assessment, obj, object_type, force_intents=force_intents)
+            if claim is not None:
+                assessment = ip_rows(request, obj, post_server_key, snapshot, claim.entries)
+                approved = self._approved_rows(request, claim, assessment)
+                selected = {row_id: payload["vrf"] for row_id, payload in approved.items()}
+            if not selected:
+                if claim is not None:
+                    draft.restore(claim, claim.entries)
+                    if not any(entry.intent is Intent.ON for entry in claim.entries.values()):
+                        messages.error(request, "No IP addresses selected for synchronization.")
+                    return self.draft_answer(request, obj, draft)
+                if intent_errors:
+                    for error in dict.fromkeys(intent_errors.values()):
+                        messages.error(request, error)
+                    return self.redirect_to_ip_tab(request, obj)
+                messages.error(request, "No IP addresses selected for synchronization.")
+                return self.redirect_to_ip_tab(request, obj)
+            results = self.process_ip_sync(
+                request, selected, assessment, obj, object_type, force_intents=force_intents, approved=approved
+            )
         except CommittedFollowUpError:
             # The rows committed, so the claim keeps them as written.
             raise
         except Exception:
-            # Every other failure rolled the whole batch back, so the claimed rows go back as the user left them.
+            # Every other failure after the claim wrote nothing, so the claimed rows go back as the user left them.
             if claim is not None:
                 draft.restore(claim, claim.entries)
             raise
@@ -378,7 +388,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 if claim is not None:
                     # The claim changed the draft, so the tab behind the dialog reads its results again.
                     response["HX-Trigger"] = json.dumps({RESULTS_STALE_EVENT: None})
-                    response[REVISION_HEADER] = str(draft.revision)
+                    if not draft.changed_since_claim:
+                        response[REVISION_HEADER] = str(draft.revision)
             return apply_request_cache_transition(request, response)
 
         if claim is not None:
@@ -391,8 +402,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
         The answer carries no table: the page reads the results from the draft after the claim. After a
         claim, ``X-Draft-Revision`` names the revision that the claim and the restore left, which the
-        page's draft writer sends with the input made during the submit; without one, the page's draft
-        is stale. A plain POST goes back to the tab.
+        page's draft writer sends with the input made during the submit. Without one (no claim, or another
+        window changed the draft meanwhile) the page's draft is stale. A plain POST goes back to the tab.
         """
         if not request.htmx:
             return self.redirect_to_ip_tab(request, obj)
@@ -400,7 +411,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         # Only the out-of-band messages swap; the sync form's target stays as it is.
         response["HX-Reswap"] = "none"
         response["HX-Trigger"] = json.dumps({RESULTS_STALE_EVENT: None})
-        if draft is not None:
+        # After another window's change the page must read the draft before it writes again.
+        if draft is not None and not draft.changed_since_claim:
             response[REVISION_HEADER] = str(draft.revision)
         return response
 
@@ -424,7 +436,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
     @staticmethod
     def _displayed_row(request, obj, server_key, snapshot, raw_row_id):
         """
-        Return the assessment and ``{row_id: VRF}`` of a row action whose page shows the row as it is now.
+        Return the assessment and ``{row_id: evidence}`` of a row action whose page shows the row as it is now.
 
         The action posts the draft ID and revision of its page and the row's evidence token. Another
         draft or revision, or evidence that is not the row's current evidence, gives an empty dict: the
@@ -443,12 +455,12 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         row = next((row for row in assessment.rows if row["row_id"] == row_id), None)
         if row is None or evidence_changed(payload, row["evidence"]):
             return assessment, {}
-        return assessment, {row_id: payload["vrf"]}
+        return assessment, {row_id: payload}
 
     @staticmethod
     def _approved_rows(request, claim, assessment):
         """
-        Return the VRF of each claimed selected row whose evidence is the evidence the user approved.
+        Return the approved evidence of each claimed selected row whose evidence is still the current one.
 
         A row that changed after the user selected it, or whose selection approves no evidence, is
         refused with one message; the restore puts it back.
@@ -459,15 +471,11 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             if entry.intent is not Intent.ON:
                 continue
             if selection_problem(entry, rows.get(row_key)) is None:
-                selected[row_key] = entry.evidence["vrf"]
+                selected[row_key] = entry.evidence
             else:
                 changed.append(row_key.partition("@")[0])
         if changed:
-            messages.warning(
-                request,
-                "These IP addresses changed after you selected them, so they were not synced. "
-                f"Select them again: {', '.join(changed)}.",
-            )
+            messages.warning(request, CHANGED_ROWS.format(", ".join(changed)))
         return selected
 
     @staticmethod
@@ -1095,7 +1103,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         except IPAddress.DoesNotExist:
             raise ValueError("The existing IP address is no longer available in your change scope.") from None
 
-    def process_ip_sync(self, request, selected, assessment, obj, object_type, force_intents=None):
+    def process_ip_sync(self, request, selected, assessment, obj, object_type, force_intents=None, approved=None):
         """Sync selected IP rows in one transaction with per-row savepoints; a lock conflict retries the batch once."""
         return run_transaction(
             lambda: self._process_ip_sync(
@@ -1106,6 +1114,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 self.get_object(object_type, obj.pk, self._owner_action(request)),
                 object_type,
                 force_intents=force_intents,
+                approved=approved,
             )
         )
 
@@ -1117,6 +1126,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         obj,
         object_type,
         force_intents=None,
+        approved=None,
     ):
         """
         Create or update IP addresses in NetBox from the assessed snapshot rows.
@@ -1133,6 +1143,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             obj (Device | VirtualMachine): The object that owns the target interfaces.
             object_type (str): The synced object type.
             force_intents (dict[str, dict] | None): Confirmed IP changes indexed by canonical row identifier.
+            approved (dict[str, dict] | None): The evidence payload that the user approved, by row ID. Under
+                the row's locks, a row whose interface or address is not the approved one is refused as changed.
 
         Returns:
             dict: The per-outcome row lists, errors, conflicts, warnings, the batch mutation state, and
@@ -1153,6 +1165,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             "skipped_by_ip_rule": [],
             "errors": {},
             "conflicts": [],
+            "changed": [],
             "mutated": False,
             "written": set(),
         }
@@ -1171,6 +1184,9 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         attribution_ids = frozenset(member.pk for member in scope.chassis.attribution_members)
         cached_index, duplicate_cached_rows = self._cached_ip_index(assessment.rows)
         force_intents = force_intents or {}
+        approved = approved or {}
+        # The interfaces that this attempt created for rows that approved no interface.
+        created_interface_ids = set()
         create_missing_interfaces = self._create_missing_interfaces(request)
         cached_ports_by_id = index_ip_port_records(assessment.ports_by_id)
         bound_ports_by_id = index_ip_port_records(assessment.bound_ports_by_id)
@@ -1192,6 +1208,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             row_mutations = set()
             # The row outcomes publish only when the savepoint commits.
             row_results = []
+            row_created_interface_id = None
             interface_creation_state_before_row = interface_creation_state
             interfaces_by_port_id_before_row = (
                 {key: list(value) for key, value in interface_creation_state["interfaces_by_port_id"].items()}
@@ -1229,6 +1246,12 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     if target is WITHHELD:
                         raise ValueError(VIEW_SCOPE_REFUSAL)
                     interface = target.interface if isinstance(target, VisibleInterface) else None
+                    approval = approved.get(row_id)
+                    resolved_id = interface.pk if interface is not None else None
+                    if approval is not None and resolved_id != approval["interface"]:
+                        # A row that approved no interface may use one that an earlier row of this batch created.
+                        if not (approval["interface"] is None and resolved_id in created_interface_ids):
+                            raise _ApprovedRowChanged
 
                     if interface is None and create_missing_interfaces:
                         interface, interface_creation_state = self._create_interface_for_ip(
@@ -1241,6 +1264,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             attribution_ids=attribution_ids,
                         )
                         row_mutations.add(row_id)
+                        row_created_interface_id = interface.pk
+                        created_interface_ids.add(interface.pk)
 
                     if interface is not None:
                         locked_interface, owner = self._lock_target_interface(
@@ -1317,6 +1342,9 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     else:
                         # Read again under the row locks: the first read only refuses early.
                         viewable_rows = self._viewable_rows(scope, parsed, vrf)
+                        vrf_id = vrf.pk if vrf is not None else None
+                        if approval is not None and vrf_address_ids(viewable_rows[0], vrf_id) != approval["addresses"]:
+                            raise _ApprovedRowChanged
                         ip_obj, outcome, conflict = self._classify_ip_change(
                             viewable_rows=viewable_rows,
                             row_id=row_id,
@@ -1359,6 +1387,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 if classify_conflict(exc):
                     raise
                 # The savepoint dropped the row's interface, so the catalog drops it too.
+                created_interface_ids.discard(row_created_interface_id)
                 interface_creation_state = interface_creation_state_before_row
                 if interface_creation_state is not None:
                     interface_creation_state["interfaces_by_port_id"].clear()
@@ -1367,6 +1396,10 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 row_mutations.clear()
                 row_results.clear()
                 row_written = False
+                if isinstance(exc, _ApprovedRowChanged):
+                    # The savepoint dropped any write of the row; the restore puts the row back to select again.
+                    results["changed"].append(display_address)
+                    continue
                 detail = exception_text_for(exc, IPAddress, request.user)
                 if isinstance(exc, PortSyncBlocked):
                     # The interface rules refused the create: an expected outcome, not an error.
@@ -1392,6 +1425,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         """Display flash messages summarizing the IP sync results."""
         for warning in results["warnings"]:
             messages.warning(request, warning)
+        if results["changed"]:
+            messages.warning(request, CHANGED_ROWS.format(", ".join(results["changed"])))
         if results["created"]:
             messages.success(request, f"Created IP addresses: {', '.join(results['created'])}")
         if results["updated"]:

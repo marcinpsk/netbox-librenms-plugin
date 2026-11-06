@@ -357,3 +357,21 @@ def test_a_command_finds_only_the_draft_of_its_generation_and_never_starts_one()
     assert _find(user, device, generation="g1") is None
     assert _find(user, device, generation="g2").draft_id == draft.draft_id
     assert _intents(_open(user, device, generation="g2")) == {"ip-1": Intent.ON}
+
+
+@pytest.mark.django_db
+def test_a_restore_tells_whether_another_mutation_came_after_the_claim():
+    user, device = _user("draft-restore-interleaved"), make_device("draft-restore-interleaved")
+    draft = _open(user, device)
+    draft.assign(draft.draft_id, 0, {"ip-1": Assignment(Intent.ON, EVIDENCE)})
+    claim = draft.claim(draft.draft_id, 1)
+    draft.restore(claim, ["ip-1"])
+    assert draft.changed_since_claim is False
+
+    claim = draft.claim(draft.draft_id, draft.revision)
+    window = _open(user, device)
+    window.assign(window.draft_id, window.revision, {"ip-2": Assignment(Intent.ON, EVIDENCE)})
+    draft.restore(claim, ["ip-1"])
+
+    assert draft.changed_since_claim is True
+    assert _intents(_open(user, device)) == {"ip-1": Intent.ON, "ip-2": Intent.ON}
