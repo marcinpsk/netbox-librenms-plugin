@@ -343,6 +343,30 @@ def ip_tab(client, owner, *, server_key="default", **query):
     return SimpleNamespace(html=html, table=tables[0], rows=rows)
 
 
+def switch_set_primary_ip(client, table, selected):
+    """
+    Post the Set Primary IP command of an IP tab as its page does, with the evidence of the management rows it shows.
+
+    Args:
+        client (Client): A signed-in client.
+        table (dict): The attributes of the tab's draft table (``ip_tab(...).table``).
+        selected (str): ``"on"`` or ``"off"``.
+
+    Returns:
+        HttpResponse: The command's response.
+
+    """
+    return client.post(
+        table["data-management-url"],
+        {
+            "draft_id": table["data-draft-id"],
+            "expected_revision": table["data-draft-revision"],
+            "selected": selected,
+            "evidence": table["data-management-evidence"],
+        },
+    )
+
+
 def select_ip_rows(client, owner, row_ids, *, server_key="default", vrfs=None, **query):
     """
     Select *row_ids* in the user's IP draft as the tab does: each VRF of *vrfs* first, then one batch of checks.

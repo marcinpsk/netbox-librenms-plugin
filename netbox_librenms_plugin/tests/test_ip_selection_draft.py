@@ -32,6 +32,7 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     make_user_with_perms,
     select_ip_rows,
     submit_ip_selection,
+    switch_set_primary_ip,
 )
 
 pytestmark = pytest.mark.django_db
@@ -453,18 +454,58 @@ class TestSetPrimaryIp:
     def test_the_switch_selects_and_clears_the_management_row(self, client, tab):
         state = ip_tab(client, tab)
         assert not _checked(state, MANAGEMENT_ROW)
-        url = state.table["data-management-url"]
 
-        on = _command(client, url, draft_id=state.table["data-draft-id"], expected_revision=0, selected="on")
+        on = switch_set_primary_ip(client, state.table, "on")
         assert on.status_code == 204
         assert json.loads(on["HX-Trigger"]) == {"lnms-results-stale": None}
-        assert _checked(ip_tab(client, tab), MANAGEMENT_ROW)
+        after = ip_tab(client, tab)
+        assert _checked(after, MANAGEMENT_ROW)
 
-        off = _command(
-            client, url, draft_id=state.table["data-draft-id"], expected_revision=on["X-Draft-Revision"], selected="off"
-        )
+        off = switch_set_primary_ip(client, after.table, "off")
         assert off.status_code == 204
         assert not _checked(ip_tab(client, tab), MANAGEMENT_ROW)
+
+    def test_the_switch_approves_the_management_address_that_the_page_showed(self, client, tab):
+        interface = tab.interfaces.get(name="eth12")
+        shown = IPAddress.objects.create(address=MANAGEMENT_ROW, assigned_object=interface)
+        state = ip_tab(client, tab)
+        # Another operation replaces the address that the page shows, on the same interface.
+        shown.delete()
+        replacement = IPAddress.objects.create(address=MANAGEMENT_ROW, assigned_object=interface)
+
+        switched = switch_set_primary_ip(client, state.table, "on")
+        assert switched.status_code == 204
+        # The page submits before its read of the tab after the switch.
+        draft = {"draft_id": state.table["data-draft-id"], "expected_revision": switched["X-Draft-Revision"]}
+        response = _submit(client, tab, draft, **{"set-primary-ip-toggle": "on"})
+
+        tab.refresh_from_db()
+        assert tab.primary_ip4_id is None
+        assert any("198.18.60.12" in text and "changed" in text for text in _messages(response))
+        assert IPAddress.objects.get(pk=replacement.pk).assigned_object == interface
+
+    def test_the_switch_leaves_a_management_row_without_shown_evidence_unapproved(self, client, tab):
+        state = ip_tab(client, tab)
+
+        switched = switch_set_primary_ip(client, {**state.table, "data-management-evidence": "{}"}, "on")
+
+        assert switched.status_code == 204
+        after = ip_tab(client, tab)
+        assert not _checked(after, MANAGEMENT_ROW)
+        assert after.rows[MANAGEMENT_ROW]["data-evidence-changed"] == "true"
+        draft = {"draft_id": after.table["data-draft-id"], "expected_revision": after.table["data-draft-revision"]}
+        _submit(client, tab, draft, **{"set-primary-ip-toggle": "on"})
+        tab.refresh_from_db()
+        assert tab.primary_ip4_id is None
+        assert not IPAddress.objects.filter(address=MANAGEMENT_ROW).exists()
+
+    def test_the_switch_refuses_evidence_of_another_row(self, client, tab):
+        state = ip_tab(client, tab)
+        foreign = json.dumps({MANAGEMENT_ROW: state.rows[CREATE_ROW]["data-evidence"]})
+
+        switched = switch_set_primary_ip(client, {**state.table, "data-management-evidence": foreign}, "on")
+
+        assert switched.status_code == 400
 
 
 def test_a_data_refresh_clears_the_selection_and_says_so(client, live_librenms, tab):

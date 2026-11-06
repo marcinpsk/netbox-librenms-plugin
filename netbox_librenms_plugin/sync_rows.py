@@ -7,6 +7,7 @@ row read answers the row exactly as the table shows it. The eligibility, the che
 evidence of each row are computed at every render from the draft and the current assessment, never stored.
 """
 
+import json
 from dataclasses import replace
 
 from django.template.loader import render_to_string
@@ -163,12 +164,18 @@ def selection_problem(entry, row):
     return None
 
 
-def management_assignments(rows, selected):
-    """Return the assignments that select, or clear, the management rows that Set Primary IP takes."""
+def management_assignments(rows, selected, shown_evidence):
+    """
+    Return the assignments that select, or clear, the management rows that Set Primary IP takes.
+
+    A selection approves only the evidence that the page showed for the row (*shown_evidence*, by row key).
+    A management row without it is selected with no evidence, so the submit refuses it until the user
+    selects the row.
+    """
     if not selected:
         return {row["row_id"]: Assignment(Intent.NONE) for row in rows if row.get("is_mgmt_ip") and row["row_id"]}
     return {
-        row["row_id"]: Assignment(Intent.ON, row["evidence"])
+        row["row_id"]: Assignment(Intent.ON, shown_evidence.get(row["row_id"]))
         for row in rows
         if row.get("is_mgmt_ip") and selectable(row)
     }
@@ -184,8 +191,10 @@ def seed_management_rows(request, assessment, draft):
     """
     if draft.revision or not resolve_set_primary_ip(request):
         return True
+    # This request renders the tab, so it shows the evidence of these rows (in the table, for an off-page row).
+    shown = {row["row_id"]: row["evidence"] for row in assessment.rows}
     try:
-        draft.assign(draft.draft_id, 0, management_assignments(assessment.rows, True))
+        draft.assign(draft.draft_id, 0, management_assignments(assessment.rows, True, shown))
     except DraftConflict:
         return False
     return True
@@ -214,8 +223,13 @@ def _show_selection(request, obj, server_key, rows, entries):
         row["row_read_url"] = _row_url(query, obj, server_key, row["row_id"]) if row["row_id"] else ""
 
 
-def _bind_draft(table, request, obj, server_key, draft):
-    """Give the table the draft it shows and the URLs of the draft commands, for the page's draft writer."""
+def _bind_draft(table, request, obj, server_key, draft, rows):
+    """
+    Give the table the draft it shows and the URLs of the draft commands, for the page's draft writer.
+
+    The table also carries the evidence token of each management row of *rows*, also of a row that no page
+    of the table shows: Set Primary IP approves only that evidence.
+    """
     query = SyncQuery.from_request(request)
     kwargs = {"object_type": obj._meta.model_name, "pk": obj.pk}
     for attribute, name in (
@@ -227,6 +241,9 @@ def _bind_draft(table, request, obj, server_key, draft):
         table.attrs[attribute] = query.url(path, {"server_key": server_key})
     table.attrs["data-draft-id"] = draft.draft_id
     table.attrs["data-draft-revision"] = str(draft.revision)
+    table.attrs["data-management-evidence"] = json.dumps(
+        {row["row_id"]: row["evidence_token"] for row in rows if row.get("is_mgmt_ip") and selectable(row)}
+    )
 
 
 def ip_table(request, obj, server_key, assessment, draft):
@@ -246,7 +263,7 @@ def ip_table(request, obj, server_key, assessment, draft):
     """
     _show_selection(request, obj, server_key, assessment.rows, draft.entries())
     table, filters, filtered_from = filter_sync_table(request, assessment.rows, IPAddressTable)
-    _bind_draft(table, request, obj, server_key, draft)
+    _bind_draft(table, request, obj, server_key, draft, assessment.rows)
     table.configure(request)
     return table, filters, filtered_from
 

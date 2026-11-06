@@ -243,27 +243,58 @@ def _parse_assignments(raw, obj, server_key):
         raise BadRequest("The assignments are not JSON.") from None
     if not isinstance(data, dict) or not data:
         raise BadRequest("The assignments name no row.")
-    subject = [obj._meta.label_lower, obj.pk]
     assignments = {}
     for row_key, value in data.items():
         _canonical_row_key(row_key)
         try:
             intent = Intent(value["state"])
             token = value["token"] if intent is Intent.ON else None
-            payload = read_evidence(IP_TAB, token) if isinstance(token, str) else None
-        except (KeyError, TypeError, ValueError, signing.BadSignature):
+        except (KeyError, TypeError, ValueError):
             raise BadRequest(f"The assignment of IP row {row_key} is not valid.") from None
-        if intent is not Intent.ON:
-            assignments[row_key] = Assignment(intent)
-        elif isinstance(payload, dict) and (payload.get("row"), payload.get("subject"), payload.get("server")) == (
-            row_key,
-            subject,
-            server_key,
-        ):
-            assignments[row_key] = Assignment(intent, payload)
-        else:
-            raise BadRequest(f"The selection of IP row {row_key} carries no evidence of this row.")
+        assignments[row_key] = (
+            Assignment(intent, _row_evidence(row_key, token, obj, server_key))
+            if intent is Intent.ON
+            else Assignment(intent)
+        )
     return assignments
+
+
+def _parse_shown_evidence(raw, obj, server_key):
+    """
+    Return the evidence payload of each management row that the page showed: ``{row_key: token}`` as JSON.
+
+    Raises:
+        BadRequest: The body is not such a JSON object, or a token is not one of its row.
+
+    """
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        raise BadRequest("The shown evidence is not JSON.") from None
+    if not isinstance(data, dict):
+        raise BadRequest("The shown evidence is not a JSON object.")
+    return {_canonical_row_key(key): _row_evidence(key, token, obj, server_key) for key, token in data.items()}
+
+
+def _row_evidence(row_key, token, obj, server_key):
+    """
+    Return the payload of *token* when the IP tab of this subject and server signed it for the row *row_key*.
+
+    Raises:
+        BadRequest: The token is not such a token.
+
+    """
+    try:
+        payload = read_evidence(IP_TAB, token) if isinstance(token, str) else None
+    except signing.BadSignature:
+        payload = None
+    if isinstance(payload, dict) and (payload.get("row"), payload.get("subject"), payload.get("server")) == (
+        row_key,
+        [obj._meta.label_lower, obj.pk],
+        server_key,
+    ):
+        return payload
+    raise BadRequest(f"The request carries no evidence of IP row {row_key}.")
 
 
 class _IPDraftView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
@@ -389,7 +420,7 @@ class IPManagementView(_IPDraftCommandView):
     """Select the management rows that Set Primary IP takes in the user's draft, or clear them."""
 
     def post(self, request, object_type, pk):
-        """Select the management rows when ``selected`` is ``on``, clear them when it is ``off``."""
+        """Select the management rows with the shown ``evidence`` when ``selected`` is ``on``; else clear them."""
         obj, server_key, snapshot, error = self.subject(request, object_type, pk)
         if error:
             return error
@@ -397,11 +428,13 @@ class IPManagementView(_IPDraftCommandView):
         selected = request.POST.get("selected")
         if selected not in ("on", "off"):
             raise BadRequest("Set Primary IP is on or off.")
+        # The page sends the evidence it showed for the management rows; only that evidence is approved.
+        shown = _parse_shown_evidence(request.POST.get("evidence"), obj, server_key) if selected == "on" else {}
         if (draft := self.draft(request, obj, server_key, snapshot)) is None:
             return self.conflict()
         rows = ip_rows(request, obj, server_key, snapshot, draft.entries()).rows
         try:
-            revision = draft.assign(draft_id, expected_revision, management_assignments(rows, selected == "on"))
+            revision = draft.assign(draft_id, expected_revision, management_assignments(rows, selected == "on", shown))
         except DraftConflict:
             return self.conflict()
         return self.acknowledge(revision, {RESULTS_STALE_EVENT: None})

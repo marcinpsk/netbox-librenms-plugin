@@ -29,6 +29,9 @@ FRAGMENT_URL = "https://plugin.example.com/plugins/librenms_plugin/device/1/sync
 REFRESH_URL = "https://plugin.example.com/plugins/librenms_plugin/devices/1/ipaddress-sync/"
 FILTER_URL = "https://plugin.example.com/plugins/librenms_plugin/device/1/sync-tab-filter/ipaddresses/"
 ROWS = ("198.18.0.1/24", "198.18.0.2/24", "198.18.0.3/24", "198.18.0.4/24")
+# The management rows: one that the page shows and one that no page shows.
+MANAGEMENT_ROW = ROWS[3]
+OFF_PAGE_MANAGEMENT_ROW = "198.18.0.9/24"
 
 
 def _form_fields(request):
@@ -173,7 +176,8 @@ class _DraftServer:
             f'<option value="{value}"{" selected" if value == vrf else ""}>{label}</option>'
             for value, label in (("", "Global"), ("5", "Blue"), ("9", "Red"))
         )
-        return f"""<tr data-row-key="{key}" data-evidence="token-{key}-{vrf}" data-rendered="{self.renders}"
+        management = ' data-mgmt-ip="true"' if key == MANAGEMENT_ROW else ""
+        return f"""<tr data-row-key="{key}" data-evidence="token-{key}-{vrf}" data-rendered="{self.renders}"{management}
             hx-get="{ROW_URL}?key={key}" hx-trigger="librenms:row-read" hx-target="this" hx-swap="outerHTML"
             hx-sync="this:replace" hx-params="none">
             <td data-col="selection"><input type="checkbox" name="select" value="{key}"{checked}></td>
@@ -183,6 +187,11 @@ class _DraftServer:
     def content(self):
         """Render the IP tab content: the refresh button and the sync form with the draft table."""
         rows = "".join(self.row(key) for key in ROWS)
+        # The table's token of the shown row is older than the row's own: a row READ changed the row since.
+        management = {
+            MANAGEMENT_ROW: "token-from-the-table",
+            OFF_PAGE_MANAGEMENT_ROW: f"token-{OFF_PAGE_MANAGEMENT_ROW}-",
+        }
         return f"""<button id="refresh" type="button" hx-post="{REFRESH_URL}" hx-target="#ipaddress-sync-content">
                 Refresh</button>
               <output id="revision">{self.revision}</output>
@@ -191,7 +200,8 @@ class _DraftServer:
                 <input type="hidden" name="csrfmiddlewaretoken" value="csrf-test">
                 <table id="librenms-ipaddress-table" data-draft-id="{self.draft_id}"
                        data-draft-revision="{self.revision}" data-selection-url="{escape(SELECTION_URL)}"
-                       data-choice-url="{escape(CHOICE_URL)}" data-management-url="{escape(MANAGEMENT_URL)}">
+                       data-choice-url="{escape(CHOICE_URL)}" data-management-url="{escape(MANAGEMENT_URL)}"
+                       data-management-evidence="{escape(json.dumps(management))}">
                   <thead><tr><th><input type="checkbox" class="toggle"></th><th>VRF</th><th>Status</th></tr></thead>
                   <tbody>{rows}</tbody>
                 </table>
@@ -449,7 +459,9 @@ def test_set_primary_ip_is_a_command_and_the_page_is_read_again(page):
     page.check("#set-primary-ip-toggle-cb")
 
     expect(page.locator("#revision")).to_have_text("6")
-    assert server.commands == [("management", {"draft_id": "draft-1", "expected_revision": "5", "selected": "on"})]
+    ((kind, fields),) = server.commands
+    assert kind == "management"
+    assert (fields["draft_id"], fields["expected_revision"], fields["selected"]) == ("draft-1", "5", "on")
     assert server.reads == [f"{PAGE_URL}?tab=ipaddresses"]
 
 
@@ -844,3 +856,64 @@ def test_a_page_that_back_restores_from_the_cache_reads_the_draft_again(bfcache_
     expect(page.locator("#revision")).to_have_text("6")
     expect(_box(page, ROWS[2])).to_be_checked()
     assert page.url == f"{PAGE_URL}?tab=ipaddresses"
+
+
+def test_a_choice_made_before_a_row_settles_is_kept_for_the_next_choice(page):
+    server = _DraftServer(page)
+    server.open()
+    row = f'tr[data-row-key="{ROWS[1]}"]'
+    server.hold.add("row")
+    page.select_option(f"{row} select", "5")
+    server.wait_until(lambda: server.held)
+    # Choose Red right after htmx inserts the row read of Blue, before htmx settles it; its answer waits.
+    page.evaluate(
+        """key => {
+            document.addEventListener('htmx:afterSettle', () => { window.__settled = true; }, { once: true });
+            document.addEventListener('htmx:afterSwap', () => setTimeout(() => {
+                window.__choseBeforeSettle = !window.__settled;
+                const select = [...document.querySelectorAll('tr[data-row-key]')]
+                    .find(row => row.dataset.rowKey === key).querySelector('select');
+                select.value = '9';
+                select.dispatchEvent(new Event('change', { bubbles: true }));
+            }, 0), { once: true });
+        }""",
+        ROWS[1],
+    )
+    server.hold = {"choice"}
+    server.release("row")
+    server.wait_for_commands(2)
+    page.wait_for_function("window.__settled === true")
+    assert page.evaluate("window.__choseBeforeSettle") is True
+
+    # Back to Blue while the Red command waits for its answer.
+    page.select_option(f"{row} select", "5")
+    server.hold.clear()
+    server.release("choice")
+
+    server.wait_for_commands(3)
+    assert [fields["value"] for _kind, fields in server.commands] == ["5", "9", "5"]
+    expect(page.locator(f"{row} select")).to_have_value("5")
+    assert server.vrfs[ROWS[1]] == "5"
+
+
+def test_set_primary_ip_sends_the_shown_evidence_and_a_submit_before_the_next_read_takes_its_revision(page):
+    server = _DraftServer(page)
+    server.open()
+    server.hold.add("page")
+
+    page.check("#set-primary-ip-toggle-cb")
+    server.wait_for_commands(1)
+    # The page reads the tab after the command; that read waits, and the user submits meanwhile.
+    server.wait_until(lambda: server.held)
+    page.click("#sync-selected")
+    server.wait_until(lambda: server.submits)
+
+    ((kind, fields),) = server.commands
+    assert kind == "management"
+    # A shown row gives the token that the row shows; a row that no page shows gives the table's token.
+    assert json.loads(fields["evidence"]) == {
+        MANAGEMENT_ROW: f"token-{MANAGEMENT_ROW}-",
+        OFF_PAGE_MANAGEMENT_ROW: f"token-{OFF_PAGE_MANAGEMENT_ROW}-",
+    }
+    assert server.submits[0]["expected_revision"] == "6"
+    assert server.errors == []

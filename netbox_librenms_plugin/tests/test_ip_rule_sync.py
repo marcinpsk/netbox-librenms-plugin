@@ -22,6 +22,7 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     ip_tab,
     read_ip_row,
     submit_ip_selection,
+    switch_set_primary_ip,
     write_ip_rows,
 )
 
@@ -170,14 +171,7 @@ class TestTheTableShowsAnIgnoredAddress:
         )
 
         tab = ip_tab(client, device)
-        response = client.post(
-            tab.table["data-management-url"],
-            {
-                "draft_id": tab.table["data-draft-id"],
-                "expected_revision": tab.table["data-draft-revision"],
-                "selected": "on",
-            },
-        )
+        response = switch_set_primary_ip(client, tab.table, "on")
 
         assert response.status_code == 204
         assert tab.rows[LINK_LOCAL]["data-mgmt-ip"] == "true"
