@@ -1,6 +1,7 @@
 """Classify the stored LibreNMS mappings for their move to plugin tables; ``nbshell < mapping_classifier.py`` checks them."""
 
 import json
+import os
 import re
 import sys
 import traceback
@@ -476,10 +477,24 @@ def main() -> int:
     return exit_status(report)
 
 
+def _discard_stdout() -> None:
+    """Point the stdout file descriptor at the null device, so that the flush at exit cannot fail again."""
+    null = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(null, sys.stdout.fileno())
+    os.close(null)
+
+
 def _run_unless_imported(name) -> None:
     """Run the check and exit with its status, unless the module was imported under its own name."""
     if name != MODULE_NAME:
-        sys.exit(main())
+        status = main()
+        try:
+            sys.stdout.flush()
+        except OSError:
+            # A failed flush stays buffered, and the flush at exit would change the status to 120.
+            _discard_stdout()
+            status = EXIT_ERROR
+        sys.exit(status)
 
 
 _run_unless_imported(__name__)

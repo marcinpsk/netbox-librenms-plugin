@@ -791,7 +791,7 @@ def _manage_py():
     return manage
 
 
-def _run_nbshell(tmp_path, *, database, servers, **extra_environment):
+def _run_nbshell(tmp_path, *, database, servers, stdout=subprocess.PIPE, **extra_environment):
     (tmp_path / "classifier_check_settings.py").write_text(
         "from netbox_librenms_plugin.tests.isolated_settings import *  # noqa: F403\n"
         f"DATABASES['default']['NAME'] = {database!r}\n"
@@ -808,8 +808,9 @@ def _run_nbshell(tmp_path, *, database, servers, **extra_environment):
         return subprocess.run(
             [sys.executable, str(_manage_py()), "nbshell"],
             stdin=script,
+            stdout=stdout,
+            stderr=subprocess.PIPE,
             env=environment,
-            capture_output=True,
             text=True,
             timeout=120,
             check=False,
@@ -862,4 +863,18 @@ def test_a_report_that_cannot_be_written_exits_with_status_3_through_nbshell(tmp
     )
 
     assert result.returncode == 3, result.stdout + result.stderr
+    assert "ERROR" in result.stderr
+
+
+@transactional_db_with_all_apps()
+def test_a_report_that_cannot_be_flushed_exits_with_status_3_through_nbshell(tmp_path):
+    """A failed flush of the buffered report must not fail again at exit and change the status."""
+    from django.db import connection
+
+    _stored("device", {"primary": 5}, "device")
+
+    with Path("/dev/full").open("w") as full:
+        result = _run_nbshell(tmp_path, database=connection.settings_dict["NAME"], servers=("primary",), stdout=full)
+
+    assert result.returncode == 3, result.stderr
     assert "ERROR" in result.stderr
