@@ -148,14 +148,15 @@ def strict_id(value) -> int | None:
     return None
 
 
-def _wide_legacy_id(value) -> bool:
-    """Return whether the old legacy rule, ``int()`` of an int or a text, reads a positive id from *value*."""
+def _wide_legacy_id(value) -> int | None:
+    """Return the positive id that the runtime's legacy rule, ``int()`` of an int or a text, reads, or None."""
     if isinstance(value, bool) or not isinstance(value, (int, str)):
-        return False
+        return None
     try:
-        return int(value) > 0
+        identity = int(value)
     except ValueError:
-        return False
+        return None
+    return identity if identity > 0 else None
 
 
 def is_server_key(value) -> bool:
@@ -225,9 +226,12 @@ def _stored_server_names(values) -> frozenset:
     for value in values:
         if not isinstance(value, dict):
             continue
-        names.extend(key for key in value if key != PREFERRED_SERVER_FIELD)
         names.append(value.get(PREFERRED_SERVER_FIELD))
-        for entry in value.values():
+        for key, entry in value.items():
+            # A preference is opaque JSON: only its own text names a server.
+            if key == PREFERRED_SERVER_FIELD:
+                continue
+            names.append(key)
             marker = entry.get(MIGRATED_TO_FIELD) if isinstance(entry, dict) else None
             if isinstance(marker, dict):
                 names.append(marker.get("server_key"))
@@ -341,12 +345,16 @@ def _read_legacy(target, space, value, legacy, found) -> None:
     """Read a bare legacy value. It converts only to the one configured server, and else claims every key seen."""
     refusal, claim_keys = legacy
     identity = strict_id(value)
-    if identity is None:
-        found.reasons.append(Reason("legacy_id_unreadable" if _wide_legacy_id(value) else "invalid_value"))
+    readable_id = _wide_legacy_id(value)
+    if readable_id is None:
+        found.reasons.append(Reason("invalid_value"))
         return
+    if identity is None:
+        refusal = Reason("legacy_id_unreadable")
     if refusal is not None:
         found.reasons.append(refusal)
-        found.claims.extend(Claim(target, key, space, identity, ROLE_LEGACY) for key in claim_keys)
+        # The runtime reads a legacy id with the wide rule, on every server.
+        found.claims.extend(Claim(target, key, space, readable_id, ROLE_LEGACY) for key in claim_keys)
         return
     (server_key,) = claim_keys
     _add_server_state(target, space, server_key, (identity, None, False, None, None), found)
@@ -455,7 +463,9 @@ def main() -> int:
     """Print the check report and return the exit status. An error prints to stderr and returns 3."""
     try:
         report = check()
-        lines = report_lines(report)
+        # An output error must give status 3 here: the nbshell console would print it and exit 0.
+        sys.stdout.write("\n".join(report_lines(report)) + "\n")
+        sys.stdout.flush()
     except ClassifierError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return EXIT_ERROR
@@ -463,7 +473,6 @@ def main() -> int:
         print("ERROR: the mapping check failed.", file=sys.stderr)
         traceback.print_exc()
         return EXIT_ERROR
-    print("\n".join(lines))
     return exit_status(report)
 
 
