@@ -1474,8 +1474,8 @@ class VlanAssignmentMixin:
                                 "is_ambiguous": False,
                             }
                         # Keep auto-selection when the group was deleted or is out of the row's scope.
-                    elif raw_override_group_id == "" and (vid, None) in lookup_maps.get("vid_group_to_vlan", {}):
-                        # User explicitly chose "No Group (Global)"
+                    elif raw_override_group_id == "":
+                        # The user chose "No Group (Global)": it stays, also when Global holds no such VLAN.
                         vlan_group_map[vid] = {
                             "group_id": "",
                             "group_name": "Global",

@@ -28,11 +28,16 @@
  * commands and the READs. So a READ never shows a state from before an operation admitted ahead of it.
  *
  * A dialog form with data-write-url (the bulk VC member, a row's VLAN groups) is a write: its
- * data-draft-write button sends the form's fields to that URL through the queue.
+ * data-draft-write button sends the form's fields to that URL through the queue. A form that names its own
+ * draft_id and expected_revision (the VLAN groups dialog, from the draft state that it read) is sent with
+ * them, so the server refuses it when the draft changed after the dialog was read; every other write names
+ * the writer's draft and revision.
  *
  * A dialog opener (data-dialog-url) reads its dialog through its loader (data-dialog-loader) as a READ of the
  * queue, so the dialog shows the draft after every write admitted before it. An answer that a later input
- * made stale never shows: the dialog keeps its loading state and is read again. Only the last opening shows.
+ * made stale never shows: the dialog keeps its loading state and is read again. Only the last opening shows:
+ * the gate runs on the dialog content (the swap target), which stays in the page also when a tab read
+ * replaces the element that sent the read.
  *
  * A row with data-intent has a tri-state intent: on (selected), off (excluded) or none. Such a row also names
  * the rows it requires (data-requires) and how many selected rows of other pages require it
@@ -522,8 +527,10 @@
     function sendWrite(op) {
         const fields = op.kind === 'batch' ? { assignments: JSON.stringify(Object.fromEntries(op.rows)) } : op.fields;
         const body = new FormData();
-        body.set('draft_id', writer.draftId);
-        body.set('expected_revision', String(writer.revision));
+        if (!Object.hasOwn(fields, 'draft_id')) {
+            body.set('draft_id', writer.draftId);
+            body.set('expected_revision', String(writer.revision));
+        }
         Object.entries(fields).forEach(([name, value]) => body.set(name, value));
         fetch(op.kind === 'batch' ? writer.urls.selection : op.url, {
             method: 'POST',
@@ -1047,15 +1054,7 @@
     // The gate runs before htmx reads any header, out-of-band content or swap of the response.
     document.addEventListener('htmx:beforeOnLoad', function (event) {
         const read = reads.get(event.detail.xhr);
-        if (!read || read.region) return;
-        if (read.dialog) {
-            // A dialog shows no navigation: only a later input or write makes its answer stale.
-            if (read.inputEpoch !== inputEpoch) {
-                event.preventDefault();
-                readDialog(read.dialog);
-            }
-            return;
-        }
+        if (!read || read.region || read.dialog) return;
         const superseded = read.navEpoch !== navEpoch;
         if (superseded && !inFilterRun(read)) {
             event.preventDefault();
@@ -1076,6 +1075,16 @@
     // htmx writes its history before the swap too, so the swapped content reads the new URL.
     document.addEventListener('htmx:beforeSwap', function (event) {
         const read = reads.get(event.detail.xhr);
+        if (read?.dialog) {
+            // htmx fires this one on the dialog content. A later opening wins; a later input or write reads it again.
+            if (read.dialog.epoch !== dialogEpoch) {
+                event.detail.shouldSwap = false;
+            } else if (read.inputEpoch !== inputEpoch) {
+                event.detail.shouldSwap = false;
+                readDialog(read.dialog);
+            }
+            return;
+        }
         if (read?.region) {
             // Decided here, not in beforeOnLoad: the fragment loader reads the request outcome, and only a swap is held.
             // A navigation or a search that started after the READ was sent replaces it; a draft region also

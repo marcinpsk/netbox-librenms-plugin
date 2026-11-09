@@ -634,6 +634,33 @@ class TestTheVlanGroups:
 
         assert str(foreign.pk) not in _evidence_groups(_tab(client, owner), "41").values()
 
+    def test_the_dialog_names_the_draft_it_read_and_its_save_after_a_newer_revision_writes_nothing(
+        self, client, vlan_device
+    ):
+        owner, (first, second) = vlan_device
+        shown = _tab(client, owner)
+        (button,) = [attrs for attrs in open_tags(_row_html(shown.html, "41"), "button") if "data-dialog-url" in attrs]
+        dialog = client.get(unescape(button["data-dialog-url"])).content.decode()
+        (form,) = [attrs for attrs in open_tags(dialog, "form") if "data-write-url" in attrs]
+        binding = {
+            attrs["name"]: attrs["value"]
+            for attrs in open_tags(dialog, "input")
+            if attrs.get("name") in ("draft_id", "expected_revision")
+        }
+        assert binding == {
+            "draft_id": shown.table["data-draft-id"],
+            "expected_revision": shown.table["data-draft-revision"],
+        }
+
+        # Another window stores a group for the row after the dialog read the draft.
+        assert (
+            draft_command(client, shown, "data-vlan-groups-url", row="41", group_100=str(first.pk)).status_code == 204
+        )
+        response = client.post(unescape(form["data-write-url"]), {**binding, "row": "41", "group_100": str(second.pk)})
+
+        assert response.status_code == 409
+        assert _evidence_groups(_tab(client, owner), "41") == {"100": str(first.pk)}
+
     def test_the_submit_writes_the_vlan_of_the_chosen_group(self, client, vlan_device):
         owner, (first, second) = vlan_device
 
@@ -647,6 +674,27 @@ class TestTheVlanGroups:
 
         interface = Interface.objects.get(device=owner, name="eth41")
         assert interface.untagged_vlan.group_id == second.pk
+
+
+def test_an_explicit_global_choice_stays_global_in_the_row_and_the_dialog_without_a_global_vlan(client, settings):
+    configure_default_librenms_server(settings)
+    client.force_login(make_superuser("iface-draft-global-user"))
+    owner = make_device("iface-draft-global", librenms_cf={SERVER_KEY: {"id": 4401}})
+    group = VLANGroup.objects.create(name="iface-draft-only", slug="iface-draft-only", scope=owner.site)
+    VLAN.objects.create(vid=100, name="v100-only", group=group)
+    seed_interfaces_snapshot(owner, [sync_port(41, "eth41", **port_vlans("access", 100))], server_key=SERVER_KEY)
+    shown = _tab(client, owner)
+    assert _evidence_groups(shown, "41") == {"100": str(group.pk)}
+
+    assert draft_command(client, shown, "data-vlan-groups-url", row="41", group_100="").status_code == 204
+    row = client.get(unescape(shown.rows["41"]["hx-get"])).content.decode()
+
+    assert read_evidence(INTERFACE_TAB, open_tags(row, "tr")[0]["data-evidence"])["vlan_groups"] == {"100": ""}
+    (button,) = [attrs for attrs in open_tags(row, "button") if "data-dialog-url" in attrs]
+    dialog = client.get(unescape(button["data-dialog-url"])).content.decode()
+    assert re.search(r'<option value=""\s+selected>', dialog)
+    # Global holds no VLAN 100, so the dialog marks the VID as missing in its group.
+    assert re.search(r'id="vlan-modal-vid-100">.*?mdi-alert', dialog)
 
 
 def _hidden_selection(html):

@@ -1569,7 +1569,8 @@ class InterfaceVlanModalView(_InterfaceDraftView):
         table = view.get_table([record], obj, get_interface_name_field(request, obj), vlan_groups=rows["vlan_groups"])
         # The dialog's own fields ride on its preview request, never on the URLs it renders.
         page_query = request.GET.copy()
-        for key in [key for key in page_query if key in ("row", "apply_to_all") or key.startswith("group_")]:
+        dialog_fields = ("row", "apply_to_all", "draft_id", "expected_revision")
+        for key in [key for key in page_query if key in dialog_fields or key.startswith("group_")]:
             page_query.pop(key)
         query = SyncQuery(page_query)
         context = {
@@ -1580,6 +1581,9 @@ class InterfaceVlanModalView(_InterfaceDraftView):
             "command_url": interface_command_urls(query, obj, server_key)["data-vlan-groups-url"],
             "preview_url": row_url(query, obj, server_key, "interface_vlan_modal", row_key),
             "apply_to_all": bool(request.GET.get("apply_to_all")),
+            # Save names the draft state that the dialog shows; the command refuses it after any later change.
+            "draft_id": draft.draft_id,
+            "draft_revision": draft.revision,
         }
         response = render(request, self.template_name, context)
         response["Cache-Control"] = "no-store"
