@@ -206,8 +206,8 @@ class TestInterfaceRefreshOobMerge:
         assert paths == ["/api/v0/devices/21/ports", "/api/v0/devices/21/port_stack", "/api/v0/devices/21"]
         assert not any("not-an-id" in path for path in paths)
 
-    def test_a_broken_port_stack_rule_records_the_failed_refresh(self, librenms_server, settings):
-        """The refresh deleted the snapshot first, so the tab state must say the refresh failed, not missing."""
+    def test_a_broken_port_stack_rule_keeps_the_acquired_snapshot(self, librenms_server, settings):
+        """The refresh stores the source snapshot; the tab assessment reads the rules and names the broken one."""
         from netbox_librenms_plugin.models import PortStackLagPattern, RuleConfigurationError
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
@@ -221,7 +221,7 @@ class TestInterfaceRefreshOobMerge:
         with pytest.raises(RuleConfigurationError):
             _refresh(DeviceInterfaceTableView, device, librenms_server, settings)
 
-        assert _tab_state(device)["state"] == "refresh_failed"
+        assert _tab_state(device)["state"] == "ready"
 
     def test_oob_ports_merge_and_only_real_shared_macs_are_flagged(self, librenms_server, settings):
         """OOB rows merge in tagged _source=oob, and only a real MAC on both sides is a conflict."""
