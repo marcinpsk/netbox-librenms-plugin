@@ -401,6 +401,41 @@ def test_a_legacy_value_converts_when_stored_values_name_only_the_configured_ser
     assert result.identities == (own("primary", 5),)
 
 
+@pytest.mark.django_db
+def test_a_malformed_preference_names_no_server(settings):
+    """A preference is opaque JSON: a marker shape inside it names no server and blocks no legacy conversion."""
+    _configure(settings, "primary")
+    legacy = _stored("device", 5, "legacy")
+    preference = {"_migrated_to": {"device_id": 3, "server_key": "secondary"}}
+    holder = _stored("device", {"_preferred_server": preference}, "malformed-preference")
+
+    report = mapping_classifier.check()
+
+    result = _only_result(report, legacy)
+    assert result.reasons == ()
+    assert result.identities == (own("primary", 5),)
+    assert {claim.server_key for claim in result.claims} == {"primary"}
+    holder_result = _only_result(report, holder)
+    assert (holder_result.preference_recorded, holder_result.preference_value) == (True, preference)
+    assert holder_result.links == holder_result.reasons == ()
+
+
+@pytest.mark.django_db
+def test_a_wide_only_legacy_id_claims_every_server_key_seen(settings):
+    """The decoder reads "4_2" as 42 on every server, so the quarantined value still owns 42 on each key."""
+    _configure(settings, "primary", "secondary")
+    legacy = _stored("device", "4_2", "legacy")
+    owner = _stored("vm", {"tertiary": {"oob": {"id": 42, "type": "ilo"}}}, "owner")
+
+    report = mapping_classifier.check()
+
+    assert _only_result(report, legacy).reasons == (reason("legacy_id_unreadable"),)
+    assert {claim.server_key for claim in _only_result(report, legacy).claims} == {"primary", "secondary", "tertiary"}
+    assert _collision_keys(report) == {("tertiary", "device", 42)}
+    assert _claimants(report, ("tertiary", "device", 42)) == {(_target(legacy), "legacy"), (_target(owner), "oob")}
+    assert mapping_classifier.exit_status(report) == 2
+
+
 # Collisions across objects.
 
 
@@ -439,7 +474,9 @@ def _claimants(report, key):
         (("device", {"primary": 5}), ("interface", {"primary": 5}), set()),
         (("device", {"primary": 5}), ("device", {"secondary": 5}), set()),
         (("device", {"primary": {"id": 5, "oob": {"id": 5, "type": "ilo"}}}), ("device", {}), set()),
-        (("device", "4_2"), ("device", {"primary": 42}), set()),
+        (("device", "4_2"), ("device", {"primary": 42}), {("primary", "device", 42)}),
+        (("vm", str(BIGINT_MAX + 1)), ("device", BIGINT_MAX + 1), {("primary", "device", BIGINT_MAX + 1)}),
+        (("interface", "1_1"), ("vminterface", {"primary": {"id": 11}}), {("primary", "port", 11)}),
     ],
     ids=[
         "two devices",
@@ -452,7 +489,9 @@ def _claimants(report, key):
         "device and port spaces are separate",
         "servers are separate",
         "own and oob on one object",
-        "an unreadable legacy id claims nothing",
+        "a wide-only legacy id claims the id that the decoder reads",
+        "two legacy ids above bigint",
+        "a wide-only legacy port id",
     ],
 )
 def test_collisions_across_objects(settings, first, second, expected):
@@ -641,7 +680,7 @@ def _decoder_shows(found, state, raw, obj):
 
 def _decoder_claims(state, configured):
     if state.container is ContainerStatus.LEGACY:
-        legacy_id = state.legacy.queryable_id
+        legacy_id = state.legacy.readable_id
         return {(server, legacy_id) for server in configured if legacy_id is not None}
     return {
         (entry.server, identity)
@@ -752,14 +791,16 @@ def _manage_py():
     return manage
 
 
-def _run_nbshell(tmp_path, *, database, servers):
+def _run_nbshell(tmp_path, *, database, servers, **extra_environment):
     (tmp_path / "classifier_check_settings.py").write_text(
         "from netbox_librenms_plugin.tests.isolated_settings import *  # noqa: F403\n"
         f"DATABASES['default']['NAME'] = {database!r}\n"
-        f"PLUGINS_CONFIG['netbox_librenms_plugin']['servers'] = {_server_settings(*servers)!r}\n"
+        f"PLUGINS_CONFIG['netbox_librenms_plugin']['servers'] = {_server_settings(*servers)!r}\n",
+        encoding="utf-8",
     )
     environment = {
         **os.environ,
+        **extra_environment,
         "PYTHONPATH": os.pathsep.join([str(tmp_path), *(path for path in sys.path if path)]),
         "DJANGO_SETTINGS_MODULE": "classifier_check_settings",
     }
@@ -804,5 +845,21 @@ def test_the_check_script_runs_through_nbshell(tmp_path):
     assert f"dcim.device pk={clean.pk} own" in collision
 
     result = _run_nbshell(tmp_path, database=f"{database}_absent", servers=("primary",))
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "ERROR" in result.stderr
+
+
+@transactional_db_with_all_apps()
+def test_a_report_that_cannot_be_written_exits_with_status_3_through_nbshell(tmp_path):
+    """An output error must not end the console run with a clean status."""
+    from django.db import connection
+
+    _stored("device", {"café": 5}, "device")
+    _stored("vm", {"café": 5}, "vm")
+
+    result = _run_nbshell(
+        tmp_path, database=connection.settings_dict["NAME"], servers=("café",), PYTHONIOENCODING="ascii:strict"
+    )
+
     assert result.returncode == 3, result.stdout + result.stderr
     assert "ERROR" in result.stderr
