@@ -899,6 +899,71 @@ class TestALateRefusalReachesEveryLaterWrite:
         assert draft_tab(superuser_client, device, "interfaces", **QUERY).rows["10"]["data-evidence-changed"] == "true"
 
 
+def _sync_row(client, device, port_id, **extra):
+    """Post the row action Sync of *port_id* as its page shows the row now."""
+    return _sync(
+        client,
+        device,
+        sync_one=port_id,
+        fields=row_action_fields(client, device, "interfaces", port_id, **QUERY),
+        extra={"exclude_columns": ["vlans"], **extra},
+    )
+
+
+@pytest.mark.django_db
+class TestARowSyncKeepsTheDraftCoverage:
+    """A row action writes its row; every other row keeps what the draft's approval covers, as in the bulk submit."""
+
+    def test_an_excluded_aggregate_is_not_taken_along_by_the_sync_of_its_member(self, superuser_client):
+        device = _device("row-sync-excluded-new-aggregate")
+        _bound(device, "Gi0/1", 10, iface_type="1000base-t")
+        _seed(device, [_port(10, "Gi0/1"), _port(20, "Po1", if_type="ieee8023adLag")], [port_pair(10, 20)])
+        _select(superuser_client, device, [], states={20: "off"})
+
+        _sync_row(superuser_client, device, 10, auto_select_lag_members="1")
+
+        assert list(Interface.objects.filter(device=device).values_list("name", flat=True)) == ["Gi0/1"]
+
+    def test_an_excluded_physical_aggregate_is_not_promoted_by_the_sync_of_its_member(self, superuser_client):
+        device, _rule, member, aggregate = _promotion_scenario(
+            "row-sync-excluded-aggregate", relation="lag", rule_type="lag"
+        )
+        _select(superuser_client, device, [], states={20: "off"})
+
+        _sync_row(superuser_client, device, 10)
+
+        member.refresh_from_db()
+        aggregate.refresh_from_db()
+        assert (member.lag_id, aggregate.type) == (None, "other")
+
+    def test_a_selected_aggregate_whose_evidence_changed_is_not_taken_along(self, superuser_client):
+        device = _device("row-sync-stale-aggregate")
+        _bound(device, "Gi0/1", 10, iface_type="1000base-t")
+        _seed(device, [_port(10, "Gi0/1"), _port(20, "Po1", if_type="ieee8023adLag")], [port_pair(10, 20)])
+        _select(superuser_client, device, [20])
+        # The page showed no aggregate in NetBox; now one has its name, so the selection of it is stale.
+        aggregate = make_interface(device, "Po1", iface_type="lag")
+        before = _state(aggregate)
+
+        _sync_row(superuser_client, device, 10, auto_select_lag_members="1")
+
+        assert _state(aggregate) == before
+
+    def test_the_row_that_the_action_names_is_written_although_the_draft_excludes_it(self, superuser_client):
+        device = _device("row-sync-excluded-clicked")
+        aggregate = _bound(device, "Po1", 20, iface_type="1000base-t")
+        member = _bound(device, "Gi0/1", 10, iface_type="1000base-t")
+        _seed(device, [_port(10, "Gi0/1"), _port(20, "Po1")], [port_pair(10, 20)], os=_po_lag_os())
+        _select(superuser_client, device, [], states={20: "off"})
+
+        _sync_row(superuser_client, device, 20, auto_select_lag_members="1")
+
+        member.refresh_from_db()
+        aggregate.refresh_from_db()
+        # The member link promotes the aggregate, which the action approves.
+        assert (member.lag_id, aggregate.type) == (aggregate.pk, "lag")
+
+
 def _planning_rule(tag, platform, name, rule, netbox_type):
     """Plan *netbox_type* on port *name*: a legacy ifType mapping, or a platform Set type rule on its name."""
     if rule == "legacy":

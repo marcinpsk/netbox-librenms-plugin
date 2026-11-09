@@ -159,7 +159,8 @@
 {# sync_draft.js reads the dialog of a row through this loader, in turn with the draft writes; a later opening aborts an earlier one. #}
 <span class="d-none" id="vlanDetailLoader" hx-get="" hx-trigger="librenms:dialog-read" hx-sync="this:replace"
     hx-target="#vlanDetailModalContent" hx-swap="innerHTML"></span>
-<div class="modal fade" id="vlanDetailModal" tabindex="-1" aria-labelledby="vlanDetailModalLabel" aria-hidden="true">
+{# hx-preserve: a read of the tab keeps the dialog as it is, so it never takes the user's unsaved edits away. #}
+<div class="modal fade" id="vlanDetailModal" hx-preserve="true" tabindex="-1" aria-labelledby="vlanDetailModalLabel" aria-hidden="true">
     <div class="modal-dialog">
         <div class="modal-content" id="vlanDetailModalContent">
             <div class="modal-body text-center text-muted py-3" role="status">
