@@ -7,8 +7,10 @@ Each case of ``selection_rule_cases.json`` renders its page rows with the attrib
 page must tick the rows that the server checks, and send the intent that the case names.
 """
 
+import ast
 import importlib.util
 import json
+import re
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -385,35 +387,63 @@ def test_a_relationship_action_after_a_member_choice_goes_after_it_bound_to_the_
     )
 
 
+DIALOG_URL = "https://plugin.example.com/plugins/librenms_plugin/device/1/interface-row/{key}/vlan-dialog/"
+
+
+def _vlan_edit_button(url):
+    """Return the edit button that the interface table renders for a row whose VLAN groups dialog is at *url*."""
+    tree = ast.parse((PLUGIN_DIR / "tables" / "interfaces.py").read_text(encoding="utf-8"))
+    (markup,) = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and "vlan-edit-btn" in node.value
+    ]
+    # The table fills its one placeholder with format_html.
+    return markup.format(url)
+
+
+def _vlan_dialog_page(keys):
+    """Return a sync page whose interface rows *keys* open the VLAN groups dialog, as the tab renders them."""
+    template = (TEMPLATE_DIR / "_interface_sync_content.html").read_text(encoding="utf-8")
+    dialog = re.search(r"<!-- VLAN groups dialog.*?-->(.*?)\{% else %\}", template, flags=re.S).group(1)
+    dialog = re.sub(r"\{#.*?#\}", "", dialog)
+    rows = "".join(
+        f"""<tr data-row-key="{key}" data-evidence="token-{key}">
+            <td><input type="checkbox" name="select" value="{key}"></td>
+            <td>{_vlan_edit_button(DIALOG_URL.format(key=key))}</td></tr>"""
+        for key in keys
+    )
+    return _sync_document(
+        f"""<div id="librenms-sync-tabs"><input type="hidden" name="csrfmiddlewaretoken" value="csrf-test">
+            <table id="librenms-interface-table" data-draft-id="draft-1" data-draft-revision="1"
+                   data-selection-url="{SELECTION_URL}" data-choice-url="{CHOICE_URL}"><tbody>{rows}</tbody></table>
+            {dialog}</div>"""
+    )
+
+
+def _open_vlan_dialog(page, key):
+    page.click(f'#librenms-interface-table tr[data-row-key="{key}"] .vlan-edit-btn')
+
+
 def test_a_late_answer_of_an_earlier_vlan_dialog_opening_never_replaces_the_dialog(page):
     """Two rows open the dialog in turn; the answer of the first one comes last, and Save sends the second row's form."""
     dialogs, writes = {}, []
     _serve_page_scripts(page)
-    buttons = "".join(
-        f"""<button type="button" class="vlan-edit-btn" id="edit-{key}" hx-get="{VLAN_PREVIEW_URL}?row={key}"
-            hx-target="#vlanDetailModalContent" hx-swap="innerHTML" hx-sync="#vlanDetailModalContent:replace">{key}</button>"""
-        for key in ("10", "11")
-    )
-    body = _sync_document(
-        f"""<div id="librenms-sync-tabs"><input type="hidden" name="csrfmiddlewaretoken" value="csrf-test">
-            <table id="librenms-interface-table" data-draft-id="draft-1" data-draft-revision="1"
-                   data-selection-url="{SELECTION_URL}" data-choice-url="{CHOICE_URL}"><tbody></tbody></table>
-            {buttons}<div id="vlanDetailModalContent"></div></div>"""
-    )
+    body = _vlan_dialog_page(["10", "11"])
 
     def write(route):
         writes.append(_form_fields(route.request))
         route.fulfill(status=204, headers={"X-Draft-Revision": "2"})
 
     page.route(f"{PAGE_URL}**", lambda route: route.fulfill(status=200, content_type="text/html", body=body))
-    page.route(f"{VLAN_PREVIEW_URL}**", lambda route: dialogs.setdefault(route.request.url.rsplit("=", 1)[1], route))
+    page.route("**/vlan-dialog/", lambda route: dialogs.setdefault(route.request.url.split("/")[-3], route))
     page.route(VLAN_GROUPS_URL, write)
     page.goto(PAGE_URL)
     page.wait_for_function("() => window.librenmsSyncDraft !== undefined")
 
-    page.click("#edit-10")
+    _open_vlan_dialog(page, "10")
     _wait_for(page, lambda: "10" in dialogs)
-    page.click("#edit-11")
+    _open_vlan_dialog(page, "11")
     _wait_for(page, lambda: "11" in dialogs)
     dialogs["11"].fulfill(
         status=200, content_type="text/html", body=_vlan_dialog("7", apply_to_all=False, row_key="11")
@@ -427,6 +457,84 @@ def test_a_late_answer_of_an_earlier_vlan_dialog_opening_never_replaces_the_dial
     page.click("#saveVlanGroups")
     _flush(page)
     assert [(fields["row"], fields.get("apply_to_all")) for fields in writes] == [("11", "1")]
+
+
+class _VlanDialogServer:
+    """Serve the VLAN dialog page; hold each dialog read with the group the draft has when it comes, and each write."""
+
+    def __init__(self, page):
+        self.group = "7"
+        self.dialogs, self.writes, self.held = [], [], []
+        _serve_page_scripts(page)
+        body = _vlan_dialog_page(["10"])
+        page.route(f"{PAGE_URL}**", lambda route: route.fulfill(status=200, content_type="text/html", body=body))
+        page.route(DIALOG_URL.format(key="10"), lambda route: self.dialogs.append((route, self.group)))
+        page.route(f"{VLAN_PREVIEW_URL}**", lambda route: route.fulfill(status=204))
+        page.route(VLAN_GROUPS_URL, self._write)
+        page.route(SELECTION_URL, self._write)
+        page.goto(PAGE_URL)
+        page.wait_for_function("() => window.librenmsSyncDraft !== undefined")
+
+    def _write(self, route):
+        self.writes.append((route.request.url, _form_fields(route.request)))
+        self.held.append(route)
+
+    def acknowledge(self, group, revision):
+        """Answer the held write: the draft now holds *group*, and the row is stale."""
+        self.group = group
+        stale = json.dumps({"lnms-row-stale": {"key": "10"}})
+        self.held.pop(0).fulfill(status=204, headers={"X-Draft-Revision": revision, "HX-Trigger": stale})
+
+    def answer_dialog(self):
+        """Answer the oldest held dialog read with the group that the draft had when the read came."""
+        route, group = self.dialogs.pop(0)
+        route.fulfill(status=200, content_type="text/html", body=_vlan_dialog(group, apply_to_all=False))
+
+
+def test_a_vlan_dialog_opened_again_during_its_save_shows_the_saved_group(page):
+    """Save holds group 8 while the dialog opens again; the dialog then shows 8, and a second Save cannot send 7."""
+    server = _VlanDialogServer(page)
+    _open_vlan_dialog(page, "10")
+    _wait_for(page, lambda: server.dialogs)
+    server.answer_dialog()
+    page.select_option('select[name="group_100"]', "8")
+    page.click("#saveVlanGroups")
+    _wait_for(page, lambda: server.held)
+
+    _open_vlan_dialog(page, "10")
+    page.wait_for_timeout(200)
+    server.acknowledge(server.writes[-1][1]["group_100"], "2")
+    _wait_for(page, lambda: server.dialogs)
+    page.wait_for_timeout(200)
+    # The answer of the dialog opened during the Save comes after the Save and its row read.
+    server.answer_dialog()
+
+    expect(page.locator('select[name="group_100"]')).to_have_value("8")
+    page.click("#saveVlanGroups")
+    _wait_for(page, lambda: len(server.writes) == 2)
+    assert [(fields["group_100"], fields["expected_revision"]) for _url, fields in server.writes] == [
+        ("8", "1"),
+        ("8", "2"),
+    ]
+
+
+def test_a_vlan_dialog_answer_read_before_a_later_write_never_shows_and_the_dialog_is_read_again(page):
+    """The dialog read goes, then a row click writes the draft; the old answer is dropped and a new read shows."""
+    server = _VlanDialogServer(page)
+    _open_vlan_dialog(page, "10")
+    _wait_for(page, lambda: server.dialogs)
+
+    page.locator('tr[data-row-key="10"] input[name="select"]').check()
+    _wait_for(page, lambda: server.held)
+    server.acknowledge("8", "2")
+    page.wait_for_timeout(200)
+    server.answer_dialog()
+    page.wait_for_timeout(200)
+
+    expect(page.locator('select[name="group_100"]')).to_have_count(0)
+    _wait_for(page, lambda: server.dialogs)
+    server.answer_dialog()
+    expect(page.locator('select[name="group_100"]')).to_have_value("8")
 
 
 VLAN_SELECTION_URL = "https://plugin.example.com/plugins/librenms_plugin/device/1/vlan-selection/?server_key=default"

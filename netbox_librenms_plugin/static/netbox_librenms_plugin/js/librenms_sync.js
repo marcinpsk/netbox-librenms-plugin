@@ -3783,10 +3783,11 @@ document.addEventListener('htmx:afterRequest', function (event) {
     btn.title = reason;
 });
 
-// Each opening of the VLAN groups dialog shows only its own row: the form of an earlier opening goes at once.
-document.addEventListener('htmx:beforeRequest', function (event) {
+// Each opening of the VLAN groups dialog shows only its own row: the form of an earlier opening goes at the click,
+// and the dialog shows its loading state until sync_draft.js installs a read that no later write made stale.
+document.addEventListener('click', function (event) {
     const content = document.getElementById('vlanDetailModalContent');
-    if (!content || !event.detail.elt.matches?.('.vlan-edit-btn')) return;
+    if (!content || !(event.target instanceof Element) || !event.target.closest('.vlan-edit-btn')) return;
     const loading = document.createElement('div');
     loading.className = 'modal-body text-center text-muted';
     const spinner = document.createElement('i');

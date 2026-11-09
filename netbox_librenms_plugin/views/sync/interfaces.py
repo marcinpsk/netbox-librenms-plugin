@@ -2,6 +2,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from functools import partial
+from operator import attrgetter
 
 from dcim.models import Device, Interface, VirtualChassis
 from django.contrib import messages
@@ -24,6 +25,7 @@ from netbox_librenms_plugin.constants import (
 from netbox_librenms_plugin.interface_relationships import (
     build_interface_index,
     filter_interface_index,
+    interface_identity,
     interface_owner_for_object,
     interface_queryset_for_object,
     relationship_candidate_ids,
@@ -127,7 +129,7 @@ SELECTION_CHANGED = (
 CHANGED_ROWS = "These interfaces changed after you selected them, so they were not synced. Select them again: {}."
 # A row action of a page that does not show the row as it is now.
 ROW_CHANGED = "The interface changed after the page showed it, so it was not synced. Review the row and try again."
-# The skip reason of an approved row whose member or bound interface changed before the writer locked it.
+# The skip reason of an approved row whose member, interface or relationship target changed before the writer locked it.
 APPROVED_ROW_CHANGED = "it changed after you selected it; select it again"
 RELATIONSHIPS_NOT_SYNCED = (
     "The LAG, parent and bridge links were not synced: the interface owner changed during the sync. "
@@ -170,6 +172,22 @@ class _RowSelection:
     def add_created(self, interface):
         """Record *interface*, which the attempt created with the name that the user selected."""
         self.created_names[interface.pk] = interface.name
+
+    def created(self, interface):
+        """Return whether the attempt created *interface*."""
+        return type(interface) is self.model and interface.pk in self.created_names
+
+    def approves(self, approved, interface, identity):
+        """
+        Return whether *interface* (None for none) is the interface that a row's evidence names as *approved*.
+
+        *identity* returns what the evidence holds of an interface. A value takes only that interface.
+        None (the page resolved no interface) takes none, one that the attempt created, or one that
+        the user may not view: the final write check decides on that one.
+        """
+        if approved is not None:
+            return interface is not None and identity(interface) == approved
+        return interface is None or self.created(interface) or self.shown_name(type(interface), interface.pk) is None
 
     def permitted(self, pks):
         """Return the rows of *pks* that the user may view and those that the attempt may change."""
@@ -272,12 +290,14 @@ class _BulkRelationshipContext:
     unique_host_port_ids: set
     unambiguous_name_port_ids: set
     excluded_columns: set
-    # The port IDs that the user's approval does not cover (see effective_intents): no edge may write them.
-    uncovered_port_ids: set
 
 
 class _HostInterfaceNameConflict(Exception):
     """An OOB row cannot claim a host interface by its name."""
+
+
+class _ApprovedInterfaceGone(Exception):
+    """The name of a row approved on an existing interface names no interface now, or another one."""
 
 
 @dataclass(frozen=True)
@@ -387,7 +407,7 @@ class SyncInterfacesView(
         self._row_choices = choices
         self._approved = {int(key): payload for key, payload in approved.items()}
         # The rows that the user's approval does not cover: the walk never adds them and no edge writes them.
-        self._uncovered_port_ids = uncovered
+        self._unapproved_port_ids = frozenset(uncovered)
         visible_port_ids = set(self._approved)
         # The related-row walk runs under the owner locks (_lock_sync_scope), with the writer's state.
         self._related_walk = (
@@ -566,6 +586,8 @@ class SyncInterfacesView(
 
         """
         self._selected_port_ids = set(visible_port_ids)
+        # The writer adds each approved row that it refuses under its locks (_refuse_changed_row).
+        self._uncovered_port_ids = set(self._unapproved_port_ids)
         self._auto_selected_port_ids = set()
         # Inferred off-page owners are resolved only after the chassis and its members are locked.
         self._auto_selected_target_ids = {}
@@ -905,7 +927,6 @@ class SyncInterfacesView(
                     unique_host_port_ids=unique_host_port_ids,
                     unambiguous_name_port_ids=unambiguous_name_port_ids,
                     excluded_columns=set(excluded_columns),
-                    uncovered_port_ids=set(getattr(self, "_uncovered_port_ids", set())),
                 )
                 self._apply_bulk_relationships(context, selected_edge_source_ids)
         except IntegrityError:
@@ -1026,11 +1047,13 @@ class SyncInterfacesView(
         )
         if member is None or (member.lag_id == aggregate.pk and not _lag_aggregate_needs_promotion(aggregate)):
             return
+        if self._approved_target_changed(port_id, "lag", member, aggregate):
+            return
         decisions = self._bulk_edge_decisions(context, "LAG", (port_id, member), (raw_lag, aggregate))
         if decisions is None:
             return
         promotes = _lag_aggregate_needs_promotion(aggregate)
-        if promotes and normalize_librenms_port_id(raw_lag) in context.uncovered_port_ids:
+        if promotes and normalize_librenms_port_id(raw_lag) in self._uncovered_port_ids:
             shown = self._shown(aggregate)
             self._record_skipped_conflict(
                 self._shown(member), f"LAG link to {shown} not synced; the selection does not cover {shown}"
@@ -1066,6 +1089,8 @@ class SyncInterfacesView(
         child, parent = self._resolve_bulk_relationship(context, port_id, raw_parent, expected_owner, "parent")
         if child is None or (child.parent_id == parent.pk and not _parent_child_needs_promotion(child)):
             return
+        if self._approved_target_changed(port_id, "parent", child, parent):
+            return
         decisions = self._bulk_edge_decisions(context, "parent", (port_id, child), (raw_parent, parent))
         if decisions is None:
             return
@@ -1100,6 +1125,8 @@ class SyncInterfacesView(
         member, bridge = self._resolve_bulk_relationship(context, port_id, raw_bridge, expected_owner, "bridge")
         if member is None or member.bridge_id == bridge.pk:
             return
+        if self._approved_target_changed(port_id, "bridge", member, bridge):
+            return
         if self._bulk_edge_decisions(context, "bridge", (port_id, member), (raw_bridge, bridge)) is None:
             return
         if self._apply_relationship_edge(member, "bridge", bridge, None, "bridge"):
@@ -1133,6 +1160,29 @@ class SyncInterfacesView(
                 self._shown(source_iface), f"{label} link to {shown} not synced; {shown}: {reason}"
             )
         return decisions
+
+    def _approved_target_changed(self, port_id, relation, source_iface, related_iface):
+        """
+        Refuse the edge of an approved row that resolves to another interface than the target that the user approved.
+
+        The evidence names the NetBox interface of each relationship as the page resolved it, or None
+        when it resolved none: then only an interface that the page could not show can be the target.
+
+        Returns:
+            bool: True when the edge is refused (a skipped conflict) and not written.
+
+        """
+        approval = getattr(self, "_approved", {}).get(normalize_librenms_port_id(port_id))
+        if approval is None or self._attempt_selection.approves(
+            approval["relations"][relation][1], related_iface, interface_identity
+        ):
+            return False
+        label = "LAG" if relation == "lag" else relation
+        self._record_skipped_conflict(
+            self._shown(source_iface),
+            f"{label} link to {self._shown(related_iface)} not synced; {APPROVED_ROW_CHANGED}",
+        )
+        return True
 
     @staticmethod
     def _prepare_bulk_lag_aggregate(agg_iface):
@@ -1812,7 +1862,7 @@ class SyncInterfacesView(
         # Decided under the owner locks: a row the user approved goes only to the member the page showed.
         approval = getattr(self, "_approved", {}).get(port_id)
         if approval is not None and (target_device or obj).pk != approval["member"]:
-            self._record_skipped_conflict(interface_name, APPROVED_ROW_CHANGED)
+            self._refuse_changed_row(port_id, interface_name)
             return
         # The rules decide the port for its owner before the resolvers below can create anything.
         owner = target_device if target_device is not None else obj
@@ -1849,14 +1899,14 @@ class SyncInterfacesView(
                 interface_name, "LibreNMS port ID is already assigned to another NetBox interface"
             )
             return
-        if approval is not None and port_owner is not None and approval["interface"] not in (None, port_owner.pk):
-            # The port is bound to another interface of the owner than the one the page showed.
-            self._record_skipped_conflict(interface_name, APPROVED_ROW_CHANGED)
+        if approval is not None and port_owner is not None and not self._approved_interface(approval, port_owner):
+            # The port is bound to another interface than the page showed, or a new row's port to an existing one.
+            self._refuse_changed_row(port_id, interface_name)
             return
-        if port_owner_is_ambiguous:
-            interface = None
-        elif target_device is not None:
-            try:
+        try:
+            if port_owner_is_ambiguous:
+                interface = None
+            elif target_device is not None:
                 interface = self._resolve_device_interface(
                     target_device,
                     interface_name,
@@ -1864,14 +1914,22 @@ class SyncInterfacesView(
                     server_key,
                     port_owner=port_owner,
                     oob=librenms_interface.get("_source") == OOB_INVENTORY_SOURCE,
+                    approval=approval,
                 )
-            except _HostInterfaceNameConflict:
-                self._record_skipped_conflict(interface_name, "host interface already uses this name")
-                return
-        else:
-            interface = self._resolve_vm_interface(
-                obj, interface_name, lookup_port_id, server_key, port_owner=port_owner
-            )
+            else:
+                interface = self._resolve_vm_interface(
+                    obj, interface_name, lookup_port_id, server_key, port_owner=port_owner, approval=approval
+                )
+        except _HostInterfaceNameConflict:
+            self._record_skipped_conflict(interface_name, "host interface already uses this name")
+            return
+        except _ApprovedInterfaceGone:
+            self._refuse_changed_row(port_id, interface_name)
+            return
+        if approval is not None and interface is not None and not self._approved_interface(approval, interface):
+            # A new row takes no interface that the user may view: the page would have shown it.
+            self._refuse_changed_row(port_id, interface_name)
+            return
 
         if interface is None:
             logger.warning(
@@ -1931,6 +1989,22 @@ class SyncInterfacesView(
         if skipped is not None:
             skipped.append(f"{interface_name or '(unnamed)'} ({reason})")
 
+    def _approved_interface(self, approval, interface):
+        """Return whether *interface* (None for none) is the interface of the row that the *approval* names."""
+        return self._attempt_selection.approves(approval["interface"], interface, attrgetter("pk"))
+
+    def _refuse_changed_row(self, port_id, interface_name):
+        """
+        Refuse an approved row whose member or interface the attribute pass finds changed under its locks.
+
+        This is the one place for such a refusal. It reports the row, and no later write of the
+        attempt starts from the row (it leaves the selected rows) or promotes it (it joins the
+        rows that the approval does not cover).
+        """
+        self._record_skipped_conflict(interface_name, APPROVED_ROW_CHANGED)
+        getattr(self, "_selected_port_ids", set()).discard(port_id)
+        self.__dict__.setdefault("_uncovered_port_ids", set()).add(port_id)
+
     def _oob_row_is_unsyncable(self, port, interface_name_field, rejected_names):
         """
         Report whether a selected OOB row must be skipped, recording why.
@@ -1959,8 +2033,10 @@ class SyncInterfacesView(
             return True
         return False
 
-    def _resolve_device_interface(self, target_device, interface_name, port_id, server_key, *, port_owner, oob=False):
-        """Resolve a device interface from the port's owner first, then safe name fallback."""
+    def _resolve_device_interface(
+        self, target_device, interface_name, port_id, server_key, *, port_owner, oob=False, approval=None
+    ):
+        """Resolve a device interface from the port's owner first, then safe name fallback (see ``_interface_by_name``)."""
         selection = self._attempt_selection
         if port_id and port_owner is not None:
             if not isinstance(port_owner, Interface) or port_owner.device_id != target_device.pk:
@@ -1970,7 +2046,7 @@ class SyncInterfacesView(
             return port_owner if selection.may_change(port_owner) else None
         if interface_name is None:
             return None
-        interface, created = Interface.objects.get_or_create(device=target_device, name=interface_name)
+        interface, created = _interface_by_name(Interface, approval, device=target_device, name=interface_name)
         if oob and not created:
             # The controller row has no claim on an existing host interface by name.
             if not self.restricted_queryset(Interface).filter(pk=interface.pk).exists():
@@ -1983,8 +2059,8 @@ class SyncInterfacesView(
             selection.add_created(interface)
         return interface if selection.may_change(interface) else None
 
-    def _resolve_vm_interface(self, vm, interface_name, port_id, server_key, *, port_owner):
-        """Resolve a VM interface from the port's owner first, then safe name fallback."""
+    def _resolve_vm_interface(self, vm, interface_name, port_id, server_key, *, port_owner, approval=None):
+        """Resolve a VM interface from the port's owner first, then safe name fallback (see ``_interface_by_name``)."""
         selection = self._attempt_selection
         if port_id and port_owner is not None:
             if not isinstance(port_owner, VMInterface) or port_owner.virtual_machine_id != vm.pk:
@@ -1994,7 +2070,7 @@ class SyncInterfacesView(
             return port_owner if selection.may_change(port_owner) else None
         if interface_name is None:
             return None
-        interface, created = VMInterface.objects.get_or_create(virtual_machine=vm, name=interface_name)
+        interface, created = _interface_by_name(VMInterface, approval, virtual_machine=vm, name=interface_name)
         if not created and not name_match_may_be_port(interface, server=server_key, port_id=port_id):
             return None
         if created:
@@ -2104,6 +2180,24 @@ class SyncInterfacesView(
             fresh_read_queryset=type(interface).objects.all(),
         )
         return bool(result and result.get("changed"))
+
+
+def _interface_by_name(model, approval, **lookup):
+    """
+    Return ``(interface, created)`` for the interface that *lookup* names, created when none has the name.
+
+    A row that its *approval* shows on an existing interface takes only that interface and creates none.
+
+    Raises:
+        _ApprovedInterfaceGone: The name names no interface now, or another one than the approved one.
+
+    """
+    if approval is None or approval["interface"] is None:
+        return model.objects.get_or_create(**lookup)
+    interface = model.objects.filter(**lookup).first()
+    if interface is None or interface.pk != approval["interface"]:
+        raise _ApprovedInterfaceGone
+    return interface, False
 
 
 class _RebindRefusedError(Exception):
@@ -2948,7 +3042,8 @@ class _BaseRelationshipSyncView(
 
         The button is a draft command (sync_draft.js): it posts the draft ID and revision of its page and
         the row's evidence token, which names the page's subject. A member choice or another change of the
-        row after the page showed it, and an action without that binding, write nothing.
+        row after the page showed it, and an action without that binding, write nothing. The view keeps
+        the row's evidence, which the attempt compares with the ends that it locks.
         """
         try:
             label, subject_pk = read_evidence(INTERFACE_TAB, request.POST.get("evidence") or "")["subject"]
@@ -2963,6 +3058,7 @@ class _BaseRelationshipSyncView(
         evidence = next(iter(shown.values()), None)
         if evidence is None or evidence.get("member") != obj.pk:
             return JsonResponse({"error": ROW_CHANGED}, status=409)
+        self._shown_evidence = evidence
         return None
 
     def _link_attempt(self, request, obj, server_key, port_id, related_port_id, current_edge):
@@ -3064,6 +3160,13 @@ class _BaseRelationshipSyncView(
             return JsonResponse({"error": f"{self.related_label} interface: {err}"}, status=404)
         self._attempt_ends = (source_iface, related_iface)
         self._attempt_texts = source_text, related_text = selection.shown(source_iface), selection.shown(related_iface)
+        evidence = self._shown_evidence
+        if not (
+            selection.approves(evidence["interface"], source_iface, attrgetter("pk"))
+            and selection.approves(evidence["relations"][self.relation_field][1], related_iface, interface_identity)
+        ):
+            # The locked ends are not the row and the target that the page showed.
+            return JsonResponse({"error": ROW_CHANGED}, status=409)
         decisions, blocked_end, reason = _relationship_decisions(
             interface_rules_for_request(request), (source_port, source_iface), (related_port, related_iface)
         )

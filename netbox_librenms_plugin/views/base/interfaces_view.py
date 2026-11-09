@@ -1108,10 +1108,11 @@ def interface_evidence(obj, server_key, record, table):
     Return the facts that selecting one interface row approves.
 
     The writer writes the row to its member, onto the NetBox interface the row resolves to, with the
-    type the rules plan, its relationship targets and VLAN groups; the row's sync state says what the
-    page showed. A change of
-    any of them asks the user to select the row again, and the writer compares the member and the
-    interface again under its locks. The subject and the server bind the token to its tab.
+    type the rules plan, its VLAN groups, and its LAG, parent and bridge: each the LibreNMS port and
+    the NetBox interface it resolves to (None for none); the row's sync state says what the page
+    showed. A change of any of them asks the user to select the row again, and the writer compares
+    the member, the interface and each relationship target again under its locks. The subject and
+    the server bind the token to its tab.
     """
     interface = record.get("netbox_interface")
     return {
@@ -1122,7 +1123,10 @@ def interface_evidence(obj, server_key, record, table):
         "interface": interface.pk if interface is not None else None,
         "state": table.row_sync_state(record).state,
         "type": _proposed_type(record),
-        "relations": [record.get(f"librenms_{relation}_port_id") for relation in ("lag", "parent", "bridge")],
+        "relations": {
+            relation: [record.get(f"librenms_{relation}_port_id"), record.get(f"{relation}_target")]
+            for relation in ("lag", "parent", "bridge")
+        },
         "vlan_groups": {
             str(vid): group.get("group_id", "") for vid, group in (record.get("vlan_group_map") or {}).items()
         },

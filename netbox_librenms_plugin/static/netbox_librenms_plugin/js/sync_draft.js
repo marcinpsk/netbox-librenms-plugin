@@ -30,6 +30,10 @@
  * A dialog form with data-write-url (the bulk VC member, a row's VLAN groups) is a write: its
  * data-draft-write button sends the form's fields to that URL through the queue.
  *
+ * A dialog opener (data-dialog-url) reads its dialog through its loader (data-dialog-loader) as a READ of the
+ * queue, so the dialog shows the draft after every write admitted before it. An answer that a later input
+ * made stale never shows: the dialog keeps its loading state and is read again. Only the last opening shows.
+ *
  * A row with data-intent has a tri-state intent: on (selected), off (excluded) or none. Such a row also names
  * the rows it requires (data-requires) and how many selected rows of other pages require it
  * (data-offpage-requirers); while #autoSelectLagMembers is checked, the page mirrors the server's required-row
@@ -47,6 +51,8 @@
     const ROW_CHECKBOX = 'td input[type="checkbox"][name="select"]';
     const REVISION_HEADER = 'X-Draft-Revision';
     const ROW_READ_EVENT = 'librenms:row-read';
+    const DIALOG_OPENER = '[data-dialog-url]';
+    const DIALOG_READ_EVENT = 'librenms:dialog-read';
     const ROW_STALE_EVENT = 'lnms-row-stale';
     const RESULTS_STALE_EVENT = 'lnms-results-stale';
     const NOTICE_ID = 'librenms-draft-notice';
@@ -75,6 +81,8 @@
     const reads = new WeakMap();
     // True while htmx swaps the answer of a page READ, which holds the whole page.
     let pageSwap = false;
+    // The count of dialog openings: a read of an earlier opening is never sent again.
+    let dialogEpoch = 0;
 
     // The draft writer of this document: one writer, so its acknowledgements give the next expected revision.
     const writer = {
@@ -118,8 +126,9 @@
      *
      * The kinds: "batch" (row states), "write" (a choice or Set Primary IP), "command" (a marked element's
      * request), "navigation" (a READ of the loader), "filter" (a filter request that waits for its turn),
-     * "row" (a row READ) and "turn" (flush()). The supersession rules are these, and only these: a newer
-     * navigation removes the queued navigations, filters and row READs (reserveNavigation()); row states join
+     * "row" (a row READ), "dialog" (a dialog READ) and "turn" (flush()). The supersession rules are these, and
+     * only these: a newer navigation removes the queued navigations, filters and row READs
+     * (reserveNavigation()); a newer dialog opening sends no read of an earlier one (readDialog()); row states join
      * only the batch at the tail of the queue (tailBatch()); a choice replaces only a choice of its row at the
      * tail (enqueue()); a failed write drops every queued operation that is not a write (failure()); a
      * refused write drops the queued commands but a refresh, and refuses new ones until a fresh presentation
@@ -457,6 +466,32 @@
             },
         });
     }
+
+    /**
+     * Read a dialog through its loader when its turn comes; a later opening replaces it.
+     *
+     * @param {{loader: string, url: string, epoch: number}} dialog - The loader's ID, the dialog URL and its opening.
+     * @returns {void}
+     */
+    function readDialog(dialog) {
+        admit({
+            kind: 'dialog',
+            run: (op) => {
+                const loader = document.getElementById(dialog.loader);
+                if (dialog.epoch === dialogEpoch) {
+                    loader?.dispatchEvent(new CustomEvent(DIALOG_READ_EVENT, { detail: dialog }));
+                }
+                done(op);
+            },
+        });
+    }
+
+    document.addEventListener('click', function (event) {
+        const opener = event.target instanceof Element ? event.target.closest(DIALOG_OPENER) : null;
+        if (!opener) return;
+        dialogEpoch += 1;
+        readDialog({ loader: opener.dataset.dialogLoader, url: opener.dataset.dialogUrl, epoch: dialogEpoch });
+    });
 
     // A navigation that waits shows the draft with its own history entry, so it is the fresh READ.
     function readResults() {
@@ -927,7 +962,7 @@
         // A page READ whose swap did not happen leaves no flag behind for a later request.
         pageSwap = false;
         const read = reads.get(event.detail.xhr);
-        if (read && !read.rowKey && !read.region) endNavigation(read.navEpoch);
+        if (read && !read.rowKey && !read.region && !read.dialog) endNavigation(read.navEpoch);
         if (isCommandAnswer(event.detail)) finishCommand(writer.running, event.detail.xhr, event.detail.successful);
     });
 
@@ -954,7 +989,7 @@
         const elt = event.detail.elt;
         const parameters = event.detail.parameters;
         const op = writer.running;
-        if (elt.id === LOADER_ID) {
+        if (elt.id === LOADER_ID || event.detail.triggeringEvent?.type === DIALOG_READ_EVENT) {
             event.detail.path = event.detail.triggeringEvent.detail.url;
             return;
         }
@@ -990,6 +1025,8 @@
         if (elt.id === LOADER_ID) {
             const { url, history, navEpoch: epoch } = event.detail.requestConfig.triggeringEvent.detail;
             reads.set(xhr, { navEpoch: epoch, inputEpoch, url, history });
+        } else if (event.detail.requestConfig.triggeringEvent?.type === DIALOG_READ_EVENT) {
+            reads.set(xhr, { inputEpoch, dialog: event.detail.requestConfig.triggeringEvent.detail });
         } else if (elt.matches('.sync-filter-form')) {
             // The filter keeps the identity it took at its first confirm.
             const epoch = filterEpochs.get(event.detail.requestConfig.triggeringEvent);
@@ -1011,6 +1048,14 @@
     document.addEventListener('htmx:beforeOnLoad', function (event) {
         const read = reads.get(event.detail.xhr);
         if (!read || read.region) return;
+        if (read.dialog) {
+            // A dialog shows no navigation: only a later input or write makes its answer stale.
+            if (read.inputEpoch !== inputEpoch) {
+                event.preventDefault();
+                readDialog(read.dialog);
+            }
+            return;
+        }
         const superseded = read.navEpoch !== navEpoch;
         if (superseded && !inFilterRun(read)) {
             event.preventDefault();

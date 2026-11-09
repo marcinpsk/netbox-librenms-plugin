@@ -50,7 +50,17 @@ from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_sna
 from netbox_librenms_plugin.tests.test_ip_address_sync_filters import _refresh
 from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
-URL_ATTRIBUTES = ("href", "action", "formaction", "hx-get", "hx-post", "hx-put", "hx-patch", "hx-delete")
+URL_ATTRIBUTES = (
+    "href",
+    "action",
+    "formaction",
+    "hx-get",
+    "hx-post",
+    "hx-put",
+    "hx-patch",
+    "hx-delete",
+    "data-dialog-url",
+)
 VOID_TAGS = frozenset({"input", "br", "img", "hr", "meta", "link", "source", "wbr"})
 
 # This tab's filters and another tab's: every hop must keep the other tab's state as well.
@@ -169,6 +179,9 @@ def _classify(hop, page_path, routes):
     if path == routes["fragment"]:
         # The loader states only its tab; the browser adds the page query (the browser test checks it).
         return "fragment"
+    if attrs.get("id") == "vlanDetailLoader" and url == "":
+        # The dialog loader takes the URL of the opened row's button.
+        return "dialog loader"
     if (
         "/sync-interface-" in path
         or path.startswith(("/dcim/interfaces/", "/virtualization/interfaces/"))
@@ -273,7 +286,7 @@ def test_every_interface_tab_hop_keeps_the_page_query_or_applies_its_reset(clien
     kinds = {_classify(hop, page_path, _routes(owner, object_type)) for hop in hops.urls}
     _check_filter_form(hops)
 
-    required = {"fragment", "clear", "toggle", "page link", "refresh", "sync", "row read"} | (
+    required = {"fragment", "clear", "toggle", "page link", "refresh", "sync", "row read", "dialog loader"} | (
         {"rebind"} if kind == "device" else set()
     )
     assert required <= kinds, required - kinds

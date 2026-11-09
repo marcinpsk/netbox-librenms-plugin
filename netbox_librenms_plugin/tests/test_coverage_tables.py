@@ -1339,7 +1339,7 @@ class TestInterfaceVlans:
             table.render_vlans(None, _port(untagged_vlan=100, vlan_modal_url="/vlan-dialog/41/", member_withheld=True))
         )
 
-        assert 'hx-get="/vlan-dialog/41/"' in html
+        assert 'data-dialog-url="/vlan-dialog/41/"' in html
         assert "vlan-edit-btn" not in withheld
 
     def test_missing_port_id_does_not_render_literal_none_form_keys(self):
@@ -1380,7 +1380,7 @@ def _vlan_dialog(client, device, row_key):
     shown = draft_tab(client, device, "interfaces", interface_name_field="ifName")
     row = re.search(rf'<tr\b[^>]*data-row-key="{row_key}".*?</tr>', shown.html, re.S).group(0)
     (button,) = [attrs for attrs in open_tags(row, "button") if "vlan-edit-btn" in attrs.get("class", "")]
-    response = client.get(button["hx-get"])
+    response = client.get(button["data-dialog-url"])
     assert response.status_code == 200
     return response.content.decode()
 

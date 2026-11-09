@@ -156,6 +156,9 @@
 {% endif %}
 
 <!-- VLAN groups dialog: its content is the server-rendered dialog of one row -->
+{# sync_draft.js reads the dialog of a row through this loader, in turn with the draft writes; a later opening aborts an earlier one. #}
+<span class="d-none" id="vlanDetailLoader" hx-get="" hx-trigger="librenms:dialog-read" hx-sync="this:replace"
+    hx-target="#vlanDetailModalContent" hx-swap="innerHTML"></span>
 <div class="modal fade" id="vlanDetailModal" tabindex="-1" aria-labelledby="vlanDetailModalLabel" aria-hidden="true">
     <div class="modal-dialog">
         <div class="modal-content" id="vlanDetailModalContent">

@@ -536,8 +536,8 @@ class LibreNMSInterfaceTable(tables.Table):
         if record.get("member_withheld") or not record.get("vlan_modal_url"):
             return ""
         return format_html(
-            '<button type="button" class="btn btn-sm btn-link p-0 ms-1 vlan-edit-btn" hx-get="{}"'
-            ' hx-target="#vlanDetailModalContent" hx-swap="innerHTML" hx-sync="#vlanDetailModalContent:replace"'
+            '<button type="button" class="btn btn-sm btn-link p-0 ms-1 vlan-edit-btn" data-dialog-url="{}"'
+            ' data-dialog-loader="vlanDetailLoader"'
             ' data-bs-toggle="modal" data-bs-target="#vlanDetailModal" title="Edit VLAN group assignments">'
             '<i class="mdi mdi-pencil"></i></button>',
             record["vlan_modal_url"],

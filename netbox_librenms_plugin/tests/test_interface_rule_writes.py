@@ -684,6 +684,221 @@ class TestASubmitWritesOnlyWhatTheUserApproved:
         assert any("Po1" in text for text in _messages(response))
 
 
+@pytest.fixture
+def before_the_writer(monkeypatch):
+    """Run the callbacks at the start of each writer attempt: after the evidence check, before the owner locks."""
+    real_attempt = SyncInterfacesView._sync_attempt
+    callbacks = []
+
+    def attempt(self, *args, **kwargs):
+        while callbacks:
+            callbacks.pop(0)()
+        return real_attempt(self, *args, **kwargs)
+
+    monkeypatch.setattr(SyncInterfacesView, "_sync_attempt", attempt)
+    return callbacks
+
+
+# relation: (source name, source type, target name, its port ifType, the other target name, the other source name)
+_RELATION_ENDS = {
+    "lag": ("Gi0/1", "1000base-t", "Po1", "ieee8023adLag", "Po2", "Gi0/2"),
+    "parent": ("eth0.100", "virtual", "eth0", "ethernetCsmacd", "eth1", "eth0.200"),
+    "bridge": ("nic0", "1000base-t", "vmbr0", "ethernetCsmacd", "vmbr1", "nic1"),
+}
+_TARGET_TYPES = {"lag": "lag", "parent": "1000base-t", "bridge": "virtual"}
+
+
+def _relation_scenario(tag, relation):
+    """
+    Return a device with a bound source row (port 10) whose LAG, parent or bridge row (port 20) is bound to *target*.
+
+    Returns:
+        tuple: The device, the source, the target, an unbound interface that can take the target's port, and
+            an unbound interface that can take the source's port.
+
+    """
+    source_name, source_type, target_name, target_if_type, other_target, other_source = _RELATION_ENDS[relation]
+    device = _device(tag)
+    source = _bound(device, source_name, 10, iface_type=source_type)
+    target = _bound(device, target_name, 20, iface_type=_TARGET_TYPES[relation])
+    source_port = _port(10, source_name, if_type="l2vlan" if relation == "parent" else "ethernetCsmacd")
+    _seed(
+        device,
+        [source_port, _port(20, target_name, if_type=target_if_type)],
+        [port_pair(10, 20)],
+        os="linux" if relation == "bridge" else None,
+    )
+    return (
+        device,
+        source,
+        target,
+        make_interface(device, other_target, iface_type=_TARGET_TYPES[relation]),
+        make_interface(device, other_source, iface_type=source_type),
+    )
+
+
+def _rebind(port_id, old, new):
+    """Move the binding of LibreNMS port *port_id* from interface *old* to interface *new*, as an edit saves them."""
+    seed_stored_mapping(old, {})
+    old.save()
+    seed_mapping(new, SERVER_KEY, own=port_id, save=False)
+    new.save()
+
+
+def _relations(interface):
+    """Return the LAG, parent and bridge of *interface* and its type, read back from the database."""
+    state = _state(interface)
+    return {field: state[field] for field in ("type", "lag_id", "parent_id", "bridge_id")}
+
+
+def _unbound_state(interface):
+    """Return the state of *interface* without its custom fields, which hold its LibreNMS binding."""
+    return {field: value for field, value in _state(interface).items() if field != "custom_field_data"}
+
+
+@pytest.mark.django_db
+class TestTheApprovalBindsTheRelationshipTargets:
+    """A row's approval names the NetBox interface of its LAG, parent and bridge; another one is never linked."""
+
+    @pytest.mark.parametrize("relation", ["lag", "parent", "bridge"])
+    def test_a_target_rebound_after_the_selection_refuses_the_row(self, superuser_client, relation):
+        device, source, target, other_target, _other_source = _relation_scenario(f"target-rebound-{relation}", relation)
+        draft = _select(superuser_client, device, [10])
+        _rebind(20, target, other_target)
+        before = _relations(source), _relations(other_target)
+
+        _sync(superuser_client, device, draft=draft, extra={"exclude_columns": ["vlans"]})
+
+        assert (_relations(source), _relations(other_target)) == before
+        assert draft_tab(superuser_client, device, "interfaces", **QUERY).rows["10"]["data-evidence-changed"] == "true"
+
+    @pytest.mark.parametrize("relation", ["lag", "parent", "bridge"])
+    def test_a_target_rebound_under_the_locks_is_not_linked(self, superuser_client, before_the_writer, relation):
+        device, source, target, other_target, _other_source = _relation_scenario(f"target-late-{relation}", relation)
+        draft = _select(superuser_client, device, [10])
+        before = _relations(source), _relations(other_target)
+        before_the_writer.append(lambda: _rebind(20, target, other_target))
+
+        _sync(superuser_client, device, draft=draft, extra={"exclude_columns": ["vlans"]})
+
+        assert (_relations(source), _relations(other_target)) == before
+
+    @pytest.mark.parametrize("relation", ["lag", "parent", "bridge"])
+    def test_a_relationship_action_after_a_target_rebind_writes_nothing(self, superuser_client, monkeypatch, relation):
+        from django.contrib.auth import get_user
+
+        from netbox_librenms_plugin.views.sync.interfaces import _BaseRelationshipSyncView
+
+        device, source, target, other_target, _other_source = _relation_scenario(f"target-action-{relation}", relation)
+        binding = relationship_binding(get_user(superuser_client), device, 10, **QUERY)
+        before = _relations(source), _relations(other_target)
+        real_attempt = _BaseRelationshipSyncView._link_attempt
+
+        def rebind_under_the_locks(self, *args, **kwargs):
+            _rebind(20, target, other_target)
+            return real_attempt(self, *args, **kwargs)
+
+        monkeypatch.setattr(_BaseRelationshipSyncView, "_link_attempt", rebind_under_the_locks)
+
+        response = superuser_client.post(
+            reverse(
+                f"plugins:netbox_librenms_plugin:sync_interface_{relation}",
+                kwargs={"object_type": "device", "object_id": device.pk},
+            )
+            + "?interface_name_field=ifName",
+            {"port_id": "10", f"{relation}_port_id": "20", "server_key": SERVER_KEY, **binding},
+        )
+
+        assert response.status_code == 409
+        assert (_relations(source), _relations(other_target)) == before
+
+
+@pytest.mark.django_db
+class TestALateRefusalReachesEveryLaterWrite:
+    """A row that the writer refuses under its locks is not written, and no later pass writes from it or promotes it."""
+
+    @pytest.mark.parametrize("relation", ["lag", "parent", "bridge"])
+    def test_a_source_rebound_under_the_locks_gets_no_relationship(self, superuser_client, before_the_writer, relation):
+        device, source, _target, _other_target, other_source = _relation_scenario(f"source-late-{relation}", relation)
+        draft = _select(superuser_client, device, [10])
+        before = _unbound_state(source), _unbound_state(other_source)
+        before_the_writer.append(lambda: _rebind(10, source, other_source))
+
+        _sync(superuser_client, device, draft=draft, extra={"exclude_columns": ["vlans"]})
+
+        assert (_unbound_state(source), _unbound_state(other_source)) == before
+        assert draft_tab(superuser_client, device, "interfaces", **QUERY).rows["10"]["data-evidence-changed"] == "true"
+
+    def test_an_aggregate_rebound_under_the_locks_is_not_promoted_by_its_taken_member(
+        self, superuser_client, before_the_writer
+    ):
+        device = _device("aggregate-late")
+        member = _bound(device, "Gi0/1", 10, iface_type="1000base-t")
+        aggregate = _bound(device, "Po1", 20, iface_type="other")
+        physical = make_interface(device, "Po2", iface_type="1000base-t")
+        _seed(device, [_port(10, "Gi0/1"), _port(20, "Po1", if_type="ieee8023adLag")], [port_pair(10, 20)])
+        draft = _select(superuser_client, device, [20])
+        before_the_writer.append(lambda: _rebind(20, aggregate, physical))
+
+        _sync(
+            superuser_client, device, draft=draft, extra={"exclude_columns": ["vlans"], "auto_select_lag_members": "on"}
+        )
+
+        assert (_relations(member)["lag_id"], _relations(physical)["type"]) == (None, "1000base-t")
+        assert _relations(aggregate)["type"] == "other"
+
+    @pytest.mark.parametrize("replaced", [False, True], ids=["deleted", "replaced-by-name"])
+    def test_an_approved_interface_gone_under_the_locks_is_not_replaced(
+        self, superuser_client, before_the_writer, replaced
+    ):
+        device = _device(f"approved-gone-{int(replaced)}")
+        approved = _bound(device, "Gi0/1", 10, iface_type="1000base-t")
+        _seed(device, [_port(10, "Gi0/1")])
+        draft = _select(superuser_client, device, [10])
+        appeared = {}
+
+        def remove():
+            Interface.objects.filter(pk=approved.pk).delete()
+            if replaced:
+                appeared["interface"] = make_interface(device, "Gi0/1", iface_type="other")
+                appeared["state"] = _state(appeared["interface"])
+
+        before_the_writer.append(remove)
+
+        _sync(superuser_client, device, draft=draft)
+
+        if replaced:
+            assert list(Interface.objects.filter(device=device)) == [appeared["interface"]]
+            assert _state(appeared["interface"]) == appeared["state"]
+        else:
+            assert not Interface.objects.filter(device=device).exists()
+        assert draft_tab(superuser_client, device, "interfaces", **QUERY).rows["10"]["data-evidence-changed"] == "true"
+
+    @pytest.mark.parametrize("bound", [True, False], ids=["bound", "same-name"])
+    def test_an_approved_new_row_takes_no_interface_that_appears_under_the_locks(
+        self, superuser_client, before_the_writer, bound
+    ):
+        device = _device(f"approved-new-{int(bound)}")
+        _seed(device, [_port(10, "Gi0/1")])
+        draft = _select(superuser_client, device, [10])
+        appeared = {}
+
+        def appear():
+            interface = make_interface(device, "Gi0/9" if bound else "Gi0/1", iface_type="other")
+            if bound:
+                seed_mapping(interface, SERVER_KEY, own=10, save=False)
+                interface.save()
+            appeared["interface"], appeared["state"] = interface, _state(interface)
+
+        before_the_writer.append(appear)
+
+        _sync(superuser_client, device, draft=draft)
+
+        assert list(Interface.objects.filter(device=device)) == [appeared["interface"]]
+        assert _state(appeared["interface"]) == appeared["state"]
+        assert draft_tab(superuser_client, device, "interfaces", **QUERY).rows["10"]["data-evidence-changed"] == "true"
+
+
 def _planning_rule(tag, platform, name, rule, netbox_type):
     """Plan *netbox_type* on port *name*: a legacy ifType mapping, or a platform Set type rule on its name."""
     if rule == "legacy":
