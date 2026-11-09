@@ -542,16 +542,17 @@ class TestTheRelationshipAction:
         member.refresh_from_db()
         assert member.lag_id is None
 
-    def test_each_vlan_dialog_opening_syncs_on_the_shared_dialog(self, client, vlan_device):
+    def test_each_vlan_dialog_opening_reads_through_the_one_dialog_loader_of_the_tab(self, client, vlan_device):
         owner, _groups = vlan_device
+        html = _tab(client, owner).html
         (button,) = [
-            attrs
-            for attrs in open_tags(_row_html(_tab(client, owner).html, "41"), "button")
-            if "vlan-edit-btn" in attrs.get("class", "")
+            attrs for attrs in open_tags(_row_html(html, "41"), "button") if "vlan-edit-btn" in attrs.get("class", "")
         ]
+        (loader,) = [attrs for attrs in open_tags(html, "span") if attrs.get("id") == button["data-dialog-loader"]]
 
-        # A later opening of any row aborts an earlier one, so a late answer never replaces the dialog.
-        assert button["hx-sync"] == "#vlanDetailModalContent:replace"
+        # sync_draft.js reads the dialog in turn with the draft writes; a later opening aborts an earlier one.
+        assert "hx-get" not in button
+        assert loader["hx-sync"] == "this:replace"
 
 
 @pytest.fixture
@@ -586,10 +587,10 @@ class TestTheVlanGroups:
     def test_the_dialog_renders_the_rows_vlans_and_previews_a_group(self, client, vlan_device):
         owner, (first, second) = vlan_device
         shown = _tab(client, owner)
-        (button,) = [attrs for attrs in open_tags(_row_html(shown.html, "41"), "button") if "hx-get" in attrs]
+        (button,) = [attrs for attrs in open_tags(_row_html(shown.html, "41"), "button") if "data-dialog-url" in attrs]
 
-        dialog = client.get(unescape(button["hx-get"]))
-        preview = client.get(f"{unescape(button['hx-get'])}&group_100={second.pk}")
+        dialog = client.get(unescape(button["data-dialog-url"]))
+        preview = client.get(f"{unescape(button['data-dialog-url'])}&group_100={second.pk}")
 
         assert dialog.status_code == preview.status_code == 200
         assert re.search(r'<select name="group_100"', dialog.content.decode())

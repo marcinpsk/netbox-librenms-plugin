@@ -71,6 +71,13 @@ def interface_owner(interface):
     return (getattr(interface, "device_id", None), getattr(interface, "virtual_machine_id", None))
 
 
+def interface_identity(interface):
+    """Return the identity of *interface* that a row's evidence binds (its model, pk and owner), or None for no interface."""
+    if interface is None:
+        return None
+    return [interface._meta.label_lower, interface.pk, *interface_owner(interface)]
+
+
 def interface_owner_for_object(obj):
     """Return the owner tuple for a Device or VirtualMachine."""
     if isinstance(obj, Device):
@@ -825,60 +832,6 @@ def relationship_diagnostics_report(assessment, interface_name_field="ifName"):
     }
 
 
-# The relationship FK columns of each owner's interface model; a VMInterface has no LAG.
-_RELATION_ID_FIELDS = {Device: ("lag_id", "parent_id", "bridge_id"), VirtualMachine: ("parent_id", "bridge_id")}
-
-
-def build_candidate_relationship_context(obj, server_key, user, can_write, port_ids, names):
-    """Build one permission-aware relationship context for a bounded row set."""
-    interface_queryset = interface_queryset_for_object(obj)
-    candidate_queryset = interface_queryset.filter(
-        relationship_candidate_q(interface_queryset.model, server_key, port_ids, names)
-    )
-    catalog_ids = set(candidate_queryset.values_list("pk", flat=True))
-    catalog_index = build_interface_index(obj, server_key, allowed_ids=catalog_ids)
-
-    owner_model = Device if isinstance(obj, Device) else VirtualMachine
-    owner_field = "device_id" if isinstance(obj, Device) else "virtual_machine_id"
-    owner_ids = candidate_queryset.values_list(owner_field, flat=True)
-    actionable_owner_ids = set(
-        owner_model.objects.restrict(user, "view").filter(pk__in=owner_ids).values_list("pk", flat=True)
-    )
-    permitted_queryset = candidate_queryset.filter(**{f"{owner_field}__in": actionable_owner_ids})
-    viewable_ids = set(permitted_queryset.restrict(user, "view").values_list("pk", flat=True))
-    # A change grant does not show an interface: an action needs both grants.
-    changeable_ids = viewable_ids & set(permitted_queryset.restrict(user, "change").values_list("pk", flat=True))
-    display_index = build_interface_index(obj, server_key, allowed_ids=viewable_ids)
-    source_index = filter_interface_index(display_index, changeable_ids)
-    # The current LAG, parent and bridge of each shown interface, so that the row can project them.
-    target_ids = {
-        target_id
-        for row in permitted_queryset.filter(pk__in=viewable_ids).values(*_RELATION_ID_FIELDS[owner_model])
-        for target_id in row.values()
-        if target_id is not None
-    }
-    # A target is shown when the user may view it and its owner, whatever owners the candidates have.
-    viewable_target_ids = set(
-        interface_queryset.filter(
-            pk__in=target_ids, **{f"{owner_field}__in": owner_model.objects.restrict(user, "view").values("pk")}
-        )
-        .restrict(user, "view")
-        .values_list("pk", flat=True)
-    )
-    return RelationshipResolutionContext(
-        obj=obj,
-        server_key=server_key,
-        catalog_index=catalog_index,
-        display_index=display_index,
-        related_index=display_index,
-        source_index=source_index,
-        actionable_owner_ids=actionable_owner_ids,
-        changeable_interface_ids=changeable_ids,
-        viewable_interface_ids=viewable_ids | viewable_target_ids,
-        can_write=can_write,
-    )
-
-
 def enrich_port_relationships(
     port,
     relationship_maps,
@@ -1047,9 +1000,9 @@ def resolve_relationship_row(
         port["netbox_interface"] = oob_interface
         port["exists_in_netbox"] = oob_interface is not None
         port["relationship_source_resolvable"] = False
-        port["lag_target_resolvable"] = False
-        port["parent_target_resolvable"] = False
-        port["bridge_target_resolvable"] = False
+        for relation in ("lag", "parent", "bridge"):
+            port[f"{relation}_target"] = None
+            port[f"{relation}_target_resolvable"] = False
         return oob_interface
 
     name_fallback_allowed = port_id in unambiguous_name_port_ids
@@ -1115,12 +1068,14 @@ def resolve_relationship_row(
                     and getattr(permitted_interface, "pk", None) == catalog_interface.pk
                 ):
                     related_interface = permitted_interface
-            if (
-                relation == "lag"
-                and related_interface is not None
-                and getattr(related_interface, "type", None) != "lag"
-                and related_interface.pk not in context.changeable_interface_ids
-            ):
-                related_interface = None
+        # The target that the row's evidence binds, also when the link cannot promote it.
+        port[f"{relation}_target"] = interface_identity(related_interface)
+        if (
+            relation == "lag"
+            and related_interface is not None
+            and getattr(related_interface, "type", None) != "lag"
+            and related_interface.pk not in context.changeable_interface_ids
+        ):
+            related_interface = None
         port[f"{relation}_target_resolvable"] = related_interface is not None
     return resolved_interface
