@@ -1219,6 +1219,28 @@ def effective_intents(obj, server_key, table, records, entries):
     return intents
 
 
+def draft_coverage(request, obj, server_key, snapshot, entries):
+    """
+    Return the rows of the whole *snapshot* by row key, and the effective intent of each of the draft *entries*.
+
+    The bulk submit and the row Sync read here which rows the user's approval covers (see ``effective_intents``).
+
+    Args:
+        request (HttpRequest): The request; its query holds the name field and the ignored toggle.
+        obj (Device | VirtualMachine): The subject of the sync page.
+        server_key (str): The LibreNMS server of the snapshot.
+        snapshot (SourceSnapshot): The stored interfaces snapshot.
+        entries (dict[str, Entry]): The draft entries.
+
+    Returns:
+        tuple: The rows by row key, and ``effective_intents`` of the entries.
+
+    """
+    _view, table, rows = current_interface_rows(request, obj, server_key, snapshot, entries)
+    records = {key: row for row in rows["table_rows"] or () if (key := interface_row_key(row)) is not None}
+    return records, effective_intents(obj, server_key, table, records, entries)
+
+
 def show_interface_selection(request, obj, server_key, table, rows, draft, *, enabled, extra_keys=()):
     """
     Add to each page row its checkbox state, its intent, its requirements, its evidence token and its row read URL.

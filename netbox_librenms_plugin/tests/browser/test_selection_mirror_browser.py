@@ -402,7 +402,7 @@ def _vlan_edit_button(url):
     return markup.format(url)
 
 
-def _vlan_dialog_page(keys):
+def _vlan_dialog_page(keys, *, revision="1", before=""):
     """Return a sync page whose interface rows *keys* open the VLAN groups dialog, as the tab renders them."""
     template = (TEMPLATE_DIR / "_interface_sync_content.html").read_text(encoding="utf-8")
     dialog = re.search(r"<!-- VLAN groups dialog.*?-->(.*?)\{% else %\}", template, flags=re.S).group(1)
@@ -414,8 +414,8 @@ def _vlan_dialog_page(keys):
         for key in keys
     )
     return _sync_document(
-        f"""<div id="librenms-sync-tabs"><input type="hidden" name="csrfmiddlewaretoken" value="csrf-test">
-            <table id="librenms-interface-table" data-draft-id="draft-1" data-draft-revision="1"
+        f"""{before}<div id="librenms-sync-tabs"><input type="hidden" name="csrfmiddlewaretoken" value="csrf-test">
+            <table id="librenms-interface-table" data-draft-id="draft-1" data-draft-revision="{revision}"
                    data-selection-url="{SELECTION_URL}" data-choice-url="{CHOICE_URL}"><tbody>{rows}</tbody></table>
             {dialog}</div>"""
     )
@@ -535,6 +535,65 @@ def test_a_vlan_dialog_answer_read_before_a_later_write_never_shows_and_the_dial
     _wait_for(page, lambda: server.dialogs)
     server.answer_dialog()
     expect(page.locator('select[name="group_100"]')).to_have_value("8")
+
+
+def test_a_tab_read_after_an_apply_to_all_save_keeps_the_open_vlan_dialog_and_its_newer_edits(page):
+    """Save with Apply to all asks for the whole tab; its read comes while the reopened dialog holds newer edits."""
+    dialogs, writes, held, reads = [], [], [], []
+    _serve_page_scripts(page)
+
+    def serve(route):
+        # The first request loads the page; the tab reads after it wait for the test.
+        if reads:
+            held.append(route)
+        reads.append(route.request.url)
+        if len(reads) == 1:
+            route.fulfill(
+                status=200, content_type="text/html", body=_vlan_dialog_page(["10"], before=_navigation_loader())
+            )
+
+    def write(route):
+        writes.append(_form_fields(route.request))
+        held.append(route)
+
+    page.route(f"{PAGE_URL}**", serve)
+    page.route(DIALOG_URL.format(key="10"), lambda route: dialogs.append(route))
+    page.route(f"{VLAN_PREVIEW_URL}**", lambda route: route.fulfill(status=204))
+    page.route(VLAN_GROUPS_URL, write)
+    page.goto(PAGE_URL)
+    page.wait_for_function("history.state && history.state.lnmsSync === true")
+
+    _open_vlan_dialog(page, "10")
+    _wait_for(page, lambda: dialogs)
+    dialogs.pop(0).fulfill(status=200, content_type="text/html", body=_vlan_dialog("7", apply_to_all=False))
+    page.select_option('select[name="group_100"]', "8")
+    page.check("#applyVlanGroupToAll")
+    page.click("#saveVlanGroups")
+    _wait_for(page, lambda: held)
+    _open_vlan_dialog(page, "10")
+    page.wait_for_timeout(200)
+    held.pop(0).fulfill(
+        status=204, headers={"X-Draft-Revision": "2", "HX-Trigger": json.dumps({"lnms-results-stale": True})}
+    )
+    _wait_for(page, lambda: dialogs and held)
+    dialogs.pop(0).fulfill(status=200, content_type="text/html", body=_vlan_dialog("8", apply_to_all=True))
+    page.select_option('select[name="group_100"]', "7")
+    page.uncheck("#applyVlanGroupToAll")
+    held.pop(0).fulfill(
+        status=200,
+        content_type="text/html",
+        body=_vlan_dialog_page(["10"], revision="2", before=_navigation_loader()),
+    )
+    page.wait_for_timeout(300)
+
+    expect(page.locator('select[name="group_100"]')).to_have_value("7")
+    expect(page.locator("#applyVlanGroupToAll")).not_to_be_checked()
+    page.click("#saveVlanGroups")
+    _wait_for(page, lambda: len(writes) == 2)
+    assert [(fields["group_100"], fields.get("apply_to_all"), fields["expected_revision"]) for fields in writes] == [
+        ("8", "1", "1"),
+        ("7", None, "2"),
+    ]
 
 
 VLAN_SELECTION_URL = "https://plugin.example.com/plugins/librenms_plugin/device/1/vlan-selection/?server_key=default"

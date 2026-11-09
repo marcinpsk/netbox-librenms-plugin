@@ -87,14 +87,12 @@ from netbox_librenms_plugin.utils import (
     synced_interface_names,
     validation_error_detail,
 )
-from netbox_librenms_plugin.tables.interfaces import interface_row_key
 from netbox_librenms_plugin.views.base.interfaces_view import (
     INTERFACE_TAB,
     InterfaceChoices,
     assess_stored_snapshot,
-    current_interface_rows,
     displayed_interface_row,
-    effective_intents,
+    draft_coverage,
     find_interface_draft,
     read_interface_assessment,
 )
@@ -244,6 +242,11 @@ _DUPLICATED_SELECTION_MESSAGE = (
 )
 
 
+def _uncovered_port_ids(intents):
+    """Return the port IDs of the draft rows that the user's approval does not cover, from ``effective_intents``."""
+    return {int(key) for key, intent in intents.items() if intent is Intent.OFF}
+
+
 def _duplicated_port_ids(ports_data):
     """Return the port IDs the snapshot holds more than once, or on both the host and the OOB side."""
     host_port_id_counts = {}
@@ -389,7 +392,9 @@ class SyncInterfacesView(
                 messages.error(request, ROW_CHANGED)
                 return self._tab_response(request, object_type, interface_name_field, server_key)
             choices = InterfaceChoices.of(draft.entries())
-            uncovered = set()
+            # The action approves its own row; every other row keeps the coverage of the draft, as in a bulk submit.
+            _records, intents = draft_coverage(request, obj, server_key, self._snapshot, draft.entries())
+            uncovered = _uncovered_port_ids(intents) - {int(key) for key in approved}
         else:
             draft = find_interface_draft(request, obj, server_key, self._snapshot)
             try:
@@ -532,9 +537,7 @@ class SyncInterfacesView(
                 excluded rows and of the refused selections.
 
         """
-        _view, table, rows = current_interface_rows(request, obj, server_key, self._snapshot, claim.entries)
-        records = {key: row for row in rows["table_rows"] or () if (key := interface_row_key(row)) is not None}
-        intents = effective_intents(obj, server_key, table, records, claim.entries)
+        records, intents = draft_coverage(request, obj, server_key, self._snapshot, claim.entries)
         approved = {key: claim.entries[key].evidence for key, intent in intents.items() if intent is Intent.ON}
         changed = [
             str((records.get(key) or {}).get(self.interface_name_field) or key)
@@ -543,7 +546,7 @@ class SyncInterfacesView(
         ]
         if changed:
             messages.warning(request, CHANGED_ROWS.format(", ".join(changed)))
-        return approved, {int(key) for key, intent in intents.items() if intent is Intent.OFF}
+        return approved, _uncovered_port_ids(intents)
 
     def _sync_attempt(
         self,
