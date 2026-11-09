@@ -259,8 +259,10 @@ VLAN_GROUPS_URL = (
 VLAN_PREVIEW_URL = "https://plugin.example.com/plugins/librenms_plugin/device/1/interface-row/10/vlan-groups/"
 
 
-def _vlan_dialog(group_id, *, apply_to_all, css="text-success", missing=False, row_key="10"):
-    """Return the VLAN groups dialog of row *row_key* with VLAN 100 in group *group_id*, as the server renders it."""
+def _vlan_dialog(
+    group_id, *, apply_to_all, css="text-success", missing=False, row_key="10", draft_id="draft-1", revision="1"
+):
+    """Return the VLAN groups dialog of row *row_key* with VLAN 100 in group *group_id*, read at draft *revision*."""
     from django.template import Context, Engine
 
     engine = Engine(dirs=[str(TEMPLATE_DIR.parent)])
@@ -277,6 +279,8 @@ def _vlan_dialog(group_id, *, apply_to_all, css="text-success", missing=False, r
                 "command_url": VLAN_GROUPS_URL,
                 "preview_url": VLAN_PREVIEW_URL,
                 "apply_to_all": apply_to_all,
+                "draft_id": draft_id,
+                "draft_revision": revision,
             },
             use_l10n=False,
         )
@@ -402,7 +406,7 @@ def _vlan_edit_button(url):
     return markup.format(url)
 
 
-def _vlan_dialog_page(keys, *, revision="1", before=""):
+def _vlan_dialog_page(keys, *, draft_id="draft-1", revision="1", before=""):
     """Return a sync page whose interface rows *keys* open the VLAN groups dialog, as the tab renders them."""
     template = (TEMPLATE_DIR / "_interface_sync_content.html").read_text(encoding="utf-8")
     dialog = re.search(r"<!-- VLAN groups dialog.*?-->(.*?)\{% else %\}", template, flags=re.S).group(1)
@@ -415,7 +419,7 @@ def _vlan_dialog_page(keys, *, revision="1", before=""):
     )
     return _sync_document(
         f"""{before}<div id="librenms-sync-tabs"><input type="hidden" name="csrfmiddlewaretoken" value="csrf-test">
-            <table id="librenms-interface-table" data-draft-id="draft-1" data-draft-revision="{revision}"
+            <table id="librenms-interface-table" data-draft-id="{draft_id}" data-draft-revision="{revision}"
                    data-selection-url="{SELECTION_URL}" data-choice-url="{CHOICE_URL}"><tbody>{rows}</tbody></table>
             {dialog}</div>"""
     )
@@ -463,12 +467,12 @@ class _VlanDialogServer:
     """Serve the VLAN dialog page; hold each dialog read with the group the draft has when it comes, and each write."""
 
     def __init__(self, page):
-        self.group = "7"
+        self.group, self.revision = "7", "1"
         self.dialogs, self.writes, self.held = [], [], []
         _serve_page_scripts(page)
         body = _vlan_dialog_page(["10"])
         page.route(f"{PAGE_URL}**", lambda route: route.fulfill(status=200, content_type="text/html", body=body))
-        page.route(DIALOG_URL.format(key="10"), lambda route: self.dialogs.append((route, self.group)))
+        page.route(DIALOG_URL.format(key="10"), lambda route: self.dialogs.append((route, self.group, self.revision)))
         page.route(f"{VLAN_PREVIEW_URL}**", lambda route: route.fulfill(status=204))
         page.route(VLAN_GROUPS_URL, self._write)
         page.route(SELECTION_URL, self._write)
@@ -481,14 +485,15 @@ class _VlanDialogServer:
 
     def acknowledge(self, group, revision):
         """Answer the held write: the draft now holds *group*, and the row is stale."""
-        self.group = group
+        self.group, self.revision = group, revision
         stale = json.dumps({"lnms-row-stale": {"key": "10"}})
         self.held.pop(0).fulfill(status=204, headers={"X-Draft-Revision": revision, "HX-Trigger": stale})
 
     def answer_dialog(self):
         """Answer the oldest held dialog read with the group that the draft had when the read came."""
-        route, group = self.dialogs.pop(0)
-        route.fulfill(status=200, content_type="text/html", body=_vlan_dialog(group, apply_to_all=False))
+        route, group, revision = self.dialogs.pop(0)
+        body = _vlan_dialog(group, apply_to_all=False, revision=revision)
+        route.fulfill(status=200, content_type="text/html", body=body)
 
 
 def test_a_vlan_dialog_opened_again_during_its_save_shows_the_saved_group(page):
@@ -576,7 +581,9 @@ def test_a_tab_read_after_an_apply_to_all_save_keeps_the_open_vlan_dialog_and_it
         status=204, headers={"X-Draft-Revision": "2", "HX-Trigger": json.dumps({"lnms-results-stale": True})}
     )
     _wait_for(page, lambda: dialogs and held)
-    dialogs.pop(0).fulfill(status=200, content_type="text/html", body=_vlan_dialog("8", apply_to_all=True))
+    dialogs.pop(0).fulfill(
+        status=200, content_type="text/html", body=_vlan_dialog("8", apply_to_all=True, revision="2")
+    )
     page.select_option('select[name="group_100"]', "7")
     page.uncheck("#applyVlanGroupToAll")
     held.pop(0).fulfill(
@@ -594,6 +601,95 @@ def test_a_tab_read_after_an_apply_to_all_save_keeps_the_open_vlan_dialog_and_it
         ("8", "1", "1"),
         ("7", None, "2"),
     ]
+
+
+class _TabServer:
+    """Serve the sync page with the navigation loader: the first request loads it, each later tab read waits."""
+
+    def __init__(self, page, keys):
+        self.keys, self.dialogs, self.writes, self.held, self.reads = keys, {}, [], [], []
+        _serve_page_scripts(page)
+        page.route(f"{PAGE_URL}**", self._page)
+        page.route("**/vlan-dialog/", lambda route: self.dialogs.setdefault(route.request.url.split("/")[-3], route))
+        page.route(f"{VLAN_PREVIEW_URL}**", lambda route: route.fulfill(status=204))
+        page.route(VLAN_GROUPS_URL, self._write)
+        page.goto(PAGE_URL)
+        page.wait_for_function("history.state && history.state.lnmsSync === true")
+
+    def _page(self, route):
+        if not self.reads:
+            route.fulfill(status=200, content_type="text/html", body=self.page_body())
+        else:
+            self.held.append(route)
+        self.reads.append(route.request.url)
+
+    def _write(self, route):
+        self.writes.append(_form_fields(route.request))
+        self.held.append(route)
+
+    def page_body(self, **draft):
+        """Return the sync page as the server renders it, with the draft ID and revision *draft* names."""
+        return _vlan_dialog_page(self.keys, before=_navigation_loader(), **draft)
+
+
+def test_an_answer_of_an_earlier_vlan_dialog_opening_never_replaces_a_later_one_across_a_tab_read(page):
+    """Opening A is held across the tab read that Apply to all asks for; B opens and shows, then A comes last."""
+    server = _TabServer(page, ["10", "11"])
+    _open_vlan_dialog(page, "10")
+    _wait_for(page, lambda: "10" in server.dialogs)
+    server.dialogs.pop("10").fulfill(status=200, content_type="text/html", body=_vlan_dialog("7", apply_to_all=False))
+    page.select_option('select[name="group_100"]', "8")
+    page.check("#applyVlanGroupToAll")
+    page.click("#saveVlanGroups")
+    _wait_for(page, lambda: server.held)
+    _open_vlan_dialog(page, "10")
+    page.wait_for_timeout(200)
+    server.held.pop(0).fulfill(
+        status=204, headers={"X-Draft-Revision": "2", "HX-Trigger": json.dumps({"lnms-results-stale": None})}
+    )
+    _wait_for(page, lambda: "10" in server.dialogs and server.held)
+    server.held.pop(0).fulfill(status=200, content_type="text/html", body=server.page_body(revision="2"))
+    expect(page.locator("#librenms-interface-table")).to_have_attribute("data-draft-revision", "2")
+
+    _open_vlan_dialog(page, "11")
+    _wait_for(page, lambda: "11" in server.dialogs)
+    server.dialogs.pop("11").fulfill(
+        status=200, content_type="text/html", body=_vlan_dialog("8", apply_to_all=False, row_key="11", revision="2")
+    )
+    server.dialogs.pop("10").fulfill(
+        status=200, content_type="text/html", body=_vlan_dialog("8", apply_to_all=True, revision="2")
+    )
+    page.wait_for_timeout(300)
+
+    expect(page.locator('#vlanDetailModalContent input[name="row"]')).to_have_value("11")
+    expect(page.locator("#applyVlanGroupToAll")).not_to_be_checked()
+
+
+@pytest.mark.parametrize(
+    ("draft_id", "revision"),
+    [("draft-1", "5"), ("draft-2", "1")],
+    ids=["another-window-changed-the-draft", "a-refresh-replaced-the-draft"],
+)
+def test_an_open_vlan_dialog_saves_with_the_draft_it_read_after_the_tab_adopts_another(page, draft_id, revision):
+    """The tab takes a newer draft or revision while the dialog stays open; Save names the dialog's own draft."""
+    server = _TabServer(page, ["10"])
+    _open_vlan_dialog(page, "10")
+    _wait_for(page, lambda: "10" in server.dialogs)
+    server.dialogs.pop("10").fulfill(status=200, content_type="text/html", body=_vlan_dialog("7", apply_to_all=False))
+
+    page.evaluate("() => window.librenmsSyncDraft.navigate(window.location.href, 'replace')")
+    _wait_for(page, lambda: server.held)
+    server.held.pop(0).fulfill(
+        status=200, content_type="text/html", body=server.page_body(draft_id=draft_id, revision=revision)
+    )
+    expect(page.locator("#librenms-interface-table")).to_have_attribute("data-draft-revision", revision)
+    page.select_option('select[name="group_100"]', "8")
+    page.click("#saveVlanGroups")
+    _wait_for(page, lambda: server.writes)
+
+    assert [(fields["draft_id"], fields["expected_revision"]) for fields in server.writes] == [("draft-1", "1")]
+    server.held.pop(0).fulfill(status=409)
+    expect(page.locator("#librenms-draft-notice")).to_be_visible()
 
 
 VLAN_SELECTION_URL = "https://plugin.example.com/plugins/librenms_plugin/device/1/vlan-selection/?server_key=default"
