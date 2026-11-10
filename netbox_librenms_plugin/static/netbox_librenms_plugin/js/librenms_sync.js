@@ -2587,13 +2587,12 @@ document.addEventListener('htmx:configRequest', function (e) {
     if (!tables.length) return;
     // A row whose choice is being reassessed has no current token, so the submit waits for its answer.
     if (hasPendingIntent(form)) {
-        e.preventDefault();
+        cancelSyncSubmit(form, e);
         return;
     }
     const singleName = SINGLE_ROW_SUBMITTERS.find((name) => e.detail.parameters.has(name));
     if (!singleName && hasPendingOffPageIntent(tables)) {
-        e.preventDefault();
-        showErrorToast(PENDING_OFF_PAGE_MESSAGE);
+        cancelSyncSubmit(form, e, PENDING_OFF_PAGE_MESSAGE);
         return;
     }
     e.detail.parameters.delete(INTENT_FIELD);
@@ -2619,6 +2618,29 @@ document.addEventListener('submit', function (e) {
         injectOffPageSelections(e.target);
     }
 });
+
+/**
+ * Cancel a sync submit before it sends anything, and give the form its submit buttons back.
+ *
+ * The submit listener of the form starts its spinner, before or after this cancel, so the cancel takes
+ * the failure path of a failed request once the submit event is done. It consumed no stored rows, so
+ * the failure path gives none back.
+ *
+ * @param {HTMLFormElement} form - The submitted form.
+ * @param {Event} e - The submit or htmx:configRequest event.
+ * @param {string} [message] - The reason to show the user.
+ * @returns {void}
+ */
+function cancelSyncSubmit(form, e, message) {
+    e.preventDefault();
+    consumedOffPageSelections.set(form, {});
+    window.setTimeout(function () {
+        form.dispatchEvent(new CustomEvent('librenmsRequestFailed', {bubbles: true, detail: {elt: form}}));
+        // The failure path enables the buttons, so a row that still waits locks them again.
+        _syncIntentSubmitLock(form);
+    });
+    if (message) showErrorToast(message);
+}
 
 /**
  * Return the selectable tables inside a form.
@@ -2663,13 +2685,12 @@ function injectRowIntents(e) {
     const tables = _selectableTablesIn(form);
     if (!tables.length) return true;
     if (hasPendingIntent(form)) {
-        e.preventDefault();
+        cancelSyncSubmit(form, e);
         return false;
     }
     const single = SINGLE_ROW_SUBMITTERS.includes(e.submitter?.name) ? e.submitter : null;
     if (!single && hasPendingOffPageIntent(tables)) {
-        e.preventDefault();
-        showErrorToast(PENDING_OFF_PAGE_MESSAGE);
+        cancelSyncSubmit(form, e, PENDING_OFF_PAGE_MESSAGE);
         return false;
     }
     form.querySelectorAll('input[data-row-intent]').forEach((input) => input.remove());
