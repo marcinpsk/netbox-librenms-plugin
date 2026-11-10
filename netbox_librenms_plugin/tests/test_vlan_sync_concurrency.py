@@ -245,6 +245,7 @@ def _wait_until_blocked(pid, future, seconds=5):
         ("rule", "effects.name"),
         ("source", "effects.name"),
         ("expire", "source.available"),
+        ("device_type", "effects.name"),
     ],
 )
 def test_a_target_change_committed_while_the_writer_waits_for_its_lock_is_stale(change, path):
@@ -264,6 +265,18 @@ def test_a_target_change_committed_while_the_writer_waits_for_its_lock_is_stale(
 
     user = _grouped_vlan_user(f"vlan-lock-race-{change}-user")
     _seed_grouped_vid(device, 61, "librenms-name")
+    if change == "device_type":
+        # Another manufacturer's rule renames the source name; the device moves to that manufacturer's type.
+        from dcim.models import DeviceType, Manufacturer
+
+        ruled = Manufacturer.objects.create(name="Lock-Race-Ruled", slug="lock-race-ruled")
+        ruled_type = DeviceType.objects.create(manufacturer=ruled, model="Lock-Race-Ruled", slug="lock-race-ruled")
+        NormalizationRule.objects.create(
+            scope=NormalizationRule.SCOPE_VLAN_NAME,
+            manufacturer=ruled,
+            match_pattern=r"^librenms-name$",
+            replacement="ruled-by-type",
+        )
     token = assessed_tokens(device, user, choices={61: group.pk})[61]
     backend_pids = Queue()
 
@@ -297,8 +310,10 @@ def test_a_target_change_committed_while_the_writer_waits_for_its_lock_is_stale(
                 )
             elif change == "source":
                 _seed_grouped_vid(device, 61, "refreshed-name")
-            else:
+            elif change == "expire":
                 source_cache.delete(device, Resource.VLANS, "default")
+            else:
+                type(device).objects.filter(pk=device.pk).update(device_type=ruled_type)
         recorded = syncing.result(timeout=20)
 
     joined = " || ".join(text for _level, text in recorded)
@@ -313,6 +328,7 @@ def test_a_target_change_committed_while_the_writer_waits_for_its_lock_is_stale(
             "rule": ["old-name"],
             "source": ["old-name"],
             "expire": ["old-name"],
+            "device_type": ["old-name"],
         }[change]
     )
 
