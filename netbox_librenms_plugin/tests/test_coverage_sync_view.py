@@ -299,7 +299,7 @@ class TestSyncPageRouting:
 
     def test_bare_integer_mapping_is_marked_as_legacy(self, logged_in_client, settings, librenms_server):
         _configure_servers(settings, librenms_server, SERVER_KEY)
-        device = make_device("sync-legacy", serial="LEGACY-SERIAL", librenms_cf=6611)
+        device = seed_stored_mapping(make_device("sync-legacy", serial="LEGACY-SERIAL"), 6611, save=True)
         _register_device(librenms_server, 6611, device.name, serial=device.serial)
 
         response = logged_in_client.get(_sync_url(device))
@@ -405,9 +405,10 @@ class TestServerMappingContext:
         assert mappings[0]["is_oob_only"] is True
 
     def test_invalid_mapping_entries_are_omitted(self, librenms_server):
-        device = make_device(
-            "mapping-invalid-entries",
-            librenms_cf={SERVER_KEY: True, SECONDARY_KEY: "not-an-id", "retired": None},
+        device = seed_stored_mapping(
+            make_device("mapping-invalid-entries"),
+            {SERVER_KEY: True, SECONDARY_KEY: "not-an-id", "retired": None},
+            save=True,
         )
 
         assert self._mappings(device) is None

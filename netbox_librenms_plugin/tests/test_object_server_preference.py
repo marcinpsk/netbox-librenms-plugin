@@ -25,6 +25,7 @@ from netbox_librenms_plugin.tests.mapping_fixtures import (
     seed_malformed_preference,
     seed_mapping,
     seed_mapping_row,
+    seed_stored_mapping,
 )
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 from netbox_librenms_plugin.tests.view_test_helpers import assert_titled_icons_are_named, grant, make_user_with_perms
@@ -130,7 +131,7 @@ def test_preference_post_records_the_mapping_change_with_its_before_state(client
     from django.contrib.contenttypes.models import ContentType
 
     mapping = {"primary": {"id": 13511}, "secondary": {"id": 13512}}
-    device = make_device("set-object-preference-log", librenms_cf=mapping)
+    device = seed_stored_mapping(make_device("set-object-preference-log"), mapping, save=True)
     old_last_updated = Device.objects.values_list("last_updated", flat=True).get(pk=device.pk)
     client.force_login(make_superuser("object-preference-log-writer"))
 

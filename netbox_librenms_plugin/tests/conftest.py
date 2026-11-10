@@ -16,7 +16,7 @@ import pytest
 import requests
 
 from netbox_librenms_plugin.server_mappings import read_mapping
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.parallel import isolated_test_database_name
 
 _TEST_DATABASE_BASE_NAME = os.environ["TEST_DB_NAME"]
@@ -550,15 +550,12 @@ def _shared_infra():
     return site, mfr, dtype, role
 
 
-def make_device(name, *, serial="", librenms_cf=None):
-    """Create a real Device on the shared infra, optionally seeding the raw stored mapping *librenms_cf*."""
+def make_device(name, *, serial=""):
+    """Create a real Device on the shared infra."""
     from dcim.models import Device
 
     site, _mfr, dtype, role = _shared_infra()
-    dev = Device.objects.create(name=name, device_type=dtype, role=role, site=site, status="active", serial=serial)
-    if librenms_cf is not None:
-        seed_stored_mapping(dev, librenms_cf, save=True)
-    return dev
+    return Device.objects.create(name=name, device_type=dtype, role=role, site=site, status="active", serial=serial)
 
 
 def make_virtual_chassis_members(tag, count=2):
@@ -888,14 +885,9 @@ def bind_librenms_server(settings, server, *, server_key):
     return LibreNMSAPI(server_key=server_key)
 
 
-def map_device_to_librenms(device, librenms_id=None, *, server_key, oob=None):
-    """Persist the device's LibreNMS mapping, optionally with an OOB controller sub-entry."""
-    entry = {}
-    if librenms_id is not None:
-        entry["id"] = librenms_id
-    if oob is not None:
-        entry["oob"] = oob
-    return seed_stored_mapping(device, {server_key: entry}, save=True)
+def map_device_to_librenms(device, librenms_id, *, server_key):
+    """Map *device* to its own *librenms_id* on *server_key* and save it; return *device*."""
+    return seed_mapping(device, server_key, own=librenms_id)
 
 
 @pytest.fixture

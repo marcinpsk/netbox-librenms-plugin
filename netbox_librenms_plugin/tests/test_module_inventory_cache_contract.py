@@ -11,7 +11,7 @@ from netbox_librenms_plugin.acquisition.snapshot import SourceSnapshot
 from netbox_librenms_plugin.tests.source_snapshot_helpers import module_inventory, seed_modules_snapshot
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, stored_mapping_for_test
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view, message_texts
 from netbox_librenms_plugin.tests.view_test_helpers import post as _post
 
@@ -360,7 +360,7 @@ class TestTrustedPayloadMatchesTheDeviceMapping:
         from netbox_librenms_plugin.tests.conftest import make_device
 
         if case == "legacy-bare-integer":
-            device = make_device(f"trusted-payload-{case}", librenms_cf=librenms_cf)
+            device = seed_stored_mapping(make_device(f"trusted-payload-{case}"), librenms_cf, save=True)
         else:
             device = seed_mapping(make_device(f"trusted-payload-{case}"), own=3)
 

@@ -10,7 +10,12 @@ from copy import deepcopy
 import pytest
 
 from netbox_librenms_plugin.serial_identity import SerialRules
-from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary, seed_mapping, stored_mapping_for_test
+from netbox_librenms_plugin.tests.mapping_fixtures import (
+    mapping_summary,
+    seed_mapping,
+    seed_stored_mapping,
+    stored_mapping_for_test,
+)
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
 
@@ -1121,7 +1126,7 @@ class TestLegacyLibreNMSIdMigration:
         from netbox_librenms_plugin.tests.conftest import make_device
 
         if legacy:
-            existing = make_device("legacy-device", serial=serial, librenms_cf=42)
+            existing = seed_stored_mapping(make_device("legacy-device", serial=serial), 42, save=True)
         else:
             existing = seed_mapping(make_device("legacy-device", serial=serial), own=42)
 
@@ -1150,7 +1155,7 @@ class TestLegacyLibreNMSIdMigration:
         from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        device = make_device("legacy-shape-device", librenms_cf=stored_value)
+        device = seed_stored_mapping(make_device("legacy-shape-device"), stored_value, save=True)
         change = convert_legacy(device, "primary")
 
         assert change.changed is expected_changed
@@ -1160,7 +1165,7 @@ class TestLegacyLibreNMSIdMigration:
         from netbox_librenms_plugin.server_mappings import convert_legacy
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        device = make_device("legacy-gate-device", librenms_cf=" 42 ")
+        device = seed_stored_mapping(make_device("legacy-gate-device"), " 42 ", save=True)
         change = convert_legacy(device, "primary")
 
         assert change.before.legacy.is_legacy is True
@@ -1837,7 +1842,7 @@ class TestBuildIdServerInfo:
         from netbox_librenms_plugin.tests.conftest import make_device
 
         # Storage shape: a legacy bare value or an empty container.
-        return make_device("build-id-server-info", librenms_cf=stored)
+        return seed_stored_mapping(make_device("build-id-server-info"), stored, save=True)
 
     def test_returns_none_for_legacy_int(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
