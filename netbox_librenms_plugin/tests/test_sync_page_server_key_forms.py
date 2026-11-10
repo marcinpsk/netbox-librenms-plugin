@@ -381,7 +381,8 @@ class TestUpdateDeviceLocationRebindsServer:
 
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
-        device = make_device("loc-rebind", librenms_cf={"default": 41, "secondary": 42})
+        device = seed_mapping(make_device("loc-rebind"), "default", own=41, save=False)
+        seed_mapping(device, "secondary", own=42)
         writes = []
 
         def record_write(**request):

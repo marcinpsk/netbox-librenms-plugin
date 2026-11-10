@@ -306,7 +306,7 @@ class TestUpdateDeviceLocationView:
 
     def test_unlinked_device_does_not_patch_a_missing_id(self, client, librenms_server):
         """An unlinked device must stop before the LibreNMS update request."""
-        device = make_device("location-update-unlinked", librenms_cf={SERVER_KEY: None})
+        device = make_device("location-update-unlinked")
         client.force_login(make_superuser("location-update-unlinked-writer"))
 
         response = client.post(
