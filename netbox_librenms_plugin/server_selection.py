@@ -265,6 +265,7 @@ def chassis_sync_devices(devices, server_key: str | None = None) -> dict:
 
 def _select_sync_member(master_id, all_members, server_key):  # noqa: C901
     """Choose the sync member from the prefetched *all_members* of one chassis."""
+    # nosemgrep: mapping-read-loop-needs-prefetch  # noqa: ERA001  # each caller prefetches all_members
     mappings = [(member, read_mapping(member)) for member in all_members]
 
     if server_key is not None:
