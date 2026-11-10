@@ -375,8 +375,9 @@ in `_map_os_platform`. The creator must also recover uniqueness errors from
 
 `inventory-fallback-normalizes-indices` covers the direct `str(row.get(field)) == str(value)`
 comparison and its reverse inside `effective_inventory`. It allows numeric index comparison
-and exact physical class comparison. Comparisons through aliases, other functions, and literal
-field names are outside this narrow check.
+and exact physical class comparison. It also covers the literal field `entPhysicalContainedIn`.
+Comparisons through aliases, other functions, and other literal field names are outside this
+narrow check.
 
 `capture-requires-source-identities` rejects direct comparisons between `record.request.path`
 and `blocker.path` in capture, in either order. Capture validates mapping states and response
