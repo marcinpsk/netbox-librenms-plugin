@@ -24,6 +24,7 @@ PACKAGE = Path(__file__).resolve().parents[1]
 SCANNED = ("views/base", "views/object_sync", "views/sync", "tables", "assessment")
 # (file, function): writers that lock or re-check every member under the chassis lock.
 LOCKED_MEMBER_READS = {
+    ("views/sync/cables.py", "_lock_remote_chassis"),
     ("views/sync/interfaces.py", "_lock_selected_device_targets"),
     ("views/sync/interfaces.py", "_lock_relationship_scope"),
     ("views/sync/ip_addresses.py", "_lock_interface_owner_scope"),
