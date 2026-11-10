@@ -30,7 +30,10 @@ def _page(rows):
         <input type="hidden" name="csrfmiddlewaretoken" value="vlan-csrf-token">
         <div id="django-messages"></div>
         <div id="librenms-sync-tabs" data-server-key="default"></div>
-        <button id="toolbar-sync" type="submit" form="vlan-sync-form">Sync Selected VLANs</button>
+        <button id="toolbar-sync" type="submit" form="vlan-sync-form" class="btn btn-primary">
+            <span class="spinner spinner-border d-none" id="sync-spinner"></span>
+            <span>Sync Selected VLANs</span>
+        </button>
         <div id="tab-content">
           <form id="vlan-sync-form" method="post" action="{SYNC_URL}" hx-post="{SYNC_URL}" hx-target="#tab-content">
             <input type="hidden" name="server_key" value="default">
@@ -43,8 +46,13 @@ def _load(page, rows):
     html = _page(rows)
     page.route(PAGE_URL, lambda route: route.fulfill(status=200, content_type="text/html", body=html))
     page.goto(PAGE_URL)
+    _init(page)
+
+
+def _init(page):
+    """Load the scripts and run the initializers that the VLAN tab runs: the group selects and the spinners."""
     _add_page_scripts(page)
-    page.evaluate("initializeVlanSyncGroupSelects()")
+    page.evaluate("initializeVlanSyncGroupSelects(); initializeSyncFormSpinners()")
 
 
 def _token(page, vid):
@@ -126,6 +134,8 @@ def test_a_submit_while_a_row_waits_for_its_answer_sends_nothing(page):
     page.wait_for_timeout(200)
 
     assert sent == []
+    # The cancel gives the buttons back only when no row on the page still waits.
+    assert page.locator("#toolbar-sync").is_disabled()
 
 
 def test_a_bulk_submit_posts_the_tokens_of_the_checked_rows_and_of_the_rows_on_other_pages(page):
@@ -326,3 +336,45 @@ def test_a_failed_reassessment_after_a_back_forward_restore_still_rolls_back(pag
 
     assert _token(page, 501) == "vlan:rendered-501"
     assert not page.locator("#toolbar-sync").is_disabled()
+
+
+def test_a_bulk_submit_refused_for_a_pending_row_elsewhere_gives_the_button_back(page):
+    pages = {"1": _page([_row(501)]), "2": _page([_row(502)])}
+    page.route(
+        f"{PAGE_URL}**",
+        lambda route: route.fulfill(
+            status=200, content_type="text/html", body=pages[route.request.url.rsplit("=", 1)[-1]]
+        ),
+    )
+    page.route(VERIFY_ROUTE, lambda route: None)
+    bodies = []
+
+    def answer_sync(route):
+        bodies.append(route.request.post_data)
+        route.fulfill(status=200, content_type="text/html", body='<span id="swapped">Synced</span>')
+
+    page.route(SYNC_URL, answer_sync)
+    page.goto(f"{PAGE_URL}?page=1")
+    _init(page)
+    page.check('tr[data-vlan-id="501"] input[name="select"]')
+    page.locator(".vlan-sync-group-select").select_option("2")
+    page.goto(f"{PAGE_URL}?page=2")
+    _init(page)
+    page.evaluate("restoreTableSelection(document.getElementById('librenms-vlan-table'))")
+    toolbar = page.locator("#toolbar-sync")
+
+    toolbar.click()
+    page.locator(".toast").first.wait_for()
+    page.wait_for_function("!document.getElementById('toolbar-sync').disabled")
+
+    assert bodies == []
+    assert "d-none" in page.locator("#sync-spinner").get_attribute("class").split()
+
+    page.locator("#librenms-vlan-table-offpage-selection button").click()
+    page.check('tr[data-vlan-id="502"] input[name="select"]')
+    toolbar.click()
+    page.locator("#swapped").wait_for()
+
+    assert [value for key, value in _selection_form_pairs(bodies[0]) if key == "confirmation_intent"] == [
+        "vlan:rendered-502"
+    ]
