@@ -15,6 +15,7 @@ import pytest
 from django.core.cache import cache
 
 from netbox_librenms_plugin.tests.conftest import delete_keeping_pk, make_device, make_superuser
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 pytestmark = pytest.mark.django_db
 
@@ -480,7 +481,7 @@ class TestProcessDeviceFiltersJobControl:
         )
         assert [item["device_id"] for item in first] == [351]
 
-        make_device("cache-hit-excluded", librenms_cf={"default": 351})
+        seed_mapping(make_device("cache-hit-excluded"), "default", own=351)
 
         second = process_device_filters(
             live_librenms.api,

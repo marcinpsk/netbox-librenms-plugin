@@ -893,6 +893,7 @@ def test_timos_refresh_and_sync_put_each_ip_interface_under_its_port(client, set
     from netbox_librenms_plugin.models import PortStackLagPattern
     from netbox_librenms_plugin.tests.conftest import bind_librenms_server, make_device
     from netbox_librenms_plugin.tests.interface_sync_post_helpers import SERVER_KEY, post_interface_sync
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from netbox_librenms_plugin.tests.recordings import load_recording
     from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
 
@@ -907,7 +908,7 @@ def test_timos_refresh_and_sync_put_each_ip_interface_under_its_port(client, set
             "sap_name_pattern": recording["sap_patterns"][device_os],
         },
     )
-    device = make_device("timos-ip-interfaces", librenms_cf={SERVER_KEY: {"id": recording["device_id"]}})
+    device = seed_mapping(make_device("timos-ip-interfaces"), SERVER_KEY, own=recording["device_id"])
     client.force_login(make_superuser("timos-ip-interfaces-user"))
     refresh_url = reverse("plugins:netbox_librenms_plugin:device_interface_sync", kwargs={"pk": device.pk})
     assert client.post(refresh_url, {"server_key": SERVER_KEY, "interface_name_field": "ifName"}).status_code == 200

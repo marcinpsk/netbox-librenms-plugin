@@ -23,7 +23,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_vm,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, post as view_post
 
 pytestmark = pytest.mark.django_db
@@ -83,7 +83,7 @@ class TestLibreNMSIdentityQueries:
     def test_invalid_identity_matches_no_device(self, invalid):
         from dcim.models import Device
 
-        make_device("id-invalid", librenms_cf={"default": {"id": 42, "oob": {"id": 99}}})
+        seed_mapping(make_device("id-invalid"), "default", own=42, oob=99)
 
         assert not Device.objects.filter(
             identity_q(Device, server="default", identities=(invalid,), roles=(MappingRole.OWN, MappingRole.OOB))
@@ -102,7 +102,7 @@ class TestLibreNMSIdentityQueries:
     def test_supported_storage_shapes_resolve_the_real_device(self, mapping, server_key, value):
         from dcim.models import Device
 
-        expected = make_device("id-shape", librenms_cf=mapping)
+        expected = seed_stored_mapping(make_device("id-shape"), mapping, save=True)
         predicate = identity_q(Device, server=server_key, identities=(value,), roles=(MappingRole.OWN, MappingRole.OOB))
 
         assert Device.objects.get(predicate) == expected
@@ -110,8 +110,8 @@ class TestLibreNMSIdentityQueries:
     def test_remote_identity_excludes_an_oob_reference(self):
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
 
-        expected = make_device("remote-owner", librenms_cf={"default": {"id": 71}})
-        make_device("remote-oob-reference", librenms_cf={"default": {"oob": {"id": 71}}})
+        expected = seed_mapping(make_device("remote-owner"), "default", own=71)
+        seed_mapping(make_device("remote-oob-reference"), "default", oob=71)
 
         device, found, error = BaseCableTableView().get_device_by_id_or_name(
             71,

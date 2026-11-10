@@ -5,6 +5,7 @@ from django.core.exceptions import ValidationError
 from django.urls import reverse
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.vlan_intent_helpers import reassess, row_tokens, sync
 
 LIBRENMS_ID = 4242
@@ -31,7 +32,7 @@ def _device(name, manufacturer_name):
     from django.utils.text import slugify
 
     manufacturer, _ = Manufacturer.objects.get_or_create(name=manufacturer_name, slug=slugify(manufacturer_name))
-    device = make_device(name, librenms_cf={"default": {"id": LIBRENMS_ID}})
+    device = seed_mapping(make_device(name), "default", own=LIBRENMS_ID)
     device.device_type = DeviceType.objects.create(
         manufacturer=manufacturer, model=f"{name}-model", slug=slugify(f"{name}-model")
     )

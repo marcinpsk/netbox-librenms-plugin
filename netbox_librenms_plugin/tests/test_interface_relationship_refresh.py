@@ -5,6 +5,7 @@ import pytest
 from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.models import PortStackLagPattern
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import interface_rows
 
 from netbox_librenms_plugin.tests.view_test_helpers import make_request
@@ -29,7 +30,7 @@ def _refresh(live_librenms, name, ports, *, device_os, port_stack):
         server.register(PORT_STACK_PATH, {"status": "error", "message": "unavailable"}, status=500)
     else:
         server.register(PORT_STACK_PATH, {"status": "ok", "mappings": port_stack})
-    device = make_device(name, librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
+    device = seed_mapping(make_device(name), SERVER_KEY, own=DEVICE_ID)
     return device, source_cache.refresh(make_request(), device, Resource.INTERFACES, SERVER_KEY)
 
 

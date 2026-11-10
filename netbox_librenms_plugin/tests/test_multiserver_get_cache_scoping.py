@@ -1,9 +1,8 @@
 """Real multi-server cache-scoping tests for sync-tab GET renders."""
 
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
-
 import pytest
 
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import link_row, port_row, seed_cables_snapshot
 
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_modules_snapshot
@@ -108,7 +107,8 @@ class TestConfiguredServerCacheScoping:
         from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot
         from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
 
-        device = make_device("multiserver-ip", librenms_cf={"default": 31, "production": 13})
+        device = seed_mapping(make_device("multiserver-ip"), "default", own=31)
+        seed_mapping(device, "production", own=13)
         interface = make_interface(device, "Ethernet3")
         make_ip("198.18.30.1/24", assigned_object=interface)
         port = {"port_id": 13, "ifName": interface.name, "ifDescr": interface.name}
@@ -127,7 +127,7 @@ class TestConfiguredServerCacheScoping:
 
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
-        device = make_device("multiserver-module", librenms_cf={"production": 14})
+        device = seed_mapping(make_device("multiserver-module"), "production", own=14)
         view = DeviceModuleTableView()
         request = _request("production")
         seed_modules_snapshot(device, [], server_key="production")
@@ -207,7 +207,7 @@ class TestRemovedServerFailsClosed:
         from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_ip_snapshot, seed_source_snapshot
 
         view_class = import_string(view_path)
-        device = make_device(f"removed-{data_type}", librenms_cf={"removed": 22})
+        device = seed_mapping(make_device(f"removed-{data_type}"), "removed", own=22)
         if data_type == "ports":
             make_interface(device, "Ethernet4")
         view = view_class()
@@ -230,10 +230,7 @@ class TestRemovedServerFailsClosed:
         from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
 
         winner = make_device("removed-ip-winner")
-        donor = make_device(
-            "removed-ip-donor",
-            librenms_cf={"removed": {"_migrated_to": {"device_id": winner.pk, "server_key": "removed"}}},
-        )
+        donor = seed_mapping(make_device("removed-ip-donor"), "removed", migrated_to=winner.pk)
         interface = make_interface(donor, "Ethernet5")
         address = make_ip("198.18.31.1/24", assigned_object=interface)
         view = DeviceIPAddressTableView()

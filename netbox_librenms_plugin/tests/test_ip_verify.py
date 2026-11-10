@@ -12,6 +12,7 @@ import json
 import pytest
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot
 
 
@@ -76,10 +77,10 @@ class TestVerifyPostServerCacheNamespace:
                 },
             }
         )
-        device = make_device(
-            f"ip-verify-namespace-{expected_port}-{include_server_key}",
-            librenms_cf={"default": 40, "production": 41},
+        device = seed_mapping(
+            make_device(f"ip-verify-namespace-{expected_port}-{include_server_key}"), "default", own=40
         )
+        seed_mapping(device, "production", own=41)
         address = "198.18.40.1"
         # The address is on two ports in each snapshot, so only the snapshot that holds the posted row id answers.
         for namespace, first_port in (("default", 10), ("production", 20)):
@@ -120,7 +121,7 @@ class TestVerifyPostRejectsMalformedVrfId:
     def _post(self, vrf_id):
         from ipam.models import IPAddress
 
-        device = make_device("vrfsk-dev", librenms_cf={"default": 50})
+        device = seed_mapping(make_device("vrfsk-dev"), "default", own=50)
         IPAddress.objects.get_or_create(address="10.0.0.1/24")  # make the vrf__id filter reachable
         seed_ip_snapshot(device, [])
 
@@ -160,7 +161,7 @@ class TestFindRowResolvesAssessedRows:
         from netbox_librenms_plugin.tests.conftest import make_interface
         from netbox_librenms_plugin.views.base.ip_addresses_view import read_ip_assessment
 
-        device = make_device("ip-verify-find-row", librenms_cf={"default": 60})
+        device = seed_mapping(make_device("ip-verify-find-row"), "default", own=60)
         vrf = VRF.objects.create(name="find-row-vrf")
         IPAddress.objects.create(address="10.0.0.1/32", vrf=vrf, assigned_object=make_interface(device, "eth5"))
         seed_ip_snapshot(

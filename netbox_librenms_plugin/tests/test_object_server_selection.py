@@ -17,6 +17,7 @@ from netbox_librenms_plugin.tests.conftest import (
     map_device_to_librenms,
 )
 from netbox_librenms_plugin.tests.import_server_helpers import selector_html
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_interfaces_snapshot
 
@@ -96,7 +97,7 @@ def test_single_non_default_mapping_redirects_before_query_and_then_uses_that_se
     if object_kind == "virtualmachine":
         obj = map_device_to_librenms(make_vm("one-mapped-vm"), 13402, server_key="secondary")
     else:
-        obj = make_device("one-mapped-server", librenms_cf={"secondary": {"id": 13401}})
+        obj = seed_mapping(make_device("one-mapped-server"), "secondary", own=13401)
     assert Device.objects.filter(name="one-mapped-server").exists() is (object_kind == "device")
     device_id = 13401 if object_kind == "device" else 13402
     observed = []
@@ -149,10 +150,8 @@ def test_virtual_chassis_member_uses_the_mapping_owners_server(client, servers):
 
 @pytest.mark.django_db
 def test_explicit_mapping_is_active_and_server_switch_keeps_only_the_tab(client, servers):
-    device = make_device(
-        "explicit-mapped-server",
-        librenms_cf={"primary": {"id": 13404}, "secondary": {"id": 13405}},
-    )
+    device = seed_mapping(make_device("explicit-mapped-server"), "primary", own=13404)
+    seed_mapping(device, "secondary", own=13405)
     _register_device(servers.secondary, 13405, device.name)
     client.force_login(make_superuser("object-server-explicit-user"))
     url = _sync_url(device)
@@ -179,7 +178,7 @@ def test_explicit_mapping_is_active_and_server_switch_keeps_only_the_tab(client,
 
 @pytest.mark.django_db
 def test_configured_but_unmapped_server_fails_closed_without_discovery(client, servers):
-    device = make_device("configured-unmapped-server", librenms_cf={"secondary": {"id": 13406}})
+    device = seed_mapping(make_device("configured-unmapped-server"), "secondary", own=13406)
     observed = []
     _register_device(servers.primary, 13406, device.name, observed)
     client.force_login(make_superuser("object-server-unmapped-user"))
@@ -197,13 +196,8 @@ def test_configured_but_unmapped_server_fails_closed_without_discovery(client, s
 @pytest.mark.django_db
 @pytest.mark.parametrize("stored_key", ["contains", "dc__west"])
 def test_malformed_stored_server_key_does_not_break_the_page(client, servers, stored_key):
-    device = make_device(
-        f"malformed-stored-{stored_key}",
-        librenms_cf={
-            stored_key: {"_migrated_to": {"device_id": 4242, "server_key": stored_key}},
-            "secondary": 13409,
-        },
-    )
+    stored = {stored_key: {"_migrated_to": {"device_id": 4242, "server_key": stored_key}}, "secondary": 13409}
+    device = seed_stored_mapping(make_device(f"malformed-stored-{stored_key}"), stored, save=True)
     _register_device(
         servers.secondary,
         13409,
@@ -223,7 +217,7 @@ def test_malformed_stored_server_key_does_not_break_the_page(client, servers, st
 @pytest.mark.django_db
 @pytest.mark.parametrize("requested_key", ["contains", "dc__west", "_preferred_server"])
 def test_malformed_requested_server_key_renders_the_blocked_page(client, servers, requested_key):
-    device = make_device("malformed-server-key", librenms_cf={"secondary": {"id": 13408}})
+    device = seed_mapping(make_device("malformed-server-key"), "secondary", own=13408)
     observed = []
     _register_device(servers.secondary, 13408, device.name, observed)
     client.force_login(make_superuser(f"object-server-malformed-{requested_key}-user"))
@@ -249,7 +243,7 @@ def test_cache_only_endpoints_reject_malformed_server_keys(
     tab_argument,
 ):
     label = f"{url_name}-{requested_key}"
-    device = make_device(f"malformed-cache-{label}", librenms_cf={"secondary": {"id": 13410}})
+    device = seed_mapping(make_device(f"malformed-cache-{label}"), "secondary", own=13410)
     client.force_login(make_superuser(f"object-server-cache-{label}-user"))
     url = reverse(f"plugins:netbox_librenms_plugin:{url_name}", args=["device", device.pk, *tab_argument])
 
@@ -260,7 +254,7 @@ def test_cache_only_endpoints_reject_malformed_server_keys(
 
 @pytest.mark.django_db
 def test_unconfigured_mapping_is_removable_but_not_selectable(client, servers):
-    device = make_device("stale-server-mapping", librenms_cf={"retired": {"id": 13407}})
+    device = seed_mapping(make_device("stale-server-mapping"), "retired", own=13407)
     client.force_login(make_superuser("object-server-stale-user"))
 
     response = client.get(_sync_url(device), {"server_key": "retired"})
@@ -284,10 +278,8 @@ def test_multiple_non_default_mappings_require_selection_without_querying(client
             secondary=(servers.secondary, "Secondary LibreNMS"),
             tertiary=(tertiary, "Tertiary LibreNMS"),
         )
-        device = make_device(
-            "ambiguous-server-mappings",
-            librenms_cf={"secondary": {"id": 13408}, "tertiary": {"id": 13409}},
-        )
+        device = seed_mapping(make_device("ambiguous-server-mappings"), "secondary", own=13408)
+        seed_mapping(device, "tertiary", own=13409)
         observed = []
         _register_device(servers.secondary, 13408, device.name, observed)
         _register_device(tertiary, 13409, device.name, observed)
@@ -307,10 +299,8 @@ def test_multiple_non_default_mappings_require_selection_without_querying(client
 @pytest.mark.django_db
 def test_mapped_installation_default_wins_when_several_mappings_exist(client, servers):
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
-    device = make_device(
-        "mapped-installation-default",
-        librenms_cf={"primary": {"id": 13410}, "secondary": {"id": 13411}},
-    )
+    device = seed_mapping(make_device("mapped-installation-default"), "primary", own=13410)
+    seed_mapping(device, "secondary", own=13411)
     observed = []
     _register_device(servers.primary, 13410, device.name, observed)
     client.force_login(make_superuser("object-server-default-user"))
@@ -326,14 +316,8 @@ def test_mapped_installation_default_wins_when_several_mappings_exist(client, se
 @pytest.mark.django_db
 def test_valid_object_preference_beats_default_and_is_not_a_mapping_row(client, servers):
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
-    device = make_device(
-        "preferred-object-server",
-        librenms_cf={
-            "primary": {"id": 13412},
-            "secondary": {"id": 13413},
-            "_preferred_server": "secondary",
-        },
-    )
+    device = seed_mapping(make_device("preferred-object-server"), "primary", own=13412)
+    seed_mapping(device, "secondary", own=13413, preferred=True)
     observed = []
     _register_device(servers.secondary, 13413, device.name, observed)
     client.force_login(make_superuser("object-server-preference-user"))
@@ -358,7 +342,7 @@ def test_valid_object_preference_beats_default_and_is_not_a_mapping_row(client, 
 @pytest.mark.django_db
 def test_legacy_integer_mapping_keeps_the_installation_default(client, servers):
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
-    device = make_device("legacy-object-server", librenms_cf=13414)
+    device = seed_stored_mapping(make_device("legacy-object-server"), 13414, save=True)
     observed = []
     _register_device(servers.primary, 13414, device.name, observed)
     client.force_login(make_superuser("object-server-legacy-user"))
@@ -373,10 +357,8 @@ def test_legacy_integer_mapping_keeps_the_installation_default(client, servers):
 
 @pytest.mark.django_db
 def test_unavailable_explicit_server_stays_active_without_fallback(client, servers):
-    device = make_device(
-        "unavailable-object-server",
-        librenms_cf={"primary": {"id": 13415}, "secondary": {"id": 13416}},
-    )
+    device = seed_mapping(make_device("unavailable-object-server"), "primary", own=13415)
+    seed_mapping(device, "secondary", own=13416)
     observed = []
     primary_requests = []
     _register_device(servers.primary, 13415, device.name, primary_requests)
@@ -402,7 +384,7 @@ def test_unavailable_explicit_server_stays_active_without_fallback(client, serve
 
 @pytest.mark.django_db
 def test_interface_paginator_keeps_the_active_server(client, servers):
-    device = make_device("server-scoped-paginator", librenms_cf={"secondary": {"id": 13417}})
+    device = seed_mapping(make_device("server-scoped-paginator"), "secondary", own=13417)
     ports = [
         {
             "port_id": number,
@@ -465,7 +447,8 @@ def test_fallback_mapping_rows_render_the_active_server_the_same_way(settings, s
 
     from netbox_librenms_plugin.views.base.librenms_sync_view import BaseLibreNMSSyncView
 
-    device = make_device("fallback-selector-device", librenms_cf={"primary": 51001, "secondary": 51002})
+    device = seed_mapping(make_device("fallback-selector-device"), "primary", own=51001)
+    seed_mapping(device, "secondary", own=51002)
 
     rows = BaseLibreNMSSyncView._build_all_server_mappings(device, "primary")
     markup = render_to_string(

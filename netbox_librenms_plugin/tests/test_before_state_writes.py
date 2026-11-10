@@ -18,7 +18,6 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_vm,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
     SERVER_KEY,
     SYNCED,
@@ -26,6 +25,7 @@ from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
     seed_ports,
     sync_port,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import messages_on
 
 MAC = "00:11:22:33:44:55"
@@ -37,7 +37,7 @@ def _server(settings):
 
 
 def _device_owner(tag):
-    return make_device(f"before-state-{tag}", librenms_cf={SERVER_KEY: {"id": 40}}), Interface
+    return seed_mapping(make_device(f"before-state-{tag}"), SERVER_KEY, own=40), Interface
 
 
 def _vm_owner(tag):

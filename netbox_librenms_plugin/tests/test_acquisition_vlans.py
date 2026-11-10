@@ -13,8 +13,9 @@ def _vlan(vid, device_id=DEVICE_ID):
 
 def _device(name):
     from netbox_librenms_plugin.tests.conftest import make_device
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
-    return make_device(name, librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
+    return seed_mapping(make_device(name), SERVER_KEY, own=DEVICE_ID)
 
 
 def _acquire(device):
