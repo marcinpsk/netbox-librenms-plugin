@@ -20,7 +20,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_virtual_chassis,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping, stored_mapping_for_test
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
 
 
 pytestmark = pytest.mark.django_db
@@ -149,8 +149,8 @@ class TestGetLibreNMSSyncDevice:
         from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
         _vc, (first, second, _third) = self._members("mapping")
-        seed_stored_mapping(first, {"other": 10}, save=True)
-        seed_stored_mapping(second, {"default": {"id": "42"}}, save=True)
+        seed_mapping(first, "other", own=10)
+        seed_mapping(second, own=42)
 
         assert get_librenms_sync_device(first, server_key="default") == second
         assert get_librenms_sync_device(first, server_key=None) == first
