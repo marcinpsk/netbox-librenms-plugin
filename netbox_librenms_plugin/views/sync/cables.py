@@ -1637,7 +1637,10 @@ class CableRemoteCreateView(SyncCablesView):
 
     def _lock_remote_chassis(self, remote_device):
         """Lock the remote device's VirtualChassis row, and return its pk and the pks of its current members."""
-        remote_device.refresh_from_db(fields=["virtual_chassis"])
+        try:
+            remote_device.refresh_from_db(fields=["virtual_chassis"])
+        except Device.DoesNotExist:
+            raise _RemoteCreateAborted("The cable row changed. Refresh the cable data and try again.") from None
         chassis_id = remote_device.virtual_chassis_id
         if chassis_id is None:
             return None, set()
