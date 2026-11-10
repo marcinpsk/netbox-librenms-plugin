@@ -25,8 +25,8 @@ def _row(vid, *, checked=False):
         </tr>"""
 
 
-def _load(page, rows):
-    html = f"""<!doctype html><html><body>
+def _page(rows):
+    return f"""<!doctype html><html><body>
         <input type="hidden" name="csrfmiddlewaretoken" value="vlan-csrf-token">
         <div id="librenms-sync-tabs" data-server-key="default"></div>
         <button id="toolbar-sync" type="submit" form="vlan-sync-form">Sync Selected VLANs</button>
@@ -36,6 +36,10 @@ def _load(page, rows):
             <table id="librenms-vlan-table"><tbody>{"".join(rows)}</tbody></table>
           </form>
         </div></body></html>"""
+
+
+def _load(page, rows):
+    html = _page(rows)
     page.route(PAGE_URL, lambda route: route.fulfill(status=200, content_type="text/html", body=html))
     page.goto(PAGE_URL)
     _add_page_scripts(page)
@@ -210,3 +214,67 @@ def test_an_answer_with_another_proposed_name_shows_that_name_with_its_token(pag
     assert page.locator('tr[data-vlan-id="501"] td[data-col="name"]').inner_text() == "people"
     assert page.locator(".vlan-sync-group-select").get_attribute("data-vlan-name") == "people"
     assert _token(page, 501) == "vlan:people"
+
+
+def test_a_changed_choice_forgets_the_stored_token_before_another_page_can_post_it(page):
+    pages = {"1": _page([_row(501)]), "2": _page([_row(502)])}
+    page.route(
+        f"{PAGE_URL}**",
+        lambda route: route.fulfill(
+            status=200, content_type="text/html", body=pages[route.request.url.rsplit("=", 1)[-1]]
+        ),
+    )
+    page.route(VERIFY_ROUTE, lambda route: None)
+    sent = []
+    page.route(SYNC_URL, lambda route: sent.append(route.request.post_data))
+    page.goto(f"{PAGE_URL}?page=1")
+    _add_page_scripts(page)
+    page.evaluate("initializeVlanSyncGroupSelects()")
+    page.check('tr[data-vlan-id="501"] input[name="select"]')
+
+    # The reassessment of the new choice is held, and the user leaves the page before it answers.
+    page.locator(".vlan-sync-group-select").select_option("2")
+    page.goto(f"{PAGE_URL}?page=2")
+    _add_page_scripts(page)
+    stored = page.evaluate("readStoredSelection(document.getElementById('librenms-vlan-table'))")
+    page.click("#toolbar-sync")
+    page.wait_for_timeout(200)
+
+    assert stored["501"]["inputs"]["confirmation_intent"] == ""
+    assert stored["501"]["inputs"]["vlan_group_501"] == "2"
+    assert not any("vlan%3Arendered-501" in body for body in sent)
+    assert sent == []
+
+
+def test_a_row_that_waited_on_another_page_is_assessed_again_on_its_page(page):
+    page.route(
+        f"{PAGE_URL}**", lambda route: route.fulfill(status=200, content_type="text/html", body=_page([_row(501)]))
+    )
+    held = []
+    page.route(VERIFY_ROUTE, lambda route: held.append(route))
+    bodies = []
+
+    def answer_sync(route):
+        bodies.append(route.request.post_data)
+        route.fulfill(status=200, content_type="text/html", body='<span id="swapped">Synced</span>')
+
+    page.route(SYNC_URL, answer_sync)
+    page.goto(f"{PAGE_URL}?page=1")
+    _add_page_scripts(page)
+    page.evaluate("initializeVlanSyncGroupSelects()")
+    page.check('tr[data-vlan-id="501"] input[name="select"]')
+    page.locator(".vlan-sync-group-select").select_option("2")
+    _wait_for(page, lambda: len(held) == 1)
+
+    page.goto(f"{PAGE_URL}?page=1&again=1")
+    _add_page_scripts(page)
+    page.evaluate(
+        "initializeVlanSyncGroupSelects(); restoreTableSelection(document.getElementById('librenms-vlan-table'))"
+    )
+    _wait_for(page, lambda: len(held) == 2)
+    _answer(held[1], 2, "vlan:in-b")
+    page.locator("#answered-2").wait_for()
+    page.click("#toolbar-sync")
+    page.locator("#swapped").wait_for()
+
+    assert [value for key, value in _selection_form_pairs(bodies[0]) if key == "confirmation_intent"] == ["vlan:in-b"]

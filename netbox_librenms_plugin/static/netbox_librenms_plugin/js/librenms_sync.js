@@ -2090,6 +2090,7 @@ function persistTableSelection(table) {
                       ? 'member'
                       : '',
                 chosen: _chosenVrfNames(row),
+                pending: Boolean(_rowIntentInput(row)?.dataset.intentPending),
             };
         } else {
             // Only the visible page can retract a row: an absent checkbox means "another page",
@@ -2590,6 +2591,11 @@ document.addEventListener('htmx:configRequest', function (e) {
         return;
     }
     const singleName = SINGLE_ROW_SUBMITTERS.find((name) => e.detail.parameters.has(name));
+    if (!singleName && hasPendingOffPageIntent(tables)) {
+        e.preventDefault();
+        showErrorToast(PENDING_OFF_PAGE_MESSAGE);
+        return;
+    }
     e.detail.parameters.delete(INTENT_FIELD);
     // A row action posts only its own row's token; a row action without its button posts none.
     const tokens = singleName
@@ -2660,8 +2666,13 @@ function injectRowIntents(e) {
         e.preventDefault();
         return false;
     }
-    form.querySelectorAll('input[data-row-intent]').forEach((input) => input.remove());
     const single = SINGLE_ROW_SUBMITTERS.includes(e.submitter?.name) ? e.submitter : null;
+    if (!single && hasPendingOffPageIntent(tables)) {
+        e.preventDefault();
+        showErrorToast(PENDING_OFF_PAGE_MESSAGE);
+        return false;
+    }
+    form.querySelectorAll('input[data-row-intent]').forEach((input) => input.remove());
     submittedRowIntents(tables, single).forEach(function (token) {
         const hidden = document.createElement('input');
         hidden.type = 'hidden';
@@ -3424,6 +3435,49 @@ function _syncIntentSubmitLock(form) {
         });
 }
 
+/**
+ * Drop the stored token of a row whose choice changed, so another page cannot post the earlier approval.
+ *
+ * Only the row's own stored entry changes: a full store write here could run in the middle of a restore pass.
+ *
+ * @param {HTMLTableRowElement} row - The row.
+ * @param {string} choiceName - The name of the choice field that changed.
+ * @param {string} choice - The new value of the choice field.
+ * @returns {void}
+ */
+function _forgetStoredIntent(row, choiceName, choice) {
+    const table = row.closest('table');
+    const rowKey = row.querySelector('input[name="select"]')?.value;
+    if (!table || !rowKey || !SELECTABLE_TABLE_IDS.includes(table.id)) return;
+    const selection = readStoredSelection(table);
+    const entry = selection[rowKey];
+    if (!entry) return;
+    entry.inputs = Object.assign({}, entry.inputs, {[INTENT_FIELD]: '', [choiceName]: choice});
+    entry.pending = true;
+    writeStoredSelection(table, selection);
+}
+
+/**
+ * Return whether a row selected on another page still waits for the reassessment of its choice.
+ *
+ * @param {HTMLElement[]} tables - The selectable tables inside the submitted form.
+ * @returns {boolean}
+ */
+function hasPendingOffPageIntent(tables) {
+    return tables.some((table) =>
+        Object.values(offPageRecords(table, readStoredSelection(table))).some((entry) => entry && entry.pending)
+    );
+}
+
+// A reassessment that a navigation cuts off keeps its row pending; it never rolls back to the earlier approval.
+let syncPageUnloading = false;
+['beforeunload', 'pagehide'].forEach((eventName) => window.addEventListener(eventName, () => {
+    syncPageUnloading = true;
+}));
+
+const PENDING_OFF_PAGE_MESSAGE =
+    'A selected row on another page waits for the check of its new choice. Open its page, or clear the rows on other pages.';
+
 // ============================================
 // VLAN SYNC TABLE GROUP VERIFICATION
 // ============================================
@@ -3467,7 +3521,10 @@ function verifyVlanSyncGroup(select, vid, groupId) {
         select._lastVerifiedGroup = rendered ? rendered.value : '';
         select._lastVerifiedIntent = intentInput ? intentInput.value : '';
     }
-    if (row) setRowIntentPending(row, true);
+    if (row) {
+        setRowIntentPending(row, true);
+        _forgetStoredIntent(row, select.name, groupId);
+    }
     const rollbackToLastVerified = () => {
         if (select.tomselect && typeof select.tomselect.setValue === 'function') {
             select.tomselect.setValue(select._lastVerifiedGroup, true);
@@ -3546,7 +3603,7 @@ function verifyVlanSyncGroup(select, vid, groupId) {
             markFilterStaleRow(row);
         })
         .catch(error => {
-            if (error.name === 'AbortError' || controller.signal.aborted || !_isLiveRow(row)) return;
+            if (error.name === 'AbortError' || controller.signal.aborted || syncPageUnloading || !_isLiveRow(row)) return;
             console.error('VLAN sync group verification error:', error);
             rollbackToLastVerified();
             showErrorToast(withFullStop(`The VLAN group check failed: ${error.refusal || error.message}`));
