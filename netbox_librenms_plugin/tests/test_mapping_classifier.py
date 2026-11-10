@@ -780,13 +780,13 @@ def test_strict_id_agrees_with_the_runtime_id_rule(value):
     assert mapping_classifier.strict_id(value) == coerce_librenms_id(value)
 
 
-def test_the_classifier_imports_no_plugin_module():
+def test_the_classifier_imports_only_the_standard_library_and_django():
     """The check script runs on an old plugin version, so it imports only the standard library and Django."""
     tree = ast.parse(Path(mapping_classifier.__file__).read_text())
     imported = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names} | {
-        node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+        "." * node.level + (node.module or "") for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
     }
-    assert not {name for name in imported if name.split(".")[0] == "netbox_librenms_plugin"}
+    assert {name.split(".")[0] for name in imported} - sys.stdlib_module_names - {"django"} == set()
 
 
 # The check script entry point.
