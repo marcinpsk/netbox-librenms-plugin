@@ -607,8 +607,8 @@ class TestPrepareContextIncompleteRefresh:
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
         server_key = _point_at(settings, librenms_server.url)
-        make_device("ctx-ambiguous-owner-a", librenms_cf={server_key: 8801})
-        make_device("ctx-ambiguous-owner-b", librenms_cf={server_key: 8801})
+        seed_mapping(make_device("ctx-ambiguous-owner-a"), server_key, own=8801)
+        seed_mapping(make_device("ctx-ambiguous-owner-b"), server_key, own=8801)
         target, _csps, _ = make_serial_device("ctx-ambiguous-target", csp_names=["ttyS0"])
         seed_unmapped(target, server_key)
         librenms_server.register(

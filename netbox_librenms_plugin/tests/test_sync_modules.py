@@ -271,7 +271,7 @@ class TestInventoryCacheContract:
     def test_current_fingerprint_returns_the_real_cached_rows(self, live_librenms):
         from netbox_librenms_plugin.tests.source_snapshot_helpers import module_inventory
 
-        device = make_device("module-current-cache", librenms_cf={"default": 41})
+        device = seed_mapping(make_device("module-current-cache"), "default", own=41)
         _view(_cache_view_class(), _post_request({}), live_librenms)
         rows = [_inventory_item(1, "CARD", "Slot 1")]
         key = seed_inventory(device, rows, librenms_id=41)
@@ -282,7 +282,7 @@ class TestInventoryCacheContract:
     def test_stale_fingerprint_is_rejected(self, live_librenms):
         from netbox_librenms_plugin.tests.source_snapshot_helpers import module_inventory
 
-        device = make_device("module-stale-cache", librenms_cf={"default": 42})
+        device = seed_mapping(make_device("module-stale-cache"), "default", own=42)
         _view(_cache_view_class(), _post_request({}), live_librenms)
         seed_inventory(device, [_inventory_item(1, "CARD", "Slot 1")], librenms_id=99)
 
@@ -293,7 +293,7 @@ class TestInventoryCacheContract:
         from netbox_librenms_plugin.module_grants import ACTION_UPDATE_SERIAL, installed_module_target
         from netbox_librenms_plugin.views.sync.modules import _authorize_module_grant
 
-        device = make_device("resolve-row-hit", librenms_cf={"default": 771})
+        device = seed_mapping(make_device("resolve-row-hit"), "default", own=771)
         _view(_cache_view_class(), _post_request({}), live_librenms)
         module = install_module(device, make_module_bay(device, "Slot 1").name, "CARD", serial="OLD")
         item = _inventory_item(77, "CARD", "Slot 1", serial="NEW")
@@ -328,7 +328,7 @@ class TestInventoryCacheContract:
         )
         from netbox_librenms_plugin.views.sync.modules import _authorize_module_grant
 
-        device = make_device("resolve-row-no-index", librenms_cf={"default": 772})
+        device = seed_mapping(make_device("resolve-row-no-index"), "default", own=772)
         _view(_cache_view_class(), _post_request({}), live_librenms)
         module = install_module(device, make_module_bay(device, "Slot 1").name, "CARD", serial="OLD")
         item = _inventory_item(77, "CARD", "Slot 1", serial="NEW")
@@ -350,7 +350,7 @@ class TestInventoryCacheContract:
         from netbox_librenms_plugin.module_grants import ACTION_UPDATE_SERIAL, GrantRefusal, GrantRefused
         from netbox_librenms_plugin.views.sync.modules import _authorize_module_grant
 
-        device = make_device("resolve-row-stale", librenms_cf={"default": 999})
+        device = seed_mapping(make_device("resolve-row-stale"), "default", own=999)
         _view(_cache_view_class(), _post_request({}), live_librenms)
         seed_inventory(device, [_inventory_item(77, "CARD", "Te1/1/1")], librenms_id=555)
 
@@ -846,7 +846,7 @@ class TestInstallAndUpdateViews:
 
         from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
-        device = make_device("view-install", librenms_cf={"default": 51})
+        device = seed_mapping(make_device("view-install"), "default", own=51)
         bay = make_module_bay(device, "View Install Bay")
         module_type = make_module_type("VIEW-INSTALL-CARD")
         item = _inventory_item(510, module_type.model, bay.name, serial="VIEW-SERIAL")
@@ -870,7 +870,7 @@ class TestInstallAndUpdateViews:
         from netbox_librenms_plugin.tests.source_snapshot_helpers import module_inventory
         from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
-        device = make_device(f"view-install-holder-{phys_class}", librenms_cf={"default": 52})
+        device = seed_mapping(make_device(f"view-install-holder-{phys_class}"), "default", own=52)
         bay = make_module_bay(device, "Holder Bay")
         module_type = make_module_type(f"HOLDER-CARD-{phys_class.upper()}")
         holder = _inventory_item(520, model, bay.name, phys_class=phys_class)
@@ -912,7 +912,7 @@ class TestInstallAndUpdateViews:
 
         from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
-        device = make_device("view-install-bind-error", librenms_cf={"default": 68})
+        device = seed_mapping(make_device("view-install-bind-error"), "default", own=68)
         bay = make_module_bay(device, "Bind Error Bay")
         module_type = make_module_type("BIND-ERROR-CARD")
         interface = make_interface(device, "Ethernet68")
@@ -945,7 +945,7 @@ class TestInstallAndUpdateViews:
 
         from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
-        device = make_device("view-install-stale", librenms_cf={"default": 64})
+        device = seed_mapping(make_device("view-install-stale"), "default", own=64)
         bay = make_module_bay(device, "Stale Install Bay")
         module_type = make_module_type("STALE-INSTALL-CARD")
         rendered_item = _inventory_item(640, module_type.model, bay.name, serial="ORIGINAL-SERIAL")
@@ -967,7 +967,7 @@ class TestInstallAndUpdateViews:
 
         from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
-        device = make_device("view-install-occupied", librenms_cf={"default": 52})
+        device = seed_mapping(make_device("view-install-occupied"), "default", own=52)
         bay = make_module_bay(device, "Occupied View Bay")
         module_type = make_module_type("VIEW-OCCUPIED-CARD")
         existing = install_module(device, bay.name, module_type.model, serial="ORIGINAL")
@@ -993,7 +993,7 @@ class TestInstallAndUpdateViews:
 
         from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
-        device = make_device("view-install-unresolved", librenms_cf={"default": 55})
+        device = seed_mapping(make_device("view-install-unresolved"), "default", own=55)
         bay = make_module_bay(device, "Unresolved Install Bay")
         module_type = make_module_type("UNRESOLVED-INSTALL-CARD")
         interface = make_interface(device, "Ethernet55")
@@ -1035,7 +1035,7 @@ class TestInstallAndUpdateViews:
 
         from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
-        device = make_device("view-install-carrier", librenms_cf={"default": 60})
+        device = seed_mapping(make_device("view-install-carrier"), "default", own=60)
         bay = make_module_bay(device, "Carrier Install Bay")
         module_type = make_module_type("CARRIER-INSTALL-CARD")
         request = _post_request({"module_bay_id": bay.pk, "module_type_id": module_type.pk, "server_key": "default"})
@@ -1050,7 +1050,7 @@ class TestInstallAndUpdateViews:
     def test_update_serial_changes_the_real_module(self, live_librenms):
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
 
-        device = make_device("view-update-serial", librenms_cf={"default": 53})
+        device = seed_mapping(make_device("view-update-serial"), "default", own=53)
         bay = make_module_bay(device, "Serial Bay")
         module = install_module(device, bay.name, "SERIAL-CARD", serial="OLD")
         item = _inventory_item(530, module.module_type.model, bay.name, serial="NEW")
@@ -1069,7 +1069,7 @@ class TestInstallAndUpdateViews:
         """A replayed or edited form must not store a serial LibreNMS never reported."""
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
 
-        device = make_device("view-serial-cached", librenms_cf={"default": 56})
+        device = seed_mapping(make_device("view-serial-cached"), "default", own=56)
         bay = make_module_bay(device, "Cached Serial Bay")
         module = install_module(device, bay.name, "CACHED-SERIAL-CARD", serial="OLD-SN")
         item = _inventory_item(560, module.module_type.model, bay.name, serial="LNMS-SN")
@@ -1095,7 +1095,7 @@ class TestInstallAndUpdateViews:
         """A stale serial form must not apply a replacement row's serial."""
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
 
-        device = make_device("view-serial-stale", librenms_cf={"default": 65})
+        device = seed_mapping(make_device("view-serial-stale"), "default", own=65)
         bay = make_module_bay(device, "Stale Serial Bay")
         module = install_module(device, bay.name, "STALE-SERIAL-CARD", serial="OLD-SERIAL")
         rendered_item = _inventory_item(650, module.module_type.model, bay.name, serial="ORIGINAL-SERIAL")
@@ -1118,7 +1118,7 @@ class TestInstallAndUpdateViews:
 
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
 
-        device = make_device("view-serial-binding", librenms_cf={"default": 62})
+        device = seed_mapping(make_device("view-serial-binding"), "default", own=62)
         expected_bay = make_module_bay(device, "Expected Serial Bay")
         forged_bay = make_module_bay(device, "Forged Serial Bay")
         expected = install_module(device, expected_bay.name, "BOUND-SERIAL-CARD", serial="EXPECTED-OLD")
@@ -1156,7 +1156,7 @@ class TestInstallAndUpdateViews:
         """OOB controller inventory renders no action, so a crafted index for it carries another row's grant."""
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
 
-        device = make_device("view-serial-oob", librenms_cf={"default": 57})
+        device = seed_mapping(make_device("view-serial-oob"), "default", own=57)
         bay = make_module_bay(device, "OOB Serial Bay")
         module = install_module(device, bay.name, "OOB-SERIAL-CARD", serial="OLD-SN")
         host = _inventory_item(571, module.module_type.model, bay.name, serial="HOST-SN")
@@ -1185,7 +1185,7 @@ class TestInstallAndUpdateViews:
         """A row the snapshot does not carry is refused instead of writing a blank serial."""
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
 
-        device = make_device("view-serial-missing", librenms_cf={"default": 58})
+        device = seed_mapping(make_device("view-serial-missing"), "default", own=58)
         bay = make_module_bay(device, "Missing Serial Bay")
         module = install_module(device, bay.name, "MISSING-SERIAL-CARD", serial="OLD-SN")
         item = _inventory_item(580, module.module_type.model, bay.name, serial="LNMS-SN")
@@ -1203,7 +1203,7 @@ class TestInstallAndUpdateViews:
     def test_update_interface_binds_cached_inventory_identity(self, live_librenms):
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
-        device = make_device("view-update-interface", librenms_cf={"default": 54})
+        device = seed_mapping(make_device("view-update-interface"), "default", own=54)
         bay = make_module_bay(device, "Interface Bay")
         module = install_module(device, bay.name, "INTERFACE-CARD")
         interface = make_interface(device, "Ethernet54")
@@ -1232,7 +1232,7 @@ class TestInstallAndUpdateViews:
         """A stale interface form must not bind identity from a replacement row."""
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
-        device = make_device("view-interface-stale", librenms_cf={"default": 66})
+        device = seed_mapping(make_device("view-interface-stale"), "default", own=66)
         bay = make_module_bay(device, "Stale Interface Bay")
         module = install_module(device, bay.name, "STALE-INTERFACE-CARD")
         original = make_interface(device, "Ethernet66")
@@ -1275,7 +1275,7 @@ class TestInstallAndUpdateViews:
 
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
-        device = make_device("view-interface-binding", librenms_cf={"default": 63})
+        device = seed_mapping(make_device("view-interface-binding"), "default", own=63)
         expected_bay = make_module_bay(device, "Expected Interface Bay")
         forged_bay = make_module_bay(device, "Forged Interface Bay")
         expected = install_module(device, expected_bay.name, "BOUND-INTERFACE-CARD")
@@ -1316,7 +1316,7 @@ class TestInstallAndUpdateViews:
         """Posted metadata carries no _source marker, so an unknown ent_index must not bind at all."""
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
-        device = make_device("view-update-interface-unresolved", librenms_cf={"default": 61})
+        device = seed_mapping(make_device("view-update-interface-unresolved"), "default", own=61)
         bay = make_module_bay(device, "Unresolved Interface Bay")
         module = install_module(device, bay.name, "UNRESOLVED-INTERFACE-CARD")
         interface = make_interface(device, "Ethernet61")
@@ -1349,7 +1349,7 @@ class TestInstallAndUpdateViews:
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
-        device = make_device("view-update-interface-oob", librenms_cf={"default": 59})
+        device = seed_mapping(make_device("view-update-interface-oob"), "default", own=59)
         bay = make_module_bay(device, "OOB Interface Bay")
         module = install_module(device, bay.name, "OOB-INTERFACE-CARD")
         interface = make_interface(device, "Ethernet59")
@@ -1498,7 +1498,7 @@ class TestInstallAndUpdateViews:
         from netbox_librenms_plugin.models import ModuleBayMapping
         from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
 
-        device = make_device("view-install-selected", librenms_cf={"default": 55})
+        device = seed_mapping(make_device("view-install-selected"), "default", own=55)
         bay = make_module_bay(device, "Selected Bay")
         module_type = make_module_type("SELECTED-CARD")
         ModuleBayMapping.objects.create(
@@ -1526,7 +1526,7 @@ class TestInstallAndUpdateViews:
 
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView, InstallSelectedView
 
-        device = make_device(f"view-bulk-stale-{scenario}", librenms_cf={"default": 66})
+        device = seed_mapping(make_device(f"view-bulk-stale-{scenario}"), "default", own=66)
         bay = make_module_bay(device, f"Stale {scenario} Bay")
         module_type = make_module_type(f"STALE-{scenario}-CARD")
         selected = _inventory_item(700, module_type.model, bay.name, serial="ORIGINAL-SERIAL")
@@ -1578,7 +1578,7 @@ class TestInstallAndUpdateViews:
 
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView, InstallSelectedView
 
-        device = make_device(f"view-bulk-unsigned-{action}", librenms_cf={"default": 67})
+        device = seed_mapping(make_device(f"view-bulk-unsigned-{action}"), "default", own=67)
         bay = make_module_bay(device, f"Unsigned {action} Bay")
         module_type = make_module_type(f"UNSIGNED-{action}-CARD")
         inventory = [_inventory_item(700, module_type.model, bay.name)]
@@ -1601,7 +1601,7 @@ class TestInstallAndUpdateViews:
 
         from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
 
-        device = make_device("view-serial-rule-preload", librenms_cf={"default": 60})
+        device = seed_mapping(make_device("view-serial-rule-preload"), "default", own=60)
         module_type = make_module_type("SERIAL-PRELOAD-CARD")
         inventory = []
         for position in range(1, 4):
@@ -1639,7 +1639,7 @@ class TestInstallAndUpdateViews:
         from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
-        device = make_device("module-catalog-scope", librenms_cf={"default": 1})
+        device = seed_mapping(make_device("module-catalog-scope"), "default", own=1)
         hidden_bay = make_module_bay(device, "Hidden Scope Bay")
         allowed_bay = make_module_bay(device, "Allowed Scope Bay")
         hidden_type = make_module_type("Hidden Scope Module Type")
@@ -1675,7 +1675,7 @@ class TestInstallAndUpdateViews:
         from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
-        device = make_device("module-interface-scope", librenms_cf={"default": 2})
+        device = seed_mapping(make_device("module-interface-scope"), "default", own=2)
         bay = make_module_bay(device, "Interface Scope Bay")
         module = install_module(device, bay.name, "INTERFACE-SCOPE-CARD")
         hidden = make_interface(device, "Te1/1/1")
@@ -1724,7 +1724,7 @@ class TestModuleBindLockConflicts:
 
         from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
-        device = make_device("bind-busy-install", librenms_cf={"default": 81})
+        device = seed_mapping(make_device("bind-busy-install"), "default", own=81)
         bay = make_module_bay(device, "Busy Install Bay")
         module_type = make_module_type("BUSY-INSTALL-CARD")
         interface = make_interface(device, "Ethernet81")
@@ -1755,7 +1755,7 @@ class TestModuleBindLockConflicts:
 
         from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
 
-        device = make_device("bind-busy-replace", librenms_cf={"default": 82})
+        device = seed_mapping(make_device("bind-busy-replace"), "default", own=82)
         bay = make_module_bay(device, "Busy Replace Bay")
         installed = install_module(device, bay.name, "BUSY-REPLACE-OLD")
         new_type = make_module_type("BUSY-REPLACE-NEW")
@@ -1786,7 +1786,7 @@ class TestModuleBindLockConflicts:
     def test_the_interface_update_raises_a_busy_port_claim(self, live_librenms):
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
-        device = make_device("bind-busy-update", librenms_cf={"default": 83})
+        device = seed_mapping(make_device("bind-busy-update"), "default", own=83)
         bay = make_module_bay(device, "Busy Update Bay")
         module = install_module(device, bay.name, "BUSY-UPDATE-CARD")
         interface = make_interface(device, "Ethernet83")
@@ -1819,7 +1819,7 @@ class TestModuleBindLockConflicts:
 
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
-        device = make_device("adopt-lock-update", librenms_cf={"default": 84})
+        device = seed_mapping(make_device("adopt-lock-update"), "default", own=84)
         bay = make_module_bay(device, "Adopt Lock Bay")
         module = install_module(device, bay.name, "ADOPT-LOCK-CARD")
         InterfaceTemplate.objects.create(module_type=module.module_type, name="c2/1", type="other")
@@ -3180,7 +3180,7 @@ def test_refresh_drops_out_of_spec_oob_inventory(live_librenms, oob_index, oob_p
     from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
     from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
-    device = make_device("signed-inventory", librenms_cf={"default": 777})
+    device = seed_mapping(make_device("signed-inventory"), "default", own=777)
     apply_mapping_change(device, attach_oob(device, "default", 999, oob_type="idrac9"))
     device.save(update_fields=["custom_field_data"])
     # RFC 2737 defines entPhysicalIndex as 1..2147483647.
@@ -3226,7 +3226,7 @@ def test_refresh_rejects_a_negative_main_inventory_index(live_librenms):
 
     from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
-    device = make_device("signed-main-inventory", librenms_cf={"default": 778})
+    device = seed_mapping(make_device("signed-main-inventory"), "default", own=778)
     live_librenms.server.register(
         "/api/v0/inventory/778/all",
         {
@@ -4345,7 +4345,7 @@ class TestGenericModuleTypeFallback:
 
         from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
 
-        device = make_device("generic-selected", librenms_cf={"default": 91})
+        device = seed_mapping(make_device("generic-selected"), "default", own=91)
         make_module_bay(device, "Generic Slot")
         generic_type = self._generic_only_type("GENERIC-SHARED-SELECTED")
         rows = [_inventory_item(910, generic_type.model, "Generic Slot", serial="SN-GENERIC-SELECTED")]
@@ -4361,7 +4361,7 @@ class TestGenericModuleTypeFallback:
     def test_the_replace_uses_the_generic_type(self, live_librenms):
         from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
 
-        device = make_device("generic-replace", librenms_cf={"default": 92})
+        device = seed_mapping(make_device("generic-replace"), "default", own=92)
         bay = make_module_bay(device, "Generic Replace Bay")
         install_module(device, bay.name, "GENERIC-REPLACE-OLD")
         generic_type = self._generic_only_type("GENERIC-SHARED-REPLACE")
@@ -4384,7 +4384,7 @@ class TestGenericModuleTypeFallback:
     def test_the_replace_preview_recognises_the_generic_type(self, live_librenms):
         from netbox_librenms_plugin.views.sync.modules import ModuleMismatchPreviewView
 
-        device = make_device("generic-preview", librenms_cf={"default": 93})
+        device = seed_mapping(make_device("generic-preview"), "default", own=93)
         bay = make_module_bay(device, "Generic Preview Bay")
         generic_type = self._generic_only_type("GENERIC-SHARED-PREVIEW")
         install_module(device, bay.name, generic_type.model, manufacturer=generic_type.manufacturer)

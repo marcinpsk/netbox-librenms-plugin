@@ -987,7 +987,7 @@ class TestStorelibrenmsId:
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
 
-        device = make_device("store-interface-owner", librenms_cf={"default": 42})
+        device = seed_mapping(make_device("store-interface-owner"), "default", own=42)
         interface = make_interface(device, "Ethernet1")
         api = api_for(settings, librenms_server.url)
         cache_key = api._get_cache_key(interface)

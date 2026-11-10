@@ -416,7 +416,7 @@ class TestStoredLibreNMSIdentifiers:
             )
             is None
         )
-        owner = make_device("stored-id-owner", librenms_cf={"default": 4242})
+        owner = seed_mapping(make_device("stored-id-owner"), "default", own=4242)
         with transaction.atomic():
             found = find_mapping(
                 Device.objects.select_for_update(),

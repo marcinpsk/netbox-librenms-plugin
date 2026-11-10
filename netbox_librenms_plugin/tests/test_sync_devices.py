@@ -275,7 +275,7 @@ class TestAddDeviceToLibreNMSView:
 class TestUpdateDeviceLocationView:
     def test_location_update_sends_the_netbox_site_to_the_active_server(self, client, librenms_server):
         device_id = 42
-        device = make_device("location-update-target", librenms_cf={SERVER_KEY: device_id})
+        device = seed_mapping(make_device("location-update-target"), SERVER_KEY, own=device_id)
         received = []
 
         def record_update(**request):
@@ -438,7 +438,7 @@ class TestRemoveServerMappingView:
     def test_mapping_removal_preserves_unrelated_legacy_device_state(self, client):
         from dcim.models import Device
 
-        device = make_device("remove-orphaned-device-mapping", librenms_cf={"orphaned-server": 42})
+        device = seed_mapping(make_device("remove-orphaned-device-mapping"), "orphaned-server", own=42)
         Device.objects.filter(pk=device.pk).update(face="front")
         user = make_user_with_perms("remove-orphaned-device-writer", [("change", Device)])
         client.force_login(user)

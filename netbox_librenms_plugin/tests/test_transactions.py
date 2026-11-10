@@ -950,8 +950,8 @@ def test_a_stale_merge_side_that_work_swallowed_is_still_retried():
     from netbox_librenms_plugin.tests.conftest import make_device
 
     suffix = uuid4().hex[:8]
-    winner = make_device(f"runner-merge-winner-{suffix}", librenms_cf={"default": {"id": 9405}})
-    donor = make_device(f"runner-merge-donor-{suffix}", librenms_cf={"default": {"id": 9406}})
+    winner = seed_mapping(make_device(f"runner-merge-winner-{suffix}"), "default", own=9405)
+    donor = seed_mapping(make_device(f"runner-merge-donor-{suffix}"), "default", own=9406)
     calls = []
 
     def work():

@@ -501,7 +501,7 @@ class TestUpdateModuleInterfaceAdoption:
     def _module_with_templates(self, tag, template_names):
         from dcim.models import InterfaceTemplate, Module
 
-        device = make_device(f"{tag}-device", librenms_cf={"default": ADOPTION_LIBRENMS_ID})
+        device = seed_mapping(make_device(f"{tag}-device"), "default", own=ADOPTION_LIBRENMS_ID)
         bay = make_module_bay(device, f"{tag} Bay")
         module_type = make_module_type(f"{tag.upper()}-CARD")
         module = Module.objects.create(device=device, module_bay=bay, module_type=module_type, status="active")

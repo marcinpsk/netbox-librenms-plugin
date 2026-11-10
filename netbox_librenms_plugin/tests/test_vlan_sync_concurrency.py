@@ -261,7 +261,7 @@ def test_a_target_change_committed_while_the_writer_waits_for_its_lock_is_stale(
     from django.db import transaction
     from ipam.models import VLAN, VLANGroup
 
-    device = make_device(f"vlan-lock-race-{change}", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device(f"vlan-lock-race-{change}"), "default", own=42)
     group = VLANGroup.objects.create(name=f"Lock-Race-{change}", slug=f"lock-race-{change}")
     vlan = VLAN.objects.create(vid=61, group=group, name="old-name", status="active") if change != "create" else None
     from netbox_librenms_plugin.models import NormalizationRule

@@ -144,7 +144,7 @@ def _column_values(interface, columns):
 def test_a_concurrent_change_to_unowned_columns_survives_the_attribute_write(
     client, attempts, monkeypatch, commit_point
 ):
-    device = make_device(f"late-write-attr-{commit_point}", librenms_cf={SERVER_KEY: {"id": 1}})
+    device = seed_mapping(make_device(f"late-write-attr-{commit_point}"), SERVER_KEY, own=1)
     interface = bound_interface(device, "eth10", 10)
     concurrent = _unowned_columns(device)
     seed_ports(device, [sync_port(10, "eth10", alias="uplink")])
@@ -176,7 +176,7 @@ def test_a_concurrent_change_to_unowned_columns_survives_the_attribute_write(
 @COMMIT_POINTS
 def test_a_concurrent_change_to_unowned_columns_survives_the_vlan_write(client, attempts, monkeypatch, commit_point):
     """Only the mode and the untagged VLAN change, so the attribute writer does not write and the VLAN helper does."""
-    device = make_device(f"late-write-vlan-{commit_point}", librenms_cf={SERVER_KEY: {"id": 2}})
+    device = seed_mapping(make_device(f"late-write-vlan-{commit_point}"), SERVER_KEY, own=2)
     interface = synced_interface(device, "eth10", 10)
     vlan = VLAN.objects.create(vid=100, name=f"late-write-vlan-{commit_point}")
     concurrent = _unowned_columns(device)
@@ -209,7 +209,7 @@ def test_a_concurrent_change_to_unowned_columns_survives_the_vlan_write(client, 
 @COMMIT_POINTS
 def test_a_concurrent_lag_keeps_a_planned_virtual_type_from_being_stored(client, attempts, monkeypatch, commit_point):
     InterfaceTypeMapping.objects.create(librenms_type="propVirtual", netbox_type="virtual")
-    device = make_device(f"late-write-type-{commit_point}", librenms_cf={SERVER_KEY: {"id": 3}})
+    device = seed_mapping(make_device(f"late-write-type-{commit_point}"), SERVER_KEY, own=3)
     interface = bound_interface(device, "eth10", 10)
     lag = make_interface(device, "Po1", iface_type="lag")
     seed_ports(device, [sync_port(10, "eth10", if_type="propVirtual")])
@@ -236,7 +236,7 @@ def test_a_concurrent_lag_keeps_a_planned_virtual_type_from_being_stored(client,
 
 @transactional_db_with_all_apps()
 def test_a_written_row_keeps_its_ordering_name_timestamp_and_change_record(client, monkeypatch):
-    device = make_device("late-write-changelog", librenms_cf={SERVER_KEY: {"id": 4}})
+    device = seed_mapping(make_device("late-write-changelog"), SERVER_KEY, own=4)
     interface = bound_interface(device, "eth10", 10)
     Interface.objects.filter(pk=interface.pk).update(description="old")
     interface.refresh_from_db()
@@ -277,7 +277,7 @@ def test_a_written_row_keeps_its_ordering_name_timestamp_and_change_record(clien
 @pytest.mark.django_db
 def test_a_tagged_vlan_only_change_records_the_before_state(client, monkeypatch):
     """No column changes, so the scalar write takes no snapshot; the tagged VLAN change still needs one."""
-    device = make_device("late-write-tagged-only", librenms_cf={SERVER_KEY: {"id": 50}})
+    device = seed_mapping(make_device("late-write-tagged-only"), SERVER_KEY, own=50)
     interface = synced_interface(device, "eth10", 10, mode="tagged")
     old_vlan = VLAN.objects.create(vid=100, name="late-write-old-vlan")
     new_vlan = VLAN.objects.create(vid=200, name="late-write-new-vlan")
@@ -308,7 +308,7 @@ def test_a_tagged_vlan_only_change_records_the_before_state(client, monkeypatch)
 @transactional_db_with_all_apps()
 def test_the_before_state_of_a_row_holds_the_old_mac_and_the_old_custom_field_data(client):
     """The MAC step creates and attaches the new MAC, and the port binding changes the custom field data, before the save."""
-    device = make_device("late-write-mac-before", librenms_cf={SERVER_KEY: {"id": 10}})
+    device = seed_mapping(make_device("late-write-mac-before"), SERVER_KEY, own=10)
     interface = make_interface(device, "eth10")
     old_mac = MACAddress.objects.create(mac_address="00:11:22:33:44:01", assigned_object=interface)
     Interface.objects.filter(pk=interface.pk).update(
@@ -338,7 +338,7 @@ def test_the_before_state_of_a_row_holds_the_old_mac_and_the_old_custom_field_da
 @transactional_db_with_all_apps()
 def test_a_kept_name_warning_never_shows_a_name_that_a_concurrent_rename_put_out_of_view(client, monkeypatch):
     """The renamed row stays in the change scope, so the sync writes it, but it leaves the view scope."""
-    device = make_device("late-write-kept-name", librenms_cf={SERVER_KEY: {"id": 5}})
+    device = seed_mapping(make_device("late-write-kept-name"), SERVER_KEY, own=5)
     interface = bound_interface(device, "eth10", 10)
     make_interface(device, "eth11")
     user = make_user_with_perms(
@@ -377,7 +377,7 @@ def test_a_kept_name_warning_never_shows_a_name_that_a_concurrent_rename_put_out
 def test_a_row_that_is_stale_on_both_attempts_gives_the_try_again_answer_and_writes_nothing(
     client, attempts, monkeypatch, htmx
 ):
-    device = make_device(f"late-write-stale-twice-{htmx}", librenms_cf={SERVER_KEY: {"id": 5}})
+    device = seed_mapping(make_device(f"late-write-stale-twice-{htmx}"), SERVER_KEY, own=5)
     interface = bound_interface(device, "eth10", 10)
     seed_ports(device, [sync_port(10, "eth10", alias="uplink")])
     client.force_login(make_superuser("late-write-stale-twice-user"))
@@ -405,7 +405,7 @@ def test_a_row_that_is_stale_on_both_attempts_gives_the_try_again_answer_and_wri
 
 @transactional_db_with_all_apps()
 def test_a_stale_row_version_that_a_broad_handler_swallows_is_still_retried(client, attempts, monkeypatch):
-    device = make_device("late-write-swallowed", librenms_cf={SERVER_KEY: {"id": 6}})
+    device = seed_mapping(make_device("late-write-swallowed"), SERVER_KEY, own=6)
     interface = bound_interface(device, "eth10", 10)
     seed_ports(device, [sync_port(10, "eth10", alias="uplink")])
     client.force_login(make_superuser("late-write-swallowed-user"))
@@ -443,7 +443,7 @@ def test_a_stale_row_version_that_a_broad_handler_swallows_is_still_retried(clie
 @transactional_db_with_all_apps()
 def test_a_row_that_left_its_owner_after_the_read_is_not_written(client, attempts, monkeypatch):
     """The fresh read finds no row of the expected owner; the retry refuses its new foreign binding."""
-    device = make_device("late-write-moved", librenms_cf={SERVER_KEY: {"id": 7}})
+    device = seed_mapping(make_device("late-write-moved"), SERVER_KEY, own=7)
     elsewhere = make_device("late-write-moved-elsewhere")
     interface = bound_interface(device, "eth10", 10)
     seed_ports(device, [sync_port(10, "eth10", alias="uplink")])
@@ -504,7 +504,7 @@ def _user_who_may_change_only_eth_interfaces(username, *perm_specs):
 def test_a_row_that_leaves_the_change_scope_during_the_attribute_write(
     client, attempts, monkeypatch, commit_point, attempt_count, shown, columns
 ):
-    device = make_device(f"late-write-scope-attr-{commit_point}", librenms_cf={SERVER_KEY: {"id": 8}})
+    device = seed_mapping(make_device(f"late-write-scope-attr-{commit_point}"), SERVER_KEY, own=8)
     interface = bound_interface(device, "eth10", 10)
     seed_ports(device, [sync_port(10, "eth10", alias="uplink")])
     client.force_login(_user_who_may_change_only_eth_interfaces(f"late-write-scope-attr-{commit_point}-user"))
@@ -539,7 +539,7 @@ def test_a_row_that_leaves_the_change_scope_during_the_vlan_write(
     client, attempts, monkeypatch, commit_point, attempt_count, shown
 ):
     """Only the mode and the untagged VLAN change, so the VLAN helper is the one writer of the row."""
-    device = make_device(f"late-write-scope-vlan-{commit_point}", librenms_cf={SERVER_KEY: {"id": 9}})
+    device = seed_mapping(make_device(f"late-write-scope-vlan-{commit_point}"), SERVER_KEY, own=9)
     interface = synced_interface(device, "eth10", 10)
     VLAN.objects.create(vid=100, name=f"late-write-scope-vlan-{commit_point}")
     seed_ports(device, [sync_port(10, "eth10", **port_vlans("access", 100, []))])

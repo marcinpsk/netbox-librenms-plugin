@@ -244,7 +244,7 @@ def _contract_ports():
 
 def _contract_owner(kind):
     if kind == "device":
-        device = make_device("contract-device", librenms_cf={SERVER_KEY: {"id": LIBRENMS_ID}})
+        device = seed_mapping(make_device("contract-device"), SERVER_KEY, own=LIBRENMS_ID)
         # A stale port holds the name of one row, so that row offers Rebind; by name it sorts onto page 2.
         _bind(device.interfaces.create(name="eth100", type="other"), STALE_PORT)
         return device, "device"
@@ -453,7 +453,7 @@ def _check_tab_filter_form(hops, tab, page_query):
 def _ip_owner(kind, client, server):
     """Return a device or VM with IP rows whose interface names match the IP filters of the page query."""
     if kind == "device":
-        owner = make_device(f"contract-ip-{kind}", librenms_cf={"default": {"id": 42}})
+        owner = seed_mapping(make_device(f"contract-ip-{kind}"), "default", own=42)
     else:
         owner = map_device_to_librenms(make_vm(f"contract-ip-{kind}"), 42, server_key=SERVER_KEY)
     rows = [
@@ -466,7 +466,7 @@ def _ip_owner(kind, client, server):
 
 def _vlan_owner(client, settings, server):
     """Return a device with VLAN rows whose names match the VLAN filters of the page query."""
-    device = make_device("contract-vlan", librenms_cf={SERVER_KEY: {"id": LIBRENMS_ID}})
+    device = seed_mapping(make_device("contract-vlan"), SERVER_KEY, own=LIBRENMS_ID)
     rows = [
         {"vlan_vlan": 100 + n, "vlan_name": f"v{n:02d} a&b+c É", "vlan_type": "ethernet", "vlan_state": 1}
         for n in range(12)
@@ -479,7 +479,7 @@ def _vlan_owner(client, settings, server):
 def _cable_owner(kind, client, settings, server):
     """Return a device or VC member with cable rows whose remote device and local ports match the cable filters."""
     if kind == "device":
-        owner = make_device("contract-cables", librenms_cf={SERVER_KEY: {"id": LIBRENMS_ID}})
+        owner = seed_mapping(make_device("contract-cables"), SERVER_KEY, own=LIBRENMS_ID)
         members = [owner]
     else:
         _vc, members = make_virtual_chassis_members("contract-cables", 2)
@@ -566,7 +566,7 @@ def _four_tab_owner(client, settings, librenms_server):
     bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
     client.force_login(make_superuser("four-tab-user"))
     # The IP rows come from a refresh against the loopback LibreNMS, which serves the device as ID 42.
-    owner = make_device("four-tab-device", librenms_cf={SERVER_KEY: {"id": 42}})
+    owner = seed_mapping(make_device("four-tab-device"), SERVER_KEY, own=42)
     _seed(owner, _contract_ports())
     seed_source_snapshot(
         owner,

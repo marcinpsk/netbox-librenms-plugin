@@ -847,7 +847,7 @@ class TestSerialNumberMatching:
         """librenms_id match with matching serial shows confirmation."""
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        make_device("switch-01", serial="ABC123", librenms_cf={"default": {"id": 1}})
+        seed_mapping(make_device("switch-01", serial="ABC123"), "default", own=1)
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -863,7 +863,7 @@ class TestSerialNumberMatching:
         """librenms_id match with different serial warns about drift."""
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        make_device("switch-01", serial="OLD_SERIAL", librenms_cf={"default": {"id": 1}})
+        seed_mapping(make_device("switch-01", serial="OLD_SERIAL"), "default", own=1)
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -880,7 +880,7 @@ class TestSerialNumberMatching:
 
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        make_device("switch-01", serial="", librenms_cf={"default": {"id": 1}})
+        seed_mapping(make_device("switch-01", serial=""), "default", own=1)
         site, _ = Site.objects.get_or_create(name="DC1", slug="dc1")
         manufacturer, _ = Manufacturer.objects.get_or_create(name="Validation Mfr", slug="validation-mfr")
         device_type, _ = DeviceType.objects.get_or_create(
@@ -992,7 +992,7 @@ class TestNameMatchesWithNamingPreferences:
         from netbox_librenms_plugin.import_utils import validate_device_for_import
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        existing = make_device(expected_name, serial="NAMING-SERIAL", librenms_cf={"default": {"id": 42}})
+        existing = seed_mapping(make_device(expected_name, serial="NAMING-SERIAL"), "default", own=42)
         device_data.update({"device_id": 42, "serial": existing.serial})
 
         result = validate_device_for_import(device_data, include_vc_detection=False, **options)
@@ -1006,7 +1006,7 @@ class TestNameMatchesWithNamingPreferences:
         from netbox_librenms_plugin.import_utils import validate_device_for_import
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        existing = make_device("old-name", serial="RENAME-SERIAL", librenms_cf={"default": {"id": 43}})
+        existing = seed_mapping(make_device("old-name", serial="RENAME-SERIAL"), "default", own=43)
 
         result = validate_device_for_import(
             {

@@ -1964,7 +1964,7 @@ class TestInstallRefusesADuplicateSerial:
         )
         from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
 
-        device = make_device("bulkdup", librenms_cf={"default": 77})
+        device = seed_mapping(make_device("bulkdup"), "default", own=77)
         module_type = make_module_type("MT-bulkdup")
         installed = Module.objects.create(
             device=device,
@@ -2030,7 +2030,7 @@ class TestIdentityIsNotGatedOnBayMapping:
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, make_view
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
-        device = make_device(prefix, librenms_cf={"default": 91})
+        device = seed_mapping(make_device(prefix), "default", own=91)
         module_type = make_module_type(f"MT-{prefix}")
         installed = Module.objects.create(
             device=device,

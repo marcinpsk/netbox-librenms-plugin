@@ -11,7 +11,7 @@ from django.contrib.auth import get_user_model
 from django.test import RequestFactory, override_settings
 
 from netbox_librenms_plugin.tests.conftest import make_device
-from netbox_librenms_plugin.tests.mapping_fixtures import custom_fields_without_mapping, mapping_summary
+from netbox_librenms_plugin.tests.mapping_fixtures import custom_fields_without_mapping, mapping_summary, seed_mapping
 from netbox_librenms_plugin.tests.recordings import load_recording
 from netbox_librenms_plugin.views.data_shapes import CaptureDataShapeView
 
@@ -110,7 +110,7 @@ def test_capture_view_renders_modal_with_anonymized_json_and_issue_link(recordin
     recording = load_recording("cisco-stackwise-3member")
     original_serial = recording["responses"][f"GET /api/v0/devices/{recording['device_id']}"]["devices"][0]["serial"]
     server, api = recording_server(recording)
-    device = make_device("cap-dev", librenms_cf={"test": {"id": _STACK_RECORDING_ID}})
+    device = seed_mapping(make_device("cap-dev"), "test", own=_STACK_RECORDING_ID)
     view = _view_with_api(api)
 
     response = _run_capture(view, server, device)
@@ -130,7 +130,7 @@ def test_capture_view_renders_modal_with_anonymized_json_and_issue_link(recordin
 def test_capture_view_reports_novelty_verdict(recording_server):
     """A shape already covered by the manifest is reported as likely-covered."""
     server, api = recording_server(load_recording("cisco-stackwise-3member"))
-    device = make_device("cap-dev-2", librenms_cf={"test": {"id": _STACK_RECORDING_ID}})
+    device = seed_mapping(make_device("cap-dev-2"), "test", own=_STACK_RECORDING_ID)
     view = _view_with_api(api)
 
     response = _run_capture(view, server, device)
@@ -146,7 +146,7 @@ def test_capture_view_reports_similar_for_related_os_variant(recording_server):
     rec["responses"][f"GET /api/v0/devices/{_STACK_RECORDING_ID}"]["devices"][0]["os"] = "iosxr"
     rec["meta"] = {**rec.get("meta", {}), "os": "iosxr"}
     server, api = recording_server(rec)
-    device = make_device("cap-dev-similar", librenms_cf={"test": {"id": _STACK_RECORDING_ID}})
+    device = seed_mapping(make_device("cap-dev-similar"), "test", own=_STACK_RECORDING_ID)
     view = _view_with_api(api)
 
     response = _run_capture(view, server, device)
@@ -186,7 +186,7 @@ def test_capture_view_compresses_redundant_ports(recording_server):
         },
     }
     server, api = recording_server(rec)
-    device = make_device("cap-big", librenms_cf={"test": {"id": 1000}})
+    device = seed_mapping(make_device("cap-big"), "test", own=1000)
     view = _view_with_api(api)
 
     response = _run_capture(view, server, device)
@@ -206,7 +206,7 @@ def test_capture_view_issue_url_uses_anonymized_name_not_device_name(recording_s
     import re
 
     server, api = recording_server(load_recording("cisco-stackwise-3member"))
-    device = make_device("supersecret-rtr01.dc1.internal", librenms_cf={"test": {"id": _STACK_RECORDING_ID}})
+    device = seed_mapping(make_device("supersecret-rtr01.dc1.internal"), "test", own=_STACK_RECORDING_ID)
     view = _view_with_api(api)
 
     response = _run_capture(view, server, device)
@@ -225,7 +225,7 @@ def test_capture_view_download_filename_uses_anonymized_name_not_device_name(rec
     import re
 
     server, api = recording_server(load_recording("cisco-stackwise-3member"))
-    device = make_device("supersecret-rtr01.dc1.internal", librenms_cf={"test": {"id": _STACK_RECORDING_ID}})
+    device = seed_mapping(make_device("supersecret-rtr01.dc1.internal"), "test", own=_STACK_RECORDING_ID)
     view = _view_with_api(api)
 
     response = _run_capture(view, server, device)
@@ -255,9 +255,7 @@ def test_capture_view_includes_oob_controller_ports(recording_server):
     server, api = recording_server(rec)
     # Seed the device's librenms_id CF with an OOB controller under the 'test' server key. The real
     # get_librenms_id (CF read), rebind_api_for_server and get_librenms_oob all run — no owned patches.
-    device = make_device(
-        "cap-oob", librenms_cf={"test": {"id": _STACK_RECORDING_ID, "oob": {"id": 2500, "type": "drac"}}}
-    )
+    device = seed_mapping(make_device("cap-oob"), "test", own=_STACK_RECORDING_ID, oob=2500, oob_type="drac")
     view = _view_with_api(api)
 
     response = _run_capture(view, server, device)
@@ -291,7 +289,7 @@ def test_capture_view_does_not_discover_a_conflicting_id(client, recording_serve
     """An unlinked device stays unlinked even when discovery would find another owner."""
     recording = load_recording("cisco-stackwise-3member")
     server, api = recording_server(recording)
-    make_device("capture-conflict-owner", librenms_cf={"test": {"id": _STACK_RECORDING_ID}})
+    seed_mapping(make_device("capture-conflict-owner"), "test", own=_STACK_RECORDING_ID)
     target = make_device("capture-conflict-target.example.com", librenms_cf={"test": None})
     server.register(
         f"/api/v0/devices/{target.name}",
@@ -362,7 +360,7 @@ def test_capture_get_with_view_permission_does_not_store_a_discovered_id(client,
 def test_capture_view_rejects_missing_http_responses(recording_server, suffix):
     """A broken collection connection must not produce an incomplete recording."""
     server, api = recording_server(load_recording("cisco-stackwise-3member"))
-    device = make_device("capture-incomplete", librenms_cf={"test": {"id": _STACK_RECORDING_ID}})
+    device = seed_mapping(make_device("capture-incomplete"), "test", own=_STACK_RECORDING_ID)
 
     def refuse_request(**_request):
         raise ConnectionResetError("simulated connection reset")
@@ -383,7 +381,7 @@ def test_capture_view_rejects_missing_http_responses(recording_server, suffix):
 def test_capture_view_names_the_failed_oob_controller(recording_server, failure):
     """An incomplete OOB capture must identify the linked controller in its error."""
     server, api = recording_server(load_recording("cisco-stackwise-3member"))
-    device = make_device("capture-stale-oob", librenms_cf={"test": {"id": _STACK_RECORDING_ID, "oob": {"id": 2500}}})
+    device = seed_mapping(make_device("capture-stale-oob"), "test", own=_STACK_RECORDING_ID, oob=2500)
     if failure == "transport":
 
         def refuse_request(**_request):
@@ -422,7 +420,7 @@ def test_capture_view_warns_on_residual_pii(recording_server):
     root_key = f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalContainedIn=0"
     rec["responses"][root_key]["inventory"][0]["custom_note"] = "endpoint 10.7.8.9"
     server, api = recording_server(rec)
-    device = make_device("cap-dev-5", librenms_cf={"test": {"id": _STACK_RECORDING_ID}})
+    device = seed_mapping(make_device("cap-dev-5"), "test", own=_STACK_RECORDING_ID)
     view = _view_with_api(api)
 
     response = _run_capture(view, server, device)
@@ -436,7 +434,7 @@ def test_capture_view_warns_on_residual_pii(recording_server):
 def test_capture_view_errors_on_mid_capture_transport_failure(recording_server):
     """A mid-capture failure (capture raises RuntimeError) renders the error panel — an unhandled raise would 500, which htmx silently drops, leaving the Capture button apparently dead."""
     server, api = recording_server(load_recording("cisco-stackwise-3member"))
-    device = make_device("cap-dev-transport", librenms_cf={"test": {"id": _STACK_RECORDING_ID}})
+    device = seed_mapping(make_device("cap-dev-transport"), "test", own=_STACK_RECORDING_ID)
     view = _view_with_api(api)
 
     def refuse_request(**_request):
@@ -458,7 +456,7 @@ def test_capture_view_warns_when_the_sensor_table_fails(recording_server):
     """A 500 from the instance-wide sensor table still renders the recording, with a serial-sensor warning."""
     server, api = recording_server(load_recording("cisco-stackwise-3member"))
     server.register("/api/v0/resources/sensors", {"message": "Server Error"}, status=500, method="GET")
-    device = make_device("cap-dev-sensors-500", librenms_cf={"test": {"id": _STACK_RECORDING_ID}})
+    device = seed_mapping(make_device("cap-dev-sensors-500"), "test", own=_STACK_RECORDING_ID)
 
     response = _run_capture(_view_with_api(api), server, device)
 
@@ -478,7 +476,7 @@ def test_capture_view_warns_when_the_sensor_table_fails(recording_server):
 def test_capture_view_has_no_sensor_warning_when_the_table_answers(recording_server):
     """A working sensor table shows no serial-sensor warning."""
     server, api = recording_server(load_recording("cisco-stackwise-3member"))
-    device = make_device("cap-dev-sensors-ok", librenms_cf={"test": {"id": _STACK_RECORDING_ID}})
+    device = seed_mapping(make_device("cap-dev-sensors-ok"), "test", own=_STACK_RECORDING_ID)
 
     response = _run_capture(_view_with_api(api), server, device)
 
@@ -491,7 +489,7 @@ def test_capture_view_has_no_sensor_warning_when_the_table_answers(recording_ser
 def test_capture_view_reports_an_unanonymizable_recording(recording_server, monkeypatch):
     """Anonymization refuses a device with more addresses than the documentation ranges hold; an unhandled raise would 500 and htmx would drop it silently."""
     server, api = recording_server(load_recording("cisco-stackwise-3member"))
-    device = make_device("cap-dev-addresses", librenms_cf={"test": {"id": _STACK_RECORDING_ID}})
+    device = seed_mapping(make_device("cap-dev-addresses"), "test", own=_STACK_RECORDING_ID)
     view = _view_with_api(api)
 
     from netbox_librenms_plugin.views import data_shapes
@@ -513,7 +511,7 @@ def test_capture_view_reports_an_unanonymizable_recording(recording_server, monk
 def test_capture_view_reports_an_unavailable_novelty_manifest(recording_server, monkeypatch):
     """A broken packaged manifest must render an error instead of a false novelty verdict."""
     server, api = recording_server(load_recording("cisco-stackwise-3member"))
-    device = make_device("cap-dev-manifest", librenms_cf={"test": {"id": _STACK_RECORDING_ID}})
+    device = seed_mapping(make_device("cap-dev-manifest"), "test", own=_STACK_RECORDING_ID)
     view = _view_with_api(api)
 
     from netbox_librenms_plugin.views import data_shapes
@@ -540,7 +538,7 @@ def test_capture_view_denies_device_outside_users_object_scope(recording_server)
     from users.models import ObjectPermission
 
     server, api = recording_server(load_recording("cisco-stackwise-3member"))
-    target = make_device("secret-rtr", librenms_cf={"test": {"id": _STACK_RECORDING_ID}})
+    target = seed_mapping(make_device("secret-rtr"), "test", own=_STACK_RECORDING_ID)
 
     user = get_user_model().objects.create_user(username="scoped-viewer", password="x")
     op = ObjectPermission.objects.create(
@@ -577,10 +575,7 @@ def test_capture_view_denies_a_hidden_virtual_chassis_sync_owner(recording_serve
 
     server, api = recording_server(load_recording("cisco-stackwise-3member"))
     visible = make_device("capture-visible-member")
-    hidden = make_device(
-        "capture-hidden-owner",
-        librenms_cf={"test": {"id": _STACK_RECORDING_ID, "oob": {"id": 1001, "type": "oob"}}},
-    )
+    hidden = seed_mapping(make_device("capture-hidden-owner"), "test", own=_STACK_RECORDING_ID, oob=1001)
     make_virtual_chassis("capture-scoped-vc", visible, hidden)
     user = get_user_model().objects.create_user(username="capture-vc-viewer", password="x")
     permission = ObjectPermission.objects.create(
@@ -616,7 +611,7 @@ def test_capture_view_salts_every_capture_freshly(recording_server):
     source = load_recording("cisco-stackwise-3member")
     source["responses"][f"GET /api/v0/devices/{_STACK_RECORDING_ID}"]["devices"][0]["poller_group"] = 7
     server, api = recording_server(source)
-    device = make_device("cap-dev-salt", librenms_cf={"test": {"id": _STACK_RECORDING_ID}})
+    device = seed_mapping(make_device("cap-dev-salt"), "test", own=_STACK_RECORDING_ID)
 
     first_response = _run_capture(_view_with_api(api), server, device)
     second_response = _run_capture(_view_with_api(api), server, device)
@@ -712,7 +707,7 @@ def test_capture_anonymizes_unencodable_port_names(client, settings, recording_s
         "test": {"librenms_url": server.url, "api_token": "test-token", "cache_timeout": 0, "verify_ssl": False}
     }
     settings.PLUGINS_CONFIG = config
-    device = make_device("capture-unencodable", librenms_cf={"test": {"id": _STACK_RECORDING_ID}})
+    device = seed_mapping(make_device("capture-unencodable"), "test", own=_STACK_RECORDING_ID)
     client.force_login(make_superuser("capture-unencodable-user"))
     response = client.get(
         reverse("plugins:netbox_librenms_plugin:capture_data_shape", kwargs={"device_id": device.pk}),

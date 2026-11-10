@@ -237,7 +237,7 @@ def test_vm_validation_is_read_only_and_offers_an_explicit_link(client, servers)
 @pytest.mark.parametrize("object_kind", ["device", "virtualmachine"])
 def test_primary_ip_match_changes_only_after_explicit_update_and_link(client, servers, object_kind):
     if object_kind == "device":
-        target = make_device("existing-primary-ip-device", librenms_cf={"primary": 48701})
+        target = seed_mapping(make_device("existing-primary-ip-device"), "primary", own=48701)
         interface = make_interface(target, "mgmt0")
         device_id = 48801
         address = "198.18.1.10/32"
@@ -287,11 +287,7 @@ def test_primary_ip_match_changes_only_after_explicit_update_and_link(client, se
 
 @pytest.mark.django_db
 def test_serial_match_changes_only_after_explicit_update_and_link(client, servers):
-    device = make_device(
-        "existing-serial-device",
-        serial="TEST-SERIAL-49101",
-        librenms_cf={"primary": 49101},
-    )
+    device = seed_mapping(make_device("existing-serial-device", serial="TEST-SERIAL-49101"), "primary", own=49101)
     libre_device = librenms_device(49201, "renamed-serial-device")
     libre_device["serial"] = "TEST-SERIAL-49101"
     _register_import_device(servers.secondary, libre_device)
@@ -322,7 +318,7 @@ def test_link_reloads_locked_mapping_state_before_adding_the_active_server(clien
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
 
-    device = make_device("concurrent-link-device", librenms_cf={"primary": 49101})
+    device = seed_mapping(make_device("concurrent-link-device"), "primary", own=49101)
     _register_import_device(servers.secondary, librenms_device(49201, device.name))
     client.force_login(make_superuser("concurrent-server-linker"))
     concurrent_change_applied = False
@@ -360,7 +356,7 @@ def test_vm_link_rechecks_device_id_collisions_after_validation(client, servers)
 
     vm = make_vm("cross-model-link-target")
     seed_mapping(vm, "primary", own=49501)
-    device = make_device("cross-model-link-owner", librenms_cf={"primary": 49502})
+    device = seed_mapping(make_device("cross-model-link-owner"), "primary", own=49502)
     _register_import_device(
         servers.secondary,
         librenms_device(49601, vm.name),
@@ -397,7 +393,7 @@ def test_device_and_vm_links_serialize_one_cross_model_id_claim(servers):
     from django.db import close_old_connections, connection
     from django.test import Client
 
-    device = make_device("concurrent-cross-model-device", librenms_cf={"primary": 49701})
+    device = seed_mapping(make_device("concurrent-cross-model-device"), "primary", own=49701)
     vm = make_vm("concurrent-cross-model-vm")
     seed_mapping(vm, "primary", own=49702)
     first_fetch_completed = Event()
@@ -489,7 +485,7 @@ def test_a_link_that_meets_a_held_claim_answers_try_again_and_writes_nothing(cli
 
     from netbox_librenms_plugin.middleware import REQUEST_FAILED_EVENT, TRY_AGAIN_MESSAGE
 
-    device = make_device("held-claim-link-device", librenms_cf={"primary": 49901})
+    device = seed_mapping(make_device("held-claim-link-device"), "primary", own=49901)
     _register_import_device(servers.secondary, librenms_device(49902, device.name))
     client.force_login(make_superuser("held-claim-linker"))
 

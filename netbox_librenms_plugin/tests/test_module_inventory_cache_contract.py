@@ -11,7 +11,7 @@ from netbox_librenms_plugin.acquisition.snapshot import SourceSnapshot
 from netbox_librenms_plugin.tests.source_snapshot_helpers import module_inventory, seed_modules_snapshot
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
-from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, stored_mapping_for_test
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view, message_texts
 from netbox_librenms_plugin.tests.view_test_helpers import post as _post
 
@@ -34,7 +34,7 @@ class TestSeedInventoryMatchesTheReaderContract:
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
 
-        device = make_device(name, librenms_cf={"default": librenms_id})
+        device = seed_mapping(make_device(name), "default", own=librenms_id)
         request = make_request("post", {"server_key": "default"})
         view = make_view(InstallSelectedView, request, librenms_api=LibreNMSAPI(server_key="default"))
         return view, device
@@ -177,7 +177,7 @@ class TestEmptyInventoryIsNotACacheMiss:
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
         from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
 
-        device = make_device("empty-inventory-install", librenms_cf={"default": 7})
+        device = seed_mapping(make_device("empty-inventory-install"), "default", own=7)
         user = make_user_with_perms(
             "empty-inventory-install",
             [
@@ -217,7 +217,7 @@ class TestEmptyInventoryIsNotACacheMiss:
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
         from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
 
-        device = make_device("absent-inventory-install", librenms_cf={"default": 7})
+        device = seed_mapping(make_device("absent-inventory-install"), "default", own=7)
         user = make_user_with_perms(
             "absent-inventory-install",
             [
@@ -245,7 +245,7 @@ class TestEmptyInventoryIsNotACacheMiss:
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
-        device = make_device("empty-inventory-branch", librenms_cf={"default": 7})
+        device = seed_mapping(make_device("empty-inventory-branch"), "default", own=7)
         user = make_user_with_perms(
             "empty-inventory-branch",
             [
@@ -306,7 +306,7 @@ class TestReplaceReadsAreStalenessChecked:
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
         from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
 
-        device = make_device("replace-stale-fingerprint", librenms_cf={"default": 7})
+        device = seed_mapping(make_device("replace-stale-fingerprint"), "default", own=7)
         make_module_bay(device, "Bay 1")
         module = install_module(device, "Bay 1", "Installed Model", serial="INSTALLED")
         # A resolvable type, so the staleness guard is the only thing that can stop the write.
@@ -368,7 +368,7 @@ class TestTrustedPayloadMatchesTheDeviceMapping:
         """Positive control: the guard must not reject the ordinary path."""
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        device = make_device("trusted-payload-ok", librenms_cf={"default": 3})
+        device = seed_mapping(make_device("trusted-payload-ok"), "default", own=3)
 
         payload = seed_mapped_modules(device, [{"index": 1}], librenms_id=9).to_payload()
 

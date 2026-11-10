@@ -259,7 +259,7 @@ def test_snapshot_cleanup_removes_snapshot_bound_cable_picks(
 ):
     """The configured backend must drop the picks bound to a discarded cable snapshot."""
     _configure_servers(settings)
-    device = make_device("cache-cable-pick-cleanup", librenms_cf={"primary": {"id": 6406}})
+    device = seed_mapping(make_device("cache-cable-pick-cleanup"), "primary", own=6406)
     coordinator = SyncCacheConsistency(device)
     _seed_snapshot("ports", device, "primary")
     _seed_snapshot("links", device, "primary")
@@ -295,9 +295,9 @@ def test_virtual_machine_unsupported_cache_fragment_returns_404(client, settings
 def test_cable_cache_fragment_does_not_rewrite_the_snapshot(client, settings, primary_librenms):
     """A cache-only cable fragment may enrich its response but must not rewrite shared state."""
     _configure_servers(settings)
-    local_device = make_device("cache-only-cable-local", librenms_cf={"primary": {"id": 6403}})
+    local_device = seed_mapping(make_device("cache-only-cable-local"), "primary", own=6403)
     local = make_interface(local_device, "Ethernet1")
-    remote_device = make_device("cache-only-cable-remote", librenms_cf={"primary": {"id": 6404}})
+    remote_device = seed_mapping(make_device("cache-only-cable-remote"), "primary", own=6404)
     remote = make_interface(remote_device, "Ethernet2")
     seed_mapping(local, "primary", own=7403, save=False)
     seed_mapping(remote, "primary", own=7404, save=False)
@@ -329,7 +329,7 @@ def test_cable_cache_fragment_does_not_rewrite_the_snapshot(client, settings, pr
 def test_module_cache_status_reads_the_inventory_snapshot_like_the_tab(client, settings):
     """A snapshot from an older inventory writer is one the Modules tab rejects, so status must not call it ready."""
     _configure_servers(settings)
-    device = make_device("cache-status-module-version", librenms_cf={"primary": {"id": 6406}})
+    device = seed_mapping(make_device("cache-status-module-version"), "primary", own=6406)
     key = _cache_key("inventory", device, "primary")
     cache.set(key, {"schema": 0}, timeout=300)
     client.force_login(make_superuser("cache-status-module-version-user"))
@@ -354,7 +354,7 @@ def test_module_cache_status_rejects_a_snapshot_of_another_oob_link_like_the_tab
     """A snapshot merged from another OOB controller is one the Modules tab rejects, so status must not call it ready."""
 
     _configure_servers(settings)
-    device = make_device("cache-status-module-oob", librenms_cf={"primary": {"id": 6407, "oob": {"id": 6408}}})
+    device = seed_mapping(make_device("cache-status-module-oob"), "primary", own=6407, oob=6408)
     client.force_login(make_superuser("cache-status-module-oob-user"))
     status_url = reverse(
         "plugins:netbox_librenms_plugin:sync_cache_status",
@@ -388,7 +388,7 @@ def test_module_cache_status_agrees_with_the_tab_after_the_host_mapping_changes(
     from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_mapping_row
 
     _configure_servers(settings)
-    device = make_device("cache-status-module-host", librenms_cf={"primary": {"id": 6407}})
+    device = seed_mapping(make_device("cache-status-module-host"), "primary", own=6407)
     client.force_login(make_superuser("cache-status-module-host-user"))
     status_url = reverse(
         "plugins:netbox_librenms_plugin:sync_cache_status",
@@ -421,10 +421,7 @@ def test_module_cache_status_agrees_with_the_tab_after_the_host_mapping_changes(
 def test_module_cache_fragment_does_not_discover_a_missing_host_id(client, settings, primary_librenms):
     """An OOB-mapped module fragment must not discover a missing host identity."""
     _configure_servers(settings)
-    device = make_device(
-        "cache-only-module",
-        librenms_cf={"primary": {"oob": {"id": 6405}}},
-    )
+    device = seed_mapping(make_device("cache-only-module"), "primary", oob=6405)
     with mapping_in_memory(device, "primary", own=9999):
         seed_modules_snapshot(device, [], oob_inventory=[], server_key="primary")
     client.force_login(make_superuser("cache-only-module-user"))
@@ -445,7 +442,7 @@ def test_module_cache_fragment_does_not_discover_a_missing_host_id(client, setti
 def test_cold_sync_page_load_fetches_librenms_status(client, settings, primary_librenms):
     """The status card must load even when the active tab has no snapshot."""
     _configure_servers(settings)
-    device = make_device("cache-cold-status", librenms_cf={"primary": {"id": 7401}})
+    device = seed_mapping(make_device("cache-cold-status"), "primary", own=7401)
     client.force_login(make_superuser("cache-cold-status-user"))
     _serve_device_info(primary_librenms, 7401, device.name, "Status Hardware 7401")
 
@@ -471,7 +468,7 @@ class TestSyncPageRenderCoordinator:
         from netbox_librenms_plugin.views.base import librenms_sync_view as sync_view_module
 
         _configure_servers(settings)
-        device = make_device("cache-single-render-coordinator", librenms_cf={"primary": {"id": 7408}})
+        device = seed_mapping(make_device("cache-single-render-coordinator"), "primary", own=7408)
         client.force_login(make_superuser("cache-single-render-coordinator-user"))
         constructed_subjects = []
         direct_applicable_tabs_subjects = []
@@ -514,7 +511,7 @@ class TestSyncPageRenderCoordinator:
 def test_mapped_device_missing_from_librenms_renders_danger_status(client, settings, primary_librenms):
     """A stale stored LibreNMS ID must not make a failed lookup look successful."""
     _configure_servers(settings)
-    device = make_device("cache-missing-status", librenms_cf={"primary": {"id": 7402}})
+    device = seed_mapping(make_device("cache-missing-status"), "primary", own=7402)
     client.force_login(make_superuser("cache-missing-status-user"))
     url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
 
@@ -545,7 +542,7 @@ def test_an_attribute_only_interface_change_schedules_the_cache_transition(
     from dcim.models import Interface
 
     _configure_servers(settings)
-    device = make_device("cache-attr-only", librenms_cf={"primary": {"id": 51}})
+    device = seed_mapping(make_device("cache-attr-only"), "primary", own=51)
     interface = Interface.objects.create(
         device=device, name="Ethernet1/9", type="1000base-t", description="stale description"
     )
@@ -717,7 +714,7 @@ def test_a_sibling_refresh_clears_the_shared_tab_block_on_every_member(
     _configure_servers(settings)
     _chassis, (owner, sibling) = make_virtual_chassis_members("cache-shared-state")
     seed_mapping(owner, "primary", own=61)
-    remote_device = make_device("cache-shared-state-remote", librenms_cf={"primary": {"id": 62}})
+    remote_device = seed_mapping(make_device("cache-shared-state-remote"), "primary", own=62)
     local = make_interface(sibling, "Ethernet1", iface_type="1000base-t")
     remote = make_interface(remote_device, "Ethernet2", iface_type="1000base-t")
     seed_mapping(local, "primary", own=7481, save=False)
@@ -834,7 +831,7 @@ def test_selected_interface_that_already_matches_preserves_other_snapshots(
 ):
     """A selected row with no semantic change must not clear another tab."""
     _configure_servers(settings)
-    device = make_device("cache-interface-unchanged", librenms_cf={"primary": {"id": 52}})
+    device = seed_mapping(make_device("cache-interface-unchanged"), "primary", own=52)
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(interface, "primary", own=7002)
     seed_interfaces_snapshot(device, [{"port_id": 7002, "ifName": interface.name}], server_key="primary")
@@ -876,7 +873,7 @@ def test_ip_sync_invalidates_other_tabs_after_creating_an_address(
     """A committed IP row must retain its source snapshot and clear other tabs."""
     _configure_servers(settings)
     settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]["primary"]["cache_timeout"] = 60
-    device = make_device("cache-ip-writer", librenms_cf={"primary": {"id": 61}})
+    device = seed_mapping(make_device("cache-ip-writer"), "primary", own=61)
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(interface, "primary", own=7101)
     address = "198.18.61.10/24"
@@ -915,7 +912,7 @@ def test_partial_ip_commit_invalidates_other_tabs_before_conflict_confirmation(
 ):
     """A safe committed row must invalidate stale tabs when another row needs confirmation."""
     _configure_servers(settings)
-    device = make_device("cache-ip-partial-conflict", librenms_cf={"primary": {"id": 612}})
+    device = seed_mapping(make_device("cache-ip-partial-conflict"), "primary", own=612)
     conflict_target = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(conflict_target, "primary", own=7121)
     safe_target = make_interface(device, "Ethernet2", iface_type="1000base-t")
@@ -967,7 +964,7 @@ def test_partial_ip_commit_invalidates_other_tabs_before_conflict_confirmation(
 def test_htmx_mutation_does_not_repeat_cache_notice_on_next_navigation(client, settings):
     """An HTMX mutation must report its cache transition only in the current response."""
     _configure_servers(settings)
-    device = make_device("cache-parent-immediate-notice", librenms_cf={"primary": {"id": 611}})
+    device = seed_mapping(make_device("cache-parent-immediate-notice"), "primary", own=611)
     parent = make_interface(device, "Ethernet1", iface_type="1000base-t")
     child = make_interface(device, "Ethernet1.100", iface_type="virtual")
     seed_mapping(parent, "primary", own=7111, save=False)
@@ -1016,7 +1013,7 @@ def test_htmx_module_action_delivers_the_cache_notice_with_the_fragment(client, 
     """A module action swaps its tab in place, so the browser gets the cache notice from the trigger."""
 
     _configure_servers(settings)
-    device = make_device("cache-modules-refresh-notice", librenms_cf={"primary": {"id": 612}})
+    device = seed_mapping(make_device("cache-modules-refresh-notice"), "primary", own=612)
     bay = make_module_bay(device, "Refresh Bay")
     module_type = make_module_type("REFRESH-CARD")
     _seed_snapshot("ports", device, "primary")
@@ -1089,7 +1086,7 @@ def test_vlan_sync_invalidates_other_tabs_after_creating_a_vlan(
 ):
     """A committed VLAN row must publish the same cache transition as other writers."""
     _configure_servers(settings)
-    device = make_device("cache-vlan-writer", librenms_cf={"primary": {"id": 62}})
+    device = seed_mapping(make_device("cache-vlan-writer"), "primary", own=62)
     vlan_payload = [{"vlan_vlan": 3062, "vlan_name": "Cache Test VLAN"}]
     seed_source_snapshot(device, Resource.VLANS, "primary", vlans=vlan_payload)
     _seed_snapshot("links", device, "primary")
@@ -1115,8 +1112,8 @@ def test_cable_sync_invalidates_other_tabs_after_creating_a_cable(
 ):
     """A committed cable must clear comparisons that depend on current topology."""
     _configure_servers(settings)
-    device = make_device("cache-cable-writer", librenms_cf={"primary": {"id": 63}})
-    remote_device = make_device("cache-cable-remote", librenms_cf={"primary": {"id": 64}})
+    device = seed_mapping(make_device("cache-cable-writer"), "primary", own=63)
+    remote_device = seed_mapping(make_device("cache-cable-remote"), "primary", own=64)
     local = make_interface(device, "Ethernet1", iface_type="1000base-t")
     remote = make_interface(remote_device, "Ethernet2", iface_type="1000base-t")
     seed_mapping(local, "primary", own=7201, save=False)
@@ -1161,7 +1158,7 @@ def test_module_install_invalidates_other_tabs_after_creating_a_module(
 ):
     """A committed module action must retain inventory and clear other snapshots."""
     _configure_servers(settings)
-    device = make_device("cache-module-writer", librenms_cf={"primary": {"id": 64}})
+    device = seed_mapping(make_device("cache-module-writer"), "primary", own=64)
     bay = ModuleBay.objects.create(device=device, name="Slot 1")
     module_type = ModuleType.objects.create(
         manufacturer=device.device_type.manufacturer,
@@ -1224,7 +1221,7 @@ def test_unchanged_module_serial_preserves_other_snapshots(client, settings, dja
     from django.contrib.messages import get_messages
 
     _configure_servers(settings)
-    device = make_device("cache-module-unchanged", librenms_cf={"primary": {"id": 641}})
+    device = seed_mapping(make_device("cache-module-unchanged"), "primary", own=641)
     bay = ModuleBay.objects.create(device=device, name="Slot 1")
     module_type = ModuleType.objects.create(
         manufacturer=device.device_type.manufacturer,
@@ -1259,7 +1256,7 @@ def test_module_mutation_without_posted_server_uses_active_namespace(
 ):
     """A module writer must resolve its active namespace before it mutates."""
     _configure_servers(settings)
-    device = make_device("cache-module-missing-server", librenms_cf={"primary": {"id": 642}})
+    device = seed_mapping(make_device("cache-module-missing-server"), "primary", own=642)
     bay = ModuleBay.objects.create(device=device, name="Slot 1")
     module_type = ModuleType.objects.create(
         manufacturer=device.device_type.manufacturer,
@@ -1290,7 +1287,7 @@ def test_interface_delete_without_posted_server_uses_active_namespace(
 ):
     """The delete writer must validate its server namespace before deleting a row."""
     _configure_servers(settings)
-    device = make_device("cache-delete-missing-server", librenms_cf={"primary": {"id": 643}})
+    device = seed_mapping(make_device("cache-delete-missing-server"), "primary", own=643)
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     _seed_snapshot("ports", device, "primary")
     seed_ip_snapshot(device, [], server_key="primary")
@@ -1317,7 +1314,7 @@ def test_interface_delete_without_a_usable_server_invalidates_the_source_snapsho
 ):
     """A NetBox-only deletion without cleanup ownership must invalidate its source snapshot."""
     server_key = _configured_server_key(settings)
-    device = make_device("cache-delete-without-server", librenms_cf={server_key: {"id": 644}})
+    device = seed_mapping(make_device("cache-delete-without-server"), server_key, own=644)
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     configure_no_librenms_servers(settings)
     _seed_snapshot("ports", device, server_key)
@@ -1348,10 +1345,7 @@ def test_configured_unmapped_server_action_invalidates_mapped_snapshots_without_
     _configure_servers(settings)
     configured_server_keys = tuple(settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"])
     mapped_server_key, acting_server_key, *_remaining_server_keys = configured_server_keys
-    device = make_device(
-        "cache-configured-unmapped-action",
-        librenms_cf={mapped_server_key: {"id": 646}},
-    )
+    device = seed_mapping(make_device("cache-configured-unmapped-action"), mapped_server_key, own=646)
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     snapshots = {
         SyncTab.INTERFACES: "ports",
@@ -1466,7 +1460,7 @@ def test_request_transitions_for_different_servers_preserve_both_sources(setting
 def test_a_response_built_inside_the_transaction_reports_the_committed_cleanup(settings):
     """Verify that a response built before commit reports cleanup deferred by ATOMIC_REQUESTS."""
     server_key = _configured_server_key(settings)
-    device = make_device("cache-deferred-response", librenms_cf={server_key: {"id": 651}})
+    device = seed_mapping(make_device("cache-deferred-response"), server_key, own=651)
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     # Seed a DEPENDENT tab: schedule_mutation discards the source tab from cleanup_tabs when
     # the device is mapped to the active server, so seeding "ports" would clean nothing.
@@ -1497,7 +1491,7 @@ def test_module_serial_update_without_a_usable_server_refuses_the_write(
     from netbox_librenms_plugin.views.sync.modules import NO_LIBRENMS_SERVER_MESSAGE
 
     server_key = _configured_server_key(settings)
-    device = make_device("cache-serial-without-server", librenms_cf={server_key: {"id": 645}})
+    device = seed_mapping(make_device("cache-serial-without-server"), server_key, own=645)
     bay = ModuleBay.objects.create(device=device, name="Slot 1")
     module_type = ModuleType.objects.create(
         manufacturer=device.device_type.manufacturer,
@@ -1581,8 +1575,8 @@ def test_interface_move_invalidates_winner_dependent_snapshots(
 ):
     """Moving an interface must publish the cache transition for its new owner too."""
     _configure_servers(settings)
-    donor = make_device("cache-move-interface-donor", librenms_cf={"primary": {"id": 6410}})
-    winner = make_device("cache-move-interface-winner", librenms_cf={"primary": {"id": 6411}})
+    donor = seed_mapping(make_device("cache-move-interface-donor"), "primary", own=6410)
+    winner = seed_mapping(make_device("cache-move-interface-winner"), "primary", own=6411)
     _mark_migrated_donor(donor, winner)
     interface = make_interface(donor, "Ethernet1", iface_type="1000base-t")
     seed_ip_snapshot(winner, [], server_key="primary")
@@ -1613,14 +1607,8 @@ def test_interface_move_clears_winner_snapshots_when_active_server_is_unmapped(
     active_server_key, winner_server_key, *_remaining_server_keys = settings.PLUGINS_CONFIG["netbox_librenms_plugin"][
         "servers"
     ]
-    donor = make_device(
-        "cache-move-interface-unmapped-donor",
-        librenms_cf={active_server_key: {"id": 6418}},
-    )
-    winner = make_device(
-        "cache-move-interface-unmapped-winner",
-        librenms_cf={winner_server_key: {"id": 6419}},
-    )
+    donor = seed_mapping(make_device("cache-move-interface-unmapped-donor"), active_server_key, own=6418)
+    winner = seed_mapping(make_device("cache-move-interface-unmapped-winner"), winner_server_key, own=6419)
     apply_mapping_change(donor, mark_migrated(donor, winner.pk, active_server_key))
     donor.save(update_fields=["custom_field_data"])
     interface = make_interface(donor, "Ethernet1", iface_type="1000base-t")
@@ -1647,8 +1635,8 @@ def test_interface_move_response_reports_winner_cleanup_failure(
 ):
     """A winner cleanup failure must remain visible in the single response event."""
     _configure_servers(settings)
-    donor = make_device("cache-move-interface-failure-donor", librenms_cf={"primary": {"id": 6416}})
-    winner = make_device("cache-move-interface-failure-winner", librenms_cf={"primary": {"id": 6417}})
+    donor = seed_mapping(make_device("cache-move-interface-failure-donor"), "primary", own=6416)
+    winner = seed_mapping(make_device("cache-move-interface-failure-winner"), "primary", own=6417)
     _mark_migrated_donor(donor, winner)
     interface = make_interface(donor, "Ethernet1", iface_type="1000base-t")
     client.force_login(make_superuser("cache-move-interface-failure-user"))
@@ -1678,8 +1666,8 @@ def test_ip_move_invalidates_winner_dependent_snapshots(
 ):
     """Moving an address must publish the cache transition for its new owner too."""
     _configure_servers(settings)
-    donor = make_device("cache-move-ip-donor", librenms_cf={"primary": {"id": 6412}})
-    winner = make_device("cache-move-ip-winner", librenms_cf={"primary": {"id": 6413}})
+    donor = seed_mapping(make_device("cache-move-ip-donor"), "primary", own=6412)
+    winner = seed_mapping(make_device("cache-move-ip-winner"), "primary", own=6413)
     _mark_migrated_donor(donor, winner)
     address = ip_on(donor, "198.18.20.10/24", "Ethernet1")
     make_interface(winner, "Ethernet1", iface_type="1000base-t")
@@ -1704,8 +1692,8 @@ def test_device_ip_transfer_invalidates_winner_dependent_snapshots(
 ):
     """Transferring a device IP role must publish the cache transition for the winner too."""
     _configure_servers(settings)
-    donor = make_device("cache-transfer-ip-donor", librenms_cf={"primary": {"id": 6414}})
-    winner = make_device("cache-transfer-ip-winner", librenms_cf={"primary": {"id": 6415}})
+    donor = seed_mapping(make_device("cache-transfer-ip-donor"), "primary", own=6414)
+    winner = seed_mapping(make_device("cache-transfer-ip-winner"), "primary", own=6415)
     _mark_migrated_donor(donor, winner)
     address = ip_on(winner, "198.18.21.10/24", "Ethernet1")
     donor.primary_ip4 = address
@@ -1734,7 +1722,7 @@ def test_inline_relationship_noop_preserves_other_snapshots(
 ):
     """An already-applied relationship must not publish a second mutation."""
     _configure_servers(settings)
-    device = make_device("cache-parent-noop", librenms_cf={"primary": {"id": 644}})
+    device = seed_mapping(make_device("cache-parent-noop"), "primary", own=644)
     parent = make_interface(device, "Ethernet1", iface_type="1000base-t")
     child = make_interface(device, "Ethernet1.100", iface_type="virtual")
     seed_mapping(parent, "primary", own=7441, save=False)
@@ -1774,7 +1762,7 @@ def test_inline_relationship_noop_preserves_other_snapshots(
 def test_htmx_ip_cache_miss_replaces_active_tab_with_warning(client, settings):
     """An HTMX writer cache miss must not navigate away from the active tab."""
     _configure_servers(settings)
-    device = make_device("cache-ip-missing", librenms_cf={"primary": {"id": 645}})
+    device = seed_mapping(make_device("cache-ip-missing"), "primary", own=645)
     client.force_login(make_superuser("cache-ip-missing-user"))
     url = reverse(
         "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
@@ -1798,7 +1786,7 @@ def test_htmx_ip_cache_miss_replaces_active_tab_with_warning(client, settings):
 def test_htmx_module_cache_miss_replaces_active_tab_with_warning(client, settings):
     """An HTMX module writer cache miss must render an empty refresh state."""
     _configure_servers(settings)
-    device = make_device("cache-module-missing", librenms_cf={"primary": {"id": 646}})
+    device = seed_mapping(make_device("cache-module-missing"), "primary", own=646)
     client.force_login(make_superuser("cache-module-missing-user"))
     url = reverse("plugins:netbox_librenms_plugin:install_selected", kwargs={"pk": device.pk})
 
@@ -1820,11 +1808,8 @@ def test_htmx_module_cache_miss_replaces_active_tab_with_warning(client, setting
 def test_partial_cable_refresh_keeps_rows_from_available_sources(client, settings, primary_librenms):
     """An OOB fetch failure must retain actionable host rows in the cached snapshot."""
     _configure_servers(settings)
-    device = make_device(
-        "cache-cable-partial",
-        librenms_cf={"primary": {"id": 647, "oob": {"id": 649, "type": "oob"}}},
-    )
-    remote_device = make_device("cache-cable-partial-remote", librenms_cf={"primary": {"id": 648}})
+    device = seed_mapping(make_device("cache-cable-partial"), "primary", own=647, oob=649)
+    remote_device = seed_mapping(make_device("cache-cable-partial-remote"), "primary", own=648)
     local = make_interface(device, "Ethernet1", iface_type="1000base-t")
     remote = make_interface(remote_device, "Ethernet2", iface_type="1000base-t")
     seed_mapping(local, "primary", own=7471, save=False)
@@ -1872,7 +1857,7 @@ def test_partial_cable_refresh_keeps_rows_from_available_sources(client, setting
 def test_a_failed_host_ports_fetch_fails_the_cable_refresh(client, settings, primary_librenms):
     """Without the host ports the rows lose their port names, so the refresh must not cache them as a success."""
     _configure_servers(settings)
-    device = make_device("cache-cable-ports-fail", librenms_cf={"primary": {"id": 651}})
+    device = seed_mapping(make_device("cache-cable-ports-fail"), "primary", own=651)
     make_interface(device, "GigabitEthernet0/1", iface_type="1000base-t")
     user = make_superuser("cache-cable-ports-fail-user")
     client.force_login(user)
@@ -1925,7 +1910,7 @@ def test_cable_refresh_refuses_an_ambiguous_server_key(client, settings, primary
 @pytest.mark.django_db
 def test_cable_refresh_reports_a_single_unconfigured_server_key(client, settings, primary_librenms):
     _configure_servers(settings)
-    device = make_device("cache-cable-unconfigured", librenms_cf={"primary": {"id": 672}})
+    device = seed_mapping(make_device("cache-cable-unconfigured"), "primary", own=672)
     client.force_login(make_superuser("cache-cable-unconfigured-user"))
     url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", kwargs={"pk": device.pk})
 
@@ -1942,8 +1927,8 @@ def test_cable_refresh_without_a_cached_snapshot_reports_failure_not_success(
 ):
     """The toast must agree with the tab state: no snapshot means no success message."""
     _configure_servers(settings)
-    device = make_device("cache-cable-nosnap", librenms_cf={"primary": {"id": 661}})
-    remote_device = make_device("cache-cable-nosnap-remote", librenms_cf={"primary": {"id": 662}})
+    device = seed_mapping(make_device("cache-cable-nosnap"), "primary", own=661)
+    remote_device = seed_mapping(make_device("cache-cable-nosnap-remote"), "primary", own=662)
     local = make_interface(device, "Ethernet1", iface_type="1000base-t")
     remote = make_interface(remote_device, "Ethernet2", iface_type="1000base-t")
     seed_mapping(local, "primary", own=7481, save=False)
@@ -2022,7 +2007,7 @@ def test_interface_refresh_without_a_cached_snapshot_reports_failure_not_success
 ):
     """A lost interface snapshot records a failed refresh and shows no success toast."""
     _configure_servers(settings)
-    device = make_device("cache-interface-nosnap", librenms_cf={"primary": {"id": 663}})
+    device = seed_mapping(make_device("cache-interface-nosnap"), "primary", own=663)
     user = make_superuser("cache-interface-nosnap-user")
     client.force_login(user)
     primary_librenms.register("/api/v0/devices/663/ports", {"status": "ok", "ports": []})
@@ -2071,8 +2056,8 @@ def _serve_module_rows(server, librenms_id):
 
 def _serve_cable_rows(server, name):
     """Return a device (LibreNMS 661) whose one LibreNMS link goes to Ethernet42 of a NetBox peer."""
-    device = make_device(name, librenms_cf={"primary": {"id": 661}})
-    remote_device = make_device(f"{name}-remote", librenms_cf={"primary": {"id": 662}})
+    device = seed_mapping(make_device(name), "primary", own=661)
+    remote_device = seed_mapping(make_device(f"{name}-remote"), "primary", own=662)
     local = make_interface(device, "Ethernet1", iface_type="1000base-t")
     remote = make_interface(remote_device, "Ethernet42", iface_type="1000base-t")
     seed_mapping(local, "primary", own=7481, save=False)
@@ -2124,7 +2109,7 @@ def test_a_refresh_publishes_its_snapshot_before_it_reads_the_snapshot_ttl(
     if tab is SyncTab.CABLES:
         device = _serve_cable_rows(primary_librenms, "cache-ttl-down")
     else:
-        device = make_device("cache-ttl-down", librenms_cf={"primary": {"id": 668}})
+        device = seed_mapping(make_device("cache-ttl-down"), "primary", own=668)
         (_serve_ip_rows if tab is SyncTab.IP_ADDRESSES else _serve_module_rows)(primary_librenms, 668)
     user = make_superuser("cache-ttl-down-user")
     client.force_login(user)
@@ -2154,7 +2139,7 @@ def test_a_module_snapshot_removed_during_the_refresh_read_is_no_success(
 ):
     """Another request can remove the snapshot after the outcome is published and before the table reads it."""
     _configure_servers(settings)
-    device = make_device("cache-module-lost", librenms_cf={"primary": {"id": 669}})
+    device = seed_mapping(make_device("cache-module-lost"), "primary", own=669)
     _serve_module_rows(primary_librenms, 669)
     user = make_superuser("cache-module-lost-user")
     client.force_login(user)
@@ -2188,7 +2173,7 @@ def test_a_module_snapshot_removed_and_stored_again_during_the_refresh_is_no_suc
     from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
     _configure_servers(settings)
-    device = make_device("cache-module-flicker", librenms_cf={"primary": {"id": 671}})
+    device = seed_mapping(make_device("cache-module-flicker"), "primary", own=671)
     _serve_module_rows(primary_librenms, 671)
     user = make_superuser("cache-module-flicker-user")
     client.force_login(user)
@@ -2232,7 +2217,7 @@ def test_a_failed_ip_cache_write_does_not_claim_there_is_nothing_to_show(
     with no idea that those rows cannot be synced until the data is cached.
     """
     _configure_servers(settings)
-    device = make_device("cache-ip-rows", librenms_cf={"primary": {"id": 665}})
+    device = seed_mapping(make_device("cache-ip-rows"), "primary", own=665)
     client.force_login(make_superuser("cache-ip-rows-user"))
     _serve_ip_rows(primary_librenms, 665)
     _drop_snapshot_write(monkeypatch, device, SyncTab.IP_ADDRESSES)
@@ -2250,7 +2235,7 @@ def test_a_failed_module_cache_write_hides_unstored_rows_and_reports_an_error(
 ):
     """A failed module cache write must hide unstored rows and report an error."""
     _configure_servers(settings)
-    device = make_device("cache-module-rows", librenms_cf={"primary": {"id": 667}})
+    device = seed_mapping(make_device("cache-module-rows"), "primary", own=667)
     client.force_login(make_superuser("cache-module-rows-user"))
     _serve_module_rows(primary_librenms, 667)
     skipped = _drop_snapshot_write(monkeypatch, device, SyncTab.MODULES)
@@ -2290,7 +2275,7 @@ def test_ip_address_refresh_without_a_cached_snapshot_reports_failure_not_succes
 ):
     """A lost IP address snapshot records a failed refresh and shows no success toast."""
     _configure_servers(settings)
-    device = make_device("cache-ip-nosnap", librenms_cf={"primary": {"id": 664}})
+    device = seed_mapping(make_device("cache-ip-nosnap"), "primary", own=664)
     user = make_superuser("cache-ip-nosnap-user")
     client.force_login(user)
     primary_librenms.register("/api/v0/devices/664/ip", {"status": "ok", "addresses": []})
@@ -2316,7 +2301,7 @@ def test_vlan_refresh_without_a_cached_snapshot_reports_failure_not_success(
 ):
     """A lost VLAN snapshot records a failed refresh and shows no success toast."""
     _configure_servers(settings)
-    device = make_device("cache-vlan-nosnap", librenms_cf={"primary": {"id": 665}})
+    device = seed_mapping(make_device("cache-vlan-nosnap"), "primary", own=665)
     user = make_superuser("cache-vlan-nosnap-user")
     client.force_login(user)
     primary_librenms.register("/api/v0/resources/vlans", {"status": "ok", "vlans": []})
@@ -2340,7 +2325,7 @@ def test_module_refresh_without_a_cached_snapshot_reports_failure_not_success(
 ):
     """A lost module snapshot records a failed refresh and shows no success toast."""
     _configure_servers(settings)
-    device = make_device("cache-module-nosnap", librenms_cf={"primary": {"id": 666}})
+    device = seed_mapping(make_device("cache-module-nosnap"), "primary", own=666)
     user = make_superuser("cache-module-nosnap-user")
     client.force_login(user)
     primary_librenms.register("/api/v0/inventory/666/all", {"status": "ok", "inventory": []})
@@ -2364,7 +2349,7 @@ def test_module_refresh_without_a_cached_snapshot_reports_failure_not_success(
 def test_partial_module_refresh_renders_no_inventory_rows(client, settings, primary_librenms):
     """An incomplete module refresh must render the empty state instead of a degraded table."""
     _configure_servers(settings)
-    device = make_device("cache-module-partial", librenms_cf={"primary": {"id": 651}})
+    device = seed_mapping(make_device("cache-module-partial"), "primary", own=651)
     client.force_login(make_superuser("cache-module-partial-user"))
     _seed_snapshot("inventory", device, "primary")
 
@@ -2407,7 +2392,7 @@ def test_cleanup_failure_invalidates_every_dependent_tab(
 ):
     """A partial cache-backend failure must leave all dependent tabs fail-closed."""
     _configure_servers(settings)
-    device = make_device("cache-cleanup-failure", librenms_cf={"primary": {"id": 650}})
+    device = seed_mapping(make_device("cache-cleanup-failure"), "primary", own=650)
     coordinator = SyncCacheConsistency(device)
     for data_type in ("ports", "links", "inventory", "vlans"):
         _seed_snapshot(data_type, device, "primary")
@@ -2458,10 +2443,7 @@ def test_cleanup_failure_on_unmapped_active_server_invalidates_surviving_mapped_
     mapped_server_key, active_server_key, *_remaining_server_keys = settings.PLUGINS_CONFIG["netbox_librenms_plugin"][
         "servers"
     ]
-    device = make_device(
-        "cache-cleanup-failure-unmapped-active",
-        librenms_cf={mapped_server_key: {"id": 652}},
-    )
+    device = seed_mapping(make_device("cache-cleanup-failure-unmapped-active"), mapped_server_key, own=652)
     coordinator = SyncCacheConsistency(device)
     snapshots = {
         SyncTab.INTERFACES: "ports",
@@ -2502,7 +2484,7 @@ def test_cleanup_failure_does_not_mark_tabs_without_cache_state(
 ):
     """Cleanup failure reasons must be limited to tabs that had snapshot-bound state."""
     _configure_servers(settings)
-    device = make_device("cache-cleanup-sparse", librenms_cf={"primary": {"id": 651}})
+    device = seed_mapping(make_device("cache-cleanup-sparse"), "primary", own=651)
     coordinator = SyncCacheConsistency(device)
     _seed_snapshot("ports", device, "primary")
     _seed_snapshot("links", device, "primary")
@@ -2532,7 +2514,7 @@ def test_cleanup_failure_before_affected_tabs_are_known_invalidates_all_tabs(
 ):
     """An early cleanup failure must publish fail-closed states for every dependent tab."""
     _configure_servers(settings)
-    device = make_device("cache-cleanup-early-failure", librenms_cf={"primary": {"id": 653}})
+    device = seed_mapping(make_device("cache-cleanup-early-failure"), "primary", own=653)
     coordinator = SyncCacheConsistency(device)
 
     from netbox_librenms_plugin import sync_cache
@@ -2563,7 +2545,7 @@ def test_cleanup_failure_before_affected_tabs_are_known_invalidates_all_tabs(
 def test_legacy_ip_fragment_never_backfills_from_librenms(client, settings, primary_librenms):
     """An old-shape IP payload reads as no snapshot, and the cache-only fragment does not fetch one."""
     _configure_servers(settings)
-    device = make_device("cache-ip-fragment-legacy", librenms_cf={"primary": {"id": 652}})
+    device = seed_mapping(make_device("cache-ip-fragment-legacy"), "primary", own=652)
     # The enriched payload that the IP tab stored before it stored source snapshots.
     legacy_key = _cache_key("ip_addresses", device, "primary")
     cache.set(
@@ -2598,7 +2580,7 @@ def test_legacy_ip_fragment_never_backfills_from_librenms(client, settings, prim
 def test_refresh_failure_reason_is_anonymous_across_users(settings):
     """The shared failure reason must identify only whether this user initiated it."""
     _configure_servers(settings)
-    device = make_device("cache-refresh-failure-reason", librenms_cf={"primary": {"id": 653}})
+    device = seed_mapping(make_device("cache-refresh-failure-reason"), "primary", own=653)
     coordinator = SyncCacheConsistency(device)
     coordinator.mark_refresh_failure(SyncTab.IP_ADDRESSES, "primary", actor_id=101)
 
@@ -2613,7 +2595,7 @@ def test_refresh_failure_reason_is_anonymous_across_users(settings):
 def test_refresh_failure_marks_server_rendered_tab_without_dynamic_content(client, settings, primary_librenms):
     """HTMX navigation must mark the tab itself and must not add variable-width content."""
     _configure_servers(settings)
-    device = make_device("cache-refresh-failed-tab", librenms_cf={"primary": {"id": 655}})
+    device = seed_mapping(make_device("cache-refresh-failed-tab"), "primary", own=655)
     user = make_superuser("cache-refresh-failed-tab-user")
     _seed_snapshot("ports", device, "primary", {"ports": [], "port_stack_relationships": {}})
     SyncCacheConsistency(device).mark_refresh_failure(SyncTab.IP_ADDRESSES, "primary", actor_id=user.pk)
@@ -2636,7 +2618,7 @@ def test_refresh_failure_marks_server_rendered_tab_without_dynamic_content(clien
 def test_opening_unavailable_tab_acknowledges_only_its_current_revision(client, settings, primary_librenms):
     """Opening an unavailable tab must suppress its marker until a new revision appears."""
     _configure_servers(settings)
-    device = make_device("cache-tab-acknowledgement", librenms_cf={"primary": {"id": 656}})
+    device = seed_mapping(make_device("cache-tab-acknowledgement"), "primary", own=656)
     user = make_superuser("cache-tab-acknowledgement-user")
     _seed_snapshot("ports", device, "primary", {"ports": [], "port_stack_relationships": {}})
     coordinator = SyncCacheConsistency(device)
@@ -2687,7 +2669,7 @@ def test_cache_get_endpoint_requires_plugin_and_object_view_permissions(client, 
     from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
     _configure_servers(settings)
-    device = make_device("cache-read-permissions", librenms_cf={"primary": {"id": 657}})
+    device = seed_mapping(make_device("cache-read-permissions"), "primary", own=657)
     seed_interfaces_snapshot(device, [], server_key="primary")
     plugin_model = django_apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
     read_only_user = make_user_with_perms(
@@ -2749,7 +2731,7 @@ def test_cleanup_failure_payload_names_tabs_that_must_fail_closed():
 def test_fragment_restores_from_cache_without_calling_librenms(client, settings, primary_librenms):
     """The fragment endpoint must rebuild comparison HTML from cache and ORM only."""
     _configure_servers(settings)
-    device = make_device("cache-fragment", librenms_cf={"primary": {"id": 65}})
+    device = seed_mapping(make_device("cache-fragment"), "primary", own=65)
     port = {
         "port_id": 7301,
         "ifName": "Ethernet1",
@@ -2784,7 +2766,7 @@ def test_status_fragment_and_invalidated_tab_navigation_never_call_librenms(
 ):
     """Cache checks, fragment restoration, and tab navigation must not fetch tab data."""
     _configure_servers(settings)
-    device = make_device("cache-browser-flows", librenms_cf={"primary": {"id": 654}})
+    device = seed_mapping(make_device("cache-browser-flows"), "primary", own=654)
     _serve_device_info(primary_librenms, 654, device.name, "Flows Hardware 654")
     ports = [
         {
@@ -2844,7 +2826,7 @@ def test_rolled_back_mutation_keeps_snapshots_and_publishes_no_state(
 ):
     """A rollback must discard the invalidation callback."""
     _configure_servers(settings)
-    device = make_device("cache-rollback", librenms_cf={"primary": {"id": 66}})
+    device = seed_mapping(make_device("cache-rollback"), "primary", own=66)
     _seed_snapshot("ports", device, "primary")
     seed_ip_snapshot(device, [], server_key="primary")
     coordinator = SyncCacheConsistency(device)
@@ -2868,7 +2850,7 @@ def test_source_snapshot_expiry_before_commit_callback_is_not_reversed(
 ):
     """A successful mutation must not restore or extend a source snapshot that expires in flight."""
     _configure_servers(settings)
-    device = make_device("cache-source-expiry", librenms_cf={"primary": {"id": 661}})
+    device = seed_mapping(make_device("cache-source-expiry"), "primary", own=661)
     ports = [
         {
             **_PORT_KEYS_UNSET,
@@ -2915,7 +2897,7 @@ def test_failed_refresh_retains_an_existing_invalidation_reason(
 ):
     """A failed retry must not erase why another tab cleared this snapshot."""
     _configure_servers(settings)
-    device = make_device("cache-failed-refresh", librenms_cf={"primary": {"id": 67}})
+    device = seed_mapping(make_device("cache-failed-refresh"), "primary", own=67)
     coordinator = SyncCacheConsistency(device)
     _seed_snapshot("ports", device, "primary")
     seed_ip_snapshot(device, [], server_key="primary")
@@ -2942,7 +2924,7 @@ def test_add_bay_template_preserves_server_scope_and_invalidates_other_tabs(
 ):
     """The modal must carry the active server through its committed module mutation."""
     _configure_servers(settings)
-    device = make_device("cache-add-bay", librenms_cf={"secondary": {"id": 68}})
+    device = seed_mapping(make_device("cache-add-bay"), "secondary", own=68)
     inventory_payload = {"inventory": [{"entPhysicalIndex": 8201}]}
     inventory_payload = seed_modules_snapshot(
         device, inventory_payload["inventory"], server_key="secondary"
@@ -3057,7 +3039,7 @@ def test_acknowledged_revisions_stay_bounded_across_objects(client, settings, pr
     monkeypatch.setattr(sync_cache, "_MAX_ACKNOWLEDGED_REVISIONS", 3)
     for index in range(5):
         device_id = 6200 + index
-        device = make_device(f"cache-ack-{index}", librenms_cf={"primary": {"id": device_id}})
+        device = seed_mapping(make_device(f"cache-ack-{index}"), "primary", own=device_id)
         SyncCacheConsistency(device).mark_refresh_failure(SyncTab.INTERFACES, "primary")
         acknowledged_keys.append(f"device:{device.pk}:primary:interfaces")
         _serve_device_info(primary_librenms, device_id, device.name, "Hardware")
@@ -3100,7 +3082,7 @@ def test_blocked_active_tab_still_reads_the_device_header(
 ):
     """A blocked tab must not hide the device header after its short device-info cache expires."""
     _configure_servers(settings)
-    device = make_device(f"cache-blocked-{blocked_state.value}", librenms_cf={"primary": {"id": 7801}})
+    device = seed_mapping(make_device(f"cache-blocked-{blocked_state.value}"), "primary", own=7801)
     _serve_device_info(primary_librenms, 7801, device.name, "Header Hardware 7801")
     seed_ip_snapshot(device, [], server_key="primary")
     coordinator = SyncCacheConsistency(device)
@@ -3129,7 +3111,7 @@ def test_blocked_active_tab_still_reads_the_device_header(
 def test_blocked_vlan_tab_does_not_render_its_cached_rows(client, settings, primary_librenms):
     """A blocked tab must lose its rendered rows whatever context key its table uses."""
     _configure_servers(settings)
-    device = make_device("cache-vlan-blocked", librenms_cf={"primary": {"id": 7802}})
+    device = seed_mapping(make_device("cache-vlan-blocked"), "primary", own=7802)
     seed_source_snapshot(device, Resource.VLANS, "primary", vlans=[{"vlan_vlan": 10, "vlan_name": "CACHED-VLAN-10"}])
     coordinator = SyncCacheConsistency(device)
     coordinator.mark_refresh_failure(SyncTab.VLANS, "primary", actor_id=1)
@@ -3156,7 +3138,7 @@ def test_failed_duplicate_selection_keeps_the_committed_rows_invalidation(
 ):
     """A failing row must not cancel the cache invalidation another row already earned."""
     _configure_servers(settings)
-    device = make_device("cache-ip-duplicate-rows", librenms_cf={"primary": {"id": 68}})
+    device = seed_mapping(make_device("cache-ip-duplicate-rows"), "primary", own=68)
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(interface, "primary", own=7801)
     address = "2001:db8:68::10/64"

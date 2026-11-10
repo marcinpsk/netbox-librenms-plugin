@@ -68,7 +68,7 @@ def _platform(slug):
 
 
 def _device(name, platform=None):
-    device = make_device(name, librenms_cf={SERVER_KEY: {"id": 64}})
+    device = seed_mapping(make_device(name), SERVER_KEY, own=64)
     device.platform = platform
     device.save()
     return device
