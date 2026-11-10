@@ -23,7 +23,7 @@ from django.test import RequestFactory
 from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 
 pytestmark = pytest.mark.django_db
 
@@ -219,7 +219,7 @@ class TestSyncPageFormsCarryServerKey:
         """The legacy-only action keeps its active server key in the submitted form."""
         from django.urls import reverse
 
-        device = make_device("sync-page-legacy-form", serial="NB-SER-2", librenms_cf=42)
+        device = seed_stored_mapping(make_device("sync-page-legacy-form", serial="NB-SER-2"), 42, save=True)
         # The installation default must MATCH the query key here: server_selection.py:248 accepts a
         # requested key for a legacy bare-integer mapping only when it equals the installation
         # default, so separating them makes this scenario unreachable rather than stronger.
