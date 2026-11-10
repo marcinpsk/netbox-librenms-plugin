@@ -1611,7 +1611,7 @@ class CableRemoteCreateView(SyncCablesView):
         mapping_owner = self._hostname_mapping_owner(context["remote_device"], context["row"], server_key)
         chassis_id = None
         if mapping_owner is not None:
-            chassis_id, member_ids = self._lock_remote_chassis(context["remote_device"].pk)
+            chassis_id, member_ids = self._lock_remote_chassis(context["remote_device"])
             evidence_owner_ids |= {mapping_owner.pk, *member_ids}
         locked_owners = self._lock_owner_devices(owner_ids, evidence_owner_ids)
         if locked_owners is None:
@@ -1635,14 +1635,14 @@ class CableRemoteCreateView(SyncCablesView):
         owner = get_virtual_chassis_member(locked_remote, row.get("remote_port"), return_device_on_failure=False)
         return owner is not None and owner.pk == locked_remote.pk
 
-    @staticmethod
-    def _lock_remote_chassis(remote_device_pk):
+    def _lock_remote_chassis(self, remote_device):
         """Lock the remote device's VirtualChassis row, and return its pk and the pks of its current members."""
-        chassis_id = Device.objects.filter(pk=remote_device_pk).values_list("virtual_chassis_id", flat=True).first()
+        remote_device.refresh_from_db(fields=["virtual_chassis"])
+        chassis_id = remote_device.virtual_chassis_id
         if chassis_id is None:
             return None, set()
         # Lock the chassis before its members, so no device can join it until the transaction ends.
-        list(VirtualChassis.objects.select_for_update().filter(pk=chassis_id))
+        self.relock_scoped_row(VirtualChassis, pk=chassis_id)
         return chassis_id, set(Device.objects.filter(virtual_chassis_id=chassis_id).values_list("pk", flat=True))
 
     def _locked_mapping_owner_still_holds(self, locked_owners, mapping_owner, chassis_id, context, server_key):
