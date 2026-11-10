@@ -101,17 +101,17 @@ class TestCablePortsDataWithoutHostMapping:
 
         ports_data = view.get_ports_data(None)
 
-        assert ports_data == {"ports": []}
+        assert ports_data == ({"ports": []}, None)
         assert librenms_server.requests == []
 
-    def test_a_failed_ports_fetch_returns_an_empty_payload(self, librenms_server, settings):
-        """A LibreNMS ports failure must degrade to an empty payload, not the error string."""
+    def test_a_failed_ports_fetch_returns_an_empty_payload_and_the_error(self, librenms_server, settings):
+        """A LibreNMS ports failure returns an empty payload and names the failure for the refresh."""
         view = _cable_view(settings, librenms_server)
         # /api/v0/devices/141/ports stays unregistered, so the loopback answers 404.
 
         ports_data = view.get_ports_data(141)
 
-        assert ports_data == {"ports": []}
+        assert ports_data == ({"ports": []}, "Host ports fetch failed: Device not found in LibreNMS")
         assert "/api/v0/devices/141/ports" in [r["path"] for r in librenms_server.requests]
 
 

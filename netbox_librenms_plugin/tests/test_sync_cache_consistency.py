@@ -1923,6 +1923,43 @@ def test_partial_cable_refresh_keeps_rows_from_available_sources(client, setting
 
 
 @pytest.mark.django_db
+def test_a_failed_host_ports_fetch_fails_the_cable_refresh(client, settings, primary_librenms):
+    """Without the host ports the rows lose their port names, so the refresh must not cache them as a success."""
+    _configure_servers(settings)
+    device = make_device("cache-cable-ports-fail", librenms_cf={"primary": {"id": 651}})
+    local = make_interface(device, "GigabitEthernet0/1", iface_type="1000base-t")
+    user = make_superuser("cache-cable-ports-fail-user")
+    client.force_login(user)
+    primary_librenms.register(
+        "/api/v0/devices/651/links",
+        {
+            "status": "ok",
+            "links": [
+                {
+                    "local_port_id": 7491,
+                    "local_port": "Gi0/1",
+                    "remote_port": "Ethernet2",
+                    "remote_hostname": "cache-cable-ports-fail-remote",
+                }
+            ],
+        },
+    )
+    primary_librenms.register("/api/v0/devices/651/ports", {"message": "Unavailable"}, status=503)
+    links_key = _cache_key("links", device, "primary")
+    cache.set(links_key, {"links": [{"local_port": local.name, "local_port_id": 7491}]}, timeout=300)
+
+    url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", kwargs={"pk": device.pk})
+    response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
+
+    assert response.status_code == 200
+    assert b"Cable data refreshed successfully" not in response.content
+    assert b"Failed to fetch links from LibreNMS" in response.content
+    assert cache.get(links_key) is None
+    state = SyncCacheConsistency(device).status("primary", actor_id=user.pk)[SyncTab.CABLES.value]
+    assert state["state"] == SyncTabState.REFRESH_FAILED.value
+
+
+@pytest.mark.django_db
 def test_cable_refresh_refuses_an_ambiguous_server_key(client, settings):
     """QueryDict.get() keeps the LAST repeated value, so an ambiguous POST could refresh another server."""
     _configure_servers(settings)

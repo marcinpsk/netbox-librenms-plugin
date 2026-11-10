@@ -857,11 +857,13 @@ class BaseCableTableView(
         return interface if interface.pk in context["visible_interface_ids"] else None
 
     def get_ports_data(self, librenms_id):
-        """Fetch the host ports that name the cable rows; an owner with no host id (OOB only) has none."""
+        """Fetch the host ports that name the cable rows as ``(ports_data, error)``; an OOB-only owner has none."""
         if librenms_id is None:
-            return {"ports": []}
+            return {"ports": []}, None
         success, data = self.librenms_api.get_ports(librenms_id, with_vlans=False)
-        return data if success else {"ports": []}
+        if success and isinstance(data, dict) and isinstance(data.get("ports"), list) and data.get("status") != "error":
+            return data, None
+        return {"ports": []}, f"Host ports fetch failed: {self._classify_links_fetch_error(success, data)}"
 
     @staticmethod
     def _build_cable_port_name_maps(ports_data, interface_name_field, alt_name_field):
@@ -1328,7 +1330,11 @@ class BaseCableTableView(
         # interface may still be named from ifDescr (and vice versa). Carrying the alternate
         # name lets enrich_local_port fall back to either field (issue #88).
         alt_name_field = "ifDescr" if interface_name_field == "ifName" else "ifName"
-        ports_data = self.get_ports_data(self.librenms_id)
+        ports_data, ports_error = self.get_ports_data(self.librenms_id)
+        if ports_error is not None:
+            # The host rows take their port names from the ports, so they fail with them.
+            self._links_fetch_error = self._links_fetch_error or ports_error
+            lldp_ok = False
         local_ports_map, local_ports_alt_map = self._build_cable_port_name_maps(
             ports_data, interface_name_field, alt_name_field
         )
