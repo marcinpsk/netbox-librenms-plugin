@@ -1,12 +1,96 @@
-"""Runtime sync POST gates. Mixin contract tests live in test_permissions.py."""
+"""Runtime sync POST gates and the confirmation inventory. Mixin contract tests live in test_permissions.py."""
 
 import pytest
 
+# Views that apply no assessed change carry no confirmation intent (section 4 of the #177 design).
+EXEMPT_VIEWS = {
+    "SetPreferredServerView": "the operator names the server",
+    "AddDeviceToLibreNMSView": "writes LibreNMS, outside NetBox reconciliation",
+    "UpdateDeviceLocationView": "writes LibreNMS, outside NetBox reconciliation",
+    "SyncSiteLocationView": "writes LibreNMS, outside NetBox reconciliation",
+    "AddBayTemplateView": "an operator-authored command: it materializes the operator's own input",
+    "_BaseRelationshipSyncView": "a base without an operation of its own; each subclass is covered",
+}
 
-def pytest_generate_tests(metafunc):
-    if "sync_case" not in metafunc.fixturenames:
-        return
+# Confirmation-required views that a later increment migrates to the confirmation intent module.
+MIGRATION_INVENTORY = {
+    "SyncCablesView": "cable",
+    "CableRemoteCreateView": "cable",
+    "UpdateDeviceNameView": "device_field",
+    "UpdateDeviceSerialView": "device_field",
+    "UpdateDeviceTypeView": "device_field",
+    "UpdateDevicePlatformView": "device_field",
+    "UpdateVMPlatformView": "device_field",
+    "CreateAndAssignPlatformView": "device_field",
+    "CreateAndAssignVMPlatformView": "device_field",
+    "AssignVCSerialView": "device_field",
+    "RemoveServerMappingView": "mapping_lifecycle",
+    "ConvertLegacyLibreNMSIdView": "mapping_lifecycle",
+    "SyncInterfacesView": "interface",
+    "SyncInterfaceLagView": "interface",
+    "SyncInterfaceParentView": "interface",
+    "SyncInterfaceBridgeView": "interface",
+    "RebindInterfacePortView": "interface",
+    "DeleteNetBoxInterfacesView": "interface",
+    "SyncIPAddressesView": "ip_address",
+    "CreateVRFFromIPRowView": "ip_address",
+    "MoveInterfaceToWinnerView": "migration",
+    "MoveIPAddressToWinnerView": "migration",
+    "TransferDeviceIPView": "migration",
+    "InstallModuleView": "module",
+    "InstallBranchView": "module",
+    "InstallSelectedView": "module",
+    "UpdateModuleSerialView": "module",
+    "UpdateModuleInterfaceView": "module",
+    "ApplyModuleInterfaceTypesView": "module",
+    "ReplaceModuleView": "module",
+    "MoveModuleView": "module",
+    "MarkBuiltInView": "module",
+    "DeviceConflictActionView": "import_identity_replacement",
+}
 
+# The inventory may only shrink: a new confirmation-required view declares its actions instead.
+_INVENTORY_CEILING = frozenset(
+    {
+        "SyncCablesView",
+        "CableRemoteCreateView",
+        "UpdateDeviceNameView",
+        "UpdateDeviceSerialView",
+        "UpdateDeviceTypeView",
+        "UpdateDevicePlatformView",
+        "UpdateVMPlatformView",
+        "CreateAndAssignPlatformView",
+        "CreateAndAssignVMPlatformView",
+        "AssignVCSerialView",
+        "RemoveServerMappingView",
+        "ConvertLegacyLibreNMSIdView",
+        "SyncInterfacesView",
+        "SyncInterfaceLagView",
+        "SyncInterfaceParentView",
+        "SyncInterfaceBridgeView",
+        "RebindInterfacePortView",
+        "DeleteNetBoxInterfacesView",
+        "SyncIPAddressesView",
+        "CreateVRFFromIPRowView",
+        "MoveInterfaceToWinnerView",
+        "MoveIPAddressToWinnerView",
+        "TransferDeviceIPView",
+        "InstallModuleView",
+        "InstallBranchView",
+        "InstallSelectedView",
+        "UpdateModuleSerialView",
+        "UpdateModuleInterfaceView",
+        "ApplyModuleInterfaceTypesView",
+        "ReplaceModuleView",
+        "MoveModuleView",
+        "MarkBuiltInView",
+        "DeviceConflictActionView",
+    }
+)
+
+
+def _discovered_post_views():
+    """Return ``(module name, class name, class)`` for every view class in views/sync that handles POST."""
     import importlib
     import inspect
     import pkgutil
@@ -15,45 +99,50 @@ def pytest_generate_tests(metafunc):
 
     from netbox_librenms_plugin.views import sync
 
-    cases = []
+    views = []
     for module_info in pkgutil.walk_packages(sync.__path__, prefix=f"{sync.__name__}."):
         module = importlib.import_module(module_info.name)
         for name, cls in inspect.getmembers(module, inspect.isclass):
-            if cls.__module__ != module.__name__ or not issubclass(cls, View) or not hasattr(cls, "post"):
-                continue
-            # The relationship base can deny before it needs subclass attributes. Cover it too.
-            variants = [("device", {})]
-            if name in {
-                "SyncInterfacesView",
-                "RebindInterfacePortView",
-                "DeleteNetBoxInterfacesView",
-                "SyncInterfaceParentView",
-                "SyncIPAddressesView",
-                "CreateVRFFromIPRowView",
-                "AddDeviceToLibreNMSView",
-                "RemoveServerMappingView",
-                "SetPreferredServerView",
-                "ConvertLegacyLibreNMSIdView",
-            }:
-                variants.append(("virtualmachine", {}))
-            if name == "AddBayTemplateView":
-                variants = [
-                    ("device", {"target_kind": "device_type"}),
-                    ("device", {"target_kind": "module_type"}),
-                    ("device", {"mode": "map_existing"}),
-                ]
-            if name == "CreateAndAssignPlatformView":
-                variants.append(("device", {"platform_name": "Existing platform", "manufacturer": "existing"}))
-            if name == "SyncVLANsView":
-                variants.append(("device", {"confirmation_intent": "grouped"}))
-            for object_type, data in variants:
-                suffix = "-".join(f"{key}={value}" for key, value in data.items())
-                cases.append(
-                    pytest.param(
-                        (cls, object_type, data),
-                        id=f"{module_info.name.rsplit('.', 1)[-1]}.{name}-{object_type}-{suffix}",
-                    )
-                )
+            # hasattr, not __dict__: a view that inherits its handler is still a POST view.
+            if cls.__module__ == module.__name__ and issubclass(cls, View) and hasattr(cls, "post"):
+                views.append((module_info.name.rsplit(".", 1)[-1], name, cls))
+    return views
+
+
+def pytest_generate_tests(metafunc):
+    if "sync_case" not in metafunc.fixturenames:
+        return
+
+    cases = []
+    for module_name, name, cls in _discovered_post_views():
+        # The relationship base can deny before it needs subclass attributes. Cover it too.
+        variants = [("device", {})]
+        if name in {
+            "SyncInterfacesView",
+            "RebindInterfacePortView",
+            "DeleteNetBoxInterfacesView",
+            "SyncInterfaceParentView",
+            "SyncIPAddressesView",
+            "CreateVRFFromIPRowView",
+            "AddDeviceToLibreNMSView",
+            "RemoveServerMappingView",
+            "SetPreferredServerView",
+            "ConvertLegacyLibreNMSIdView",
+        }:
+            variants.append(("virtualmachine", {}))
+        if name == "AddBayTemplateView":
+            variants = [
+                ("device", {"target_kind": "device_type"}),
+                ("device", {"target_kind": "module_type"}),
+                ("device", {"mode": "map_existing"}),
+            ]
+        if name == "CreateAndAssignPlatformView":
+            variants.append(("device", {"platform_name": "Existing platform", "manufacturer": "existing"}))
+        if name == "SyncVLANsView":
+            variants.append(("device", {"confirmation_intent": "grouped"}))
+        for object_type, data in variants:
+            suffix = "-".join(f"{key}={value}" for key, value in data.items())
+            cases.append(pytest.param((cls, object_type, data), id=f"{module_name}.{name}-{object_type}-{suffix}"))
     assert cases, "No sync POST views discovered"
     metafunc.parametrize("sync_case", cases)
 
@@ -240,3 +329,59 @@ class TestSyncPostPermissionGates:
             device.refresh_from_db()
             assert device.platform_id is None
             assert librenms_server.requests == []
+
+
+def _confirmation_views():
+    """Return every discovered sync POST view, and the import view that confirms an identity replacement."""
+    from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+    return {name: cls for _module, name, cls in _discovered_post_views()} | {
+        "DeviceConflictActionView": DeviceConflictActionView
+    }
+
+
+class TestConfirmationInventory:
+    """Every POST view declares its confirmation actions, a named exemption, or a migration inventory entry."""
+
+    def test_every_post_view_has_exactly_one_confirmation_class(self):
+        from netbox_librenms_plugin import confirmation_intent as intent
+
+        unclassified = []
+        for name, cls in _confirmation_views().items():
+            classes = [
+                isinstance(getattr(cls, "confirmation_policy", None), intent.RoutePolicy),
+                name in EXEMPT_VIEWS,
+                name in MIGRATION_INVENTORY,
+            ]
+            if classes.count(True) != 1:
+                unclassified.append(name)
+        assert unclassified == []
+
+    def test_the_lists_name_only_discovered_views(self):
+        from netbox_librenms_plugin import confirmation_intent as intent
+
+        views = _confirmation_views()
+        assert set(EXEMPT_VIEWS) - set(views) == set()
+        assert set(MIGRATION_INVENTORY) - set(views) == set()
+        assert all(resource in set(intent.Resource) for resource in MIGRATION_INVENTORY.values())
+
+    def test_the_migration_inventory_only_shrinks(self):
+        assert set(MIGRATION_INVENTORY) - _INVENTORY_CEILING == set()
+
+    def test_every_declared_action_is_registered_and_has_a_contract_scenario(self):
+        from netbox_librenms_plugin import confirmation_intent as intent
+        from netbox_librenms_plugin.tests.test_confirmation_intent_contract import SCENARIOS
+
+        declared = {
+            (resource, action)
+            for cls in _confirmation_views().values()
+            if isinstance(policy := getattr(cls, "confirmation_policy", None), intent.RoutePolicy)
+            for resource, action, _role in policy.entries
+        }
+        assert declared
+        assert declared <= intent.registered_actions()
+        assert declared <= set(SCENARIOS)
+        # A resource with a registered action has no view left in the inventory.
+        assert {resource for resource, _action in intent.registered_actions()} & set(
+            MIGRATION_INVENTORY.values()
+        ) == set()
