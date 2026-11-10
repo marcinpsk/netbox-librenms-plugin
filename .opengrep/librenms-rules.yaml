@@ -2188,7 +2188,9 @@ rules:
       This loop reads the mapping of each object it iterates, and its function never calls
       prefetch_mappings(). After the mappings move to their own tables, each cold read costs three
       queries. Call prefetch_mappings() once on the collection before the first read, and iterate
-      the list it returns.
+      the list it returns. Limits: any prefetch_mappings() call in the function, also an unrelated
+      or a late one, hides this finding, and a read through a per-item helper or on a variable
+      derived from the loop variable is not seen.
     metadata:
       category: performance
       references:
