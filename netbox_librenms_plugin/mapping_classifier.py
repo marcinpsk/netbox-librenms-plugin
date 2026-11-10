@@ -471,19 +471,29 @@ def main() -> int:
         sys.stdout.write("\n".join(report_lines(report)) + "\n")
         sys.stdout.flush()
     except ClassifierError as error:
-        print(f"ERROR: {error}", file=sys.stderr)
+        _report_error(f"ERROR: {error}")
         return EXIT_ERROR
     except Exception:  # A failed check must never look like a clean one.
-        print("ERROR: the mapping check failed.", file=sys.stderr)
-        traceback.print_exc()
+        _report_error("ERROR: the mapping check failed.", with_traceback=True)
         return EXIT_ERROR
     return exit_status(report)
 
 
-def _discard_stdout() -> None:
-    """Point the stdout file descriptor at the null device, so that the flush at exit cannot fail again."""
+def _report_error(message, *, with_traceback=False) -> None:
+    """Print *message* to stderr, with the current traceback when asked. A failed write keeps status 3."""
+    try:
+        print(message, file=sys.stderr)
+        if with_traceback:
+            traceback.print_exc()
+        sys.stderr.flush()
+    except OSError:
+        _discard_output(sys.stderr)
+
+
+def _discard_output(stream) -> None:
+    """Point the file descriptor of *stream* at the null device, so that the flush at exit cannot fail again."""
     null = os.open(os.devnull, os.O_WRONLY)
-    os.dup2(null, sys.stdout.fileno())
+    os.dup2(null, stream.fileno())
     os.close(null)
 
 
@@ -495,7 +505,7 @@ def _run_unless_imported(name) -> None:
             sys.stdout.flush()
         except OSError:
             # A failed flush stays buffered, and the flush at exit would change the status to 120.
-            _discard_stdout()
+            _discard_output(sys.stdout)
             status = EXIT_ERROR
         sys.exit(status)
 
