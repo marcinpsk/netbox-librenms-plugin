@@ -20,6 +20,7 @@ from netbox_librenms_plugin.tests.conftest import (
 from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row, lock_timeout, second_connection
 from netbox_librenms_plugin.tests.mapping_fixtures import (
     mapping_from_change_record,
+    mapping_summary,
     seed_mapping,
     seed_stored_mapping,
     stored_mapping_for_test,
@@ -850,12 +851,10 @@ class TestRemoveServerMappingView:
         logged_in_client,
         librenms_server,
     ):
-        from netbox_librenms_plugin.server_mappings import PREFERRED_SERVER_FIELD
 
-        device = make_device(
-            "mapping-remove",
-            librenms_cf={SERVER_KEY: 6541, "retired": 9001, PREFERRED_SERVER_FIELD: "retired"},
-        )
+        device = make_device("mapping-remove")
+        seed_mapping(device, SERVER_KEY, own=6541, save=False)
+        seed_mapping(device, "retired", own=9001, preferred=True)
 
         response = _post(
             logged_in_client,
@@ -870,8 +869,7 @@ class TestRemoveServerMappingView:
         )
 
         device.refresh_from_db()
-        mapping = stored_mapping_for_test(device)
-        assert mapping == {SERVER_KEY: 6541}
+        assert mapping_summary(device) == {SERVER_KEY: {"own": 6541}}
         assert response.url.endswith(f"?tab=interfaces&server_key={SERVER_KEY}")
         assert any("Removed LibreNMS mapping" in text for text in _messages(response, "success"))
 
@@ -899,7 +897,9 @@ class TestRemoveServerMappingView:
     def test_a_lock_conflict_of_the_write_gives_the_try_again_answer(
         self, logged_in_client, librenms_server, caplog, check_at_save
     ):
-        device = make_device("mapping-remove-locked", librenms_cf={SERVER_KEY: 6545, "retired": 9004})
+        device = make_device("mapping-remove-locked")
+        seed_mapping(device, SERVER_KEY, own=6545, save=False)
+        seed_mapping(device, "retired", own=9004)
 
         with caplog.at_level("ERROR"):
             response = _post_while_the_user_row_is_locked(
@@ -911,7 +911,7 @@ class TestRemoveServerMappingView:
             )
 
         device.refresh_from_db()
-        assert stored_mapping_for_test(device) == {SERVER_KEY: 6545, "retired": 9004}
+        assert mapping_summary(device) == {SERVER_KEY: {"own": 6545}, "retired": {"own": 9004}}
         assert response.status_code == 302
         assert messages_on(response.wsgi_request) == [("error", TRY_AGAIN_MESSAGE)]
         assert [record.getMessage() for record in caplog.records if record.levelname == "ERROR"] == []
@@ -927,7 +927,7 @@ class TestRemoveServerMappingView:
         )
 
         device.refresh_from_db()
-        assert stored_mapping_for_test(device) == {SERVER_KEY: 6542}
+        assert mapping_summary(device) == {SERVER_KEY: {"own": 6542}}
         assert any("Cannot remove mapping for configured server" in text for text in _messages(response, "error"))
 
     def test_vm_alias_targets_the_virtual_machine_model(self, logged_in_client, librenms_server):
@@ -943,7 +943,7 @@ class TestRemoveServerMappingView:
         )
 
         vm.refresh_from_db()
-        assert stored_mapping_for_test(vm) == {SERVER_KEY: 6543}
+        assert mapping_summary(vm) == {SERVER_KEY: {"own": 6543}}
 
     def test_unsupported_object_type_is_a_400(self, logged_in_client, librenms_server):
         device = make_device("mapping-invalid-type")
@@ -989,10 +989,9 @@ class TestRemoveServerMappingView:
         from django.core.exceptions import ValidationError
         from django.db.models.signals import pre_save
 
-        device = make_device(
-            f"mapping-{failure_type}-failure",
-            librenms_cf={SERVER_KEY: 6546, "retired": 9003},
-        )
+        device = make_device(f"mapping-{failure_type}-failure")
+        seed_mapping(device, SERVER_KEY, own=6546, save=False)
+        seed_mapping(device, "retired", own=9003)
 
         def reject_save(sender, instance, **kwargs):
             if instance.pk != device.pk:
@@ -1022,7 +1021,7 @@ class TestRemoveServerMappingView:
             pre_save.disconnect(reject_save, sender=Device)
 
         device.refresh_from_db()
-        assert stored_mapping_for_test(device) == {SERVER_KEY: 6546, "retired": 9003}
+        assert mapping_summary(device) == {SERVER_KEY: {"own": 6546}, "retired": {"own": 9003}}
         if failure_type == "validation":
             rendered_messages = _messages(response)
             assert any("Validation error removing LibreNMS mapping" in text for text in rendered_messages)
@@ -1038,7 +1037,6 @@ class TestSetPreferredServerView:
         librenms_server,
         object_type,
     ):
-        from netbox_librenms_plugin.server_mappings import PREFERRED_SERVER_FIELD
 
         owner = make_device("preferred-device") if object_type == "device" else make_vm("preferred-vm")
         seed_mapping(owner, SERVER_KEY, own=6551, save=False)
@@ -1057,7 +1055,7 @@ class TestSetPreferredServerView:
         )
 
         owner.refresh_from_db()
-        assert stored_mapping_for_test(owner)[PREFERRED_SERVER_FIELD] == SECONDARY_KEY
+        assert mapping_summary(owner)["preferred"] == SECONDARY_KEY
         assert f"server_key={SERVER_KEY}" in response.url
         assert "tab=interfaces" in response.url
         assert any("Preferred LibreNMS server changed" in text for text in _messages(response, "success"))
@@ -1079,7 +1077,9 @@ class TestSetPreferredServerView:
     def test_a_lock_conflict_of_the_write_gives_the_try_again_answer(
         self, logged_in_client, librenms_server, caplog, check_at_save
     ):
-        device = make_device("preferred-locked", librenms_cf={SERVER_KEY: 6556, SECONDARY_KEY: 6557})
+        device = make_device("preferred-locked")
+        seed_mapping(device, SERVER_KEY, own=6556, save=False)
+        seed_mapping(device, SECONDARY_KEY, own=6557)
 
         with caplog.at_level("ERROR"):
             response = _post_while_the_user_row_is_locked(
@@ -1091,16 +1091,15 @@ class TestSetPreferredServerView:
             )
 
         device.refresh_from_db()
-        assert stored_mapping_for_test(device) == {SERVER_KEY: 6556, SECONDARY_KEY: 6557}
+        assert mapping_summary(device) == {SERVER_KEY: {"own": 6556}, SECONDARY_KEY: {"own": 6557}}
         assert response.status_code == 302
         assert messages_on(response.wsgi_request) == [("error", TRY_AGAIN_MESSAGE)]
         assert [record.getMessage() for record in caplog.records if record.levelname == "ERROR"] == []
 
     def test_unknown_preference_key_is_rejected(self, logged_in_client, librenms_server):
-        device = make_device(
-            "preferred-unknown",
-            librenms_cf={SERVER_KEY: 6554, SECONDARY_KEY: 6555},
-        )
+        device = make_device("preferred-unknown")
+        seed_mapping(device, SERVER_KEY, own=6554, save=False)
+        seed_mapping(device, SECONDARY_KEY, own=6555)
 
         response = _post(
             logged_in_client,
@@ -1124,10 +1123,9 @@ class TestSetPreferredServerView:
         assert response.status_code == 400
 
     def test_missing_preference_key_is_rejected(self, logged_in_client, librenms_server):
-        device = make_device(
-            "preferred-missing-key",
-            librenms_cf={SERVER_KEY: 6556, SECONDARY_KEY: 6557},
-        )
+        device = make_device("preferred-missing-key")
+        seed_mapping(device, SERVER_KEY, own=6556, save=False)
+        seed_mapping(device, SECONDARY_KEY, own=6557)
 
         response = _post(
             logged_in_client,
