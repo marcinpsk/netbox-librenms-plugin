@@ -286,8 +286,8 @@ class SyncVLANsView(
                 targets = [vlan for vlan in vlans if vlan.vid == vid and vlan.group_id == group]
                 rebuilt = build_operation(vid=vid, group=group, name=source_name(source_row, vid), targets=targets)
             pairs.append((operation, rebuilt))
-        # The writer schedule: updates release names and VIDs before the creates that can take them.
-        return sorted(pairs, key=lambda pair: isinstance(pair[0], VLANCreate))
+        # The verification orders each group by its claims: a rename frees a name before another member takes it.
+        return pairs
 
     @staticmethod
     def _report_stale(result, outcome):

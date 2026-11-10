@@ -567,3 +567,45 @@ class TestDependentVLANOperations:
         assert not VLAN.objects.filter(vid=300).exists()
         assert VLAN.objects.filter(vid=301, name="voice").exists()
         assert "effects.name" in _stale_paths(response, 300)
+
+
+class _RenameChain:
+    """VID 100 and VID 200 hold alpha and beta in one group; the source proposes the names *proposed*."""
+
+    def __init__(self, client, settings, tag, proposed):
+        configure_librenms_servers(settings, SERVERS)
+        self.device = make_device(f"chain-{tag}", librenms_cf={"default": {"id": 42}})
+        self.group = VLANGroup.objects.create(name=f"chain-{tag}", slug=f"chain-{tag}")
+        VLAN.objects.create(vid=100, group=self.group, name="alpha", status="active")
+        VLAN.objects.create(vid=200, group=self.group, name="beta", status="active")
+        seed_vlans(
+            self.device, [{"vlan_vlan": 100, "vlan_name": proposed[0]}, {"vlan_vlan": 200, "vlan_name": proposed[1]}]
+        )
+        client.force_login(make_user_with_perms(f"chain-{tag}", VLAN_PERMISSIONS))
+        self.tokens = tab_tokens(client, self.device)
+
+    def names(self):
+        return dict(VLAN.objects.filter(group=self.group).values_list("vid", "name"))
+
+
+@pytest.mark.django_db
+class TestRenameSchedule:
+    """The writer frees a name before another member of the group takes it, whatever the request order."""
+
+    @pytest.mark.parametrize("order", [(100, 200), (200, 100)], ids=["vid-order", "reverse-order"])
+    def test_a_rename_chain_applies_in_either_submission_order(self, client, settings, order):
+        case = _RenameChain(client, settings, f"order-{order[0]}", ("beta", "gamma"))
+
+        sync(client, case.device, [case.tokens[vid] for vid in order], confirm=True)
+
+        assert case.names() == {100: "beta", 200: "gamma"}
+
+    def test_a_name_swap_refuses_its_group_and_writes_nothing(self, client, settings):
+        case = _RenameChain(client, settings, "swap", ("beta", "alpha"))
+        before = domain_state()
+
+        response = sync(client, case.device, [case.tokens[100], case.tokens[200]], confirm=True)
+
+        assert domain_state() == before
+        assert "schedule.cycle" in _stale_paths(response, 100)
+        assert "schedule.cycle" in _stale_paths(response, 200)

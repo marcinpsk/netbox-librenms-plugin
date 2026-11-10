@@ -507,6 +507,35 @@ class TestDependencyGroups:
         )
         assert rebuild.calls == []
 
+    @pytest.mark.parametrize("order", ["first-takes", "first-releases"])
+    def test_a_member_that_releases_a_name_runs_before_the_member_that_takes_it(self, order):
+        # VID 100 takes beta, which VID 200 releases for gamma.
+        takes = _update(vid=100, group=5, current="alpha", proposed="beta", pk=9)
+        releases = _update(vid=200, group=5, current="beta", proposed="gamma", pk=10)
+        offers = self._offers(takes, releases) if order == "first-takes" else self._offers(releases, takes)
+
+        (result,) = intent.verify(
+            [offer.token for offer in offers], policy=POLICY, context=CONTEXT, rebuild=_Rebuild()
+        ).results
+
+        assert [member.operation for member in result.members] == [releases, takes]
+
+    def test_a_cycle_of_names_refuses_its_group_with_a_named_path(self):
+        # A swap needs a temporary name that nobody approved.
+        first = _update(vid=100, group=5, current="alpha", proposed="beta", pk=9)
+        second = _update(vid=200, group=5, current="beta", proposed="alpha", pk=10)
+        other = _create(vid=300, group=5, name="printers")
+        offers = self._offers(first, second, other)
+
+        verification = intent.verify(
+            [offer.token for offer in offers], policy=POLICY, context=CONTEXT, rebuild=_Rebuild()
+        )
+
+        assert verification.results == (
+            intent.Stale(intent.StaleReason.INVALID, ("schedule.cycle",), (first, second)),
+            intent.Verified((intent.Offer(offers[2].token, other),)),
+        )
+
     def test_an_operation_without_claims_cannot_register(self):
         @dataclasses.dataclass(frozen=True)
         class Unclaimed:

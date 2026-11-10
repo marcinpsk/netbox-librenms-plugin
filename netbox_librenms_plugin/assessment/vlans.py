@@ -65,13 +65,13 @@ def _scope(group):
 
 
 def _vid_claim(group, vid, *, writes):
-    """Claim the VID in a scope: NetBox keeps it unique in a group, and the global advisory lock keeps it global."""
+    """Claim the VID in a scope: NetBox keeps it unique in a group; only this writer's advisory lock guards a global VID."""
     return intent.Claim(f"ipam.vlan.vid:{_scope(group)}:{vid}", writes)
 
 
-def _name_claims(group, *names):
-    """Claim names in a group, where NetBox keeps VLAN names unique; global names have no such constraint."""
-    return () if group is None else tuple(intent.Claim(f"ipam.vlan.name:{group}:{name}", True) for name in names)
+def _name_claim(group, name, *, releases=False):
+    """Claim a name in a group, where NetBox keeps VLAN names unique; global names have no such constraint."""
+    return () if group is None else (intent.Claim(f"ipam.vlan.name:{group}:{name}", True, releases),)
 
 
 @intent.register
@@ -90,7 +90,7 @@ class VLANCreate:
     def claims(self):
         """Take the VID in its scope, and the name in its group."""
         effects = self.effects
-        return (_vid_claim(effects.group, effects.vid, writes=True), *_name_claims(effects.group, effects.name))
+        return (_vid_claim(effects.group, effects.vid, writes=True), *_name_claim(effects.group, effects.name))
 
 
 @intent.register
@@ -120,7 +120,11 @@ class VLANUpdate:
         )
         if not self.renames:
             return claims
-        return (*claims, *_name_claims(target.group, target.name, self.effects.name))
+        return (
+            *claims,
+            *_name_claim(target.group, target.name, releases=True),
+            *_name_claim(target.group, self.effects.name),
+        )
 
 
 def build_operation(*, vid, group, name, targets):

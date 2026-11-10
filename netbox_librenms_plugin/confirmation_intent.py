@@ -102,10 +102,16 @@ class Unavailable:
 
 @dataclass(frozen=True)
 class Claim:
-    """An existing object or an absence predicate that an operation reads, or writes."""
+    """
+    An existing object or an absence predicate that an operation reads, or writes.
+
+    A write that releases the claim (a rename frees its old name) runs before a write of another member
+    that takes it.
+    """
 
     key: str
     writes: bool
+    releases: bool = False
 
 
 @dataclass(frozen=True)
@@ -222,8 +228,15 @@ def claims_of(operation):
     resource, _action = _action_of(operation)
     identity = _encode(operation.identity, type(operation.identity))
     declared = tuple(operation.claims())
-    if not all(type(claim) is Claim and type(claim.key) is str and type(claim.writes) is bool for claim in declared):
-        raise TypeError(f"{type(operation).__name__}.claims() must return Claim values.")
+    if not all(
+        type(claim) is Claim
+        and type(claim.key) is str
+        and type(claim.writes) is bool
+        and type(claim.releases) is bool
+        and (claim.writes or not claim.releases)
+        for claim in declared
+    ):
+        raise TypeError(f"{type(operation).__name__}.claims() must return Claim values; a release is a write.")
     return (Claim(f"identity:{resource.value}:{sorted(identity.items())}", True), *declared)
 
 
@@ -236,7 +249,9 @@ def verify(tokens, *, policy, context, rebuild):
 
     Call it inside the caller's transaction. ``rebuild(approved)`` takes the writer's locks, rebuilds
     each approved operation from current state and its signed choices, writes nothing, and returns
-    ``(approved, rebuilt or Unavailable)`` pairs in the writer's schedule.
+    ``(approved, rebuilt or Unavailable)`` pairs. A verified group lists its members in write order:
+    a member that releases a claim comes before a member that takes it, and the others keep the
+    order of the pairs.
     """
     tokens = list(tokens)
     if not tokens:
@@ -324,7 +339,39 @@ def _verify_group(pairs, approved, policy):
         paths.extend(_differences(approved_operation, rebuilt))
     if paths:
         return Stale(StaleReason.ASSUMPTIONS_CHANGED, tuple(dict.fromkeys(paths)), members)
-    return Verified(tuple(Offer(approved[operation], rebuilt) for operation, rebuilt in pairs))
+    scheduled = _schedule(pairs)
+    if scheduled is None:
+        # A cycle, such as a swap of two unique names, needs an intermediate state that nobody approved.
+        return Stale(StaleReason.INVALID, ("schedule.cycle",), members)
+    return Verified(tuple(Offer(approved[operation], rebuilt) for operation, rebuilt in scheduled))
+
+
+def _schedule(pairs):
+    """
+    Return the pairs in write order: a member that releases a claim before each member that takes it.
+
+    Members without such a dependency keep the rebuild's order. Return None for a cycle.
+    """
+    releasers, takers = {}, {}
+    for index, (operation, _rebuilt) in enumerate(pairs):
+        for claim in claims_of(operation):
+            if claim.releases:
+                releasers.setdefault(claim.key, set()).add(index)
+            elif claim.writes:
+                takers.setdefault(claim.key, set()).add(index)
+    after = {index: set() for index in range(len(pairs))}
+    for key, released_by in releasers.items():
+        for releaser in released_by:
+            after[releaser] |= takers.get(key, set()) - {releaser}
+    waiting = {index: sum(index in followers for followers in after.values()) for index in after}
+    order = []
+    while ready := sorted(index for index, count in waiting.items() if count == 0):
+        index = ready[0]
+        order.append(index)
+        del waiting[index]
+        for follower in after[index]:
+            waiting[follower] -= 1
+    return None if waiting else [pairs[index] for index in order]
 
 
 def _authenticate(token, policy):
