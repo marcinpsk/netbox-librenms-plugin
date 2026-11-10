@@ -32,7 +32,11 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis,
     stack_inventory,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import mapping_from_change_record, stored_mapping_for_test
+from netbox_librenms_plugin.tests.mapping_fixtures import (
+    mapping_from_change_record,
+    seed_mapping,
+    stored_mapping_for_test,
+)
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, render_module_tab, rendered_module_form
 
 pytestmark = pytest.mark.django_db
@@ -326,7 +330,7 @@ def test_a_mapping_change_saves_with_the_other_columns_in_one_record():
     from netbox_librenms_plugin.server_mappings import link_import
     from netbox_librenms_plugin.views.imports.actions import _save_device
 
-    device = make_device("partial-save-mapping", librenms_cf={"other": 7301})
+    device = seed_mapping(make_device("partial-save-mapping"), "other", own=7301)
 
     with _change_logging("partial-save-mapping-user"), transaction.atomic():
         locked = type(device).objects.select_for_update().get(pk=device.pk)
@@ -384,8 +388,8 @@ def test_a_merge_saves_each_side_once_and_a_refusal_rolls_the_group_back():
     from netbox_librenms_plugin.server_mappings import merge_links, persist_merge
     from netbox_librenms_plugin.views.imports.actions import _save_device
 
-    winner = make_device("partial-save-merge-winner", librenms_cf={SERVER_KEY: {"id": 7304}})
-    donor = make_device("partial-save-merge-donor", librenms_cf={SERVER_KEY: {"id": 7305}})
+    winner = seed_mapping(make_device("partial-save-merge-winner"), SERVER_KEY, own=7304)
+    donor = seed_mapping(make_device("partial-save-merge-donor"), SERVER_KEY, own=7305)
 
     class _Refused(Exception):
         pass
