@@ -9,7 +9,12 @@ from django.core.cache import cache
 from django.urls import reverse
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_superuser, make_vm
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping_row, stored_mapping_for_test
+from netbox_librenms_plugin.tests.mapping_fixtures import (
+    mapping_summary,
+    seed_mapping,
+    seed_stored_mapping_row,
+    stored_mapping_for_test,
+)
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
@@ -338,7 +343,7 @@ class TestRemoveServerMappingView:
         assert response.url == reverse("plugins:netbox_librenms_plugin:vm_librenms_sync", args=[vm.pk])
         assert _messages(response, "success") == ["Removed LibreNMS mapping for server 'orphaned-server'."]
         vm.refresh_from_db()
-        assert stored_mapping_for_test(vm) is None
+        assert mapping_summary(vm) == {}
 
     @pytest.mark.parametrize("stored", ["²", 0, -1, True])
     def test_a_legacy_value_the_reader_cannot_resolve_has_no_mapping_to_remove(self, client, settings, stored):
