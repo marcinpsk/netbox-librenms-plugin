@@ -686,12 +686,10 @@ def test_the_interfaces_tab_of_a_virtual_machine_prefetches_its_interfaces(super
 
 @pytest.mark.django_db
 def test_an_interface_verify_prefetches_the_relationship_index(superuser_client):
-    """The verify repaint indexes the owner's interfaces by bound port to resolve the row's LAG."""
-    from netbox_librenms_plugin import interface_relationships
-
+    """The verify repaint indexes the owner's interfaces by bound port, then enriches and renders the row's LAG."""
     device = _interfaces_device("prefetch-verify", 6)
 
-    with spy_mapping_reads((interface_relationships, "build_interface_index")) as spy:
+    with spy_mapping_reads() as spy:
         response = superuser_client.post(
             reverse("plugins:netbox_librenms_plugin:verify_interface"),
             json.dumps(
@@ -701,5 +699,5 @@ def test_an_interface_verify_prefetches_the_relationship_index(superuser_client)
         )
 
     assert response.status_code == 200
-    assert spy.reading_scopes() == {"build_interface_index"}
-    _assert_prefetched(spy)
+    assert "ae0" in response.json()["formatted_row"]["parent"]
+    _assert_prefetched(spy, device)
