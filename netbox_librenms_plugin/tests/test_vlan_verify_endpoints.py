@@ -308,6 +308,28 @@ class TestVerifyVlanSyncGroupReassessment:
         assert response.json()["name_matches"] is True
         assert self._operation(response.json()["confirmation_intent"])["effects"]["name"] == "Users"
 
+    def test_the_answer_shows_the_name_that_its_token_proposes(self, client, configure_librenms):
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.tests.vlan_intent_helpers import reassess, tab_tokens
+
+        configure_librenms({SERVER_KEY: {"librenms_url": "https://librenms.example.com", "api_token": "t"}})
+        group = _vlan_group("Reassess name")
+        device = self._device("name", [{"vlan_vlan": 124, "vlan_name": "users"}])
+        client.force_login(make_superuser("vlan-reassess-name-user"))
+        tab_tokens(client, device)
+        # The proposal changes between the render and the reassessment.
+        NormalizationRule.objects.create(
+            scope=NormalizationRule.SCOPE_VLAN_NAME, match_pattern=r"^users$", replacement="people"
+        )
+
+        answer = reassess(client, device, "124", group).json()
+
+        assert self._operation(answer["confirmation_intent"])["effects"]["name"] == "people"
+        assert answer["name"] == "people"
+        assert ">people</span>" in answer["name_html"]
+        assert "LibreNMS name: users" in answer["name_html"]
+
     def test_a_changed_choice_answers_a_new_token_for_that_choice(self, client, configure_librenms):
         from ipam.models import VLAN
 

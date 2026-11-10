@@ -31,6 +31,7 @@ from netbox_librenms_plugin.tables.interfaces import (
     VCInterfaceTable,
 )
 from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable, VCModuleTable
+from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
 from netbox_librenms_plugin.utils import (
     build_migrated_context,
     coerce_model_pk,
@@ -792,6 +793,9 @@ class VerifyVlanSyncGroupView(
                 "name_matches": name_matches,
                 "css_class": get_vlan_sync_css_class(exists_in_netbox, name_matches),
                 "netbox_vlan_name": row["netbox_vlan_name"],
+                # The answer shows the name that its token proposes, so the row cannot show another one.
+                "name": row["name"],
+                "name_html": str(LibreNMSVLANTable([]).name_cell(row)),
                 "status_html": status_html,
                 "confirmation_intent": token,
             }

@@ -184,3 +184,29 @@ def test_a_row_action_without_its_button_posts_no_token(page):
     pairs = _selection_form_pairs(bodies[0])
     assert ("sync_one", "999") in pairs
     assert [value for key, value in pairs if key == "confirmation_intent"] == []
+
+
+def test_an_answer_with_another_proposed_name_shows_that_name_with_its_token(page):
+    _load(page, [_row(501)])
+    held = []
+    page.route(VERIFY_ROUTE, lambda route: held.append(route))
+
+    page.locator(".vlan-sync-group-select").select_option("1")
+    _wait_for(page, lambda: len(held) == 1)
+    body = {
+        "status": "success",
+        "vlan_group_id": 1,
+        "css_class": "text-danger",
+        "exists_in_netbox": False,
+        "name_matches": False,
+        "name": "people",
+        "name_html": '<span class="text-danger">people</span>',
+        "status_html": '<button id="answered" type="submit" name="sync_one" value="501">Create</button>',
+        "confirmation_intent": "vlan:people",
+    }
+    held[0].fulfill(status=200, content_type="application/json", body=json.dumps(body))
+    page.locator("#answered").wait_for()
+
+    assert page.locator('tr[data-vlan-id="501"] td[data-col="name"]').inner_text() == "people"
+    assert page.locator(".vlan-sync-group-select").get_attribute("data-vlan-name") == "people"
+    assert _token(page, 501) == "vlan:people"

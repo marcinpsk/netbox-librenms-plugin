@@ -244,6 +244,11 @@ class LibreNMSVLANTable(tables.Table):
 
         return format_html('<span class="{}">{}</span>{}', css_class, text, rule_note)
 
+    def name_cell(self, record):
+        """Return the markup of the name cell, as the rendered table shows it."""
+        name = record.get("name")
+        return self.default if name in EMPTY_CELL_VALUES else self.render_name(name, record)
+
     def render_vlan_group_selection(self, value, record):
         """
         Render per-row VLAN group dropdown.
