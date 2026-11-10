@@ -459,3 +459,22 @@ class _SingleTokenRoute:
 
     def applied(self):
         return VLAN.objects.filter(vid=100, name="users").exists()
+
+
+@pytest.mark.django_db
+def test_a_repeated_token_cannot_clear_the_way_for_another_token_of_its_vid(client, settings):
+    """[T1, T1, T2] for one VID refuses both choices; an unrelated VID still applies."""
+    configure_librenms_servers(settings, SERVERS)
+    device = make_device("contract-repeat", librenms_cf={"default": {"id": 42}})
+    first = VLANGroup.objects.create(name="contract-repeat-a", slug="contract-repeat-a")
+    second = VLANGroup.objects.create(name="contract-repeat-b", slug="contract-repeat-b")
+    seed_vlans(device, [{"vlan_vlan": 100, "vlan_name": "users"}, {"vlan_vlan": 200, "vlan_name": "printers"}])
+    client.force_login(make_user_with_perms("contract-repeat", VLAN_PERMISSIONS))
+    in_first = reassess(client, device, 100, first).json()["confirmation_intent"]
+    in_second = reassess(client, device, 100, second).json()["confirmation_intent"]
+
+    response = sync(client, device, [in_first, in_first, in_second, tab_tokens(client, device)[200]])
+
+    assert not VLAN.objects.filter(vid=100).exists()
+    assert VLAN.objects.filter(vid=200, name="printers").exists()
+    assert "identity.duplicate" in _stale_paths(response, 100)
