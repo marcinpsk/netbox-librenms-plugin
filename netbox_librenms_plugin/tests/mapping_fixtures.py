@@ -82,8 +82,8 @@ def seed_mapping(
     if oob_recorded:
         _record_oob_without_id(obj, server, oob_type)
     if preferred:
+        # A preference with no server mapping is a state of its own.
         if _stored_value(obj) is None:
-            # A preference with no server mapping is a state of its own.
             _put_stored_value(obj, {})
         _seed(obj, set_preference(obj, server))
     if save:
