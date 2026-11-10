@@ -1109,18 +1109,21 @@ class TestLegacyLibreNMSIdMigration:
     """Exercise legacy identity detection and migration with real devices."""
 
     @pytest.mark.parametrize(
-        ("stored_value", "serial", "expected_migration", "expected_confirmed"),
+        ("legacy", "serial", "expected_migration", "expected_confirmed"),
         [
-            (42, "LEGACY-SERIAL", True, True),
-            (42, "", True, False),
-            ({"default": {"id": 42}}, "LEGACY-SERIAL", False, True),
+            (True, "LEGACY-SERIAL", True, True),
+            (True, "", True, False),
+            (False, "LEGACY-SERIAL", False, True),
         ],
     )
-    def test_validation_reports_identity_format(self, stored_value, serial, expected_migration, expected_confirmed):
+    def test_validation_reports_identity_format(self, legacy, serial, expected_migration, expected_confirmed):
         from netbox_librenms_plugin.import_utils import validate_device_for_import
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        existing = make_device("legacy-device", serial=serial, librenms_cf=stored_value)
+        if legacy:
+            existing = make_device("legacy-device", serial=serial, librenms_cf=42)
+        else:
+            existing = seed_mapping(make_device("legacy-device", serial=serial), own=42)
 
         result = validate_device_for_import(
             {"device_id": 42, "hostname": existing.name, "serial": serial},
@@ -1824,29 +1827,36 @@ class TestSyncModuleBayCounter:
 class TestBuildIdServerInfo:
     """Test DeviceValidationDetailsView._build_id_server_info method on real Device rows."""
 
-    def _make_device(self, librenms_id_value):
+    def _make_device(self, server=None, own=None):
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        return make_device("build-id-server-info", librenms_cf=librenms_id_value)
+        device = make_device("build-id-server-info")
+        return device if server is None else seed_mapping(device, server, own=own)
+
+    def _make_raw_device(self, stored):
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        # Storage shape: a legacy bare value or an empty container.
+        return make_device("build-id-server-info", librenms_cf=stored)
 
     def test_returns_none_for_legacy_int(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
 
-        device = self._make_device(42)
+        device = self._make_raw_device(42)
         result = DeviceValidationDetailsView._build_id_server_info(device)
         assert result is None
 
     def test_returns_none_for_missing_cf(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
 
-        device = self._make_device(None)
+        device = self._make_device()
         result = DeviceValidationDetailsView._build_id_server_info(device)
         assert result is None
 
     def test_single_server_resolves_display_name(self, settings):
         from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
 
-        device = self._make_device({"production": 42})
+        device = self._make_device("production", 42)
         plugins_cfg = {
             "netbox_librenms_plugin": {
                 "servers": {
@@ -1866,7 +1876,7 @@ class TestBuildIdServerInfo:
     def test_unconfigured_server_uses_key_as_display_name(self, settings):
         from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
 
-        device = self._make_device({"deleted-server": 77})
+        device = self._make_device("deleted-server", 77)
         plugins_cfg = {"netbox_librenms_plugin": {"servers": {}}}
         settings.PLUGINS_CONFIG = plugins_cfg
         result = DeviceValidationDetailsView._build_id_server_info(device)
@@ -1877,7 +1887,7 @@ class TestBuildIdServerInfo:
     def test_empty_dict_returns_none(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
 
-        device = self._make_device({})
+        device = self._make_raw_device({})
         result = DeviceValidationDetailsView._build_id_server_info(device)
         assert result is None
 

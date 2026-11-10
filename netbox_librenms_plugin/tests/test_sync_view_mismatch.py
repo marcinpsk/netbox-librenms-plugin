@@ -223,7 +223,7 @@ class TestBuildAllServerMappings:
             }
         )
         device = _netbox_device("configured")
-        seed_stored_mapping(device, {"production": " 42 "})
+        seed_mapping(device, "production", own=42, save=False)
 
         mapping = self._mappings(device)[0]
 

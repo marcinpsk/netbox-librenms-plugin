@@ -248,10 +248,7 @@ class TestLinkNotes:
     def test_existing_link_description_reads_real_custom_field_data(self):
         from netbox_librenms_plugin.import_utils.device_operations import _describe_existing_librenms_link
 
-        device = make_device(
-            "described-link",
-            librenms_cf={SERVER_KEY: {"id": "42", "oob": {"id": "7", "type": "idrac"}}},
-        )
+        device = seed_mapping(make_device("described-link"), SERVER_KEY, own=42, oob=7, oob_type="idrac")
 
         assert _describe_existing_librenms_link(device, SERVER_KEY) == {
             "host_id": 42,

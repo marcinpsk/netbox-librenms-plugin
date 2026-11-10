@@ -359,7 +359,10 @@ class TestTrustedPayloadMatchesTheDeviceMapping:
     def test_a_declined_mapping_write_fails_the_helper(self, case, librenms_cf, librenms_id):
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        device = make_device(f"trusted-payload-{case}", librenms_cf=librenms_cf)
+        if case == "legacy-bare-integer":
+            device = make_device(f"trusted-payload-{case}", librenms_cf=librenms_cf)
+        else:
+            device = seed_mapping(make_device(f"trusted-payload-{case}"), own=3)
 
         with pytest.raises(ValueError, match="skipped the seed"):
             seed_mapped_modules(device, [], librenms_id=librenms_id)

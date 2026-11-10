@@ -23,7 +23,6 @@ from netbox_librenms_plugin.tests.conftest import (
     make_interface,
     make_virtual_chassis_members,
     make_vm,
-    map_device_to_librenms,
 )
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, seed_ports
 from netbox_librenms_plugin.tests.mapping_fixtures import (
@@ -168,7 +167,7 @@ OOB_ID = 9900
 
 def _link_oob(device):
     """Link an OOB controller on the device's mapping and return the device."""
-    return map_device_to_librenms(device, server_key="default", oob={"id": OOB_ID, "type": "idrac"})
+    return seed_mapping(device, oob=OOB_ID, oob_type="idrac")
 
 
 def _relationship_ports(relation_field, source_id, related_id, source_name="", related_name=""):
@@ -4878,7 +4877,11 @@ class TestRelationshipSyncObjectScope:
         for interface, port_id in ((child, 10), (visible_parent, 20)):
             seed_mapping(interface, own=port_id, save=False)
             interface.save()
-        seed_stored_mapping(hidden_duplicate, {"default": hidden_stored_id}, save=True)
+        if isinstance(hidden_stored_id, int):
+            seed_mapping(hidden_duplicate, own=hidden_stored_id)
+        else:
+            # Storage shape: a zero-padded text id.
+            seed_stored_mapping(hidden_duplicate, {"default": hidden_stored_id}, save=True)
         user = make_user_with_perms(
             "hidden-duplicate-parent-id",
             [("view", Device), ("add", Interface)],
@@ -5012,9 +5015,7 @@ def test_relationship_name_fallback_checks_host_and_oob_rows(client, settings, e
     from netbox_librenms_plugin.tests.conftest import make_superuser
 
     configure_default_librenms_server(settings)
-    device = map_device_to_librenms(
-        make_device("cross-source-parent"), 1, server_key="default", oob={"id": OOB_ID, "type": "idrac"}
-    )
+    device = seed_mapping(make_device("cross-source-parent"), own=1, oob=OOB_ID, oob_type="idrac")
     child = make_interface(device, "Ethernet1.100", iface_type="virtual")
     parent = make_interface(device, "Ethernet1")
     seed_mapping(child, own=10, save=False)

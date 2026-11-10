@@ -451,5 +451,5 @@ class TestRemoveServerMappingView:
         assert response.status_code == 302
         assert _messages(response, "success") == ["Removed LibreNMS mapping for server 'orphaned-server'."]
         device.refresh_from_db()
-        assert stored_mapping_for_test(device) is None
+        assert mapping_summary(device) == {}
         assert device.face == "front"

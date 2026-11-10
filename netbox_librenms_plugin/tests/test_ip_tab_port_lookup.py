@@ -129,7 +129,7 @@ def _acquired(live_librenms, recording_name, *, ports=None, addresses=None, vrfs
     for path, (field, rows) in replacements.items():
         if rows is not None:
             server.register(path, {"status": "ok", field: rows}, method="GET")
-    device = make_device(f"ip-vrf-{recording_name}", librenms_cf={SERVER_KEY: {"id": device_id}})
+    device = seed_mapping(make_device(f"ip-vrf-{recording_name}"), SERVER_KEY, own=device_id)
     server.requests.clear()
     snapshot = acquire(device, server_key=SERVER_KEY, resources=[Resource.IP_ADDRESSES])
     assert source_cache.store(device, Resource.IP_ADDRESSES, snapshot)
@@ -152,7 +152,7 @@ class TestIpRowInterfaceNames:
         """A render must not normalize all port keys again for each IP row."""
         from netbox_librenms_plugin.assessment import ip_addresses as ip_addresses_view
 
-        device = make_device("ip-linear-cache", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
+        device = seed_mapping(make_device("ip-linear-cache"), SERVER_KEY, own=DEVICE_ID)
         ports = _seed(device, 20)
         original = ip_addresses_view._port_key
         conversions = []
@@ -172,7 +172,7 @@ class TestIpRowInterfaceNames:
         from netbox_librenms_plugin import utils
         from netbox_librenms_plugin.assessment import ip_addresses as ip_addresses_view
 
-        device = make_device("ip-linear-assignments", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
+        device = seed_mapping(make_device("ip-linear-assignments"), SERVER_KEY, own=DEVICE_ID)
         ports = _seed(device, port_count)
         for port in ports:
             interface = make_interface(device, port["ifName"])
@@ -195,7 +195,7 @@ class TestIpRowInterfaceNames:
 
     def test_a_refresh_reads_the_ports_once_and_a_render_reads_nothing(self, client, live_librenms):
         """One /devices/{id}/ports read replaces one /ports/{port_id} call per row; the render calls no LibreNMS."""
-        device = make_device("ip-fanout", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
+        device = seed_mapping(make_device("ip-fanout"), SERVER_KEY, own=DEVICE_ID)
         ports = _serve(live_librenms, 6)
         client.force_login(make_superuser("ip-fanout-user"))
 
@@ -224,7 +224,7 @@ class TestIpRowInterfaceNames:
 
     def test_rows_still_carry_the_librenms_interface_name(self):
         """Dropping the fan-out must not drop the name it was fetched for."""
-        device = make_device("ip-fanout-names", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
+        device = seed_mapping(make_device("ip-fanout-names"), SERVER_KEY, own=DEVICE_ID)
         interface = make_interface(device, "Ethernet0", iface_type="1000base-t")
         _set_librenms_id(interface, 9000)
         _seed(device, 3)
@@ -238,7 +238,7 @@ class TestIpRowInterfaceNames:
     )
     def test_the_requested_name_field_is_honoured(self, field, expected):
         """ifDescr-mode devices read their name from the same one ports snapshot."""
-        device = make_device("ip-fanout-ifdescr", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
+        device = seed_mapping(make_device("ip-fanout-ifdescr"), SERVER_KEY, own=DEVICE_ID)
         ports = [{**port, "ifDescr": f"uplink-{index}"} for index, port in enumerate(_ports(2))]
         seed_ip_snapshot(device, _addresses(ports), ports)
 
@@ -249,7 +249,7 @@ class TestIpRowInterfaceNames:
 
     def test_a_row_naming_an_unknown_port_keeps_its_address(self):
         """An IP row pointing at a port the device does not report still renders, without a name."""
-        device = make_device("ip-fanout-unknown", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
+        device = seed_mapping(make_device("ip-fanout-unknown"), SERVER_KEY, own=DEVICE_ID)
         seed_ip_snapshot(device, [{"ipv4_address": "198.18.9.9", "ipv4_prefixlen": 24, "port_id": 4242}], _ports(1))
 
         assessment = _assess(device)
@@ -262,7 +262,7 @@ class TestIpRowInterfaceNames:
 
     def test_a_port_bound_in_netbox_is_rule_evidence_and_not_a_row_port(self):
         """A port no row names stays out of the row map; a bound one is kept as evidence for the rules."""
-        device = make_device("ip-bound-evidence", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
+        device = seed_mapping(make_device("ip-bound-evidence"), SERVER_KEY, own=DEVICE_ID)
         ports = _ports(3)
         _set_librenms_id(make_interface(device, "renamed"), ports[1]["port_id"])
         seed_ip_snapshot(device, _addresses(ports[:1]), ports)
@@ -274,7 +274,7 @@ class TestIpRowInterfaceNames:
 
     def test_a_failed_port_read_fails_the_refresh_and_a_render_does_not_retry_it(self, client, live_librenms):
         """Without the ports the rows cannot be named, so no snapshot is stored and the render stays off LibreNMS."""
-        device = make_device("ip-ports-fail", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
+        device = seed_mapping(make_device("ip-ports-fail"), SERVER_KEY, own=DEVICE_ID)
         _serve(live_librenms, 2)
         ports_path = f"/api/v0/devices/{DEVICE_ID}/ports"
         live_librenms.server.register(ports_path, {"status": "error", "message": "ports unavailable"}, status=500)

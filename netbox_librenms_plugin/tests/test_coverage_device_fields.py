@@ -1624,9 +1624,12 @@ class TestCommonFieldUpdateFailures:
 
         from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row_nowait
 
-        device = make_device(f"wrapped-{view_name}-{saved_model}", serial="WRAPPED-SERIAL", librenms_cf=6574)
-        if view_name == "update_device_serial":
-            seed_stored_mapping(device, {SERVER_KEY: 6574}, save=True)
+        legacy = view_name == "convert_legacy_librenms_id"
+        device = make_device(f"wrapped-{view_name}-{saved_model}", serial="WRAPPED-SERIAL")
+        if legacy:
+            seed_stored_mapping(device, 6574, save=True)
+        else:
+            seed_mapping(device, SERVER_KEY, own=6574)
         Platform.objects.create(name="Wrapped Existing Platform", slug="wrapped-existing-platform")
         live_serial = "NEW-SERIAL" if view_name == "update_device_serial" else "WRAPPED-SERIAL"
         librenms_server.device_info_response(device_id=6574, hostname=device.name, serial=live_serial)
@@ -1652,7 +1655,10 @@ class TestCommonFieldUpdateFailures:
         assert response.status_code == 302
         assert messages_on(response.wsgi_request) == [("error", TRY_AGAIN_MESSAGE)]
         assert (device.serial, device.platform_id) == ("WRAPPED-SERIAL", None)
-        assert stored_mapping_for_test(device) in (6574, {SERVER_KEY: 6574})
+        if legacy:
+            assert stored_mapping_for_test(device) == 6574
+        else:
+            assert mapping_summary(device) == {SERVER_KEY: {"own": 6574}}
         assert not Platform.objects.filter(name="Wrapped New Platform").exists()
 
 

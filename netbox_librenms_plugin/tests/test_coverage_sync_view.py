@@ -107,7 +107,7 @@ def _device_view(server_key=SERVER_KEY):
 @pytest.mark.django_db
 class TestSyncPageRouting:
     def test_non_vc_device_uses_its_real_mapping_and_live_details(self, logged_in_client, librenms_server):
-        device = make_device("sync-page-device", librenms_cf={SERVER_KEY: 6601})
+        device = seed_mapping(make_device("sync-page-device"), SERVER_KEY, own=6601)
         _register_device(
             librenms_server,
             6601,
@@ -127,10 +127,8 @@ class TestSyncPageRouting:
         assert response.context["mismatched_device"] is False
 
     def test_requested_server_rebinds_header_tabs_and_refresh_links(self, logged_in_client, librenms_server):
-        device = make_device(
-            "sync-secondary-device",
-            librenms_cf={SERVER_KEY: 6602, SECONDARY_KEY: 6603},
-        )
+        device = seed_mapping(make_device("sync-secondary-device"), SERVER_KEY, own=6602, save=False)
+        seed_mapping(device, SECONDARY_KEY, own=6603)
         _register_device(librenms_server, 6603, device.name)
 
         response = logged_in_client.get(_sync_url(device), {"server_key": SECONDARY_KEY})
@@ -178,8 +176,7 @@ class TestSyncPageRouting:
 
     @pytest.mark.parametrize(
         ("viewed_mapping", "delegation_shown"),
-        [(None, True), (0, True), ({"_preferred_server": SERVER_KEY}, False), ({"retired": "abc"}, False)],
-        ids=repr,
+        [("absent", True), ("zero", True), ("preference-only", False), ("malformed-entry", False)],
     )
     def test_the_delegation_notice_follows_the_viewed_members_own_mapping(
         self, logged_in_client, librenms_server, viewed_mapping, delegation_shown
@@ -187,7 +184,11 @@ class TestSyncPageRouting:
         _vc, members = make_virtual_chassis_members(f"sync-vc-notice-{delegation_shown}", count=2)
         linked, viewed = members
         seed_mapping(linked, SERVER_KEY, own=6609)
-        seed_stored_mapping(viewed, viewed_mapping, save=True)
+        if viewed_mapping == "preference-only":
+            seed_mapping(viewed, SERVER_KEY, preferred=True)
+        elif viewed_mapping != "absent":
+            # Storage shape: a falsy invalid value, and a server entry whose id no reader accepts.
+            seed_stored_mapping(viewed, {"zero": 0, "malformed-entry": {"retired": "abc"}}[viewed_mapping], save=True)
         _register_device(librenms_server, 6609, linked.name)
 
         response = logged_in_client.get(_sync_url(viewed))
@@ -278,7 +279,7 @@ class TestSyncPageRouting:
         assert response.context["librenms_device_id"] == 6608
 
     def test_all_applicable_tabs_and_active_tab_are_exposed(self, logged_in_client, librenms_server):
-        device = make_device("sync-tab-device", librenms_cf={SERVER_KEY: 6609})
+        device = seed_mapping(make_device("sync-tab-device"), SERVER_KEY, own=6609)
         _register_device(librenms_server, 6609, device.name)
 
         response = logged_in_client.get(_sync_url(device), {"tab": "cables"})
@@ -289,7 +290,7 @@ class TestSyncPageRouting:
         assert response.context["module_sync"] is not None
 
     def test_invalid_tab_falls_back_to_interfaces(self, logged_in_client, librenms_server):
-        device = make_device("sync-invalid-tab", librenms_cf={SERVER_KEY: 6610})
+        device = seed_mapping(make_device("sync-invalid-tab"), SERVER_KEY, own=6610)
         _register_device(librenms_server, 6610, device.name)
 
         response = logged_in_client.get(_sync_url(device), {"tab": "not-a-tab"})
@@ -318,7 +319,9 @@ class TestSyncPageRouting:
         )
         _configure_servers(settings, librenms_server, SERVER_KEY)
         device_id = 6612 if matches else 6613
-        device = make_device(f"sync-keyed-serial-{device_id}", serial="ABC-SYNC", librenms_cf=device_id)
+        device = seed_mapping(
+            make_device(f"sync-keyed-serial-{device_id}", serial="ABC-SYNC"), SERVER_KEY, own=device_id
+        )
         _register_device(librenms_server, device_id, device.name, serial=librenms_serial)
 
         response = logged_in_client.get(_sync_url(device))
@@ -336,7 +339,7 @@ class TestSyncPageRouting:
     ):
         """A key needs three letters or digits in a row, so a one-digit serial confirms nothing."""
         _configure_servers(settings, librenms_server, SERVER_KEY)
-        device = make_device(f"sync-numeric-serial-{stored}", serial=stored, librenms_cf=6614)
+        device = seed_mapping(make_device(f"sync-numeric-serial-{stored}", serial=stored), SERVER_KEY, own=6614)
         _register_device(librenms_server, 6614, device.name, serial=reported)
 
         response = logged_in_client.get(_sync_url(device))
@@ -380,10 +383,8 @@ class TestServerMappingContext:
         assert self._mappings(device) is None
 
     def test_scoped_entries_include_urls_display_names_and_active_state(self, librenms_server):
-        device = make_device(
-            "mapping-context",
-            librenms_cf={SERVER_KEY: "6621", SECONDARY_KEY: {"id": 6622}},
-        )
+        device = seed_mapping(make_device("mapping-context"), SERVER_KEY, own=6621, save=False)
+        seed_mapping(device, SECONDARY_KEY, own=6622)
 
         mappings = self._mappings(device, SECONDARY_KEY)
 
@@ -396,10 +397,7 @@ class TestServerMappingContext:
         assert all(mapping["is_configured"] for mapping in mappings)
 
     def test_oob_only_mapping_is_surfaced_without_a_host_id(self, librenms_server):
-        device = make_device(
-            "mapping-oob-only",
-            librenms_cf={SERVER_KEY: {"id": "invalid", "oob": {"id": "6623", "type": "idrac"}}},
-        )
+        device = seed_mapping(make_device("mapping-oob-only"), SERVER_KEY, oob=6623, oob_type="idrac")
 
         mappings = self._mappings(device)
 
@@ -415,7 +413,7 @@ class TestServerMappingContext:
         assert self._mappings(device) is None
 
     def test_unconfigured_mapping_remains_visible_but_not_selectable(self, librenms_server):
-        device = make_device("mapping-retired", librenms_cf={"retired": 6624})
+        device = seed_mapping(make_device("mapping-retired"), "retired", own=6624)
 
         mappings = self._mappings(device, "retired")
 
