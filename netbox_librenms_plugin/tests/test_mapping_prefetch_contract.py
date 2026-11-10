@@ -20,6 +20,7 @@ from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import (
     bind_librenms_server,
+    cable_together,
     make_cluster,
     make_device,
     make_interface,
@@ -443,6 +444,32 @@ class TestCableWrites:
         assert response.status_code == 302
         assert Cable.objects.count() == 1
         assert spy.reading_scopes() == {name for _owner, name in producers}
+        _assert_prefetched(spy)
+
+    def test_a_cable_replacement_prefetches_the_displaced_far_end(self, client, live_librenms):
+        """A forced replacement detaches the old cable's far end; the rule check reads that interface too."""
+        from dcim.models import Cable
+
+        from netbox_librenms_plugin.tests.test_cable_overwrite import _confirmed_intent
+        from netbox_librenms_plugin.tests.test_cable_snapshot_read_actions import LOCAL_PORT_ID, _pair, _sync
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        _ignore_rule()
+        subject, _neighbour, local, remote, *_rest = _pair(remote_interface=True)
+        # Unbound, so the rules have no port of it to decide; the check still reads its mapping.
+        displaced = make_interface(make_device("prefetch-cable-displaced-peer"), "eth9")
+        old_cable = cable_together(local, displaced)
+        client.force_login(make_superuser("mapping-prefetch-cable-replace"))
+        intent = _confirmed_intent(local, remote, old_cable)
+
+        with spy_mapping_reads((SyncCablesView, "_rule_block")) as spy:
+            response = _sync(
+                client, subject, local, remote, force="on", **{f"expected_cable_intent_{LOCAL_PORT_ID}": intent}
+            )
+
+        assert response.status_code == 302
+        assert not Cable.objects.filter(pk=old_cable.pk).exists()
+        assert displaced.pk in {obj.pk for obj in spy.saved_reads()}
         _assert_prefetched(spy)
 
     def test_a_cable_verify_prefetches_the_page_devices(self, client, live_librenms):
