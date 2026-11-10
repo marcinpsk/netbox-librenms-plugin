@@ -246,15 +246,19 @@ class SyncVLANsView(
             )
         # Unscoped on purpose: a VLAN the caller cannot see still holds the VID, and the writer must not miss it.
         vlans = list(VLAN.objects.select_for_update().filter(scope).order_by("pk"))
-        # The source rows and the name rules are read after the locks, so a change made while this waited counts.
+        # The subject, the source rows and the name rules are read after the locks, so a change made while this waited
+        # counts: the name rules apply by the manufacturer of the device's current type.
+        subject = self.restricted_queryset(Device).select_related("device_type__manufacturer").filter(pk=obj.pk).first()
         snapshot = source_cache.read(obj, Resource.VLANS, self._post_server_key)
         source_by_vid = {} if snapshot is None else index_vlan_source_rows(snapshot.value(Resource.VLANS, "vlans"))[0]
-        source_name = vlan_source_namer(obj)
+        source_name = vlan_source_namer(subject) if subject is not None else None
         groups = []
         for operation in approved:
             vid, group = operation.identity.vid, operation.choices.group
             source_row = source_by_vid.get(vid)
-            if snapshot is None:
+            if subject is None:
+                rebuilt = intent.Unavailable("subject.available")
+            elif snapshot is None:
                 rebuilt = intent.Unavailable("source.available")
             elif group is not None and group not in locked_groups:
                 rebuilt = intent.Unavailable("target.group")
