@@ -3474,6 +3474,15 @@ let syncPageUnloading = false;
 ['beforeunload', 'pagehide'].forEach((eventName) => window.addEventListener(eventName, () => {
     syncPageUnloading = true;
 }));
+// A page restored from the back/forward cache is live again: each row cut off while pending is assessed again.
+window.addEventListener('pageshow', (event) => {
+    syncPageUnloading = false;
+    if (!event.persisted) return;
+    document.querySelectorAll('input[name="' + INTENT_FIELD + '"][data-intent-pending]').forEach(function (input) {
+        const select = input.closest('tr')?.querySelector('select.vlan-sync-group-select');
+        if (select) verifyVlanSyncGroup(select, select.dataset.vlanId, select.value);
+    });
+});
 
 const PENDING_OFF_PAGE_MESSAGE =
     'A selected row on another page waits for the check of its new choice. Open its page, or clear the rows on other pages.';

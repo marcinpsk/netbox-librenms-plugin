@@ -28,6 +28,7 @@ def _row(vid, *, checked=False):
 def _page(rows):
     return f"""<!doctype html><html><body>
         <input type="hidden" name="csrfmiddlewaretoken" value="vlan-csrf-token">
+        <div id="django-messages"></div>
         <div id="librenms-sync-tabs" data-server-key="default"></div>
         <button id="toolbar-sync" type="submit" form="vlan-sync-form">Sync Selected VLANs</button>
         <div id="tab-content">
@@ -278,3 +279,50 @@ def test_a_row_that_waited_on_another_page_is_assessed_again_on_its_page(page):
     page.locator("#swapped").wait_for()
 
     assert [value for key, value in _selection_form_pairs(bodies[0]) if key == "confirmation_intent"] == ["vlan:in-b"]
+
+
+def test_a_page_restored_from_the_back_forward_cache_reassesses_a_cut_off_row(page):
+    # A dispatched pagehide and pageshow with persisted=true stand in for a real cache restore.
+    _load(page, [_row(501)])
+    held = []
+    page.route(VERIFY_ROUTE, lambda route: held.append(route))
+    page.locator(".vlan-sync-group-select").select_option("1")
+    _wait_for(page, lambda: len(held) == 1)
+
+    page.evaluate(
+        """() => {
+            window.dispatchEvent(new PageTransitionEvent('pagehide', {persisted: true}));
+            window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted: true}));
+        }"""
+    )
+    _wait_for(page, lambda: len(held) == 2)
+
+    assert held[1].request.post_data_json["vlan_group_id"] == "1"
+    assert _token(page, 501) == ""
+    # A failed answer on the live page rolls the row back to the group that its token names, with an error.
+    held[1].fulfill(status=500, content_type="application/json", body=json.dumps({"status": "error"}))
+    page.wait_for_function("document.querySelector('.vlan-sync-group-select').value === ''")
+
+    assert _token(page, 501) == "vlan:rendered-501"
+    assert not page.locator("#toolbar-sync").is_disabled()
+    assert page.locator(".toast").count() >= 1
+
+
+def test_a_failed_reassessment_after_a_back_forward_restore_still_rolls_back(page):
+    _load(page, [_row(501)])
+    page.route(
+        VERIFY_ROUTE,
+        lambda route: route.fulfill(status=500, content_type="application/json", body=json.dumps({"status": "error"})),
+    )
+    page.evaluate(
+        """() => {
+            window.dispatchEvent(new PageTransitionEvent('pagehide', {persisted: true}));
+            window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted: true}));
+        }"""
+    )
+
+    page.locator(".vlan-sync-group-select").select_option("2")
+    page.wait_for_function("document.querySelector('.vlan-sync-group-select').value === ''")
+
+    assert _token(page, 501) == "vlan:rendered-501"
+    assert not page.locator("#toolbar-sync").is_disabled()
