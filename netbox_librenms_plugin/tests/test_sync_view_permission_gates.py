@@ -10,6 +10,13 @@ EXEMPT_VIEWS = {
     "SyncSiteLocationView": "writes LibreNMS, outside NetBox reconciliation",
     "AddBayTemplateView": "an operator-authored command: it materializes the operator's own input",
     "_BaseRelationshipSyncView": "a base without an operation of its own; each subclass is covered",
+    "BulkImportConfirmView": "read-only: it renders the import confirmation and writes nothing",
+    "DeviceImportPlanUpdateView": "read-only: it revalidates one import row and renders it",
+    "SaveUserPrefView": "an operator preference: it stores the operator's own toggle value",
+    "AddDeviceTypeMappingView": "an operator-authored mapping: the operator picks the device type for the string",
+    "AddPlatformMappingView": "an operator-authored mapping: the operator picks the platform for the OS string",
+    # The design keeps import creation outside #177: other import workflows do not migrate here.
+    "BulkImportDevicesView": "creates new objects from the import plan, outside reconciliation",
 }
 
 # Confirmation-required views that a later increment migrates to the confirmation intent module.
@@ -47,6 +54,10 @@ MIGRATION_INVENTORY = {
     "MoveModuleView": "module",
     "MarkBuiltInView": "module",
     "DeviceConflictActionView": "import_identity_replacement",
+    "PromoteToHostView": "import_identity_replacement",
+    "AddAsOOBView": "mapping_lifecycle",
+    "CreatePlatformFromImportView": "device_field",
+    "MergeNetBoxDevicesView": "migration",
 }
 
 # The inventory may only shrink: a new confirmation-required view declares its actions instead.
@@ -85,12 +96,16 @@ _INVENTORY_CEILING = frozenset(
         "MoveModuleView",
         "MarkBuiltInView",
         "DeviceConflictActionView",
+        "PromoteToHostView",
+        "AddAsOOBView",
+        "CreatePlatformFromImportView",
+        "MergeNetBoxDevicesView",
     }
 )
 
 
-def _discovered_post_views():
-    """Return ``(module name, class name, class)`` for every view class in views/sync that handles POST."""
+def _discovered_post_views(package=None):
+    """Return ``(module name, class name, class)`` for every view class of *package* (views/sync) that handles POST."""
     import importlib
     import inspect
     import pkgutil
@@ -99,8 +114,9 @@ def _discovered_post_views():
 
     from netbox_librenms_plugin.views import sync
 
+    package = package or sync
     views = []
-    for module_info in pkgutil.walk_packages(sync.__path__, prefix=f"{sync.__name__}."):
+    for module_info in pkgutil.walk_packages(package.__path__, prefix=f"{package.__name__}."):
         module = importlib.import_module(module_info.name)
         for name, cls in inspect.getmembers(module, inspect.isclass):
             # hasattr, not __dict__: a view that inherits its handler is still a POST view.
@@ -332,12 +348,10 @@ class TestSyncPostPermissionGates:
 
 
 def _confirmation_views():
-    """Return every discovered sync POST view, and the import view that confirms an identity replacement."""
-    from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+    """Return every discovered POST view of views/sync and views/imports, inherited handlers included."""
+    from netbox_librenms_plugin.views import imports, sync
 
-    return {name: cls for _module, name, cls in _discovered_post_views()} | {
-        "DeviceConflictActionView": DeviceConflictActionView
-    }
+    return {name: cls for package in (sync, imports) for _module, name, cls in _discovered_post_views(package)}
 
 
 class TestConfirmationInventory:
