@@ -106,7 +106,8 @@ class Claim:
     An existing object or an absence predicate that an operation reads, or writes.
 
     A write that releases the claim (a rename frees its old name) runs before a write of another member
-    that takes it.
+    that takes it. An action that can give one object field two different values needs a check for that
+    conflict before the first write; a rollback does not replace it.
     """
 
     key: str
