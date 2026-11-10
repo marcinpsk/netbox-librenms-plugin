@@ -52,6 +52,7 @@ from netbox_librenms_plugin.views.sync.interfaces import (
     SyncInterfacesView,
     _InterfaceSyncOutcome,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 # Long enough for a blocked statement to be a real lock wait, short enough for two attempts.
 LOCK_TIMEOUT_MS = 200
@@ -98,7 +99,7 @@ def committed_outcomes(monkeypatch):
 @transactional_db_with_all_apps()
 @PLAIN_AND_HTMX
 def test_a_lock_conflict_on_the_first_attempt_is_retried_once(client, attempts, committed_outcomes, htmx):
-    device = make_device(f"sync-retry-once-{htmx}", librenms_cf={SERVER_KEY: {"id": 91}})
+    device = seed_mapping(make_device(f"sync-retry-once-{htmx}"), SERVER_KEY, own=91)
     seed_ports(device, [sync_port(10, "eth10")])
     client.force_login(make_superuser("sync-retry-once-user"))
 
@@ -118,7 +119,7 @@ def test_a_lock_conflict_on_the_first_attempt_is_retried_once(client, attempts, 
 @transactional_db_with_all_apps()
 @PLAIN_AND_HTMX
 def test_conflicts_on_both_attempts_give_one_try_again_answer_and_change_nothing(client, attempts, htmx):
-    device = make_device(f"sync-retry-exhausted-{htmx}", librenms_cf={SERVER_KEY: {"id": 92}})
+    device = seed_mapping(make_device(f"sync-retry-exhausted-{htmx}"), SERVER_KEY, own=92)
     seed_ports(device, [sync_port(10, "eth10")])
     client.force_login(make_superuser("sync-retry-exhausted-user"))
 
@@ -135,7 +136,7 @@ def test_conflicts_on_both_attempts_give_one_try_again_answer_and_change_nothing
 @transactional_db_with_all_apps()
 def test_a_busy_port_claim_on_the_first_attempt_is_retried_once(client, attempts, committed_outcomes):
     """Another open transaction holds the claim on the port; the second attempt claims it after that transaction ends."""
-    device = make_device("sync-busy-port", librenms_cf={SERVER_KEY: {"id": 97}})
+    device = seed_mapping(make_device("sync-busy-port"), SERVER_KEY, own=97)
     seed_ports(device, [sync_port(10, "eth10")])
     client.force_login(make_superuser("sync-busy-port-user"))
 
@@ -153,7 +154,7 @@ def test_a_busy_port_claim_on_the_first_attempt_is_retried_once(client, attempts
 @transactional_db_with_all_apps()
 def test_a_real_deadlock_on_the_first_attempt_is_retried_once(client, attempts, committed_outcomes):
     """The sync holds its Device and waits for an interface; the other session holds that interface and waits for the Device."""
-    device = make_device("sync-deadlock", librenms_cf={SERVER_KEY: {"id": 96}})
+    device = seed_mapping(make_device("sync-deadlock"), SERVER_KEY, own=96)
     interface = bound_interface(device, "eth10", 10)
     seed_ports(device, [sync_port(10, "eth10", alias="uplink")])
     client.force_login(make_superuser("sync-deadlock-user"))
@@ -190,7 +191,7 @@ def test_a_retried_sync_reports_its_warnings_skips_and_success_once(client, atte
     """The attempt that conflicts has already warned, skipped a row, kept a name and counted syncs; none of it is published."""
     from ipam.models import VLAN
 
-    device = make_device("sync-retry-report", librenms_cf={SERVER_KEY: {"id": 93}})
+    device = seed_mapping(make_device("sync-retry-report"), SERVER_KEY, own=93)
     interface = bound_interface(device, "eth10", 10)
     # Port 11 reports the name of another interface on the device, so its bound interface keeps its name.
     bound_interface(device, "old11", 11)
@@ -287,9 +288,9 @@ def test_a_relationship_conflict_after_a_written_attribute_pass_leaves_one_sync_
     # Its own session, so the control's messages do not carry over into the retried sync's messages.
     control_client = Client()
     control_client.force_login(user)
-    control = make_device("sync-relationship-control", librenms_cf={SERVER_KEY: {"id": 97}})
+    control = seed_mapping(make_device("sync-relationship-control"), SERVER_KEY, own=97)
     control_aggregate, control_ports = _seed_relationship_sync(control, 1000, "00:11:22:33:44:01")
-    device = make_device("sync-relationship-retry", librenms_cf={SERVER_KEY: {"id": 98}})
+    device = seed_mapping(make_device("sync-relationship-retry"), SERVER_KEY, own=98)
     aggregate, ports = _seed_relationship_sync(device, 2000, "00:11:22:33:44:01")
     skipped_before = list(Interface.objects.filter(device__in=[control, device], name="eth7").order_by("pk").values())
     real_relationships = SyncInterfacesView._sync_interface_relationships
@@ -349,7 +350,7 @@ def test_a_relationship_conflict_after_a_written_attribute_pass_leaves_one_sync_
 @transactional_db_with_all_apps()
 @PLAIN_AND_HTMX
 def test_a_follow_up_conflict_after_the_commit_is_reported_and_not_retried(client, attempts, monkeypatch, htmx):
-    device = make_device(f"sync-follow-up-{htmx}", librenms_cf={SERVER_KEY: {"id": 94}})
+    device = seed_mapping(make_device(f"sync-follow-up-{htmx}"), SERVER_KEY, own=94)
     locked = make_device(f"sync-follow-up-locked-{htmx}")
     seed_ports(device, [sync_port(10, "eth10")])
     client.force_login(make_superuser("sync-follow-up-user"))
@@ -377,7 +378,7 @@ def test_a_follow_up_conflict_after_the_commit_is_reported_and_not_retried(clien
 @pytest.mark.django_db
 def test_an_integrity_error_after_a_swallowed_conflict_reaches_the_sync_handler(client, attempts, monkeypatch):
     """A swallowed 55P03 does not make a later 23505 a retry; the sync's own handler reports it."""
-    device = make_device("sync-mixed-error", librenms_cf={SERVER_KEY: {"id": 95}})
+    device = seed_mapping(make_device("sync-mixed-error"), SERVER_KEY, own=95)
     seed_ports(device, [sync_port(10, "eth10")])
     client.force_login(make_superuser("sync-mixed-error-user"))
     # Migrations committed this row, so the second connection can lock it in this non-transactional test.

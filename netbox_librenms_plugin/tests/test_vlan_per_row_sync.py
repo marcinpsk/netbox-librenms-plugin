@@ -15,6 +15,7 @@ from netbox_librenms_plugin.tests.vlan_intent_helpers import (
     sync,
     tab_tokens,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 
 class _VLANControlParser(HTMLParser):
@@ -73,7 +74,7 @@ def test_usable_vlan_vid_spellings_round_trip_through_rendered_controls(client, 
 
     configure_default_librenms_server(settings)
     suffix = str(source_vid).strip().replace(" ", "-") or "empty"
-    device = make_device(f"vid-round-trip-{suffix}", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device(f"vid-round-trip-{suffix}"), "default", own=42)
     group = VLANGroup.objects.create(name=f"VID group {suffix}", slug=f"vid-group-{suffix}")
     existing = VLAN.objects.create(vid=501, group=group, name="Application")
     _seed_vlan_snapshot(device, [{"vlan_vlan": source_vid, "vlan_name": existing.name}])
@@ -180,7 +181,7 @@ def test_duplicate_canonical_vlan_vid_rows_are_blocked_on_render_and_post(client
     from netbox_librenms_plugin.views.object_sync.devices import DeviceVLANTableView
 
     configure_default_librenms_server(settings)
-    device = make_device("duplicate-canonical-vid", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("duplicate-canonical-vid"), "default", own=42)
     source_rows = [
         {"vlan_vlan": "501", "vlan_name": "First duplicate"},
         {"vlan_vlan": "0501", "vlan_name": "Second duplicate"},
@@ -226,7 +227,7 @@ def test_a_posted_group_field_cannot_move_a_signed_choice(client, settings):
     )
 
     configure_default_librenms_server(settings)
-    device = make_device("signed-group-choice", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("signed-group-choice"), "default", own=42)
     other = VLANGroup.objects.create(name="Not chosen", slug="not-chosen")
     _seed_vlan_snapshot(device, [{"vlan_vlan": "0612", "vlan_name": "Explicit global"}])
     client.force_login(make_superuser("signed-group-choice-user"))
@@ -261,7 +262,7 @@ def test_unsigned_selection_fields_write_nothing(client, settings, fields, names
     )
 
     configure_default_librenms_server(settings)
-    device = make_device("unsigned-selection", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("unsigned-selection"), "default", own=42)
     _seed_vlan_snapshot(device, [{"vlan_vlan": 701, "vlan_name": "Checked bulk row"}])
     client.force_login(make_superuser("unsigned-selection-user"))
 
@@ -284,7 +285,7 @@ def test_a_token_that_names_a_group_requires_vlan_group_view_permission(client, 
     from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
     configure_default_librenms_server(settings)
-    device = make_device(f"group-permission-{confirm}", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device(f"group-permission-{confirm}"), "default", own=42)
     group = VLANGroup.objects.create(name=f"Group permission {confirm}", slug=f"group-permission-{confirm}")
     vlan = VLAN.objects.create(vid=101, group=group, name="Current name")
     _seed_vlan_snapshot(device, [{"vlan_vlan": 101, "vlan_name": "Proposed name"}])
@@ -315,7 +316,7 @@ def test_per_row_create_ignores_other_ticked_rows(client, settings):
     )
 
     configure_default_librenms_server(settings)
-    device = make_device("per-row-create", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("per-row-create"), "default", own=42)
     _seed_vlan_snapshot(
         device,
         [
@@ -345,7 +346,7 @@ def test_per_row_update_keeps_one_row_through_confirmation(client, settings):
     )
 
     configure_default_librenms_server(settings)
-    device = make_device("per-row-update", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("per-row-update"), "default", own=42)
     group = VLANGroup.objects.create(name="Per-row update", slug="per-row-update")
     selected = VLAN.objects.create(vid=301, group=group, name="Current selected")
     ticked = VLAN.objects.create(vid=302, group=group, name="Current ticked")
@@ -546,7 +547,7 @@ def test_verify_vlan_group_returns_the_shared_status_cell(client, settings, sync
 
     configure_default_librenms_server(settings)
     tag = str(sync_actions).lower().replace("[]", "list").replace("{}", "object") or "empty"
-    device = make_device(f"verify-per-row-{tag}", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device(f"verify-per-row-{tag}"), "default", own=42)
     group = VLANGroup.objects.create(name=f"Verify per-row {tag}", slug=f"verify-per-row-{tag}")
     VLAN.objects.create(vid=501, group=group, name="Current name")
     _seed_vlan_snapshot(device, [{"vlan_vlan": 501, "vlan_name": "Updated name"}])
@@ -608,7 +609,7 @@ def test_a_forged_token_still_reports_the_batch_summary(client, settings):
     )
 
     configure_default_librenms_server(settings)
-    device = make_device("forged-only-summary", librenms_cf={"default": {"id": 77}})
+    device = seed_mapping(make_device("forged-only-summary"), "default", own=77)
     _seed_vlan_snapshot(device, [{"vlan_vlan": 10, "vlan_name": "Users"}])
     client.force_login(make_superuser("forged-only-summary-user"))
 
@@ -632,7 +633,7 @@ def test_an_oversized_token_is_not_echoed(client, settings):
     )
 
     configure_default_librenms_server(settings)
-    device = make_device("unbounded-token-diagnostic", librenms_cf={"default": {"id": 78}})
+    device = seed_mapping(make_device("unbounded-token-diagnostic"), "default", own=78)
     _seed_vlan_snapshot(device, [{"vlan_vlan": 3201, "vlan_name": "Valid VLAN"}])
     client.force_login(make_superuser("unbounded-token-diagnostic-user"))
     oversized = "vlan:" + "x" * 9000
@@ -656,7 +657,7 @@ def test_the_row_compares_and_offers_the_scope_its_dropdown_selects(client, sett
     from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_device, make_superuser
 
     configure_default_librenms_server(settings)
-    device = make_device("row-scope-agreement", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("row-scope-agreement"), "default", own=42)
     first = VLANGroup.objects.create(name="Tie first", slug="tie-first")
     second = VLANGroup.objects.create(name="Tie second", slug="tie-second")
     VLAN.objects.create(vid=801, group=first, name="first", status="active")

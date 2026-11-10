@@ -281,7 +281,7 @@ class TestRenderingTheMenu:
         configure_default_librenms_server(settings)
 
     def _device(self, name):
-        device = make_device(name, librenms_cf={SERVER_KEY: {"id": 91}})
+        device = seed_mapping(make_device(name), SERVER_KEY, own=91)
         _seed(device)
         return device
 
@@ -437,7 +437,7 @@ class TestSavedIPChoicesThroughTheSyncView:
 
     def _sync(self, client, settings, live_librenms, *, name, saved_key, extra_perms, toggles):
         _configure_test_server(settings)
-        device = make_device(name, librenms_cf={SERVER_KEY: {"id": 42}})
+        device = seed_mapping(make_device(name), SERVER_KEY, own=42)
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
         seed_mapping(interface, SERVER_KEY, own=7051)
         user = make_user_with_perms(
@@ -590,7 +590,7 @@ class TestRenderingTheIPMenu:
         self, client, settings, live_librenms, saved
     ):
         _configure_test_server(settings)
-        device = make_device("ip-option-render", librenms_cf={SERVER_KEY: {"id": 42}})
+        device = seed_mapping(make_device("ip-option-render"), SERVER_KEY, own=42)
         client.force_login(_user("ip-option-render-user"))
         for key, value in saved.items():
             assert _save(client, value, key).status_code == 200
@@ -600,7 +600,7 @@ class TestRenderingTheIPMenu:
 
     def test_without_a_choice_and_with_a_corrupt_one_the_switches_render_off(self, client, settings, live_librenms):
         _configure_test_server(settings)
-        device = make_device("ip-option-render-off", librenms_cf={SERVER_KEY: {"id": 42}})
+        device = seed_mapping(make_device("ip-option-render-off"), SERVER_KEY, own=42)
         user = _user("ip-option-render-off-user")
         client.force_login(user)
         off = {"set_primary_ip": False, "create_missing_interfaces": False}
@@ -615,7 +615,7 @@ class TestRenderingTheIPMenu:
         self, client, settings, live_librenms
     ):
         _configure_test_server(settings)
-        device = make_device("ip-option-render-mgmt", librenms_cf={SERVER_KEY: {"id": 42}})
+        device = seed_mapping(make_device("ip-option-render-mgmt"), SERVER_KEY, own=42)
         client.force_login(_user("ip-option-render-mgmt-user"))
         # NetBox's paginator moves up to 5 orphan rows onto the last page, so the last of 8 rows is not on page 1.
         rows = [
@@ -658,7 +658,7 @@ class TestRenderingTheIPMenu:
 
     def test_a_posted_toggle_beats_the_saved_choice_on_refresh(self, client, settings, live_librenms):
         _configure_test_server(settings)
-        device = make_device("ip-option-render-posted", librenms_cf={SERVER_KEY: {"id": 42}})
+        device = seed_mapping(make_device("ip-option-render-posted"), SERVER_KEY, own=42)
         client.force_login(_user("ip-option-render-posted-user"))
         assert _save(client, True, "create_missing_interfaces").status_code == 200
 

@@ -87,7 +87,7 @@ class TestHtmxSync:
         configure_default_librenms_server(settings)
 
     def test_the_fragment_keeps_the_page_and_the_page_size(self, client):
-        device = make_device("htmx-sync-page", librenms_cf={SERVER_KEY: {"id": 81}})
+        device = seed_mapping(make_device("htmx-sync-page"), SERVER_KEY, own=81)
         _seed(device, _ports())
         client.force_login(make_superuser("htmx-sync-page-user"))
         synced_port = FIRST_PORT + 12
@@ -113,7 +113,7 @@ class TestHtmxSync:
         assert read_mapping(interface).own_id(SERVER_KEY) == synced_port
 
     def test_the_cache_transition_rides_on_the_fragment(self, client, django_capture_on_commit_callbacks):
-        device = make_device("htmx-sync-transition", librenms_cf={SERVER_KEY: {"id": 82}})
+        device = seed_mapping(make_device("htmx-sync-transition"), SERVER_KEY, own=82)
         _seed(device, _ports())
         client.force_login(make_superuser("htmx-sync-transition-user"))
 
@@ -125,7 +125,7 @@ class TestHtmxSync:
         assert json.loads(response["HX-Trigger"])["librenmsCacheChanged"] == transition
 
     def test_a_rejected_submit_reports_in_the_fragment(self, client):
-        device = make_device("htmx-sync-empty", librenms_cf={SERVER_KEY: {"id": 83}})
+        device = seed_mapping(make_device("htmx-sync-empty"), SERVER_KEY, own=83)
         _seed(device, _ports())
         client.force_login(make_superuser("htmx-sync-empty-user"))
 
@@ -138,7 +138,7 @@ class TestHtmxSync:
         assert not Interface.objects.filter(device=device).exists()
 
     def test_an_unknown_server_renders_an_empty_tab(self, client):
-        device = make_device("htmx-sync-server", librenms_cf={SERVER_KEY: {"id": 84}})
+        device = seed_mapping(make_device("htmx-sync-server"), SERVER_KEY, own=84)
         _seed(device, _ports())
         client.force_login(make_superuser("htmx-sync-server-user"))
 
@@ -164,7 +164,7 @@ class TestHtmxSync:
         assert VMInterface.objects.filter(virtual_machine=vm, name="eth01").exists()
 
     def test_a_plain_submit_still_redirects(self, client):
-        device = make_device("htmx-sync-plain", librenms_cf={SERVER_KEY: {"id": 85}})
+        device = seed_mapping(make_device("htmx-sync-plain"), SERVER_KEY, own=85)
         _seed(device, _ports())
         client.force_login(make_superuser("htmx-sync-plain-user"))
 
@@ -177,7 +177,7 @@ class TestHtmxSync:
 @pytest.mark.django_db
 def test_an_htmx_rebind_swaps_the_tab_in_place(client, settings, django_capture_on_commit_callbacks):
     configure_default_librenms_server(settings)
-    device = make_device("htmx-rebind", librenms_cf={SERVER_KEY: {"id": 86}})
+    device = seed_mapping(make_device("htmx-rebind"), SERVER_KEY, own=86)
     interface = make_interface(device, "eth12")
     seed_mapping(interface, SERVER_KEY, own=8679, save=False)
     interface.save()
