@@ -516,9 +516,9 @@ class TestRemoteDeviceResolutionExcludesOOB:
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
 
-        host = make_device("remote-host", librenms_cf={"default": {"id": 42}})
+        host = seed_mapping(make_device("remote-host"), "default", own=42)
         # A DIFFERENT device references LibreNMS id 42 as its OOB controller (not its own id).
-        make_device("oob-referencer", librenms_cf={"default": {"oob": {"id": 42}}})
+        seed_mapping(make_device("oob-referencer"), "default", oob=42)
 
         view = object.__new__(BaseCableTableView)
         # Pass a hostname that matches NO device so the resolution can only succeed via the id-42

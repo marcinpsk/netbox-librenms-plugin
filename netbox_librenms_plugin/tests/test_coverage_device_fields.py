@@ -89,7 +89,7 @@ def _post(client, name, obj, data=None):
 
 
 def _linked_device(name, device_id, **kwargs):
-    return make_device(name, librenms_cf={SERVER_KEY: device_id}, **kwargs)
+    return seed_mapping(make_device(name, **kwargs), SERVER_KEY, own=device_id)
 
 
 def _reporting_device(name, server, device_id, os):
@@ -1623,7 +1623,7 @@ class TestConvertLegacyLibreNMSIdView:
 
     def test_conflicting_assignment_blocks_conversion(self, logged_in_client, librenms_server):
         device = make_device("legacy-conflict-source", serial="LEGACY-CONFLICT", librenms_cf=6567)
-        make_device("legacy-conflict-owner", librenms_cf={SERVER_KEY: 6567})
+        seed_mapping(make_device("legacy-conflict-owner"), SERVER_KEY, own=6567)
         librenms_server.device_info_response(
             device_id=6567,
             hostname=device.name,
@@ -1654,7 +1654,7 @@ class TestConvertLegacyLibreNMSIdView:
             obj = make_vm(f"legacy-cross-{converting}")
             seed_stored_mapping(obj, librenms_id, save=True)
         if owning == "device":
-            make_device(f"legacy-cross-owner-{owning}", librenms_cf={SERVER_KEY: librenms_id})
+            seed_mapping(make_device(f"legacy-cross-owner-{owning}"), SERVER_KEY, own=librenms_id)
         else:
             owner = make_vm(f"legacy-cross-owner-{owning}")
             seed_mapping(owner, SERVER_KEY, own=librenms_id)
