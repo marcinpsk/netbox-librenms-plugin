@@ -32,7 +32,7 @@ from netbox_librenms_plugin.interface_relationships import (
     resolve_relationship_row,
 )
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
-from netbox_librenms_plugin.server_mappings import read_mapping, read_mappings
+from netbox_librenms_plugin.server_mappings import prefetch_mappings, read_mapping, read_mappings
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.sync_filters import filter_sync_table, parse_table_filters, show_ignored_interfaces
@@ -228,12 +228,17 @@ class BaseInterfaceTableView(
             extra_related = ["parent", "bridge"] if related_field == "virtual_machine" else ["lag", "parent", "bridge"]
             # The planned type check asks each device interface whether it has LAG members.
             extra_prefetch = [] if related_field == "virtual_machine" else ["member_interfaces"]
-            interfaces = (
-                (interface, read_mapping(interface))
-                for interface in queryset.select_related(
-                    related_field, "untagged_vlan", *extra_related
-                ).prefetch_related("tagged_vlans", "tagged_vlans__group", "mac_addresses", *extra_prefetch)
+            loaded = list(
+                queryset.select_related(related_field, "untagged_vlan", *extra_related).prefetch_related(
+                    "tagged_vlans", "tagged_vlans__group", "mac_addresses", *extra_prefetch
+                )
             )
+            # The row enrichment reads the mapping of each related LAG, parent and bridge interface too.
+            related = [
+                related for interface in loaded for name in extra_related if (related := getattr(interface, name))
+            ]
+            prefetch_mappings([*loaded, *related])
+            interfaces = ((interface, read_mapping(interface)) for interface in loaded)
         interfaces = list(interfaces)
         for (interface, _), librenms_id in zip(interfaces, self._get_object_librenms_ids(interfaces), strict=True):
             by_name[interface.name] = interface

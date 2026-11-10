@@ -40,6 +40,7 @@ from netbox_librenms_plugin.serial_identity import (
 from netbox_librenms_plugin.server_mappings import (
     name_match_may_be_port,
     port_holders,
+    prefetch_mappings,
     read_mapping,
 )
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
@@ -1603,7 +1604,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         if interface_manager is None or not hasattr(interface_manager, "all"):
             return interfaces_by_pk, interfaces_by_name, interfaces_by_module
 
-        for interface in interface_manager.all():
+        for interface in prefetch_mappings(interface_manager.all()):
             interfaces_by_pk[interface.pk] = interface
             interfaces_by_module.setdefault(interface.module_id, []).append(interface)
             name = (getattr(interface, "name", "") or "").strip()

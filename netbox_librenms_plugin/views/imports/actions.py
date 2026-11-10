@@ -126,6 +126,7 @@ from netbox_librenms_plugin.server_mappings import (
     merge_links,
     persist_mapping,
     persist_merge,
+    prefetch_mappings,
     promote_to_host,
     read_mapping,
 )
@@ -3816,6 +3817,19 @@ class _MergeRefused(Exception):
         self.response = response
 
 
+def _legacy_link_label(**devices_by_label):
+    """Return the label of the first device whose mapping is a legacy bare value, or None."""
+    devices = prefetch_mappings(devices_by_label.values())
+    return next(
+        (
+            label
+            for label, device in zip(devices_by_label, devices, strict=True)
+            if read_mapping(device).legacy.is_legacy
+        ),
+        None,
+    )
+
+
 class MergeNetBoxDevicesView(
     LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View
 ):
@@ -3967,12 +3981,11 @@ class MergeNetBoxDevicesView(
             # Gate the link-holding sync devices, not merely the selected VC members. The merge
             # helpers reject legacy data either way; checking here preserves the actionable
             # convert-first message when the legacy link lives on a sibling.
-            for label, obj in (("winner", winner_sync), ("donor", donor_sync)):
-                if read_mapping(obj).legacy.is_legacy:
-                    return _htmx_error_response(
-                        f"{label.capitalize()} device has a legacy bare-integer librenms_id; "
-                        "use 'Convert mapping' to migrate before merging."
-                    )
+            if (label := _legacy_link_label(winner=winner_sync, donor=donor_sync)) is not None:
+                return _htmx_error_response(
+                    f"{label.capitalize()} device has a legacy bare-integer librenms_id; "
+                    "use 'Convert mapping' to migrate before merging."
+                )
             if winner_sync.pk == donor_sync.pk:
                 # Both candidates belong to the same virtual chassis (one sync device); merging its
                 # LibreNMS link into itself would read and write the same CF entry. Fail closed.

@@ -43,6 +43,7 @@ from netbox_librenms_plugin.server_mappings import (
     claim_librenms_port_binding,
     find_port_owner,
     persist_mapping,
+    prefetch_mappings,
     read_mapping,
 )
 from netbox_librenms_plugin.serial_identity import (
@@ -786,14 +787,15 @@ def _select_bind_candidate(device, item, module_pk, server_key, interfaces, port
     if candidate is None:
         # Choose from every interface, as the table does, then refuse a choice outside the caller's scope.
         device_interfaces = Interface.objects.filter(device=device)
+        named = list(device_interfaces.filter(name__in=interface_names))
+        module_interfaces = list(device_interfaces.filter(module_id=module_pk)) if module_pk else []
+        prefetch_mappings([*named, *module_interfaces])
         choice = select_module_interface(
             device,
             item,
             server_key=server_key,
-            interfaces_by_name={
-                interface.name: interface for interface in device_interfaces.filter(name__in=interface_names)
-            },
-            module_interfaces=list(device_interfaces.filter(module_id=module_pk)) if module_pk else [],
+            interfaces_by_name={interface.name: interface for interface in named},
+            module_interfaces=module_interfaces,
         )
         if choice.interface is not None and not interfaces.filter(pk=choice.interface.pk).exists():
             return None, {

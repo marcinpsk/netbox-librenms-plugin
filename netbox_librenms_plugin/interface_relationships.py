@@ -14,7 +14,13 @@ from netbox_librenms_plugin.constants import (
     RELATIONSHIP_KINDS,
 )
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
-from netbox_librenms_plugin.server_mappings import MappingRole, identity_q, name_match_may_be_port, read_mapping
+from netbox_librenms_plugin.server_mappings import (
+    MappingRole,
+    identity_q,
+    name_match_may_be_port,
+    prefetch_mappings,
+    read_mapping,
+)
 from netbox_librenms_plugin.utils import invert_relationship_edges
 
 RELATIONSHIP_CANDIDATE_BATCH_SIZE = 64
@@ -165,7 +171,7 @@ def build_interface_index(obj, server_key, user=None, action="change", *, lock=F
 
     by_librenms_id = {}
     by_name = {}
-    for interface in interface_queryset:
+    for interface in prefetch_mappings(interface_queryset):
         stored_id = normalize_librenms_port_id(read_mapping(interface).own_id(server_key))
         if stored_id is not None:
             by_librenms_id.setdefault(stored_id, []).append(interface)

@@ -41,6 +41,7 @@ from netbox_librenms_plugin.server_mappings import (
     identity_q,
     name_match_may_be_port,
     persist_mapping,
+    prefetch_mappings,
     read_mapping,
     resolve_device_port,
 )
@@ -63,6 +64,7 @@ from netbox_librenms_plugin.transactions import (
     saved_in_scope,
 )
 from netbox_librenms_plugin.utils import (
+    any_device_migrated,
     cable_path_reaches,
     classify_cable_action,
     get_cable_sync_settings,
@@ -388,15 +390,9 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             locked_local_owner = getattr(self, "_locked_local_owner", None)
             locked_cache_device = getattr(self, "_locked_cache_device", None)
             server_key = getattr(self, "_post_server_key", None)
-            if any(
-                read_mapping(device).migrated_to(server_key or "default")
-                for device in (
-                    locked_initial_device,
-                    locked_origin_device,
-                    locked_local_owner,
-                    locked_cache_device,
-                )
-                if device is not None
+            if any_device_migrated(
+                (locked_initial_device, locked_origin_device, locked_local_owner, locked_cache_device),
+                server_key or "default",
             ):
                 return {"status": "stale", "interface": display_name}
             local_term, remote_term = locked_terms
@@ -540,6 +536,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         ends = [(local_term, link_data.get("local_port_id"))]
         if not link_data.get("manual_remote"):
             ends.append((remote_term, remote_port_ref(link_data)))
+        prefetch_mappings(term for term, _port_id in ends if isinstance(term, Interface))
         return all(
             name_match_may_be_port(term, server=server_key, port_id=port_id)
             for term, port_id in ends
@@ -612,7 +609,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         for side, port_id, _record in row_ports:
             owner_id = port_owner_id(link_data, side)
             ports[(port_id, owner_id)] = None if owner_id is None else owners[owner_id]
-        for interface in touched_interfaces:
+        for interface in prefetch_mappings(touched_interfaces):
             if (port_id := read_mapping(interface).own_id(server_key)) is not None:
                 ports[(port_id, interface.device_id)] = owners[interface.device_id]
         if not ports:
@@ -632,8 +629,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             return {}
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
         wanted = {port_id for _side, port_id, _record in cable_row_ports(link_data)}
-        interfaces = cable_rule_interfaces(*terminations)
-        for interface in interfaces:
+        for interface in prefetch_mappings(cable_rule_interfaces(*terminations)):
             if (port_id := read_mapping(interface).own_id(server_key)) is not None:
                 wanted.add(port_id)
         records = {**(prefetched or {}), **self._snapshot_port_records}
@@ -1314,7 +1310,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             if not same_device and not same_chassis:
                 messages.error(request, "The cable page and selected device do not match.")
                 return redirect(redirect_url)
-        if read_mapping(origin_device).migrated_to(server_key) or read_mapping(initial_device).migrated_to(server_key):
+        if any_device_migrated((origin_device, initial_device), server_key):
             messages.error(request, "This device has been migrated and is read-only for this LibreNMS server.")
             return redirect(redirect_url)
         self._post_server_key = server_key
@@ -1544,10 +1540,8 @@ class CableRemoteCreateView(SyncCablesView):
             reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[obj.pk]),
             {"tab": "cables", "server_key": server_key},
         )
-        if any(
-            read_mapping(device).migrated_to(server_key)
-            for device in (obj, context["local_interface"].device, getattr(self, "_cache_device", None))
-            if device is not None
+        if any_device_migrated(
+            (obj, context["local_interface"].device, getattr(self, "_cache_device", None)), server_key
         ):
             messages.error(request, "This device has been migrated and is read-only for this LibreNMS server.")
             return self._sync_response(request, obj, server_key, redirect_url, close_modal=True)

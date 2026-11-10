@@ -17,7 +17,7 @@ from netbox_librenms_plugin.serial_utils import (
     get_serial_sensor_type_patterns,
     project_serial_sensors,
 )
-from netbox_librenms_plugin.server_mappings import MappingRole, identity_q, read_mapping
+from netbox_librenms_plugin.server_mappings import MappingRole, identity_q, prefetch_mappings, read_mapping
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
 REMOTE_ALIAS_FETCH_BUDGET_SECONDS = 15.0
@@ -179,17 +179,21 @@ def _cable_parts(fetch, librenms_id):
     for link in resolved_links:
         identity = (coerce_librenms_id(link.get("remote_device_id")), link.get("remote_hostname"))
         identities.setdefault(identity, []).append(link)
+    hostname_owners = []
     for (device_id, hostname), device_links in identities.items():
         device, found, _error = resolve_remote_device(device_id, hostname, server_key=fetch.server_key)
         if found:
             resolved_devices.append(device)
             if device_id is None:
                 owner = get_librenms_sync_device(device, server_key=fetch.server_key) or device
-                neighbour_id = read_mapping(owner).own_id(fetch.server_key)
-                if neighbour_id is not None:
-                    neighbours[neighbour_id] = None
-                    for link in device_links:
-                        link["resolved_remote_device_id"] = neighbour_id
+                hostname_owners.append((owner, device_links))
+    prefetch_mappings(owner for owner, _links in hostname_owners)
+    for owner, device_links in hostname_owners:
+        neighbour_id = read_mapping(owner).own_id(fetch.server_key)
+        if neighbour_id is not None:
+            neighbours[neighbour_id] = None
+            for link in device_links:
+                link["resolved_remote_device_id"] = neighbour_id
     parts["links"] = fetch.responses[links.request.key] = replace(links, value=resolved_links)
     neighbours.update(
         dict.fromkeys(_displaced_owner_ids(fetch.server_key, (librenms_id, *neighbours), resolved_devices))

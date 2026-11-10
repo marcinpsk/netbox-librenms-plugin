@@ -24,7 +24,7 @@ from netbox_librenms_plugin.interface_sync import resolve_or_create_interface_fr
 from netbox_librenms_plugin.ip_addressing import UNAVAILABLE_VRF_MESSAGE, parse_address_with_prefix
 from netbox_librenms_plugin.ip_rules import ip_rules_for_request
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
-from netbox_librenms_plugin.server_mappings import name_match_may_be_port, read_mapping
+from netbox_librenms_plugin.server_mappings import name_match_may_be_port, prefetch_mappings, read_mapping
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
@@ -473,7 +473,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             "interfaces_by_port_id": {},
         }
         if isinstance(locked_obj, Device):
-            current_interfaces = list(
+            current_interfaces = prefetch_mappings(
                 Interface.objects.filter(device_id__in=state["members_by_id"]).select_related("device")
             )
             for interface in current_interfaces:

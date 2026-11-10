@@ -48,6 +48,7 @@ from netbox_librenms_plugin.server_mappings import (
     identity_q,
     is_server_key,
     name_match_may_be_port,
+    prefetch_mappings,
     read_mapping,
 )
 from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE, classify_conflict, nearest_database_error
@@ -230,7 +231,7 @@ def index_ip_source_interfaces(interfaces, server_key, obj_device_id=None):
     """Index one owner scope with identical ambiguity rules for reads and writes."""
     by_librenms_id = {}
     by_name = {}
-    for iface in interfaces:
+    for iface in prefetch_mappings(interfaces):
         lib_id = read_mapping(iface).own_id(server_key)
         if lib_id is not None:
             key = str(lib_id)
@@ -3264,7 +3265,7 @@ class PortDisclosure:
                     identities=new_ids,
                     roles=(MappingRole.OWN, MappingRole.OOB),
                 )
-                for interface in model.objects.filter(match):
+                for interface in prefetch_mappings(model.objects.filter(match)):
                     port_id = read_mapping(interface).own_id(self._server_key)
                     if port_id in new_ids:
                         self._bindings.setdefault(port_id, []).append(interface)
@@ -3747,6 +3748,24 @@ def set_device_ip_fk(device, field, ip, *, save=True):
     if save:
         device.save(update_fields=[field, "last_updated"])
     return field
+
+
+def any_device_migrated(devices, server_key: str) -> bool:
+    """
+    Return whether a migration marker on *server_key* makes any of *devices* read-only.
+
+    Args:
+        devices (Iterable[Device | None]): The devices a page or a write acts on; None is skipped.
+        server_key (str): The LibreNMS server key the marker is namespaced under.
+
+    Returns:
+        bool: True when at least one device holds a marker for *server_key*.
+
+    """
+    return any(
+        read_mapping(device).migrated_to(server_key)
+        for device in prefetch_mappings(device for device in devices if device is not None)
+    )
 
 
 def build_migrated_context(obj, server_key: str = "default") -> dict:
