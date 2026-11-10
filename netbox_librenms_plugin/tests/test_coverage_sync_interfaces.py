@@ -818,11 +818,16 @@ class TestInterfaceContextOOBRows:
         assert row["lag_sync_status"] == "missing_nb"
         assert "lag-sync-btn" not in str(context["table"].render_parent(None, row))
 
-    def test_a_related_interface_with_a_malformed_binding_is_not_a_name_match(self):
+    @pytest.mark.parametrize("binding", ["malformed-entry", "quarantined"])
+    def test_a_related_interface_with_a_malformed_binding_is_not_a_name_match(self, binding):
         """A malformed binding is never unbound, so a same-name LAG cannot stand for the LibreNMS LAG port."""
-        device = make_device("table-malformed-related-binding")
+        device = make_device(f"table-{binding}-related-binding")
         lag = make_interface(device, "Port-Channel1", iface_type="lag")
-        seed_quarantined(lag)
+        if binding == "quarantined":
+            seed_quarantined(lag)
+        else:
+            # Storage shape: a server entry whose id no reader accepts.
+            seed_stored_mapping(lag, {"default": {"id": "junk"}}, save=True)
         source = make_interface(device, "Ethernet1")
         seed_mapping(source, own=10, save=False)
         source.lag = lag
