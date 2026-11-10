@@ -444,8 +444,7 @@ class TestOobInventory:
 
     def test_an_oob_optic_takes_only_an_oob_pic(self, librenms_server, server_key):
         from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
-        from netbox_librenms_plugin.server_mappings import attach_oob
-        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
         recording = _recording(RECORDING)
         librenms_server.load_recording(recording)
@@ -484,8 +483,7 @@ class TestOobInventory:
         ]
         librenms_server.register("/api/v0/inventory/999/all", {"status": "ok", "inventory": oob_rows}, method="GET")
         device = _mapped_device("dangling-oob", recording, server_key)
-        apply_mapping_change(device, attach_oob(device, server_key, 999, oob_type="idrac9"))
-        device.save(update_fields=["custom_field_data"])
+        seed_mapping(device, server_key, oob=999, oob_type="idrac9")
 
         _refresh(device, server_key)
 
