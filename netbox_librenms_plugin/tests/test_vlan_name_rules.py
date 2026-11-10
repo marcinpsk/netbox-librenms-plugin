@@ -1,12 +1,11 @@
 """End-to-end checks for VLAN name normalization rules on the VLAN tab and the VLAN writer."""
 
-import re
-
 import pytest
 from django.core.exceptions import ValidationError
 from django.urls import reverse
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
+from netbox_librenms_plugin.tests.vlan_intent_helpers import reassess, row_tokens, sync
 
 LIBRENMS_ID = 4242
 JUNOS_SUFFIX_RULE = {"match_pattern": r"^(.+)\+{vid}$", "replacement": r"\1"}
@@ -60,24 +59,14 @@ def _rows(response):
     return {row["vlan_id"]: row for row in response.context["vlan_sync"]["vlan_table"].data}
 
 
-def _shown_names(response):
-    """Return the name that the rendered tab posts for each VID."""
-    pattern = r'name="expected_vlan_name_(\d+)" value="([^"]*)"'
-    return {int(vid): name for vid, name in re.findall(pattern, response.content.decode())}
+def _tokens(response):
+    """Return the token that the rendered tab offers for each VID."""
+    return row_tokens(response.content.decode())
 
 
-def _sync(client, device, shown_names, *, group=None):
-    """Create the VLANs of *shown_names* through the real writer, posting the names the tab showed."""
-    url = reverse(
-        "plugins:netbox_librenms_plugin:sync_selected_vlans",
-        kwargs={"object_type": "device", "object_id": device.pk},
-    )
-    data = {"server_key": "default", "action": "create_vlans", "select": [str(vid) for vid in shown_names]}
-    for vid, name in shown_names.items():
-        data[f"vlan_group_{vid}"] = str(group.pk) if group is not None else ""
-        if name is not None:
-            data[f"expected_vlan_name_{vid}"] = name
-    return client.post(url, data)
+def _sync(client, device, tokens):
+    """Apply *tokens* through the real writer."""
+    return sync(client, device, tokens, htmx=False)
 
 
 @pytest.mark.django_db
@@ -111,8 +100,8 @@ def test_a_juniper_rule_strips_only_the_suffix_that_repeats_the_vid(client, vlan
     assert "users+100" in html
     assert "web+300" in html
 
-    shown = _shown_names(response)
-    _sync(client, device, {200: shown[200], 300: shown[300]})
+    tokens = _tokens(response)
+    _sync(client, device, [tokens[200], tokens[300]])
 
     assert VLAN.objects.get(vid=300, group=None).name == "web"
     assert VLAN.objects.get(vid=200, group=None).name == "guests+300"
@@ -131,7 +120,7 @@ def test_a_rule_for_another_manufacturer_leaves_the_name(client, vlan_librenms):
 
     response = _refresh(client, device)
     assert _rows(response)[300]["name"] == "web+300"
-    _sync(client, device, {300: _shown_names(response)[300]})
+    _sync(client, device, [_tokens(response)[300]])
 
     assert VLAN.objects.get(vid=300, group=None).name == "web+300"
 
@@ -159,9 +148,10 @@ def test_an_adjusted_name_that_the_group_already_holds_is_reported_by_name(clien
     VLAN.objects.create(vid=300, group=group, name="web", status="active")
     vlan_librenms([{"vlan_vlan": 301, "vlan_name": "web+301"}])
     client.force_login(make_superuser("vlan-rule-collision-user"))
-    shown = _shown_names(_refresh(client, device))
+    _refresh(client, device)
+    token = reassess(client, device, 301, group).json()["confirmation_intent"]
 
-    response = _sync(client, device, {301: shown[301]}, group=group)
+    response = _sync(client, device, [token])
 
     assert not VLAN.objects.filter(vid=301).exists()
     errors = [str(message) for message in get_messages(response.wsgi_request)]
@@ -169,7 +159,7 @@ def test_an_adjusted_name_that_the_group_already_holds_is_reported_by_name(clien
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("change", ["rule deleted", "rule added", "name not posted"])
+@pytest.mark.parametrize("change", ["rule deleted", "rule added", "token not posted"])
 def test_a_create_refuses_a_name_that_the_page_did_not_show(client, vlan_librenms, change):
     """A rule change between the page and the create never saves a name that the user did not see."""
     from ipam.models import VLAN
@@ -178,15 +168,21 @@ def test_a_create_refuses_a_name_that_the_page_did_not_show(client, vlan_librenm
     rule = _rule(juniper) if change == "rule deleted" else None
     vlan_librenms([{"vlan_vlan": 300, "vlan_name": "web+300"}])
     client.force_login(make_superuser("vlan-rule-stale-user"))
-    shown = _shown_names(_refresh(client, device))[300]
+    token = _tokens(_refresh(client, device))[300]
 
     if change == "rule deleted":
         rule.delete()
     elif change == "rule added":
         _rule(juniper)
-    _sync(client, device, {300: None if change == "name not posted" else shown})
+    response = _sync(client, device, [] if change == "token not posted" else [token])
 
     assert not VLAN.objects.filter(vid=300).exists()
+    if change != "token not posted":
+        assert any(text.startswith("VLAN 300: ") and "effects.name" in text for text in _texts(response))
+
+
+def _texts(response):
+    return [str(message) for message in response.wsgi_request._messages]
 
 
 @pytest.mark.django_db

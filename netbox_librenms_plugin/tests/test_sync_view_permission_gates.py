@@ -45,7 +45,7 @@ def pytest_generate_tests(metafunc):
             if name == "CreateAndAssignPlatformView":
                 variants.append(("device", {"platform_name": "Existing platform", "manufacturer": "existing"}))
             if name == "SyncVLANsView":
-                variants.append(("device", {"select": ["100"], "vlan_group_100": "existing"}))
+                variants.append(("device", {"confirmation_intent": "grouped"}))
             for object_type, data in variants:
                 suffix = "-".join(f"{key}={value}" for key, value in data.items())
                 cases.append(
@@ -58,29 +58,18 @@ def pytest_generate_tests(metafunc):
     metafunc.parametrize("sync_case", cases)
 
 
-def _domain_state():
-    from django.apps import apps
-
-    labels = {"dcim", "ipam", "virtualization", "netbox_librenms_plugin", "extras", "core"}
-    return {
-        model._meta.label: list(model._base_manager.order_by("pk").values())
-        for model in apps.get_models(include_auto_created=True)
-        if model._meta.app_label in labels and model._meta.managed and not model._meta.proxy
-    }
-
-
 def _post_without_writes(view, request, **kwargs):
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
 
-    from netbox_librenms_plugin.tests.view_test_helpers import post
+    from netbox_librenms_plugin.tests.view_test_helpers import domain_state, post
 
-    before = _domain_state()
+    before = domain_state()
     with CaptureQueriesContext(connection) as queries:
         try:
             response = post(view, request, **kwargs)
         finally:
-            after = _domain_state()
+            after = domain_state()
             changed = [table for table in before if before[table] != after[table]]
             assert changed == [], f"Denied POST changed tables: {changed}"
     writes = [
@@ -90,6 +79,26 @@ def _post_without_writes(view, request, **kwargs):
     ]
     assert writes == [], "Denied POST issued write SQL"
     return response
+
+
+def _grouped_vlan_token(device):
+    """Return an authentic VLAN token that names a VLAN group, so the VLAN route also requires VLANGroup view."""
+    from ipam.models import VLANGroup
+
+    from netbox_librenms_plugin import confirmation_intent as intent
+    from netbox_librenms_plugin.assessment.vlans import (
+        VLANAssumptions,
+        VLANChoices,
+        VLANCreate,
+        VLANCreateEffects,
+        VLANIdentity,
+    )
+
+    group = VLANGroup.objects.create(name="Permission VLAN group", slug="permission-vlans").pk
+    operation = VLANCreate(
+        VLANIdentity(100), VLANChoices(group), VLANAssumptions(None), VLANCreateEffects(100, group, "users", "active")
+    )
+    return intent.offer(operation, intent.IntentContext(1, (device._meta.label_lower, device.pk), "default")).token
 
 
 def _assert_object_denial(view, request, response, *, htmx, expected_missing=None):
@@ -127,7 +136,6 @@ class TestSyncPostPermissionGates:
         import inspect
 
         from dcim.models import Platform
-        from ipam.models import VLANGroup
         from utilities.permissions import get_permission_for_model
 
         from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN
@@ -145,10 +153,8 @@ class TestSyncPostPermissionGates:
         if data.get("manufacturer") == "existing":
             Platform.objects.create(name=data["platform_name"], slug="existing-platform")
             data["manufacturer"] = str(device.device_type.manufacturer_id)
-        if data.get("vlan_group_100") == "existing":
-            data["vlan_group_100"] = str(
-                VLANGroup.objects.create(name="Permission VLAN group", slug="permission-vlans").pk
-            )
+        if data.get("confirmation_intent") == "grouped":
+            data["confirmation_intent"] = _grouped_vlan_token(device)
         pk = owner.pk
         if view_class.__name__ == "MoveInterfaceToWinnerView":
             pk = interface.pk

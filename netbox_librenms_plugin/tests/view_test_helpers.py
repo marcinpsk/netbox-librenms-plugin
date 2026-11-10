@@ -85,6 +85,18 @@ def plugin_perms():
     return (PERM_VIEW_PLUGIN, PERM_CHANGE_PLUGIN)
 
 
+def domain_state():
+    """Return every row of the NetBox and plugin domain tables, so a test can assert that a request wrote nothing."""
+    from django.apps import apps
+
+    labels = {"dcim", "ipam", "virtualization", "netbox_librenms_plugin", "extras", "core"}
+    return {
+        model._meta.label: list(model._base_manager.order_by("pk").values())
+        for model in apps.get_models(include_auto_created=True)
+        if model._meta.app_label in labels and model._meta.managed and not model._meta.proxy
+    }
+
+
 # =============================================================================
 # Real requests
 # =============================================================================

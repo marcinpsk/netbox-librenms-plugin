@@ -1,10 +1,11 @@
 from dataclasses import dataclass, field
+from functools import partial
 
 from dcim.models import Device
 from django.contrib import messages
-from django.core import signing
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
+from django.db.models import Q
 from django.http import Http404, HttpResponse
 from django.shortcuts import redirect, render
 from django.urls import reverse
@@ -12,9 +13,10 @@ from django.views import View
 from ipam.models import VLAN, VLANGroup
 from utilities.exceptions import PermissionsViolation
 
+from netbox_librenms_plugin import confirmation_intent as intent
 from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
-from netbox_librenms_plugin.assessment.vlans import assess
+from netbox_librenms_plugin.assessment.vlans import VLANCreate, VLANUpdate, build_operation
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
@@ -24,7 +26,7 @@ from netbox_librenms_plugin.sync_query import page_query_url
 from netbox_librenms_plugin.transactions import saved_in_scope
 from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
-    normalize_vlan_vid,
+    index_vlan_source_rows,
     vlan_source_namer,
 )
 from netbox_librenms_plugin.views.object_sync.devices import DeviceLibreNMSSyncView
@@ -35,19 +37,15 @@ from netbox_librenms_plugin.views.mixins import (
     NetBoxObjectPermissionMixin,
 )
 
-_VID_PREVIEW_LIMIT = 32
-VLAN_CONFLICT_SIGNING_SALT = "netbox_librenms_plugin.vlan_conflict"
-
-
-@dataclass
-class _SelectedVLANVIDs:
-    """Hold canonical selected VIDs and every rejected request value."""
-
-    vids: list[str]
-    errors: list[str]
-
-    def __iter__(self):
-        return iter(self.vids)
+VLAN_SYNC_POLICY = intent.RoutePolicy(
+    frozenset(
+        {
+            (intent.Resource.VLAN, VLANCreate.ACTION, intent.Role.PRIMARY),
+            (intent.Resource.VLAN, VLANUpdate.ACTION, intent.Role.PRIMARY),
+        }
+    )
+)
+_INVALID_CONFIRMATION = "VLAN confirmation is invalid or has expired. Refresh the VLAN data and try again."
 
 
 @dataclass
@@ -57,16 +55,10 @@ class _VLANSyncOutcome:
     created_count: int = 0
     updated_count: int = 0
     skipped_count: int = 0
-    group_missing_count: int = 0
     permission_skipped_count: int = 0
-    ambiguous_count: int = 0
-    duplicate_source_count: int = 0
-    source_missing_count: int = 0
     concurrent_change_count: int = 0
-    invalid_vid_count: int = 0
     invalid_name_count: int = 0
     name_taken_count: int = 0
-    stale_name_count: int = 0
     add_permission_skipped_count: int = 0
     confirmation_error_count: int = 0
     conflicts: list[dict] = field(default_factory=list)
@@ -85,37 +77,19 @@ class _VLANSyncOutcome:
     def skip_reasons(self):
         """Return summary fragments for rejected synchronization outcomes."""
         reasons = []
-        if self.group_missing_count:
-            reasons.append(f"{self.group_missing_count} skipped (VLAN group missing)")
         if self.permission_skipped_count:
             reasons.append(f"{self.permission_skipped_count} skipped (change permission missing)")
         if self.add_permission_skipped_count:
             reasons.append(f"{self.add_permission_skipped_count} skipped (add permission constraints)")
-        if self.ambiguous_count:
-            reasons.append(f"{self.ambiguous_count} skipped (VLAN match ambiguous)")
-        if self.duplicate_source_count:
-            reasons.append(f"{self.duplicate_source_count} skipped (duplicate source VID)")
-        if self.source_missing_count:
-            reasons.append(f"{self.source_missing_count} skipped (source row missing)")
         if self.concurrent_change_count:
             reasons.append(f"{self.concurrent_change_count} skipped (concurrent VLAN change)")
-        if self.invalid_vid_count:
-            reasons.append(f"{self.invalid_vid_count} skipped (invalid VLAN VID)")
         if self.invalid_name_count:
             reasons.append(f"{self.invalid_name_count} skipped (invalid VLAN name)")
         if self.name_taken_count:
             reasons.append(f"{self.name_taken_count} skipped (VLAN name already in the group)")
-        if self.stale_name_count:
-            reasons.append(f"{self.stale_name_count} skipped (VLAN name changed after display)")
         if self.confirmation_error_count:
             reasons.append(f"{self.confirmation_error_count} skipped (confirmation no longer current)")
         return reasons
-
-
-def _vid_preview(value):
-    """Return a bounded, printable form of one rejected VID for a user-facing message."""
-    text = str(value) if value not in (None, "") else "empty"
-    return text if len(text) <= _VID_PREVIEW_LIMIT else f"{text[:_VID_PREVIEW_LIMIT]}..."
 
 
 def _acquire_global_vlan_locks(vids):
@@ -127,6 +101,7 @@ def _acquire_global_vlan_locks(vids):
 class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
     """Create or update NetBox VLANs from a LibreNMS source snapshot."""
 
+    confirmation_policy = VLAN_SYNC_POLICY
     required_object_permissions = {
         "POST": [
             # The owner device is resolved through a restricted queryset (see get_object), so
@@ -138,27 +113,12 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
     }
 
     def _required_post_permissions(self, request):
-        """Require VLANGroup access when a selected row or a signed intent names a group."""
+        """Require VLANGroup access when a submitted confirmation names a group."""
         permissions = list(type(self).required_object_permissions["POST"])
-        if self._post_names_a_vlan_group(request):
+        operations = intent.signed_operations(request.POST.getlist(intent.FIELD), policy=VLAN_SYNC_POLICY)
+        if any(operation.choices.group is not None for operation in operations):
             permissions.append(("view", VLANGroup))
         return permissions
-
-    @classmethod
-    def _post_names_a_vlan_group(cls, request):
-        """Report whether this POST targets a VLAN group through a row field or a signed intent."""
-        for vid_str in cls._selected_vlan_vids(request):
-            if request.POST.get(f"vlan_group_{vid_str}"):
-                return True
-        # A confirmation carries its target group in the signed payload, with no companion field.
-        for token in request.POST.getlist("conflict_intent"):
-            try:
-                _vid, payload = cls._load_conflict_intent(token)
-            except (KeyError, TypeError, ValueError, signing.BadSignature, signing.SignatureExpired):
-                continue
-            if payload.get("target_group_id"):
-                return True
-        return False
 
     def post(self, request, object_type: str, object_id: int):
         """
@@ -166,8 +126,8 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
 
         Expected POST data:
         - action: 'create_vlans'
-        - select: List of VLAN IDs to create
-        - vlan_group_{vid}: Per-row VLAN group selection
+        - confirmation_intent: The token of each selected VLAN row, repeated
+        - confirm_conflicts: '1' to apply the renames that a disclosure showed
 
         Args:
             request (HttpRequest): The request that contains the VLAN synchronization data.
@@ -227,36 +187,6 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             self.request, reverse(url_name, kwargs={"pk": object_id}), {"tab": "vlans", "server_key": server_key}
         )
 
-    @staticmethod
-    def _vlan_state(vlan: VLAN) -> dict:
-        """Return the mutable VLAN state protected by a confirmation intent."""
-        return {
-            "vid": vlan.vid,
-            "group_id": vlan.group_id,
-            "name": vlan.name,
-        }
-
-    def _build_conflict(self, *, vlan, proposed_name, obj, object_type, server_key):
-        """Return one VLAN rename disclosure with its signed confirmation intent."""
-        payload = {
-            "vid": vlan.vid,
-            "object_type": object_type,
-            "object_pk": str(obj.pk),
-            "server_key": server_key,
-            "target_group_id": vlan.group_id,
-            "vlan_pk": str(vlan.pk),
-            "vlan_state": self._vlan_state(vlan),
-            "proposed_name": proposed_name,
-        }
-        return {
-            "vid": vlan.vid,
-            "group": str(vlan.group) if vlan.group is not None else "Global",
-            "group_id": vlan.group_id,
-            "current_name": vlan.name,
-            "proposed_name": proposed_name,
-            "intent": signing.dumps(payload, salt=VLAN_CONFLICT_SIGNING_SALT, compress=True),
-        }
-
     def _render_conflicts(self, request, conflicts, obj, object_type, object_id):
         """Render VLAN rename disclosures for an HTMX or native form submission."""
         context = {
@@ -275,390 +205,166 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             template_name = "netbox_librenms_plugin/vlan_conflicts_page.html"
         return render(request, template_name, context)
 
-    @staticmethod
-    def _load_conflict_intent(token):
-        """Verify one signed conflict intent and return its canonical VID and payload."""
-        payload = signing.loads(token, salt=VLAN_CONFLICT_SIGNING_SALT, max_age=3600)
-        if not isinstance(payload, dict) or (vid := normalize_vlan_vid(payload.get("vid"))) is None:
-            raise signing.BadSignature("Invalid VLAN conflict intent.")
-        return str(vid), payload
-
-    def _load_force_intents(self, request, obj, object_type, server_key):
-        """Validate submitted conflict intents and return them by canonical VID."""
-        intents = {}
-        errors = []
-        for token in request.POST.getlist("conflict_intent"):
-            try:
-                vid, payload = self._load_conflict_intent(token)
-                if (
-                    payload.get("object_type") != object_type
-                    or str(payload.get("object_pk")) != str(obj.pk)
-                    or payload.get("server_key") != server_key
-                ):
-                    raise signing.BadSignature("Conflict intent belongs to another sync context.")
-                if vid in intents:
-                    raise signing.BadSignature("Duplicate conflict intent.")
-                intents[vid] = payload
-            except (KeyError, TypeError, ValueError, signing.BadSignature, signing.SignatureExpired):
-                errors.append("VLAN confirmation is invalid or has expired. Refresh the VLAN data and try again.")
-        return intents, errors
-
-    def _apply_confirmed_vlan_change(
-        self,
-        *,
-        vid,
-        payload,
-        proposed_name,
-        row_vlan_group,
-        changeable_vlans,
-    ):
-        """Recheck and apply one signed VLAN rename while the target row is locked."""
-        target_group_id = row_vlan_group.pk if row_vlan_group is not None else None
-        if payload.get("target_group_id") != target_group_id or payload.get("proposed_name") != proposed_name:
-            raise ValueError("The VLAN target changed after confirmation. Refresh the VLAN data and try again.")
-
-        vlan = changeable_vlans.select_for_update(of=("self",)).filter(pk=payload.get("vlan_pk")).first()
-        if vlan is None:
-            raise ValueError("The existing VLAN is no longer available in your change scope.")
-        if vlan.vid != vid or vlan.group_id != target_group_id or payload.get("vlan_state") != self._vlan_state(vlan):
-            raise ValueError("The existing VLAN changed after confirmation. Refresh the VLAN data and try again.")
-        if VLAN.objects.filter(vid=vid, group=row_vlan_group).exclude(pk=vlan.pk).exists():
-            raise ValueError("The VLAN scope is now ambiguous. Refresh the VLAN data and try again.")
-
-        vlan.snapshot()
-        vlan.name = proposed_name
-        try:
-            with transaction.atomic():
-                vlan.save(update_fields=["name", "last_updated"])
-        except IntegrityError as exc:
-            raise ValueError(
-                "The proposed VLAN name already exists in the selected group. Refresh the VLAN data and try again."
-            ) from exc
-        return vlan
-
-    @classmethod
-    def _selected_vlan_vids(cls, request, force_intents=None):
-        """
-        Return the VLAN VIDs this POST selects.
-
-        Pass the validated ``force_intents`` map to get the exact work list. Pass None, before the
-        intents can be validated, to get every VID the POST names: a superset, so the permission gate
-        can never be narrower than the work the request goes on to do.
-        """
-
-        def canonicalize(values):
-            vids = []
-            errors = []
-            for value in values:
-                vid = normalize_vlan_vid(value)
-                if vid is None:
-                    errors.append(f"VLAN {_vid_preview(value)}: the LibreNMS VID is invalid; skipped.")
-                    continue
-                canonical = str(vid)
-                if canonical not in vids:
-                    vids.append(canonical)
-            return _SelectedVLANVIDs(vids, list(dict.fromkeys(errors)))
-
-        if force_intents is None:
-            named_vids = request.POST.getlist("select")
-            if "sync_one" in request.POST:
-                named_vids.append(request.POST.get("sync_one"))
-            named_vids.extend(request.POST.getlist("force_conflict"))
-            for token in request.POST.getlist("conflict_intent"):
-                try:
-                    vid, _payload = cls._load_conflict_intent(token)
-                    named_vids.append(vid)
-                except (KeyError, TypeError, ValueError, signing.BadSignature, signing.SignatureExpired):
-                    continue
-            return canonicalize(named_vids)
-
-        if request.POST.get("force_all"):
-            return canonicalize(force_intents)
-        if request.POST.get("confirm_conflicts"):
-            confirmed = canonicalize(request.POST.getlist("force_conflict"))
-            return _SelectedVLANVIDs(
-                [vid for vid in force_intents if vid in set(confirmed.vids)],
-                confirmed.errors,
-            )
-        if "sync_one" in request.POST:
-            return canonicalize([request.POST.get("sync_one")])
-        return canonicalize(request.POST.getlist("select"))
-
-    @staticmethod
-    def _selected_global_vids(request, selected_vlans, librenms_vlans, force_intents):
-        """Return selected global VIDs that require advisory transaction locks."""
-        global_vids = []
-        for vid_str in selected_vlans:
-            vid = normalize_vlan_vid(vid_str)
-            if vid is None:
-                continue
-            force_payload = force_intents.get(str(vid))
-            if force_payload is not None:
-                target_group_id = force_payload.get("target_group_id")
-            else:
-                group_field = f"vlan_group_{vid}"
-                if group_field not in request.POST:
-                    continue
-                target_group_id = request.POST.get(group_field)
-            if vid in librenms_vlans and not target_group_id:
-                global_vids.append(vid)
-        return global_vids
-
-    def _resolve_row_vlan_group(self, request, vid, force_payload, outcome):
-        """Resolve one selected VLAN group without falling back to global scope."""
-        if force_payload is not None:
-            group_id = force_payload.get("target_group_id")
-        else:
-            group_field = f"vlan_group_{vid}"
-            if group_field not in request.POST:
-                messages.error(
-                    request,
-                    f"VLAN {vid}: the VLAN group selection is missing. Refresh the VLAN data and try again.",
-                )
-                outcome.group_missing_count += 1
-                return None, False
-            group_id = request.POST.get(group_field)
-        if group_id is None or group_id == "":
-            return None, True
-
-        try:
-            return self.restricted_queryset(VLANGroup).get(pk=int(group_id)), True
-        except (ValueError, VLANGroup.DoesNotExist):
-            if force_payload is not None:
-                messages.error(
-                    request,
-                    f"VLAN {vid}: the confirmed VLAN group is no longer available. "
-                    "Refresh the VLAN data and try again.",
-                )
-                outcome.confirmation_error_count += 1
-            else:
-                messages.error(
-                    request,
-                    f"VLAN {vid}: the selected VLAN group no longer exists; skipped to avoid "
-                    "creating it in the wrong scope.",
-                )
-                outcome.group_missing_count += 1
-            return None, False
-
-    @staticmethod
-    def _validated_vlan_name(request, vid, vlan_data, outcome, source_name):
-        """Validate one proposed VLAN name at the NetBox model boundary."""
-        name = source_name(vlan_data, vid)
-        try:
-            VLAN._meta.get_field("name").clean(name, None)
-        except ValidationError:
-            messages.error(request, f"VLAN {vid}: the LibreNMS name is invalid; skipped.")
-            outcome.invalid_name_count += 1
-            return None
-        return name
-
-    @staticmethod
-    def _name_is_the_displayed_name(request, vid, name, outcome):
-        """Return whether the page showed *name* for this VID, so a rule change never writes an unseen name."""
-        if request.POST.get(f"expected_vlan_name_{vid}") == name:
-            return True
-        messages.error(
-            request,
-            f"VLAN {vid}: the proposed VLAN name changed after the page was shown. "
-            "Refresh the VLAN data and try again.",
+    def _rebuild(self, approved, *, obj, snapshot):
+        """Lock the scope of every approved VLAN operation and rebuild each one from current state."""
+        source_by_vid, _invalid_rows = index_vlan_source_rows(snapshot.value(Resource.VLANS, "vlans"))
+        source_name = vlan_source_namer(obj)
+        _acquire_global_vlan_locks(operation.identity.vid for operation in approved if operation.choices.group is None)
+        # The group row lock keeps a chosen group, and the absence of a VID in it, until the writes commit.
+        group_pks = {operation.choices.group for operation in approved} - {None}
+        locked_groups = set(
+            self.restricted_queryset(VLANGroup)
+            .select_for_update(of=("self",))
+            .filter(pk__in=group_pks)
+            .order_by("pk")
+            .values_list("pk", flat=True)
         )
-        outcome.stale_name_count += 1
-        return False
-
-    def _apply_force_payload(
-        self,
-        request,
-        *,
-        vid,
-        force_payload,
-        proposed_name,
-        row_vlan_group,
-        changeable_vlans,
-        outcome,
-    ):
-        """Apply a confirmed rename and report whether this row was consumed."""
-        if force_payload is None:
-            return False
-        try:
-            self._apply_confirmed_vlan_change(
-                vid=vid,
-                payload=force_payload,
-                proposed_name=proposed_name,
-                row_vlan_group=row_vlan_group,
-                changeable_vlans=changeable_vlans,
+        scope = Q()
+        for operation in approved:
+            group = operation.choices.group
+            scope |= Q(
+                vid=operation.identity.vid, **({"group__isnull": True} if group is None else {"group_id": group})
             )
-        except ValueError as exc:
-            messages.error(request, f"VLAN {vid}: {exc}")
+        # Unscoped on purpose: a VLAN the caller cannot see still holds the VID, and the writer must not miss it.
+        vlans = list(VLAN.objects.select_for_update().filter(scope).order_by("pk"))
+        groups = []
+        for operation in approved:
+            vid, group = operation.identity.vid, operation.choices.group
+            source_row = source_by_vid.get(vid)
+            if group is not None and group not in locked_groups:
+                rebuilt = intent.Unavailable("target.group")
+            elif source_row is None:
+                rebuilt = intent.Unavailable("source.row")
+            else:
+                targets = [vlan for vlan in vlans if vlan.vid == vid and vlan.group_id == group]
+                rebuilt = build_operation(vid=vid, group=group, name=source_name(source_row, vid), targets=targets)
+            groups.append(((operation, rebuilt),))
+        return groups
+
+    @staticmethod
+    def _report_stale(request, result, outcome):
+        """Report one refused group by its VIDs and changed facts, or one refused token."""
+        if not result.members:
+            messages.error(request, _INVALID_CONFIRMATION)
             outcome.confirmation_error_count += 1
-        else:
-            outcome.updated_count += 1
+            return
+        changed = ", ".join(result.paths)
+        for operation in result.members:
+            messages.error(
+                request,
+                f"VLAN {operation.identity.vid}: the confirmed change is no longer current ({changed}). "
+                "Refresh the VLAN data and try again.",
+            )
+            outcome.confirmation_error_count += 1
+
+    @staticmethod
+    def _valid_name(request, operation, outcome):
+        """Return whether the proposed name passes the NetBox model field, and report it when not."""
+        try:
+            VLAN._meta.get_field("name").clean(operation.effects.name, None)
+        except ValidationError:
+            messages.error(request, f"VLAN {operation.identity.vid}: the LibreNMS name is invalid; skipped.")
+            outcome.invalid_name_count += 1
+            return False
         return True
 
     @staticmethod
-    def _create_vlan(request, *, lookup, vid, name, outcome):
-        """Create one VLAN or resolve the row created by a concurrent request."""
+    def _report_name_conflict(request, *, vid, group, name, outcome):
+        """Report a write that the group's unique VLAN name, or a concurrent writer, refused."""
+        # NetBox keeps VLAN names unique in a group, and a VLAN name rule can make two VIDs share a name.
+        if VLAN.objects.filter(group_id=group, name=name).exists():
+            messages.error(request, f'VLAN {vid}: the VLAN group already has a VLAN named "{name}"; skipped.')
+            outcome.name_taken_count += 1
+        else:
+            messages.error(request, f"VLAN {vid}: the VLAN could not be written after a concurrent change; skipped.")
+            outcome.concurrent_change_count += 1
+
+    def _create(self, request, operation, outcome):
+        """Create the VLAN of one verified create operation under the caller's add constraints."""
+        effects = operation.effects
+        if not self._valid_name(request, operation, outcome):
+            return
         try:
             with transaction.atomic():
-                vlan = VLAN.objects.create(**lookup, name=name, status="active")
+                vlan = VLAN.objects.create(
+                    vid=effects.vid, group_id=effects.group, name=effects.name, status=effects.status
+                )
                 if not saved_in_scope(vlan, request.user, "add"):
                     raise PermissionsViolation()
-            return vlan, True
         except PermissionsViolation:
             messages.error(
                 request,
-                f"VLAN {vid}: the new VLAN is outside your add permission constraints; skipped.",
+                f"VLAN {effects.vid}: the new VLAN is outside your add permission constraints; skipped.",
             )
             outcome.add_permission_skipped_count += 1
-            return None, False
         except IntegrityError:
-            try:
-                return VLAN.objects.get(**lookup), False
-            except VLAN.MultipleObjectsReturned:
-                messages.error(
-                    request,
-                    f"VLAN {vid}: several VLANs match this VID and scope; skipped to avoid renaming the wrong one.",
-                )
-                outcome.ambiguous_count += 1
-            except VLAN.DoesNotExist:
-                # NetBox keeps VLAN names unique in a group, and a VLAN name rule can make two VIDs share a name.
-                if VLAN.objects.filter(group=lookup["group"], name=name).exists():
-                    messages.error(request, f'VLAN {vid}: the VLAN group already has a VLAN named "{name}"; skipped.')
-                    outcome.name_taken_count += 1
-                else:
-                    messages.error(
-                        request,
-                        f"VLAN {vid}: the VLAN could not be resolved after a concurrent change; skipped.",
-                    )
-                    outcome.concurrent_change_count += 1
-            return None, False
-
-    def _find_or_create_vlan(self, request, *, vid, row_vlan_group, name, outcome):
-        """Resolve one scoped VLAN or create it under the caller's constraints."""
-        lookup = {"vid": vid, "group": row_vlan_group}
-        try:
-            return VLAN.objects.get(**lookup), False
-        except VLAN.MultipleObjectsReturned:
-            messages.error(
-                request,
-                f"VLAN {vid}: several VLANs match this VID and scope; skipped to avoid renaming the wrong one.",
-            )
-            outcome.ambiguous_count += 1
-            return None, False
-        except VLAN.DoesNotExist:
-            return self._create_vlan(
-                request,
-                lookup=lookup,
-                vid=vid,
-                name=name,
-                outcome=outcome,
-            )
-
-    def _lock_changeable_vlan(self, request, *, vlan, vid, created, changeable_vlans, outcome):
-        """Authorize and lock an existing VLAN before comparing its mutable state."""
-        if created:
-            return vlan
-        try:
-            changeable_vlans.get(pk=vlan.pk)
-        except VLAN.DoesNotExist:
-            messages.error(
-                request,
-                f"VLAN {vid}: an existing VLAN in this scope is outside your change permission; skipped.",
-            )
-            outcome.permission_skipped_count += 1
-            return None
-
-        vlan = self.relock_scoped_row(VLAN, pk=vlan.pk)
-        if vlan is None:
-            messages.error(
-                request,
-                f"VLAN {vid}: the VLAN could not be resolved after a concurrent change; skipped.",
-            )
-            outcome.concurrent_change_count += 1
-        return vlan
-
-    def _sync_selected_vlan(
-        self,
-        request,
-        *,
-        vid_str,
-        librenms_vlans,
-        source_name,
-        duplicate_source_vids,
-        force_intents,
-        changeable_vlans,
-        obj,
-        object_type,
-        outcome,
-    ):
-        """Process one selected LibreNMS VLAN inside the batch transaction."""
-        vid = normalize_vlan_vid(vid_str)
-        if vid is None:
-            return
-        if vid in duplicate_source_vids:
-            messages.error(request, f"VLAN {vid}: duplicate source rows use this VID; skipped.")
-            outcome.duplicate_source_count += 1
-            return
-        vlan_data = librenms_vlans.get(vid)
-        if not vlan_data:
-            messages.error(request, f"VLAN {vid}: no source row matches this VID; skipped.")
-            outcome.source_missing_count += 1
-            return
-
-        force_payload = force_intents.get(str(vid))
-        row_vlan_group, group_is_valid = self._resolve_row_vlan_group(request, vid, force_payload, outcome)
-        if not group_is_valid:
-            return
-        name = self._validated_vlan_name(request, vid, vlan_data, outcome, source_name)
-        if name is None:
-            return
-        # A confirmation carries its own signed name, which _apply_confirmed_vlan_change checks.
-        if force_payload is None and not self._name_is_the_displayed_name(request, vid, name, outcome):
-            return
-        if self._apply_force_payload(
-            request,
-            vid=vid,
-            force_payload=force_payload,
-            proposed_name=name,
-            row_vlan_group=row_vlan_group,
-            changeable_vlans=changeable_vlans,
-            outcome=outcome,
-        ):
-            return
-
-        vlan, created = self._find_or_create_vlan(
-            request,
-            vid=vid,
-            row_vlan_group=row_vlan_group,
-            name=name,
-            outcome=outcome,
-        )
-        if vlan is None:
-            return
-        vlan = self._lock_changeable_vlan(
-            request,
-            vlan=vlan,
-            vid=vid,
-            created=created,
-            changeable_vlans=changeable_vlans,
-            outcome=outcome,
-        )
-        if vlan is None:
-            return
-
-        if created:
-            outcome.created_count += 1
-        elif vlan.name != name:
-            outcome.conflicts.append(
-                self._build_conflict(
-                    vlan=vlan,
-                    proposed_name=name,
-                    obj=obj,
-                    object_type=object_type,
-                    server_key=self._post_server_key,
-                )
+            self._report_name_conflict(
+                request, vid=effects.vid, group=effects.group, name=effects.name, outcome=outcome
             )
         else:
+            outcome.created_count += 1
+
+    def _changeable_target(self, request, operation, changeable_vlans, outcome):
+        """Return the verified target VLAN when it is in the caller's change scope, and report it when not."""
+        vlan = changeable_vlans.select_related("group").filter(pk=operation.effects.vlan).first()
+        if vlan is None:
+            messages.error(
+                request,
+                f"VLAN {operation.identity.vid}: an existing VLAN in this scope is outside your change permission; "
+                "skipped.",
+            )
+            outcome.permission_skipped_count += 1
+        return vlan
+
+    def _rename(self, request, operation, vlan, outcome):
+        """Apply one verified, confirmed rename to its target VLAN, which the rebuild locked."""
+        if not self._valid_name(request, operation, outcome):
+            return
+        vlan.snapshot()
+        vlan.name = operation.effects.name
+        try:
+            with transaction.atomic():
+                vlan.save(update_fields=["name", "last_updated"])
+                if not saved_in_scope(vlan, request.user, "change"):
+                    raise PermissionsViolation()
+        except PermissionsViolation:
+            messages.error(
+                request,
+                f"VLAN {operation.identity.vid}: the renamed VLAN is outside your change permission; skipped.",
+            )
+            outcome.permission_skipped_count += 1
+        except IntegrityError:
+            self._report_name_conflict(
+                request, vid=operation.identity.vid, group=vlan.group_id, name=operation.effects.name, outcome=outcome
+            )
+        else:
+            outcome.updated_count += 1
+
+    def _apply(self, request, member, *, confirm, changeable_vlans, outcome):
+        """Write one verified operation, or disclose a rename that the request has not confirmed."""
+        operation = member.operation
+        if isinstance(operation, VLANCreate):
+            self._create(request, operation, outcome)
+            return
+        if not operation.renames:
             outcome.skipped_count += 1
+            return
+        vlan = self._changeable_target(request, operation, changeable_vlans, outcome)
+        if vlan is None:
+            return
+        if confirm:
+            self._rename(request, operation, vlan, outcome)
+            return
+        outcome.conflicts.append(
+            {
+                "vid": operation.identity.vid,
+                "group": str(vlan.group) if vlan.group is not None else "Global",
+                "current_name": operation.assumptions.target.name,
+                "proposed_name": operation.effects.name,
+                # The disclosure passes on the token of the verified operation; it never mints one.
+                "token": member.token,
+            }
+        )
 
     @staticmethod
     def _report_outcome(request, outcome):
@@ -674,9 +380,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
 
     def _handle_create_vlans(self, request, obj, object_type, object_id):
         """
-        Create selected VLANs and disclose name changes that require confirmation.
-
-        Reads per-row VLAN group selections from form fields named 'vlan_group_{vid}'.
+        Apply the verified VLAN operations of the submitted tokens, and disclose unconfirmed renames.
 
         Args:
             request (HttpRequest): The request that contains the selected VLAN data.
@@ -688,27 +392,9 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             HttpResponse: A confirmation disclosure or redirect to the VLAN synchronization page.
 
         """
-        force_intents, intent_errors = self._load_force_intents(
-            request,
-            obj,
-            object_type,
-            self._post_server_key,
-        )
-        selection = self._selected_vlan_vids(request, force_intents)
-        selected_vlans = selection.vids
-        outcome = _VLANSyncOutcome()
-        # Count rejections before the empty-selection exit, so an all-invalid request keeps its summary.
-        for error in dict.fromkeys(selection.errors):
-            messages.error(request, error)
-            outcome.invalid_vid_count += 1
-
-        if not selected_vlans:
-            for error in dict.fromkeys(intent_errors):
-                messages.error(request, error)
-            if selection.errors:
-                self._report_outcome(request, outcome)
-            elif not intent_errors:
-                messages.error(request, "No VLAN changes selected.")
+        tokens = request.POST.getlist(intent.FIELD)
+        if not any(tokens):
+            messages.error(request, "No VLAN changes selected.")
             return self._redirect(object_type, object_id)
 
         snapshot = source_cache.read(obj, Resource.VLANS, self._post_server_key)
@@ -716,35 +402,25 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             messages.error(request, "No cached VLAN data. Please refresh VLANs first.")
             return self._redirect(object_type, object_id)
 
-        assessment = assess(snapshot, subject=obj, lookup_maps={})
-        librenms_vlans, invalid_rows = assessment.source_by_vid, assessment.invalid_rows
-        duplicate_source_vids = {
-            vid for row in invalid_rows if (vid := normalize_vlan_vid(row.get("vlan_vlan"))) is not None
-        }
+        context = intent.IntentContext(request.user.pk, (obj._meta.label_lower, obj.pk), self._post_server_key)
+        confirm = request.POST.get("confirm_conflicts") == "1"
         changeable_vlans = self.restricted_queryset(VLAN, "change")
-        source_name = vlan_source_namer(obj)
-
+        outcome = _VLANSyncOutcome()
         with transaction.atomic():
-            global_vids = self._selected_global_vids(request, selected_vlans, librenms_vlans, force_intents)
-            _acquire_global_vlan_locks(global_vids)
-            for vid_str in selected_vlans:
-                self._sync_selected_vlan(
-                    request,
-                    vid_str=vid_str,
-                    librenms_vlans=librenms_vlans,
-                    source_name=source_name,
-                    duplicate_source_vids=duplicate_source_vids,
-                    force_intents=force_intents,
-                    changeable_vlans=changeable_vlans,
-                    obj=obj,
-                    object_type=object_type,
-                    outcome=outcome,
-                )
+            verification = intent.verify(
+                tokens,
+                policy=VLAN_SYNC_POLICY,
+                context=context,
+                rebuild=partial(self._rebuild, obj=obj, snapshot=snapshot),
+            )
+            for result in verification.results:
+                if isinstance(result, intent.Stale):
+                    self._report_stale(request, result, outcome)
+                    continue
+                for member in result.members:
+                    self._apply(request, member, confirm=confirm, changeable_vlans=changeable_vlans, outcome=outcome)
 
         self._report_outcome(request, outcome)
-
-        for error in dict.fromkeys(intent_errors):
-            messages.error(request, error)
 
         if outcome.created_count or outcome.updated_count:
             schedule_request_cache_mutation(

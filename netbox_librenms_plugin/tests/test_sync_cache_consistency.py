@@ -1098,21 +1098,11 @@ def test_vlan_sync_invalidates_other_tabs_after_creating_a_vlan(
     _seed_snapshot("links", device, "primary")
 
     client.force_login(make_superuser("cache-vlan-writer-user"))
-    url = reverse(
-        "plugins:netbox_librenms_plugin:sync_selected_vlans",
-        kwargs={"object_type": "device", "object_id": device.pk},
-    )
+    from netbox_librenms_plugin.tests.vlan_intent_helpers import sync, tab_tokens
+
+    token = tab_tokens(client, device, "primary")[3062]
     with django_capture_on_commit_callbacks(execute=True):
-        response = client.post(
-            url,
-            {
-                "server_key": "primary",
-                "action": "create_vlans",
-                "select": "3062",
-                "vlan_group_3062": "",
-                "expected_vlan_name_3062": "Cache Test VLAN",
-            },
-        )
+        response = sync(client, device, [token], server_key="primary", htmx=False)
 
     assert response.status_code == 302
     assert VLAN.objects.filter(vid=3062, name="Cache Test VLAN").exists()

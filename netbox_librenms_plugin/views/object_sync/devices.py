@@ -8,8 +8,9 @@ from ipam.models import VLAN, VLANGroup
 from utilities.permissions import get_permission_for_model
 from utilities.views import ViewTab, register_model_view
 
-from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin import confirmation_intent, source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
+from netbox_librenms_plugin.assessment.vlans import assess
 from netbox_librenms_plugin.constants import PERM_VIEW_PLUGIN, is_supported_interface_name_field
 from netbox_librenms_plugin.interface_rules import interface_rules_for_request
 from netbox_librenms_plugin.interface_relationships import (
@@ -703,33 +704,32 @@ class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
         return mark_safe(", ".join(parts))
 
 
-class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
+class VerifyVlanSyncGroupView(
+    LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, VlanAssignmentMixin, LibreNMSAPIMixin, CacheMixin, View
+):
     """
-    Verify whether a VLAN (by VID) exists in a selected VLAN group.
+    Reassess one VLAN sync row for the VLAN group the operator chose.
 
-    Called from the VLAN sync tab when the user changes the per-row
-    VLAN group dropdown. Returns the correct CSS class so the JS can
-    update row colors without a full page reload.
+    Called from the VLAN sync tab when the user changes the per-row VLAN group dropdown. The row comes
+    from the device's VLAN source snapshot, and the answer carries the row's preview together with the
+    token of the operation that the preview shows.
     """
 
     # A fetch() caller reads the answer, so the middleware answers with a JSON error.
     answers_json = True
 
-    # Read-only verify endpoint that surfaces NetBox VLAN existence + names — require
-    # object-view permission on VLAN (there is no device in scope here, unlike the other
-    # verify views), so an unauthorized caller can't enumerate VLANs/groups.
-    required_object_permissions = {"POST": [("view", VLAN), ("view", VLANGroup)]}
+    # Read-only reassessment that surfaces the device's VLAN rows, NetBox VLAN existence and names.
+    required_object_permissions = {"POST": [("view", Device), ("view", VLAN), ("view", VLANGroup)]}
 
     def post(self, request):
         data, err = parse_request_json(request)
         if err:
             return err
-        # Gate BEFORE resolving the VLAN group / querying VLANs (mirrors the other verify views).
+        # Gate BEFORE resolving the device or the VLAN group / querying VLANs (mirrors the other verify views).
         if error := self.require_object_permissions_json("POST"):
             return error
         vlan_group_id = data.get("vlan_group_id")
         vid_str = data.get("vid", "")
-        librenms_name = data.get("name", "")
 
         if vid_str is None or vid_str == "":
             return JsonResponse({"status": "error", "message": "No VID provided"}, status=400)
@@ -742,37 +742,58 @@ class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
         if vlan_group_id not in (None, "") and selected_gid is None:
             return JsonResponse({"status": "error", "message": "Invalid VLAN group ID"}, status=400)
 
-        # Check if VLAN exists in the selected group (or globally)
-        visible_vlans = self.restricted_queryset(VLAN)
-        if selected_gid:
-            vlan_group = self.restrict_object_or_404(VLANGroup, pk=selected_gid)
-            netbox_vlan = visible_vlans.filter(vid=vid, group=vlan_group).first()
-        else:
-            # No group = global VLANs
-            netbox_vlan = visible_vlans.filter(vid=vid, group__isnull=True).first()
+        device_id = coerce_model_pk(data.get("device_id"))
+        if device_id is None:
+            return JsonResponse({"status": "error", "message": "No device ID provided"}, status=400)
+        device = self.restrict_object_or_404(Device, pk=device_id)
+        server_key = self.resolve_requested_server_key(data)
+        if server_key is None:
+            return server_unavailable_json()
+        snapshot = source_cache.read(device, Resource.VLANS, server_key)
+        if snapshot is None:
+            return JsonResponse(
+                {"status": "error", "message": "No cached VLAN data; refresh VLANs first"},
+                status=400,
+            )
 
-        from netbox_librenms_plugin.assessment.vlans import compare_vlan
-
-        comparison = compare_vlan(netbox_vlan, librenms_name)
-        exists_in_netbox = comparison["exists_in_netbox"]
-        name_matches = comparison["name_matches"]
-        css_class = get_vlan_sync_css_class(exists_in_netbox, name_matches)
+        vlan_group = self.restrict_object_or_404(VLANGroup, pk=selected_gid) if selected_gid else None
+        lookup_maps = self._build_vlan_lookup_maps([vlan_group] if vlan_group else [], user=request.user)
+        rows = assess(
+            snapshot,
+            subject=device,
+            lookup_maps=lookup_maps,
+            context=confirmation_intent.context_for(request.user, device, server_key),
+            choices={vid: selected_gid},
+            vids={vid},
+        ).rows
+        if len(rows) != 1 or rows[0]["vid_error"]:
+            return JsonResponse(
+                {"status": "error", "message": "The VLAN data has no single row for this VID"},
+                status=400,
+            )
+        row = rows[0]
+        exists_in_netbox = row["exists_in_netbox"]
+        name_matches = row["name_matches"]
+        token = row["confirmation_intent"]
         sync_actions = data.get("sync_actions", True)
         status_html = render_vlan_sync_action(
             vid,
             exists_in_netbox,
             name_matches,
-            actions_enabled=sync_actions if isinstance(sync_actions, bool) else True,
+            actions_enabled=(sync_actions if isinstance(sync_actions, bool) else True) and token is not None,
         )
 
         return JsonResponse(
             {
                 "status": "success",
+                "vid": vid,
+                "vlan_group_id": selected_gid,
                 "exists_in_netbox": exists_in_netbox,
                 "name_matches": name_matches,
-                "css_class": css_class,
-                "netbox_vlan_name": netbox_vlan.name if netbox_vlan else None,
+                "css_class": get_vlan_sync_css_class(exists_in_netbox, name_matches),
+                "netbox_vlan_name": row["netbox_vlan_name"],
                 "status_html": status_html,
+                "confirmation_intent": token,
             }
         )
 

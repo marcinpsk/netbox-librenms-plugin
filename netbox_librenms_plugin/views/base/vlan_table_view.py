@@ -2,7 +2,7 @@ from django.contrib import messages
 from django.utils import timezone
 from django.views import View
 
-from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin import confirmation_intent, source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.assessment.vlans import assess
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
@@ -202,8 +202,9 @@ class BaseVLANTableView(
         # (a device with no VLANs) and must still render an empty table — a truthy check would skip
         # construction and make a VLAN-less device look like it never loaded.
         if cached_vlans is not None:
-            # Compare VLANs with NetBox (against all device-available VLANs)
-            compared_vlans = assess(snapshot, subject=obj, lookup_maps=lookup_maps).rows
+            # Compare VLANs with NetBox (against all device-available VLANs); each row offers its operation.
+            context = confirmation_intent.context_for(getattr(request, "user", None), obj, server_key)
+            compared_vlans = assess(snapshot, subject=obj, lookup_maps=lookup_maps, context=context).rows
             migrated = bool(build_migrated_context(obj, server_key).get("migrated_to_marker"))
 
             def build_table(rows):

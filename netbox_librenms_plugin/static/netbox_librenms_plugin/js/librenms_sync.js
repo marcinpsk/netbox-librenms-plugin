@@ -1876,6 +1876,9 @@ const SELECTABLE_TABLE_TABS = {
 };
 const SELECTABLE_TABLE_IDS = Object.keys(SELECTABLE_TABLE_TABS);
 
+// The repeated field that carries the confirmation token of each submitted row.
+const INTENT_FIELD = 'confirmation_intent';
+
 /**
  * Build the sessionStorage key for one table.
  *
@@ -2060,7 +2063,7 @@ function _isShownStateName(name) {
         'expected_local_device_id_',
         'expected_remote_id_',
         'expected_remote_device_id_',
-        'expected_vlan_name_',
+        INTENT_FIELD,
     ].some((prefix) => name.startsWith(prefix));
 }
 
@@ -2160,7 +2163,7 @@ function restoreTableSelection(table) {
                 input.value = companionInputs[input.name];
             }
             if (input.matches('select.vlan-sync-group-select') && input.value !== renderedValue) {
-                verifyVlanSyncGroup(input, input.dataset.vlanId, input.dataset.vlanName, input.value);
+                verifyVlanSyncGroup(input, input.dataset.vlanId, input.value);
             }
             // The row status belongs to the rendered VRF, so a restored VRF is verified again.
             if (input.matches('select.vrf-select') && input.value !== renderedValue) restoredVrfs.push(input);
@@ -2579,13 +2582,17 @@ document.addEventListener('htmx:configRequest', function (e) {
     const form = e.detail.elt;
     if (!(form instanceof HTMLFormElement)) return;
     // The module table sits OUTSIDE its form and has its own configRequest injector.
-    const tables = SELECTABLE_TABLE_IDS
-        .map(function (tableId) { return document.getElementById(tableId); })
-        .filter(function (table) { return table && form.contains(table); });
+    const tables = _selectableTablesIn(form);
     if (!tables.length) return;
-    const consumed = SINGLE_ROW_SUBMITTERS.some(name => e.detail.parameters.has(name))
-        ? {}
-        : consumeOffPageSelections(tables, e.detail.parameters);
+    // A row whose choice is being reassessed has no current token, so the submit waits for its answer.
+    if (hasPendingIntent(form)) {
+        e.preventDefault();
+        return;
+    }
+    const single = _singleRowSubmitter(form, e.detail.parameters, e.detail.triggeringEvent?.submitter);
+    e.detail.parameters.delete(INTENT_FIELD);
+    submittedRowIntents(tables, single).forEach((token) => e.detail.parameters.append(INTENT_FIELD, token));
+    const consumed = single ? {} : consumeOffPageSelections(tables, e.detail.parameters);
     consumedOffPageSelections.set(form, consumed);
 });
 
@@ -2595,10 +2602,70 @@ document.addEventListener('submit', function (e) {
     if (!(e.target instanceof HTMLFormElement) || e.defaultPrevented) return;
     if (e.target.id === 'install-selected-form') {
         injectModuleSelection(e.target);
-    } else if (!SINGLE_ROW_SUBMITTERS.includes(e.submitter?.name)) {
+        return;
+    }
+    if (!injectRowIntents(e)) return;
+    if (!SINGLE_ROW_SUBMITTERS.includes(e.submitter?.name)) {
         injectOffPageSelections(e.target);
     }
 });
+
+/**
+ * Return the selectable tables inside a form.
+ *
+ * @param {HTMLFormElement} form - The form.
+ * @returns {HTMLElement[]}
+ */
+function _selectableTablesIn(form) {
+    return SELECTABLE_TABLE_IDS
+        .map(function (tableId) { return document.getElementById(tableId); })
+        .filter(function (table) { return table && form.contains(table); });
+}
+
+/**
+ * Return the single-row button that submitted an htmx request, or null for a bulk submit.
+ *
+ * @param {HTMLFormElement} form - The submitted form.
+ * @param {FormData} params - The request parameters.
+ * @param {HTMLElement|undefined} submitter - The submitter of the triggering event, when htmx knows it.
+ * @returns {HTMLElement|null}
+ */
+function _singleRowSubmitter(form, params, submitter) {
+    const name = SINGLE_ROW_SUBMITTERS.find((candidate) => params.has(candidate));
+    if (!name) return null;
+    if (submitter && submitter.name === name) return submitter;
+    // Compare values instead of building a selector: no row key may reach a selector.
+    return Array.from(form.querySelectorAll('button[name]')).find(
+        (button) => button.name === name && button.value === params.get(name)
+    ) || null;
+}
+
+/**
+ * Add the tokens of the rows a native submit applies, or cancel a submit that waits for a reassessment.
+ *
+ * @param {SubmitEvent} e - The submit event.
+ * @returns {boolean} Whether the submit goes on.
+ */
+function injectRowIntents(e) {
+    const form = e.target;
+    const tables = _selectableTablesIn(form);
+    if (!tables.length) return true;
+    if (hasPendingIntent(form)) {
+        e.preventDefault();
+        return false;
+    }
+    form.querySelectorAll('input[data-row-intent]').forEach((input) => input.remove());
+    const single = SINGLE_ROW_SUBMITTERS.includes(e.submitter?.name) ? e.submitter : null;
+    submittedRowIntents(tables, single).forEach(function (token) {
+        const hidden = document.createElement('input');
+        hidden.type = 'hidden';
+        hidden.name = INTENT_FIELD;
+        hidden.value = token;
+        hidden.dataset.rowIntent = '1';
+        form.appendChild(hidden);
+    });
+    return true;
+}
 
 let pendingSyncConfirmAction = null;
 
@@ -3260,13 +3327,104 @@ function initializeVlanModalSave() {
 }
 
 // ============================================
+// CONFIRMATION INTENTS
+// ============================================
+
+/**
+ * Return the confirmation token input of a row, or null when the row renders none.
+ *
+ * @param {HTMLTableRowElement|null} row - The row.
+ * @returns {HTMLInputElement|null}
+ */
+function _rowIntentInput(row) {
+    return row ? row.querySelector('input[name="' + INTENT_FIELD + '"]') : null;
+}
+
+/**
+ * Return the tokens of the rows a submit applies: the submitter's row, or every checked row on the page.
+ *
+ * The token inputs are disabled, so a form never posts the token of a row that the user did not submit.
+ *
+ * @param {HTMLElement[]} tables - The selectable tables inside the submitted form.
+ * @param {HTMLElement|null} singleRowSubmitter - The single-row button that submitted the form.
+ * @returns {string[]} Tokens.
+ */
+function submittedRowIntents(tables, singleRowSubmitter) {
+    const rows = singleRowSubmitter
+        ? [singleRowSubmitter.closest('tr')]
+        : tables.flatMap((table) =>
+            Array.from(table.querySelectorAll('td input[name="select"]'))
+                .filter((checkbox) => checkbox.checked)
+                .map((checkbox) => checkbox.closest('tr'))
+        );
+    return rows
+        .map(_rowIntentInput)
+        .filter((input) => input && input.value)
+        .map((input) => input.value);
+}
+
+/**
+ * Return whether a form holds a row whose choice is being reassessed, so the row has no current token.
+ *
+ * @param {HTMLFormElement} form - The form.
+ * @returns {boolean}
+ */
+function hasPendingIntent(form) {
+    return Boolean(form.querySelector('input[name="' + INTENT_FIELD + '"][data-intent-pending]'));
+}
+
+/**
+ * Mark the token of a row as waiting for a reassessment, or as settled.
+ *
+ * A changed choice drops the token of the earlier choice at once, and the form's submit buttons stay
+ * disabled while any row waits.
+ *
+ * @param {HTMLTableRowElement} row - The row.
+ * @param {boolean} pending - Whether a reassessment of the row is in flight.
+ * @returns {void}
+ */
+function setRowIntentPending(row, pending) {
+    const input = _rowIntentInput(row);
+    if (!input) return;
+    if (pending) {
+        input.value = '';
+        input.dataset.intentPending = 'true';
+    } else {
+        delete input.dataset.intentPending;
+    }
+    _syncIntentSubmitLock(row.closest('form'));
+}
+
+/**
+ * Disable a form's submit buttons while a row waits for its token, and enable the ones this disabled.
+ *
+ * @param {HTMLFormElement|null} form - The form.
+ * @returns {void}
+ */
+function _syncIntentSubmitLock(form) {
+    if (!form) return;
+    const pending = hasPendingIntent(form);
+    // The toolbar button sits outside the form and names the form in its form attribute.
+    Array.from(document.querySelectorAll('button[type="submit"]'))
+        .filter((button) => button.form === form)
+        .forEach(function (button) {
+            if (pending && !button.disabled) {
+                button.disabled = true;
+                button.dataset.intentLock = 'true';
+            } else if (!pending && button.dataset.intentLock) {
+                button.disabled = false;
+                delete button.dataset.intentLock;
+            }
+        });
+}
+
+// ============================================
 // VLAN SYNC TABLE GROUP VERIFICATION
 // ============================================
 
 /**
  * Initialize change listeners on the VLAN sync table's per-row group dropdowns.
- * When the user changes the VLAN group for a row, re-checks whether the VID
- * exists in the selected group and updates row colors accordingly.
+ * When the user changes the VLAN group for a row, the row is assessed again for that group.
  */
 function initializeVlanSyncGroupSelects() {
     document.querySelectorAll('.vlan-sync-group-select').forEach(function (select) {
@@ -3274,46 +3432,54 @@ function initializeVlanSyncGroupSelects() {
         select.dataset.vlanSyncInitialized = 'true';
 
         select.addEventListener('change', function () {
-            const vid = this.dataset.vlanId;
-            const vlanName = this.dataset.vlanName;
-            const groupId = this.value;
-
-            verifyVlanSyncGroup(this, vid, vlanName, groupId);
+            verifyVlanSyncGroup(this, this.dataset.vlanId, this.value);
         });
     });
 }
 
 /**
- * Verify if a VLAN exists in the selected group and update the row colors.
+ * Assess a VLAN row again for the selected group, and update its preview and token together.
  *
  * @param {HTMLSelectElement} select - The group dropdown element
  * @param {string} vid - VLAN ID
- * @param {string} vlanName - VLAN name from LibreNMS
  * @param {string} groupId - Selected VLAN group ID (empty string = global)
  */
-function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
+function verifyVlanSyncGroup(select, vid, groupId) {
     const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]');
-    if (!csrfToken) return;
+    const deviceInfo = getDeviceIdFromUrl();
+    const row = select.closest('tr');
+    const intentInput = _rowIntentInput(row);
     // Only the latest group choice may repaint or roll back the row, as in handleVRFChange.
     if (select._vlanGroupVerifyController) {
         select._vlanGroupVerifyController.abort();
     }
     const controller = new AbortController();
     select._vlanGroupVerifyController = controller;
-    // The row's colours and status show the verdict of the last verified group; the rendered group comes first.
+    // The row's colours, status and token show the verdict of the last verified group; the rendered group comes first.
     if (typeof select._lastVerifiedGroup === 'undefined') {
         const rendered = Array.from(select.options).find((option) => option.defaultSelected);
         select._lastVerifiedGroup = rendered ? rendered.value : '';
+        select._lastVerifiedIntent = intentInput ? intentInput.value : '';
     }
+    if (row) setRowIntentPending(row, true);
     const rollbackToLastVerified = () => {
         if (select.tomselect && typeof select.tomselect.setValue === 'function') {
             select.tomselect.setValue(select._lastVerifiedGroup, true);
         } else {
             select.value = select._lastVerifiedGroup;
         }
+        // The last verified group is shown again, so its token is the row's token again.
+        if (intentInput) intentInput.value = select._lastVerifiedIntent;
+        if (row) setRowIntentPending(row, false);
         const table = select.closest('table');
         if (table) commitSelectionChange(table);
     };
+    // Without a subject the choice cannot be assessed, so the row keeps the group its token names.
+    if (!csrfToken || !deviceInfo) {
+        rollbackToLastVerified();
+        showErrorToast('The VLAN group check failed: the page names no device.');
+        return;
+    }
 
     fetch('/plugins/librenms_plugin/verify-vlan-sync-group/', {
         method: 'POST',
@@ -3323,8 +3489,9 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
             'X-CSRFToken': csrfToken.value
         },
         body: JSON.stringify({
+            device_id: deviceInfo.id,
+            server_key: syncServerKey(),
             vid: String(vid),
-            name: vlanName,
             vlan_group_id: groupId || null,
             sync_actions: !!select.closest('form')
         })
@@ -3337,15 +3504,16 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
         })
         .then(data => {
             // A tab swap replaced this row, and its table no longer owns the stored selection.
-            if (controller.signal.aborted || !_isLiveRow(select.closest('tr'))) return;
+            if (controller.signal.aborted || !_isLiveRow(row)) return;
             if (data.status !== 'success') {
                 rollbackToLastVerified();
                 return;
             }
+            // Only the answer for the current choice may set the row's preview and token.
+            if (String(data.vlan_group_id ?? '') !== String(select.value || '')) return;
             select._lastVerifiedGroup = groupId;
-
-            const row = select.closest('tr');
-            if (!row) return;
+            select._lastVerifiedIntent = data.confirmation_intent || '';
+            if (intentInput) intentInput.value = select._lastVerifiedIntent;
 
             const cssClass = data.css_class || 'text-danger';
 
@@ -3362,7 +3530,7 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
 
                 // Add/remove name mismatch tooltip
                 if (data.exists_in_netbox && !data.name_matches && data.netbox_vlan_name) {
-                    nameCell.title = 'NetBox: ' + data.netbox_vlan_name + ' | LibreNMS: ' + vlanName;
+                    nameCell.title = 'NetBox: ' + data.netbox_vlan_name + ' | LibreNMS: ' + select.dataset.vlanName;
                 } else {
                     nameCell.title = '';
                 }
@@ -3372,10 +3540,13 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
             if (statusCell && data.status_html) {
                 statusCell.innerHTML = data.status_html;
             }
+            setRowIntentPending(row, false);
+            const table = select.closest('table');
+            if (table) commitSelectionChange(table);
             markFilterStaleRow(row);
         })
         .catch(error => {
-            if (error.name === 'AbortError' || controller.signal.aborted || !_isLiveRow(select.closest('tr'))) return;
+            if (error.name === 'AbortError' || controller.signal.aborted || !_isLiveRow(row)) return;
             console.error('VLAN sync group verification error:', error);
             rollbackToLastVerified();
             showErrorToast(withFullStop(`The VLAN group check failed: ${error.refusal || error.message}`));

@@ -276,25 +276,16 @@ class TestIPAddressSynchronization:
 @pytest.mark.django_db
 class TestVLANSynchronization:
     def test_cached_vlan_is_created(self, client, live_librenms):
+        from netbox_librenms_plugin.tests.vlan_intent_helpers import sync, tab_tokens
+
         device = make_device("vlan-create", librenms_cf={SERVER_KEY: {"id": 91}})
         seed_source_snapshot(
             device, Resource.VLANS, SERVER_KEY, vlans=[{"vlan_vlan": 3091, "vlan_name": "Application"}]
         )
         _login(client, "vlan-create-user")
-        url = reverse(
-            "plugins:netbox_librenms_plugin:sync_selected_vlans",
-            kwargs={"object_type": "device", "object_id": device.pk},
-        )
 
-        created = client.post(
-            url,
-            {
-                "server_key": SERVER_KEY,
-                "action": "create_vlans",
-                "select": "3091",
-                "vlan_group_3091": "",
-                "expected_vlan_name_3091": "Application",
-            },
+        created = sync(
+            client, device, [tab_tokens(client, device, SERVER_KEY)[3091]], server_key=SERVER_KEY, htmx=False
         )
 
         assert created.status_code == 302
@@ -303,43 +294,25 @@ class TestVLANSynchronization:
         assert _response_messages(created, "success") == ["VLANs synced: 1 created."]
 
     def test_cached_vlan_updates_an_existing_global_vlan(self, client, live_librenms):
+        from netbox_librenms_plugin.tests.vlan_intent_helpers import sync, tab_tokens
+
         device = make_device("vlan-update", librenms_cf={SERVER_KEY: {"id": 93}})
         vlan = VLAN.objects.create(vid=3093, name="Old Name", status="active")
         _login(client, "vlan-update-user")
-        url = reverse(
-            "plugins:netbox_librenms_plugin:sync_selected_vlans",
-            kwargs={"object_type": "device", "object_id": device.pk},
-        )
         seed_source_snapshot(
             device, Resource.VLANS, SERVER_KEY, vlans=[{"vlan_vlan": 3093, "vlan_name": "Application Servers"}]
         )
-        updated = client.post(
-            url,
-            {
-                "server_key": SERVER_KEY,
-                "action": "create_vlans",
-                "select": "3093",
-                "vlan_group_3093": "",
-                "expected_vlan_name_3093": "Application Servers",
-            },
-        )
+        token = tab_tokens(client, device, SERVER_KEY)[3093]
+
+        updated = sync(client, device, [token], server_key=SERVER_KEY, htmx=False)
 
         assert updated.status_code == 200
         assert b"Confirm VLAN changes" in updated.content
         vlan.refresh_from_db()
         assert vlan.name == "Old Name"
 
-        conflict = updated.context["conflicts"][0]
-        confirmed = client.post(
-            url,
-            {
-                "server_key": SERVER_KEY,
-                "action": "create_vlans",
-                "confirm_conflicts": "1",
-                "force_conflict": "3093",
-                "select": "3093",
-                "conflict_intent": conflict["intent"],
-            },
+        confirmed = sync(
+            client, device, [updated.context["conflicts"][0]["token"]], server_key=SERVER_KEY, htmx=False, confirm=True
         )
 
         assert confirmed.status_code == 302
@@ -348,16 +321,16 @@ class TestVLANSynchronization:
         assert _response_messages(confirmed, "success") == ["VLANs synced: 1 updated."]
 
     def test_missing_snapshot_fails_without_creating_a_vlan(self, client, live_librenms):
-        device = make_device("vlan-cache-miss", librenms_cf={SERVER_KEY: {"id": 92}})
-        _login(client, "vlan-cache-miss-user")
+        from netbox_librenms_plugin import source_cache
+        from netbox_librenms_plugin.tests.vlan_intent_helpers import sync, tab_tokens
 
-        response = client.post(
-            reverse(
-                "plugins:netbox_librenms_plugin:sync_selected_vlans",
-                kwargs={"object_type": "device", "object_id": device.pk},
-            ),
-            {"server_key": SERVER_KEY, "action": "create_vlans", "select": "3092", "vlan_group_3092": ""},
-        )
+        device = make_device("vlan-cache-miss", librenms_cf={SERVER_KEY: {"id": 92}})
+        seed_source_snapshot(device, Resource.VLANS, SERVER_KEY, vlans=[{"vlan_vlan": 3092, "vlan_name": "Gone"}])
+        _login(client, "vlan-cache-miss-user")
+        token = tab_tokens(client, device, SERVER_KEY)[3092]
+        source_cache.delete(device, Resource.VLANS, SERVER_KEY)
+
+        response = sync(client, device, [token], server_key=SERVER_KEY, htmx=False)
 
         assert response.status_code == 302
         assert not VLAN.objects.filter(vid=3092).exists()
