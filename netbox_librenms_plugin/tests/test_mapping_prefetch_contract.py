@@ -20,7 +20,6 @@ from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import (
     bind_librenms_server,
-    configure_default_librenms_server,
     make_cluster,
     make_device,
     make_interface,
@@ -54,8 +53,8 @@ REMOTE_PORT_BASE = 30_000
 
 
 @pytest.fixture
-def superuser_client(client, settings):
-    configure_default_librenms_server(settings)
+def superuser_client(client, live_librenms):
+    # A loopback LibreNMS: the sync page asks the server for the device, and no test may reach the network.
     client.force_login(make_superuser("mapping-prefetch-user"))
     return client
 
