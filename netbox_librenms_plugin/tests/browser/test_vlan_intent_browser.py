@@ -161,3 +161,26 @@ def test_a_row_button_posts_only_its_own_token(page):
     pairs = _selection_form_pairs(bodies[0])
     assert [value for key, value in pairs if key == "confirmation_intent"] == ["vlan:rendered-502"]
     assert ("sync_one", "502") in pairs
+
+
+def test_a_row_action_without_its_button_posts_no_token(page):
+    bodies = []
+
+    def answer(route):
+        bodies.append(route.request.post_data)
+        route.fulfill(status=204)
+
+    _load(page, [_row(501, checked=True)])
+    page.route(SYNC_URL, answer)
+
+    page.evaluate(
+        """() => htmxTest.ajax('POST', document.getElementById('vlan-sync-form').action, {
+            source: document.getElementById('vlan-sync-form'),
+            target: '#tab-content',
+            values: {sync_one: '999'}
+        })"""
+    )
+
+    pairs = _selection_form_pairs(bodies[0])
+    assert ("sync_one", "999") in pairs
+    assert [value for key, value in pairs if key == "confirmation_intent"] == []

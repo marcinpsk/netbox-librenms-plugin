@@ -2589,10 +2589,14 @@ document.addEventListener('htmx:configRequest', function (e) {
         e.preventDefault();
         return;
     }
-    const single = _singleRowSubmitter(form, e.detail.parameters, e.detail.triggeringEvent?.submitter);
+    const singleName = SINGLE_ROW_SUBMITTERS.find((name) => e.detail.parameters.has(name));
     e.detail.parameters.delete(INTENT_FIELD);
-    submittedRowIntents(tables, single).forEach((token) => e.detail.parameters.append(INTENT_FIELD, token));
-    const consumed = single ? {} : consumeOffPageSelections(tables, e.detail.parameters);
+    // A row action posts only its own row's token; a row action without its button posts none.
+    const tokens = singleName
+        ? _singleRowIntents(tables, form, singleName, e.detail.parameters, e.detail.triggeringEvent?.submitter)
+        : submittedRowIntents(tables, null);
+    tokens.forEach((token) => e.detail.parameters.append(INTENT_FIELD, token));
+    const consumed = singleName ? {} : consumeOffPageSelections(tables, e.detail.parameters);
     consumedOffPageSelections.set(form, consumed);
 });
 
@@ -2623,21 +2627,23 @@ function _selectableTablesIn(form) {
 }
 
 /**
- * Return the single-row button that submitted an htmx request, or null for a bulk submit.
+ * Return the token of the row whose single-row action an htmx request carries.
  *
+ * @param {HTMLElement[]} tables - The selectable tables inside the form.
  * @param {HTMLFormElement} form - The submitted form.
+ * @param {string} name - The single-row action field that the request carries.
  * @param {FormData} params - The request parameters.
  * @param {HTMLElement|undefined} submitter - The submitter of the triggering event, when htmx knows it.
- * @returns {HTMLElement|null}
+ * @returns {string[]} The row's token, or no token when the request names no button of the form.
  */
-function _singleRowSubmitter(form, params, submitter) {
-    const name = SINGLE_ROW_SUBMITTERS.find((candidate) => params.has(candidate));
-    if (!name) return null;
-    if (submitter && submitter.name === name) return submitter;
+function _singleRowIntents(tables, form, name, params, submitter) {
     // Compare values instead of building a selector: no row key may reach a selector.
-    return Array.from(form.querySelectorAll('button[name]')).find(
-        (button) => button.name === name && button.value === params.get(name)
-    ) || null;
+    const button = submitter && submitter.name === name
+        ? submitter
+        : Array.from(form.querySelectorAll('button[name]')).find(
+            (candidate) => candidate.name === name && candidate.value === params.get(name)
+        );
+    return button ? submittedRowIntents(tables, button) : [];
 }
 
 /**
