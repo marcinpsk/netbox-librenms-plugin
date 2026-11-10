@@ -5,7 +5,7 @@ import json
 import logging
 from collections import defaultdict
 
-from dcim.models import Cable, CableTermination, ConsolePort, ConsoleServerPort, Device, Interface
+from dcim.models import Cable, CableTermination, ConsolePort, ConsoleServerPort, Device, Interface, VirtualChassis
 from django.contrib import messages
 from django.contrib.contenttypes.models import ContentType
 from django.core.cache import cache
@@ -1608,25 +1608,39 @@ class CableRemoteCreateView(SyncCablesView):
             owner_ids.add(cache_device.pk)
         evidence_owner_ids = {port_owner_id(context["row"], side) for side in ("local", "remote")} - {None}
         mapping_owner = self._hostname_mapping_owner(context["remote_device"], context["row"], server_key)
+        chassis_id = None
         if mapping_owner is not None:
-            evidence_owner_ids.add(mapping_owner.pk)
+            chassis_id, member_ids = self._lock_remote_chassis(context["remote_device"].pk)
+            evidence_owner_ids |= {mapping_owner.pk, *member_ids}
         locked_owners = self._lock_owner_devices(owner_ids, evidence_owner_ids)
         if locked_owners is None:
             raise _RemoteCreateAborted("The cable row changed. Refresh the cable data and try again.")
         if mapping_owner is not None and not self._locked_mapping_owner_still_holds(
-            locked_owners, mapping_owner, context, server_key
+            locked_owners, mapping_owner, chassis_id, context, server_key
         ):
             raise _RemoteCreateAborted(
                 f"The LibreNMS mapping of {context['remote_device'].name} changed. Refresh the cable data and try again."
             )
 
-    def _locked_mapping_owner_still_holds(self, locked_owners, mapping_owner, context, server_key):
+    @staticmethod
+    def _lock_remote_chassis(remote_device_pk):
+        """Lock the remote device's VirtualChassis row, and return its pk and the pks of its current members."""
+        chassis_id = Device.objects.filter(pk=remote_device_pk).values_list("virtual_chassis_id", flat=True).first()
+        if chassis_id is None:
+            return None, set()
+        # Lock the chassis before its members, so no device can join it until the transaction ends.
+        list(VirtualChassis.objects.select_for_update().filter(pk=chassis_id))
+        return chassis_id, set(Device.objects.filter(virtual_chassis_id=chassis_id).values_list("pk", flat=True))
+
+    def _locked_mapping_owner_still_holds(self, locked_owners, mapping_owner, chassis_id, context, server_key):
         """True when the locked remote device still selects *mapping_owner*, and its locked mapping names the neighbour."""
-        # A member can change chassis, so re-derive the owner from the locked remote device row.
-        rederived = self._hostname_mapping_owner(locked_owners[context["remote_device"].pk], context["row"], server_key)
+        locked_remote = locked_owners[context["remote_device"].pk]
+        rederived = self._hostname_mapping_owner(locked_remote, context["row"], server_key)
         # Mapping writes lock the owner, so the locked row holds the mapping that the write uses.
-        return rederived.pk == mapping_owner.pk and self._hostname_neighbour_still_maps_to(
-            locked_owners[mapping_owner.pk], context["row"], server_key
+        return (
+            locked_remote.virtual_chassis_id == chassis_id
+            and rederived.pk == mapping_owner.pk
+            and self._hostname_neighbour_still_maps_to(locked_owners[mapping_owner.pk], context["row"], server_key)
         )
 
     def _resolve_proposal(self, request, pk, data):

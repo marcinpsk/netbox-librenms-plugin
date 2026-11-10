@@ -12,11 +12,14 @@ from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab
 from netbox_librenms_plugin.tests.conftest import (
+    bounded_executor,
     make_device,
     make_interface,
     make_superuser,
+    make_virtual_chassis,
     make_virtual_chassis_members,
     map_device_to_librenms,
+    transactional_db_with_all_apps,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import (
@@ -537,3 +540,85 @@ def test_create_far_end_rechecks_the_chassis_of_a_hostname_neighbour_member_unde
     else:
         assert Interface.objects.filter(device=far_member, name="xe-2/0/0").exists()
         assert Cable.objects.count() == 1
+
+
+@transactional_db_with_all_apps()
+def test_create_far_end_locks_every_member_of_a_hostname_neighbour_chassis(client, live_librenms, monkeypatch):
+    """No chassis member can take a LibreNMS identity while the create holds its locks."""
+    from django.db import OperationalError, close_old_connections, connection, transaction
+
+    from netbox_librenms_plugin.views.sync.cables import CableRemoteCreateView
+
+    subject = map_device_to_librenms(make_device("source-vc-lock-owner"), HOST_ID, server_key=SERVER_KEY)
+    # Members order by name, so the unmapped member "a" comes before the mapping owner "b".
+    mapping_owner = map_device_to_librenms(make_device("source-vc-lock-b"), NEIGHBOUR_ID, server_key=SERVER_KEY)
+    far_member = make_device("source-vc-lock-c")
+    earlier_member = make_device("source-vc-lock-a")
+    make_virtual_chassis("source-vc-lock", mapping_owner, far_member, earlier_member)
+    local = seed_mapping(make_interface(subject, "eth1"), SERVER_KEY, own=LOCAL_PORT_ID)
+    live_librenms.server.register(
+        f"/api/v0/devices/{HOST_ID}/links",
+        {
+            "status": "ok",
+            "links": [
+                link_row(
+                    LOCAL_PORT_ID,
+                    "xe-2/0/0",
+                    local_port="eth1",
+                    remote_port_id=REMOTE_PORT_ID,
+                    remote_hostname=mapping_owner.name,
+                )
+            ],
+        },
+    )
+    live_librenms.server.register(
+        f"/api/v0/devices/{HOST_ID}/ports",
+        {"status": "ok", "ports": [port_row(LOCAL_PORT_ID, "eth1", device_id=HOST_ID)]},
+    )
+    live_librenms.server.register(
+        f"/api/v0/devices/{NEIGHBOUR_ID}/ports",
+        {"status": "ok", "ports": [port_row(REMOTE_PORT_ID, "xe-2/0/0", device_id=NEIGHBOUR_ID)]},
+    )
+    client.force_login(make_superuser("source-vc-lock-member"))
+    (row,) = _rows(_refresh(client, subject))
+    assert row["remote_device_id"] is None
+    assert row["remote_port_owner_id"] == far_member.pk
+    outcomes = []
+
+    def map_the_earlier_member():
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                with connection.cursor() as cursor:
+                    cursor.execute("SET LOCAL lock_timeout = '300ms'")
+                map_device_to_librenms(
+                    Device.objects.get(pk=earlier_member.pk), NEIGHBOUR_ID + 10, server_key=SERVER_KEY
+                )
+        finally:
+            close_old_connections()
+
+    create_remote_interface = CableRemoteCreateView._create_remote_interface
+
+    def create_while_another_session_maps_a_member(self, *args, **kwargs):
+        # The create holds its locks here, so another session tries to give a member an identity.
+        with bounded_executor(max_workers=1) as executor:
+            try:
+                executor.submit(map_the_earlier_member).result(timeout=5)
+            except OperationalError as error:
+                outcomes.append(error)
+            else:
+                outcomes.append(None)
+        return create_remote_interface(self, *args, **kwargs)
+
+    monkeypatch.setattr(CableRemoteCreateView, "_create_remote_interface", create_while_another_session_maps_a_member)
+
+    client.post(
+        reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[subject.pk]),
+        {"server_key": SERVER_KEY, "row_id": str(LOCAL_PORT_ID), "expected_local_id": local.pk},
+    )
+
+    (outcome,) = outcomes
+    assert isinstance(outcome, OperationalError)
+    assert "lock timeout" in str(outcome)
+    assert Interface.objects.filter(device=far_member, name="xe-2/0/0").exists()
+    assert Cable.objects.count() == 1
