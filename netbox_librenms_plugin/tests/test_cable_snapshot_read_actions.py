@@ -90,10 +90,11 @@ def _pair(*, remote_interface=False, host_ports=True, neighbour_ports=True):
     return subject, neighbour, local, remote, snapshot, local_port, remote_port
 
 
-def _sync(client, subject, local, remote):
+def _sync(client, subject, local, remote, **extra):
     return client.post(
         reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[subject.pk]),
         {
+            **extra,
             "server_key": SERVER_KEY,
             "select": str(LOCAL_PORT_ID),
             f"device_selection_{LOCAL_PORT_ID}": local.device_id,
