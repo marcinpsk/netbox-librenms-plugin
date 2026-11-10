@@ -205,10 +205,8 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             template_name = "netbox_librenms_plugin/vlan_conflicts_page.html"
         return render(request, template_name, context)
 
-    def _rebuild(self, approved, *, obj, snapshot):
+    def _rebuild(self, approved, *, obj):
         """Lock the scope of every approved VLAN operation and rebuild each one from current state."""
-        source_by_vid, _invalid_rows = index_vlan_source_rows(snapshot.value(Resource.VLANS, "vlans"))
-        source_name = vlan_source_namer(obj)
         _acquire_global_vlan_locks(operation.identity.vid for operation in approved if operation.choices.group is None)
         # The group row lock keeps a chosen group, and the absence of a VID in it, until the writes commit.
         group_pks = {operation.choices.group for operation in approved} - {None}
@@ -227,11 +225,17 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             )
         # Unscoped on purpose: a VLAN the caller cannot see still holds the VID, and the writer must not miss it.
         vlans = list(VLAN.objects.select_for_update().filter(scope).order_by("pk"))
+        # The source rows and the name rules are read after the locks, so a change made while this waited counts.
+        snapshot = source_cache.read(obj, Resource.VLANS, self._post_server_key)
+        source_by_vid = {} if snapshot is None else index_vlan_source_rows(snapshot.value(Resource.VLANS, "vlans"))[0]
+        source_name = vlan_source_namer(obj)
         groups = []
         for operation in approved:
             vid, group = operation.identity.vid, operation.choices.group
             source_row = source_by_vid.get(vid)
-            if group is not None and group not in locked_groups:
+            if snapshot is None:
+                rebuilt = intent.Unavailable("source.available")
+            elif group is not None and group not in locked_groups:
                 rebuilt = intent.Unavailable("target.group")
             elif source_row is None:
                 rebuilt = intent.Unavailable("source.row")
@@ -397,8 +401,8 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             messages.error(request, "No VLAN changes selected.")
             return self._redirect(object_type, object_id)
 
-        snapshot = source_cache.read(obj, Resource.VLANS, self._post_server_key)
-        if snapshot is None:
+        # The rebuild reads the snapshot again under its locks; this read only refuses a request without one.
+        if source_cache.read(obj, Resource.VLANS, self._post_server_key) is None:
             messages.error(request, "No cached VLAN data. Please refresh VLANs first.")
             return self._redirect(object_type, object_id)
 
@@ -411,7 +415,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                 tokens,
                 policy=VLAN_SYNC_POLICY,
                 context=context,
-                rebuild=partial(self._rebuild, obj=obj, snapshot=snapshot),
+                rebuild=partial(self._rebuild, obj=obj),
             )
             for result in verification.results:
                 if isinstance(result, intent.Stale):

@@ -16,6 +16,7 @@ from django.apps import apps
 from django.contrib.auth import get_user_model
 from django.db import close_old_connections, connection
 
+from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.confirmation_intent import FIELD
 from netbox_librenms_plugin.tests.conftest import bounded_executor, make_device, run_in_threads
@@ -241,16 +242,26 @@ def _wait_until_blocked(pid, future, seconds=5):
         ("rename", "assumptions.target.name"),
         ("delete", "assumptions.target"),
         ("create", "assumptions.target"),
+        ("rule", "effects.name"),
+        ("source", "effects.name"),
+        ("expire", "source.available"),
     ],
 )
 def test_a_target_change_committed_while_the_writer_waits_for_its_lock_is_stale(change, path):
-    """The rebuild reads the target under its lock, so a change that commits while it waits refuses the write."""
+    """
+    The rebuild reads the target, the name rules and the snapshot after its locks.
+
+    So a change that commits while the writer waits refuses the write: a target change, a VLAN name
+    rule that changes the proposed name, or a refreshed snapshot with another LibreNMS name.
+    """
     from django.db import transaction
     from ipam.models import VLAN, VLANGroup
 
     device = make_device(f"vlan-lock-race-{change}")
     group = VLANGroup.objects.create(name=f"Lock-Race-{change}", slug=f"lock-race-{change}")
     vlan = VLAN.objects.create(vid=61, group=group, name="old-name", status="active") if change != "create" else None
+    from netbox_librenms_plugin.models import NormalizationRule
+
     user = _grouped_vlan_user(f"vlan-lock-race-{change}-user")
     _seed_grouped_vid(device, 61, "librenms-name")
     token = assessed_tokens(device, user, choices={61: group.pk})[61]
@@ -278,8 +289,16 @@ def test_a_target_change_committed_while_the_writer_waits_for_its_lock_is_stale(
                 VLAN.objects.filter(pk=vlan.pk).update(name="renamed")
             elif change == "delete":
                 VLAN.objects.filter(pk=vlan.pk).delete()
-            else:
+            elif change == "create":
                 VLAN.objects.create(vid=61, group=group, name="competitor", status="active")
+            elif change == "rule":
+                NormalizationRule.objects.create(
+                    scope=NormalizationRule.SCOPE_VLAN_NAME, match_pattern=r"^librenms-name$", replacement="ruled-name"
+                )
+            elif change == "source":
+                _seed_grouped_vid(device, 61, "refreshed-name")
+            else:
+                source_cache.delete(device, Resource.VLANS, "default")
         recorded = syncing.result(timeout=20)
 
     joined = " || ".join(text for _level, text in recorded)
@@ -291,5 +310,51 @@ def test_a_target_change_committed_while_the_writer_waits_for_its_lock_is_stale(
             "rename": ["renamed"],
             "delete": [],
             "create": ["competitor"],
+            "rule": ["old-name"],
+            "source": ["old-name"],
+            "expire": ["old-name"],
         }[change]
     )
+
+
+@pytest.mark.django_db(
+    transaction=True,
+    # Explicit available apps make Django use cascade-aware transaction cleanup.
+    # This is required when another installed plugin has M2M tables outside the default flush list.
+    available_apps=[app.name for app in apps.get_app_configs()],
+)
+def test_a_vid_moved_into_the_group_while_the_create_waits_is_refused_without_a_write():
+    """The group row lock does not keep a VID absent; the unique group VID constraint refuses the create."""
+    from django.db import transaction
+    from ipam.models import VLAN, VLANGroup
+
+    device = make_device("vlan-vid-move-race")
+    group = VLANGroup.objects.create(name="Vid-Move-Race", slug="vid-move-race")
+    moving = VLAN.objects.create(vid=99, group=group, name="moving", status="active")
+    user = _grouped_vlan_user("vlan-vid-move-race-user")
+    _seed_grouped_vid(device, 61, "librenms-name")
+    token = assessed_tokens(device, user, choices={61: group.pk})[61]
+    backend_pids = Queue()
+
+    def sync_as_caller():
+        close_old_connections()
+        try:
+            connection.ensure_connection()
+            backend_pids.put(connection.connection.info.backend_pid)
+            return _drive_grouped_sync(device, get_user_model().objects.get(pk=user.pk), token)
+        finally:
+            close_old_connections()
+
+    with bounded_executor(max_workers=1) as executor:
+        with transaction.atomic():
+            # Another writer gives an existing VLAN of the group the VID, without touching the group row.
+            VLAN.objects.filter(pk=moving.pk).update(vid=61)
+            syncing = executor.submit(sync_as_caller)
+            # The create passes the rebuild and waits on the unique group VID index for this transaction.
+            _wait_until_blocked(backend_pids.get(timeout=5), syncing)
+        recorded = syncing.result(timeout=20)
+
+    joined = " || ".join(text for _level, text in recorded)
+    assert any(level == "error" and text.startswith("VLAN 61: ") for level, text in recorded), joined
+    assert not any(level == "success" for level, _text in recorded), joined
+    assert list(VLAN.objects.filter(group=group).values_list("vid", "name")) == [(61, "moving")]
