@@ -101,6 +101,14 @@ class Unavailable:
 
 
 @dataclass(frozen=True)
+class Claim:
+    """An existing object or an absence predicate that an operation reads, or writes."""
+
+    key: str
+    writes: bool
+
+
+@dataclass(frozen=True)
 class Verified:
     """A dependency group whose rebuilt members equal the approved ones, in the writer's schedule."""
 
@@ -159,6 +167,8 @@ def register(cls):
         raise TypeError(f"{resource}.{action} is already registered.")
     if not _is_frozen_dataclass(cls) or tuple(field.name for field in dataclasses.fields(cls)) != _PARTS:
         raise TypeError(f"{cls.__name__} must be a frozen dataclass with the fields {_PARTS}.")
+    if not callable(getattr(cls, "claims", None)):
+        raise TypeError(f"{cls.__name__} must declare the claims() that its operation reads and writes.")
     for hint in _field_hints(cls).values():
         _check_schema(hint)
     _ACTIONS[(resource, action)] = cls
@@ -202,56 +212,102 @@ def signed_operations(tokens, *, policy):
     return tuple(operations)
 
 
+def claims_of(operation):
+    """
+    Return the claims of an operation: its identity, which it always writes, and the claims it declares.
+
+    The claims derive from signed fields only, so the comparison of a rebuilt operation already names
+    any change that would change them.
+    """
+    resource, _action = _action_of(operation)
+    identity = _encode(operation.identity, type(operation.identity))
+    declared = tuple(operation.claims())
+    if not all(type(claim) is Claim and type(claim.key) is str and type(claim.writes) is bool for claim in declared):
+        raise TypeError(f"{type(operation).__name__}.claims() must return Claim values.")
+    return (Claim(f"identity:{resource.value}:{sorted(identity.items())}", True), *declared)
+
+
 def verify(tokens, *, policy, context, rebuild):
     """
     Verify the tokens of one applying request against *policy*, *context* and current state.
 
+    Operations that share a claim, where at least one of them writes it, form one dependency group. A
+    group verifies as a whole: a stale, invalid or unavailable member makes every member stale.
+
     Call it inside the caller's transaction. ``rebuild(approved)`` takes the writer's locks, rebuilds
     each approved operation from current state and its signed choices, writes nothing, and returns
-    the dependency groups as sequences of ``(approved, rebuilt or Unavailable)`` pairs in the
-    writer's schedule.
+    ``(approved, rebuilt or Unavailable)`` pairs in the writer's schedule.
     """
     tokens = list(tokens)
     if not tokens:
         return Verification((Stale(StaleReason.MISSING, (FIELD,)),))
-    refused = []
-    authentic = []
     counts = Counter(tokens)
+    results = []
+    entries = []
     for token in counts:
         if not token:
-            refused.append(Stale(StaleReason.MISSING, (FIELD,)))
+            results.append(Stale(StaleReason.MISSING, (FIELD,)))
         elif isinstance(decoded := _authenticate(token, policy), Stale):
-            refused.append(Stale(StaleReason.INVALID, (f"{FIELD}.duplicate",)) if counts[token] > 1 else decoded)
-        elif paths := _context_differences(decoded[0], context):
-            refused.append(Stale(StaleReason.CONTEXT_CHANGED, paths, (decoded[1],)))
+            results.append(Stale(StaleReason.INVALID, (f"{FIELD}.duplicate",)) if counts[token] > 1 else decoded)
         else:
-            authentic.append((token, decoded[1]))
-    by_identity = {}
-    for token, operation in authentic:
-        by_identity.setdefault((type(operation).RESOURCE, operation.identity), []).append((token, operation))
-    approved = {}
-    for members in by_identity.values():
-        # A repeated token still counts against its identity, so it cannot clear the way for another token.
-        if len(members) > 1:
-            refused.append(Stale(StaleReason.INVALID, ("identity.duplicate",), tuple(op for _t, op in members)))
-        elif counts[members[0][0]] > 1:
-            refused.append(Stale(StaleReason.INVALID, (f"{FIELD}.duplicate",), (members[0][1],)))
+            envelope, operation, expired = decoded
+            if expired:
+                refusal = Stale(StaleReason.EXPIRED, (FIELD,))
+            elif paths := _context_differences(envelope, context):
+                refusal = Stale(StaleReason.CONTEXT_CHANGED, paths)
+            elif counts[token] > 1:
+                refusal = Stale(StaleReason.INVALID, (f"{FIELD}.duplicate",))
+            else:
+                refusal = None
+            entries.append((token, operation, refusal))
+    approved_groups = []
+    for group in _dependency_groups(entries):
+        operations = tuple(operation for _token, operation, _refusal in group)
+        refusals = [refusal for _token, _operation, refusal in group if refusal is not None]
+        identities = Counter((type(operation).RESOURCE, operation.identity) for operation in operations)
+        if any(count > 1 for count in identities.values()):
+            refusals.append(Stale(StaleReason.INVALID, ("identity.duplicate",)))
+        if refusals:
+            paths = tuple(dict.fromkeys(path for refusal in refusals for path in refusal.paths))
+            results.append(Stale(refusals[0].reason, paths, operations))
         else:
-            approved[members[0][1]] = members[0][0]
-    if not approved:
-        return Verification(tuple(refused))
-    groups = rebuild(tuple(approved))
-    return Verification(tuple(refused) + _verify_groups(groups, approved, policy))
+            approved_groups.append(group)
+    if not approved_groups:
+        return Verification(tuple(results))
+    approved = {operation: token for group in approved_groups for token, operation, _refusal in group}
+    pairs = [tuple(pair) for pair in rebuild(tuple(approved))]
+    if not all(len(pair) == 2 for pair in pairs) or Counter(op for op, _rebuilt in pairs) != Counter(list(approved)):
+        raise TypeError("rebuild() must return one (approved, rebuilt) pair for every approved operation.")
+    schedule = {operation: index for index, (operation, _rebuilt) in enumerate(pairs)}
+    rebuilt_by_operation = dict(pairs)
+    for group in approved_groups:
+        ordered = sorted((operation for _token, operation, _refusal in group), key=schedule.__getitem__)
+        results.append(_verify_group([(op, rebuilt_by_operation[op]) for op in ordered], approved, policy))
+    return Verification(tuple(results))
 
 
-def _verify_groups(groups, approved, policy):
-    """Return one result per rebuilt group, after checking that the rebuild covered every approval once."""
-    groups = [tuple(group) for group in groups]
-    if not all(groups):
-        raise TypeError("rebuild() returned an empty dependency group.")
-    if Counter(operation for pairs in groups for operation, _rebuilt in pairs) != Counter(list(approved)):
-        raise TypeError("rebuild() must return every approved operation in exactly one group.")
-    return tuple(_verify_group(pairs, approved, policy) for pairs in groups)
+def _dependency_groups(entries):
+    """Return the entries in connected groups: two entries connect when they share a claim that one of them writes."""
+    parent = list(range(len(entries)))
+
+    def root(index):
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    by_key = {}
+    for index, (_token, operation, _refusal) in enumerate(entries):
+        for claim in claims_of(operation):
+            by_key.setdefault(claim.key, []).append((index, claim.writes))
+    for claimants in by_key.values():
+        if any(writes for _index, writes in claimants):
+            for index, _writes in claimants[1:]:
+                parent[root(index)] = root(claimants[0][0])
+    groups = {}
+    for index, entry in enumerate(entries):
+        groups.setdefault(root(index), []).append(entry)
+    return list(groups.values())
 
 
 def _verify_group(pairs, approved, policy):
@@ -272,7 +328,7 @@ def _verify_group(pairs, approved, policy):
 
 
 def _authenticate(token, policy):
-    """Return ``(envelope, operation)`` for an authentic, current, well-formed token, or a Stale result."""
+    """Return ``(envelope, operation, expired)`` for an authentic, well-formed token, or a Stale result."""
     invalid = Stale(StaleReason.INVALID, (FIELD,))
     if type(token) is not str or len(token) > MAX_TOKEN_LENGTH:
         return invalid
@@ -280,10 +336,13 @@ def _authenticate(token, policy):
     if prefix not in {resource.value for resource in policy.resources} or not signed:
         return invalid
     resource = Resource(prefix)
+    expired = False
     try:
         envelope = signing.loads(signed, salt=_salt(resource), max_age=MAX_AGE_SECONDS)
     except signing.SignatureExpired:
-        return Stale(StaleReason.EXPIRED, (FIELD,))
+        # The signature still holds, so the operation is known and refuses its whole dependency group.
+        expired = True
+        envelope = signing.loads(signed, salt=_salt(resource))
     except (signing.BadSignature, ValueError):
         return invalid
     if (
@@ -301,7 +360,7 @@ def _authenticate(token, policy):
         operation = _decode(envelope["operation"], _ACTIONS[(resource, envelope["action"])])
     except (TypeError, ValueError):
         return invalid
-    return envelope, operation
+    return envelope, operation, expired
 
 
 def _is_context_shape(envelope):

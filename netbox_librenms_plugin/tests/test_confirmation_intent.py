@@ -44,15 +44,17 @@ def _update(vid=100, group=5, current="old", proposed="new", pk=9):
 
 
 class _Rebuild:
-    """Answer each approved operation with the operation it maps to, and record every call."""
+    """Answer each approved operation with the operation it maps to, in *schedule* order, and record every call."""
 
-    def __init__(self, rebuilt=None):
+    def __init__(self, rebuilt=None, schedule=None):
         self.rebuilt = rebuilt or {}
+        self.schedule = schedule
         self.calls = []
 
     def __call__(self, approved):
         self.calls.append(approved)
-        return [((operation, self.rebuilt.get(operation, operation)),) for operation in approved]
+        ordered = sorted(approved, key=self.schedule) if self.schedule else approved
+        return [(operation, self.rebuilt.get(operation, operation)) for operation in ordered]
 
 
 def _signed(token):
@@ -209,7 +211,8 @@ class TestExpiry:
         result = _only(intent.verify([token], policy=POLICY, context=CONTEXT, rebuild=_Rebuild()))
 
         if expired:
-            assert result == intent.Stale(intent.StaleReason.EXPIRED, (intent.FIELD,))
+            # The signature still holds, so the expired operation is known and refuses its dependency group.
+            assert result == intent.Stale(intent.StaleReason.EXPIRED, (intent.FIELD,), (_create(),))
         else:
             assert isinstance(result, intent.Verified)
 
@@ -295,7 +298,11 @@ class TestDuplicates:
         )
 
         assert verification.results == (
-            intent.Stale(intent.StaleReason.INVALID, ("identity.duplicate",), (first.operation, second.operation)),
+            intent.Stale(
+                intent.StaleReason.INVALID,
+                (f"{intent.FIELD}.duplicate", "identity.duplicate"),
+                (first.operation, second.operation),
+            ),
             intent.Verified((intent.Offer(other.token, other.operation),)),
         )
         assert rebuild.calls == [(other.operation,)]
@@ -399,14 +406,119 @@ class TestComparison:
 
     @pytest.mark.parametrize(
         "groups",
-        [lambda approved: [], lambda approved: [()], lambda approved: [((op, op),) for op in approved] * 2],
-        ids=["drops-a-member", "empty-group", "repeats-a-member"],
+        [lambda approved: [], lambda approved: [()], lambda approved: [(op, op) for op in approved] * 2],
+        ids=["drops-a-member", "malformed-pair", "repeats-a-member"],
     )
     def test_a_rebuild_that_does_not_cover_every_approval_once_is_a_programming_error(self, groups):
         token = intent.offer(_create(), CONTEXT).token
 
         with pytest.raises(TypeError):
             intent.verify([token], policy=POLICY, context=CONTEXT, rebuild=groups)
+
+
+class TestDependencyGroups:
+    """Operations that share a claim that one of them writes verify, and refuse, as one group."""
+
+    # Rename VID 100 from users to staff, which frees the name that the create of VID 200 takes.
+    RENAME = _update(vid=100, group=5, current="users", proposed="staff", pk=9)
+    CREATE = _create(vid=200, group=5, name="users")
+    OTHER = _create(vid=300, group=5, name="printers")
+
+    def _offers(self, *operations):
+        return [intent.offer(operation, CONTEXT) for operation in operations]
+
+    def test_a_shared_written_claim_joins_one_group_in_the_writer_schedule(self):
+        create, rename, other = self._offers(self.CREATE, self.RENAME, self.OTHER)
+        # The writer renames before it creates.
+        rebuild = _Rebuild(schedule=lambda operation: isinstance(operation, VLANCreate))
+
+        verification = intent.verify(
+            [create.token, rename.token, other.token], policy=POLICY, context=CONTEXT, rebuild=rebuild
+        )
+
+        assert verification.results == (
+            intent.Verified((intent.Offer(rename.token, self.RENAME), intent.Offer(create.token, self.CREATE))),
+            intent.Verified((intent.Offer(other.token, self.OTHER),)),
+        )
+
+    def test_a_stale_member_refuses_its_whole_group_and_no_other(self):
+        rename, create, other = self._offers(self.RENAME, self.CREATE, self.OTHER)
+        changed = dataclasses.replace(self.CREATE, effects=VLANCreateEffects(200, 5, "guests", "active"))
+
+        verification = intent.verify(
+            [rename.token, create.token, other.token],
+            policy=POLICY,
+            context=CONTEXT,
+            rebuild=_Rebuild({self.CREATE: changed}),
+        )
+
+        assert verification.results == (
+            intent.Stale(intent.StaleReason.ASSUMPTIONS_CHANGED, ("effects.name",), (self.RENAME, self.CREATE)),
+            intent.Verified((intent.Offer(other.token, self.OTHER),)),
+        )
+
+    def test_an_unavailable_member_refuses_its_whole_group(self):
+        rename, create = self._offers(self.RENAME, self.CREATE)
+
+        (result,) = intent.verify(
+            [rename.token, create.token],
+            policy=POLICY,
+            context=CONTEXT,
+            rebuild=_Rebuild({self.CREATE: intent.Unavailable("source.row")}),
+        ).results
+
+        assert result == intent.Stale(intent.StaleReason.UNAVAILABLE, ("source.row",), (self.RENAME, self.CREATE))
+
+    def test_operations_that_only_read_a_claim_stay_independent(self):
+        first = _update(vid=100, group=5, current="users", proposed="users", pk=9)
+        second = _update(vid=101, group=5, current="voice", proposed="voice", pk=10)
+        offers = self._offers(first, second)
+
+        verification = intent.verify(
+            [offer.token for offer in offers], policy=POLICY, context=CONTEXT, rebuild=_Rebuild()
+        )
+
+        assert [len(result.members) for result in verification.results] == [1, 1]
+
+    @pytest.mark.parametrize("refusal", ["context", "expired", "repeated"])
+    def test_a_refused_member_refuses_its_whole_group_before_any_rebuild(self, monkeypatch, refusal):
+        clock = _Clock(1_900_000_000)
+        monkeypatch.setattr(signing, "time", clock)
+        rename = intent.offer(self.RENAME, CONTEXT)
+        if refusal == "expired":
+            clock.now -= intent.MAX_AGE_SECONDS + 1
+        create = intent.offer(
+            self.CREATE, intent.IntentContext(8, ("dcim.device", 11), "default") if refusal == "context" else CONTEXT
+        )
+        clock.now = 1_900_000_000
+        tokens = [rename.token, create.token] + ([create.token] if refusal == "repeated" else [])
+        rebuild = _Rebuild()
+
+        (result,) = intent.verify(tokens, policy=POLICY, context=CONTEXT, rebuild=rebuild).results
+
+        assert result.members == (self.RENAME, self.CREATE)
+        assert (
+            result.reason
+            is {
+                "context": intent.StaleReason.CONTEXT_CHANGED,
+                "expired": intent.StaleReason.EXPIRED,
+                "repeated": intent.StaleReason.INVALID,
+            }[refusal]
+        )
+        assert rebuild.calls == []
+
+    def test_an_operation_without_claims_cannot_register(self):
+        @dataclasses.dataclass(frozen=True)
+        class Unclaimed:
+            RESOURCE = intent.Resource.VLAN
+            ACTION = "unclaimed"
+            identity: VLANIdentity
+            choices: VLANChoices
+            assumptions: VLANAssumptions
+            effects: VLANUpdateEffects
+
+        with pytest.raises(TypeError):
+            intent.register(Unclaimed)
 
 
 class TestRegistry:

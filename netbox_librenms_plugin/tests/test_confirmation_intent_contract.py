@@ -478,3 +478,92 @@ def test_a_repeated_token_cannot_clear_the_way_for_another_token_of_its_vid(clie
     assert not VLAN.objects.filter(vid=100).exists()
     assert VLAN.objects.filter(vid=200, name="printers").exists()
     assert "identity.duplicate" in _stale_paths(response, 100)
+
+
+class _DependentRename:
+    """VID 100 is named users in a group; the source renames it to staff and creates VID 200 named users."""
+
+    def __init__(self, client, settings, tag, permissions=VLAN_PERMISSIONS):
+        configure_librenms_servers(settings, SERVERS)
+        self.client = client
+        self.device = make_device(f"dependent-{tag}", librenms_cf={"default": {"id": 42}})
+        self.group = VLANGroup.objects.create(name=f"dependent-{tag}", slug=f"dependent-{tag}")
+        self.vlan = VLAN.objects.create(vid=100, group=self.group, name="users", status="active")
+        self.seed("users")
+        self.user = make_user_with_perms(f"dependent-{tag}", permissions)
+        client.force_login(self.user)
+        self.rename = tab_tokens(client, self.device)[100]
+        self.create = reassess(client, self.device, 200, self.group).json()["confirmation_intent"]
+
+    def seed(self, name_of_200):
+        seed_vlans(
+            self.device, [{"vlan_vlan": 100, "vlan_name": "staff"}, {"vlan_vlan": 200, "vlan_name": name_of_200}]
+        )
+
+    def names(self):
+        return dict(VLAN.objects.filter(group=self.group).values_list("vid", "name"))
+
+
+@pytest.mark.django_db
+class TestDependentVLANOperations:
+    """A create that takes the name a rename frees depends on it: they verify and write as one group."""
+
+    def test_a_stale_dependent_member_writes_nothing_of_its_group(self, client, settings):
+        case = _DependentRename(client, settings, "stale")
+        case.seed("guests")
+        before = domain_state()
+
+        response = sync(client, case.device, [case.rename, case.create], confirm=True)
+
+        assert domain_state() == before
+        assert case.names() == {100: "users"}
+        assert "effects.name" in _stale_paths(response, 100)
+        assert "effects.name" in _stale_paths(response, 200)
+
+    def test_an_unchanged_group_writes_every_member_in_the_writer_schedule(self, client, settings):
+        case = _DependentRename(client, settings, "control")
+
+        # The create comes first in the request; the writer still renames first, which frees the name.
+        sync(client, case.device, [case.create, case.rename], confirm=True)
+
+        assert case.names() == {100: "staff", 200: "users"}
+
+    def test_a_write_failure_in_the_group_rolls_back_every_member(self, client, settings):
+        from netbox_librenms_plugin.tests.view_test_helpers import grant
+
+        permissions = [permission for permission in VLAN_PERMISSIONS if permission != ("add", VLAN)]
+        case = _DependentRename(client, settings, "rollback", permissions)
+        # The new VLAN falls outside the add constraint, so the create fails after the rename wrote.
+        client.force_login(grant(case.user, "add", VLAN, constraints={"vid": 999}))
+
+        response = sync(client, case.device, [case.rename, case.create], confirm=True)
+
+        assert case.names() == {100: "users"}
+        texts = message_texts(response)
+        assert any(text.startswith("VLAN 200: ") and "add permission" in text for text in texts)
+        assert any(text.startswith("VLAN 100: ") and "group failed" in text for text in texts)
+
+    def test_an_unconfirmed_group_is_disclosed_whole_and_its_tokens_apply_it(self, client, settings):
+        case = _DependentRename(client, settings, "disclosure")
+        before = domain_state()
+
+        disclosure = sync(client, case.device, [case.create, case.rename])
+
+        assert domain_state() == before
+        assert sorted(conflict["token"] for conflict in disclosure.context["conflicts"]) == sorted(
+            [case.create, case.rename]
+        )
+        sync(client, case.device, [conflict["token"] for conflict in disclosure.context["conflicts"]], confirm=True)
+        assert case.names() == {100: "staff", 200: "users"}
+
+    def test_unrelated_operations_still_succeed_partially(self, client, settings):
+        case = _DependentRename(client, settings, "partial")
+        seed_vlans(case.device, [{"vlan_vlan": 300, "vlan_name": "printers"}, {"vlan_vlan": 301, "vlan_name": "voice"}])
+        tokens = tab_tokens(client, case.device)
+        seed_vlans(case.device, [{"vlan_vlan": 300, "vlan_name": "changed"}, {"vlan_vlan": 301, "vlan_name": "voice"}])
+
+        response = sync(client, case.device, [tokens[300], tokens[301]])
+
+        assert not VLAN.objects.filter(vid=300).exists()
+        assert VLAN.objects.filter(vid=301, name="voice").exists()
+        assert "effects.name" in _stale_paths(response, 300)
