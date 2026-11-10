@@ -728,3 +728,39 @@ def test_an_interface_verify_prefetches_the_relationship_index(superuser_client)
     assert response.status_code == 200
     assert "ae0" in response.json()["formatted_row"]["parent"]
     _assert_prefetched(spy, device)
+
+
+def _status_chassis(tag, chassis_count, members_per_chassis=3):
+    """Return the filter of a new device role whose chassis members are all listed, in mixed mapping states."""
+    from dcim.models import DeviceRole
+
+    role = DeviceRole.objects.create(name=tag, slug=tag, color="00ff00")
+    for chassis in range(chassis_count):
+        _vc, members = make_virtual_chassis_members(f"{tag}-{chassis}", count=members_per_chassis)
+        for position, member in enumerate(members):
+            member.role = role
+            member.save()
+            # The first member is unmapped, so each row points at a mapped sibling.
+            if position:
+                _seed_device_mapping(member, chassis + position, NEIGHBOUR_BASE + chassis * 10 + position)
+    return {"role": role.pk}
+
+
+@pytest.mark.django_db
+def test_the_device_status_list_loads_the_chassis_members_once(client, settings, librenms_server):
+    """Each chassis row links to its sync member; the members are loaded and prefetched once for the whole list."""
+    bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
+    client.force_login(make_superuser("mapping-prefetch-status-vc-user"))
+    few = _status_chassis("prefetch-status-vc-few", 1)
+    many = _status_chassis("prefetch-status-vc-many", 6)
+    _status_list(client, "device_status_list", _status_chassis("prefetch-status-vc-warm", 1))
+
+    counts, prefetch_calls = [], []
+    for filters in (few, many):
+        with spy_mapping_reads() as spy:
+            counts.append(_query_count(lambda filters=filters: _status_list(client, "device_status_list", filters)))
+        prefetch_calls.append(spy.prefetch_calls)
+        _assert_prefetched(spy)
+
+    assert counts[0] == counts[1], counts
+    assert prefetch_calls[0] == prefetch_calls[1], prefetch_calls

@@ -2,7 +2,7 @@ import logging
 
 from dcim.models import Device
 from django.contrib import messages
-from django.db.models import BooleanField, Case, Value, When
+from django.db.models import BooleanField, Case, CharField, IntegerField, Value, When
 from netbox.views import generic
 from virtualization.models import VirtualMachine
 
@@ -12,6 +12,7 @@ from netbox_librenms_plugin.forms import (
     VirtualMachineStatusFilterForm,
 )
 from netbox_librenms_plugin.server_mappings import prefetch_mappings
+from netbox_librenms_plugin.server_selection import chassis_sync_devices
 from netbox_librenms_plugin.tables.device_status import DeviceStatusTable
 from netbox_librenms_plugin.tables.VM_status import VMStatusTable
 from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE, TransactionConflict, classify_conflict
@@ -74,7 +75,8 @@ class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gen
             queryset = self.filterset(self.request.GET, queryset=queryset).qs
 
             # Check LibreNMS status for each device
-            for device in prefetch_mappings(queryset):
+            devices = prefetch_mappings(queryset)
+            for device in devices:
                 try:
                     librenms_id, lookup_error = self.resolve_librenms_id(device)
                     if lookup_error is not None:
@@ -102,8 +104,26 @@ class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gen
             for device_id, status in device_status_map.items():
                 case_when.append(When(pk=device_id, then=Value(status)))
 
+            # A chassis row links to its sync member; one member query serves every listed chassis.
+            sync_by_chassis = chassis_sync_devices(devices)
+            sync_rows = [
+                (device.pk, sync_device)
+                for device in devices
+                if (sync_device := sync_by_chassis.get(device.virtual_chassis_id)) is not None
+                and sync_device.pk != device.pk
+            ]
             queryset = queryset.annotate(
-                librenms_status=Case(*case_when, default=Value(None), output_field=BooleanField())
+                librenms_status=Case(*case_when, default=Value(None), output_field=BooleanField()),
+                librenms_sync_device_id=Case(
+                    *(When(pk=pk, then=Value(sync_device.pk)) for pk, sync_device in sync_rows),
+                    default=Value(None),
+                    output_field=IntegerField(),
+                ),
+                librenms_sync_device_name=Case(
+                    *(When(pk=pk, then=Value(sync_device.name)) for pk, sync_device in sync_rows),
+                    default=Value(None),
+                    output_field=CharField(),
+                ),
             )
 
             return queryset
