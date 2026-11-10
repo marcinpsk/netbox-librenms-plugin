@@ -16,7 +16,6 @@ from netbox_librenms_plugin.import_utils.disclosure import scope_validation_disc
 from netbox_librenms_plugin.import_utils.naming import import_name_variants
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.serial_identity import display
-from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.utils import netbox_allows_standalone_vm_host
 
 _IMPORT_NAMING_INCLUDE = "#use-sysname-toggle, #strip-domain-toggle"
@@ -39,18 +38,14 @@ class DeviceStatusTable(DeviceTable):
             kwargs={"pk": record.pk},
         )
 
-        # Check if device is VC member and redirect to sync device if different
-        if hasattr(record, "virtual_chassis") and record.virtual_chassis:
-            sync_device = get_librenms_sync_device(record)
-            if sync_device and record.pk != sync_device.pk:
-                sync_device_url = reverse(
-                    "plugins:netbox_librenms_plugin:device_librenms_sync",
-                    kwargs={"pk": sync_device.pk},
-                )
-                return mark_safe(
-                    f'<a href="{sync_device_url}"><span class="text-info">'
-                    f'<i class="mdi mdi-server-network"></i> See {sync_device.name}</span></a>'
-                )
+        # The list view annotates a chassis row whose sync member is another device.
+        sync_device_id = getattr(record, "librenms_sync_device_id", None)
+        if sync_device_id is not None:
+            return format_html(
+                '<a href="{}"><span class="text-info"><i class="mdi mdi-server-network"></i> See {}</span></a>',
+                reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": sync_device_id}),
+                record.librenms_sync_device_name,
+            )
         if value:
             status = '<span class="text-success"><i class="mdi mdi-check-circle"></i> Found</span>'
         elif value is False:

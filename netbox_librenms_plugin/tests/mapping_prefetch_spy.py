@@ -28,6 +28,7 @@ class MappingReadSpy:
     """The reads and prefetches seen while the spy is active."""
 
     prefetched: dict = field(default_factory=dict)
+    prefetch_calls: int = 0
     reads: list = field(default_factory=list)
     scopes: list = field(default_factory=list)
 
@@ -115,6 +116,7 @@ def spy_mapping_reads(*producers):
 
     def prefetch_mappings(objects):
         result = real_prefetch(objects)
+        spy.prefetch_calls += 1
         # The dict keeps each instance alive, so its id() cannot be reused while the spy runs.
         spy.prefetched.update((id(obj), obj) for obj in result)
         return result

@@ -97,19 +97,22 @@ class TestDeviceStatusTable:
         assert css_class in html
         assert label in html
 
-    def test_virtual_chassis_member_links_to_the_real_sync_member(self):
-        from netbox_librenms_plugin.tables.device_status import DeviceStatusTable
+    def test_virtual_chassis_member_links_to_the_real_sync_member(self, client, settings, librenms_server):
+        from netbox_librenms_plugin.tests.conftest import bind_librenms_server
 
+        bind_librenms_server(settings, librenms_server, server_key="default")
         viewed = make_device("status-vc-viewed")
-        sync_member = make_device("status-vc-sync")
+        sync_member = make_device("status-vc-<sync>")
         make_virtual_chassis("status-vc", viewed, sync_member)
         seed_mapping(sync_member, own=4102, save=False)
         sync_member.save()
-        table = DeviceStatusTable(type(viewed).objects.none())
+        client.force_login(make_superuser("status-vc-user"))
 
-        html = str(table.render_librenms_status(True, viewed))
+        response = client.get(reverse("plugins:netbox_librenms_plugin:device_status_list"), {"site": viewed.site_id})
 
-        assert f"See {sync_member.name}" in html
+        html = response.content.decode()
+        assert response.status_code == 200
+        assert "See status-vc-&lt;sync&gt;" in html
         assert (
             reverse(
                 "plugins:netbox_librenms_plugin:device_librenms_sync",
