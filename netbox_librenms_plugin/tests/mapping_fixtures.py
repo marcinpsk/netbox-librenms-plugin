@@ -140,8 +140,8 @@ def seed_stored_mapping(obj, value, *, save=False):
     """
     Store a copy of the raw mapping *value* on *obj*, only for a legacy runtime or a storage shape test.
 
-    The allowlist in ``test_mapping_fixture_scope.py`` names the files that may call it. With *save*,
-    save *obj*. Returns *obj*.
+    ``test_mapping_fixture_scope.py`` pins the raw uses that each file may keep. With *save*, save
+    *obj*. Returns *obj*.
     """
     fields = _put_stored_value(obj, value)
     if save:
