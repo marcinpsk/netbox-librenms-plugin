@@ -10,7 +10,6 @@ from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_interface,
     make_ip,
-    map_device_to_librenms,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import (
@@ -152,9 +151,7 @@ class TestCableHTTPAndORM:
 
     def test_host_and_oob_links_are_merged_from_two_real_devices(self, live_librenms):
 
-        device = map_device_to_librenms(
-            make_device("cable-oob"), 42, server_key="default", oob={"id": 99, "type": "controller"}
-        )
+        device = seed_mapping(make_device("cable-oob"), own=42, oob=99)
         _register_ports(live_librenms, 42)
         _register_links(live_librenms, 42)
         _register_ports(

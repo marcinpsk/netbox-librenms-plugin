@@ -8,6 +8,7 @@ Companion to ``test_coverage_bulk_import.py``; see that file for the primary
 import pytest
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_vm, map_device_to_librenms
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 pytestmark = pytest.mark.django_db
 
@@ -50,10 +51,6 @@ def _refresh(validation, libre_device=None, server_key="default"):
     _refresh_existing_device(validation, libre_device=libre_device, server_key=server_key)
 
 
-def _link(device, payload):
-    return map_device_to_librenms(device, payload["id"], server_key="default", oob=payload.get("oob"))
-
-
 class TestLinkageRefresh:
     """A cached link match survives a missing scan id, but not a missing NetBox link."""
 
@@ -74,7 +71,7 @@ class TestRefreshPromotesACachedMatch:
     """A row cached under a weaker match is promoted once NetBox carries the link."""
 
     def test_a_serial_match_promoted_to_a_host_link_drops_its_stale_action(self):
-        device = _link(make_device("promote-host"), {"id": 6001})
+        device = seed_mapping(make_device("promote-host"), own=6001)
         validation = _validation(device)
         validation["existing_match_type"] = "serial"
         validation["serial_action"] = "oob_candidate"
@@ -87,7 +84,7 @@ class TestRefreshPromotesACachedMatch:
         assert validation["oob_candidate"] is None
 
     def test_a_serial_match_promoted_to_an_oob_link_drops_its_merge_candidates(self):
-        device = _link(make_device("promote-oob"), {"id": 6001, "oob": {"id": 6002, "type": "drac"}})
+        device = seed_mapping(make_device("promote-oob"), own=6001, oob=6002, oob_type="drac")
         validation = _validation(device)
         validation["existing_match_type"] = "serial"
         validation["serial_action"] = "merge_netbox_devices"
@@ -100,7 +97,7 @@ class TestRefreshPromotesACachedMatch:
         assert not validation["merge_candidates"]
 
     def test_a_row_already_cached_as_a_link_keeps_its_derived_action(self):
-        device = _link(make_device("promote-noop"), {"id": 6003})
+        device = seed_mapping(make_device("promote-noop"), own=6003)
         validation = _validation(device)
         validation["existing_match_type"] = "librenms_id"
         validation["serial_action"] = "update_serial"
@@ -234,7 +231,7 @@ class TestRefreshFreshLookup:
         assert not any("role must be manually selected" in issue.lower() for issue in validation["issues"])
 
     def test_a_librenms_id_bound_to_both_a_device_and_a_vm_blocks_the_row(self):
-        _link(make_device("collide-device"), {"id": 77})
+        seed_mapping(make_device("collide-device"), own=77)
         map_device_to_librenms(make_vm("collide-vm"), 77, server_key="default")
         validation = self._unmatched("collide-device")
 

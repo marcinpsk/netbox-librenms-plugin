@@ -16,8 +16,8 @@ from netbox_librenms_plugin.tests.conftest import (
     bind_librenms_server,
     make_device,
     make_vm,
-    map_device_to_librenms,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import (
     make_request,
     make_superuser,
@@ -33,7 +33,10 @@ SERVER_KEY = "alpha"
 
 # The shared helpers in conftest take the server key; this module always uses its own.
 _bind_server = partial(bind_librenms_server, server_key=SERVER_KEY)
-_map_device = partial(map_device_to_librenms, server_key=SERVER_KEY)
+
+
+def _map_device(device, own, *, oob=None):
+    return seed_mapping(device, SERVER_KEY, own=own, oob=oob, oob_type="idrac")
 
 
 def _refresh(view_class, device, server, settings, post_data=None):
@@ -189,7 +192,11 @@ class TestInterfaceRefreshOobMerge:
         """A linked OOB controller with an uncoercible id must not be silently skipped."""
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
-        device = _map_device(make_device("iface-oob-corrupt"), 21, oob={"id": "not-an-id", "type": "idrac"})
+        device = seed_stored_mapping(
+            make_device("iface-oob-corrupt"),
+            {SERVER_KEY: {"id": 21, "oob": {"id": "not-an-id", "type": "idrac"}}},
+            save=True,
+        )
         librenms_server.ports_response(device_id=21, ports=[{"port_id": 1, "ifName": "eth0"}])
 
         response, _view, request = _refresh(DeviceInterfaceTableView, device, librenms_server, settings)
@@ -233,7 +240,7 @@ class TestInterfaceRefreshOobMerge:
         """OOB rows merge in tagged _source=oob, and only a real MAC on both sides is a conflict."""
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
-        device = _map_device(make_device("iface-oob-merge"), 31, oob={"id": 32, "type": "idrac"})
+        device = _map_device(make_device("iface-oob-merge"), 31, oob=32)
         librenms_server.ports_response(
             device_id=31,
             ports=[
@@ -271,7 +278,7 @@ class TestInterfaceRefreshOobMerge:
         """A failed OOB ports fetch keeps host rows, warns, and the snapshot reads as oob_incomplete."""
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
-        device = _map_device(make_device("iface-oob-fetch-fail"), 41, oob={"id": 42, "type": "idrac"})
+        device = _map_device(make_device("iface-oob-fetch-fail"), 41, oob=42)
         librenms_server.ports_response(device_id=41, ports=[{"port_id": 1, "ifName": "eth0"}])
         # /api/v0/devices/42/ports stays unregistered, so the loopback answers 404.
 

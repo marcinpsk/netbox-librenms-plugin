@@ -21,9 +21,8 @@ from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_interface,
     make_virtual_chassis,
-    map_device_to_librenms,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import (
     grant,
     make_request,
@@ -41,7 +40,10 @@ SERVER_KEY = "alpha"
 
 # The shared helpers in conftest take the server key; this module always uses its own.
 _bind_server = partial(bind_librenms_server, server_key=SERVER_KEY)
-_map_device = partial(map_device_to_librenms, server_key=SERVER_KEY)
+
+
+def _map_device(device, own, *, oob=None):
+    return seed_mapping(device, SERVER_KEY, own=own, oob=oob, oob_type="idrac")
 
 
 def _map_interface(interface, port_id):
@@ -282,7 +284,7 @@ class TestCableRefreshOobMerge:
     def test_cable_port_names_are_fetched_without_vlan_expansion(self, librenms_server, settings, port_device_id):
         from netbox_librenms_plugin.views.base.cables_view import read_cable_assessment
 
-        device = _map_device(make_device("cable-oob-port-names"), 161, oob={"id": 162, "type": "idrac"})
+        device = _map_device(make_device("cable-oob-port-names"), 161, oob=162)
         librenms_server.ports_response(device_id=161, ports=[])
         librenms_server.ports_response(device_id=162, ports=[{"port_id": 7, "ifName": "mgmt0"}])
         _links_route(librenms_server, 161, [])
@@ -313,7 +315,11 @@ class TestCableRefreshOobMerge:
 
     def test_a_corrupt_oob_id_warns_instead_of_dropping_the_rows_silently(self, librenms_server, settings):
         """A linked OOB controller with an uncoercible id must warn, not be skipped in silence."""
-        device = _map_device(make_device("cable-oob-corrupt"), 111, oob={"id": "not-an-id", "type": "idrac"})
+        device = seed_stored_mapping(
+            make_device("cable-oob-corrupt"),
+            {SERVER_KEY: {"id": 111, "oob": {"id": "not-an-id", "type": "idrac"}}},
+            save=True,
+        )
         librenms_server.ports_response(device_id=111, ports=[{"port_id": 1, "ifName": "eth0"}])
         _links_route(
             librenms_server,
@@ -337,7 +343,7 @@ class TestCableRefreshOobMerge:
 
     def test_a_failed_oob_links_fetch_warns_and_keeps_the_host_rows(self, librenms_server, settings):
         """A 404 on the OOB controller's links endpoint warns and leaves the host rows in place."""
-        device = _map_device(make_device("cable-oob-fetch-fail"), 121, oob={"id": 122, "type": "idrac"})
+        device = _map_device(make_device("cable-oob-fetch-fail"), 121, oob=122)
         librenms_server.ports_response(device_id=121, ports=[{"port_id": 1, "ifName": "eth0"}])
         _links_route(
             librenms_server,
@@ -361,7 +367,7 @@ class TestCableRefreshOobMerge:
 
     def test_a_malformed_oob_links_payload_warns_and_keeps_the_host_rows(self, librenms_server, settings):
         """A 200 whose OOB "links" is not a list must warn instead of crashing on iteration."""
-        device = _map_device(make_device("cable-oob-malformed"), 151, oob={"id": 152, "type": "idrac"})
+        device = _map_device(make_device("cable-oob-malformed"), 151, oob=152)
         librenms_server.ports_response(device_id=151, ports=[{"port_id": 1, "ifName": "eth0"}])
         _links_route(
             librenms_server,

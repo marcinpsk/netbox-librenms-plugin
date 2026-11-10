@@ -271,7 +271,7 @@ def test_a_replacement_that_removes_a_cable_to_an_ignored_port_is_refused(
     if source_mapping == "vc-owner":
         map_device_to_librenms(master, 10, server_key=SERVER_KEY)
     elif source_mapping == "oob":
-        map_device_to_librenms(far_device, None, server_key=SERVER_KEY, oob={"id": 10, "type": "idrac"})
+        seed_mapping(far_device, SERVER_KEY, oob=10, oob_type="idrac")
     else:
         map_device_to_librenms(far_device, 10, server_key=SERVER_KEY)
     link.ignore(far_platform, "^Xe" if ignored else "^no-such-port$")
@@ -777,12 +777,10 @@ def test_a_manual_destination_prefetches_displaced_rule_evidence_before_the_writ
         map_device_to_librenms(master, 10, server_key=SERVER_KEY)
     else:
         far_device = make_device("manual-cable-displaced")
-        map_device_to_librenms(
-            far_device,
-            10 if source_mapping == "own" else None,
-            server_key=SERVER_KEY,
-            oob={"id": 10, "type": "idrac"} if source_mapping == "oob" else None,
-        )
+        if source_mapping == "own":
+            seed_mapping(far_device, SERVER_KEY, own=10)
+        else:
+            seed_mapping(far_device, SERVER_KEY, oob=10, oob_type="idrac")
     far_device.platform = far_platform
     far_device.save()
     far = _bound(far_device, "Xe0/1", 777)
@@ -934,12 +932,10 @@ def test_displaced_source_failures_are_redacted_for_each_snapshot_reader(
         map_device_to_librenms(master, 10, server_key=SERVER_KEY)
     else:
         hidden_owner = make_device("hidden-source-owner")
-        map_device_to_librenms(
-            hidden_owner,
-            10 if source_mapping == "own" else None,
-            server_key=SERVER_KEY,
-            oob={"id": 10, "type": "idrac"} if source_mapping == "oob" else None,
-        )
+        if source_mapping == "own":
+            seed_mapping(hidden_owner, SERVER_KEY, own=10)
+        else:
+            seed_mapping(hidden_owner, SERVER_KEY, oob=10, oob_type="idrac")
     hidden_port = _bound(hidden_owner, "hidden-source-port", 777)
     cable_together(link.remote, hidden_port)
     link.server.register(

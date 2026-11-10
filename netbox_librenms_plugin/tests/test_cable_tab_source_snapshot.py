@@ -9,6 +9,7 @@ from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser, map_device_to_librenms
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 HOST_ID = 5401
 OOB_ID = 5402
@@ -41,8 +42,8 @@ def _serve(server, *, device_id=HOST_ID, links=None, ports=None):
     )
 
 
-def _device(name, **mapping):
-    return map_device_to_librenms(make_device(name), HOST_ID, server_key=SERVER_KEY, **mapping)
+def _device(name, *, oob=None):
+    return seed_mapping(make_device(name), SERVER_KEY, own=HOST_ID, oob=oob, oob_type="idrac")
 
 
 def _refresh(client, device):
@@ -149,7 +150,7 @@ def test_refresh_stores_raw_facts_and_reads_current_name_options(client, live_li
 
 @pytest.mark.django_db
 def test_failed_oob_ports_block_oob_rows_and_keep_host_rows(client, live_librenms):
-    device = _device("cable-snapshot-oob", oob={"id": OOB_ID, "type": "idrac"})
+    device = _device("cable-snapshot-oob", oob=OOB_ID)
     client.force_login(make_superuser("cable-snapshot-oob-user"))
     _serve(live_librenms.server)
     _serve(live_librenms.server, device_id=OOB_ID, links=[_link(9)], ports=[_port(9, "oob9")])
@@ -252,7 +253,7 @@ def test_snapshot_binding_tracks_host_and_oob_mapping_changes(client, live_libre
 
     from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_mapping_row, seed_unmapped
 
-    device = _device("cable-snapshot-binding", oob={"id": OOB_ID, "type": "idrac"})
+    device = _device("cable-snapshot-binding", oob=OOB_ID)
     client.force_login(make_superuser("cable-snapshot-binding-user"))
     _serve(live_librenms.server)
     _serve(live_librenms.server, device_id=OOB_ID, links=[], ports=[])
