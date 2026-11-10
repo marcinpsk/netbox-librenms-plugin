@@ -170,6 +170,7 @@ from .views import (
     SerialSensorTypePatternEditView,
     SerialSensorTypePatternListView,
     SerialSensorTypePatternView,
+    EditServerMappingView,
     SetPreferredServerView,
     SingleCableVerifyView,
     SingleInterfaceVerifyView,
@@ -540,6 +541,11 @@ urlpatterns = [
         "devices/<int:pk>/remove-server-mapping/",
         RemoveServerMappingView.as_view(),
         name="remove_server_mapping",
+    ),
+    path(
+        "devices/<int:pk>/edit-server-mapping/",
+        EditServerMappingView.as_view(),
+        name="edit_server_mapping",
     ),
     path(
         "devices/<int:pk>/preferred-server/",
