@@ -398,3 +398,46 @@ class TestRegistry:
         offered = intent.offer(_create(group=5), intent.IntentContext(99, ("dcim.device", 1), "other"))
 
         assert intent.signed_operations([offered.token, "vlan:forged", ""], policy=POLICY) == (offered.operation,)
+
+
+class TestMechanicalGuards:
+    """The opengrep allowlists of the confirmation guards only shrink, and name only files that still need them."""
+
+    # The legacy signing sites of the actions that later increments migrate.
+    LEGACY_SIGNING_SITES = frozenset(
+        {
+            "**/netbox_librenms_plugin/views/sync/ip_addresses.py",
+            "**/netbox_librenms_plugin/module_grants.py",
+            "**/netbox_librenms_plugin/identity_replacement.py",
+        }
+    )
+
+    @staticmethod
+    def _rule(rule_id):
+        from pathlib import Path
+
+        import yaml
+
+        root = Path(__file__).resolve().parents[2]
+        rules = yaml.safe_load((root / ".opengrep" / "librenms-rules.yaml").read_text())["rules"]
+        return next(rule for rule in rules if rule["id"] == rule_id)
+
+    def test_the_signing_allowlist_holds_only_the_module_tests_and_unmigrated_legacy_sites(self):
+        from pathlib import Path
+
+        excluded = set(self._rule("signing-only-in-confirmation-intent")["paths"]["exclude"])
+        own = {"**/netbox_librenms_plugin/tests/**", "**/netbox_librenms_plugin/confirmation_intent.py"}
+        legacy = excluded - own
+
+        assert own <= excluded
+        assert legacy <= self.LEGACY_SIGNING_SITES
+        package = Path(intent.__file__).resolve().parent
+        for pattern in legacy:
+            source = (package / pattern.removeprefix("**/netbox_librenms_plugin/")).read_text()
+            # A migrated site leaves the allowlist in the same change.
+            assert "from django.core import signing" in source, pattern
+
+    def test_offers_are_allowed_only_in_assessment_modules(self):
+        excluded = set(self._rule("offer-only-from-assessment")["paths"]["exclude"])
+
+        assert excluded == {"**/netbox_librenms_plugin/assessment/**", "**/netbox_librenms_plugin/tests/**"}
