@@ -43,6 +43,7 @@ from netbox_librenms_plugin.tests.lock_conflict_helpers import (
 from netbox_librenms_plugin.tests.source_snapshot_helpers import port_vlans
 from netbox_librenms_plugin.tests.view_test_helpers import messages_on
 from netbox_librenms_plugin.transactions import key_columns, save_at_version
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 INTERFACE_TABLE = Interface._meta.db_table
 THROUGH_TABLE = Interface.tagged_vlans.through._meta.db_table
@@ -91,7 +92,7 @@ def _interface_updates(queries):
     ],
 )
 def test_a_row_is_locked_only_when_it_changes_and_in_the_mode_of_its_update(client, port, locks):
-    device = make_device("late-lock", librenms_cf={SERVER_KEY: {"id": 11}})
+    device = seed_mapping(make_device("late-lock"), SERVER_KEY, own=11)
     synced_interface(device, "eth10", 10)
     seed_ports(device, [port])
     client.force_login(make_superuser("late-lock-user"))
@@ -117,7 +118,7 @@ CHANGE_LOG_READS = ('"extras_taggeditem"', '"dcim_interface_vdcs"', '"dcim_inter
     ],
 )
 def test_a_row_is_serialized_for_the_change_log_only_when_it_changes(client, port, serialized):
-    device = make_device("late-lock-change-log", librenms_cf={SERVER_KEY: {"id": 14}})
+    device = seed_mapping(make_device("late-lock-change-log"), SERVER_KEY, own=14)
     synced_interface(device, "eth10", 10)
     seed_ports(device, [port])
     client.force_login(make_superuser("late-lock-change-log-user"))
@@ -181,7 +182,7 @@ def test_the_tagged_vlan_clear_schedule_completes_without_a_deadlock(client, att
     ``UPDATE``. A lock before ``save()`` would hold the interface while the clear waits for the
     tagged-VLAN rows, and the other session's update would close the cycle.
     """
-    device = make_device(f"late-lock-clear-{writer}", librenms_cf={SERVER_KEY: {"id": 12}})
+    device = seed_mapping(make_device(f"late-lock-clear-{writer}"), SERVER_KEY, own=12)
     tagged = VLAN.objects.create(vid=100, name=f"late-lock-clear-{writer}-100")
     if writer == "vlan-helper":
         # The sync takes the row out of tagged mode; the attribute writer has nothing to write.
@@ -227,7 +228,7 @@ def test_the_primary_mac_schedule_completes_without_a_deadlock(client, attempts)
     A new primary MAC changes a key column, so the ``UPDATE`` needs ``FOR UPDATE``. A lock taken
     first in the weaker ``FOR NO KEY UPDATE`` mode and then upgraded would close the cycle.
     """
-    device = make_device("late-lock-mac", librenms_cf={SERVER_KEY: {"id": 13}})
+    device = seed_mapping(make_device("late-lock-mac"), SERVER_KEY, own=13)
     interface = synced_interface(device, "eth10", 10)
     seed_ports(device, [sync_port(10, "eth10", mac=MAC)])
     client.force_login(make_superuser("late-lock-mac-user"))

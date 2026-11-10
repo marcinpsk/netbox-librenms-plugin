@@ -9,6 +9,7 @@ conflicts on every restack.
 import json
 
 import pytest
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 
 SERVER_KEY = "default"
@@ -280,7 +281,7 @@ class TestVerifyVlanSyncGroupReassessment:
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.tests.vlan_intent_helpers import seed_vlans
 
-        device = make_device(f"vlan-reassess-{tag}", librenms_cf={SERVER_KEY: {"id": 42}})
+        device = seed_mapping(make_device(f"vlan-reassess-{tag}"), SERVER_KEY, own=42)
         seed_vlans(device, rows)
         return device
 
@@ -361,7 +362,7 @@ class TestVerifyVlanSyncGroupReassessment:
 
         configure_librenms({SERVER_KEY: {"librenms_url": "https://librenms.example.com", "api_token": "t"}})
         device = self._device("subject", [{"vlan_vlan": 122, "vlan_name": "Data"}])
-        unseeded = make_device("vlan-reassess-unseeded", librenms_cf={SERVER_KEY: {"id": 43}})
+        unseeded = seed_mapping(make_device("vlan-reassess-unseeded"), SERVER_KEY, own=43)
         client.force_login(make_superuser("vlan-reassess-subject-user"))
 
         assert _json_post(client, "verify_vlan_sync_group", {"vid": "122"}).status_code == 400
@@ -393,7 +394,7 @@ class TestSaveVlanGroupOverridesBranches:
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.views.object_sync.devices import SaveVlanGroupOverridesView
 
-        device = make_device("vlan-overrides-reader", librenms_cf={SERVER_KEY: {"id": 161}})
+        device = seed_mapping(make_device("vlan-overrides-reader"), SERVER_KEY, own=161)
         overrides_key = SaveVlanGroupOverridesView().get_vlan_overrides_key(device, SERVER_KEY)
         client.force_login(_plugin_reader("vlan-overrides-reader-user"))
 

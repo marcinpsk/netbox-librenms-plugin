@@ -13,6 +13,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
 )
 from netbox_librenms_plugin.tests.vlan_intent_helpers import message_texts, seed_vlans, sync, tab_tokens
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 
 def _disclosed_tokens(response, form_id):
@@ -25,7 +26,7 @@ def _disclosed_tokens(response, form_id):
 def _grouped_rename(tag, vid, current, proposed):
     from ipam.models import VLAN, VLANGroup
 
-    device = make_device(f"vlan-{tag}-device", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device(f"vlan-{tag}-device"), "default", own=42)
     group = VLANGroup.objects.create(name=f"{tag.title()} group", slug=f"{tag}-group")
     existing = VLAN.objects.create(vid=vid, group=group, name=current, status="active")
     seed_vlans(device, [{"vlan_vlan": vid, "vlan_name": proposed}])
@@ -191,7 +192,7 @@ def test_bulk_vlan_sync_commits_safe_rows_before_confirmation(
     from netbox_librenms_plugin.tests.source_snapshot_helpers import stored_source_value
 
     configure_default_librenms_server(settings)
-    device = make_device("vlan-bulk-device", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("vlan-bulk-device"), "default", own=42)
     group = VLANGroup.objects.create(name="Bulk group", slug="bulk-group")
     existing = VLAN.objects.create(vid=105, group=group, name="Current name", status="active")
     snapshot = [
@@ -277,7 +278,7 @@ def test_a_review_never_applies_in_the_same_request(client, settings):
     from netbox_librenms_plugin.tests.view_test_helpers import domain_state
 
     configure_default_librenms_server(settings)
-    device = make_device("vlan-review-only-device", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("vlan-review-only-device"), "default", own=42)
     seed_vlans(device, [{"vlan_vlan": 112, "vlan_name": "Users"}])
     client.force_login(make_superuser("vlan-review-only-user"))
     token = tab_tokens(client, device)[112]
@@ -295,7 +296,7 @@ def test_a_review_refuses_a_choice_it_cannot_assess(client, settings):
     from netbox_librenms_plugin.tests.vlan_intent_helpers import message_texts
 
     configure_default_librenms_server(settings)
-    device = make_device("vlan-review-refusal-device", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("vlan-review-refusal-device"), "default", own=42)
     seed_vlans(device, [{"vlan_vlan": 113, "vlan_name": "A"}, {"vlan_vlan": 114, "vlan_name": "B"}])
     client.force_login(make_superuser("vlan-review-refusal-user"))
 
@@ -315,7 +316,7 @@ def test_a_review_that_names_a_group_requires_vlan_group_view_permission(client,
     from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
     configure_default_librenms_server(settings)
-    device = make_device("vlan-review-permission-device", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("vlan-review-permission-device"), "default", own=42)
     group = VLANGroup.objects.create(name="Review permission", slug="review-permission")
     seed_vlans(device, [{"vlan_vlan": 116, "vlan_name": "A"}])
     client.force_login(
@@ -371,7 +372,7 @@ def test_the_rendered_tab_reviews_and_applies_without_javascript(client, setting
     from netbox_librenms_plugin.tests.vlan_intent_helpers import sync_url
 
     configure_default_librenms_server(settings)
-    device = make_device("vlan-noscript-device", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("vlan-noscript-device"), "default", own=42)
     seed_vlans(device, [{"vlan_vlan": 117, "vlan_name": "Users"}, {"vlan_vlan": 118, "vlan_name": "Voice"}])
     client.force_login(make_superuser("vlan-noscript-user"))
     url = reverse(

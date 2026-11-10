@@ -6,6 +6,7 @@ from django.urls import reverse
 from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 from netbox_librenms_plugin.tests.test_modules_view import _two_server_keys, configure_servers
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 pytestmark = pytest.mark.django_db
 
@@ -202,7 +203,7 @@ def test_a_writer_refuses_the_write_and_names_the_broken_rule(client, server):
 
 def test_a_read_only_page_shows_a_banner_that_names_the_broken_rule(client, server):
     """The sync page matches the LibreNMS hardware through the device_type rules before it renders."""
-    device = make_device("rule-error-sync-page", librenms_cf={server.server_key: {"id": 4712}})
+    device = seed_mapping(make_device("rule-error-sync-page"), server.server_key, own=4712)
     server.device_info_response(device_id=4712, hostname=device.name, hardware="WS-C9300")
     rule = _break_device_type_normalization()
     client.force_login(make_superuser("rule-error-reader"))
@@ -227,7 +228,7 @@ def test_only_a_viewer_of_the_rule_sees_its_details(client, server, htmx, may_vi
     from netbox_librenms_plugin.models import HIDDEN_RULE_ERROR_MESSAGE, NormalizationRule
     from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
-    device = make_device(f"rule-error-viewer-{htmx}-{may_view_rule}", librenms_cf={server.server_key: {"id": 4714}})
+    device = seed_mapping(make_device(f"rule-error-viewer-{htmx}-{may_view_rule}"), server.server_key, own=4714)
     server.device_info_response(device_id=4714, hostname=device.name, hardware="WS-C9300")
     rule = _break_device_type_normalization()
     perms = [("view", Device)] + ([("view", NormalizationRule)] if may_view_rule else [])

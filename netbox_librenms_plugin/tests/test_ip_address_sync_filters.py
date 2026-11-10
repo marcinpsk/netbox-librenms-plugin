@@ -26,6 +26,7 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.test_interface_sync_filters import CELL, _visible_text
 from netbox_librenms_plugin.tests.test_ip_address_sync_safety import _serve_librenms_ip_rows
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 SERVER_KEY = "default"
 # The loopback helper serves the LibreNMS device as ID 42.
@@ -108,7 +109,7 @@ def _mixed_owner(kind, tag, client, server):
     """
     blue = VRF.objects.create(name=f"blue-{tag}")
     if kind == "device":
-        owner = make_device(f"ip-filters-{tag}", librenms_cf={SERVER_KEY: {"id": LIBRENMS_ID}})
+        owner = seed_mapping(make_device(f"ip-filters-{tag}"), SERVER_KEY, own=LIBRENMS_ID)
 
         def interface(name):
             return Interface.objects.create(device=owner, name=name, type="1000base-t")
@@ -151,7 +152,7 @@ class TestMatching:
     ):
         bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
         client = _client(client, "page-two")
-        device = make_device("ip-filters-page-two", librenms_cf={SERVER_KEY: {"id": LIBRENMS_ID}})
+        device = seed_mapping(make_device("ip-filters-page-two"), SERVER_KEY, own=LIBRENMS_ID)
         _refresh(client, device, librenms_server, [_row(f"198.18.9.{n}", 7600 + n, f"eth{n}") for n in range(1, 61)])
 
         assert "198.18.9.57/24" not in _rows(_tab(client, device, ipaddresses_per_page="25"))

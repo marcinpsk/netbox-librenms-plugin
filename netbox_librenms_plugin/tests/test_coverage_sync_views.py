@@ -89,8 +89,8 @@ class TestCableSynchronization:
         assert SyncCablesView().get_selected_interfaces(request, device) is None
 
     def test_cached_link_creates_a_real_provenance_cable(self, client, live_librenms):
-        local_device = make_device("cable-local", librenms_cf={SERVER_KEY: {"id": 61}})
-        remote_device = make_device("cable-remote", librenms_cf={SERVER_KEY: {"id": 62}})
+        local_device = seed_mapping(make_device("cable-local"), SERVER_KEY, own=61)
+        remote_device = seed_mapping(make_device("cable-remote"), SERVER_KEY, own=62)
         local = make_interface(local_device, "Ethernet1", iface_type="1000base-t")
         remote = make_interface(remote_device, "Ethernet2", iface_type="1000base-t")
         _set_librenms_id(local, 7201)
@@ -143,7 +143,7 @@ class TestCableSynchronization:
 @pytest.mark.django_db
 class TestInterfaceSynchronization:
     def test_cached_port_creates_a_real_interface(self, client, live_librenms):
-        device = make_device("interface-create", librenms_cf={SERVER_KEY: {"id": 71}})
+        device = seed_mapping(make_device("interface-create"), SERVER_KEY, own=71)
         port = {
             "port_id": 8101,
             "ifName": "Ethernet1/1",
@@ -177,7 +177,7 @@ class TestInterfaceSynchronization:
         assert interface.mtu == 1500
 
     def test_empty_selection_does_not_change_interfaces(self, client, live_librenms):
-        device = make_device("interface-no-selection", librenms_cf={SERVER_KEY: {"id": 72}})
+        device = seed_mapping(make_device("interface-no-selection"), SERVER_KEY, own=72)
         seed_interfaces_snapshot(device, [], server_key=SERVER_KEY)
         _login(client, "interface-no-selection-user")
 
@@ -194,7 +194,7 @@ class TestInterfaceSynchronization:
         assert _response_messages(response, "error") == ["No interfaces selected for synchronization."]
 
     def test_delete_endpoint_removes_only_the_selected_interface(self, client, live_librenms):
-        device = make_device("interface-delete", librenms_cf={SERVER_KEY: {"id": 73}})
+        device = seed_mapping(make_device("interface-delete"), SERVER_KEY, own=73)
         selected = make_interface(device, "Ethernet1")
         retained = make_interface(device, "Ethernet2")
         _login(client, "interface-delete-user")
@@ -213,7 +213,7 @@ class TestInterfaceSynchronization:
         assert Interface.objects.filter(pk=retained.pk).exists()
 
     def test_delete_endpoint_rejects_an_empty_selection(self, client, live_librenms):
-        device = make_device("interface-delete-empty", librenms_cf={SERVER_KEY: {"id": 74}})
+        device = seed_mapping(make_device("interface-delete-empty"), SERVER_KEY, own=74)
         _login(client, "interface-delete-empty-user")
 
         response = client.post(
@@ -231,7 +231,7 @@ class TestInterfaceSynchronization:
 @pytest.mark.django_db
 class TestIPAddressSynchronization:
     def test_cached_ip_is_created_and_assigned_by_port_identity(self, client, live_librenms):
-        device = make_device("ip-create", librenms_cf={SERVER_KEY: {"id": 81}})
+        device = seed_mapping(make_device("ip-create"), SERVER_KEY, own=81)
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
         _set_librenms_id(interface, 8201)
         row_id = "198.18.81.10/24"
@@ -257,7 +257,7 @@ class TestIPAddressSynchronization:
         assert _response_messages(response, "success") == [f"Created IP addresses: {row_id}"]
 
     def test_expired_snapshot_does_not_create_an_address(self, client, live_librenms):
-        device = make_device("ip-cache-miss", librenms_cf={SERVER_KEY: {"id": 82}})
+        device = seed_mapping(make_device("ip-cache-miss"), SERVER_KEY, own=82)
         _login(client, "ip-cache-miss-user")
 
         response = client.post(
@@ -278,7 +278,7 @@ class TestVLANSynchronization:
     def test_cached_vlan_is_created(self, client, live_librenms):
         from netbox_librenms_plugin.tests.vlan_intent_helpers import sync, tab_tokens
 
-        device = make_device("vlan-create", librenms_cf={SERVER_KEY: {"id": 91}})
+        device = seed_mapping(make_device("vlan-create"), SERVER_KEY, own=91)
         seed_source_snapshot(
             device, Resource.VLANS, SERVER_KEY, vlans=[{"vlan_vlan": 3091, "vlan_name": "Application"}]
         )
@@ -296,7 +296,7 @@ class TestVLANSynchronization:
     def test_cached_vlan_updates_an_existing_global_vlan(self, client, live_librenms):
         from netbox_librenms_plugin.tests.vlan_intent_helpers import sync, tab_tokens
 
-        device = make_device("vlan-update", librenms_cf={SERVER_KEY: {"id": 93}})
+        device = seed_mapping(make_device("vlan-update"), SERVER_KEY, own=93)
         vlan = VLAN.objects.create(vid=3093, name="Old Name", status="active")
         _login(client, "vlan-update-user")
         seed_source_snapshot(
@@ -324,7 +324,7 @@ class TestVLANSynchronization:
         from netbox_librenms_plugin import source_cache
         from netbox_librenms_plugin.tests.vlan_intent_helpers import sync, tab_tokens
 
-        device = make_device("vlan-cache-miss", librenms_cf={SERVER_KEY: {"id": 92}})
+        device = seed_mapping(make_device("vlan-cache-miss"), SERVER_KEY, own=92)
         seed_source_snapshot(device, Resource.VLANS, SERVER_KEY, vlans=[{"vlan_vlan": 3092, "vlan_name": "Gone"}])
         _login(client, "vlan-cache-miss-user")
         token = tab_tokens(client, device, SERVER_KEY)[3092]
@@ -446,7 +446,7 @@ class TestSiteLocationSynchronization:
 @pytest.mark.django_db
 def test_ambiguous_port_id_is_skipped_despite_matching_name(client, live_librenms):
     """An ambiguous port ID cannot select one owner through a cached name."""
-    device = make_device("ambiguous-port-sync", librenms_cf={SERVER_KEY: {"id": 81}})
+    device = seed_mapping(make_device("ambiguous-port-sync"), SERVER_KEY, own=81)
     named = make_interface(device, "eth0")
     other = make_interface(device, "eth1")
     for interface in (named, other):
