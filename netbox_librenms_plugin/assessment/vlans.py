@@ -60,6 +60,20 @@ class VLANUpdateEffects:
     name: str
 
 
+def _scope(group):
+    return "global" if group is None else str(group)
+
+
+def _vid_claim(group, vid, *, writes):
+    """Claim the VID in a scope: NetBox keeps it unique in a group, and the global advisory lock keeps it global."""
+    return intent.Claim(f"ipam.vlan.vid:{_scope(group)}:{vid}", writes)
+
+
+def _name_claims(group, *names):
+    """Claim names in a group, where NetBox keeps VLAN names unique; global names have no such constraint."""
+    return () if group is None else tuple(intent.Claim(f"ipam.vlan.name:{group}:{name}", True) for name in names)
+
+
 @intent.register
 @dataclass(frozen=True)
 class VLANCreate:
@@ -72,6 +86,11 @@ class VLANCreate:
     choices: VLANChoices
     assumptions: VLANAssumptions
     effects: VLANCreateEffects
+
+    def claims(self):
+        """Take the VID in its scope, and the name in its group."""
+        effects = self.effects
+        return (_vid_claim(effects.group, effects.vid, writes=True), *_name_claims(effects.group, effects.name))
 
 
 @intent.register
@@ -91,6 +110,17 @@ class VLANUpdate:
     def renames(self):
         """Return whether the update changes the name of the target VLAN."""
         return self.effects.name != self.assumptions.target.name
+
+    def claims(self):
+        """Read the target VLAN; a rename also writes it, releases its old name and takes the new one."""
+        target = self.assumptions.target
+        claims = (
+            _vid_claim(target.group, target.vid, writes=False),
+            intent.Claim(f"ipam.vlan:{target.pk}", self.renames),
+        )
+        if not self.renames:
+            return claims
+        return (*claims, *_name_claims(target.group, target.name, self.effects.name))
 
 
 def build_operation(*, vid, group, name, targets):
