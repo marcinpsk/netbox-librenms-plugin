@@ -233,6 +233,46 @@ class TestContext:
         assert result == intent.Stale(intent.StaleReason.CONTEXT_CHANGED, (path,), (offered.operation,))
         assert rebuild.calls == []
 
+    @pytest.mark.parametrize(
+        "change",
+        [
+            lambda envelope: envelope.update(subject=["dcim.device", True]),
+            lambda envelope: envelope.update(subject=["dcim.device", 11.0]),
+            lambda envelope: envelope.update(subject=["dcim.device", "11"]),
+            lambda envelope: envelope.update(subject=[7, 11]),
+            lambda envelope: envelope.update(subject=["", 11]),
+            lambda envelope: envelope.update(subject=["dcim.device"]),
+            lambda envelope: envelope.update(subject="dcim.device:11"),
+            lambda envelope: envelope.update(actor=True),
+            lambda envelope: envelope.update(actor=7.0),
+            lambda envelope: envelope.update(server=5),
+            lambda envelope: envelope.update(server=""),
+        ],
+        ids=[
+            "bool-subject-pk",
+            "float-subject-pk",
+            "string-subject-pk",
+            "non-string-label",
+            "empty-label",
+            "short-subject",
+            "flat-subject",
+            "bool-actor",
+            "float-actor",
+            "non-string-server",
+            "empty-server",
+        ],
+    )
+    def test_a_malformed_context_field_is_invalid(self, change):
+        # Each context compares equal by value (True == 1, 11.0 == 11), so only an exact type check refuses it.
+        offered = intent.offer(_create(), CONTEXT)
+        token = _resign(offered.token, change)
+        rebuild = _Rebuild()
+
+        for context in (CONTEXT, intent.IntentContext(1, ("dcim.device", 1), "default")):
+            result = _only(intent.verify([token], policy=POLICY, context=context, rebuild=rebuild))
+            assert result == intent.Stale(intent.StaleReason.INVALID, (intent.FIELD,))
+        assert rebuild.calls == []
+
 
 class TestDuplicates:
     def test_a_repeated_token_refuses(self):
@@ -243,6 +283,22 @@ class TestDuplicates:
 
         assert result.reason is intent.StaleReason.INVALID
         assert rebuild.calls == []
+
+    def test_a_repeated_token_still_conflicts_with_another_token_of_its_identity(self):
+        first = intent.offer(_create(group=None), CONTEXT)
+        second = intent.offer(_create(group=5), CONTEXT)
+        other = intent.offer(_create(vid=200), CONTEXT)
+        rebuild = _Rebuild()
+
+        verification = intent.verify(
+            [first.token, first.token, second.token, other.token], policy=POLICY, context=CONTEXT, rebuild=rebuild
+        )
+
+        assert verification.results == (
+            intent.Stale(intent.StaleReason.INVALID, ("identity.duplicate",), (first.operation, second.operation)),
+            intent.Verified((intent.Offer(other.token, other.operation),)),
+        )
+        assert rebuild.calls == [(other.operation,)]
 
     def test_two_tokens_for_one_identity_refuse_together(self):
         global_create = intent.offer(_create(group=None), CONTEXT)

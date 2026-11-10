@@ -220,10 +220,8 @@ def verify(tokens, *, policy, context, rebuild):
     for token in counts:
         if not token:
             refused.append(Stale(StaleReason.MISSING, (FIELD,)))
-        elif counts[token] > 1:
-            refused.append(Stale(StaleReason.INVALID, (f"{FIELD}.duplicate",)))
         elif isinstance(decoded := _authenticate(token, policy), Stale):
-            refused.append(decoded)
+            refused.append(Stale(StaleReason.INVALID, (f"{FIELD}.duplicate",)) if counts[token] > 1 else decoded)
         elif paths := _context_differences(decoded[0], context):
             refused.append(Stale(StaleReason.CONTEXT_CHANGED, paths, (decoded[1],)))
         else:
@@ -233,8 +231,11 @@ def verify(tokens, *, policy, context, rebuild):
         by_identity.setdefault((type(operation).RESOURCE, operation.identity), []).append((token, operation))
     approved = {}
     for members in by_identity.values():
+        # A repeated token still counts against its identity, so it cannot clear the way for another token.
         if len(members) > 1:
             refused.append(Stale(StaleReason.INVALID, ("identity.duplicate",), tuple(op for _t, op in members)))
+        elif counts[members[0][0]] > 1:
+            refused.append(Stale(StaleReason.INVALID, (f"{FIELD}.duplicate",), (members[0][1],)))
         else:
             approved[members[0][1]] = members[0][0]
     if not approved:
@@ -293,6 +294,7 @@ def _authenticate(token, policy):
         or envelope["resource"] != resource.value
         or type(envelope["action"]) is not str
         or policy.role(resource, envelope["action"]) is None
+        or not _is_context_shape(envelope)
     ):
         return invalid
     try:
@@ -302,14 +304,28 @@ def _authenticate(token, policy):
     return envelope, operation
 
 
-def _context_differences(envelope, context):
+def _is_context_shape(envelope):
+    """Return whether the context fields of an envelope hold exact types: an int actor, a (label, pk) subject, a server."""
     subject = envelope["subject"]
+    return (
+        type(envelope["actor"]) is int
+        and type(subject) is list
+        and len(subject) == 2
+        and type(subject[0]) is str
+        and bool(subject[0])
+        and type(subject[1]) is int
+        and type(envelope["server"]) is str
+        and bool(envelope["server"])
+    )
+
+
+def _context_differences(envelope, context):
     paths = []
-    if type(envelope["actor"]) is not int or envelope["actor"] != context.actor_pk:
+    if envelope["actor"] != context.actor_pk:
         paths.append("context.actor")
-    if not isinstance(subject, list) or len(subject) != 2 or tuple(subject) != context.subject:
+    if tuple(envelope["subject"]) != context.subject:
         paths.append("context.subject")
-    if type(envelope["server"]) is not str or envelope["server"] != context.server_key:
+    if envelope["server"] != context.server_key:
         paths.append("context.server")
     return tuple(paths)
 
