@@ -263,6 +263,7 @@
             </tbody>
         </table>
     </div>
+    {% if mapping_editor %}{% include "netbox_librenms_plugin/inc/_server_mapping_editor.html" %}{% endif %}
 </div>
 {% elif librenms_server_info %}
 <div class="card mb-3">
@@ -284,6 +285,7 @@
             {% endif %}
         </div>
     </div>
+    {% if mapping_editor %}{% include "netbox_librenms_plugin/inc/_server_mapping_editor.html" %}{% endif %}
 </div>
 {% endif %}
 

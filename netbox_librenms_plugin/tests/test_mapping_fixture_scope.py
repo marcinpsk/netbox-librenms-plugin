@@ -54,6 +54,7 @@ PINNED = {
     "test_object_server_preference.py": (1, SHAPE),
     "test_object_server_selection.py": (2, f"{LEGACY}; {SHAPE}"),
     "test_partial_save_change_log.py": (2, SHAPE),
+    "test_server_mapping_edit.py": (1, LEGACY),
     "test_server_mappings.py": (64, f"{SHAPE}; {LEGACY}"),
     "test_sync_devices.py": (13, LEGACY),
     "test_sync_page_server_key_forms.py": (1, LEGACY),

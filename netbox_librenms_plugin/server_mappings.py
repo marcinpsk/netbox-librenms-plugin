@@ -983,6 +983,61 @@ def convert_legacy(obj, server: str) -> MappingChange:
     return _change(obj, {server: legacy_id}, claims=_claim_for(obj, server, legacy_id))
 
 
+def _edited_fields(entry) -> tuple:
+    return (None, None, None) if entry is None else (entry.own_id, entry.oob_id, entry.oob_type)
+
+
+def _named_id(raw, label):
+    if raw is None:
+        return None
+    identity = coerce_librenms_id(raw)
+    if identity is None:
+        raise ValueError(f"The {label} must be a positive integer, not {raw!r}.")
+    return identity
+
+
+def edit_server(obj, server: str, *, own_id, oob_id, oob_type, shown: ServerState) -> MappingChange:
+    """
+    Build the change that sets the own ID and the OOB controller that an operator named on *server*.
+
+    *shown* is the entry the operator edited, as the form showed it. The named values replace it:
+    a None ID removes that role, and the entry must keep an own ID or an OOB ID. *oob_type* counts
+    only with an OOB ID. Each named ID is claimed, so an owner of either model refuses it at persistence.
+
+    Raises:
+        MappingChanged: The stored entry is not *shown*.
+        ValueError: The stored value is legacy or invalid, the server records a migration marker,
+            no ID is named, an ID is not a positive integer, or the OOB type is unknown.
+
+    """
+    server = require_server_key(server)
+    stored = _stored_value(obj)
+    current = _decode_stored_mapping(stored)
+    if current.container is ContainerStatus.LEGACY:
+        raise ValueError("The LibreNMS mapping has the legacy format. Convert it before you edit it.")
+    if current.container is ContainerStatus.INVALID:
+        raise ValueError("The existing LibreNMS mapping has an invalid format.")
+    entry = current.server(server)
+    if entry is not None and entry.migration.recorded:
+        raise ValueError(f"This object was merged into another device on server '{server}'.")
+    if _edited_fields(entry) != _edited_fields(shown):
+        raise recorded_conflict(
+            MappingChanged("The LibreNMS mapping changed after it was read. Refresh and try again.")
+        )
+    own = _named_id(own_id, "LibreNMS ID")
+    oob = _named_id(oob_id, "OOB controller ID")
+    if own is None and oob is None:
+        raise ValueError("Enter a LibreNMS ID or an OOB controller ID.")
+    value = copy.deepcopy(stored) if isinstance(stored, dict) else {}
+    value[server] = {}
+    if own is not None:
+        value, _outcome = _with_own_id(value, server, own, obj)
+    if oob is not None:
+        value = _with_oob(value, server, oob, oob_type, obj)
+    claims = dict.fromkeys(_claim_for(obj, server, own) + _claim_for(obj, server, oob))
+    return _change(obj, value, claims=tuple(claims))
+
+
 def release_server(obj, server: str, *, clear_preference: bool) -> MappingChange:
     """
     Build the change that removes the mapping on *server* and a preference that names it.
