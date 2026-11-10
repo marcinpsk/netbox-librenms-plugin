@@ -8,6 +8,8 @@ on every restack.
 
 import pytest
 
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
 
 SERVER_KEY = "default"
 
@@ -186,7 +188,7 @@ class TestUpdateDeviceLocationBranches:
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
-        device = make_device("location-update-denied", librenms_cf={SERVER_KEY: 77})
+        device = seed_mapping(make_device("location-update-denied"), SERVER_KEY, own=77)
         received = _record_route(librenms_server, "/api/v0/devices/77", "PATCH")
         client.force_login(make_user_with_perms("location-update-denied-user", []))
 
@@ -207,7 +209,8 @@ class TestUpdateDeviceLocationBranches:
         second_key = "secondary"
         servers = settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]
         configure_librenms_servers(settings, {**servers, second_key: dict(servers[SERVER_KEY])})
-        device = make_device("location-update-repeated-keys", librenms_cf={SERVER_KEY: 89, second_key: 89})
+        device = seed_mapping(make_device("location-update-repeated-keys"), SERVER_KEY, own=89)
+        seed_mapping(device, second_key, own=89)
         received = _record_route(librenms_server, "/api/v0/devices/89", "PATCH")
         client.force_login(make_superuser("location-update-repeated-keys-user"))
 
@@ -222,7 +225,7 @@ class TestUpdateDeviceLocationBranches:
         """A LibreNMS error body becomes the failure message, not a success toast."""
         from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
 
-        device = make_device("location-update-failure", librenms_cf={SERVER_KEY: 88})
+        device = seed_mapping(make_device("location-update-failure"), SERVER_KEY, own=88)
         librenms_server.register(
             "/api/v0/devices/88",
             {"status": "error", "message": "Location is read-only"},

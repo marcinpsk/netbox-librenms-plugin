@@ -2,6 +2,8 @@
 
 import pytest
 
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(
@@ -13,7 +15,7 @@ def test_verify_uses_the_validated_interface_name_option(client, live_librenms, 
 
     from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
 
-    device = make_device("ip-verify-choice", librenms_cf={"default": {"id": 4501}})
+    device = seed_mapping(make_device("ip-verify-choice"), "default", own=4501)
     make_interface(device, "Ethernet1", iface_type="1000base-t")
     live_librenms.server.register(
         "/api/v0/devices/4501/ip",

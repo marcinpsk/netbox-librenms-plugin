@@ -14,6 +14,7 @@ from django.urls import reverse
 from extras.validators import CustomValidator
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 from netbox_librenms_plugin.tests.test_modules_view import configure_servers
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
@@ -73,7 +74,7 @@ class TestAnImportActionShowsNetBoxsMessageOnlyToASuperuser:
         from django.core.exceptions import ValidationError
 
         tag = f"vetext-importname-{int(superuser)}"
-        device, hidden = make_device(tag, librenms_cf={SERVER_KEY: LIBRENMS_ID}), make_device(f"{tag}-hidden")
+        device, hidden = seed_mapping(make_device(tag), SERVER_KEY, own=LIBRENMS_ID), make_device(f"{tag}-hidden")
         _register(librenms_server, f"{tag}-renamed")
         viewer = make_superuser(f"{tag}-superuser") if superuser else None
         if viewer is None:
