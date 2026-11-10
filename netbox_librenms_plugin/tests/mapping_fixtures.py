@@ -9,6 +9,7 @@ import copy
 from contextlib import contextmanager
 
 from netbox_librenms_plugin.server_mappings import (
+    PREFERRED_SERVER_FIELD,
     ChangeOutcome,
     ContainerStatus,
     PreferenceStatus,
@@ -102,6 +103,19 @@ def _record_oob_without_id(obj, server, oob_type):
     entry["oob"] = {"type": oob_type}
     stored[server] = entry
     _put_stored_value(obj, stored)
+
+
+def seed_malformed_preference(obj, *, save=True):
+    """Seed a stored preference that names no server, as a hand edit does; the server mappings stay. Return *obj*."""
+    stored = copy.deepcopy(_stored_value(obj))
+    stored = {} if stored is None else stored
+    if not isinstance(stored, dict):
+        raise ValueError(f"Cannot store a preference on a {read_mapping(obj).container} mapping.")
+    stored[PREFERRED_SERVER_FIELD] = 123
+    fields = _put_stored_value(obj, stored)
+    if save:
+        _save(obj, fields)
+    return obj
 
 
 def seed_unmapped(obj, server="default", *, save=True):
