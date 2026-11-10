@@ -9,49 +9,34 @@ from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_superuser,
 )
+from netbox_librenms_plugin.tests.vlan_intent_helpers import message_texts, seed_vlans, sync, tab_tokens
 
 
-def _seed_vlan_snapshot(device, rows, server_key="default"):
-    """Store a VLAN source snapshot holding *rows*."""
-    from netbox_librenms_plugin.acquisition.registry import Resource
-    from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
+def _disclosed_tokens(response, form_id):
+    """Return the tokens that one form of the rename disclosure posts."""
+    html = response.content.decode()
+    form = re.search(rf'<form[^>]*id="{form_id}".*?</form>', html, re.S).group(0)
+    return re.findall(r'name="confirmation_intent"\s+value="([^"]*)"', form)
 
-    seed_source_snapshot(device, Resource.VLANS, server_key, vlans=rows)
 
+def _grouped_rename(tag, vid, current, proposed):
+    from ipam.models import VLAN, VLANGroup
 
-def _sync_url(device):
-    """Return the public VLAN synchronization endpoint for a device."""
-    from django.urls import reverse
-
-    return reverse(
-        "plugins:netbox_librenms_plugin:sync_selected_vlans",
-        kwargs={"object_type": "device", "object_id": device.pk},
-    )
+    device = make_device(f"vlan-{tag}-device", librenms_cf={"default": {"id": 42}})
+    group = VLANGroup.objects.create(name=f"{tag.title()} group", slug=f"{tag}-group")
+    existing = VLAN.objects.create(vid=vid, group=group, name=current, status="active")
+    seed_vlans(device, [{"vlan_vlan": vid, "vlan_name": proposed}])
+    return device, group, existing
 
 
 @pytest.mark.django_db
 def test_selected_grouped_vlan_requires_confirmation_before_rename(client, settings):
     """A selected VID must not silently replace an existing VLAN name in its group."""
-    from ipam.models import VLAN, VLANGroup
-
     configure_default_librenms_server(settings)
-    device = make_device("vlan-conflict-device", librenms_cf={"default": {"id": 42}})
-    group = VLANGroup.objects.create(name="Conflict group", slug="conflict-group")
-    existing = VLAN.objects.create(vid=100, group=group, name="Current name", status="active")
-    _seed_vlan_snapshot(device, [{"vlan_vlan": 100, "vlan_name": "Proposed name"}])
+    device, group, existing = _grouped_rename("conflict", 100, "Current name", "Proposed name")
     client.force_login(make_superuser("vlan-conflict-user"))
 
-    response = client.post(
-        _sync_url(device),
-        {
-            "server_key": "default",
-            "action": "create_vlans",
-            "select": "100",
-            "vlan_group_100": str(group.pk),
-            "expected_vlan_name_100": "Proposed name",
-        },
-        HTTP_HX_REQUEST="true",
-    )
+    response = sync(client, device, [tab_tokens(client, device)[100]])
 
     assert response.status_code == 200
     assert b"Confirm VLAN changes" in response.content
@@ -64,46 +49,19 @@ def test_selected_grouped_vlan_requires_confirmation_before_rename(client, setti
 
 @pytest.mark.django_db
 def test_confirmed_grouped_vlan_rename_applies_the_disclosed_name(client, settings):
-    """A valid confirmation must rename only the VLAN named by its signed intent."""
+    """A valid confirmation must rename only the VLAN named by its signed operation."""
     from core.models import ObjectChange
     from django.contrib.contenttypes.models import ContentType
-    from ipam.models import VLAN, VLANGroup
+    from ipam.models import VLAN
 
     configure_default_librenms_server(settings)
-    device = make_device("vlan-confirm-device", librenms_cf={"default": {"id": 42}})
-    group = VLANGroup.objects.create(name="Confirm group", slug="confirm-group")
-    existing = VLAN.objects.create(vid=101, group=group, name="Current name", status="active")
-    _seed_vlan_snapshot(device, [{"vlan_vlan": 101, "vlan_name": "Confirmed name"}])
+    device, _group, existing = _grouped_rename("confirm", 101, "Current name", "Confirmed name")
     client.force_login(make_superuser("vlan-confirm-user"))
-    url = _sync_url(device)
+    token = tab_tokens(client, device)[101]
+    disclosure = sync(client, device, [token])
 
-    conflict_response = client.post(
-        url,
-        {
-            "server_key": "default",
-            "action": "create_vlans",
-            "select": "101",
-            "vlan_group_101": str(group.pk),
-            "expected_vlan_name_101": "Confirmed name",
-        },
-        HTTP_HX_REQUEST="true",
-    )
-    conflict = conflict_response.context["conflicts"][0]
-
-    response = client.post(
-        url,
-        {
-            "server_key": "default",
-            "action": "create_vlans",
-            "confirm_conflicts": "1",
-            "force_conflict": "101",
-            "select": "101",
-            "vlan_group_101": str(group.pk),
-            "expected_vlan_name_101": "Confirmed name",
-            "conflict_intent": conflict["intent"],
-        },
-        HTTP_HX_REQUEST="true",
-    )
+    assert _disclosed_tokens(disclosure, "vlan-conflicts-selected-form") == [token]
+    response = sync(client, device, [token], confirm=True)
 
     assert response.status_code == 200
     assert response.headers["HX-Redirect"]
@@ -120,83 +78,44 @@ def test_confirmed_grouped_vlan_rename_applies_the_disclosed_name(client, settin
 @pytest.mark.django_db
 def test_stale_vlan_confirmation_fails_closed(client, settings):
     """A confirmation must not replace a VLAN name changed after disclosure."""
-    from ipam.models import VLAN, VLANGroup
+    from ipam.models import VLAN
 
     configure_default_librenms_server(settings)
-    device = make_device("vlan-stale-device", librenms_cf={"default": {"id": 42}})
-    group = VLANGroup.objects.create(name="Stale group", slug="stale-group")
-    existing = VLAN.objects.create(vid=102, group=group, name="Original name", status="active")
-    _seed_vlan_snapshot(device, [{"vlan_vlan": 102, "vlan_name": "Proposed name"}])
+    device, _group, existing = _grouped_rename("stale", 102, "Original name", "Proposed name")
     client.force_login(make_superuser("vlan-stale-user"))
-    url = _sync_url(device)
-
-    conflict_response = client.post(
-        url,
-        {
-            "server_key": "default",
-            "action": "create_vlans",
-            "select": "102",
-            "vlan_group_102": str(group.pk),
-            "expected_vlan_name_102": "Proposed name",
-        },
-        HTTP_HX_REQUEST="true",
-    )
-    conflict = conflict_response.context["conflicts"][0]
+    disclosure = sync(client, device, [tab_tokens(client, device)[102]])
     VLAN.objects.filter(pk=existing.pk).update(name="Concurrent name")
 
-    response = client.post(
-        url,
-        {
-            "server_key": "default",
-            "action": "create_vlans",
-            "confirm_conflicts": "1",
-            "force_conflict": "102",
-            "select": "102",
-            "vlan_group_102": str(group.pk),
-            "expected_vlan_name_102": "Proposed name",
-            "conflict_intent": conflict["intent"],
-        },
-        HTTP_HX_REQUEST="true",
-    )
+    response = sync(client, device, _disclosed_tokens(disclosure, "vlan-conflicts-selected-form"), confirm=True)
 
     assert response.status_code == 200
     assert response.headers["HX-Redirect"]
-    assert any("changed after confirmation" in str(message) for message in response.wsgi_request._messages)
+    assert any(text.startswith("VLAN 102: ") and "assumptions.target.name" in text for text in message_texts(response))
     existing.refresh_from_db()
     assert existing.name == "Concurrent name"
 
 
 @pytest.mark.django_db
 def test_tampered_vlan_confirmation_syncs_nothing(client, settings):
-    """An invalid intent must not fall back to the unsigned row fields."""
-    from ipam.models import VLAN, VLANGroup
-
+    """An invalid token must not fall back to any unsigned row field."""
     configure_default_librenms_server(settings)
-    device = make_device("vlan-tampered-device", librenms_cf={"default": {"id": 42}})
-    group = VLANGroup.objects.create(name="Tampered group", slug="tampered-group")
-    existing = VLAN.objects.create(vid=103, group=group, name="Current name", status="active")
-    _seed_vlan_snapshot(device, [{"vlan_vlan": 103, "vlan_name": "Proposed name"}])
+    device, group, existing = _grouped_rename("tampered", 103, "Current name", "Proposed name")
     client.force_login(make_superuser("vlan-tampered-user"))
 
-    response = client.post(
-        _sync_url(device),
-        {
-            "server_key": "default",
-            "action": "create_vlans",
-            "confirm_conflicts": "1",
-            "force_conflict": "103",
-            "select": "103",
-            "vlan_group_103": str(group.pk),
-            "expected_vlan_name_103": "Proposed name",
-            "conflict_intent": "invalid-token",
-        },
-        HTTP_HX_REQUEST="true",
+    response = sync(
+        client,
+        device,
+        ["invalid-token"],
+        confirm=True,
+        select="103",
+        vlan_group_103=str(group.pk),
     )
 
     assert response.status_code == 200
     assert response.headers["HX-Redirect"]
-    assert [str(message) for message in response.wsgi_request._messages] == [
-        "VLAN confirmation is invalid or has expired. Refresh the VLAN data and try again."
+    assert message_texts(response) == [
+        "VLAN confirmation is invalid or has expired. Refresh the VLAN data and try again.",
+        "No VLANs synced: 1 skipped (confirmation no longer current).",
     ]
     existing.refresh_from_db()
     assert existing.name == "Current name"
@@ -205,25 +124,11 @@ def test_tampered_vlan_confirmation_syncs_nothing(client, settings):
 @pytest.mark.django_db
 def test_native_vlan_conflict_renders_a_complete_page(client, settings):
     """A native conflict response must render a full page around the confirmation form."""
-    from ipam.models import VLAN, VLANGroup
-
     configure_default_librenms_server(settings)
-    device = make_device("vlan-native-device", librenms_cf={"default": {"id": 42}})
-    group = VLANGroup.objects.create(name="Native group", slug="native-group")
-    existing = VLAN.objects.create(vid=104, group=group, name="Current name", status="active")
-    _seed_vlan_snapshot(device, [{"vlan_vlan": 104, "vlan_name": "Proposed name"}])
+    device, _group, existing = _grouped_rename("native", 104, "Current name", "Proposed name")
     client.force_login(make_superuser("vlan-native-user"))
 
-    response = client.post(
-        _sync_url(device),
-        {
-            "server_key": "default",
-            "action": "create_vlans",
-            "select": "104",
-            "vlan_group_104": str(group.pk),
-            "expected_vlan_name_104": "Proposed name",
-        },
-    )
+    response = sync(client, device, [tab_tokens(client, device)[104]], htmx=False)
 
     assert response.status_code == 200
     assert any(template.name == "netbox_librenms_plugin/vlan_conflicts_page.html" for template in response.templates)
@@ -248,25 +153,12 @@ def _active_tab_urls(response):
 def test_native_vlan_conflict_page_marks_the_sync_tab_active(client, settings):
     """The full conflict page belongs to the LibreNMS Sync tab, not to the device tab."""
     from django.urls import reverse
-    from ipam.models import VLAN, VLANGroup
 
     configure_default_librenms_server(settings)
-    device = make_device("vlan-tabbar-device", librenms_cf={"default": {"id": 42}})
-    group = VLANGroup.objects.create(name="Tabbar group", slug="tabbar-group")
-    VLAN.objects.create(vid=112, group=group, name="Current name", status="active")
-    _seed_vlan_snapshot(device, [{"vlan_vlan": 112, "vlan_name": "Proposed name"}])
+    device, _group, _existing = _grouped_rename("tabbar", 112, "Current name", "Proposed name")
     client.force_login(make_superuser("vlan-tabbar-user"))
 
-    response = client.post(
-        _sync_url(device),
-        {
-            "server_key": "default",
-            "action": "create_vlans",
-            "select": "112",
-            "vlan_group_112": str(group.pk),
-            "expected_vlan_name_112": "Proposed name",
-        },
-    )
+    response = sync(client, device, [tab_tokens(client, device)[112]], htmx=False)
 
     assert response.status_code == 200
     assert _active_tab_urls(response) == [reverse("dcim:device_librenms_sync", kwargs={"pk": device.pk})]
@@ -278,7 +170,7 @@ def test_bulk_vlan_sync_commits_safe_rows_before_confirmation(
     settings,
     django_capture_on_commit_callbacks,
 ):
-    """A safe row must commit while a conflicting rename remains pending."""
+    """A safe row must commit while a conflicting rename remains pending, and Apply all confirms it."""
     from ipam.models import VLAN, VLANGroup
 
     from netbox_librenms_plugin.acquisition.registry import Resource
@@ -290,44 +182,23 @@ def test_bulk_vlan_sync_commits_safe_rows_before_confirmation(
     existing = VLAN.objects.create(vid=105, group=group, name="Current name", status="active")
     snapshot = [
         {"vlan_vlan": 105, "vlan_name": "Proposed name"},
-        {"vlan_vlan": 106, "vlan_name": "Safe name"},
+        {"vlan_vlan": 107, "vlan_name": "Safe name"},
     ]
-    _seed_vlan_snapshot(device, snapshot)
+    seed_vlans(device, snapshot)
     client.force_login(make_superuser("vlan-bulk-user"))
+    tokens = tab_tokens(client, device)
 
     with django_capture_on_commit_callbacks(execute=True):
-        response = client.post(
-            _sync_url(device),
-            {
-                "server_key": "default",
-                "action": "create_vlans",
-                "select": ["105", "106"],
-                "vlan_group_105": str(group.pk),
-                "expected_vlan_name_105": "Proposed name",
-                "vlan_group_106": str(group.pk),
-                "expected_vlan_name_106": "Safe name",
-            },
-            HTTP_HX_REQUEST="true",
-        )
+        response = sync(client, device, [tokens[105], tokens[107]])
 
     assert response.status_code == 200
     assert b"Confirm VLAN changes" in response.content
-    assert VLAN.objects.filter(vid=106, group=group, name="Safe name").exists()
+    assert VLAN.objects.filter(vid=107, group__isnull=True, name="Safe name").exists()
     existing.refresh_from_db()
     assert existing.name == "Current name"
     assert stored_source_value(device, Resource.VLANS, "vlans") == snapshot
 
-    conflict = response.context["conflicts"][0]
-    confirm_response = client.post(
-        _sync_url(device),
-        {
-            "server_key": "default",
-            "action": "create_vlans",
-            "force_all": "1",
-            "conflict_intent": conflict["intent"],
-        },
-        HTTP_HX_REQUEST="true",
-    )
+    confirm_response = sync(client, device, _disclosed_tokens(response, "vlan-conflicts-all-form"), confirm=True)
 
     assert confirm_response.status_code == 200
     assert confirm_response.headers["HX-Redirect"]

@@ -1378,7 +1378,7 @@ def test_vlan_row_submit_keeps_another_page_selection_and_group(page):
         <form id="sync-form" method="post" action="{SELECTION_PAGE_URL}/submit">
           <table id="librenms-vlan-table"><tbody><tr>
             <td><input id="vlan-101" type="checkbox" name="select" value="101"></td>
-            <td><input type="hidden" name="expected_vlan_name_101" value="users">
+            <td><input type="hidden" name="confirmation_intent" value="vlan:token-101" disabled>
               <select name="vlan_group_101">
               <option value="1">Group A</option><option value="2">Group B</option>
             </select></td>
@@ -1389,7 +1389,8 @@ def test_vlan_row_submit_keeps_another_page_selection_and_group(page):
         <input name="server_key" value="production">
         <form id="sync-form" method="post" action="{SELECTION_PAGE_URL}/submit">
           <table id="librenms-vlan-table"><tbody><tr>
-            <td><input type="checkbox" name="select" value="201"></td>
+            <td><input type="checkbox" name="select" value="201">
+              <input type="hidden" name="confirmation_intent" value="vlan:token-201" disabled></td>
             <td><button id="sync-one" type="submit" name="sync_one" value="201">Create</button></td>
           </tr></tbody></table>
         </form>
@@ -1407,7 +1408,8 @@ def test_vlan_row_submit_keeps_another_page_selection_and_group(page):
 
     page.goto(f"{SELECTION_PAGE_URL}?page=2")
     _add_page_scripts(page)
-    page.locator("#sync-form").evaluate("form => form.addEventListener('submit', event => event.preventDefault())")
+    # The window listener runs after the plugin's document listener, so the plugin sees the submit first.
+    page.evaluate("window.addEventListener('submit', event => event.preventDefault())")
     page.click("#sync-one")
 
     posted = page.locator("#sync-form").evaluate(
@@ -1416,15 +1418,16 @@ def test_vlan_row_submit_keeps_another_page_selection_and_group(page):
     stored = page.evaluate("readStoredSelection(document.getElementById('librenms-vlan-table'))")
     assert [pair for pair in posted if pair[0] == "sync_one"] == [["sync_one", "201"]]
     assert [pair for pair in posted if pair == ["select", "101"]] == []
+    assert [pair for pair in posted if pair[0] == "confirmation_intent"] == [["confirmation_intent", "vlan:token-201"]]
     assert stored["101"]["inputs"]["vlan_group_101"] == "2"
-    assert stored["101"]["inputs"]["expected_vlan_name_101"] == "users"
+    assert stored["101"]["inputs"]["confirmation_intent"] == "vlan:token-101"
 
 
 @pytest.mark.parametrize(
     ("table_id", "field", "selected_value", "shown_value"),
     [
-        # A VLAN name rule changed the name.
-        ("librenms-vlan-table", "expected_vlan_name_300", "web+300", "web"),
+        # The VLAN row was assessed again, so it offers another token.
+        ("librenms-vlan-table", "confirmation_intent", "vlan:selected-token", "vlan:shown-token"),
         # The far end of the cable now resolves to another NetBox interface.
         ("librenms-cable-table", "expected_remote_id_300", "100", "200"),
         ("librenms-cable-table-vc", "expected_remote_id_300", "100", "200"),
@@ -2969,14 +2972,32 @@ def test_the_search_line_shares_the_sync_row_and_clears_the_refresh_controls(pag
     assert page.evaluate("document.documentElement.scrollWidth") <= 390
 
 
+DEVICE_PAGE_URL = "https://plugin.example.com/dcim/devices/7/librenms-sync/"
+
+
+def _on_device_page(page):
+    """Open a device sync URL, so a reassessment can name its subject; set_content() keeps the URL."""
+    page.route(
+        DEVICE_PAGE_URL,
+        lambda route: route.fulfill(status=200, content_type="text/html", body="<html><body></body></html>"),
+    )
+    page.goto(DEVICE_PAGE_URL)
+
+
+def _row_token(page):
+    return page.locator('input[name="confirmation_intent"]').input_value()
+
+
 def test_vlan_group_verification_ignores_a_late_response_for_an_old_selection(page):
-    """A late group response must not replace the selected group's row state."""
+    """A late group response must not replace the selected group's row state or token."""
+    _on_device_page(page)
     page.set_content(
         """
         <input name="csrfmiddlewaretoken" value="test-token">
         <form>
           <table id="librenms-vlan-table"><tbody><tr>
-            <td data-col="vlan_id"><span class="text-danger">501</span></td>
+            <td data-col="vlan_id"><span class="text-danger">501</span><input type="hidden"
+              name="confirmation_intent" value="vlan:rendered" disabled></td>
             <td data-col="name"><span class="text-danger">Users</span></td>
             <td data-col="vlan_group_selection">
               <select class="vlan-sync-group-select" name="vlan_group_501"
@@ -3017,11 +3038,13 @@ def test_vlan_group_verification_ignores_a_late_response_for_an_old_selection(pa
         body=json.dumps(
             {
                 "status": "success",
+                "vlan_group_id": 2,
                 "css_class": "text-warning",
                 "exists_in_netbox": True,
                 "name_matches": False,
                 "netbox_vlan_name": "Group B name",
                 "status_html": '<button id="group-b-action">Update B</button>',
+                "confirmation_intent": "vlan:group-b",
             }
         ),
     )
@@ -3032,11 +3055,13 @@ def test_vlan_group_verification_ignores_a_late_response_for_an_old_selection(pa
         body=json.dumps(
             {
                 "status": "success",
+                "vlan_group_id": 1,
                 "css_class": "text-success",
                 "exists_in_netbox": True,
                 "name_matches": True,
                 "netbox_vlan_name": "Users",
                 "status_html": '<span id="group-a-status">Synced A</span>',
+                "confirmation_intent": "vlan:group-a",
             }
         ),
     )
@@ -3046,6 +3071,7 @@ def test_vlan_group_verification_ignores_a_late_response_for_an_old_selection(pa
     assert page.locator("#group-a-status").count() == 0
     assert page.locator('td[data-col="status"]').inner_text() == "Update B"
     assert page.locator('td[data-col="vlan_id"] span').get_attribute("class") == "text-warning"
+    assert _row_token(page) == "vlan:group-b"
 
 
 VLAN_GROUP_ROW_PAGE = """
@@ -3055,6 +3081,7 @@ VLAN_GROUP_ROW_PAGE = """
     <td data-col="vlan_id"><span class="text-danger">501</span></td>
     <td data-col="name"><span class="text-danger">Users</span></td>
     <td data-col="vlan_group_selection">
+      <input type="hidden" name="confirmation_intent" value="vlan:rendered" disabled>
       <select class="vlan-sync-group-select" name="vlan_group_501" data-vlan-id="501" data-vlan-name="Users">
         <option value="" selected>Global</option>
         <option value="1">Group A</option>
@@ -3069,10 +3096,12 @@ VLAN_GROUP_ROW_PAGE = """
 
 @pytest.mark.parametrize("http_status", [500, 200], ids=["http-error", "rejected"])
 def test_a_failed_vlan_group_verification_restores_the_last_verified_group(page, http_status):
-    """The row shows the verdict of the last verified group, so a failed verify selects that group again."""
+    """The row shows the verdict of the last verified group, so a failed verify selects that group and its token again."""
+    _on_device_page(page)
     page.set_content(VLAN_GROUP_ROW_PAGE)
+    in_a = {"status": "success", "vlan_group_id": 1, "css_class": "text-success", "confirmation_intent": "vlan:in-a"}
     answers = [
-        (200, {"status": "success", "css_class": "text-success", "status_html": '<span id="in-a">In A</span>'}),
+        (200, {**in_a, "status_html": '<span id="in-a">In A</span>'}),
         (http_status, {"status": "error", "message": "x"}),
     ]
 
@@ -3092,10 +3121,12 @@ def test_a_failed_vlan_group_verification_restores_the_last_verified_group(page,
 
     assert not answers
     assert page.locator("#in-a").count() == 1
+    assert _row_token(page) == "vlan:in-a"
 
 
 def test_a_failed_verification_of_a_superseded_group_neither_rolls_back_nor_hides_the_latest(page):
     """A, then B, then A again: the first A request fails late, and the latest A request still decides the row."""
+    _on_device_page(page)
     page.set_content(VLAN_GROUP_ROW_PAGE)
     held = []
     page.route("**/plugins/librenms_plugin/verify-vlan-sync-group/", lambda route: held.append(route))
@@ -3117,7 +3148,16 @@ def test_a_failed_verification_of_a_superseded_group_neither_rolls_back_nor_hide
     wait_for_requests(1)
     select.select_option("2")
     wait_for_requests(2)
-    answer(held[1], 200, {"status": "success", "css_class": "text-success", "status_html": '<span id="in-b">B</span>'})
+    answer(
+        held[1],
+        200,
+        {
+            "status": "success",
+            "vlan_group_id": 2,
+            "css_class": "text-success",
+            "status_html": '<span id="in-b">B</span>',
+        },
+    )
     page.locator("#in-b").wait_for()
     select.select_option("1")
     wait_for_requests(3)
@@ -3126,7 +3166,16 @@ def test_a_failed_verification_of_a_superseded_group_neither_rolls_back_nor_hide
     # The answer arrives, or the request was aborted; either way the page handles it before the next answer.
     held[0].request.response()
     page.evaluate("() => new Promise((resolve) => setTimeout(resolve))")
-    answer(held[2], 200, {"status": "success", "css_class": "text-success", "status_html": '<span id="in-a">A</span>'})
+    answer(
+        held[2],
+        200,
+        {
+            "status": "success",
+            "vlan_group_id": 1,
+            "css_class": "text-success",
+            "status_html": '<span id="in-a">A</span>',
+        },
+    )
     page.locator("#in-a").wait_for(timeout=3000)
 
     assert select.input_value() == "1"
@@ -3196,6 +3245,7 @@ def test_vlan_modal_group_verification_ignores_a_late_response_for_an_old_select
 
 def test_restored_vlan_group_selection_reverifies_only_a_changed_group(page):
     """A restored group must repaint its row without rechecking an unchanged row."""
+    _on_device_page(page)
     page.set_content(
         """
         <input name="csrfmiddlewaretoken" value="test-token">
@@ -3243,6 +3293,7 @@ def test_restored_vlan_group_selection_reverifies_only_a_changed_group(page):
             body=json.dumps(
                 {
                     "status": "success",
+                    "vlan_group_id": payload["vlan_group_id"],
                     "css_class": "text-danger",
                     "exists_in_netbox": False,
                     "name_matches": False,

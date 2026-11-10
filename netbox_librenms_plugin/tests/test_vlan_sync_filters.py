@@ -15,9 +15,11 @@ from django.urls import reverse
 from ipam.models import VLAN, VLANGroup
 
 from netbox_librenms_plugin.acquisition.registry import Resource
+from netbox_librenms_plugin.confirmation_intent import FIELD
 from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
 from netbox_librenms_plugin.tests.test_interface_sync_filters import CELL, _visible_text, serve_sync_page
+from netbox_librenms_plugin.tests.vlan_intent_helpers import tab_tokens
 
 SERVER_KEY = "default"
 LIBRENMS_ID = 4242
@@ -316,13 +318,7 @@ class TestInvalidFilters:
 
         response = client.post(
             f"{_sync_url(device)}?{query}",
-            {
-                "server_key": SERVER_KEY,
-                "action": "create_vlans",
-                "select": ["30"],
-                "vlan_group_30": "",
-                "expected_vlan_name_30": "voice",
-            },
+            {"server_key": SERVER_KEY, "action": "create_vlans", FIELD: [tab_tokens(client, device)[30]]},
             HTTP_HX_REQUEST="true",
         )
 
@@ -364,13 +360,7 @@ class TestRedirectsKeepThePageQuery:
 
         response = client.post(
             action,
-            {
-                "server_key": SERVER_KEY,
-                "action": "create_vlans",
-                "select": ["30"],
-                "vlan_group_30": "",
-                "expected_vlan_name_30": "voice",
-            },
+            {"server_key": SERVER_KEY, "action": "create_vlans", FIELD: [tab_tokens(client, device)[30]]},
             HTTP_HX_REQUEST="true",
         )
 
@@ -386,26 +376,21 @@ class TestRedirectsKeepThePageQuery:
     @pytest.mark.parametrize("htmx", [True, False])
     def test_the_rename_confirmation_keeps_the_filters_and_page(self, client, settings, librenms_server, htmx):
         device = serve_sync_page(client, settings, librenms_server, _mixed_device(f"rename-{htmx}"))
-        group = VLANGroup.objects.get(name=f"campus-rename-{htmx}")
         action = _rendered_sync_action(client, device)
         headers = {"HTTP_HX_REQUEST": "true"} if htmx else {}
 
         response = client.post(
             action,
-            {
-                "server_key": SERVER_KEY,
-                "action": "create_vlans",
-                "select": ["20"],
-                "vlan_group_20": str(group.pk),
-                "expected_vlan_name_20": "guests",
-            },
+            {"server_key": SERVER_KEY, "action": "create_vlans", FIELD: [tab_tokens(client, device)[20]]},
             **headers,
         )
 
         assert response.status_code == 200
         html = response.content.decode()
-        (confirm_action,) = re.findall(r'<form method="post"[^>]*action="([^"]*)"', html)
-        _assert_keeps_the_page_query(unescape(confirm_action), _sync_url(device))
+        confirm_actions = re.findall(r'<form method="post"[^>]*action="([^"]*)"', html)
+        assert len(confirm_actions) == 2
+        for confirm_action in confirm_actions:
+            _assert_keeps_the_page_query(unescape(confirm_action), _sync_url(device))
         if not htmx:
             hrefs = [
                 unescape(href)

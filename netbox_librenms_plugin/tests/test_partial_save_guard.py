@@ -34,7 +34,7 @@ ALLOWED = [
     ("forms.py", "CableSyncSettingsForm.save", "tag", NAME_WITHOUT_NATURAL_ORDER, "Tag has no _name field."),
     (
         "views/sync/vlans.py",
-        "SyncVLANsView._apply_confirmed_vlan_change",
+        "SyncVLANsView._rename",
         "vlan",
         NAME_WITHOUT_NATURAL_ORDER,
         "VLAN has no _name field.",
