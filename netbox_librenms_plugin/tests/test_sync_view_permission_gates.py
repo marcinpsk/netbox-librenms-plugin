@@ -15,9 +15,10 @@ EXEMPT_VIEWS = {
     "SaveUserPrefView": "an operator preference: it stores the operator's own toggle value",
     "AddDeviceTypeMappingView": "an operator-authored mapping: the operator picks the device type for the string",
     "AddPlatformMappingView": "an operator-authored mapping: the operator picks the platform for the OS string",
-    # The design keeps import creation outside #177: other import workflows do not migrate here.
-    "BulkImportDevicesView": "creates new objects from the import plan, outside reconciliation",
 }
+
+# The class of a confirmation-required view that the design has no resource for yet; it needs a design decision.
+NO_RESOURCE_YET = "no resource yet"
 
 # Confirmation-required views that a later increment migrates to the confirmation intent module.
 MIGRATION_INVENTORY = {
@@ -58,6 +59,8 @@ MIGRATION_INVENTORY = {
     "AddAsOOBView": "mapping_lifecycle",
     "CreatePlatformFromImportView": "device_field",
     "MergeNetBoxDevicesView": "migration",
+    # It creates objects from the shown import plan, and the design names no import-create resource.
+    "BulkImportDevicesView": NO_RESOURCE_YET,
 }
 
 # The inventory may only shrink: a new confirmation-required view declares its actions instead.
@@ -100,6 +103,7 @@ _INVENTORY_CEILING = frozenset(
         "AddAsOOBView",
         "CreatePlatformFromImportView",
         "MergeNetBoxDevicesView",
+        "BulkImportDevicesView",
     }
 )
 
@@ -377,7 +381,14 @@ class TestConfirmationInventory:
         views = _confirmation_views()
         assert set(EXEMPT_VIEWS) - set(views) == set()
         assert set(MIGRATION_INVENTORY) - set(views) == set()
-        assert all(resource in set(intent.Resource) for resource in MIGRATION_INVENTORY.values())
+        assert all(
+            resource in set(intent.Resource) or resource == NO_RESOURCE_YET for resource in MIGRATION_INVENTORY.values()
+        )
+
+    def test_the_views_without_a_resource_are_deferred_for_a_design_decision(self):
+        # The last increment's empty inventory forces the decision on each of them.
+        deferred = {name for name, resource in MIGRATION_INVENTORY.items() if resource == NO_RESOURCE_YET}
+        assert deferred == {"BulkImportDevicesView"}
 
     def test_the_migration_inventory_only_shrinks(self):
         assert set(MIGRATION_INVENTORY) - _INVENTORY_CEILING == set()
