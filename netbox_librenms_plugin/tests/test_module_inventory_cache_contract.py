@@ -81,10 +81,15 @@ class TestWritersCheckTheOobLinkOfTheSnapshot:
 
     @staticmethod
     def _link(device, link):
-        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+        from netbox_librenms_plugin.server_mappings import clear_oob
+        from netbox_librenms_plugin.tests.mapping_fixtures import (
+            apply_mapping_change,
+            seed_mapping,
+            seed_stored_mapping,
+        )
 
         if link == "none":
-            seed_stored_mapping(device, {"default": {"id": 7}})
+            apply_mapping_change(device, clear_oob(device, "default"))
         elif link == "linked":
             seed_mapping(device, "default", oob=999)
         elif link == "corrupt":
@@ -106,11 +111,9 @@ class TestWritersCheckTheOobLinkOfTheSnapshot:
 
         view, device = TestSeedInventoryMatchesTheReaderContract._view_and_device(f"oob-reader-{link}", 7)
         inventory = [{"entPhysicalIndex": 1, "entPhysicalName": "Bay 1"}]
-        from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
-        seed_stored_mapping(
-            device, {"default": {"id": 7, **({"oob": {"id": cached_oob}} if cached_oob is not None else {})}}
-        )
+        seed_mapping(device, own=7, oob=cached_oob, save=False)
         seed_modules_snapshot(device, inventory, oob_inventory=[] if cached_oob is not None else None)
         self._link(device, link)
 

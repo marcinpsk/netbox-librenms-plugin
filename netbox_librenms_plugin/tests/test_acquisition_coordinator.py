@@ -103,11 +103,11 @@ def test_a_refresh_of_an_unmapped_subject_fails_and_drops_the_older_snapshot(liv
     from netbox_librenms_plugin.tests.conftest import make_device
     from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
 
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_unmapped
 
     device = make_device("coord-unmapped", librenms_cf={SERVER_KEY: {"id": 505}})
     seed_source_snapshot(device, Resource.VLANS, SERVER_KEY, vlans=[])
-    seed_stored_mapping(device, {SERVER_KEY: None}, save=True)
+    seed_unmapped(device, SERVER_KEY)
 
     result = source_cache.refresh(make_request("post"), device, Resource.VLANS, SERVER_KEY)
 

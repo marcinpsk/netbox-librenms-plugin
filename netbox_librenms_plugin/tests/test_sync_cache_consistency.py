@@ -46,11 +46,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis_members,
     make_vm,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import (
-    apply_mapping_change,
-    seed_mapping,
-    seed_stored_mapping,
-)
+from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change, mapping_in_memory, seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     ip_address_row,
     port_pair,
@@ -387,7 +383,9 @@ def test_module_cache_status_rejects_a_snapshot_of_another_oob_link_like_the_tab
 @pytest.mark.parametrize("remap", ["save", "concurrent_row_write"])
 def test_module_cache_status_agrees_with_the_tab_after_the_host_mapping_changes(client, settings, remap):
     """A snapshot of the old host id is one the Modules tab discards, so status must not call it ready."""
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping_row
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_mapping_row
 
     _configure_servers(settings)
     device = make_device("cache-status-module-host", librenms_cf={"primary": {"id": 6407}})
@@ -412,7 +410,7 @@ def test_module_cache_status_agrees_with_the_tab_after_the_host_mapping_changes(
     if remap == "save":
         seed_mapping(device, "primary", own=6410)
     else:
-        seed_stored_mapping_row(device, {"primary": {"id": 6410}})
+        seed_mapping_row(device, seed_mapping(Device(), "primary", own=6410, save=False))
     after = status_and_fragment()
 
     assert before == (True, True)
@@ -427,9 +425,8 @@ def test_module_cache_fragment_does_not_discover_a_missing_host_id(client, setti
         "cache-only-module",
         librenms_cf={"primary": {"oob": {"id": 6405}}},
     )
-    seed_mapping(device, "primary", own=9999, save=False)
-    seed_modules_snapshot(device, [], oob_inventory=[], server_key="primary")
-    seed_stored_mapping(device, {"primary": {"oob": {"id": 6405}}})
+    with mapping_in_memory(device, "primary", own=9999):
+        seed_modules_snapshot(device, [], oob_inventory=[], server_key="primary")
     client.force_login(make_superuser("cache-only-module-user"))
     url = reverse(
         "plugins:netbox_librenms_plugin:sync_cache_fragment",
@@ -603,8 +600,8 @@ def test_committed_interface_sync_invalidates_only_mapped_page_and_shared_snapsh
     settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]["primary"]["cache_timeout"] = 60
     settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]["secondary"]["cache_timeout"] = 600
     _chassis, (page_device, secondary_owner, sibling) = make_virtual_chassis_members("cache-scope", count=3)
-    seed_stored_mapping(page_device, {"primary": {"id": 41}}, save=True)
-    seed_stored_mapping(secondary_owner, {"secondary": {"id": 42}}, save=True)
+    seed_mapping(page_device, "primary", own=41)
+    seed_mapping(secondary_owner, "secondary", own=42)
 
     source = seed_interfaces_snapshot(
         page_device,
@@ -719,7 +716,7 @@ def test_a_sibling_refresh_clears_the_shared_tab_block_on_every_member(
     """A shared-tab refresh on one VC member must unblock that tab on its siblings."""
     _configure_servers(settings)
     _chassis, (owner, sibling) = make_virtual_chassis_members("cache-shared-state")
-    seed_stored_mapping(owner, {"primary": {"id": 61}}, save=True)
+    seed_mapping(owner, "primary", own=61)
     remote_device = make_device("cache-shared-state-remote", librenms_cf={"primary": {"id": 62}})
     local = make_interface(sibling, "Ethernet1", iface_type="1000base-t")
     remote = make_interface(remote_device, "Ethernet2", iface_type="1000base-t")
@@ -806,7 +803,7 @@ def test_fully_skipped_interface_request_preserves_all_snapshots(client, setting
     """A request that writes nothing must not invalidate another tab."""
     _configure_servers(settings)
     _chassis, (device, _sibling) = make_virtual_chassis_members("cache-noop", count=2)
-    seed_stored_mapping(device, {"primary": {"id": 51}}, save=True)
+    seed_mapping(device, "primary", own=51)
     source = seed_interfaces_snapshot(device, [], server_key="primary")
     ip_snapshot = seed_ip_snapshot(device, [ip_address_row("198.18.20.10", 7010)], server_key="primary")
 
@@ -1424,8 +1421,9 @@ def test_request_transitions_for_different_servers_preserve_both_sources(setting
     first_source_server, second_source_server, idle_server = configured_server_keys
     device = make_device(
         "cache-multi-server-request-transitions",
-        librenms_cf={server_key: {"id": 650 + index} for index, server_key in enumerate(configured_server_keys)},
     )
+    for index, server_key in enumerate(configured_server_keys):
+        seed_mapping(device, server_key, own=650 + index)
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     source_payloads = {
         first_source_server: {"snapshot": "first-source"},
@@ -1908,10 +1906,9 @@ def test_cable_refresh_refuses_an_ambiguous_server_key(client, settings, primary
     """QueryDict.get() keeps the LAST repeated value, so an ambiguous POST could refresh another server."""
     _configure_servers(settings)
     settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]["secondary"]["librenms_url"] = librenms_server.url
-    device = make_device(
-        "cache-cable-ambiguous",
-        librenms_cf={"primary": {"id": 671}, "secondary": {"id": 672}},
-    )
+    device = make_device("cache-cable-ambiguous")
+    seed_mapping(device, "primary", own=671, save=False)
+    seed_mapping(device, "secondary", own=672)
     client.force_login(make_superuser("cache-cable-ambiguous-user"))
     url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", kwargs={"pk": device.pk})
 
@@ -2997,7 +2994,7 @@ def test_cache_mutation_resolves_the_shared_owner_once_per_server(
     """The post-commit cleanup must not re-resolve the chassis owner for every tab."""
     _configure_servers(settings)
     _chassis, (page_device, _sibling) = make_virtual_chassis_members("cache-owner-resolution", count=2)
-    seed_stored_mapping(page_device, {"primary": {"id": 61}}, save=True)
+    seed_mapping(page_device, "primary", own=61)
     interface = make_interface(page_device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(interface, "primary", own=7101)
     # ifAlias: only a real field change makes the sync a mutation, and only a mutation

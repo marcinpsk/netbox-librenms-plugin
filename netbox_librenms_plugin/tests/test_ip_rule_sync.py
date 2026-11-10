@@ -507,7 +507,7 @@ class TestTheImportOobAttachReadsTheMappings:
     def test_an_ignored_oob_ip_is_not_set_and_the_link_still_commits(self, client, live_librenms, prefix, ignored):
         from dcim.models import Device
 
-        from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
+        from netbox_librenms_plugin.server_mappings import read_mapping
 
         IPAddressMapping.objects.create(prefix=prefix)
         target = make_device(f"ip-rule-oob-{ignored}", serial=f"IP-RULE-OOB-{ignored}")
@@ -516,7 +516,7 @@ class TestTheImportOobAttachReadsTheMappings:
         response = self._add_as_oob(client, live_librenms, target)
 
         device = Device.objects.get(pk=target.pk)
-        assert stored_mapping_for_test(device)[SERVER_KEY]["oob"]["id"] == self.OOB_DEVICE_ID
+        assert read_mapping(device).oob_id(SERVER_KEY) == self.OOB_DEVICE_ID
         # The other prefix is the positive control: the same request sets the OOB IP.
         assert (device.oob_ip is None) is ignored
         assert IPAddress.objects.filter(address__net_host=self.OOB_IP).exists() is (not ignored)

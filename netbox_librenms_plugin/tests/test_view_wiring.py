@@ -19,7 +19,7 @@ import pytest
 from netbox_librenms_plugin.tests.source_snapshot_helpers import link_row, port_row, seed_cables_snapshot
 
 from netbox_librenms_plugin.tests.conftest import configured_server_key
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, stored_mapping_for_test
+from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary, seed_mapping
 
 
 class TestSlashlessRouteAliases:
@@ -443,7 +443,7 @@ class TestStatusListsShowABusyClaimAsUnknown:
             "Another operation is linking some of these objects. Refresh to see their status."
         ]
         busy.refresh_from_db()
-        assert stored_mapping_for_test(busy) is None
+        assert mapping_summary(busy) == {}
 
 
 class TestRequiredObjectPermissionsWiring:

@@ -21,6 +21,7 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import (
     mapping_from_change_record,
+    seed_mapping,
     seed_stored_mapping,
     seed_stored_mapping_row,
     stored_mapping_for_test,
@@ -533,7 +534,7 @@ def test_a_blocked_vc_member_links_to_the_sync_device_that_owns_the_mapping(clie
     }
     settings.PLUGINS_CONFIG = plugin_config
     _chassis, (owner, viewed_member) = make_virtual_chassis_members("blocked-vc-owner", count=2)
-    seed_stored_mapping(owner, {"incomplete": {"id": 13541}}, save=True)
+    seed_mapping(owner, "incomplete", own=13541)
     client.force_login(make_superuser("blocked-vc-viewer"))
 
     response = client.get(_sync_url(viewed_member))

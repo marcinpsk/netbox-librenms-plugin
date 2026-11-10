@@ -35,7 +35,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
     run_in_threads,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     ip_address_row,
     seed_interfaces_snapshot,
@@ -539,9 +539,9 @@ def test_refresh_and_sync_accepts_an_already_prefixed_address(
 @pytest.mark.parametrize(
     ("tag", "binding", "matches"),
     [
-        ("ip-name-other-port", {"default": 7999}, False),
+        ("ip-name-other-port", "default", False),
         ("ip-name-unbound", None, True),
-        ("ip-name-other-server", {"secondary": 7999}, True),
+        ("ip-name-other-server", "secondary", True),
     ],
 )
 def test_a_same_name_interface_bound_to_another_port_does_not_take_the_ip(
@@ -552,7 +552,7 @@ def test_a_same_name_interface_bound_to_another_port_does_not_take_the_ip(
     device = make_device(tag, librenms_cf={"default": {"id": 42}})
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     if binding is not None:
-        seed_stored_mapping(interface, binding, save=True)
+        seed_mapping(interface, binding, own=7999)
     client.force_login(make_superuser(f"{tag}-user"))
     assert _refresh_ip_snapshot(client, device, "198.18.40.10", 24, live_librenms).status_code == 200
 
@@ -710,7 +710,7 @@ def test_native_ip_conflict_page_marks_the_sync_tab_active(client, settings, liv
         target = VMInterface.objects.create(virtual_machine=obj, name="Ethernet1")
         holder = VMInterface.objects.create(virtual_machine=obj, name="Ethernet2")
         refresh_name, sync_tab_name = "vm_ipaddress_sync", "virtualization:virtualmachine_librenms_sync"
-    seed_stored_mapping(obj, {"default": {"id": 42}}, save=True)
+    seed_mapping(obj, "default", own=42)
     seed_mapping(target, "default", own=7001)
     IPAddress.objects.create(address="198.18.2.30/24", assigned_object=holder)
     client.force_login(make_superuser(f"ip-conflict-tabbar-{object_type}"))
@@ -815,7 +815,7 @@ def test_confirmation_replays_create_missing_when_the_target_name_turns_ambiguou
     _configure_test_server(settings)
     _chassis, members = make_virtual_chassis_members("ip-conflict-vc", count=3)
     page_device, target_device, sibling = members
-    seed_stored_mapping(page_device, {"default": {"id": 42}}, save=True)
+    seed_mapping(page_device, "default", own=42)
     # The signed target: an unbound sibling interface, unambiguous by name while the intent is built.
     target = make_interface(target_device, "Ethernet2/1", iface_type="1000base-t")
     holder = make_interface(page_device, "Ethernet1/9", iface_type="1000base-t")
@@ -1215,7 +1215,7 @@ def test_create_missing_interface_resolves_the_virtual_chassis_member(client, se
     _configure_test_server(settings)
     _chassis, members = make_virtual_chassis_members("ip-create-vc")
     page_device, target_device = members
-    seed_stored_mapping(page_device, {"default": {"id": 42}}, save=True)
+    seed_mapping(page_device, "default", own=42)
     rows = [
         {
             "address": "198.18.13.10",
@@ -1264,7 +1264,7 @@ def test_create_missing_interface_supports_virtual_machine_ip_sync(client, setti
 
     _configure_test_server(settings)
     virtual_machine = make_vm("ip-create-vm")
-    seed_stored_mapping(virtual_machine, {"default": {"id": 42}}, save=True)
+    seed_mapping(virtual_machine, "default", own=42)
     rows = [
         {
             "address": "2001:db8:14::10",
@@ -1313,7 +1313,7 @@ def test_create_missing_interface_measures_the_name_against_the_vm_writer_model(
 
     _configure_test_server(settings)
     virtual_machine = make_vm("ip-create-vm")
-    seed_stored_mapping(virtual_machine, {"default": {"id": 42}}, save=True)
+    seed_mapping(virtual_machine, "default", own=42)
     rows = [
         {
             "address": "2001:db8:14::10",
@@ -1558,7 +1558,7 @@ def test_direct_ip_sync_post_does_not_mutate_a_migrated_donor(client, settings, 
 
     _configure_test_server(settings)
     _chassis, (page, member) = make_virtual_chassis_members(f"ip-migrated-{migrated}")
-    seed_stored_mapping(page, {"default": {"id": 42}}, save=True)
+    seed_mapping(page, "default", own=42)
     donor = page if migrated == "page" else member
     winner = make_device(f"ip-migration-winner-{migrated}")
     interface = make_interface(donor, "Ethernet1", iface_type="1000base-t")

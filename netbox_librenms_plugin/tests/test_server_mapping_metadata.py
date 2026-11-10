@@ -77,7 +77,7 @@ def test_identity_reader_and_writer_reject_reserved_metadata_key():
 def test_numeric_preference_metadata_cannot_become_vc_mapping_owner():
     """VC owner discovery ignores metadata even when its malformed value looks like an ID."""
     _chassis, (metadata_member, mapping_owner) = make_virtual_chassis_members("reserved-owner", count=2)
-    seed_stored_mapping(metadata_member, {PREFERRED_SERVER_FIELD: "13522"}, save=True)
+    seed_mapping(metadata_member, "13522", preferred=True)
     seed_mapping(mapping_owner, "primary", own=13523)
 
     assert get_librenms_sync_device(metadata_member, server_key=None) == mapping_owner

@@ -22,7 +22,7 @@ from django.test import RequestFactory
 from django_htmx.middleware import HtmxDetails
 
 from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, stored_mapping_for_test
+from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary, seed_mapping
 
 SERVER_KEY = "default"
 
@@ -135,7 +135,7 @@ class TestUpdateModuleInterfaceBindMessage:
         # The view wrote nothing: the row and its binding are as the concurrent writer left them.
         stored = Interface.objects.get(pk=iface.pk)
         assert stored.last_updated == iface.last_updated
-        assert stored_mapping_for_test(stored) == stored_mapping_for_test(iface)
+        assert mapping_summary(stored) == mapping_summary(iface)
 
     def test_real_rebind_still_announces_updated_interface(self):
         # Positive control: the interface has NO port binding yet, so posting a port_id actually

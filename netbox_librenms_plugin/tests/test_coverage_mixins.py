@@ -15,7 +15,6 @@ import pytest
 from dcim.models import Interface
 
 from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, configure_no_librenms_servers
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
 
 
 def server_entry(key, *, display_name=None):
@@ -149,15 +148,15 @@ class TestBuildMigratedContextLazyWinner:
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
 
+        from netbox_librenms_plugin.server_mappings import mark_migrated
         from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
         from netbox_librenms_plugin.utils import build_migrated_context
 
         donor = make_device("bmc-self")
         # A self-pointing marker (device_id == donor.pk) is corrupt: it must not flip the donor into
         # migrated mode, and the suppression happens in memory — no winner Device fetch.
-        seed_stored_mapping(
-            donor, {"default": {"_migrated_to": {"device_id": donor.pk, "server_key": "default", "at": "x"}}}, save=True
-        )
+        apply_mapping_change(donor, mark_migrated(donor, donor.pk, "default", at="x")).save()
         with CaptureQueriesContext(connection) as cap:
             ctx = build_migrated_context(donor, "default")
         assert ctx["migrated_to_marker"] is None

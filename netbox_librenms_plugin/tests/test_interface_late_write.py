@@ -50,7 +50,7 @@ from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change
 from netbox_librenms_plugin.tests.mapping_fixtures import (
     custom_fields_without_mapping,
     mapping_from_change_record,
-    seed_stored_mapping,
+    seed_mapping,
 )
 from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, port_vlans, seed_ip_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, messages_on
@@ -626,7 +626,7 @@ def _ip_tab_chassis(tag, names):
     create-missing writer finds member 2 from the port name and writes its interface.
     """
     _chassis, (page, member, sibling) = make_virtual_chassis_members(tag, count=3)
-    seed_stored_mapping(page, {SERVER_KEY: {"id": 42}}, save=True)
+    seed_mapping(page, SERVER_KEY, own=42)
     for offset, name in enumerate(names):
         bound_interface(sibling, name, 7900 + offset)
     return page, [make_interface(member, name, iface_type="1000base-t") for name in names]

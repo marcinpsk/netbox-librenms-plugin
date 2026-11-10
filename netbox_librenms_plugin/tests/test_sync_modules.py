@@ -26,7 +26,7 @@ from netbox_librenms_plugin.tests.conftest import (
     stack_inventory,
     transactional_db_with_all_apps,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
+from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary, seed_mapping
 from netbox_librenms_plugin.tests.lock_conflict_helpers import (
     aborting_statement,
     failing_statement,
@@ -633,8 +633,8 @@ def _bind(device, port_id, name, server_key="default", module_pk=None):
 @pytest.mark.parametrize(
     ("loser_server", "loser_port", "expected_status", "expected_mapping"),
     [
-        ("secondary", 302, "bound", {"default": 301, "secondary": 302}),
-        ("default", 303, "conflict", {"default": 301}),
+        ("secondary", 302, "bound", {"default": {"own": 301}, "secondary": {"own": 302}}),
+        ("default", 303, "conflict", {"default": {"own": 301}}),
     ],
     ids=["another-server", "same-server"],
 )
@@ -658,7 +658,7 @@ def test_a_bind_that_read_its_interface_before_a_concurrent_bind_keeps_the_winne
         # The name chooses again under the lock, and the name now belongs to the winner's port.
         assert loser_result["reason"] == "Ethernet30 is already bound to a different LibreNMS port; not overwriting"
     interface.refresh_from_db()
-    assert stored_mapping_for_test(interface) == expected_mapping
+    assert mapping_summary(interface) == expected_mapping
 
 
 @transactional_db_with_all_apps()
@@ -718,7 +718,7 @@ def test_a_bind_whose_bound_interface_was_renamed_still_binds_it():
     assert result == {"status": "bound", "interface": "Ethernet31", "port_id": 305, "changed": True}
     interface.refresh_from_db()
     assert (interface.name, interface.module_id) == ("Ethernet31", module.pk)
-    assert stored_mapping_for_test(interface) == {"default": 305}
+    assert mapping_summary(interface) == {"default": {"own": 305}}
 
 
 class TestBranchCollection:
@@ -1407,7 +1407,7 @@ class TestInstallAndUpdateViews:
             device.vc_position = position
             device.save()
         VirtualChassis.objects.filter(pk=vc.pk).update(master=page)
-        seed_stored_mapping(page, {"default": {"id": 77}}, save=True)
+        seed_mapping(page, "default", own=77)
         module_type = ModuleType.objects.create(manufacturer=member_mfr, model="TargetRulesModule")
         # Scoped to the MEMBER's manufacturer, so only a target-resolved lookup finds it.
         InventoryIgnoreRule.objects.create(
@@ -1457,7 +1457,7 @@ class TestInstallAndUpdateViews:
             device.vc_position = position
             device.save()
         VirtualChassis.objects.filter(pk=vc.pk).update(master=page)
-        seed_stored_mapping(page, {"default": {"id": 78}}, save=True)
+        seed_mapping(page, "default", own=78)
         module_type = ModuleType.objects.create(manufacturer=member_mfr, model="AncestorRulesOptic")
         # Scoped to the member's vendor: the serial-less parent stays with the page member, its child goes to the member.
         InventoryIgnoreRule.objects.create(
@@ -3049,7 +3049,7 @@ def _install_selected(client, device, rows, select):
     from netbox_librenms_plugin.tests.conftest import make_superuser
 
     # The snapshot answers only for the LibreNMS device that the stored mapping names.
-    seed_stored_mapping(device, {"default": {"id": 4601}}, save=True)
+    seed_mapping(device, "default", own=4601)
     seed_inventory(device, rows, librenms_id=4601)
     user = make_superuser(f"{device.name}-user")
     data = {**_rendered_fields(device, "install-selected", user=user), "select": select}

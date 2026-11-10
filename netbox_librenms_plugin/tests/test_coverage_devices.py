@@ -18,7 +18,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_virtual_chassis_members,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_interfaces_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
 from netbox_librenms_plugin.views.object_sync.devices import (
@@ -387,7 +387,7 @@ class TestSaveVLANGroupOverridesEndpoint:
         overrides_key = view.get_vlan_overrides_key(device, SERVER_KEY)
         seed_interfaces_snapshot(device, [_port()], server_key=SERVER_KEY)
         # The write signals run on commit, which this test never reaches, so only the binding refuses the snapshot.
-        seed_stored_mapping(device, {SERVER_KEY: {"id": 153, "oob": {"id": 154, "type": "idrac"}}}, save=True)
+        seed_mapping(device, SERVER_KEY, own=153, oob=154, oob_type="idrac")
         assert cache.ttl(source_cache.snapshot_key(device, Resource.INTERFACES, SERVER_KEY)) > 0
         _login(client, "save-vlan-overrides-rebound-user")
 

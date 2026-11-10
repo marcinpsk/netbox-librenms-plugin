@@ -795,7 +795,7 @@ class TestValidateDeviceForImport:
     def test_cross_model_id_collision_is_terminal(self):
         device = make_device("validation-cross-device", librenms_cf={SERVER_KEY: 5408})
         vm = make_vm("validation-cross-vm")
-        seed_stored_mapping(vm, {SERVER_KEY: 5408}, save=True)
+        seed_mapping(vm, SERVER_KEY, own=5408)
 
         result = self._validate(_device_payload(5408, hostname="unmatched-cross", serial="-"))
 
@@ -807,7 +807,7 @@ class TestValidateDeviceForImport:
         first = make_vm("validation-ambiguous-vm-a")
         second = make_vm("validation-ambiguous-vm-b", cluster=make_cluster("Validation VM ID cluster"))
         for vm in (first, second):
-            seed_stored_mapping(vm, {SERVER_KEY: 5421}, save=True)
+            seed_mapping(vm, SERVER_KEY, own=5421)
 
         result = self._validate(_device_payload(5421, hostname="unmatched-vm-id", serial="-"))
 
@@ -817,7 +817,7 @@ class TestValidateDeviceForImport:
 
     def test_vm_id_with_ambiguous_device_owners_is_terminal(self):
         vm = make_vm("validation-vm-with-device-collision")
-        seed_stored_mapping(vm, {SERVER_KEY: 5422}, save=True)
+        seed_mapping(vm, SERVER_KEY, own=5422)
         make_device("validation-device-collision-a", librenms_cf={SERVER_KEY: 5422})
         make_device("validation-device-collision-b", librenms_cf={SERVER_KEY: 5422})
 

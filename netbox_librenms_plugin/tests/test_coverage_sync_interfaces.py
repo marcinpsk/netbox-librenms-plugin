@@ -26,7 +26,13 @@ from netbox_librenms_plugin.tests.conftest import (
     map_device_to_librenms,
 )
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, seed_ports
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
+from netbox_librenms_plugin.tests.mapping_fixtures import (
+    mapping_summary,
+    seed_mapping,
+    seed_quarantined,
+    seed_stored_mapping,
+    stored_mapping_for_test,
+)
 from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     interface_rows,
     port_pair,
@@ -816,7 +822,7 @@ class TestInterfaceContextOOBRows:
         """A malformed binding is never unbound, so a same-name LAG cannot stand for the LibreNMS LAG port."""
         device = make_device("table-malformed-related-binding")
         lag = make_interface(device, "Port-Channel1", iface_type="lag")
-        seed_stored_mapping(lag, {"default": {"id": "junk"}}, save=True)
+        seed_quarantined(lag)
         source = make_interface(device, "Ethernet1")
         seed_mapping(source, own=10, save=False)
         source.lag = lag
@@ -1948,7 +1954,7 @@ class TestSyncInterfacesViewPost:
         child.refresh_from_db()
         parent.refresh_from_db()
         assert child.parent_id == parent.pk
-        assert stored_mapping_for_test(parent) is None
+        assert mapping_summary(parent) == {}
 
     def test_cross_page_parent_keeps_unsubmitted_vlan_group(self):
         from dcim.models import Device, Interface

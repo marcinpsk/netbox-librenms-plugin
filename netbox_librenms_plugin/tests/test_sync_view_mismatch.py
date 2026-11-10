@@ -3,7 +3,8 @@
 import pytest
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_virtual_chassis
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.server_mappings import mark_migrated
+from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change, seed_mapping, seed_stored_mapping
 
 
 pytestmark = pytest.mark.django_db
@@ -200,14 +201,14 @@ class TestBuildAllServerMappings:
     def test_host_id_is_extracted_from_the_nested_mapping(self, configure_librenms):
         configure_librenms({"production": {"librenms_url": "https://production.example", "api_token": "token"}})
         device = _netbox_device("nested")
-        seed_stored_mapping(device, {"production": {"id": 42, "oob": {"id": 99, "type": "controller"}}})
+        seed_mapping(device, "production", own=42, oob=99, save=False)
 
         assert self._mappings(device)[0]["device_id"] == 42
 
     def test_migrated_only_mapping_has_no_server_row(self, configure_librenms):
         configure_librenms({"production": {"librenms_url": "https://production.example", "api_token": "token"}})
         device = _netbox_device("migrated")
-        seed_stored_mapping(device, {"production": {"_migrated_to": {"device_id": 7, "server_key": "production"}}})
+        apply_mapping_change(device, mark_migrated(device, 7, "production"))
 
         assert self._mappings(device) is None
 

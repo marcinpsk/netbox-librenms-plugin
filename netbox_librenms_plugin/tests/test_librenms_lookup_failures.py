@@ -21,7 +21,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_vm,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 ABSENT_DEVICE_ID = 4041
 ERRORING_DEVICE_ID = 1255
@@ -144,7 +144,7 @@ def test_the_sync_page_reports_a_discovered_id_conflict(client, librenms_server,
     """A discovery conflict must render its owner instead of raising a server error."""
     server_key = _point_plugin_at(settings, librenms_server.url)
     owner = make_device("librenms-conflict-owner", librenms_cf={server_key: CONFLICTING_DEVICE_ID})
-    target = make_device("librenms-conflict-target.example.com", librenms_cf={server_key: None})
+    target = make_device("librenms-conflict-target.example.com")
     librenms_server.register(
         f"/api/v0/devices/{target.name}",
         {"status": "ok", "devices": [{"device_id": CONFLICTING_DEVICE_ID}]},
@@ -170,7 +170,7 @@ def test_the_device_field_handlers_name_a_conflict_owner_the_caller_may_view(
     """These four rendered the generic message even for a caller who may view the owner."""
     server_key = _point_plugin_at(settings, librenms_server.url)
     owner = make_device("librenms-field-conflict-owner", librenms_cf={server_key: CONFLICTING_DEVICE_ID})
-    target = make_device("librenms-field-conflict-target.example.com", librenms_cf={server_key: None})
+    target = make_device("librenms-field-conflict-target.example.com")
     librenms_server.register(
         f"/api/v0/devices/{target.name}",
         {"status": "ok", "devices": [{"device_id": CONFLICTING_DEVICE_ID}]},
@@ -202,7 +202,7 @@ def test_the_device_field_handlers_withhold_an_owner_outside_the_view_scope(
 
     server_key = _point_plugin_at(settings, librenms_server.url)
     owner = make_device("librenms-field-hidden-owner", librenms_cf={server_key: CONFLICTING_DEVICE_ID})
-    target = make_device("librenms-field-hidden-target.example.com", librenms_cf={server_key: None})
+    target = make_device("librenms-field-hidden-target.example.com")
     librenms_server.register(
         f"/api/v0/devices/{target.name}",
         {"status": "ok", "devices": [{"device_id": CONFLICTING_DEVICE_ID}]},
@@ -234,7 +234,7 @@ def test_a_conflict_owner_outside_the_view_scope_is_not_named(client, librenms_s
 
     server_key = _point_plugin_at(settings, librenms_server.url)
     owner = make_device("librenms-hidden-conflict-owner", librenms_cf={server_key: CONFLICTING_DEVICE_ID})
-    target = make_device("librenms-hidden-conflict-target.example.com", librenms_cf={server_key: None})
+    target = make_device("librenms-hidden-conflict-target.example.com")
     librenms_server.register(
         f"/api/v0/devices/{target.name}",
         {"status": "ok", "devices": [{"device_id": CONFLICTING_DEVICE_ID}]},
@@ -260,7 +260,7 @@ def test_the_sync_page_reports_an_ambiguous_id_claim(client, librenms_server, se
     server_key = _point_plugin_at(settings, librenms_server.url)
     owner_a = make_device("librenms-ambiguous-owner-a", librenms_cf={server_key: AMBIGUOUS_DEVICE_ID})
     owner_b = make_device("librenms-ambiguous-owner-b", librenms_cf={server_key: AMBIGUOUS_DEVICE_ID})
-    target = make_device("librenms-ambiguous-target.example.com", librenms_cf={server_key: None})
+    target = make_device("librenms-ambiguous-target.example.com")
     librenms_server.register(
         f"/api/v0/devices/{target.name}",
         {"status": "ok", "devices": [{"device_id": AMBIGUOUS_DEVICE_ID}]},
@@ -285,7 +285,7 @@ def test_ip_refresh_reports_a_discovered_id_conflict(client, librenms_server, se
     """An IP refresh must render the discovered LibreNMS ID conflict."""
     server_key = _point_plugin_at(settings, librenms_server.url)
     owner = make_device("librenms-ip-refresh-owner", librenms_cf={server_key: CONFLICTING_DEVICE_ID})
-    target = make_device("librenms-ip-refresh-target.example.test", librenms_cf={server_key: None})
+    target = make_device("librenms-ip-refresh-target.example.test")
     librenms_server.register(
         f"/api/v0/devices/{target.name}",
         {"status": "ok", "devices": [{"device_id": CONFLICTING_DEVICE_ID}]},
@@ -309,7 +309,7 @@ def test_location_update_reports_a_discovered_id_conflict(client, librenms_serve
     """A POST action must redirect with the discovery conflict and make no LibreNMS write."""
     server_key = _point_plugin_at(settings, librenms_server.url)
     owner = make_device("librenms-action-conflict-owner", librenms_cf={server_key: CONFLICTING_DEVICE_ID})
-    target = make_device("librenms-action-conflict-target.example.com", librenms_cf={server_key: None})
+    target = make_device("librenms-action-conflict-target.example.com")
     librenms_server.register(
         f"/api/v0/devices/{target.name}",
         {"status": "ok", "devices": [{"device_id": CONFLICTING_DEVICE_ID}]},
@@ -338,7 +338,7 @@ def test_location_update_answers_a_busy_identity_claim(client, librenms_server, 
     from netbox_librenms_plugin.tests.claim_race_helpers import held_device_claim
 
     server_key = _point_plugin_at(settings, librenms_server.url)
-    target = make_device("librenms-busy-claim-target.example.com", librenms_cf={server_key: None})
+    target = make_device("librenms-busy-claim-target.example.com")
     librenms_server.register(
         f"/api/v0/devices/{target.name}",
         {"status": "ok", "devices": [{"device_id": CONFLICTING_DEVICE_ID}]},
@@ -362,7 +362,7 @@ def test_device_status_reports_a_discovered_id_conflict(client, librenms_server,
     """A status lookup must identify the conflicting owner instead of only showing unlinked."""
     server_key = _point_plugin_at(settings, librenms_server.url)
     owner = make_device("librenms-status-conflict-owner", librenms_cf={server_key: CONFLICTING_DEVICE_ID})
-    target = make_device("librenms-status-conflict-target.example.com", librenms_cf={server_key: None})
+    target = make_device("librenms-status-conflict-target.example.com")
     librenms_server.register(
         f"/api/v0/devices/{target.name}",
         {"status": "ok", "devices": [{"device_id": CONFLICTING_DEVICE_ID}]},
@@ -402,15 +402,12 @@ def test_status_lists_report_each_discovery_conflict_once(
     prefix = f"duplicate-{object_type}-conflict"
     if object_type == "device":
         owner = make_device("duplicate-device-owner", librenms_cf={server_key: CONFLICTING_DEVICE_ID})
-        targets = [make_device(f"{prefix}-{suffix}", librenms_cf={server_key: None}) for suffix in ("a", "b")]
+        targets = [make_device(f"{prefix}-{suffix}") for suffix in ("a", "b")]
     else:
         owner = make_vm("duplicate-vm-owner")
         seed_mapping(owner, server_key, own=CONFLICTING_DEVICE_ID, save=False)
         owner.save()
         targets = [make_vm(f"{prefix}-{suffix}") for suffix in ("a", "b")]
-        for target in targets:
-            seed_stored_mapping(target, {server_key: None})
-            target.save()
 
     for target in targets:
         librenms_server.register(

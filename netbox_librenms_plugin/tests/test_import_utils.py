@@ -10,7 +10,7 @@ from copy import deepcopy
 import pytest
 
 from netbox_librenms_plugin.serial_identity import SerialRules
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
+from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary, seed_mapping, stored_mapping_for_test
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
 
@@ -1036,7 +1036,7 @@ class TestNameMatchesWithNamingPreferences:
         expected_name = _generate_vc_member_name(resolved_master_name, existing.vc_position, serial="VC-NAMING")
         existing.name = expected_name if existing_name_matches else "wrong-name"
         existing.serial = "VC-NAMING"
-        seed_stored_mapping(existing, {"default": {"id": 44}})
+        seed_mapping(existing, "default", own=44, save=False)
         existing.save()
 
         result = validate_device_for_import(
@@ -1066,7 +1066,7 @@ class TestNameMatchesWithNamingPreferences:
         existing.vc_position = 0
         existing.name = _generate_vc_member_name("stack-zero", 0, serial="VC-NAMING-ZERO")
         existing.serial = "VC-NAMING-ZERO"
-        seed_stored_mapping(existing, {"default": {"id": 45}})
+        seed_mapping(existing, "default", own=45, save=False)
         existing.save()
 
         result = validate_device_for_import(
@@ -2545,7 +2545,7 @@ def test_device_and_vm_imports_serialize_one_librenms_id_claim(settings):
     assert len(set(claim_keys)) == 1
     assert sorted(outcomes) == [False, True]
     assert len(owners) == 1
-    assert stored_mapping_for_test(owners[0])["primary"] == librenms_id
+    assert mapping_summary(owners[0])["primary"] == {"own": librenms_id}
     # The claim does not wait: the loser is busy while the winner holds it, else it finds the owner.
     assert len(refusals) == 1
     assert refusals[0] == IDENTITY_BUSY_MESSAGE or "already assigned" in refusals[0]
