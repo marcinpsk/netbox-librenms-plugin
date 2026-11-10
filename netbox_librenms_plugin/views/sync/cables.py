@@ -68,6 +68,7 @@ from netbox_librenms_plugin.utils import (
     get_cable_sync_settings,
     get_librenms_cable_tag,
     get_interface_name_field,
+    get_virtual_chassis_member,
     PortDisclosure,
     exception_text_for,
     render_cable_trace,
@@ -1621,6 +1622,18 @@ class CableRemoteCreateView(SyncCablesView):
             raise _RemoteCreateAborted(
                 f"The LibreNMS mapping of {context['remote_device'].name} changed. Refresh the cable data and try again."
             )
+        if chassis_id is not None and not self._remote_port_still_on(
+            locked_owners[context["remote_device"].pk], context["row"]
+        ):
+            raise _RemoteCreateAborted(
+                "The remote port moved to another chassis member. Refresh the cable data and try again."
+            )
+
+    @staticmethod
+    def _remote_port_still_on(locked_remote, row):
+        """True when the refresh's member resolver still gives *locked_remote* as the owner of the row's port."""
+        owner = get_virtual_chassis_member(locked_remote, row.get("remote_port"), return_device_on_failure=False)
+        return owner is not None and owner.pk == locked_remote.pk
 
     @staticmethod
     def _lock_remote_chassis(remote_device_pk):

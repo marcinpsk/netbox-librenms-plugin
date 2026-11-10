@@ -475,15 +475,17 @@ def test_create_far_end_rechecks_a_hostname_neighbour_mapping_under_the_lock(cli
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("member_moved", [False, True], ids=["member-kept", "member-moved"])
+@pytest.mark.parametrize(
+    "change", [None, "member-moved", "positions-swapped"], ids=["member-kept", "member-moved", "positions-swapped"]
+)
 def test_create_far_end_rechecks_the_chassis_of_a_hostname_neighbour_member_under_the_lock(
-    client, live_librenms, monkeypatch, member_moved
+    client, live_librenms, monkeypatch, change
 ):
-    """A far-end member that leaves the neighbour's chassis after the proposal check refuses the create."""
+    """A far-end member that no longer owns the port in the neighbour's chassis refuses the create."""
     from netbox_librenms_plugin.views.sync.cables import CableRemoteCreateView
 
     subject = map_device_to_librenms(make_device("source-vc-race-owner"), HOST_ID, server_key=SERVER_KEY)
-    _chassis, (mapping_owner, far_member) = make_virtual_chassis_members("source-vc-race")
+    _chassis, (mapping_owner, far_member, third_member) = make_virtual_chassis_members("source-vc-race", count=3)
     map_device_to_librenms(mapping_owner, NEIGHBOUR_ID, server_key=SERVER_KEY)
     other_chassis, (other_owner,) = make_virtual_chassis_members("source-vc-race-other", count=1)
     map_device_to_librenms(other_owner, NEIGHBOUR_ID + 10, server_key=SERVER_KEY)
@@ -519,12 +521,16 @@ def test_create_far_end_rechecks_the_chassis_of_a_hostname_neighbour_member_unde
 
     def resolve_then_move_the_member(self, *args, **kwargs):
         result = resolve_proposal(self, *args, **kwargs)
-        if member_moved:
+        if change == "member-moved":
             # Another request moves the far-end member to another chassis before the lock.
             moved = Device.objects.get(pk=far_member.pk)
             moved.virtual_chassis = other_chassis
             moved.vc_position = 2
             moved.save()
+        elif change == "positions-swapped":
+            # Another request swaps positions, so the port name now points to the third member.
+            for pk, position in ((far_member.pk, 9), (third_member.pk, 2), (far_member.pk, 3)):
+                Device.objects.filter(pk=pk).update(vc_position=position)
         return result
 
     monkeypatch.setattr(CableRemoteCreateView, "_resolve_proposal", resolve_then_move_the_member)
@@ -534,8 +540,8 @@ def test_create_far_end_rechecks_the_chassis_of_a_hostname_neighbour_member_unde
         {"server_key": SERVER_KEY, "row_id": str(LOCAL_PORT_ID), "expected_local_id": local.pk},
     )
 
-    if member_moved:
-        assert not Interface.objects.filter(device=far_member).exists()
+    if change:
+        assert not Interface.objects.filter(device__in=(far_member, third_member)).exists()
         assert not Cable.objects.exists()
     else:
         assert Interface.objects.filter(device=far_member, name="xe-2/0/0").exists()
