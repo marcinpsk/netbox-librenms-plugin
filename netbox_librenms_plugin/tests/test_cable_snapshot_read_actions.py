@@ -28,7 +28,7 @@ from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     seed_cables_snapshot,
     sensor_row,
 )
-from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms, message_texts
 
 SERVER_KEY = "default"
 HOST_ID = 6401
@@ -471,6 +471,60 @@ def test_create_far_end_rechecks_a_hostname_neighbour_mapping_under_the_lock(cli
     )
 
     assert not Interface.objects.filter(device__in=(neighbour, other)).exists()
+    assert not Cable.objects.exists()
+
+
+@pytest.mark.django_db
+def test_create_far_end_refuses_a_hostname_neighbour_deleted_before_the_lock(client, live_librenms, monkeypatch):
+    """A neighbour deleted after the proposal check gets the refresh answer, not a server error."""
+    from netbox_librenms_plugin.views.sync.cables import CableRemoteCreateView
+
+    subject = map_device_to_librenms(make_device("source-gone-owner"), HOST_ID, server_key=SERVER_KEY)
+    neighbour = map_device_to_librenms(make_device("source-gone-neighbour"), NEIGHBOUR_ID, server_key=SERVER_KEY)
+    local = seed_mapping(make_interface(subject, "eth1"), SERVER_KEY, own=LOCAL_PORT_ID)
+    live_librenms.server.register(
+        f"/api/v0/devices/{HOST_ID}/links",
+        {
+            "status": "ok",
+            "links": [
+                link_row(
+                    LOCAL_PORT_ID,
+                    "eth2",
+                    local_port="eth1",
+                    remote_port_id=REMOTE_PORT_ID,
+                    remote_hostname=neighbour.name,
+                )
+            ],
+        },
+    )
+    live_librenms.server.register(
+        f"/api/v0/devices/{HOST_ID}/ports",
+        {"status": "ok", "ports": [port_row(LOCAL_PORT_ID, "eth1", device_id=HOST_ID)]},
+    )
+    live_librenms.server.register(
+        f"/api/v0/devices/{NEIGHBOUR_ID}/ports",
+        {"status": "ok", "ports": [port_row(REMOTE_PORT_ID, "eth2", device_id=NEIGHBOUR_ID)]},
+    )
+    client.force_login(make_superuser("source-gone-mapping"))
+    (row,) = _rows(_refresh(client, subject))
+    assert row["remote_device_id"] is None
+    resolve_proposal = CableRemoteCreateView._resolve_proposal
+
+    def resolve_then_delete_the_neighbour(self, *args, **kwargs):
+        result = resolve_proposal(self, *args, **kwargs)
+        # Another request deletes the neighbour after the check and before the lock.
+        Device.objects.filter(pk=neighbour.pk).delete()
+        return result
+
+    monkeypatch.setattr(CableRemoteCreateView, "_resolve_proposal", resolve_then_delete_the_neighbour)
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[subject.pk]),
+        {"server_key": SERVER_KEY, "row_id": str(LOCAL_PORT_ID), "expected_local_id": local.pk},
+    )
+
+    assert response.status_code == 302
+    assert "Refresh the cable data" in " ".join(message_texts(response.wsgi_request, "error"))
     assert not Cable.objects.exists()
 
 
