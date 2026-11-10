@@ -12,7 +12,9 @@
   {% endif %}
 </div>
 {% url 'plugins:netbox_librenms_plugin:sync_selected_vlans' object_type=object_type object_id=object.pk as vlan_sync_url_path %}{% sync_tab_url vlan_sync_url_path as vlan_sync_url %}
+{# Each checkbox carries the token of one disclosed rename, so the selection is the set of checked tokens. #}
 <form method="post"
+      id="vlan-conflicts-selected-form"
       action="{{ vlan_sync_url }}"
       {% if not full_page %}
       hx-post="{{ vlan_sync_url }}"
@@ -37,12 +39,9 @@
         <div class="d-flex align-items-start gap-2">
           <input class="form-check-input mt-1"
                  type="checkbox"
-                 name="force_conflict"
-                 value="{{ conflict.vid }}"
+                 name="confirmation_intent"
+                 value="{{ conflict.token }}"
                  id="vlan-conflict-{{ forloop.counter }}">
-          <input type="hidden" name="select" value="{{ conflict.vid }}">
-          <input type="hidden" name="conflict_intent" value="{{ conflict.intent }}">
-          <input type="hidden" name="vlan_group_{{ conflict.vid }}" value="{{ conflict.group_id|default_if_none:'' }}">
           <label class="flex-grow-1 cursor-pointer" for="vlan-conflict-{{ forloop.counter }}">
             <div>
               <strong>VLAN {{ conflict.vid }}</strong>
@@ -66,6 +65,24 @@
       <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
     {% endif %}
     <button type="submit" class="btn btn-warning">Apply selected changes</button>
-    <button type="submit" class="btn btn-danger" name="force_all" value="1">Apply all changes</button>
+    <button type="submit" class="btn btn-danger" form="vlan-conflicts-all-form">Apply all changes</button>
   </div>
+</form>
+{# Apply all posts every disclosed token through its own form, so no script decides the selection. #}
+<form method="post"
+      id="vlan-conflicts-all-form"
+      action="{{ vlan_sync_url }}"
+      {% if not full_page %}
+      hx-post="{{ vlan_sync_url }}"
+      hx-target="#htmx-modal-content"
+      hx-swap="innerHTML"
+      {% endif %}
+      hidden>
+  {% csrf_token %}
+  <input type="hidden" name="server_key" value="{{ server_key }}">
+  <input type="hidden" name="action" value="create_vlans">
+  <input type="hidden" name="confirm_conflicts" value="1">
+  {% for conflict in conflicts %}
+    <input type="hidden" name="confirmation_intent" value="{{ conflict.token }}">
+  {% endfor %}
 </form>

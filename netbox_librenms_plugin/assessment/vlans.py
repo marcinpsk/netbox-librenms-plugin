@@ -127,18 +127,37 @@ def build_operation(*, vid, group, name, targets):
 
 @dataclass(frozen=True)
 class VLANAssessment:
-    """Compared rows and the source identities used by a writer."""
+    """Compared rows, each with the token of the operation it offers, and the source identities."""
 
     rows: list
     source_by_vid: dict
     invalid_rows: list
 
 
-def assess(snapshot, *, subject, lookup_maps):
-    """Assess VLAN rows without HTTP, cache access or writes."""
+def assess(snapshot, *, subject, lookup_maps, context, choices=None, vids=None):
+    """
+    Assess VLAN rows and offer each row's operation, without HTTP, cache access or writes.
+
+    Args:
+        snapshot: The VLAN source snapshot.
+        subject: The device that owns the snapshot.
+        lookup_maps: The VLAN lookup maps of the scope the caller may view.
+        context (IntentContext | None): The context the offers belong to. None offers nothing.
+        choices (dict | None): A chosen group pk (or None) by VID, in place of the automatic choice.
+        vids (set | None): Assess only these VIDs.
+
+    Returns:
+        VLANAssessment: Each row carries ``confirmation_intent``, its token or None.
+
+    """
     source = snapshot.value(Resource.VLANS, "vlans")
     indexed, invalid = index_vlan_source_rows(source)
-    return VLANAssessment(compare_rows(source, lookup_maps=lookup_maps, subject=subject), indexed, invalid)
+    rows = compare_rows(source, lookup_maps=lookup_maps, subject=subject, choices=choices, vids=vids)
+    for row in rows:
+        operation = row["operation"]
+        offered = context is not None and operation is not None and not isinstance(operation, intent.Unavailable)
+        row["confirmation_intent"] = intent.offer(operation, context).token if offered else None
+    return VLANAssessment(rows, indexed, invalid)
 
 
 def compare_vlan(netbox_vlan, name):
@@ -150,7 +169,18 @@ def compare_vlan(netbox_vlan, name):
     }
 
 
-def compare_rows(librenms_vlans, *, lookup_maps, subject):
+def _auto_selected_group(vid, vid_to_groups, subject):
+    """Return the group the tab selects for a VID, and whether several groups tie for it."""
+    groups = vid_to_groups.get(vid, [])
+    if len(groups) == 1:
+        return groups[0], False
+    if len(groups) > 1:
+        most_specific = select_most_specific_group(groups, subject)
+        return most_specific, most_specific is None
+    return None, False
+
+
+def compare_rows(librenms_vlans, *, lookup_maps, subject, choices=None, vids=None):
     """
     Compare LibreNMS VLANs against NetBox VLANs available to the device.
 
@@ -158,18 +188,23 @@ def compare_rows(librenms_vlans, *, lookup_maps, subject):
         librenms_vlans: List of VLAN dicts from LibreNMS
         lookup_maps: Dict with vid_to_groups, vid_group_to_vlan, vid_to_vlans
         subject: NetBox Device object for scope-based prioritization
+        choices: A chosen group pk (or None for global) by VID, in place of the automatic choice
+        vids: Compare only the rows of these VIDs
 
     Adds comparison flags:
     - exists_in_netbox: bool
     - netbox_vlan: VLAN object or None
     - netbox_vlan_group: VLANGroup name or None
     - name_matches: bool
+    - group_choice_id: ID of the group the row synchronizes into, or None for global
     - auto_selected_group_id: ID of auto-selected group or None
     - auto_selected_group_name: Name of auto-selected group or None
     - is_ambiguous: bool - True if VID exists in multiple groups with no clear priority
+    - operation: the row's operation, an Unavailable reason, or None for a row without a usable VID
 
     """
     lookup_maps = lookup_maps or {}
+    choices = choices or {}
     vid_to_groups = lookup_maps.get("vid_to_groups", {})
     vid_to_vlans = lookup_maps.get("vid_to_vlans", {})
 
@@ -179,6 +214,8 @@ def compare_rows(librenms_vlans, *, lookup_maps, subject):
     for vlan in librenms_vlans:
         raw_vid = vlan.get("vlan_vlan")
         canonical_vid = normalize_vlan_vid(raw_vid)
+        if vids is not None and canonical_vid not in vids:
+            continue
         if canonical_vid is None:
             vid_error = "Invalid VID"
         elif canonical_vid not in rows_by_vid:
@@ -188,43 +225,14 @@ def compare_rows(librenms_vlans, *, lookup_maps, subject):
         vid = canonical_vid if vid_error is None else None
         name = source_name(vlan, vid)
 
-        # Auto-selection logic for VLAN group dropdown
-        auto_selected_group_id = None
-        auto_selected_group_name = None
-        is_ambiguous = False
-        netbox_vlan = None
-
-        # Check if VID exists in groups for auto-selection
-        if vid in vid_to_groups:
-            groups = vid_to_groups[vid]
-            if len(groups) == 1:
-                auto_selected_group_id = groups[0].pk
-                auto_selected_group_name = groups[0].name
-                # Get the VLAN from this single group
-                vlans_for_vid = vid_to_vlans.get(vid, [])
-                if vlans_for_vid:
-                    netbox_vlan = vlans_for_vid[0]
-            elif len(groups) > 1:
-                # Try to select the most specific group based on device context
-                most_specific = select_most_specific_group(groups, subject)
-                if most_specific:
-                    auto_selected_group_id = most_specific.pk
-                    auto_selected_group_name = most_specific.name
-                    # Get the VLAN from the most specific group
-                    vlans_for_vid = vid_to_vlans.get(vid, [])
-                    for v in vlans_for_vid:
-                        if v.group and v.group.pk == most_specific.pk:
-                            netbox_vlan = v
-                            break
-                else:
-                    is_ambiguous = True
-        else:
-            # Check if it exists as a global VLAN (no group)
-            vlans_for_vid = vid_to_vlans.get(vid, [])
-            for v in vlans_for_vid:
-                if v.group is None:
-                    netbox_vlan = v
-                    break
+        auto_group, is_ambiguous = _auto_selected_group(vid, vid_to_groups, subject)
+        group_choice_id = choices[vid] if vid in choices else (auto_group.pk if auto_group else None)
+        # The row compares, and offers, the VLAN that holds the VID in the chosen scope.
+        targets = [v for v in vid_to_vlans.get(vid, []) if v.group_id == group_choice_id]
+        netbox_vlan = targets[0] if targets else None
+        operation = (
+            build_operation(vid=vid, group=group_choice_id, name=name, targets=targets) if vid is not None else None
+        )
 
         compared.append(
             {
@@ -240,9 +248,11 @@ def compare_rows(librenms_vlans, *, lookup_maps, subject):
                 "netbox_vlan_group": netbox_vlan.group.name if netbox_vlan and netbox_vlan.group else None,
                 "netbox_vlan_group_id": netbox_vlan.group.pk if netbox_vlan and netbox_vlan.group else None,
                 # Fields for per-row VLAN group selection
-                "auto_selected_group_id": auto_selected_group_id,
-                "auto_selected_group_name": auto_selected_group_name,
+                "group_choice_id": group_choice_id,
+                "auto_selected_group_id": auto_group.pk if auto_group else None,
+                "auto_selected_group_name": auto_group.name if auto_group else None,
                 "is_ambiguous": is_ambiguous,
+                "operation": operation,
             }
         )
 
