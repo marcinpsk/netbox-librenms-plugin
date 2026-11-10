@@ -1666,6 +1666,12 @@ class CableRemoteCreateView(SyncCablesView):
                 status=409,
                 content_type="text/plain",
             )
+        if not self._hostname_neighbour_still_maps_to(remote_device, row, server_key):
+            return None, HttpResponse(
+                f"The LibreNMS mapping of {remote_device.name} changed. Refresh the cable data and try again.",
+                status=409,
+                content_type="text/plain",
+            )
         # The far end is an interface create, so the rules decide the port for the remote device.
         decision = interface_rules_for_request(request).check_interface_write(
             port, platform_id=remote_device.platform_id
@@ -1714,6 +1720,14 @@ class CableRemoteCreateView(SyncCablesView):
             and coerce_librenms_id(port.get("device_id")) == neighbour_id
             and ((type(port.get("deleted")) is int and port["deleted"] == 0) or port.get("deleted") == "0")
         )
+
+    @staticmethod
+    def _hostname_neighbour_still_maps_to(remote_device, row, server_key):
+        """True unless the row's neighbour came from its hostname and the remote device no longer maps to it."""
+        if row.get("remote_device_id") is not None:
+            return True
+        owner = get_librenms_sync_device(remote_device, server_key=server_key) or remote_device
+        return read_mapping(owner).own_id(server_key) == link_neighbour_id(row)
 
     @staticmethod
     def _proposed_interface_name(request, obj, row, port):

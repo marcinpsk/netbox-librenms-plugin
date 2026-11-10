@@ -358,3 +358,58 @@ def test_create_far_end_of_a_hostname_only_link_checks_the_resolved_neighbour(cl
     assert live_librenms.server.requests == []
     assert response.status_code == (200 if port_owner == NEIGHBOUR_ID else 409)
     assert not Interface.objects.filter(device=neighbour).exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("mapping_moved", [False, True], ids=["mapping-kept", "mapping-moved"])
+def test_create_far_end_of_a_hostname_only_link_refuses_a_moved_neighbour_mapping(client, live_librenms, mapping_moved):
+    """A hostname-only row binds the port of the neighbour resolved at refresh, so a moved mapping needs a refresh."""
+    subject = map_device_to_librenms(make_device("source-moved-owner"), HOST_ID, server_key=SERVER_KEY)
+    neighbour = map_device_to_librenms(make_device("source-moved-neighbour"), NEIGHBOUR_ID, server_key=SERVER_KEY)
+    other = make_device("source-moved-other")
+    local = seed_mapping(make_interface(subject, "eth1"), SERVER_KEY, own=LOCAL_PORT_ID)
+    live_librenms.server.register(
+        f"/api/v0/devices/{HOST_ID}/links",
+        {
+            "status": "ok",
+            "links": [
+                link_row(
+                    LOCAL_PORT_ID,
+                    "eth2",
+                    local_port="eth1",
+                    remote_port_id=REMOTE_PORT_ID,
+                    remote_hostname=neighbour.name,
+                )
+            ],
+        },
+    )
+    live_librenms.server.register(
+        f"/api/v0/devices/{HOST_ID}/ports",
+        {"status": "ok", "ports": [port_row(LOCAL_PORT_ID, "eth1", device_id=HOST_ID)]},
+    )
+    live_librenms.server.register(
+        f"/api/v0/devices/{NEIGHBOUR_ID}/ports",
+        {"status": "ok", "ports": [port_row(REMOTE_PORT_ID, "eth2", device_id=NEIGHBOUR_ID)]},
+    )
+    client.force_login(make_superuser("source-moved-mapping"))
+    (row,) = _rows(_refresh(client, subject))
+    assert row["remote_device_id"] is None
+    assert row.get("remote_create_url")
+    if mapping_moved:
+        map_device_to_librenms(neighbour, NEIGHBOUR_ID + 10, server_key=SERVER_KEY)
+        map_device_to_librenms(other, NEIGHBOUR_ID, server_key=SERVER_KEY)
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[subject.pk]),
+        {"server_key": SERVER_KEY, "row_id": str(LOCAL_PORT_ID), "expected_local_id": local.pk},
+    )
+
+    if mapping_moved:
+        assert not Interface.objects.filter(device__in=(neighbour, other)).exists()
+        assert not Cable.objects.exists()
+        assert response.status_code == 409
+        assert "Refresh" in response.content.decode()
+    else:
+        assert response.status_code == 302
+        assert Interface.objects.filter(device=neighbour, name="eth2").exists()
+        assert Cable.objects.count() == 1
