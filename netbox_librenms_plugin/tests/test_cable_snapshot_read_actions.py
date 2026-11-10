@@ -413,3 +413,58 @@ def test_create_far_end_of_a_hostname_only_link_refuses_a_moved_neighbour_mappin
         assert response.status_code == 302
         assert Interface.objects.filter(device=neighbour, name="eth2").exists()
         assert Cable.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_create_far_end_rechecks_a_hostname_neighbour_mapping_under_the_lock(client, live_librenms, monkeypatch):
+    """A mapping that moves after the proposal check and before the device lock still refuses the create."""
+    from netbox_librenms_plugin.views.sync.cables import CableRemoteCreateView
+
+    subject = map_device_to_librenms(make_device("source-race-owner"), HOST_ID, server_key=SERVER_KEY)
+    neighbour = map_device_to_librenms(make_device("source-race-neighbour"), NEIGHBOUR_ID, server_key=SERVER_KEY)
+    other = make_device("source-race-other")
+    local = seed_mapping(make_interface(subject, "eth1"), SERVER_KEY, own=LOCAL_PORT_ID)
+    live_librenms.server.register(
+        f"/api/v0/devices/{HOST_ID}/links",
+        {
+            "status": "ok",
+            "links": [
+                link_row(
+                    LOCAL_PORT_ID,
+                    "eth2",
+                    local_port="eth1",
+                    remote_port_id=REMOTE_PORT_ID,
+                    remote_hostname=neighbour.name,
+                )
+            ],
+        },
+    )
+    live_librenms.server.register(
+        f"/api/v0/devices/{HOST_ID}/ports",
+        {"status": "ok", "ports": [port_row(LOCAL_PORT_ID, "eth1", device_id=HOST_ID)]},
+    )
+    live_librenms.server.register(
+        f"/api/v0/devices/{NEIGHBOUR_ID}/ports",
+        {"status": "ok", "ports": [port_row(REMOTE_PORT_ID, "eth2", device_id=NEIGHBOUR_ID)]},
+    )
+    client.force_login(make_superuser("source-race-mapping"))
+    (row,) = _rows(_refresh(client, subject))
+    assert row["remote_device_id"] is None
+    resolve_proposal = CableRemoteCreateView._resolve_proposal
+
+    def resolve_then_move_the_mapping(self, *args, **kwargs):
+        result = resolve_proposal(self, *args, **kwargs)
+        # Another request moves the mapping after the check and before the lock.
+        map_device_to_librenms(Device.objects.get(pk=neighbour.pk), NEIGHBOUR_ID + 10, server_key=SERVER_KEY)
+        map_device_to_librenms(other, NEIGHBOUR_ID, server_key=SERVER_KEY)
+        return result
+
+    monkeypatch.setattr(CableRemoteCreateView, "_resolve_proposal", resolve_then_move_the_mapping)
+
+    client.post(
+        reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[subject.pk]),
+        {"server_key": SERVER_KEY, "row_id": str(LOCAL_PORT_ID), "expected_local_id": local.pk},
+    )
+
+    assert not Interface.objects.filter(device__in=(neighbour, other)).exists()
+    assert not Cable.objects.exists()

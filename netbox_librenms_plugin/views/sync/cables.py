@@ -1557,13 +1557,7 @@ class CableRemoteCreateView(SyncCablesView):
         port_records = self._snapshot_cable_port_records(context["row"], (context["local_interface"],))
         try:
             with transaction.atomic():
-                # Lock owners before the insert can take a foreign-key lock on the remote device.
-                owner_ids = {obj.pk, context["local_interface"].device_id, context["remote_device"].pk}
-                if cache_device := getattr(self, "_cache_device", None):
-                    owner_ids.add(cache_device.pk)
-                evidence_owner_ids = {port_owner_id(context["row"], side) for side in ("local", "remote")} - {None}
-                if self._lock_owner_devices(owner_ids, evidence_owner_ids) is None:
-                    raise _RemoteCreateAborted("The cable row changed. Refresh the cable data and try again.")
+                self._lock_create_owners(obj, context, server_key)
                 interface = self._create_remote_interface(request, context)
                 self._initial_device = obj
                 self._origin_device = context["local_interface"].device
@@ -1605,6 +1599,27 @@ class CableRemoteCreateView(SyncCablesView):
             )
         response = self._sync_response(request, obj, server_key, redirect_url, close_modal=True)
         return apply_request_cache_transition(request, response)
+
+    def _lock_create_owners(self, obj, context, server_key):
+        """Lock the owning Devices before the insert, and refuse a hostname neighbour whose mapping moved."""
+        # Lock owners before the insert can take a foreign-key lock on the remote device.
+        owner_ids = {obj.pk, context["local_interface"].device_id, context["remote_device"].pk}
+        if cache_device := getattr(self, "_cache_device", None):
+            owner_ids.add(cache_device.pk)
+        evidence_owner_ids = {port_owner_id(context["row"], side) for side in ("local", "remote")} - {None}
+        mapping_owner = self._hostname_mapping_owner(context["remote_device"], context["row"], server_key)
+        if mapping_owner is not None:
+            evidence_owner_ids.add(mapping_owner.pk)
+        locked_owners = self._lock_owner_devices(owner_ids, evidence_owner_ids)
+        if locked_owners is None:
+            raise _RemoteCreateAborted("The cable row changed. Refresh the cable data and try again.")
+        # Mapping writes lock the owner, so the locked row holds the mapping that the write uses.
+        if mapping_owner is not None and not self._hostname_neighbour_still_maps_to(
+            locked_owners[mapping_owner.pk], context["row"], server_key
+        ):
+            raise _RemoteCreateAborted(
+                f"The LibreNMS mapping of {context['remote_device'].name} changed. Refresh the cable data and try again."
+            )
 
     def _resolve_proposal(self, request, pk, data):
         """
@@ -1666,7 +1681,9 @@ class CableRemoteCreateView(SyncCablesView):
                 status=409,
                 content_type="text/plain",
             )
-        if not self._hostname_neighbour_still_maps_to(remote_device, row, server_key):
+        if not self._hostname_neighbour_still_maps_to(
+            self._hostname_mapping_owner(remote_device, row, server_key), row, server_key
+        ):
             return None, HttpResponse(
                 f"The LibreNMS mapping of {remote_device.name} changed. Refresh the cable data and try again.",
                 status=409,
@@ -1722,12 +1739,16 @@ class CableRemoteCreateView(SyncCablesView):
         )
 
     @staticmethod
-    def _hostname_neighbour_still_maps_to(remote_device, row, server_key):
-        """True unless the row's neighbour came from its hostname and the remote device no longer maps to it."""
+    def _hostname_mapping_owner(remote_device, row, server_key):
+        """Return the Device whose mapping must still name the neighbour of a hostname-only row, else None."""
         if row.get("remote_device_id") is not None:
-            return True
-        owner = get_librenms_sync_device(remote_device, server_key=server_key) or remote_device
-        return read_mapping(owner).own_id(server_key) == link_neighbour_id(row)
+            return None
+        return get_librenms_sync_device(remote_device, server_key=server_key) or remote_device
+
+    @staticmethod
+    def _hostname_neighbour_still_maps_to(mapping_owner, row, server_key):
+        """True unless *mapping_owner* exists and no longer maps to the row's hostname-derived neighbour."""
+        return mapping_owner is None or read_mapping(mapping_owner).own_id(server_key) == link_neighbour_id(row)
 
     @staticmethod
     def _proposed_interface_name(request, obj, row, port):
