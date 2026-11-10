@@ -177,6 +177,7 @@ from .sync.device_fields import (
     ConvertLegacyLibreNMSIdView,
     CreateAndAssignPlatformView,
     CreateAndAssignVMPlatformView,
+    EditServerMappingView,
     RemoveServerMappingView,
     SetPreferredServerView,
     UpdateDeviceNameView,
