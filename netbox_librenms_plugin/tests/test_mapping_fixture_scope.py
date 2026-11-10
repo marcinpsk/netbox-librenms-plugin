@@ -9,7 +9,10 @@ not follow a raw value through any other local helper.
 """
 
 import ast
+import textwrap
 from pathlib import Path
+
+import pytest
 
 TESTS = Path(__file__).resolve().parent
 FIXTURES = "netbox_librenms_plugin.tests.mapping_fixtures"
@@ -96,41 +99,67 @@ PINNED = {
 }
 
 
-def _name(node):
-    return node.id if isinstance(node, ast.Name) else None
+def _callee(node):
+    """Return the called name: a bare name, or the last part of a dotted name."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def _can_pass_oob(keywords):
+    return any(keyword.arg in ("oob", None) for keyword in keywords)
 
 
 def _raw_callables(tree):
-    """Return the local names that call a raw helper and the local names of a raw wrapper."""
-    helpers, wrappers = set(), set(RAW_WRAPPERS)
+    """
+    Return the names that call a raw helper, and each name of a raw wrapper with whether it binds oob.
+
+    A name is the helper or wrapper itself, an import alias, or a local alias such as
+    ``x = partial(map_device_to_librenms, oob=...)``. A dotted call matches by its last name.
+    """
+    helpers, wrappers = set(RAW_HELPERS), dict.fromkeys(RAW_WRAPPERS, False)
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == FIXTURES:
-            helpers.update(alias.asname or alias.name for alias in node.names if alias.name in RAW_HELPERS)
-    for node in ast.walk(tree):
-        # A local alias, such as ``x = partial(map_device_to_librenms, ...)``.
-        if isinstance(node, ast.Assign) and len(node.targets) == 1 and _name(node.targets[0]):
-            value = node.value
-            if isinstance(value, ast.Call) and _name(value.func) == "partial" and value.args:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                name = alias.name.rpartition(".")[2]
+                if name in RAW_HELPERS:
+                    helpers.add(alias.asname or name)
+                elif name in RAW_WRAPPERS:
+                    wrappers[alias.asname or name] = False
+    aliases = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+    ]
+    # An alias can name an earlier alias, so resolve the chain.
+    for _ in range(len(aliases)):
+        for node in aliases:
+            value, binds_oob = node.value, False
+            if isinstance(value, ast.Call) and _callee(value.func) == "partial" and value.args:
+                binds_oob = _can_pass_oob(value.keywords)
                 value = value.args[0]
-            if _name(value) in helpers:
-                helpers.add(node.targets[0].id)
-            elif _name(value) in wrappers:
-                wrappers.add(node.targets[0].id)
+            callee, target = _callee(value), node.targets[0].id
+            if callee in helpers:
+                helpers.add(target)
+            elif callee in wrappers:
+                wrappers[target] = wrappers.get(target, False) or wrappers[callee] or binds_oob
     return helpers, wrappers
 
 
 def _is_raw_call(call, helpers, wrappers):
-    if _name(call.func) in helpers:
+    callee = _callee(call.func)
+    if callee in helpers:
         return True
-    if _name(call.func) in wrappers:
+    if callee in wrappers:
         # Without oob, or **kwargs that can hold it, the wrapper seeds an ordinary own id.
-        return any(keyword.arg in ("oob", None) for keyword in call.keywords)
-    # A call through the module, such as ``mapping_fixtures.seed_stored_mapping(...)``.
-    return isinstance(call.func, ast.Attribute) and call.func.attr in RAW_HELPERS
+        return wrappers[callee] or _can_pass_oob(call.keywords)
+    return False
 
 
-def _raw_uses(path):
-    tree = ast.parse(path.read_text(), filename=str(path))
+def _count_raw_uses(source):
+    tree = ast.parse(source)
     helpers, wrappers = _raw_callables(tree)
     count = 0
     for node in ast.walk(tree):
@@ -145,7 +174,7 @@ def _scan():
     for path in sorted(TESTS.rglob("*.py")):
         if path.name in {"mapping_fixtures.py", Path(__file__).name}:
             continue
-        count = _raw_uses(path)
+        count = _count_raw_uses(path.read_text())
         if count:
             found[path.relative_to(TESTS).as_posix()] = count
     return found
@@ -172,3 +201,67 @@ def test_every_pin_equals_the_raw_uses_found():
     }
 
     assert stale == {}, "(found, pinned) raw uses: lower the pin to the count found."
+
+
+WRAPPER_IMPORT = "from netbox_librenms_plugin.tests.conftest import map_device_to_librenms"
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("seed_stored_mapping(device, {'default': 1})", 1),
+        ("from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping as raw\nraw(device, 1)", 1),
+        (
+            "from netbox_librenms_plugin.tests import mapping_fixtures as fixtures\nfixtures.stored_mapping_for_test(device)",
+            1,
+        ),
+        ("raw = seed_stored_mapping_row\nraw(device, 1)", 1),
+        ("make_device('x', librenms_cf={'default': 1})", 1),
+        (f"{WRAPPER_IMPORT}\nmap_device_to_librenms(device, 1, server_key='default')", 0),
+        (f"{WRAPPER_IMPORT}\nmap_device_to_librenms(device, server_key='default', oob={{'id': 7}})", 1),
+        (f"{WRAPPER_IMPORT}\nmap_device_to_librenms(device, 1, server_key='default', **mapping)", 1),
+        (
+            "from netbox_librenms_plugin.tests.conftest import map_device_to_librenms as link\n"
+            "link(device, server_key='default', oob={'id': 7})",
+            1,
+        ),
+        (
+            "from netbox_librenms_plugin.tests import conftest\n"
+            "conftest.map_device_to_librenms(device, server_key='default', oob={'id': 7})",
+            1,
+        ),
+        (
+            f"{WRAPPER_IMPORT}\nlink = partial(map_device_to_librenms, server_key='default', oob={{'id': 7}})\n"
+            "link(device)",
+            1,
+        ),
+        (f"{WRAPPER_IMPORT}\nlink = partial(map_device_to_librenms, **options)\nlink(device)", 1),
+        (f"{WRAPPER_IMPORT}\nlink = partial(map_device_to_librenms, server_key='default')\nlink(device, 1)", 0),
+        (f"{WRAPPER_IMPORT}\nlink = partial(map_device_to_librenms, server_key='default')\nlink(device, oob={{}})", 1),
+        (
+            f"{WRAPPER_IMPORT}\nbound = partial(map_device_to_librenms, oob={{'id': 7}})\nlink = bound\nlink(device)",
+            1,
+        ),
+        ("seed_mapping(make_device('x'), own=1, oob=2)", 0),
+    ],
+    ids=[
+        "helper",
+        "helper-import-alias",
+        "helper-module-attribute",
+        "helper-local-alias",
+        "librenms-cf",
+        "wrapper-without-oob",
+        "wrapper-with-oob",
+        "wrapper-with-kwargs",
+        "wrapper-import-alias",
+        "wrapper-module-attribute",
+        "partial-binds-oob",
+        "partial-binds-kwargs",
+        "partial-without-oob",
+        "partial-called-with-oob",
+        "alias-of-a-partial",
+        "semantic-seed",
+    ],
+)
+def test_the_scan_counts_each_raw_form(source, expected):
+    assert _count_raw_uses(textwrap.dedent(source)) == expected
