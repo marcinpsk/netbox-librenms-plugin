@@ -84,7 +84,7 @@ def _binding(interface):
 @pytest.mark.django_db
 def test_host_and_colliding_oob_rows_sync_under_distinct_names(client, settings):
     configure_default_librenms_server(settings)
-    device = make_device("oob-derived-name", librenms_cf={SERVER_KEY: {"id": 71}})
+    device = seed_mapping(make_device("oob-derived-name"), SERVER_KEY, own=71)
     client.force_login(make_superuser("oob-derived-name-user"))
     oob_ports = [_port("8502", "eth0"), _port("8503", "bmc0")]
 
@@ -101,7 +101,7 @@ def test_host_and_colliding_oob_rows_sync_under_distinct_names(client, settings)
 @pytest.mark.django_db
 def test_oob_row_is_skipped_when_the_host_owns_its_derived_name(client, settings):
     configure_default_librenms_server(settings)
-    device = make_device("oob-derived-name-taken", librenms_cf={SERVER_KEY: {"id": 72}})
+    device = seed_mapping(make_device("oob-derived-name-taken"), SERVER_KEY, own=72)
     client.force_login(make_superuser("oob-derived-name-taken-user"))
     ports = [_port(8511, "eth0"), _port(8512, "eth0-oob")]
 
@@ -115,7 +115,7 @@ def test_oob_row_is_skipped_when_the_host_owns_its_derived_name(client, settings
 @pytest.mark.django_db
 def test_cross_source_duplicate_port_id_is_rejected_before_writes(client, settings):
     configure_default_librenms_server(settings)
-    device = make_device("oob-cross-source-port-id", librenms_cf={SERVER_KEY: {"id": 80}})
+    device = seed_mapping(make_device("oob-cross-source-port-id"), SERVER_KEY, own=80)
     client.force_login(make_superuser("oob-cross-source-port-id-user"))
     response = _sync(client, device, [_port("1", "eth0")], [1], oob_ports=[_port(1, "eth0")])
 
@@ -128,7 +128,7 @@ def test_cross_source_duplicate_port_id_is_rejected_before_writes(client, settin
 @pytest.mark.django_db
 def test_two_oob_rows_contesting_one_synced_name_are_both_skipped(client, settings):
     configure_default_librenms_server(settings)
-    device = make_device("oob-derived-name-contested", librenms_cf={SERVER_KEY: {"id": 73}})
+    device = seed_mapping(make_device("oob-derived-name-contested"), SERVER_KEY, own=73)
     client.force_login(make_superuser("oob-derived-name-contested-user"))
     oob_ports = [_port(8522, "eth0"), _port(8523, "eth0-oob")]
 
@@ -144,7 +144,7 @@ def test_two_oob_rows_contesting_one_synced_name_are_both_skipped(client, settin
 @pytest.mark.django_db
 def test_shared_lom_does_not_contest_an_ordinary_oob_name(client, settings):
     configure_default_librenms_server(settings)
-    device = make_device("oob-shared-lom-name-claim", librenms_cf={SERVER_KEY: {"id": 81}})
+    device = seed_mapping(make_device("oob-shared-lom-name-claim"), SERVER_KEY, own=81)
     client.force_login(make_superuser("oob-shared-lom-name-claim-user"))
     # The host and the OOB controller report one MAC, so the assessment flags 9202 as a shared LOM port.
     shared_mac = "aa:bb:cc:dd:ee:01"
@@ -170,7 +170,7 @@ def test_syncing_a_derived_oob_name_twice_is_idempotent(
     from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab
 
     configure_default_librenms_server(settings)
-    device = make_device("oob-derived-name-idempotent", librenms_cf={SERVER_KEY: {"id": 74}})
+    device = seed_mapping(make_device("oob-derived-name-idempotent"), SERVER_KEY, own=74)
     client.force_login(make_superuser("oob-derived-name-idempotent-user"))
     ports, oob_ports = [_port(8531, "eth0")], [_port(8532, "eth0")]
 
@@ -196,7 +196,7 @@ def test_syncing_a_derived_oob_name_twice_is_idempotent(
 @pytest.mark.django_db
 def test_derived_oob_name_survives_the_host_row_leaving_the_snapshot(client, settings):
     configure_default_librenms_server(settings)
-    device = make_device("oob-derived-name-host-gone", librenms_cf={SERVER_KEY: {"id": 79}})
+    device = seed_mapping(make_device("oob-derived-name-host-gone"), SERVER_KEY, own=79)
     client.force_login(make_superuser("oob-derived-name-host-gone-user"))
     host = _port(9101, "eth0")
     oob = _port(9102, "eth0")
@@ -224,7 +224,7 @@ def test_derived_oob_name_survives_the_host_row_leaving_the_snapshot(client, set
 @pytest.mark.django_db
 def test_bound_oob_keeps_its_name_when_unbound_reported_name_is_occupied(client, settings):
     configure_default_librenms_server(settings)
-    device = make_device("oob-derived-name-unbound-destination", librenms_cf={SERVER_KEY: {"id": 82}})
+    device = seed_mapping(make_device("oob-derived-name-unbound-destination"), SERVER_KEY, own=82)
     make_interface(device, "eth0")
     client.force_login(make_superuser("oob-derived-name-unbound-destination-user"))
     host = _port(9301, "eth0")
@@ -257,7 +257,7 @@ def test_bound_oob_keeps_its_name_when_unbound_reported_name_is_occupied(client,
 @pytest.mark.django_db
 def test_bound_oob_keeps_its_name_when_reported_name_is_bound_to_another_server(client, settings):
     configure_default_librenms_server(settings)
-    device = make_device("oob-derived-name-other-server", librenms_cf={SERVER_KEY: {"id": 83}})
+    device = seed_mapping(make_device("oob-derived-name-other-server"), SERVER_KEY, own=83)
     occupied = make_interface(device, "eth0")
     seed_mapping(occupied, "secondary", own=9911, save=False)
     occupied.save()
@@ -293,7 +293,7 @@ def test_bound_oob_keeps_its_name_when_reported_name_is_bound_to_another_server(
 @pytest.mark.django_db
 def test_syncing_oob_before_host_keeps_the_same_names_and_bindings(client, settings):
     configure_default_librenms_server(settings)
-    device = make_device("oob-derived-name-order", librenms_cf={SERVER_KEY: {"id": 75}})
+    device = seed_mapping(make_device("oob-derived-name-order"), SERVER_KEY, own=75)
     client.force_login(make_superuser("oob-derived-name-order-user"))
     ports, oob_ports = [_port(8541, "eth1")], [_port(8542, "eth1")]
 
@@ -310,7 +310,7 @@ def test_syncing_oob_before_host_keeps_the_same_names_and_bindings(client, setti
 @pytest.mark.django_db
 def test_oob_derived_name_that_exceeds_the_model_limit_is_skipped(client, settings):
     configure_default_librenms_server(settings)
-    device = make_device("oob-derived-name-too-long", librenms_cf={SERVER_KEY: {"id": 77}})
+    device = seed_mapping(make_device("oob-derived-name-too-long"), SERVER_KEY, own=77)
     client.force_login(make_superuser("oob-derived-name-too-long-user"))
     limit = Interface._meta.get_field("name").max_length
     name = "x" * limit
@@ -325,7 +325,7 @@ def test_oob_derived_name_that_exceeds_the_model_limit_is_skipped(client, settin
 @pytest.mark.django_db
 def test_excluding_name_does_not_bind_an_oob_port_to_an_overlong_host_name(client, settings):
     configure_default_librenms_server(settings)
-    device = make_device("oob-excluded-derived-name-too-long", librenms_cf={SERVER_KEY: {"id": 79}})
+    device = seed_mapping(make_device("oob-excluded-derived-name-too-long"), SERVER_KEY, own=79)
     client.force_login(make_superuser("oob-excluded-derived-name-too-long-user"))
     name = "x" * Interface._meta.get_field("name").max_length
     host = _port(8581, name)
@@ -349,7 +349,7 @@ def test_excluding_name_does_not_bind_an_oob_port_to_an_overlong_host_name(clien
 @pytest.mark.django_db
 def test_excluding_name_still_updates_an_oob_interface_bound_by_port_id(client, settings):
     configure_default_librenms_server(settings)
-    device = make_device("oob-excluded-derived-name-bound", librenms_cf={SERVER_KEY: {"id": 80}})
+    device = seed_mapping(make_device("oob-excluded-derived-name-bound"), SERVER_KEY, own=80)
     interface = make_interface(device, "management-controller")
     interface.enabled = False
     seed_mapping(interface, SERVER_KEY, own=8592, save=False)
@@ -371,7 +371,7 @@ def test_excluding_name_still_updates_an_oob_interface_bound_by_port_id(client, 
 @pytest.mark.django_db
 def test_excluding_name_preserves_an_operator_chosen_name(client, settings):
     configure_default_librenms_server(settings)
-    device = make_device("oob-excluded-name", librenms_cf={SERVER_KEY: {"id": 78}})
+    device = seed_mapping(make_device("oob-excluded-name"), SERVER_KEY, own=78)
     interface = make_interface(device, "management-controller")
     interface.enabled = False
     seed_mapping(interface, SERVER_KEY, own=8572, save=False)
@@ -397,7 +397,7 @@ def test_excluding_name_preserves_an_operator_chosen_name(client, settings):
 @pytest.mark.django_db
 def test_excluding_name_does_not_bind_oob_port_to_unbound_host_interface(client, settings):
     configure_default_librenms_server(settings)
-    device = make_device("oob-excluded-colliding-name", librenms_cf={SERVER_KEY: {"id": 87}})
+    device = seed_mapping(make_device("oob-excluded-colliding-name"), SERVER_KEY, own=87)
     host_interface = make_interface(device, "eth0")
     client.force_login(make_superuser("oob-excluded-colliding-name-user"))
     response = _sync(
@@ -419,7 +419,7 @@ def test_excluding_name_does_not_bind_oob_port_to_unbound_host_interface(client,
 @pytest.mark.django_db
 def test_excluding_name_updates_a_host_row_when_its_reported_name_is_occupied(client, settings):
     configure_default_librenms_server(settings)
-    device = make_device("host-excluded-occupied-name", librenms_cf={SERVER_KEY: {"id": 84}})
+    device = seed_mapping(make_device("host-excluded-occupied-name"), SERVER_KEY, own=84)
     interface = make_interface(device, "operator-name")
     interface.enabled = False
     seed_mapping(interface, SERVER_KEY, own=9301, save=False)
@@ -452,7 +452,7 @@ def test_excluding_name_updates_a_host_row_when_its_reported_name_is_occupied(cl
 @pytest.mark.django_db
 def test_bound_host_reports_that_its_reported_name_belongs_to_another_port(client, settings):
     configure_default_librenms_server(settings)
-    device = make_device("host-occupied-name-reason", librenms_cf={SERVER_KEY: {"id": 85}})
+    device = seed_mapping(make_device("host-occupied-name-reason"), SERVER_KEY, own=85)
     interface = make_interface(device, "operator-name")
     interface.enabled = False
     seed_mapping(interface, SERVER_KEY, own=9301, save=False)
@@ -509,7 +509,7 @@ def test_verify_preserves_the_full_table_name_and_action_metadata(client, settin
     from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
     configure_default_librenms_server(settings)
-    device = make_device("verify-name-metadata", librenms_cf={SERVER_KEY: {"id": 71}})
+    device = seed_mapping(make_device("verify-name-metadata"), SERVER_KEY, own=71)
     user = make_superuser("verify-name-metadata-user")
     client.force_login(user)
     if case == "rebind":

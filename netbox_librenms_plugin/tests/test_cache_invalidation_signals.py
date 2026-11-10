@@ -98,7 +98,7 @@ class TestOrmWritesInvalidateTheirOwner:
 
         from netbox_librenms_plugin.tests.conftest import install_module, make_device, make_module_bay
 
-        device = make_device("signal-module-create", librenms_cf={SERVER_KEY: 7})
+        device = seed_mapping(make_device("signal-module-create"), SERVER_KEY, own=7)
         make_module_bay(device, "Bay 1")
         keys = _seed_every_tab(device)
 
@@ -117,7 +117,7 @@ class TestOrmWritesInvalidateTheirOwner:
 
         from netbox_librenms_plugin.tests.conftest import install_module, make_device, make_module_bay
 
-        device = make_device("signal-module-delete", librenms_cf={SERVER_KEY: 7})
+        device = seed_mapping(make_device("signal-module-delete"), SERVER_KEY, own=7)
         make_module_bay(device, "Bay 1")
         module = install_module(device, "Bay 1", "Signal Model", serial="SIG-2")
         keys = _seed_every_tab(device)
@@ -139,7 +139,7 @@ class TestOrmWritesInvalidateTheirOwner:
 
         from netbox_librenms_plugin.tests.conftest import install_module, make_device, make_module_bay
 
-        device = make_device("signal-module-qs-delete", librenms_cf={SERVER_KEY: 7})
+        device = seed_mapping(make_device("signal-module-qs-delete"), SERVER_KEY, own=7)
         make_module_bay(device, "Bay 1")
         module = install_module(device, "Bay 1", "Signal Model", serial="SIG-3")
         keys = _seed_every_tab(device)
@@ -159,7 +159,7 @@ class TestOrmWritesInvalidateTheirOwner:
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
 
-        device = make_device("signal-interface-create", librenms_cf={SERVER_KEY: 7})
+        device = seed_mapping(make_device("signal-interface-create"), SERVER_KEY, own=7)
         keys = _seed_every_tab(device)
 
         try:
@@ -179,7 +179,7 @@ class TestOrmWritesInvalidateTheirOwner:
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
 
-        device = make_device("signal-vlan-m2m", librenms_cf={SERVER_KEY: 7})
+        device = seed_mapping(make_device("signal-vlan-m2m"), SERVER_KEY, own=7)
         interface = make_interface(device, "Ethernet1")
         vlan = VLAN.objects.create(vid=101, name="signal-vlan")
         keys = _seed_every_tab(device)
@@ -205,7 +205,7 @@ class TestOrmWritesInvalidateTheirOwner:
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
 
-        device = make_device("signal-vlan-write-alias", librenms_cf={SERVER_KEY: 7})
+        device = seed_mapping(make_device("signal-vlan-write-alias"), SERVER_KEY, own=7)
         interface = make_interface(device, "Ethernet1")
         vlan = VLAN.objects.create(vid=103, name="signal-vlan-write-alias")
         keys = _seed_every_tab(device)
@@ -228,7 +228,7 @@ class TestOrmWritesInvalidateTheirOwner:
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
 
-        device = make_device("signal-vlan-reverse-clear", librenms_cf={SERVER_KEY: 7})
+        device = seed_mapping(make_device("signal-vlan-reverse-clear"), SERVER_KEY, own=7)
         interface = make_interface(device, "Ethernet1")
         vlan = VLAN.objects.create(vid=102, name="signal-vlan-reverse-clear")
         interface.tagged_vlans.add(vlan)
@@ -251,8 +251,8 @@ class TestOrmWritesInvalidateTheirOwner:
 
         from netbox_librenms_plugin.tests.conftest import install_module, make_device, make_module_bay
 
-        changed = make_device("signal-bystander-changed", librenms_cf={SERVER_KEY: 7})
-        bystander = make_device("signal-bystander", librenms_cf={SERVER_KEY: 8})
+        changed = seed_mapping(make_device("signal-bystander-changed"), SERVER_KEY, own=7)
+        bystander = seed_mapping(make_device("signal-bystander"), SERVER_KEY, own=8)
         make_module_bay(changed, "Bay 1")
         keys = _seed_every_tab(bystander)
 
@@ -272,7 +272,7 @@ class TestOrmWritesInvalidateTheirOwner:
 
         from netbox_librenms_plugin.tests.conftest import install_module, make_device, make_module_bay
 
-        device = make_device("signal-rollback", librenms_cf={SERVER_KEY: 7})
+        device = seed_mapping(make_device("signal-rollback"), SERVER_KEY, own=7)
         make_module_bay(device, "Bay 1")
         keys = _seed_every_tab(device)
 
@@ -308,7 +308,7 @@ class TestTheActingPageKeepsItsOwnTransition:
         )
         from netbox_librenms_plugin.tests.conftest import install_module, make_device, make_module_bay
 
-        device = make_device("signal-claimed-page", librenms_cf={SERVER_KEY: 7})
+        device = seed_mapping(make_device("signal-claimed-page"), SERVER_KEY, own=7)
         make_module_bay(device, "Bay 1")
         keys = _seed_every_tab(device)
         modules_key = SyncCacheConsistency(device).snapshot_key(SyncTab.MODULES, SERVER_KEY)
@@ -332,7 +332,7 @@ class TestTheActingPageKeepsItsOwnTransition:
         from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab
         from netbox_librenms_plugin.tests.conftest import install_module, make_device, make_module_bay
 
-        device = make_device("signal-unclaimed-page", librenms_cf={SERVER_KEY: 7})
+        device = seed_mapping(make_device("signal-unclaimed-page"), SERVER_KEY, own=7)
         make_module_bay(device, "Bay 1")
         keys = _seed_every_tab(device)
         modules_key = SyncCacheConsistency(device).snapshot_key(SyncTab.MODULES, SERVER_KEY)
@@ -377,7 +377,7 @@ class TestOneFlushPerObject:
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
 
-        device = make_device("signal-dedup", librenms_cf={SERVER_KEY: 7})
+        device = seed_mapping(make_device("signal-dedup"), SERVER_KEY, own=7)
         _drain_pending_commit_callbacks()
 
         with django_capture_on_commit_callbacks(execute=True) as callbacks:
@@ -399,7 +399,7 @@ class TestOneFlushPerObject:
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
 
-        device = make_device("signal-assignment-batch", librenms_cf={SERVER_KEY: 7})
+        device = seed_mapping(make_device("signal-assignment-batch"), SERVER_KEY, own=7)
         interface = make_interface(device, "Ethernet1")
         keys = _seed_every_tab(device)
 
@@ -431,7 +431,7 @@ class TestOneFlushPerObject:
         from netbox_librenms_plugin import cache_signals
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
 
-        device = make_device("signal-assignment-resolution-failure", librenms_cf={SERVER_KEY: 7})
+        device = seed_mapping(make_device("signal-assignment-resolution-failure"), SERVER_KEY, own=7)
         interface = make_interface(device, "Ethernet1")
         ContentType.objects.get_for_model(interface)
         keys = _seed_every_tab(device)
@@ -462,7 +462,7 @@ class TestOneFlushPerObject:
         from netbox_librenms_plugin import cache_signals
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_vm
 
-        device = make_device("signal-failing-assignment-model", librenms_cf={SERVER_KEY: 7})
+        device = seed_mapping(make_device("signal-failing-assignment-model"), SERVER_KEY, own=7)
         interface = make_interface(device, "Ethernet1")
         virtual_machine = make_vm("signal-valid-assignment-model")
         seed_mapping(virtual_machine, SERVER_KEY, own=8)
@@ -491,10 +491,10 @@ class TestOneFlushPerObject:
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
 
-        invalid_device = make_device("signal-invalid-assignment-source", librenms_cf={SERVER_KEY: 7})
+        invalid_device = seed_mapping(make_device("signal-invalid-assignment-source"), SERVER_KEY, own=7)
         invalid_interface = make_interface(invalid_device, "Ethernet1")
         invalid_target = IPAddress.objects.create(address="198.18.33.1/24", assigned_object=invalid_interface)
-        valid_device = make_device("signal-valid-assignment-owner", librenms_cf={SERVER_KEY: 8})
+        valid_device = seed_mapping(make_device("signal-valid-assignment-owner"), SERVER_KEY, own=8)
         valid_interface = make_interface(valid_device, "Ethernet1")
         keys = _seed_every_tab(valid_device)
 
@@ -520,7 +520,7 @@ def test_loading_deferred_rows_does_not_fetch_owner_columns():
 
     from netbox_librenms_plugin.tests.conftest import make_device, make_interface
 
-    device = make_device("signal-deferred-owner", librenms_cf={SERVER_KEY: 7})
+    device = seed_mapping(make_device("signal-deferred-owner"), SERVER_KEY, own=7)
     interface = make_interface(device, "Ethernet1")
     _drain_pending_commit_callbacks()
 
@@ -542,7 +542,7 @@ class TestABatchSurvivesASavepointRollback:
 
         from netbox_librenms_plugin.tests.conftest import install_module, make_device, make_module_bay
 
-        device = make_device("savepoint-reuse", librenms_cf={SERVER_KEY: 7})
+        device = seed_mapping(make_device("savepoint-reuse"), SERVER_KEY, own=7)
         make_module_bay(device, "Bay 1")
         make_module_bay(device, "Bay 2")
         keys = _seed_every_tab(device)
@@ -580,8 +580,8 @@ class TestARolledBackInnerWriteIsNotFlushed:
 
         from netbox_librenms_plugin.tests.conftest import install_module, make_device, make_module_bay
 
-        outer = make_device("savepoint-outer", librenms_cf={SERVER_KEY: 7})
-        inner = make_device("savepoint-inner", librenms_cf={SERVER_KEY: 8})
+        outer = seed_mapping(make_device("savepoint-outer"), SERVER_KEY, own=7)
+        inner = seed_mapping(make_device("savepoint-inner"), SERVER_KEY, own=8)
         make_module_bay(outer, "Bay 1")
         make_module_bay(inner, "Bay 1")
         keys = _seed_every_tab(inner) + _seed_every_tab(outer)
@@ -663,9 +663,9 @@ class TestAReassignedRowInvalidatesBothSides:
 
         from netbox_librenms_plugin.tests.conftest import ip_on, make_device, make_interface
 
-        donor = make_device("ip-move-donor", librenms_cf={SERVER_KEY: 7})
-        winner = make_device("ip-move-winner", librenms_cf={SERVER_KEY: 8})
-        bystander = make_device("ip-move-bystander", librenms_cf={SERVER_KEY: 9})
+        donor = seed_mapping(make_device("ip-move-donor"), SERVER_KEY, own=7)
+        winner = seed_mapping(make_device("ip-move-winner"), SERVER_KEY, own=8)
+        bystander = seed_mapping(make_device("ip-move-bystander"), SERVER_KEY, own=9)
         ip = ip_on(donor, "198.18.30.10/24", "Ethernet1")
         winner_interface = make_interface(winner, "Ethernet1")
         keys = _seed_every_tab(winner) + _seed_every_tab(bystander) + _seed_every_tab(donor)
@@ -696,7 +696,7 @@ class TestAWriteOutsideATransactionStillInvalidates:
         """Verify that an autocommit write records its owner before Django runs ``on_commit`` inline."""
         from netbox_librenms_plugin.tests.conftest import install_module, make_device, make_module_bay
 
-        device = make_device("autocommit-write", librenms_cf={SERVER_KEY: 7})
+        device = seed_mapping(make_device("autocommit-write"), SERVER_KEY, own=7)
         make_module_bay(device, "Bay 1")
         keys = _seed_every_tab(device)
 
@@ -1174,7 +1174,7 @@ def test_repeated_ip_assignment_invalidates_the_last_persisted_owner(django_capt
     from netbox_librenms_plugin.tests.conftest import make_device, make_interface
 
     devices = [
-        make_device(f"signal-repeated-owner-{suffix}", librenms_cf={SERVER_KEY: port_id})
+        seed_mapping(make_device(f"signal-repeated-owner-{suffix}"), SERVER_KEY, own=port_id)
         for suffix, port_id in (("a", 71), ("b", 72), ("c", 73))
     ]
     interfaces = [make_interface(device, "Ethernet1") for device in devices]
