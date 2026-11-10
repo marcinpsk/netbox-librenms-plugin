@@ -256,6 +256,8 @@ class TestVLANVerifyEndpoints:
             "name_matches": True,
             "css_class": "text-success",
             "netbox_vlan_name": "Application",
+            "name": "Application",
+            "name_html": '<span class="text-success">Application</span>',
             "status_html": '<span class="text-success"><i class="mdi mdi-check-circle"></i> Synced</span>',
         }
 
