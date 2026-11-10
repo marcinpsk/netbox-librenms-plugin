@@ -828,19 +828,23 @@ def _manage_py():
     return manage
 
 
-def _run_nbshell(tmp_path, *, database, servers, stdout=subprocess.PIPE, **extra_environment):
+def _nbshell_environment(tmp_path, *, database, servers, **extra_environment):
     (tmp_path / "classifier_check_settings.py").write_text(
         "from netbox_librenms_plugin.tests.isolated_settings import *  # noqa: F403\n"
         f"DATABASES['default']['NAME'] = {database!r}\n"
         f"PLUGINS_CONFIG['netbox_librenms_plugin']['servers'] = {_server_settings(*servers)!r}\n",
         encoding="utf-8",
     )
-    environment = {
+    return {
         **os.environ,
         **extra_environment,
         "PYTHONPATH": os.pathsep.join([str(tmp_path), *(path for path in sys.path if path)]),
         "DJANGO_SETTINGS_MODULE": "classifier_check_settings",
     }
+
+
+def _run_nbshell(tmp_path, *, database, servers, stdout=subprocess.PIPE, **extra_environment):
+    environment = _nbshell_environment(tmp_path, database=database, servers=servers, **extra_environment)
     with Path(mapping_classifier.__file__).open() as script:
         return subprocess.run(
             [sys.executable, str(_manage_py()), "nbshell"],
@@ -915,3 +919,32 @@ def test_a_report_that_cannot_be_flushed_exits_with_status_3_through_nbshell(tmp
 
     assert result.returncode == 3, result.stderr
     assert "ERROR" in result.stderr
+
+
+def test_an_error_that_cannot_be_written_exits_with_status_3_through_nbshell(tmp_path):
+    """A failed write of the error message must not end the console run with another status."""
+    environment = _nbshell_environment(tmp_path, database="mapping_check_absent", servers=("primary",))
+    process = subprocess.Popen(
+        [sys.executable, str(_manage_py()), "nbshell"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=environment,
+        text=True,
+    )
+    try:
+        # The shell writes its banner to stderr, so stderr closes only after the shell has started.
+        process.stdin.write("__import__('sys').stderr.write('STARTED\\n')\n")
+        process.stdin.flush()
+        for line in process.stderr:
+            if line == "STARTED\n":
+                break
+        process.stderr.close()
+        process.stdin.write(Path(mapping_classifier.__file__).read_text())
+        process.stdin.close()
+        output = process.stdout.read()
+        status = process.wait(timeout=120)
+    finally:
+        process.kill()
+
+    assert status == 3, output
