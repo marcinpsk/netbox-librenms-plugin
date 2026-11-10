@@ -928,8 +928,9 @@ class TestValidateDeviceForImport:
         NormalizationRule.objects.get_or_create(
             scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
         )
-        linked = {SERVER_KEY: 5427} if match == "librenms_id" else None
-        device = make_device(f"validation-keyed-drift-{match}", serial="S/N ABC-DRIFT", librenms_cf=linked)
+        device = make_device(f"validation-keyed-drift-{match}", serial="S/N ABC-DRIFT")
+        if match == "librenms_id":
+            seed_mapping(device, SERVER_KEY, own=5427)
         payload = _device_payload(5427, hostname=device.name, sysName=device.name, serial="ABC-DRIFT")
 
         result = self._validate(payload)

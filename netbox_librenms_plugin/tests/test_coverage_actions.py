@@ -6514,7 +6514,7 @@ class TestMergeNetBoxDevicesViewOOBTransfer(_MergeViewHarness):
         assert state["moved"], "the injected interface move never fired — test wiring is stale"
 
 
-def _two_member_vc(name, *, m1_cf=None, m2_cf=None):
+def _two_member_vc(name, *, m1_cf=None):
     """Create a real 2-member VirtualChassis (positions 1, 2). m1 becomes the sync device when it is the member holding the ``librenms_id``."""
     from dcim.models import VirtualChassis
 
@@ -6523,7 +6523,7 @@ def _two_member_vc(name, *, m1_cf=None, m2_cf=None):
     m1.virtual_chassis = vc
     m1.vc_position = 1
     m1.save()
-    m2 = make_device(f"{name}-m2", librenms_cf=m2_cf)
+    m2 = make_device(f"{name}-m2")
     m2.virtual_chassis = vc
     m2.vc_position = 2
     m2.save()
@@ -6545,7 +6545,8 @@ class TestMergeNetBoxDevicesViewVCSyncDevice(_MergeViewHarness):
 
     def test_winner_is_non_sync_vc_member_link_lands_on_sync_device(self):
         """Winner is a non-sync VC member whose sync sibling already holds a host id; the donor's id must merge onto the sync sibling (into its OOB half) and NEVER onto the raw winner member — otherwise two members of one chassis hold ``librenms_id`` (split brain)."""
-        _vc, m1, m2 = _two_member_vc("mrg-vc-win", m1_cf={self.server_key: {"id": 30}}, m2_cf=None)
+        _vc, m1, m2 = _two_member_vc("mrg-vc-win")
+        seed_mapping(m1, self.server_key, own=30)
         donor = seed_mapping(make_device("mrg-vc-win-donor"), self.server_key, own=40)
 
         self._run_merge(winner=m2, donor=donor)
@@ -6563,7 +6564,8 @@ class TestMergeNetBoxDevicesViewVCSyncDevice(_MergeViewHarness):
 
     def test_donor_is_non_sync_vc_member_clears_link_on_sync_device(self):
         """Donor is a non-sync VC member; its real link lives on the sync sibling. The merge must read + clear that sibling's link (and mark IT migrated), not the empty selected member — otherwise the source VC stays linked to LibreNMS."""
-        _vc, m1, m2 = _two_member_vc("mrg-vc-don", m1_cf={self.server_key: {"id": 30}}, m2_cf=None)
+        _vc, m1, m2 = _two_member_vc("mrg-vc-don")
+        seed_mapping(m1, self.server_key, own=30)
         winner = seed_mapping(make_device("mrg-vc-don-winner"), self.server_key, own=50)
 
         self._run_merge(winner=winner, donor=m2)
@@ -6581,7 +6583,7 @@ class TestMergeNetBoxDevicesViewVCSyncDevice(_MergeViewHarness):
 
     def test_legacy_id_on_donor_sync_sibling_gets_convert_first_message(self):
         """A legacy link on the donor's sync sibling gets the friendly convert-first message."""
-        _vc, _sync_member, selected_member = _two_member_vc("mrg-vc-legacy", m1_cf=30, m2_cf=None)
+        _vc, _sync_member, selected_member = _two_member_vc("mrg-vc-legacy", m1_cf=30)
         winner = seed_mapping(make_device("mrg-vc-legacy-winner"), self.server_key, own=50)
 
         response = self._run_merge(winner=winner, donor=selected_member)
@@ -6596,9 +6598,11 @@ class TestMergeNetBoxDevicesViewVCSyncDevice(_MergeViewHarness):
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
 
-        vc, m1, m2 = _two_member_vc("mrg-vc-lock", m1_cf={self.server_key: {"id": 30}}, m2_cf=None)
+        vc, m1, m2 = _two_member_vc("mrg-vc-lock")
+
+        seed_mapping(m1, self.server_key, own=30)
         # A bystander member: not the selected winner (m2) and not the sync device (m1).
-        m3 = make_device("mrg-vc-lock-m3", librenms_cf=None)
+        m3 = make_device("mrg-vc-lock-m3")
         m3.virtual_chassis = vc
         m3.vc_position = 3
         m3.save()
@@ -8450,12 +8454,12 @@ class TestConflictActionsObjectScope:
         assert mapping_summary(Device.objects.get(pk=target.pk))["default"] == {"own": 4242}
 
     @staticmethod
-    def _vc_pair(name, *, sync_cf):
+    def _vc_pair(name, *, sync_own):
         """Create a two-member chassis whose first member is the sync device."""
         from dcim.models import VirtualChassis
 
         vc = VirtualChassis.objects.create(name=name)
-        m1 = make_device(f"{name}-m1", librenms_cf=sync_cf)
+        m1 = seed_mapping(make_device(f"{name}-m1"), own=sync_own)
         m1.virtual_chassis = vc
         m1.vc_position = 1
         m1.save()
@@ -8469,7 +8473,7 @@ class TestConflictActionsObjectScope:
         """The OOB link lands on the VC sync sibling, so a grant covering only the selected member must not attach it."""
         from dcim.models import Device
 
-        sync, selected = self._vc_pair("scope-oob-vc", sync_cf={"default": {"id": 30}})
+        sync, selected = self._vc_pair("scope-oob-vc", sync_own=30)
         user = self._scoped_writer(selected, "scoped-oob-vc-writer")  # excludes the sync sibling
 
         response = self._post_add_as_oob(user, selected)
@@ -8487,7 +8491,7 @@ class TestConflictActionsObjectScope:
         from django.contrib.auth import get_user_model
         from users.models import ObjectPermission
 
-        sync, selected = self._vc_pair("scope-oob-vc-ok", sync_cf={"default": {"id": 30}})
+        sync, selected = self._vc_pair("scope-oob-vc-ok", sync_own=30)
         user = self._scoped_writer(selected, "scoped-oob-vc-writer-ok")
         extra = ObjectPermission.objects.create(
             name="scoped-oob-vc-sync", actions=["change"], constraints={"pk": sync.pk}
@@ -8691,7 +8695,9 @@ class TestPromoteAndMergeObjectScope:
         """The donor's VC sync sibling holds the link the merge clears and stamps, so an out-of-scope sibling must block the merge."""
         from dcim.models import Device
 
-        _vc, m1, m2 = _two_member_vc("mrg-scope-vc", m1_cf={"default": {"id": 30}}, m2_cf=None)
+        _vc, m1, m2 = _two_member_vc("mrg-scope-vc")
+
+        seed_mapping(m1, "default", own=30)
         winner = seed_mapping(make_device("mrg-scope-winner"), "default", own=50)
         # Covers the selected winner and the selected donor member, but NOT the sync sibling m1.
         user = _constrained_device_writer({"pk__in": [winner.pk, m2.pk]}, "scoped-merge-vc-sync")
@@ -8706,7 +8712,9 @@ class TestPromoteAndMergeObjectScope:
         """Widening the grant to the sync sibling lets the same merge through (no over-block)."""
         from dcim.models import Device
 
-        _vc, m1, m2 = _two_member_vc("mrg-scope-vc-ok", m1_cf={"default": {"id": 30}}, m2_cf=None)
+        _vc, m1, m2 = _two_member_vc("mrg-scope-vc-ok")
+
+        seed_mapping(m1, "default", own=30)
         winner = seed_mapping(make_device("mrg-scope-winner-ok"), "default", own=50)
         user = _constrained_device_writer({"pk__in": [winner.pk, m1.pk, m2.pk]}, "scoped-merge-vc-sync-ok")
 

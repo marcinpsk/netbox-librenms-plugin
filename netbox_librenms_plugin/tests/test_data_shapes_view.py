@@ -290,7 +290,7 @@ def test_capture_view_does_not_discover_a_conflicting_id(client, recording_serve
     recording = load_recording("cisco-stackwise-3member")
     server, api = recording_server(recording)
     seed_mapping(make_device("capture-conflict-owner"), "test", own=_STACK_RECORDING_ID)
-    target = make_device("capture-conflict-target.example.com", librenms_cf={"test": None})
+    target = make_device("capture-conflict-target.example.com")
     server.register(
         f"/api/v0/devices/{target.name}",
         {"status": "ok", "devices": [{"device_id": _STACK_RECORDING_ID}]},
