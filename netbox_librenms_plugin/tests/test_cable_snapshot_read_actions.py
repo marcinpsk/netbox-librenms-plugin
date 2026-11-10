@@ -15,6 +15,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_interface,
     make_superuser,
+    make_virtual_chassis_members,
     map_device_to_librenms,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
@@ -468,3 +469,71 @@ def test_create_far_end_rechecks_a_hostname_neighbour_mapping_under_the_lock(cli
 
     assert not Interface.objects.filter(device__in=(neighbour, other)).exists()
     assert not Cable.objects.exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("member_moved", [False, True], ids=["member-kept", "member-moved"])
+def test_create_far_end_rechecks_the_chassis_of_a_hostname_neighbour_member_under_the_lock(
+    client, live_librenms, monkeypatch, member_moved
+):
+    """A far-end member that leaves the neighbour's chassis after the proposal check refuses the create."""
+    from netbox_librenms_plugin.views.sync.cables import CableRemoteCreateView
+
+    subject = map_device_to_librenms(make_device("source-vc-race-owner"), HOST_ID, server_key=SERVER_KEY)
+    _chassis, (mapping_owner, far_member) = make_virtual_chassis_members("source-vc-race")
+    map_device_to_librenms(mapping_owner, NEIGHBOUR_ID, server_key=SERVER_KEY)
+    other_chassis, (other_owner,) = make_virtual_chassis_members("source-vc-race-other", count=1)
+    map_device_to_librenms(other_owner, NEIGHBOUR_ID + 10, server_key=SERVER_KEY)
+    local = seed_mapping(make_interface(subject, "eth1"), SERVER_KEY, own=LOCAL_PORT_ID)
+    live_librenms.server.register(
+        f"/api/v0/devices/{HOST_ID}/links",
+        {
+            "status": "ok",
+            "links": [
+                link_row(
+                    LOCAL_PORT_ID,
+                    "xe-2/0/0",
+                    local_port="eth1",
+                    remote_port_id=REMOTE_PORT_ID,
+                    remote_hostname=mapping_owner.name,
+                )
+            ],
+        },
+    )
+    live_librenms.server.register(
+        f"/api/v0/devices/{HOST_ID}/ports",
+        {"status": "ok", "ports": [port_row(LOCAL_PORT_ID, "eth1", device_id=HOST_ID)]},
+    )
+    live_librenms.server.register(
+        f"/api/v0/devices/{NEIGHBOUR_ID}/ports",
+        {"status": "ok", "ports": [port_row(REMOTE_PORT_ID, "xe-2/0/0", device_id=NEIGHBOUR_ID)]},
+    )
+    client.force_login(make_superuser("source-vc-race-member"))
+    (row,) = _rows(_refresh(client, subject))
+    assert row["remote_device_id"] is None
+    assert row["remote_port_owner_id"] == far_member.pk
+    resolve_proposal = CableRemoteCreateView._resolve_proposal
+
+    def resolve_then_move_the_member(self, *args, **kwargs):
+        result = resolve_proposal(self, *args, **kwargs)
+        if member_moved:
+            # Another request moves the far-end member to another chassis before the lock.
+            moved = Device.objects.get(pk=far_member.pk)
+            moved.virtual_chassis = other_chassis
+            moved.vc_position = 2
+            moved.save()
+        return result
+
+    monkeypatch.setattr(CableRemoteCreateView, "_resolve_proposal", resolve_then_move_the_member)
+
+    client.post(
+        reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[subject.pk]),
+        {"server_key": SERVER_KEY, "row_id": str(LOCAL_PORT_ID), "expected_local_id": local.pk},
+    )
+
+    if member_moved:
+        assert not Interface.objects.filter(device=far_member).exists()
+        assert not Cable.objects.exists()
+    else:
+        assert Interface.objects.filter(device=far_member, name="xe-2/0/0").exists()
+        assert Cable.objects.count() == 1

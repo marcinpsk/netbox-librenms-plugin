@@ -1613,13 +1613,21 @@ class CableRemoteCreateView(SyncCablesView):
         locked_owners = self._lock_owner_devices(owner_ids, evidence_owner_ids)
         if locked_owners is None:
             raise _RemoteCreateAborted("The cable row changed. Refresh the cable data and try again.")
-        # Mapping writes lock the owner, so the locked row holds the mapping that the write uses.
-        if mapping_owner is not None and not self._hostname_neighbour_still_maps_to(
-            locked_owners[mapping_owner.pk], context["row"], server_key
+        if mapping_owner is not None and not self._locked_mapping_owner_still_holds(
+            locked_owners, mapping_owner, context, server_key
         ):
             raise _RemoteCreateAborted(
                 f"The LibreNMS mapping of {context['remote_device'].name} changed. Refresh the cable data and try again."
             )
+
+    def _locked_mapping_owner_still_holds(self, locked_owners, mapping_owner, context, server_key):
+        """True when the locked remote device still selects *mapping_owner*, and its locked mapping names the neighbour."""
+        # A member can change chassis, so re-derive the owner from the locked remote device row.
+        rederived = self._hostname_mapping_owner(locked_owners[context["remote_device"].pk], context["row"], server_key)
+        # Mapping writes lock the owner, so the locked row holds the mapping that the write uses.
+        return rederived.pk == mapping_owner.pk and self._hostname_neighbour_still_maps_to(
+            locked_owners[mapping_owner.pk], context["row"], server_key
+        )
 
     def _resolve_proposal(self, request, pk, data):
         """
