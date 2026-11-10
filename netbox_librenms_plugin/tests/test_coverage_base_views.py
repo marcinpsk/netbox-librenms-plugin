@@ -309,7 +309,7 @@ class TestCableHTTPAndORM:
         ports = _register_ports(live_librenms)
         view = _view(DeviceCableTableView, live_librenms)
 
-        assert [port["port_id"] for port in view.get_ports_data(42)["ports"]] == [port["port_id"] for port in ports]
+        assert [port["port_id"] for port in view.get_ports_data(42)[0]["ports"]] == [port["port_id"] for port in ports]
         assert [item["path"] for item in live_librenms.server.requests] == ["/api/v0/devices/42/ports"]
 
     def test_exact_name_fallback_accepts_a_fqdn(self, live_librenms):
