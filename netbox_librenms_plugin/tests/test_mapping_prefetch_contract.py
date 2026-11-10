@@ -764,3 +764,42 @@ def test_the_device_status_list_loads_the_chassis_members_once(client, settings,
 
     assert counts[0] == counts[1], counts
     assert prefetch_calls[0] == prefetch_calls[1], prefetch_calls
+
+
+@pytest.mark.django_db
+def test_the_import_list_prefetches_every_matched_object(live_librenms):
+    """Validation and the cached-row refresh read the mapping of each matched device; one preload serves both."""
+    from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
+    from netbox_librenms_plugin.tests.test_coverage_bulk_import import _libre_device
+
+    live_librenms.api.cache_timeout = 300
+    rows = []
+    for index in range(12):
+        device = make_device(f"import-prefetch-{index}", serial=f"IMPORT-SN-{index}")
+        state = index % 4
+        if state == 0:
+            seed_mapping(device, SERVER_KEY, own=7000 + index)
+        elif state == 1:
+            seed_mapping(device, SERVER_KEY, own=7000 + index, oob=8000 + index)
+        # State 2 matches by host name and state 3 by serial, so neither is mapped yet.
+        hostname = f"import-prefetch-other-{index}" if state == 3 else device.name
+        rows.append(_libre_device(7000 + index, hostname, serial=device.serial if state == 3 else ""))
+    live_librenms.server.register("/api/v0/devices", {"status": "ok", "devices": rows})
+
+    def validate(clear_cache):
+        with spy_mapping_reads() as spy:
+            validated = process_device_filters(
+                live_librenms.api,
+                {"hostname": "import-prefetch"},
+                vc_detection_enabled=False,
+                clear_cache=clear_cache,
+                show_disabled=True,
+            )
+        assert all(row["_validation"]["existing_device"] is not None for row in validated)
+        return spy
+
+    for clear_cache in (True, False):
+        spy = validate(clear_cache)
+        assert len({obj.pk for obj in spy.saved_reads()}) == len(rows)
+        assert spy.prefetch_calls == 1, "the list loads its matched objects in one batch, not one per row"
+        _assert_prefetched(spy)
