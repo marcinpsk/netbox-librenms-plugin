@@ -3,7 +3,7 @@
 <div class="{% if full_page %}card-header{% else %}modal-header{% endif %}">
   <h5 class="{% if full_page %}card-title{% else %}modal-title{% endif %}">
     <i class="mdi mdi-alert-outline text-warning me-1"></i>
-    Confirm VLAN changes
+    {% if review %}Review VLAN changes{% else %}Confirm VLAN changes{% endif %}
   </h5>
   {% if full_page %}
     <a href="{{ cancel_url }}" class="btn-close ms-auto" aria-label="Close"></a>
@@ -30,8 +30,13 @@
     {% if not full_page %}{% include 'inc/messages.html' %}{% endif %}
 
     <p>
-      Any safe selected rows were synchronized. The following rows would rename an existing VLAN.
-      Select the changes to confirm.
+      {% if review %}
+        Nothing was changed. The selected rows would make the following changes with the chosen groups.
+        Select the changes to apply.
+      {% else %}
+        Any safe selected rows were synchronized. The following rows would rename an existing VLAN.
+        Select the changes to confirm.
+      {% endif %}
     </p>
 
     {% for conflict in conflicts %}
@@ -49,7 +54,7 @@
             </div>
             <dl class="row small mb-0 mt-2">
               <dt class="col-sm-4 text-muted">Current NetBox name</dt>
-              <dd class="col-sm-8">{{ conflict.current_name }}</dd>
+              <dd class="col-sm-8">{% if conflict.current_name is None %}Not in NetBox{% else %}{{ conflict.current_name }}{% endif %}</dd>
               <dt class="col-sm-4 text-muted">Proposed name</dt>
               <dd class="col-sm-8 mb-0">{{ conflict.proposed_name }}</dd>
             </dl>
