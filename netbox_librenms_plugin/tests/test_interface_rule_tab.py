@@ -25,7 +25,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis_members,
     make_vm,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import port_pair, seed_interfaces_snapshot
 
 SERVER_KEY = "default"
@@ -242,7 +242,7 @@ class TestIgnoredRowsInTheTab:
         InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform, name_pattern="^Vlan")
         vm = make_vm("rule-tab-vm")
         vm.platform = platform
-        seed_stored_mapping(vm, {SERVER_KEY: {"id": 62}})
+        seed_mapping(vm, SERVER_KEY, own=62, save=False)
         vm.save()
         _seed(vm, _vlan_ports())
 
@@ -286,7 +286,7 @@ class TestVirtualChassisOwners:
         InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform_p, name_pattern="^Gi")
         _vc, (first, second) = make_virtual_chassis_members(tag)
         first.platform = platform_p
-        seed_stored_mapping(first, {SERVER_KEY: {"id": 63}})
+        seed_mapping(first, SERVER_KEY, own=63, save=False)
         first.save()
         second.platform = platform_q
         second.save()
@@ -458,7 +458,7 @@ class TestAnIncompleteRecordIsBlocked:
 
     def test_the_verify_repaint_asks_for_a_refresh(self, superuser_client):
         _vc, (first, _second) = make_virtual_chassis_members("rule-tab-incomplete-verify")
-        seed_stored_mapping(first, {SERVER_KEY: {"id": 68}})
+        seed_mapping(first, SERVER_KEY, own=68, save=False)
         first.save()
         _seed(first, [self._incomplete_port(801)])
 
@@ -521,7 +521,7 @@ class TestTheRulePillSitsInTheActionsCell:
 
     def test_an_unresolved_owner_pill_sits_in_the_actions_cell(self, superuser_client):
         _vc, (first, _second) = make_virtual_chassis_members("rule-tab-pill-owner")
-        seed_stored_mapping(first, {SERVER_KEY: {"id": 69}})
+        seed_mapping(first, SERVER_KEY, own=69, save=False)
         first.save()
         _seed(first, [_port(30, "ae0", if_type="ieee8023adLag"), _port(31, "Vlan10")], [port_pair(31, 30)])
 
@@ -538,7 +538,7 @@ class TestTheRulePillSitsInTheActionsCell:
         InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform, name_pattern="^Gi")
         _vc, (first, _second) = make_virtual_chassis_members("rule-tab-pill-verify")
         first.platform = platform
-        seed_stored_mapping(first, {SERVER_KEY: {"id": 70}})
+        seed_mapping(first, SERVER_KEY, own=70, save=False)
         first.save()
         _seed(first, [_port(40, "ae0", if_type="ieee8023adLag"), _port(41, "Gi1/0/1")], [port_pair(41, 40)])
 

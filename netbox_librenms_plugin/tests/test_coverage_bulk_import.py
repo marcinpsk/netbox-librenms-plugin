@@ -8,7 +8,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_superuser,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, stored_mapping_for_test
+from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary, seed_mapping
 
 
 class TestStackKey:
@@ -283,7 +283,7 @@ class TestBulkImportIntegration:
         assert len(result["success"]) == 1
         imported = Device.objects.get(name="bulk-new-device")
         assert imported.serial == "TEST-SERIAL-81"
-        assert stored_mapping_for_test(imported)["default"] == 81
+        assert mapping_summary(imported)["default"] == {"own": 81}
 
     def test_a_later_import_row_sees_the_serial_created_earlier_in_its_batch(self, live_librenms):
         from dcim.models import Device

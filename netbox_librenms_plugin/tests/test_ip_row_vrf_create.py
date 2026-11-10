@@ -13,7 +13,7 @@ from django.urls import reverse
 
 from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
 from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_device, make_superuser, make_vm
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
 SERVER_KEY = "test"
@@ -54,13 +54,11 @@ def seeded(recording_server, settings):
         recording = load_recording("iosxe-subinterfaces")
         server, _api = recording_server(recording, server_key=SERVER_KEY)
         configure_librenms_servers(settings, {SERVER_KEY: {"librenms_url": server.url, "api_token": "test-token"}})
-        librenms_cf = {SERVER_KEY: {"id": recording["device_id"]}}
         if object_type == "device":
-            owner, route = make_device(name, librenms_cf=librenms_cf), "device_ipaddress_sync"
+            owner, route = make_device(name), "device_ipaddress_sync"
         else:
             owner, route = make_vm(name), "vm_ipaddress_sync"
-            seed_stored_mapping(owner, librenms_cf)
-            owner.save()
+        seed_mapping(owner, SERVER_KEY, own=recording["device_id"])
         refresher = Client()
         refresher.force_login(make_superuser(f"{name}-refresher"))
         response = refresher.post(
@@ -631,7 +629,7 @@ def test_ip_table_refresh_refuses_repeated_server_keys(client, settings, recordi
     server, _ = recording_server(recording, server_key="test")
     configure_librenms_servers(settings, {"test": {"librenms_url": server.url, "api_token": "test-token"}})
     owner = make_device("ambiguous-ip-refresh") if object_type == "device" else make_vm("ambiguous-ip-refresh")
-    seed_stored_mapping(owner, {"test": {"id": recording["device_id"]}})
+    seed_mapping(owner, "test", own=recording["device_id"], save=False)
     owner.save()
     client.force_login(make_superuser("ambiguous-ip-refresh-user"))
 

@@ -19,7 +19,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_vm,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot, seed_source_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 from netbox_librenms_plugin.tests.vlan_intent_helpers import reassess, sync, tab_tokens
@@ -301,7 +301,7 @@ class TestIPAddressWriteFailures:
 
     def test_vm_address_is_assigned_to_a_real_vm_interface(self, client, live_librenms):
         vm = make_vm("ip-vm")
-        seed_stored_mapping(vm, {SERVER_KEY: {"id": 125}}, save=True)
+        seed_mapping(vm, SERVER_KEY, own=125)
         interface = VMInterface.objects.create(virtual_machine=vm, name="eth0")
         _set_id(interface, 8351)
         row_id = "198.18.125.10/24"

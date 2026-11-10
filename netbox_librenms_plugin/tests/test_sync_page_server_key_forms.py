@@ -542,10 +542,11 @@ def test_refresh_configuration_error_cannot_retry_another_server(
     from netbox_librenms_plugin.tests.conftest import make_vm
 
     factory = make_device if model == "device" else make_vm
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
     obj = factory("refresh-retry-scope")
-    seed_stored_mapping(obj, {"default": {"id": 42}, "secondary": {"id": 42}}, save=True)
+    seed_mapping(obj, "default", own=42, save=False)
+    seed_mapping(obj, "secondary", own=42)
     client.force_login(make_superuser("refresh-retry-user"))
     _register_device_info(servers.default)
     _register_device_info(servers.secondary)

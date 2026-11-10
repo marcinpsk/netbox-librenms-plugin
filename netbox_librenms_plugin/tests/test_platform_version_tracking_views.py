@@ -18,7 +18,6 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
     transactional_db_with_all_apps,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 from netbox_librenms_plugin.tests.view_test_helpers import (
     assert_update_logged,
@@ -26,6 +25,7 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     make_user_with_perms,
     message_texts,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 pytestmark = pytest.mark.django_db
 
@@ -69,7 +69,7 @@ def _linked(name, server, device_id, *, platform=None, os="junos", version=VERSI
 
 def _linked_vm(name, server, device_id, *, platform=None, os="junos", version=VERSION):
     vm = make_vm(name)
-    seed_stored_mapping(vm, {SERVER_KEY: device_id}, save=True)
+    seed_mapping(vm, SERVER_KEY, own=device_id)
     if platform is not None:
         vm.platform = platform
         vm.save()
