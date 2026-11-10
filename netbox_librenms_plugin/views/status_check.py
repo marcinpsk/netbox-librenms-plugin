@@ -11,6 +11,7 @@ from netbox_librenms_plugin.forms import (
     DeviceStatusFilterForm,
     VirtualMachineStatusFilterForm,
 )
+from netbox_librenms_plugin.server_mappings import prefetch_mappings
 from netbox_librenms_plugin.tables.device_status import DeviceStatusTable
 from netbox_librenms_plugin.tables.VM_status import VMStatusTable
 from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE, TransactionConflict, classify_conflict
@@ -73,7 +74,7 @@ class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gen
             queryset = self.filterset(self.request.GET, queryset=queryset).qs
 
             # Check LibreNMS status for each device
-            for device in queryset:
+            for device in prefetch_mappings(queryset):
                 try:
                     librenms_id, lookup_error = self.resolve_librenms_id(device)
                     if lookup_error is not None:
@@ -141,7 +142,7 @@ class VMStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, generic
             queryset = self.filterset(self.request.GET, queryset=queryset).qs
 
             # Check LibreNMS status for each VM
-            for vm in queryset:
+            for vm in prefetch_mappings(queryset):
                 try:
                     librenms_id, lookup_error = self.resolve_librenms_id(vm)
                     if lookup_error is not None:

@@ -45,6 +45,7 @@ from netbox_librenms_plugin.server_mappings import (
     port_holders,
     identity_q,
     name_match_may_be_port,
+    prefetch_mappings,
     read_mapping,
     resolve_device_port,
 )
@@ -60,6 +61,7 @@ from netbox_librenms_plugin.sync_filters import filter_sync_table, parse_table_f
 from netbox_librenms_plugin.sync_query import SyncQuery
 from netbox_librenms_plugin.tables.cables import SYNC_CABLE_LABEL
 from netbox_librenms_plugin.utils import (
+    any_device_migrated,
     cable_far_terminations,
     cable_has_librenms_tag,
     cable_is_point_to_point,
@@ -430,7 +432,7 @@ class BaseCableTableView(
                 roles=(MappingRole.OWN,),
             )
             device_pks.update(Device.objects.filter(id_q).values_list("pk", flat=True))
-        catalog_devices = list(Device.objects.filter(pk__in=device_pks).select_related("virtual_chassis"))
+        catalog_devices = prefetch_mappings(Device.objects.filter(pk__in=device_pks).select_related("virtual_chassis"))
         visible_device_ids = set(
             self._viewable_queryset(Device)
             .filter(pk__in=[device.pk for device in catalog_devices])
@@ -572,7 +574,7 @@ class BaseCableTableView(
                 roles=(MappingRole.OWN, MappingRole.OOB),
             )
             candidate_pks.update(Interface.objects.filter(candidate_q).values_list("pk", flat=True))
-        catalog_interfaces = list(
+        catalog_interfaces = prefetch_mappings(
             Interface.objects.filter(pk__in=candidate_pks)
             .select_related("device", "cable", "parent__cable")
             .prefetch_related(
@@ -2220,6 +2222,7 @@ class BaseCableTableView(
         )
         # A render without a resolved server reads the marker under "default", as the marker reader always did.
         marker_key = server_key or "default"
+        prefetch_mappings(owner_devices.values())
         read_only_owner_ids = {
             device_id for device_id, device in owner_devices.items() if read_mapping(device).migrated_to(marker_key)
         }
@@ -2393,9 +2396,8 @@ class SingleCableVerifyView(BaseCableTableView):
             else:
                 primary_device = selected_device
 
-            read_only_origin = any(
-                read_mapping(device).migrated_to(server_key or "default")
-                for device in {origin_device, primary_device, selected_device}
+            read_only_origin = any_device_migrated(
+                {origin_device, primary_device, selected_device}, server_key or "default"
             )
 
             links_cache_key = source_cache.snapshot_key(origin_device, Resource.CABLES, server_key)

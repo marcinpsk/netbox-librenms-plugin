@@ -7,7 +7,12 @@ from django.conf import settings as django_settings
 
 from netbox_librenms_plugin.ip_addressing import primary_ips
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-from netbox_librenms_plugin.server_mappings import PreferenceStatus, read_mapping, require_server_key
+from netbox_librenms_plugin.server_mappings import (
+    PreferenceStatus,
+    prefetch_mappings,
+    read_mapping,
+    require_server_key,
+)
 
 
 class ServerSelectionState(StrEnum):
@@ -221,7 +226,7 @@ def get_librenms_sync_device(device, server_key: str | None = None):  # noqa: C9
         return device
 
     vc = device.virtual_chassis
-    all_members = vc.members.all()
+    all_members = prefetch_mappings(vc.members.all())
     mappings = [(member, read_mapping(member)) for member in all_members]
 
     if server_key is not None:
@@ -256,9 +261,10 @@ def get_librenms_sync_device(device, server_key: str | None = None):  # noqa: C9
             if any(entry.oob_id is not None for entry in mapping.servers):
                 return member
 
-    # Priority 2: the master with a primary IP, when it is a member; a link to an outside device names no owner.
-    if vc.master and vc.master.virtual_chassis_id == vc.pk and primary_ips(vc.master):
-        return vc.master
+    # Priority 2: the master with a primary IP, read from the prefetched members; a link to an outside device names no owner.
+    master = next((member for member in all_members if member.pk == vc.master_id), None)
+    if master and primary_ips(master):
+        return master
 
     # Priority 3: Find any member with primary IP
     for member in all_members:
