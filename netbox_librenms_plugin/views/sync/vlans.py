@@ -16,7 +16,7 @@ from utilities.exceptions import PermissionsViolation
 from netbox_librenms_plugin import confirmation_intent as intent
 from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
-from netbox_librenms_plugin.assessment.vlans import VLANCreate, VLANUpdate, build_operation
+from netbox_librenms_plugin.assessment.vlans import VLANCreate, VLANUpdate, assess, build_operation
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
@@ -26,7 +26,9 @@ from netbox_librenms_plugin.sync_query import page_query_url
 from netbox_librenms_plugin.transactions import saved_in_scope
 from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
+    coerce_model_pk,
     index_vlan_source_rows,
+    normalize_vlan_vid,
     vlan_source_namer,
 )
 from netbox_librenms_plugin.views.object_sync.devices import DeviceLibreNMSSyncView
@@ -35,6 +37,7 @@ from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
+    VlanAssignmentMixin,
 )
 
 VLAN_SYNC_POLICY = intent.RoutePolicy(
@@ -98,7 +101,9 @@ def _acquire_global_vlan_locks(vids):
         acquire_advisory_transaction_lock(f"netbox-librenms-plugin:global-vlan:{vid}")
 
 
-class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
+class SyncVLANsView(
+    LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, VlanAssignmentMixin, LibreNMSAPIMixin, CacheMixin, View
+):
     """Create or update NetBox VLANs from a LibreNMS source snapshot."""
 
     confirmation_policy = VLAN_SYNC_POLICY
@@ -113,12 +118,27 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
     }
 
     def _required_post_permissions(self, request):
-        """Require VLANGroup access when a submitted confirmation names a group."""
+        """Require VLANGroup access when a submitted confirmation, or a reviewed row, names a group."""
         permissions = list(type(self).required_object_permissions["POST"])
         operations = intent.signed_operations(request.POST.getlist(intent.FIELD), policy=VLAN_SYNC_POLICY)
-        if any(operation.choices.group is not None for operation in operations):
+        reviewed_groups = [request.POST.get(f"vlan_group_{vid}") for vid in self._reviewed_vids(request)[0]]
+        if any(operation.choices.group is not None for operation in operations) or any(reviewed_groups):
             permissions.append(("view", VLANGroup))
         return permissions
+
+    @staticmethod
+    def _reviewed_vids(request):
+        """Return the canonical VIDs that a review request names, and the values that name no VID."""
+        if not request.POST.get("review_choices"):
+            return [], []
+        vids, invalid = [], []
+        for value in request.POST.getlist("select"):
+            vid = normalize_vlan_vid(value)
+            if vid is None:
+                invalid.append(value)
+            elif vid not in vids:
+                vids.append(vid)
+        return vids, invalid
 
     def post(self, request, object_type: str, object_id: int):
         """
@@ -187,10 +207,11 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             self.request, reverse(url_name, kwargs={"pk": object_id}), {"tab": "vlans", "server_key": server_key}
         )
 
-    def _render_conflicts(self, request, conflicts, obj, object_type, object_id):
-        """Render VLAN rename disclosures for an HTMX or native form submission."""
+    def _render_conflicts(self, request, conflicts, obj, object_type, object_id, *, review=False):
+        """Render VLAN rename disclosures, or a review of chosen operations, for an HTMX or native submission."""
         context = {
             "conflicts": conflicts,
+            "review": review,
             "object_type": object_type,
             "object": obj,
             "server_key": self._post_server_key,
@@ -382,6 +403,75 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         elif not outcome.conflicts:
             messages.warning(request, "No VLANs were created or updated.")
 
+    def _reviewed_choices(self, request, vids):
+        """Return the posted group choice of each reviewed VID that names a usable scope, and report the others."""
+        choices, groups = {}, {}
+        posted = {vid: request.POST.get(f"vlan_group_{vid}") for vid in vids}
+        group_pks = {coerce_model_pk(value) for value in posted.values() if value} - {None}
+        visible = {group.pk: group for group in self.restricted_queryset(VLANGroup).filter(pk__in=group_pks)}
+        for vid, value in posted.items():
+            if value is None:
+                messages.error(request, f"VLAN {vid}: the VLAN group selection is missing; nothing to review.")
+            elif value == "":
+                choices[vid] = None
+            elif (group := visible.get(coerce_model_pk(value))) is None:
+                messages.error(request, f"VLAN {vid}: the selected VLAN group is not available; nothing to review.")
+            else:
+                choices[vid], groups[group.pk] = group.pk, group
+        return choices, list(groups.values())
+
+    def _review(self, request, obj, object_type, object_id):
+        """
+        Reassess the ticked rows for their posted group choices and show the resulting operations.
+
+        This is the first step of a page without JavaScript. It writes nothing; an explicit apply of the
+        offered tokens follows in another request.
+        """
+        vids, invalid = self._reviewed_vids(request)
+        if invalid:
+            messages.error(request, "A selected VLAN has no usable VID; nothing to review.")
+        snapshot = source_cache.read(obj, Resource.VLANS, self._post_server_key)
+        if snapshot is None:
+            messages.error(request, "No cached VLAN data. Please refresh VLANs first.")
+            return self._redirect(object_type, object_id)
+        choices, groups = self._reviewed_choices(request, vids)
+        rows = assess(
+            snapshot,
+            subject=obj,
+            lookup_maps=self._build_vlan_lookup_maps(groups, user=request.user),
+            context=intent.IntentContext(request.user.pk, (obj._meta.label_lower, obj.pk), self._post_server_key),
+            choices=choices,
+            vids=set(choices),
+        ).rows
+        by_vid = {}
+        for row in rows:
+            by_vid.setdefault(normalize_vlan_vid(row["raw_vlan_id"]), []).append(row)
+        entries = []
+        for vid in choices:
+            matched = by_vid.get(vid, [])
+            if len(matched) != 1 or matched[0]["vid_error"] or not matched[0]["confirmation_intent"]:
+                messages.error(
+                    request, f"VLAN {vid}: the VLAN data offers no change for this choice; nothing to review."
+                )
+                continue
+            operation = matched[0]["operation"]
+            if isinstance(operation, VLANUpdate) and not operation.renames:
+                messages.info(request, f"VLAN {vid}: unchanged.")
+                continue
+            group = next((group for group in groups if group.pk == operation.choices.group), None)
+            entries.append(
+                {
+                    "vid": vid,
+                    "group": str(group) if group is not None else "Global",
+                    "current_name": operation.assumptions.target.name if isinstance(operation, VLANUpdate) else None,
+                    "proposed_name": operation.effects.name,
+                    "token": matched[0]["confirmation_intent"],
+                }
+            )
+        if not entries:
+            return self._redirect(object_type, object_id)
+        return self._render_conflicts(request, entries, obj, object_type, object_id, review=True)
+
     def _handle_create_vlans(self, request, obj, object_type, object_id):
         """
         Apply the verified VLAN operations of the submitted tokens, and disclose unconfirmed renames.
@@ -396,6 +486,9 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             HttpResponse: A confirmation disclosure or redirect to the VLAN synchronization page.
 
         """
+        # A review reassesses only; one request never reassesses and applies.
+        if request.POST.get("review_choices"):
+            return self._review(request, obj, object_type, object_id)
         tokens = request.POST.getlist(intent.FIELD)
         if not any(tokens):
             messages.error(request, "No VLAN changes selected.")

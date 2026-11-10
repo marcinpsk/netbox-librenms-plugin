@@ -77,6 +77,10 @@
             </small>
         </div>
         <div class="ms-auto d-flex align-items-center justify-content-end flex-wrap gap-2">
+            {% if not migrated_to_marker %}
+            {# Without JavaScript the row tokens stay unsent, so the ticked rows and their groups go to a read-only review first. #}
+            <noscript><button type="submit" class="btn btn-sm btn-outline-primary" name="review_choices" value="1">Review choices</button></noscript>
+            {% endif %}
             <div class="color-key">
                 <span class="badge text-success text-white">Matching values</span>
                 <span class="badge text-warning text-white">Mismatched values</span>

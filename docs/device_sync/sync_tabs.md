@@ -82,7 +82,7 @@ Available for Devices. This tab creates VLANs reported by LibreNMS. Each VLAN ca
 
 Interface VLAN assignments are handled by the Interfaces tab rather than this tab.
 
-A sync applies the change that the row showed. A changed group checks the row again, and Sync stays unavailable until the check answers. A rename of an existing VLAN asks for a confirmation first. When the VLAN, the group, the LibreNMS row or the proposed name changes after the page was shown, or the page is older than one hour, the row is not synced: the message names what changed, and a refresh shows the current state.
+A sync applies the change that the row showed. A changed group checks the row again, and Sync stays unavailable until the check answers. A rename of an existing VLAN asks for a confirmation first. When the VLAN, the group, the LibreNMS row or the proposed name changes after the page was shown, or the page is older than one hour, the row is not synced: the message names what changed, and a refresh shows the current state. Without JavaScript, **Review choices** shows the changes of the ticked rows with their groups first, and nothing changes until you apply them there.
 
 In the [filter](#filters), **Sync state** shows the VLANs that NetBox has with the same name, with another name, or does not have. A VLAN with an invalid or duplicate VID is in no state. On the Interfaces tab, the VLAN modal option that applies the groups to all interfaces saves them for the whole device, on every page and in every filter.
 
