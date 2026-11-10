@@ -9,6 +9,8 @@ missing prefetch changes no query count, so the spy tests catch it today and the
 catch it after the storage moves to its own tables.
 """
 
+import json
+
 import pytest
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
@@ -681,3 +683,24 @@ def test_the_interfaces_tab_of_a_virtual_machine_prefetches_its_interfaces(super
 
     assert response.status_code == 200
     _assert_prefetched(spy, vm)
+
+
+@pytest.mark.django_db
+def test_an_interface_verify_prefetches_the_relationship_index(superuser_client):
+    """The verify repaint indexes the owner's interfaces by bound port to resolve the row's LAG."""
+    from netbox_librenms_plugin import interface_relationships
+
+    device = _interfaces_device("prefetch-verify", 6)
+
+    with spy_mapping_reads((interface_relationships, "build_interface_index")) as spy:
+        response = superuser_client.post(
+            reverse("plugins:netbox_librenms_plugin:verify_interface"),
+            json.dumps(
+                {"device_id": device.pk, "port_id": 1001, "interface_name_field": "ifName", "server_key": SERVER_KEY}
+            ),
+            content_type="application/json",
+        )
+
+    assert response.status_code == 200
+    assert spy.reading_scopes() == {"build_interface_index"}
+    _assert_prefetched(spy)
