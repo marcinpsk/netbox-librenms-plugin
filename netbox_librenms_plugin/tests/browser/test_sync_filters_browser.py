@@ -348,6 +348,8 @@ def _verify_vlan_group(page):
                     "css_class": "text-success",
                     "exists_in_netbox": True,
                     "name_matches": True,
+                    "name": "Users",
+                    "name_html": '<span class="text-success">Users</span>',
                     "status_html": '<span id="group-a-status">Synced</span>',
                 }
             ),

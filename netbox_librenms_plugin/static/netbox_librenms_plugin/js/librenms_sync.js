@@ -3529,18 +3529,12 @@ function verifyVlanSyncGroup(select, vid, groupId) {
                 vidCell.className = cssClass;
             }
 
-            // Update the Name cell color and tooltip
-            const nameCell = row.querySelector('td[data-col="name"] span');
-            if (nameCell) {
-                nameCell.className = cssClass;
-
-                // Add/remove name mismatch tooltip
-                if (data.exists_in_netbox && !data.name_matches && data.netbox_vlan_name) {
-                    nameCell.title = 'NetBox: ' + data.netbox_vlan_name + ' | LibreNMS: ' + select.dataset.vlanName;
-                } else {
-                    nameCell.title = '';
-                }
+            // The name cell shows the name that the new token proposes, rendered by the server.
+            const nameCell = row.querySelector('td[data-col="name"]');
+            if (nameCell && typeof data.name_html === 'string') {
+                nameCell.innerHTML = data.name_html;
             }
+            if ('name' in data) select.dataset.vlanName = data.name ?? '';
 
             const statusCell = row.querySelector('td[data-col="status"]');
             if (statusCell && data.status_html) {
