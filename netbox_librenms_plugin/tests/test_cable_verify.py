@@ -23,7 +23,6 @@ from django.conf import settings
 from django.core.cache import cache as real_cache
 from django.test import RequestFactory, override_settings
 from netbox_librenms_plugin.server_mappings import resolve_device_port
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
 
 SERVER_KEY = "default"
 
@@ -811,6 +810,6 @@ class TestResolveLocalInterfaceCore:
         device, _by_name = self._dev("core-id-ambiguous")
         for name in ("eth-dup-a", "eth-dup-b"):
             duplicate = Interface.objects.create(device=device, name=name, type="1000base-t")
-            seed_stored_mapping(duplicate, {"default": 4242}, save=True)
+            seed_mapping(duplicate, "default", own=4242)
 
         assert resolve_device_port(device, server="default", port_id=4242, name_candidates=["eth-by-name"]) is None

@@ -43,7 +43,7 @@ from netbox_librenms_plugin.tests.test_interface_sync_filters import (
     _virtual_machine,
     serve_sync_page,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
 from netbox_librenms_plugin.tests.test_ip_address_sync_filters import _refresh
 from netbox_librenms_plugin.views.sync.cables import SyncCablesView
@@ -484,7 +484,7 @@ def _cable_owner(kind, client, settings, server):
     else:
         _vc, members = make_virtual_chassis_members("contract-cables", 2)
         owner = members[0]
-        seed_stored_mapping(owner, {SERVER_KEY: {"id": LIBRENMS_ID}}, save=True)
+        seed_mapping(owner, SERVER_KEY, own=LIBRENMS_ID)
     peer = make_device("contract-cables-peer")
     links = []
     ports = []
@@ -546,7 +546,8 @@ def test_a_server_switch_keeps_only_the_tab_page_sizes_and_sorts(client, setting
             "secondary": {"librenms_url": librenms_server.url, "api_token": "test-token"},
         },
     )
-    seed_stored_mapping(owner, {SERVER_KEY: {"id": LIBRENMS_ID}, "secondary": {"id": LIBRENMS_ID + 1}}, save=True)
+    seed_mapping(owner, SERVER_KEY, own=LIBRENMS_ID, save=False)
+    seed_mapping(owner, "secondary", own=LIBRENMS_ID + 1)
     page_query = {**PAGE_QUERY, "interface_name_field": "ifDescr", "cables_page": "3", "cables_per_page": "25"}
 
     response = client.get(reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[owner.pk]), page_query)

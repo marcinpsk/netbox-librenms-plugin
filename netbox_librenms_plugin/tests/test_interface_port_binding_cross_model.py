@@ -21,11 +21,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_vm,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import (
-    custom_fields_without_mapping,
-    seed_mapping,
-    stored_mapping_for_test,
-)
+from netbox_librenms_plugin.tests.mapping_fixtures import custom_fields_without_mapping, mapping_summary, seed_mapping
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import seed_ports
 from netbox_librenms_plugin.tests.source_snapshot_helpers import interface_rows, port_pair
 
@@ -41,7 +37,7 @@ def _field_state(interface):
         interface.name,
         interface.description,
         interface.enabled,
-        stored_mapping_for_test(interface),
+        mapping_summary(interface),
         custom_fields_without_mapping(interface.custom_field_data),
     )
 

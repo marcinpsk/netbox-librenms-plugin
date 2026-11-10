@@ -308,7 +308,7 @@ def test_a_corrupt_oob_id_is_an_invalid_mapping_that_makes_no_request(live_libre
 def test_a_change_of_the_oob_link_alone_makes_the_snapshot_unreadable(live_librenms):
     from netbox_librenms_plugin import source_cache
     from netbox_librenms_plugin.acquisition.registry import Resource
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping_row
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_mapping_row
 
     device = _device("acq-iface-oob-binding", oob={"id": "not-an-id", "type": "idrac"})
     _serve(live_librenms.server)
@@ -321,7 +321,7 @@ def test_a_change_of_the_oob_link_alone_makes_the_snapshot_unreadable(live_libre
 
     # A concurrent database update sends no signal. The binding check must reject the old snapshot.
     # The host id is the same; only the OOB link becomes valid.
-    seed_stored_mapping_row(device, {SERVER_KEY: {"id": HOST_ID, "oob": {"id": OOB_ID, "type": "idrac"}}})
+    seed_mapping_row(device, seed_mapping(type(device)(), SERVER_KEY, own=HOST_ID, oob=OOB_ID, oob_type="idrac", save=False))
     assert source_cache.read(device, Resource.INTERFACES, SERVER_KEY) is None
 
     snapshot = _acquire(device)
@@ -329,7 +329,7 @@ def test_a_change_of_the_oob_link_alone_makes_the_snapshot_unreadable(live_libre
     assert source_cache.read(device, Resource.INTERFACES, SERVER_KEY) == snapshot
 
     # An unlink is a change of the link too.
-    seed_stored_mapping_row(device, {SERVER_KEY: {"id": HOST_ID}})
+    seed_mapping_row(device, seed_mapping(type(device)(), SERVER_KEY, own=HOST_ID, save=False))
     assert source_cache.read(device, Resource.INTERFACES, SERVER_KEY) is None
 
 
@@ -387,7 +387,7 @@ def test_an_oob_only_owner_has_no_interfaces_to_acquire(live_librenms):
 def test_an_oob_link_change_drops_only_the_interfaces_snapshot():
     from netbox_librenms_plugin import source_cache
     from netbox_librenms_plugin.acquisition.registry import Resource
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping_row
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_mapping_row
     from netbox_librenms_plugin.tests.source_snapshot_helpers import (
         seed_interfaces_snapshot,
         seed_ip_snapshot,
@@ -400,7 +400,7 @@ def test_an_oob_link_change_drops_only_the_interfaces_snapshot():
     seed_source_snapshot(device, Resource.VLANS, SERVER_KEY, vlans=[])
 
     # A concurrent database update sends no signal. Only the source bindings decide.
-    seed_stored_mapping_row(device, {SERVER_KEY: {"id": HOST_ID, "oob": {"id": OOB_ID, "type": "idrac"}}})
+    seed_mapping_row(device, seed_mapping(type(device)(), SERVER_KEY, own=HOST_ID, oob=OOB_ID, oob_type="idrac", save=False))
 
     assert source_cache.read(device, Resource.INTERFACES, SERVER_KEY) is None
     assert source_cache.read(device, Resource.IP_ADDRESSES, SERVER_KEY) is not None

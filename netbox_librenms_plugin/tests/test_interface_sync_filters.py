@@ -31,7 +31,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
     map_device_to_librenms,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import port_pair, port_vlans, seed_interfaces_snapshot
 
 SERVER_KEY = "default"
@@ -175,7 +175,7 @@ MIXED_STATES = {
 def _chassis(tag):
     """Return a VC member page whose rows belong to both members, one row with no resolved owner."""
     _vc, (first, second) = make_virtual_chassis_members(f"filters-{tag}", 2)
-    seed_stored_mapping(first, {SERVER_KEY: {"id": LIBRENMS_ID}}, save=True)
+    seed_mapping(first, SERVER_KEY, own=LIBRENMS_ID)
     _bind(Interface.objects.create(device=second, name="Ethernet2/1", type="other"), 2001)
     _seed(
         first,
