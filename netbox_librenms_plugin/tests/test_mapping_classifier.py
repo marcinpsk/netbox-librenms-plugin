@@ -561,6 +561,43 @@ def test_two_unconvertible_legacy_ids_collide_with_each_other(settings):
     assert _claimants(report, ("primary", "device", 5)) == {(_target(first), "legacy"), (_target(second), "legacy")}
 
 
+@transactional_db_with_all_apps()
+def test_an_id_that_moves_during_the_check_is_no_collision(settings):
+    """The check reads every model from one snapshot, so a committed move between two reads finds no collision."""
+    from django.db import connection, connections
+
+    _configure(settings, "primary")
+    device = _stored("device", {"primary": 5}, "device")
+    vm = make_vm("vm")
+    writer = connections.create_connection("default")
+    moved = []
+
+    def move_after_the_first_read(execute, sql, params, many, context):
+        result = execute(sql, params, many, context)
+        if not moved and "custom_field_data" in sql:
+            moved.append(True)
+            with writer.cursor() as cursor:
+                cursor.execute(
+                    "WITH cleared AS (UPDATE dcim_device SET custom_field_data = custom_field_data - %s WHERE id = %s) "
+                    "UPDATE virtualization_virtualmachine SET custom_field_data = custom_field_data || %s::jsonb "
+                    "WHERE id = %s",
+                    ["librenms_id", device.pk, '{"librenms_id": {"primary": 5}}', vm.pk],
+                )
+        return result
+
+    try:
+        with connection.execute_wrapper(move_after_the_first_read):
+            report = mapping_classifier.check()
+    finally:
+        writer.close()
+
+    assert moved
+    assert read_mapping(type(vm).objects.get(pk=vm.pk)).server("primary").own_id == 5
+    assert report.collisions == ()
+    assert [result.target for result in report.objects] == [_target(device)]
+    assert mapping_classifier.exit_status(report) == 0
+
+
 # Configured servers.
 
 
