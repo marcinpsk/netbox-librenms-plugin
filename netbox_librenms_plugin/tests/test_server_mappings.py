@@ -33,6 +33,7 @@ from netbox_librenms_plugin.server_mappings import (
     mark_migrated,
     merge_links,
     name_match_may_be_port,
+    prefetch_mappings,
     read_mapping,
     read_mappings,
     resolve_device_port,
@@ -194,6 +195,57 @@ class TestReadPurity:
             read_mapping(SimpleNamespace(custom_field_data={}))
         with pytest.raises(TypeError):
             identity_q(Site, server="default", identities=(42,), roles=BOTH_ROLES)
+
+
+@pytest.mark.django_db
+class TestPrefetchMappings:
+    """The prefetch returns the same instances in input order; on this storage it runs no query."""
+
+    def test_the_list_holds_the_same_instances_in_input_order(self, django_assert_num_queries):
+        from dcim.models import Device
+
+        devices = [_dev({"default": 7}), _dev(), _dev({"default": {"id": 9}})]
+        loaded = list(Device.objects.filter(pk__in=[device.pk for device in devices]).order_by("-pk"))
+
+        with django_assert_num_queries(0):
+            prefetched = prefetch_mappings(device for device in loaded)
+            assert [read_mapping(device).own_id("default") for device in prefetched] == [9, None, 7]
+
+        assert all(got is want for got, want in zip(prefetched, loaded, strict=True))
+
+    def test_a_queryset_is_evaluated_once_with_its_filters_and_order(self, django_assert_num_queries):
+        from dcim.models import Device
+
+        devices = [_dev({"default": 7}), _dev({"default": 8}), _dev({"default": 9})]
+        queryset = Device.objects.filter(pk__in=[device.pk for device in devices[1:]]).order_by("-pk")
+
+        with django_assert_num_queries(1):
+            prefetched = prefetch_mappings(queryset)
+
+        assert [device.pk for device in prefetched] == [devices[2].pk, devices[1].pk]
+        assert {device._state.db for device in prefetched} == {queryset.db}
+
+    def test_unsaved_objects_and_every_mapped_model_are_accepted(self):
+        from dcim.models import Device, Interface
+        from virtualization.models import VirtualMachine, VMInterface
+
+        objects = [Device(), Interface(), VirtualMachine(), VMInterface(), make_interface(_dev(), "eth0")]
+
+        assert prefetch_mappings(objects) == objects
+        assert prefetch_mappings([]) == []
+
+    def test_another_model_is_refused(self):
+        from dcim.models import Device, Site
+
+        with pytest.raises(TypeError):
+            prefetch_mappings([Device(), Site()])
+
+    def test_a_read_after_the_prefetch_still_sees_an_unsaved_change(self):
+        (dev,) = prefetch_mappings([_dev({"default": 42})])
+
+        seed_stored_mapping(dev, {"default": 43})
+
+        assert read_mapping(dev).own_id("default") == 43
 
 
 @pytest.mark.django_db
