@@ -168,7 +168,7 @@ class TestGetLibreNMSSyncDevice:
 
         _vc, (first, second, third) = self._members("float")
         seed_stored_mapping(first, {"default": 1.0}, save=True)
-        seed_stored_mapping(third, {"other": 5}, save=True)
+        seed_mapping(third, "other", own=5)
 
         assert get_librenms_sync_device(first, server_key=None) == third
 
@@ -590,7 +590,9 @@ class TestInterfaceNameFallbackMatchesPort:
 
     def test_unbound_and_other_server_entries_are_available(self):
         assert name_match_may_be_port(self._interface(None), server="default", port_id=42) is True
-        assert name_match_may_be_port(self._interface({"other": 42}), server="default", port_id=42) is True
+        other_server = make_interface(make_device("interface-fallback-other"), "Ethernet1", iface_type="1000base-t")
+        seed_mapping(other_server, "other", own=42)
+        assert name_match_may_be_port(other_server, server="default", port_id=42) is True
         assert (
             name_match_may_be_port(self._interface({"default": {"no_id": 42}}), server="default", port_id=42) is False
         )

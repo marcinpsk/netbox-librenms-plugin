@@ -2794,7 +2794,12 @@ class TestBuildIdServerInfo:
 
     @staticmethod
     def _object(mapping):
+        # Storage shape: a legacy, malformed or text-form stored value.
         return make_device("build-id-server-info", librenms_cf=mapping)
+
+    @staticmethod
+    def _mapped(**seed):
+        return seed_mapping(make_device("build-id-server-info"), **seed)
 
     @staticmethod
     def _configure(settings, plugin_config):
@@ -2814,7 +2819,7 @@ class TestBuildIdServerInfo:
         method = self._get_method()
         self._configure(settings, {"servers": {"default": {"display_name": "Default Server"}}})
 
-        result = method(self._object({"default": 42}))
+        result = method(self._mapped(own=42))
 
         assert result is not None
         assert result[0]["server_key"] == "default"
@@ -2835,7 +2840,7 @@ class TestBuildIdServerInfo:
         method = self._get_method()
         self._configure(settings, {"servers": {"default": {"display_name": "Default Server"}}})
 
-        result = method(self._object({"default": {"id": 42, "oob": {"id": 17, "type": "idrac"}}}))
+        result = method(self._mapped(own=42, oob=17, oob_type="idrac"))
 
         assert result is not None
         assert result[0]["device_id"] == 42
@@ -2845,7 +2850,7 @@ class TestBuildIdServerInfo:
         method = self._get_method()
         self._configure(settings, {"servers": {"default": {"display_name": "Default Server"}}})
 
-        result = method(self._object({"default": {"oob": {"id": 17, "type": "idrac"}}}))
+        result = method(self._mapped(oob=17, oob_type="idrac"))
 
         # Mirrors the device-sync modal (_build_all_server_mappings): the OOB-only link is shown
         # using the OOB controller's id rather than dropped (which would risk a duplicate re-import).
@@ -2856,7 +2861,7 @@ class TestBuildIdServerInfo:
         method = self._get_method()
         self._configure(settings, {"display_name": "My LibreNMS", "servers": {}})
 
-        result = method(self._object({"default": 55}))
+        result = method(self._mapped(own=55))
 
         assert result is not None
         assert result[0]["display_name"] == "My LibreNMS"
@@ -2874,7 +2879,7 @@ class TestBuildIdServerInfo:
         method = self._get_method()
         self._configure(settings, {"servers": "not-a-dict"})
 
-        result = method(self._object({"default": 42}))
+        result = method(self._mapped(own=42))
 
         assert result == [{"server_key": "default", "display_name": "default", "device_id": 42}]
 
