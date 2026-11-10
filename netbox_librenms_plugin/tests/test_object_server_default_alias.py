@@ -4,6 +4,7 @@ import pytest
 from django.urls import reverse
 
 from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_device, make_superuser
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
 DEVICE_ID = 13501
@@ -33,7 +34,7 @@ def primary_only(settings, monkeypatch):
 @pytest.mark.django_db
 def test_a_stale_default_server_key_resolves_to_the_installation_default(client, primary_only):
     """A ?server_key=default link from a single-server install must still open the page."""
-    device = make_device("default-alias-device", librenms_cf={"primary": {"id": DEVICE_ID}})
+    device = seed_mapping(make_device("default-alias-device"), "primary", own=DEVICE_ID)
     observed = []
 
     def device_lookup(**request):

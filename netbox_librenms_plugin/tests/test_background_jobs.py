@@ -9,6 +9,7 @@ from django.http import QueryDict
 from django.urls import reverse
 
 from netbox_librenms_plugin.tests.conftest import make_cluster, make_device, make_superuser
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 from netbox_librenms_plugin.tests.view_test_helpers import grant as grant_view_permission
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms, queued_request
@@ -164,7 +165,7 @@ class TestFilterDevicesJob:
     def test_real_filter_run_persists_only_enabled_unlinked_rows_and_options(self, librenms_server):
         from netbox_librenms_plugin.jobs import FilterDevicesJob
 
-        existing = make_device("background-existing", librenms_cf={SERVER_KEY: 6301})
+        existing = seed_mapping(make_device("background-existing"), SERVER_KEY, own=6301)
         visible = _device_payload(
             6303,
             hostname="visible-host.example.test",

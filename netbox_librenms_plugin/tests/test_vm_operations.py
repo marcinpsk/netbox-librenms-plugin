@@ -226,7 +226,7 @@ class TestCreateVmFromLibrenms:
         from virtualization.models import VirtualMachine
         from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
 
-        owner = make_device("vm-import-device-owner", librenms_cf={SERVER_KEY: 6107})
+        owner = seed_mapping(make_device("vm-import-device-owner"), SERVER_KEY, own=6107)
 
         with pytest.raises(ValueError) as excinfo:
             create_vm_from_librenms(
