@@ -249,7 +249,8 @@ class SyncVLANsView(
         # The subject, the source rows and the name rules are read after the locks, so a change made while this waited
         # counts: the name rules apply by the manufacturer of the device's current type.
         subject = self.restricted_queryset(Device).select_related("device_type__manufacturer").filter(pk=obj.pk).first()
-        snapshot = source_cache.read(obj, Resource.VLANS, self._post_server_key)
+        # The snapshot must still belong to the subject's current mapping, so it is read through the fresh subject.
+        snapshot = source_cache.read(subject, Resource.VLANS, self._post_server_key) if subject is not None else None
         source_by_vid = {} if snapshot is None else index_vlan_source_rows(snapshot.value(Resource.VLANS, "vlans"))[0]
         source_name = vlan_source_namer(subject) if subject is not None else None
         groups = []
