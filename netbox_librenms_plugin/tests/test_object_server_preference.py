@@ -290,7 +290,7 @@ def test_preference_post_revalidates_mapping_after_lock(client, servers):
 
 @pytest.mark.django_db
 def test_single_mapping_remains_implicit_without_stored_preference(client, servers):
-    owner = make_device("implicit-single-server", librenms_cf={"primary": 13509})
+    owner = seed_mapping(make_device("implicit-single-server"), "primary", own=13509)
     _register_device(servers.primary, 13509, owner.name)
     client.force_login(make_superuser("single-preference-writer"))
 

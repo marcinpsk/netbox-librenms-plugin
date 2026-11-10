@@ -94,7 +94,7 @@ def _selection_scope(html):
 
 
 def _device(tag):
-    return make_device(f"cables-{tag}", librenms_cf={SERVER_KEY: {"id": LIBRENMS_ID}})
+    return seed_mapping(make_device(f"cables-{tag}"), SERVER_KEY, own=LIBRENMS_ID)
 
 
 def _mixed_device(tag):

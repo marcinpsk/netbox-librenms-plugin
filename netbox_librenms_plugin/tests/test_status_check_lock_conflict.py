@@ -66,7 +66,7 @@ def test_an_id_claimed_by_another_object_leaves_the_status_unknown(client, setti
     bind_librenms_server(settings, librenms_server, server_key="default")
     if kind == "device":
         obj = make_device("status-claimed.example.net")
-        make_device("status-claimed-owner.example.net", librenms_cf={"default": 4402})
+        seed_mapping(make_device("status-claimed-owner.example.net"), "default", own=4402)
         url, filters = "device_status_list", {"site": obj.site_id}
     else:
         cluster = make_cluster("status-claimed-cluster")

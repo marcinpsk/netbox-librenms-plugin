@@ -161,7 +161,7 @@ class TestSingleInterfaceVerifyEndpoint:
         assert response.json() == {"status": "error", "message": "No device ID provided"}
 
     def test_a_malformed_snapshot_payload_returns_a_controlled_404(self, client, live_librenms):
-        device = make_device("verify-interface-malformed", librenms_cf={SERVER_KEY: {"id": 141}})
+        device = seed_mapping(make_device("verify-interface-malformed"), SERVER_KEY, own=141)
         key = source_cache.snapshot_key(device, Resource.INTERFACES, SERVER_KEY)
         cache.set(key, {"ports": "not-a-list"}, timeout=300)
         _login(client, "verify-interface-malformed-user")
@@ -178,7 +178,7 @@ class TestSingleInterfaceVerifyEndpoint:
         assert cache.get(key) == {"ports": "not-a-list"}
 
     def test_cached_port_returns_a_formatted_real_row(self, client, live_librenms):
-        device = make_device("verify-interface-success", librenms_cf={SERVER_KEY: {"id": 142}})
+        device = seed_mapping(make_device("verify-interface-success"), SERVER_KEY, own=142)
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
         _set_id(interface, 4001)
         seed_interfaces_snapshot(device, [_port()], server_key=SERVER_KEY)
@@ -201,7 +201,7 @@ class TestSingleInterfaceVerifyEndpoint:
         assert "Ethernet1" in data["formatted_row"]["name"]
 
     def test_duplicate_cached_port_id_is_rejected_as_ambiguous(self, client, live_librenms):
-        device = make_device("verify-interface-duplicate", librenms_cf={SERVER_KEY: {"id": 143}})
+        device = seed_mapping(make_device("verify-interface-duplicate"), SERVER_KEY, own=143)
         seed_interfaces_snapshot(device, [_port(name="Ethernet1"), _port(name="Ethernet2")], server_key=SERVER_KEY)
         _login(client, "verify-interface-duplicate-user")
 
@@ -235,7 +235,7 @@ class TestVLANVerifyEndpoints:
 
         configure_default_librenms_server(settings)
         VLAN.objects.create(vid=3201, name="Application", status="active")
-        device = make_device("verify-vlan-global", librenms_cf={"default": {"id": 42}})
+        device = seed_mapping(make_device("verify-vlan-global"), "default", own=42)
         seed_vlans(device, [{"vlan_vlan": 3201, "vlan_name": "Application"}])
         _login(client, "verify-vlan-global-user")
 
@@ -269,7 +269,7 @@ class TestVLANVerifyEndpoints:
         first = VLANGroup.objects.create(name="First Group", slug="first-group")
         second = VLANGroup.objects.create(name="Second Group", slug="second-group")
         VLAN.objects.create(vid=3202, name="Application", group=first, status="active")
-        device = make_device("verify-vlan-group", librenms_cf={"default": {"id": 42}})
+        device = seed_mapping(make_device("verify-vlan-group"), "default", own=42)
         seed_vlans(device, [{"vlan_vlan": 3202, "vlan_name": "Application"}])
         _login(client, "verify-vlan-group-user")
 
@@ -343,7 +343,7 @@ class TestVLANVerifyEndpoints:
 @pytest.mark.django_db
 class TestSaveVLANGroupOverridesEndpoint:
     def test_real_cache_ttl_is_reused_for_saved_overrides(self, client, live_librenms):
-        device = make_device("save-vlan-overrides", librenms_cf={SERVER_KEY: {"id": 151}})
+        device = seed_mapping(make_device("save-vlan-overrides"), SERVER_KEY, own=151)
         view = SaveVlanGroupOverridesView()
         ports_key = source_cache.snapshot_key(device, Resource.INTERFACES, SERVER_KEY)
         overrides_key = view.get_vlan_overrides_key(device, SERVER_KEY)
@@ -366,7 +366,7 @@ class TestSaveVLANGroupOverridesEndpoint:
         assert abs(overrides_ttl - ports_ttl) <= 2
 
     def test_missing_ports_snapshot_returns_400_without_saving(self, client, live_librenms):
-        device = make_device("save-vlan-overrides-miss", librenms_cf={SERVER_KEY: {"id": 152}})
+        device = seed_mapping(make_device("save-vlan-overrides-miss"), SERVER_KEY, own=152)
         view = SaveVlanGroupOverridesView()
         overrides_key = view.get_vlan_overrides_key(device, SERVER_KEY)
         _login(client, "save-vlan-overrides-miss-user")
@@ -382,7 +382,7 @@ class TestSaveVLANGroupOverridesEndpoint:
         assert cache.get(overrides_key) is None
 
     def test_a_snapshot_whose_binding_no_longer_holds_takes_no_overrides(self, client, live_librenms):
-        device = make_device("save-vlan-overrides-rebound", librenms_cf={SERVER_KEY: {"id": 153}})
+        device = seed_mapping(make_device("save-vlan-overrides-rebound"), SERVER_KEY, own=153)
         view = SaveVlanGroupOverridesView()
         overrides_key = view.get_vlan_overrides_key(device, SERVER_KEY)
         seed_interfaces_snapshot(device, [_port()], server_key=SERVER_KEY)
@@ -414,7 +414,7 @@ class TestSaveVLANGroupOverridesEndpoint:
 
         from netbox_librenms_plugin.views.object_sync.devices import SaveVlanGroupOverridesView
 
-        device = make_device("save-vlan-overrides-denied", librenms_cf={SERVER_KEY: {"id": 153}})
+        device = seed_mapping(make_device("save-vlan-overrides-denied"), SERVER_KEY, own=153)
         overrides_key = SaveVlanGroupOverridesView().get_vlan_overrides_key(device, SERVER_KEY)
         cache.delete(overrides_key)
         client.force_login(
