@@ -52,35 +52,20 @@ def apply_mapping_change(obj, change):
     return obj
 
 
-def seed_mapping(
-    obj,
-    server="default",
-    *,
-    own=None,
-    oob=None,
-    oob_type="oob",
-    oob_recorded=False,
-    preferred=False,
-    save=True,
-):
+def seed_mapping(obj, server="default", *, own=None, oob=None, oob_type="oob", preferred=False, save=True):
     """
     Seed the mapping of *obj* on *server* through the real builders; return *obj*.
 
     *own* is the own LibreNMS ID, *oob* the OOB controller ID with *oob_type*, and *preferred* stores
-    *server* as the preferred server. *oob_recorded* records an OOB entry of *oob_type* with no ID.
-    The other servers of *obj* stay. A builder that skips the write fails the setup. With *save*,
-    save *obj*.
+    *server* as the preferred server. The other servers of *obj* stay. A builder that skips the write
+    fails the setup. With *save*, save *obj*.
     """
-    if own is None and oob is None and not oob_recorded and not preferred:
-        raise ValueError("seed_mapping() needs own, oob, oob_recorded or preferred.")
-    if oob_recorded and oob is not None:
-        raise ValueError("oob_recorded records an OOB entry with no ID; give oob or oob_recorded.")
+    if own is None and oob is None and not preferred:
+        raise ValueError("seed_mapping() needs own, oob or preferred.")
     if own is not None:
         _seed(obj, assign_own(obj, server, own))
     if oob is not None:
         _seed(obj, attach_oob(obj, server, oob, oob_type=oob_type))
-    if oob_recorded:
-        _record_oob_without_id(obj, server, oob_type)
     if preferred:
         # A preference with no server mapping is a state of its own.
         if _stored_value(obj) is None:
@@ -90,19 +75,6 @@ def seed_mapping(
         # An unchanged build writes no field, but the object can hold an unsaved seed.
         _save(obj, _STORAGE_FIELDS)
     return obj
-
-
-def _record_oob_without_id(obj, server, oob_type):
-    # No builder records an OOB entry without an ID; a later lookup or promotion reads one.
-    stored = copy.deepcopy(_stored_value(obj))
-    stored = {} if stored is None else stored
-    if not isinstance(stored, dict):
-        raise ValueError(f"Cannot record an OOB entry on a {read_mapping(obj).container} mapping.")
-    entry = stored.get(server)
-    entry = {"id": entry} if entry is not None and not isinstance(entry, dict) else dict(entry or {})
-    entry["oob"] = {"type": oob_type}
-    stored[server] = entry
-    _put_stored_value(obj, stored)
 
 
 def seed_malformed_preference(obj, *, save=True):
