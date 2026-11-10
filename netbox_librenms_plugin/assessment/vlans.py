@@ -1,9 +1,128 @@
-"""Compare VLAN source facts with the NetBox VLANs visible to the caller."""
+"""Compare VLAN source facts with the NetBox VLANs visible to the caller, and offer the VLAN operations."""
 
 from dataclasses import dataclass
+
+from netbox_librenms_plugin import confirmation_intent as intent
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.constants import LIBRENMS_VLAN_STATE_ACTIVE
 from netbox_librenms_plugin.utils import index_vlan_source_rows, normalize_vlan_vid, vlan_source_namer
+
+# The status of every VLAN that a sync creates.
+CREATED_VLAN_STATUS = "active"
+
+
+@dataclass(frozen=True)
+class VLANIdentity:
+    """The source VID that one VLAN operation synchronizes."""
+
+    vid: int
+
+
+@dataclass(frozen=True)
+class VLANChoices:
+    """The VLAN group the operator chose for the VID; None is the global scope."""
+
+    group: int | None
+
+
+@dataclass(frozen=True)
+class VLANTarget:
+    """The NetBox VLAN that holds the VID in the chosen scope."""
+
+    pk: int
+    vid: int
+    group: int | None
+    name: str
+
+
+@dataclass(frozen=True)
+class VLANAssumptions:
+    """The target VLAN the operation acts on, or None when no VLAN holds the VID in the chosen scope."""
+
+    target: VLANTarget | None
+
+
+@dataclass(frozen=True)
+class VLANCreateEffects:
+    """The VLAN that a create adds."""
+
+    vid: int
+    group: int | None
+    name: str
+    status: str
+
+
+@dataclass(frozen=True)
+class VLANUpdateEffects:
+    """The name that an update gives the target VLAN."""
+
+    vlan: int
+    name: str
+
+
+@intent.register
+@dataclass(frozen=True)
+class VLANCreate:
+    """Create the VLAN of a source VID in the chosen scope, where no VLAN holds the VID."""
+
+    RESOURCE = intent.Resource.VLAN
+    ACTION = "create"
+
+    identity: VLANIdentity
+    choices: VLANChoices
+    assumptions: VLANAssumptions
+    effects: VLANCreateEffects
+
+
+@intent.register
+@dataclass(frozen=True)
+class VLANUpdate:
+    """Give the VLAN that holds a source VID in the chosen scope the proposed name."""
+
+    RESOURCE = intent.Resource.VLAN
+    ACTION = "update"
+
+    identity: VLANIdentity
+    choices: VLANChoices
+    assumptions: VLANAssumptions
+    effects: VLANUpdateEffects
+
+    @property
+    def renames(self):
+        """Return whether the update changes the name of the target VLAN."""
+        return self.effects.name != self.assumptions.target.name
+
+
+def build_operation(*, vid, group, name, targets):
+    """
+    Return the operation that synchronizes one source VID into the chosen scope.
+
+    Args:
+        vid (int): The canonical source VID.
+        group (int | None): The chosen VLAN group pk, or None for the global scope.
+        name: The name that the VLAN name rules propose for the source row.
+        targets: The NetBox VLANs that hold the VID in the chosen scope.
+
+    Returns:
+        VLANCreate | VLANUpdate | Unavailable: The operation, or the reason that no operation exists.
+
+    """
+    if len(targets) > 1:
+        return intent.Unavailable("target.ambiguous")
+    identity, choices = VLANIdentity(vid), VLANChoices(group)
+    # A source name that is not text has no valid NetBox name, so the writer refuses it as invalid.
+    proposed = name if isinstance(name, str) else ""
+    if not targets:
+        return VLANCreate(
+            identity, choices, VLANAssumptions(None), VLANCreateEffects(vid, group, proposed, CREATED_VLAN_STATUS)
+        )
+    target = targets[0]
+    return VLANUpdate(
+        identity,
+        choices,
+        VLANAssumptions(VLANTarget(target.pk, target.vid, target.group_id, target.name)),
+        VLANUpdateEffects(target.pk, proposed),
+    )
 
 
 @dataclass(frozen=True)
