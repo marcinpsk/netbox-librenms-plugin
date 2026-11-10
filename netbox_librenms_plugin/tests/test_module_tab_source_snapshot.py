@@ -14,10 +14,9 @@ from netbox_librenms_plugin.constants import MAIN_INVENTORY_SOURCE, OOB_INVENTOR
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency
 from netbox_librenms_plugin.tests.view_test_helpers import make_request
 from netbox_librenms_plugin.tests.conftest import make_superuser
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping_row
 from netbox_librenms_plugin.tests.source_snapshot_helpers import module_serial_context
-from netbox_librenms_plugin.tests.test_acquisition_modules import HOST_ID, OOB_ID, device, serve
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.test_acquisition_modules import HOST_ID, OOB_ID, corrupt_oob_device, device, serve
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_mapping_row
 
 INVENTORY = [
     {"entPhysicalIndex": 1, "entPhysicalContainedIn": 0, "entPhysicalClass": "chassis"},
@@ -50,7 +49,7 @@ def fragment(client, subject):
 
 @pytest.mark.django_db
 def test_oob_failure_keeps_host_modules_readable_and_names_the_failed_source(client, live_librenms):
-    subject = device("module-tab-oob-failure", oob={"id": OOB_ID, "type": "idrac"})
+    subject = device("module-tab-oob-failure", oob=OOB_ID)
     client.force_login(make_superuser("module-tab-oob-user"))
     serve(live_librenms.server, inventory=INVENTORY, transceivers=[])
     live_librenms.server.register(f"/api/v0/inventory/{OOB_ID}/all", {"status": "error"}, status=500)
@@ -74,7 +73,7 @@ def test_offsets_and_transceiver_synthesis_exist_only_in_the_assessment(client, 
     from django.core.cache import cache
     from netbox_librenms_plugin.assessment.modules import assess
 
-    subject = device("module-tab-assessment", oob={"id": OOB_ID, "type": "idrac"})
+    subject = device("module-tab-assessment", oob=OOB_ID)
     client.force_login(make_superuser("module-tab-assessment-user"))
     serve(live_librenms.server, inventory=INVENTORY)
     live_librenms.server.register(f"/api/v0/inventory/{OOB_ID}/all", {"status": "ok", "inventory": INVENTORY})
@@ -123,7 +122,7 @@ def test_failed_refresh_removes_old_modules_and_names_the_failed_part(client, li
 def test_oob_binding_changes_refuse_every_reader_without_deleting_the_snapshot(client, live_librenms):
     from django.core.cache import cache
 
-    subject = device("module-tab-binding", oob={"id": "corrupt", "type": "idrac"})
+    subject = corrupt_oob_device("module-tab-binding")
     client.force_login(make_superuser("module-tab-binding-user"))
     serve(live_librenms.server, inventory=INVENTORY, transceivers=[])
     refresh(client, subject)
@@ -189,7 +188,7 @@ def test_another_reader_sees_the_blocked_oob_source_on_the_cached_tab(client, li
     from django.contrib.auth import get_user_model
     from django.test import Client
 
-    subject = device("module-tab-cached-oob", oob={"id": OOB_ID, "type": "idrac"})
+    subject = device("module-tab-cached-oob", oob=OOB_ID)
     client.force_login(make_superuser("module-tab-cached-refresh-user"))
     serve(live_librenms.server, inventory=INVENTORY, transceivers=[])
     live_librenms.server.register(f"/api/v0/inventory/{OOB_ID}/all", {"status": "error"}, status=500)
@@ -211,7 +210,7 @@ def test_the_json_verify_of_a_blocked_source_queues_no_page_notice(client, live_
 
     from django.contrib.messages import get_messages
 
-    subject = device("module-verify-blocked-oob", oob={"id": OOB_ID, "type": "idrac"})
+    subject = device("module-verify-blocked-oob", oob=OOB_ID)
     client.force_login(make_superuser("module-verify-blocked-user"))
     serve(live_librenms.server, inventory=INVENTORY, transceivers=[])
     live_librenms.server.register(f"/api/v0/inventory/{OOB_ID}/all", {"status": "error"}, status=500)
@@ -290,7 +289,7 @@ def test_failed_refresh_of_another_version_preserves_this_versions_state(
 
 @pytest.mark.django_db
 def test_corrupt_oob_mapping_keeps_the_host_table_and_warns(client, live_librenms):
-    subject = device("module-tab-invalid-oob-notice", oob={"id": "bad-id", "type": "idrac"})
+    subject = corrupt_oob_device("module-tab-invalid-oob-notice", "bad-id")
     client.force_login(make_superuser("module-tab-invalid-oob-notice-user"))
     serve(live_librenms.server, inventory=INVENTORY, transceivers=[])
 
