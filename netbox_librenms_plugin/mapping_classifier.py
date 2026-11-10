@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 from django.apps import apps as django_apps
 from django.conf import settings
-from django.db.models import JSONField
+from django.db.models import JSONField, Value
 
 MODULE_NAME = "netbox_librenms_plugin.mapping_classifier"
 
@@ -205,20 +205,23 @@ def load_stored_values(apps=None) -> list:
     Return ``(target, value)`` for each Device, VM, Interface and VMInterface that stores a mapping value.
 
     *apps* is the app registry, so that a data migration can give its historical models.
+    One statement reads all four models, so the result comes from one database snapshot.
     """
     apps = django_apps if apps is None else apps
-    stored = []
-    for label in (*DEVICE_MODELS, *PORT_MODELS):
-        rows = (
-            apps.get_model(label)
-            ._default_manager.filter(custom_field_data__has_key=MAPPING_KEY)
-            .order_by("pk")
-            .values_list("pk", "custom_field_data")
-        )
-        for pk, data in rows.iterator():
-            if data[MAPPING_KEY] is not None:
-                stored.append((Target(label, pk), data[MAPPING_KEY]))
-    return stored
+    labels = (*DEVICE_MODELS, *PORT_MODELS)
+    scans = [
+        apps.get_model(label)
+        ._default_manager.filter(custom_field_data__has_key=MAPPING_KEY)
+        .annotate(model_index=Value(index))
+        .values_list("model_index", "pk", "custom_field_data")
+        for index, label in enumerate(labels)
+    ]
+    rows = scans[0].union(*scans[1:], all=True).order_by("model_index", "pk")
+    return [
+        (Target(labels[index], pk), data[MAPPING_KEY])
+        for index, pk, data in rows.iterator()
+        if data[MAPPING_KEY] is not None
+    ]
 
 
 def _stored_server_names(values) -> frozenset:
