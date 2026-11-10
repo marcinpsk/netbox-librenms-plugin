@@ -849,8 +849,6 @@ class TestPersistMapping:
 @pytest.mark.parametrize("competitor", ["committed", "holding"])
 def test_a_change_kept_across_a_savepoint_rollback_is_claimed_and_checked_again(competitor):
     """The rollback releases the first claim, so persistence claims again and reads the owners again."""
-    import json
-
     from netbox_librenms_plugin.server_mappings import (
         IdentityBusy,
         IdentityOwned,
@@ -865,7 +863,7 @@ def test_a_change_kept_across_a_savepoint_rollback_is_claimed_and_checked_again(
     vm = make_vm(f"retained-change-competitor-{competitor}")
     from virtualization.models import VirtualMachine
 
-    bound = json.dumps(seed_stored_mapping(VirtualMachine(), {"default": 7201}).custom_field_data)
+    competing = seed_mapping(VirtualMachine(), own=7201, save=False)
 
     class _RolledBack(Exception):
         pass
@@ -881,9 +879,7 @@ def test_a_change_kept_across_a_savepoint_rollback_is_claimed_and_checked_again(
         with other.cursor() as cursor:
             cursor.execute("SELECT pg_try_advisory_xact_lock(%s)", [device_claim_key("default", 7201)])
             assert cursor.fetchone()[0] is True
-            cursor.execute(
-                "UPDATE virtualization_virtualmachine SET custom_field_data = %s WHERE id = %s", [bound, vm.pk]
-            )
+        seed_mapping_row(vm, competing, connection=other)
         if competitor == "committed":
             other.commit()
         expected = IdentityOwned if competitor == "committed" else IdentityBusy

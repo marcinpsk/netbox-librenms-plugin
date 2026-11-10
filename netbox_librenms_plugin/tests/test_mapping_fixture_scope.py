@@ -77,7 +77,7 @@ PINNED = {
     "test_object_server_selection.py": (14, f"{LEGACY}; {PENDING}"),
     "test_partial_save_change_log.py": (2, SHAPE),
     "test_recordings.py": (1, PENDING),
-    "test_server_mappings.py": (64, f"{SHAPE}; {LEGACY}"),
+    "test_server_mappings.py": (63, f"{SHAPE}; {LEGACY}"),
     "test_sync_device_add_and_location.py": (3, PENDING),
     "test_sync_devices.py": (13, LEGACY),
     "test_sync_interface_concurrency.py": (1, PENDING),

@@ -6,6 +6,7 @@ that reaches the private storage adapter of ``server_mappings``.
 """
 
 import copy
+import json
 from contextlib import contextmanager
 
 from netbox_librenms_plugin.server_mappings import (
@@ -24,6 +25,7 @@ from netbox_librenms_plugin.server_mappings import (
 # nosemgrep: no-stored-mapping-access-private  # noqa: ERA001
 from netbox_librenms_plugin.server_mappings import (
     _MAPPING_KEY,
+    _STORAGE_FIELD,
     _STORAGE_FIELDS,
     _put_on,
     _put_stored_value,
@@ -112,17 +114,30 @@ def seed_quarantined(obj, *, save=True):
     return obj
 
 
-def seed_mapping_row(obj, source):
+def seed_mapping_row(obj, source, *, connection=None):
     """
     Write the mapping of *source* to the database row of *obj* only, as a concurrent writer does.
 
     *source* is an unsaved object of the same model, seeded with ``seed_mapping(..., save=False)``;
     a bare one writes no mapping. *obj* keeps the mapping that it loaded. The write sends no signal
-    and records no change. The other custom fields of the row stay. Returns *obj*.
+    and records no change. The other custom fields of the row stay. With *connection*, a second
+    database connection, the write runs in its open transaction and the caller commits or holds
+    it. Returns *obj*.
     """
     if type(source) is not type(obj) or source.pk is not None:
         raise ValueError("The source of a row write is an unsaved object of the same model.")
-    return seed_stored_mapping_row(obj, _stored_value(source))
+    if connection is None:
+        return seed_stored_mapping_row(obj, _stored_value(source))
+    table = obj._meta.db_table
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f'UPDATE "{table}" SET "{_STORAGE_FIELD}" = '
+            f"""jsonb_set(COALESCE("{_STORAGE_FIELD}", '{{}}'::jsonb), %s::text[], %s::jsonb) WHERE id = %s""",
+            [[_MAPPING_KEY], json.dumps(_stored_value(source)), obj.pk],
+        )
+        if cursor.rowcount != 1:
+            raise ValueError(f"{type(obj).__name__} {obj.pk} is not visible to the connection.")
+    return obj
 
 
 @contextmanager
