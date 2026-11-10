@@ -14,9 +14,8 @@ from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_interface,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change, seed_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
-from netbox_librenms_plugin.server_mappings import mark_migrated
 
 SERVER_KEY = "primary"
 
@@ -30,8 +29,7 @@ def _configure_server(settings):
 
 def _mark_migrated(donor, winner):
     """Persist the donor's migration marker for the configured server."""
-    apply_mapping_change(donor, mark_migrated(donor, winner.pk, SERVER_KEY))
-    donor.save(update_fields=["custom_field_data"])
+    seed_mapping(donor, SERVER_KEY, migrated_to=winner.pk)
 
 
 def _assert_source_survives_and_other_tabs_are_cleared(device, source_tab):

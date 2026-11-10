@@ -19,9 +19,9 @@ import time
 import pytest
 
 from netbox_librenms_plugin.server_mappings import read_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_cables_snapshot, link_row, port_row, sensor_row
 from netbox_librenms_plugin.assessment.cables import assess as assess_cables
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.conftest import (
     _PORT_KEYS_UNSET,
     configured_server_key,
@@ -1092,13 +1092,9 @@ class TestTheCreateAffordance:
         assert self._affordance(row, local_device)
 
     def test_a_migrated_owner_loses_the_remote_create_action(self):
-        from netbox_librenms_plugin.server_mappings import mark_migrated
-        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
-
         server_key, local_device, _, remote_device, row = _create_setup("create-migrated")
         assert self._affordance(row, local_device)
-        apply_mapping_change(local_device, mark_migrated(local_device, remote_device.pk, server_key))
-        local_device.save(update_fields=["custom_field_data"])
+        seed_mapping(local_device, server_key, migrated_to=remote_device.pk)
 
         _make_view()._disable_actions_for_migrated_owners([row], local_device, local_device, server_key)
 
@@ -1468,8 +1464,6 @@ class TestCheckAndCreateTheRemoteEnd:
         from dcim.models import Device, Interface
 
         from netbox_librenms_plugin.tests.conftest import make_superuser
-        from netbox_librenms_plugin.server_mappings import mark_migrated
-        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
         from netbox_librenms_plugin.views.sync.cables import CableRemoteCreateView
 
         server_key, local_device, local_interface, remote_device, row_id = self._scenario(
@@ -1483,8 +1477,7 @@ class TestCheckAndCreateTheRemoteEnd:
                 Interface.objects.filter(pk=local_interface.pk).update(device=make_device("mk-owner-drift-other"))
             else:
                 fresh = Device.objects.get(pk=local_device.pk)
-                apply_mapping_change(fresh, mark_migrated(fresh, remote_device.pk, server_key))
-                fresh.save(update_fields=["custom_field_data"])
+                seed_mapping(fresh, server_key, migrated_to=remote_device.pk)
             return port
 
         monkeypatch.setattr(CableRemoteCreateView, "_remote_port_record", drift_after_proposal)
@@ -1529,14 +1522,11 @@ class TestCheckAndCreateTheRemoteEnd:
         from dcim.models import Interface
 
         from netbox_librenms_plugin.tests.conftest import make_superuser
-        from netbox_librenms_plugin.server_mappings import mark_migrated
-        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
 
         server_key, local_device, local_interface, remote_device, row_id = self._scenario(
             "mk-migrated", librenms_server, settings
         )
-        apply_mapping_change(local_device, mark_migrated(local_device, remote_device.pk, server_key))
-        local_device.save(update_fields=["custom_field_data"])
+        seed_mapping(local_device, server_key, migrated_to=remote_device.pk)
 
         response = _logged_in(make_superuser("remote-create-mk-migrated")).post(
             _remote_create_url(local_device),
@@ -1553,16 +1543,13 @@ class TestCheckAndCreateTheRemoteEnd:
         from dcim.models import Interface
 
         from netbox_librenms_plugin.tests.conftest import make_superuser
-        from netbox_librenms_plugin.server_mappings import mark_migrated
-        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
         from netbox_librenms_plugin.views.sync.cables import CableRemoteCreateView
 
         server_key, local_device, local_interface, remote_device, row_id = self._scenario(
             "mk-cache-migrated", librenms_server, settings
         )
         cache_device = make_device("mk-cache-migrated-owner")
-        apply_mapping_change(cache_device, mark_migrated(cache_device, remote_device.pk, server_key))
-        cache_device.save(update_fields=["custom_field_data"])
+        seed_mapping(cache_device, server_key, migrated_to=remote_device.pk)
         original = CableRemoteCreateView.get_cached_links_data
 
         def cached_from_migrated_owner(view, request, obj):

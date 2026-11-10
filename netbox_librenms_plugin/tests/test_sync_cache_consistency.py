@@ -46,7 +46,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis_members,
     make_vm,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change, mapping_in_memory, seed_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import mapping_in_memory, seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     ip_address_row,
     port_pair,
@@ -57,7 +57,6 @@ from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     stored_source_value,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import render_module_tab, rendered_module_form
-from netbox_librenms_plugin.server_mappings import mark_migrated
 from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
 
@@ -299,10 +298,8 @@ def test_cable_cache_fragment_does_not_rewrite_the_snapshot(client, settings, pr
     local = make_interface(local_device, "Ethernet1")
     remote_device = seed_mapping(make_device("cache-only-cable-remote"), "primary", own=6404)
     remote = make_interface(remote_device, "Ethernet2")
-    seed_mapping(local, "primary", own=7403, save=False)
-    seed_mapping(remote, "primary", own=7404, save=False)
-    local.save(update_fields=["custom_field_data"])
-    remote.save(update_fields=["custom_field_data"])
+    seed_mapping(local, "primary", own=7403)
+    seed_mapping(remote, "primary", own=7404)
     cache_key = _cache_key("links", local_device, "primary")
     snapshot = seed_cables_snapshot(
         local_device,
@@ -717,10 +714,8 @@ def test_a_sibling_refresh_clears_the_shared_tab_block_on_every_member(
     remote_device = seed_mapping(make_device("cache-shared-state-remote"), "primary", own=62)
     local = make_interface(sibling, "Ethernet1", iface_type="1000base-t")
     remote = make_interface(remote_device, "Ethernet2", iface_type="1000base-t")
-    seed_mapping(local, "primary", own=7481, save=False)
-    seed_mapping(remote, "primary", own=7482, save=False)
-    local.save(update_fields=["custom_field_data"])
-    remote.save(update_fields=["custom_field_data"])
+    seed_mapping(local, "primary", own=7481)
+    seed_mapping(remote, "primary", own=7482)
 
     ports = [
         {
@@ -967,10 +962,8 @@ def test_htmx_mutation_does_not_repeat_cache_notice_on_next_navigation(client, s
     device = seed_mapping(make_device("cache-parent-immediate-notice"), "primary", own=611)
     parent = make_interface(device, "Ethernet1", iface_type="1000base-t")
     child = make_interface(device, "Ethernet1.100", iface_type="virtual")
-    seed_mapping(parent, "primary", own=7111, save=False)
-    seed_mapping(child, "primary", own=7112, save=False)
-    parent.save(update_fields=["custom_field_data"])
-    child.save(update_fields=["custom_field_data"])
+    seed_mapping(parent, "primary", own=7111)
+    seed_mapping(child, "primary", own=7112)
     # The child name is the parent name plus ".100", which makes it a sub-interface.
     ports = [
         {**_PORT_KEYS_UNSET, "port_id": 7111, "ifName": parent.name},
@@ -1116,10 +1109,8 @@ def test_cable_sync_invalidates_other_tabs_after_creating_a_cable(
     remote_device = seed_mapping(make_device("cache-cable-remote"), "primary", own=64)
     local = make_interface(device, "Ethernet1", iface_type="1000base-t")
     remote = make_interface(remote_device, "Ethernet2", iface_type="1000base-t")
-    seed_mapping(local, "primary", own=7201, save=False)
-    seed_mapping(remote, "primary", own=7202, save=False)
-    local.save(update_fields=["custom_field_data"])
-    remote.save(update_fields=["custom_field_data"])
+    seed_mapping(local, "primary", own=7201)
+    seed_mapping(remote, "primary", own=7202)
     snapshot = seed_cables_snapshot(
         device,
         [link_row(7201, remote.name, remote_device_id=64, remote_hostname=remote_device.name, remote_port_id=7202)],
@@ -1560,8 +1551,7 @@ def test_bay_template_creation_succeeds_without_a_configured_librenms_server(cli
 
 def _mark_migrated_donor(donor, winner):
     """Persist one real server-scoped donor marker for migration endpoint tests."""
-    apply_mapping_change(donor, mark_migrated(donor, winner.pk, "primary"))
-    donor.save(update_fields=["custom_field_data"])
+    seed_mapping(donor, "primary", migrated_to=winner.pk)
 
 
 @pytest.mark.django_db(
@@ -1609,8 +1599,7 @@ def test_interface_move_clears_winner_snapshots_when_active_server_is_unmapped(
     ]
     donor = seed_mapping(make_device("cache-move-interface-unmapped-donor"), active_server_key, own=6418)
     winner = seed_mapping(make_device("cache-move-interface-unmapped-winner"), winner_server_key, own=6419)
-    apply_mapping_change(donor, mark_migrated(donor, winner.pk, active_server_key))
-    donor.save(update_fields=["custom_field_data"])
+    seed_mapping(donor, active_server_key, migrated_to=winner.pk)
     interface = make_interface(donor, "Ethernet1", iface_type="1000base-t")
     winner_snapshot_keys = {_cache_key(data_type, winner, winner_server_key) for data_type in ("ports", "ip_addresses")}
     _seed_snapshot("ports", winner, winner_server_key)
@@ -1725,11 +1714,10 @@ def test_inline_relationship_noop_preserves_other_snapshots(
     device = seed_mapping(make_device("cache-parent-noop"), "primary", own=644)
     parent = make_interface(device, "Ethernet1", iface_type="1000base-t")
     child = make_interface(device, "Ethernet1.100", iface_type="virtual")
-    seed_mapping(parent, "primary", own=7441, save=False)
-    seed_mapping(child, "primary", own=7442, save=False)
-    parent.save(update_fields=["custom_field_data"])
+    seed_mapping(parent, "primary", own=7441)
+    seed_mapping(child, "primary", own=7442)
     child.parent = parent
-    child.save(update_fields=["custom_field_data", "parent"])
+    child.save(update_fields=["parent"])
     ports = [
         {**_PORT_KEYS_UNSET, "port_id": 7441, "ifName": parent.name},
         {**_PORT_KEYS_UNSET, "port_id": 7442, "ifName": child.name},
@@ -1812,10 +1800,8 @@ def test_partial_cable_refresh_keeps_rows_from_available_sources(client, setting
     remote_device = seed_mapping(make_device("cache-cable-partial-remote"), "primary", own=648)
     local = make_interface(device, "Ethernet1", iface_type="1000base-t")
     remote = make_interface(remote_device, "Ethernet2", iface_type="1000base-t")
-    seed_mapping(local, "primary", own=7471, save=False)
-    seed_mapping(remote, "primary", own=7472, save=False)
-    local.save(update_fields=["custom_field_data"])
-    remote.save(update_fields=["custom_field_data"])
+    seed_mapping(local, "primary", own=7471)
+    seed_mapping(remote, "primary", own=7472)
     client.force_login(make_superuser("cache-cable-partial-user"))
 
     primary_librenms.register(
@@ -1931,10 +1917,8 @@ def test_cable_refresh_without_a_cached_snapshot_reports_failure_not_success(
     remote_device = seed_mapping(make_device("cache-cable-nosnap-remote"), "primary", own=662)
     local = make_interface(device, "Ethernet1", iface_type="1000base-t")
     remote = make_interface(remote_device, "Ethernet2", iface_type="1000base-t")
-    seed_mapping(local, "primary", own=7481, save=False)
-    seed_mapping(remote, "primary", own=7482, save=False)
-    local.save(update_fields=["custom_field_data"])
-    remote.save(update_fields=["custom_field_data"])
+    seed_mapping(local, "primary", own=7481)
+    seed_mapping(remote, "primary", own=7482)
     user = make_superuser("cache-cable-nosnap-user")
     client.force_login(user)
 
@@ -2060,10 +2044,8 @@ def _serve_cable_rows(server, name):
     remote_device = seed_mapping(make_device(f"{name}-remote"), "primary", own=662)
     local = make_interface(device, "Ethernet1", iface_type="1000base-t")
     remote = make_interface(remote_device, "Ethernet42", iface_type="1000base-t")
-    seed_mapping(local, "primary", own=7481, save=False)
-    seed_mapping(remote, "primary", own=7482, save=False)
-    local.save(update_fields=["custom_field_data"])
-    remote.save(update_fields=["custom_field_data"])
+    seed_mapping(local, "primary", own=7481)
+    seed_mapping(remote, "primary", own=7482)
     link = {
         "local_port_id": 7481,
         "local_port": local.name,
