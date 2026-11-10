@@ -64,7 +64,18 @@ class _VLANSyncOutcome:
     name_taken_count: int = 0
     add_permission_skipped_count: int = 0
     confirmation_error_count: int = 0
+    rolled_back_count: int = 0
     conflicts: list[dict] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+    _SUCCESSES = ("created_count", "updated_count", "skipped_count")
+
+    def absorb(self, group, *, written):
+        """Add the outcome of one dependency group; a group rolled back keeps only its failures."""
+        for counter in (name for name in self.__dataclass_fields__ if name.endswith("_count")):
+            if written or counter not in self._SUCCESSES:
+                setattr(self, counter, getattr(self, counter) + getattr(group, counter))
+        self.errors.extend(group.errors)
 
     def success_parts(self):
         """Return summary fragments for successful synchronization outcomes."""
@@ -92,7 +103,13 @@ class _VLANSyncOutcome:
             reasons.append(f"{self.name_taken_count} skipped (VLAN name already in the group)")
         if self.confirmation_error_count:
             reasons.append(f"{self.confirmation_error_count} skipped (confirmation no longer current)")
+        if self.rolled_back_count:
+            reasons.append(f"{self.rolled_back_count} skipped (another change of the group failed)")
         return reasons
+
+
+class _GroupRolledBack(Exception):
+    """A member of a dependency group failed, so the group's savepoint rolls back every member."""
 
 
 def _acquire_global_vlan_locks(vids):
@@ -253,7 +270,7 @@ class SyncVLANsView(
         snapshot = source_cache.read(subject, Resource.VLANS, self._post_server_key) if subject is not None else None
         source_by_vid = {} if snapshot is None else index_vlan_source_rows(snapshot.value(Resource.VLANS, "vlans"))[0]
         source_name = vlan_source_namer(subject) if subject is not None else None
-        groups = []
+        pairs = []
         for operation in approved:
             vid, group = operation.identity.vid, operation.choices.group
             source_row = source_by_vid.get(vid)
@@ -268,52 +285,52 @@ class SyncVLANsView(
             else:
                 targets = [vlan for vlan in vlans if vlan.vid == vid and vlan.group_id == group]
                 rebuilt = build_operation(vid=vid, group=group, name=source_name(source_row, vid), targets=targets)
-            groups.append(((operation, rebuilt),))
-        return groups
+            pairs.append((operation, rebuilt))
+        # The writer schedule: updates release names and VIDs before the creates that can take them.
+        return sorted(pairs, key=lambda pair: isinstance(pair[0], VLANCreate))
 
     @staticmethod
-    def _report_stale(request, result, outcome):
+    def _report_stale(result, outcome):
         """Report one refused group by its VIDs and changed facts, or one refused token."""
         if not result.members:
-            messages.error(request, _INVALID_CONFIRMATION)
+            outcome.errors.append(_INVALID_CONFIRMATION)
             outcome.confirmation_error_count += 1
             return
         changed = ", ".join(result.paths)
         for operation in result.members:
-            messages.error(
-                request,
+            outcome.errors.append(
                 f"VLAN {operation.identity.vid}: the confirmed change is no longer current ({changed}). "
-                "Refresh the VLAN data and try again.",
+                "Refresh the VLAN data and try again."
             )
             outcome.confirmation_error_count += 1
 
     @staticmethod
-    def _valid_name(request, operation, outcome):
+    def _valid_name(operation, outcome):
         """Return whether the proposed name passes the NetBox model field, and report it when not."""
         try:
             VLAN._meta.get_field("name").clean(operation.effects.name, None)
         except ValidationError:
-            messages.error(request, f"VLAN {operation.identity.vid}: the LibreNMS name is invalid; skipped.")
+            outcome.errors.append(f"VLAN {operation.identity.vid}: the LibreNMS name is invalid; skipped.")
             outcome.invalid_name_count += 1
             return False
         return True
 
     @staticmethod
-    def _report_name_conflict(request, *, vid, group, name, outcome):
+    def _report_name_conflict(*, vid, group, name, outcome):
         """Report a write that the group's unique VLAN name, or a concurrent writer, refused."""
         # NetBox keeps VLAN names unique in a group, and a VLAN name rule can make two VIDs share a name.
         if VLAN.objects.filter(group_id=group, name=name).exists():
-            messages.error(request, f'VLAN {vid}: the VLAN group already has a VLAN named "{name}"; skipped.')
+            outcome.errors.append(f'VLAN {vid}: the VLAN group already has a VLAN named "{name}"; skipped.')
             outcome.name_taken_count += 1
         else:
-            messages.error(request, f"VLAN {vid}: the VLAN could not be written after a concurrent change; skipped.")
+            outcome.errors.append(f"VLAN {vid}: the VLAN could not be written after a concurrent change; skipped.")
             outcome.concurrent_change_count += 1
 
     def _create(self, request, operation, outcome):
         """Create the VLAN of one verified create operation under the caller's add constraints."""
         effects = operation.effects
-        if not self._valid_name(request, operation, outcome):
-            return
+        if not self._valid_name(operation, outcome):
+            return False
         try:
             with transaction.atomic():
                 vlan = VLAN.objects.create(
@@ -322,34 +339,34 @@ class SyncVLANsView(
                 if not saved_in_scope(vlan, request.user, "add"):
                     raise PermissionsViolation()
         except PermissionsViolation:
-            messages.error(
-                request,
-                f"VLAN {effects.vid}: the new VLAN is outside your add permission constraints; skipped.",
+            outcome.errors.append(
+                f"VLAN {effects.vid}: the new VLAN is outside your add permission constraints; skipped."
             )
             outcome.add_permission_skipped_count += 1
         except IntegrityError:
-            self._report_name_conflict(
-                request, vid=effects.vid, group=effects.group, name=effects.name, outcome=outcome
-            )
+            self._report_name_conflict(vid=effects.vid, group=effects.group, name=effects.name, outcome=outcome)
         else:
             outcome.created_count += 1
+            return True
+        return False
 
-    def _changeable_target(self, request, operation, changeable_vlans, outcome):
+    @staticmethod
+    def _changeable_target(operation, changeable_vlans, outcome):
         """Return the verified target VLAN when it is in the caller's change scope, and report it when not."""
         vlan = changeable_vlans.select_related("group").filter(pk=operation.effects.vlan).first()
         if vlan is None:
-            messages.error(
-                request,
+            outcome.errors.append(
                 f"VLAN {operation.identity.vid}: an existing VLAN in this scope is outside your change permission; "
-                "skipped.",
+                "skipped."
             )
             outcome.permission_skipped_count += 1
         return vlan
 
-    def _rename(self, request, operation, vlan, outcome):
+    def _rename(self, request, operation, changeable_vlans, outcome):
         """Apply one verified, confirmed rename to its target VLAN, which the rebuild locked."""
-        if not self._valid_name(request, operation, outcome):
-            return
+        vlan = self._changeable_target(operation, changeable_vlans, outcome)
+        if vlan is None or not self._valid_name(operation, outcome):
+            return False
         vlan.snapshot()
         vlan.name = operation.effects.name
         try:
@@ -358,43 +375,78 @@ class SyncVLANsView(
                 if not saved_in_scope(vlan, request.user, "change"):
                     raise PermissionsViolation()
         except PermissionsViolation:
-            messages.error(
-                request,
-                f"VLAN {operation.identity.vid}: the renamed VLAN is outside your change permission; skipped.",
+            outcome.errors.append(
+                f"VLAN {operation.identity.vid}: the renamed VLAN is outside your change permission; skipped."
             )
             outcome.permission_skipped_count += 1
         except IntegrityError:
             self._report_name_conflict(
-                request, vid=operation.identity.vid, group=vlan.group_id, name=operation.effects.name, outcome=outcome
+                vid=operation.identity.vid, group=vlan.group_id, name=operation.effects.name, outcome=outcome
             )
         else:
             outcome.updated_count += 1
+            return True
+        return False
 
-    def _apply(self, request, member, *, confirm, changeable_vlans, outcome):
-        """Write one verified operation, or disclose a rename that the request has not confirmed."""
-        operation = member.operation
+    def _write(self, request, operation, changeable_vlans, outcome):
+        """Write one verified operation and return whether it holds: written, or unchanged."""
         if isinstance(operation, VLANCreate):
-            self._create(request, operation, outcome)
-            return
+            return self._create(request, operation, outcome)
         if not operation.renames:
             outcome.skipped_count += 1
+            return True
+        return self._rename(request, operation, changeable_vlans, outcome)
+
+    def _disclose(self, members, changeable_vlans, outcome):
+        """Disclose every write of a dependency group that holds an unconfirmed rename; write nothing."""
+        entries = []
+        for member in members:
+            operation = member.operation
+            if isinstance(operation, VLANUpdate) and not operation.renames:
+                outcome.skipped_count += 1
+                continue
+            if isinstance(operation, VLANUpdate):
+                vlan = self._changeable_target(operation, changeable_vlans, outcome)
+                if vlan is None:
+                    # A rename outside the change scope can never apply, so its group is not offered either.
+                    return
+                group, current_name = vlan.group, operation.assumptions.target.name
+            else:
+                group = self.restricted_queryset(VLANGroup).filter(pk=operation.choices.group).first()
+                current_name = None
+            entries.append(
+                {
+                    "vid": operation.identity.vid,
+                    "group": str(group) if group is not None else "Global",
+                    "current_name": current_name,
+                    "proposed_name": operation.effects.name,
+                    # The disclosure passes on the token of the verified operation; it never mints one.
+                    "token": member.token,
+                }
+            )
+        outcome.conflicts.extend(entries)
+
+    def _apply_group(self, request, members, *, confirm, changeable_vlans, outcome):
+        """Write one verified dependency group in one savepoint, in the rebuild's schedule, or disclose it."""
+        if not confirm and any(isinstance(m.operation, VLANUpdate) and m.operation.renames for m in members):
+            self._disclose(members, changeable_vlans, outcome)
             return
-        vlan = self._changeable_target(request, operation, changeable_vlans, outcome)
-        if vlan is None:
-            return
-        if confirm:
-            self._rename(request, operation, vlan, outcome)
-            return
-        outcome.conflicts.append(
-            {
-                "vid": operation.identity.vid,
-                "group": str(vlan.group) if vlan.group is not None else "Global",
-                "current_name": operation.assumptions.target.name,
-                "proposed_name": operation.effects.name,
-                # The disclosure passes on the token of the verified operation; it never mints one.
-                "token": member.token,
-            }
-        )
+        group = _VLANSyncOutcome()
+        held = []
+        try:
+            with transaction.atomic():
+                held = [m for m in members if self._write(request, m.operation, changeable_vlans, group)]
+                if len(held) != len(members):
+                    raise _GroupRolledBack()
+        except _GroupRolledBack:
+            outcome.absorb(group, written=False)
+            for member in held:
+                outcome.errors.append(
+                    f"VLAN {member.operation.identity.vid}: not written, because another change of its group failed."
+                )
+                outcome.rolled_back_count += 1
+        else:
+            outcome.absorb(group, written=True)
 
     @staticmethod
     def _report_outcome(request, outcome):
@@ -517,11 +569,14 @@ class SyncVLANsView(
             )
             for result in verification.results:
                 if isinstance(result, intent.Stale):
-                    self._report_stale(request, result, outcome)
-                    continue
-                for member in result.members:
-                    self._apply(request, member, confirm=confirm, changeable_vlans=changeable_vlans, outcome=outcome)
+                    self._report_stale(result, outcome)
+                else:
+                    self._apply_group(
+                        request, result.members, confirm=confirm, changeable_vlans=changeable_vlans, outcome=outcome
+                    )
 
+        for error in outcome.errors:
+            messages.error(request, error)
         self._report_outcome(request, outcome)
 
         if outcome.created_count or outcome.updated_count:
