@@ -6,6 +6,8 @@ change of the storage changes the helpers and not the tests. The scan counts, pe
 a raw helper (through an import alias, a module attribute or a local alias too), each
 ``librenms_cf=`` keyword and each call of ``map_device_to_librenms`` that can pass ``oob``. It does
 not follow a raw value through any other local helper.
+Limits: it does not see ``partial`` under another name, and it keeps local aliases per file, not
+per function.
 """
 
 import ast
