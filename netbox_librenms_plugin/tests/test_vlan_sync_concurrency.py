@@ -20,6 +20,7 @@ from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.confirmation_intent import FIELD
 from netbox_librenms_plugin.tests.conftest import bounded_executor, make_device, run_in_threads
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping_row
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import (
     assert_locked_before_update,
@@ -246,6 +247,8 @@ def _wait_until_blocked(pid, future, seconds=5):
         ("source", "effects.name"),
         ("expire", "source.available"),
         ("device_type", "effects.name"),
+        ("remap", "source.available"),
+        ("unmap", "source.available"),
     ],
 )
 def test_a_target_change_committed_while_the_writer_waits_for_its_lock_is_stale(change, path):
@@ -258,7 +261,7 @@ def test_a_target_change_committed_while_the_writer_waits_for_its_lock_is_stale(
     from django.db import transaction
     from ipam.models import VLAN, VLANGroup
 
-    device = make_device(f"vlan-lock-race-{change}")
+    device = make_device(f"vlan-lock-race-{change}", librenms_cf={"default": {"id": 42}})
     group = VLANGroup.objects.create(name=f"Lock-Race-{change}", slug=f"lock-race-{change}")
     vlan = VLAN.objects.create(vid=61, group=group, name="old-name", status="active") if change != "create" else None
     from netbox_librenms_plugin.models import NormalizationRule
@@ -312,8 +315,11 @@ def test_a_target_change_committed_while_the_writer_waits_for_its_lock_is_stale(
                 _seed_grouped_vid(device, 61, "refreshed-name")
             elif change == "expire":
                 source_cache.delete(device, Resource.VLANS, "default")
-            else:
+            elif change == "device_type":
                 type(device).objects.filter(pk=device.pk).update(device_type=ruled_type)
+            else:
+                # Another writer maps the device to another LibreNMS host, or removes its mapping.
+                seed_stored_mapping_row(device, {"default": {"id": 43}} if change == "remap" else None)
         recorded = syncing.result(timeout=20)
 
     joined = " || ".join(text for _level, text in recorded)
@@ -329,6 +335,8 @@ def test_a_target_change_committed_while_the_writer_waits_for_its_lock_is_stale(
             "source": ["old-name"],
             "expire": ["old-name"],
             "device_type": ["old-name"],
+            "remap": ["old-name"],
+            "unmap": ["old-name"],
         }[change]
     )
 
