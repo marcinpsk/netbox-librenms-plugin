@@ -2244,8 +2244,8 @@ class UpdateModuleInterfaceView(
         bind_result = None
         adoption_failed = False
         try:
-            # One transaction: a lock conflict in the bind or the adoption rolls back both.
-            with transaction.atomic():
+            # One transaction: a lock conflict in the bind or the adoption rolls back both, and their events.
+            with atomic_with_events():
                 granted = _authorize_module_grant(
                     page_device, server_key, ACTION_UPDATE_INTERFACE, request.POST.get("inventory_binding")
                 )

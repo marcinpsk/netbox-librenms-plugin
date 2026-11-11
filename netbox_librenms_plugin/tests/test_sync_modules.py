@@ -1850,14 +1850,16 @@ class TestModuleBindLockConflicts:
         assert read_mapping(primary).own_id("default") is None
 
     @transactional_db_with_all_apps()
+    @pytest.mark.parametrize("victim", ["unlink", "module"])
     def test_an_unlink_cascade_and_a_bind_and_adopt_that_lock_in_opposite_orders_end_in_a_serial_outcome(
-        self, client, live_librenms
+        self, client, live_librenms, flushed_events, victim
     ):
         """
         The cascade locks the interfaces by pk; the module action locks the primary, then adopts the lower pk.
 
         PostgreSQL breaks the cycle, and the aborted side answers "try again" or runs again: the
-        contract is a valid serial outcome, not an order that prevents the cycle.
+        contract is a valid serial outcome, not an order that prevents the cycle, and no event of the
+        aborted side is sent. The session that checks for a deadlock first is the victim.
         """
         from queue import Queue
 
@@ -1890,11 +1892,14 @@ class TestModuleBindLockConflicts:
         client.force_login(user)
         token = offered_token(unlink_page(client, device))
         pids, unlinks = Queue(), []
+        deadlock_timeouts = {"unlink": "10s", "module": "10s", victim: "100ms"}
 
         def unlink():
             unlink_client = Client()
             unlink_client.force_login(user)
             pids.put(backend_pid(connection))
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT set_config('deadlock_timeout', %s, false)", [deadlock_timeouts["unlink"]])
             with raised_sqlstates() as sqlstates:
                 response = unlink_client.post(lifecycle_url(device), {"server_key": "default", intent.FIELD: [token]})
             return response.status_code, messages_on(response.wsgi_request), sqlstates
@@ -1910,12 +1915,17 @@ class TestModuleBindLockConflicts:
                         wait_for_lock_wait(observer, pids.get(timeout=5))
                 return result
 
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT set_config('deadlock_timeout', %s, false)", [deadlock_timeouts["module"]])
+            flushed_events.clear()
             with (
                 connection.execute_wrapper(start_the_unlink_once_the_primary_is_locked),
                 raised_sqlstates() as module_states,
             ):
                 module_response = client.post(action, data=fields)
             unlink_status, unlink_messages, unlink_states = unlinks[0].result(timeout=30)
+            with connection.cursor() as cursor:
+                cursor.execute("RESET deadlock_timeout")
 
         module_messages = messages_on(module_response.wsgi_request)
         for status, answers in ((module_response.status_code, module_messages), (unlink_status, unlink_messages)):
@@ -1941,8 +1951,16 @@ class TestModuleBindLockConflicts:
         assert bound or (untouched and module_retried)
         if unlinked:
             assert all("default" not in mapping_summary(row) for row in Interface.objects.filter(device=device))
-        # The interleaving is a real cycle: PostgreSQL aborts one side with a deadlock.
-        assert "40P01" in module_states + unlink_states
+        # The interleaving is a real cycle: PostgreSQL aborts the victim with a deadlock.
+        assert "40P01" in (module_states if victim == "module" else unlink_states)
+        module_events = {("interface", primary.pk), ("interface", standalone.pk)}
+        if victim == "module":
+            assert (unlinked, module_retried) == (True, True)
+            assert not module_events & set(flushed_events)
+        else:
+            assert bound
+            assert ("device", device.pk) not in flushed_events
+            assert module_events <= set(flushed_events)
 
 
 class TestModulesRedirectResponse:

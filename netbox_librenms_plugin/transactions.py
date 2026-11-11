@@ -269,6 +269,7 @@ def atomic_with_events():
         committed = True
 
     token = events_queue.set({})
+    kept = False
     try:
         with transaction.atomic():
             if outermost:

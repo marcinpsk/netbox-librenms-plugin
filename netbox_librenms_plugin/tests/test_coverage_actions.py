@@ -5959,6 +5959,31 @@ class TestAddAsOOBViewPost:
             "oob_type": "oob",
         }
 
+    @transactional_db_with_all_apps()
+    def test_a_conflict_at_the_commit_sends_no_event_of_the_attach(self, client, flushed_events):
+        """The change record's user foreign key meets a real 55P03 at the commit, after the device event was queued."""
+        from dcim.models import Device
+        from django.contrib.auth import get_user_model
+
+        existing_device = seed_mapping(make_device("oob-late", serial="OOB-LATE-SERIAL"), self.server_key, own=10)
+        self._register_oob_device(17, "controller-late", serial=existing_device.serial, generic=True)
+        user = make_superuser("oob-late-user")
+        client.force_login(user)
+        flushed_events.clear()
+
+        with second_connection() as other:
+            lock_row(other, get_user_model(), user.pk)
+            with lock_timeout(200):
+                response = client.post(
+                    url_for("plugins:netbox_librenms_plugin:device_add_as_oob", kwargs={"device_id": 17}),
+                    {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+                    headers={"HX-Request": "true"},
+                )
+
+        assert TRY_AGAIN_MESSAGE.encode() in response.content
+        assert mapping_summary(Device.objects.get(pk=existing_device.pk))[self.server_key] == {"own": 10}
+        assert flushed_events == []
+
 
 @pytest.mark.django_db
 class TestPromoteToHostViewPost:
@@ -6322,6 +6347,33 @@ class TestPromoteToHostViewPost:
         # Nothing committed: the host slot is unchanged and no OOB slot was written.
         assert mapping_summary(Device.objects.get(pk=existing_device.pk))[self.server_key] == {"own": 10}
         assert mapping_summary(Device.objects.get(pk=conflicting_device.pk))[self.server_key] == {"own": 17}
+
+    @transactional_db_with_all_apps()
+    def test_a_conflict_at_the_commit_sends_no_event_of_the_promotion(self, client, flushed_events):
+        """The change record's user foreign key meets a real 55P03 at the commit, after the device event was queued."""
+        from dcim.models import Device
+        from django.contrib.auth import get_user_model
+
+        existing_device = seed_mapping(
+            make_device("promote-late", serial="PROMOTE-LATE-SERIAL"), self.server_key, own=10
+        )
+        self._register_host_device(17, "promote-late-host", serial=existing_device.serial)
+        user = make_superuser("promote-late-user")
+        client.force_login(user)
+        flushed_events.clear()
+
+        with second_connection() as other:
+            lock_row(other, get_user_model(), user.pk)
+            with lock_timeout(200):
+                response = client.post(
+                    url_for("plugins:netbox_librenms_plugin:device_promote_to_host", kwargs={"device_id": 17}),
+                    {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+                    headers={"HX-Request": "true"},
+                )
+
+        assert TRY_AGAIN_MESSAGE.encode() in response.content
+        assert mapping_summary(Device.objects.get(pk=existing_device.pk))[self.server_key] == {"own": 10}
+        assert flushed_events == []
 
     def test_a_promotion_with_an_interface_cascade_is_sent_to_the_sync_page(self):
         """The promotion replaces the host ID, so the ports of the old host on its interfaces need the sync page."""

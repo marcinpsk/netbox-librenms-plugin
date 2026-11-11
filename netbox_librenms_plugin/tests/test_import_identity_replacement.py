@@ -750,3 +750,29 @@ def test_a_device_that_joins_the_locked_chassis_waits_for_the_replacement(client
     joiner.refresh_from_db()
     assert mapping_summary(device) == {"secondary": {"own": 52441}}
     assert joiner.virtual_chassis_id == chassis.pk
+
+
+@transactional_db_with_all_apps()
+def test_a_conflict_at_the_commit_sends_no_event_of_the_replacement(client, secondary_server, flushed_events):
+    """The change record's user foreign key meets a real 55P03 at the commit, after the device event was queued."""
+    from django.contrib.auth import get_user_model
+
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row, lock_timeout, second_connection
+    from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
+
+    device = seed_mapping(make_device("replace-late"), "secondary", own=52351)
+    user = make_superuser("identity-replacement-late")
+    client.force_login(user)
+    server = _serve_secondary(secondary_server, 52451, device.name)
+    token = _offered_token(_post_action(client, 52451, device, "link", server=server))
+    flushed_events.clear()
+
+    with second_connection() as other:
+        lock_row(other, get_user_model(), user.pk)
+        with lock_timeout(200):
+            response = _post_confirmation(client, 52451, token, server=server)
+
+    assert TRY_AGAIN_MESSAGE.encode() in response.content
+    device.refresh_from_db()
+    assert mapping_summary(device) == {"secondary": {"own": 52351}}
+    assert flushed_events == []
