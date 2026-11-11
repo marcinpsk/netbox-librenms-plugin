@@ -248,7 +248,7 @@ def _reconcile_donor_device_ip_fks(donor, winner):
     ``full_clean()`` on pre-existing unrelated inconsistencies, mirroring
     :class:`TransferDeviceIPView`.
 
-    Must run inside the caller's ``transaction.atomic()`` with both devices already
+    Must run inside the caller's atomic block with both devices already
     locked.
 
     Args:
@@ -407,7 +407,7 @@ class _BaseMoveToWinnerView(
         """
         Lock donor+winner by pk order and re-verify the migration marker under the lock.
 
-        Must be called inside a ``transaction.atomic()`` block. Locks both devices in pk order
+        Must be called inside an atomic block. Locks both devices in pk order
         (deadlock-safe), then re-resolves the winner under the lock so a concurrent request that
         cleared or repointed ``_migrated_to`` between the unlocked resolve and acquiring these row
         locks can't move the resource to a stale winner (TOCTOU). Shared by the three move endpoints
