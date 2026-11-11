@@ -21,9 +21,13 @@ def _render_editor():
         {"server_key": "secondary", "display_name": "Secondary", "own_id": None, "oob_id": None, "oob_type": None},
     ]
     context = {
-        "mapping_editor": {"blocked": False, "rows": rows, "oob_types": ("idrac", "ilo", "oob")},
-        "lookup_device_pk": 1,
-        "lookup_device_model_name": "device",
+        "mapping_editor": {
+            "blocked": False,
+            "rows": rows,
+            "oob_types": ("idrac", "ilo", "oob"),
+            "owner_pk": 1,
+            "object_type": "device",
+        },
         "server_key": "primary",
         "active_sync_tab": "modules",
         "csrf_token": "browser-token",

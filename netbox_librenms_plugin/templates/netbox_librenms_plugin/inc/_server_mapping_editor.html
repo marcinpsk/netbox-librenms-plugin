@@ -52,10 +52,10 @@
                 </td>
                 <td class="pe-3 text-end">
                     <form method="post" id="librenms-mapping-edit-{{ forloop.counter }}" class="d-inline"
-                          action="{% url 'plugins:netbox_librenms_plugin:edit_server_mapping' pk=lookup_device_pk %}">
+                          action="{% url 'plugins:netbox_librenms_plugin:edit_server_mapping' pk=mapping_editor.owner_pk %}">
                         {% csrf_token %}
                         <input type="hidden" name="server_key" value="{{ row.server_key }}">
-                        <input type="hidden" name="object_type" value="{{ lookup_device_model_name }}">
+                        <input type="hidden" name="object_type" value="{{ mapping_editor.object_type }}">
                         <input type="hidden" name="active_server_key" value="{{ server_key|default:'' }}">
                         <input type="hidden" name="tab" value="{{ active_sync_tab|default:'' }}">
                         <input type="hidden" name="shown_own_id" value="{{ row.own_id|default_if_none:'' }}">
