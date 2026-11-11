@@ -1,7 +1,7 @@
 {# One plain form: the token names every effect below, so the confirming POST needs no script. #}
 <div class="card" id="librenms-host-change" data-action="{{ action }}">
     <h5 class="card-header">
-        <i class="mdi mdi-link-variant-off text-danger me-1" aria-hidden="true"></i>
+        <i class="mdi {% if action == "unlink" %}mdi-link-variant-off{% else %}mdi-swap-horizontal{% endif %} text-danger me-1" aria-hidden="true"></i>
         {% if action == "unlink" %}Unlink {{ object.name }} from {{ server_name }}
         {% elif action == "relink" %}{% if after.own_id %}Replace the LibreNMS ID of {{ object.name }} on {{ server_name }}{% else %}Remove the LibreNMS ID of {{ object.name }} on {{ server_name }}{% endif %}
         {% elif after.oob_id %}Replace the OOB controller of {{ object.name }} on {{ server_name }}
@@ -20,15 +20,15 @@
             <strong>{{ interfaces|length }} interface{{ interfaces|length|pluralize }}</strong>{% if members|length > 1 %} on {{ members|join:", " }}{% endif %}.
         </p>
         <dl class="row mb-3">
-            <dt class="col-sm-3 text-muted">Server</dt>
-            <dd class="col-sm-9">{{ server_name }}{% if server_name != server_key %} <span class="text-muted small">({{ server_key }})</span>{% endif %}</dd>
-            <dt class="col-sm-3 text-muted">LibreNMS ID</dt>
-            <dd class="col-sm-9">
+            <dt class="col-sm-4 col-lg-2 text-muted">Server</dt>
+            <dd class="col-sm-8 col-lg-10">{{ server_name }}{% if server_name != server_key %} <span class="text-muted small">({{ server_key }})</span>{% endif %}</dd>
+            <dt class="col-sm-4 col-lg-2 text-muted">LibreNMS ID</dt>
+            <dd class="col-sm-8 col-lg-10">
                 {{ before.own_id|default_if_none:"None" }}
                 {% if before.own_id != after.own_id %}<i class="mdi mdi-arrow-right mx-1" aria-hidden="true"></i><span class="visually-hidden">changes to</span>{{ after.own_id|default_if_none:"removed" }}{% endif %}
             </dd>
-            <dt class="col-sm-3 text-muted">OOB controller ID</dt>
-            <dd class="col-sm-9 mb-0">
+            <dt class="col-sm-4 col-lg-2 text-muted">OOB controller ID</dt>
+            <dd class="col-sm-8 col-lg-10 mb-0">
                 {{ before.oob_id|default_if_none:"None" }}{% if before.oob_type %} <span class="text-muted small">({{ before.oob_type }})</span>{% endif %}
                 {% if before.oob_id != after.oob_id %}<i class="mdi mdi-arrow-right mx-1" aria-hidden="true"></i><span class="visually-hidden">changes to</span>{{ after.oob_id|default_if_none:"removed" }}{% if after.oob_id and after.oob_type %} <span class="text-muted small">({{ after.oob_type }})</span>{% endif %}{% endif %}
             </dd>
