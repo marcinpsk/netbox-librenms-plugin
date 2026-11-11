@@ -6,7 +6,7 @@ from dcim.models import Device, Interface, VirtualChassis
 from django.contrib import messages
 from django.core import signing
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError
 from django.db.models import Q
 from django.http import Http404, HttpResponse
 from django.shortcuts import redirect, render
@@ -32,7 +32,14 @@ from netbox_librenms_plugin.sync_cache import (
     schedule_request_cache_mutation,
 )
 from netbox_librenms_plugin.sync_query import page_query_url
-from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, saved_in_scope, update_existing_row
+from netbox_librenms_plugin.transactions import (
+    atomic_with_events,
+    classify_conflict,
+    row_savepoint,
+    run_transaction,
+    saved_in_scope,
+    update_existing_row,
+)
 from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
     build_migrated_context,
@@ -1079,7 +1086,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             try:
                 # Per-IP savepoint so one bad address rolls back only itself and
                 # surfaces a real error, instead of poisoning the whole batch.
-                with transaction.atomic():
+                with row_savepoint():
                     row_id = normalize_ip_sync_row_id(selected_ip)
                     if row_id in duplicate_cached_rows:
                         raise ValueError("The cached snapshot contains duplicate rows for this IP address.")
@@ -1372,7 +1379,7 @@ class CreateVRFFromIPRowView(SyncIPAddressesView):
             return self.redirect_to_ip_tab(request, obj)
         try:
             identity = self._creatable_vrf_identity(assessment, request.POST.get("create_vrf"))
-            with transaction.atomic():
+            with atomic_with_events():
                 vrf = self._create_vrf(request, identity)
         except _VRFCreateRefusedError as refusal:
             messages.error(request, str(refusal))
@@ -1444,7 +1451,7 @@ class CreateVRFFromIPRowView(SyncIPAddressesView):
             raise refusal
         vrf = VRF(name=name, rd=rd)
         try:
-            with transaction.atomic():
+            with atomic_with_events():
                 vrf.full_clean()
                 vrf.save()
         except (ValidationError, IntegrityError) as exc:

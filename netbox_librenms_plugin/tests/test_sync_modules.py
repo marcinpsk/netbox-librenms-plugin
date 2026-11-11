@@ -4244,7 +4244,7 @@ def test_module_advisory_lock_sections_do_not_render_responses():
     for node in ast.walk(tree):
         atomic = isinstance(node, ast.With) or (
             isinstance(node, ast.FunctionDef)
-            and any(ast.unparse(decorator) == "transaction.atomic" for decorator in node.decorator_list)
+            and any(ast.unparse(decorator) == "atomic_with_events()" for decorator in node.decorator_list)
         )
         if not atomic:
             continue

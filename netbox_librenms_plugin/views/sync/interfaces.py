@@ -62,7 +62,12 @@ from netbox_librenms_plugin.sync_cache import (
     schedule_request_cache_mutation,
 )
 from netbox_librenms_plugin.sync_query import page_query_url
-from netbox_librenms_plugin.transactions import CommittedFollowUpError, classify_conflict, run_transaction
+from netbox_librenms_plugin.transactions import (
+    CommittedFollowUpError,
+    atomic_with_events,
+    classify_conflict,
+    run_transaction,
+)
 from netbox_librenms_plugin.utils import (
     build_migrated_context,
     coerce_model_pk,
@@ -767,7 +772,7 @@ class SyncInterfacesView(
             interface_name_field,
         )
         try:
-            with transaction.atomic():
+            with atomic_with_events():
                 # The same locks in the same order; the owners and their view scope come from the selection.
                 obj, locked_device_ids = _lock_relationship_scope(obj)
                 if obj is None or obj.pk not in self._attempt_selection.owner_ids:
@@ -1201,7 +1206,7 @@ class SyncInterfacesView(
             # failed statements are rolled back to a savepoint first — same reasoning as the
             # move-to-winner flow in migrate.py. It also keeps the pair atomic: a related-side
             # persist (LAG type bump) can't outlive a failed source save.
-            with transaction.atomic():
+            with atomic_with_events():
                 _apply_interface_relationship(
                     source_iface,
                     relation_field,
@@ -1245,7 +1250,7 @@ class SyncInterfacesView(
         """Create or update NetBox interfaces from LibreNMS port data."""
         self._foreign_bound_port_ids = set()
         selected_port_ids = getattr(self, "_selected_port_ids", set())
-        with transaction.atomic():
+        with atomic_with_events():
             locked_obj = self._lock_sync_scope(obj, ports_data, interface_name_field)
             if locked_obj is None:
                 for port in ports_data:
@@ -1684,7 +1689,7 @@ class SyncInterfacesView(
             device_for=self._target_device_for,
         )
 
-    @transaction.atomic
+    @atomic_with_events()
     def sync_interface(  # noqa: C901
         self,
         obj,
@@ -2060,7 +2065,7 @@ class RebindInterfacePortView(SyncInterfacesView):
             return self._tab_response(request, object_type, interface_name_field, server_key)
         ports_data = assessment["ports"]
         try:
-            with transaction.atomic():
+            with atomic_with_events():
                 interface = self._rebind(obj, ports_data, port_id, expected_port_id, interface_name_field, server_key)
         except LibreNMSPortBindingConflict as conflict:
             messages.error(request, str(conflict))

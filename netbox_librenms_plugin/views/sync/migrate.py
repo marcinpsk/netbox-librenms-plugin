@@ -35,6 +35,7 @@ from netbox_librenms_plugin.sync_cache import (
     schedule_request_cache_mutation,
     sync_subject_key,
 )
+from netbox_librenms_plugin.transactions import atomic_with_events
 from netbox_librenms_plugin.utils import (
     DEVICE_IP_FK_FIELDS,
     DEVICE_IP_FK_LABELS,
@@ -247,7 +248,7 @@ def _reconcile_donor_device_ip_fks(donor, winner):
     ``full_clean()`` on pre-existing unrelated inconsistencies, mirroring
     :class:`TransferDeviceIPView`.
 
-    Must run inside the caller's ``transaction.atomic()`` with both devices already
+    Must run inside the caller's atomic block with both devices already
     locked.
 
     Args:
@@ -406,7 +407,7 @@ class _BaseMoveToWinnerView(
         """
         Lock donor+winner by pk order and re-verify the migration marker under the lock.
 
-        Must be called inside a ``transaction.atomic()`` block. Locks both devices in pk order
+        Must be called inside an atomic block. Locks both devices in pk order
         (deadlock-safe), then re-resolves the winner under the lock so a concurrent request that
         cleared or repointed ``_migrated_to`` between the unlocked resolve and acquiring these row
         locks can't move the resource to a stale winner (TOCTOU). Shared by the three move endpoints
@@ -553,7 +554,7 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
             )
 
         with claim_sync_subjects(sync_subject_key(donor), sync_subject_key(winner)):
-            with transaction.atomic():
+            with atomic_with_events():
                 donor, winner, err = self._lock_donor_winner_and_reverify(request, donor, winner, server_key)
                 if err is not None:
                     return err
@@ -789,7 +790,7 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
             )
 
         with claim_sync_subjects(sync_subject_key(donor), sync_subject_key(winner)):
-            with transaction.atomic():
+            with atomic_with_events():
                 donor, winner, err = self._lock_donor_winner_and_reverify(request, donor, winner, server_key)
                 if err is not None:
                     return err
@@ -896,7 +897,7 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
             )
 
         with claim_sync_subjects(sync_subject_key(donor), sync_subject_key(winner)):
-            with transaction.atomic():
+            with atomic_with_events():
                 donor, winner, err = self._lock_donor_winner_and_reverify(request, donor, winner, server_key)
                 if err is not None:
                     return err

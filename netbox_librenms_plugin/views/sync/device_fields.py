@@ -837,7 +837,7 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
             return self._redirect(object_type, pk, _validated_active_server_key(request), active_sync_tab)
         submitted_active_key = request.POST.get("active_server_key", "").strip() or None
 
-        with transaction.atomic():
+        with atomic_with_events():
             owner = get_object_or_404(
                 self.restricted_queryset(model, "change").select_for_update(of=("self",)),
                 pk=pk,
@@ -964,7 +964,7 @@ class EditServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
             oob_type=_posted_value(request, "shown_oob_type"),
         )
         try:
-            with transaction.atomic():
+            with atomic_with_events():
                 owner = get_object_or_404(
                     self.restricted_queryset(model, "change").select_for_update(of=("self",)), pk=pk
                 )

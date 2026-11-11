@@ -4,7 +4,7 @@ from functools import partial
 from dcim.models import Device
 from django.contrib import messages
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError
 from django.db.models import Q
 from django.http import Http404, HttpResponse
 from django.shortcuts import redirect, render
@@ -23,7 +23,7 @@ from netbox_librenms_plugin.sync_cache import (
     schedule_request_cache_mutation,
 )
 from netbox_librenms_plugin.sync_query import page_query_url
-from netbox_librenms_plugin.transactions import row_savepoint, saved_in_scope
+from netbox_librenms_plugin.transactions import atomic_with_events, row_savepoint, saved_in_scope
 from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
     coerce_model_pk,
@@ -566,7 +566,7 @@ class SyncVLANsView(
         confirm = request.POST.get("confirm_conflicts") == "1"
         changeable_vlans = self.restricted_queryset(VLAN, "change")
         outcome = _VLANSyncOutcome()
-        with transaction.atomic():
+        with atomic_with_events():
             verification = intent.verify(
                 tokens,
                 policy=VLAN_SYNC_POLICY,

@@ -9,7 +9,7 @@ from urllib.parse import quote_plus, urlsplit
 
 from django.contrib import messages
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, connection, models, transaction
+from django.db import IntegrityError, connection, models
 from django.http import HttpResponse, QueryDict
 from django.shortcuts import redirect, render
 from django.urls import reverse
@@ -609,7 +609,7 @@ def _adopt_existing_template_interfaces(device, module, interfaces):
         }
 
     adopted_names = []
-    with transaction.atomic():
+    with atomic_with_events():
         for interface in adoptable:
             interface.snapshot()
             interface.module = module
@@ -2365,7 +2365,7 @@ class UpdateModuleInterfaceView(
             # A hard conflict/skip is left untouched so we don't mutate past an unresolved issue.
             if bind_result is None or bind_result.get("status") == "bound":
                 try:
-                    with transaction.atomic():
+                    with atomic_with_events():
                         adopt_result = _adopt_existing_template_interfaces(
                             target_device,
                             module,
@@ -2569,7 +2569,7 @@ class ApplyModuleInterfaceTypesView(
         }
         validation_failures = []
         try:
-            with transaction.atomic():
+            with atomic_with_events():
                 _lock_module_destinations(page_device, {target_device.pk})
                 template_types = _module_interface_type_targets(target_device, module)
                 # The host change cascade locks interfaces in pk order too; the messages list them by name.
@@ -3210,7 +3210,7 @@ class MoveModuleView(
         serial_rules = SerialRules.load()
         moving = module_subtree_serials(conflict_module_id)
         try:
-            with transaction.atomic():
+            with atomic_with_events():
                 # The identity locks of the moved serials come before any row lock.
                 assignment_lock([serial for _pk, serial in moving], model=Module, rules=serial_rules)
                 _lock_module_destinations(page_device, {target_device.pk})
@@ -3542,7 +3542,7 @@ class AddBayTemplateView(
                 manufacturer=manufacturer,
             )
             try:
-                with transaction.atomic():
+                with atomic_with_events():
                     mapping.full_clean()
                     mapping.save()
             except (ValidationError, IntegrityError) as exc:
@@ -3764,7 +3764,7 @@ class AddBayTemplateView(
         try:
             mapping_created = False
             instantiated_count = 0
-            with transaction.atomic():
+            with atomic_with_events():
                 bay_template = ModuleBayTemplate(**kwargs)
                 bay_template.full_clean()
                 bay_template.save()
@@ -4052,7 +4052,7 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
             return _modules_action_response(request, page_device)
 
         try:
-            with transaction.atomic():
+            with atomic_with_events():
                 plan = self._plan(page_device, server_key, request.POST, write=True)
                 self.required_object_permissions = {"POST": self._permissions(plan)}
                 if error := self.require_object_permissions("POST"):
