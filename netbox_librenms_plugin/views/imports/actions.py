@@ -2494,6 +2494,7 @@ class DeviceConflictActionView(
         # object tables. The target-row lock separately preserves concurrent changes to the
         # object receiving the mapping.
         if action in {"link", "update", "update_serial"}:
+            # A conflict rolls back the write and drops its events; the middleware then answers "try again".
             with atomic_with_events():
                 server_key = self.librenms_api.server_key
                 reported_serial = libre_device.get("serial")
@@ -4006,7 +4007,8 @@ class PromoteToHostView(
                 "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first."
             )
 
-        with transaction.atomic():
+        # A conflict rolls back the write and drops its events; the middleware then answers "try again".
+        with atomic_with_events():
             # The promotion rests on a serial match: the serial identity lock comes before the claim and the row lock.
             # A type override decides the identity of the stored serials too.
             serial_rules = SerialRules.load()
