@@ -180,24 +180,35 @@ def _dribbled(head, body=b""):
 _BODY = json.dumps(_found(55)).encode()
 
 
+def _head(status_line, *headers):
+    return ("\r\n".join([status_line, *headers]) + "\r\n\r\n").encode()
+
+
+_SLOW_ANSWERS = {
+    # The status line and the headers dribble in, so the request itself does not return.
+    "slow-headers": _dribbled(
+        _head("HTTP/1.1 200 OK", "Content-Type: application/json", f"Content-Length: {len(_BODY)}"), _BODY
+    ),
+    # A redirect whose body requests reads before it returns, although it follows no redirect.
+    "redirect-with-slow-body": [
+        _head("HTTP/1.1 302 Found", "Location: /api/v0/devices/elsewhere", f"Content-Length: {len(_BODY)}"),
+        *_dribbled(b"", _BODY),
+    ],
+    # A body that only the end of the connection delimits.
+    "connection-close-body": [
+        _head("HTTP/1.1 200 OK", "Content-Type: application/json", "Connection: close"),
+        *_dribbled(b"", _BODY),
+    ],
+}
+
+
 @pytest.mark.django_db
 class TestTheDeadlineBoundsTheWholeRequest:
     """Each part arrives well inside a socket timeout; only the deadline may end the wait (1 s here)."""
 
-    @pytest.mark.parametrize(
-        "head",
-        [
-            # The status line and the headers dribble in, so the request itself does not return.
-            f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(_BODY)}\r\n\r\n".encode(),
-            # A redirect whose body requests reads before it returns, although it follows no redirect.
-            f"HTTP/1.1 302 Found\r\nLocation: /api/v0/devices/elsewhere\r\nContent-Length: {len(_BODY)}\r\n\r\n".encode(),
-            # A body that only the end of the connection delimits.
-            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",
-        ],
-        ids=["slow-headers", "redirect-with-slow-body", "connection-close-body"],
-    )
-    def test_a_slow_answer_is_not_checked_within_the_deadline(self, api, librenms_server, head):
-        librenms_server.register_raw_stream(IP_PATH, _dribbled(head, _BODY), pause=0.2)
+    @pytest.mark.parametrize("answer", list(_SLOW_ANSWERS))
+    def test_a_slow_answer_is_not_checked_within_the_deadline(self, api, librenms_server, answer):
+        librenms_server.register_raw_stream(IP_PATH, _SLOW_ANSWERS[answer], pause=0.3)
         device = _device()
         started = time.perf_counter()
 
@@ -205,6 +216,65 @@ class TestTheDeadlineBoundsTheWholeRequest:
 
         assert isinstance(result, NotChecked)
         assert time.perf_counter() - started < 1.5
+
+    def test_a_connection_that_is_never_accepted_is_not_checked_within_the_deadline(self, api):
+        """A full accept queue drops the connection request, so the connect itself waits."""
+        import socket
+
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(0)
+            host, port = listener.getsockname()
+            # One waiting connection fills a queue of length zero.
+            fillers = [socket.create_connection((host, port), timeout=1)]
+            try:
+                api.librenms_url = f"http://{host}:{port}"
+                device = _device()
+                started = time.perf_counter()
+
+                result = matching.find_librenms_match(device, api, deadline=matching.Deadline(1))
+
+                assert isinstance(result, NotChecked)
+                assert time.perf_counter() - started < 1.5
+            finally:
+                for filler in fillers:
+                    filler.close()
+
+    def test_a_probe_that_waits_for_a_busy_probe_pool_is_not_checked_within_the_deadline(self, api, librenms_server):
+        """Probes of slow answers hold every worker; a later probe of a fast answer waits its turn, not past it."""
+        import threading
+
+        from netbox_librenms_plugin.librenms_api import MATCH_PROBE_WORKERS
+        from netbox_librenms_plugin.matching import LookupInputs
+
+        librenms_server.register_raw_stream(IP_PATH, _SLOW_ANSWERS["slow-headers"], pause=0.3)
+        slow = _device()
+        LookupInputs.of(slow)
+        fast = make_device("match-fast")
+        give_primary_ip(fast, "192.0.2.9/24")
+        fast = type(fast).objects.get(pk=fast.pk)
+        LookupInputs.of(fast)
+        librenms_server.register("/api/v0/devices/192.0.2.9", _found(56))
+        busy = [
+            threading.Thread(
+                target=matching.find_librenms_match, args=(slow, api), kwargs={"deadline": matching.Deadline(3)}
+            )
+            for _ in range(MATCH_PROBE_WORKERS)
+        ]
+        for thread in busy:
+            thread.start()
+        waited = time.perf_counter()
+        while len(_paths(librenms_server)) < MATCH_PROBE_WORKERS and time.perf_counter() - waited < 2:
+            time.sleep(0.01)
+        started = time.perf_counter()
+
+        result = matching.find_librenms_match(fast, api, deadline=matching.Deadline(1))
+
+        elapsed = time.perf_counter() - started
+        for thread in busy:
+            thread.join(timeout=10)
+        assert isinstance(result, NotChecked)
+        assert elapsed < 1.5
 
 
 @pytest.mark.django_db

@@ -1,12 +1,10 @@
 import logging
 import math
-import socket
-import threading
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import requests
-import urllib3
 from django.core.cache import cache
 from netbox.plugins import get_plugin_config
 
@@ -135,79 +133,25 @@ class _TokenScopedSession(requests.Session):
 _session = _TokenScopedSession()
 
 
-class _SocketWatchdog:
-    """Shut down every socket of one request when its time is up, which ends any wait on them."""
-
-    def __init__(self, seconds):
-        self._lock = threading.Lock()
-        self._sockets = []
-        self.fired = False
-        self._timer = threading.Timer(seconds, self._fire)
-        self._timer.daemon = True
-        self._timer.start()
-
-    def watch(self, sock):
-        """Shut *sock* down at the deadline; at once when the deadline has passed."""
-        with self._lock:
-            self._sockets.append(sock)
-            if self.fired:
-                _shut_down(sock)
-
-    def _fire(self):
-        with self._lock:
-            self.fired = True
-            for sock in self._sockets:
-                _shut_down(sock)
-
-    def cancel(self):
-        """Stop the timer; a request that ended in time keeps its sockets."""
-        self._timer.cancel()
+# Match probes run here, so a request waits for one only until its deadline. The bound caps the probes that a slow
+# LibreNMS can hold: a probe that the request abandoned ends at its own per-read timeout.
+MATCH_PROBE_WORKERS = 4
+_match_probes = ThreadPoolExecutor(max_workers=MATCH_PROBE_WORKERS, thread_name_prefix="librenms-match-probe")
 
 
-def _shut_down(sock):
+def _match_probe(url, headers, timeout, verify):
+    """Run one match probe GET in a probe worker, with a session of its own; return ``(status, body)``."""
+    with _TokenScopedSession() as session:
+        try:
+            response = session.get(url, headers=headers, timeout=timeout, verify=verify, allow_redirects=False)
+        except requests.exceptions.RequestException:
+            return None, None
+    if response.is_redirect:
+        return response.status_code, None
     try:
-        sock.shutdown(socket.SHUT_RDWR)
-    except OSError:
-        # The socket is closed already.
-        pass
-
-
-def _deadline_session(watchdog):
-    """Return a session of its own whose connections, plain, TLS or through a proxy, report their socket to *watchdog*."""
-
-    class _Connection(urllib3.connection.HTTPConnection):
-        def connect(self):
-            super().connect()
-            watchdog.watch(self.sock)
-
-    class _TLSConnection(urllib3.connection.HTTPSConnection):
-        def connect(self):
-            super().connect()
-            watchdog.watch(self.sock)
-
-    class _Pool(urllib3.HTTPConnectionPool):
-        ConnectionCls = _Connection
-
-    class _TLSPool(urllib3.HTTPSConnectionPool):
-        ConnectionCls = _TLSConnection
-
-    pools = {"http": _Pool, "https": _TLSPool}
-
-    class _Adapter(requests.adapters.HTTPAdapter):
-        def init_poolmanager(self, *args, **kwargs):
-            super().init_poolmanager(*args, **kwargs)
-            self.poolmanager.pool_classes_by_scheme = pools
-
-        def proxy_manager_for(self, proxy, **kwargs):
-            manager = super().proxy_manager_for(proxy, **kwargs)
-            manager.pool_classes_by_scheme = pools
-            return manager
-
-    session = _TokenScopedSession()
-    adapter = _Adapter()
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    return session
+        return response.status_code, response.json()
+    except ValueError:
+        return response.status_code, None
 
 
 class LibreNMSAPI:
@@ -566,10 +510,10 @@ class LibreNMSAPI:
 
     def get_response_before(self, path: str, remaining) -> tuple[int | None, object] | None:
         """
-        Issue a GET that must finish before a deadline, and return ``(status_code, body)``, or None after it.
+        Issue a GET that must answer before a deadline, and return ``(status_code, body)``, or None after it.
 
-        ``remaining()`` returns the seconds left. A socket timeout limits each wait for data only, so a
-        watchdog shuts the request's socket down when the time is up, in any phase of the request. A
+        ``remaining()`` returns the seconds left. The request runs in a probe worker, and this call waits
+        for it only that long: a socket timeout limits each wait for data, not the whole request. A
         redirect is not followed: its own status comes back. A transport error yields ``(None, None)``,
         and a non-JSON body ``(status_code, None)``.
 
@@ -584,30 +528,20 @@ class LibreNMSAPI:
         left = remaining()
         if left <= 0:
             return None
-        watchdog = _SocketWatchdog(left)
-        session = _deadline_session(watchdog)
+        probe = _match_probes.submit(
+            _match_probe,
+            f"{self.librenms_url}/api/v0/{path.lstrip('/')}",
+            dict(self.headers),
+            min(DEFAULT_API_TIMEOUT, left),
+            self.verify_ssl,
+        )
         try:
-            response = session.get(
-                f"{self.librenms_url}/api/v0/{path.lstrip('/')}",
-                headers=self.headers,
-                timeout=min(DEFAULT_API_TIMEOUT, left),
-                verify=self.verify_ssl,
-                allow_redirects=False,
-            )
-        except (requests.exceptions.RequestException, OSError, urllib3.exceptions.HTTPError):
-            return None if watchdog.fired or remaining() <= 0 else (None, None)
-        finally:
-            watchdog.cancel()
-            session.close()
-        # A watchdog that fired can end a body early, which then reads as complete.
-        if watchdog.fired or remaining() <= 0:
+            answer = probe.result(timeout=left)
+        except TimeoutError:
+            # A probe that has not started never runs; a running one ends unused.
+            probe.cancel()
             return None
-        if response.is_redirect:
-            return response.status_code, None
-        try:
-            return response.status_code, response.json()
-        except ValueError:
-            return response.status_code, None
+        return None if remaining() <= 0 else answer
 
     def add_device(self, data):
         """
