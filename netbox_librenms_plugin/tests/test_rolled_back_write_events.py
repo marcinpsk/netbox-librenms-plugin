@@ -14,6 +14,7 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row, lock_timeout, second_connection
 from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary, seed_mapping
+from netbox_librenms_plugin.tests.test_import_identity_replacement import secondary_server  # noqa: F401
 from netbox_librenms_plugin.tests.test_server_mapping_edit import servers  # noqa: F401
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
@@ -220,4 +221,26 @@ def test_a_mapping_edit_whose_commit_meets_a_lock_conflict_sends_no_event(client
     assert TRY_AGAIN_MESSAGE in _texts(response)
     target.refresh_from_db()
     assert mapping_summary(target) == {}
+    assert flushed_events == []
+
+
+def test_a_serial_sync_whose_commit_meets_a_lock_conflict_sends_no_event(
+    client,
+    secondary_server,  # noqa: F811
+    flushed_events,
+):
+    from netbox_librenms_plugin.tests.test_import_identity_replacement import _post_action, _serve_secondary
+
+    device = seed_mapping(make_device("events-sync-serial", serial="SN-EVENTS-OLD"), "secondary", own=52901)
+    user = make_superuser("events-sync-serial-user")
+    client.force_login(user)
+    server = _serve_secondary(secondary_server, 52901, device.name, serial="SN-EVENTS-NEW")
+    flushed_events.clear()
+
+    with _commit_meets_a_lock_conflict(user):
+        response = _post_action(client, 52901, device, "sync_serial", server=server)
+
+    assert TRY_AGAIN_MESSAGE in response.content.decode()
+    device.refresh_from_db()
+    assert device.serial == "SN-EVENTS-OLD"
     assert flushed_events == []

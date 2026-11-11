@@ -500,7 +500,7 @@ def _write_mapping_in_scope(view, model, lookup, duplicate_message, *, field, ta
     A lock conflict propagates, so the lock-conflict middleware gives the "try again" answer.
     """
     try:
-        with transaction.atomic():
+        with atomic_with_events():
             return _write_mapping_rows(
                 view,
                 model,
@@ -3698,7 +3698,7 @@ class AddAsOOBView(
         Reads ``oob_interface_id`` from the OOB-attach form: an interface PK, or the
         sentinel ``"__new__"`` to create one named ``oob_new_interface_name``.
 
-        The caller runs inside ``transaction.atomic()``. The add-vs-reuse permission
+        The caller runs inside an atomic block. The add-vs-reuse permission
         decision can only be made from the locked row: the unlocked pre-flight in
         ``_missing_oob_ip_permissions`` can race a concurrent delete and wave through
         a change-Device-only user, so re-verify ``add`` here before creating.
@@ -3749,7 +3749,7 @@ class AddAsOOBView(
             # transaction. A concurrent create of the same (device, name) — guarded by the
             # dcim_interface_unique_device_name constraint — means we just reuse the winner.
             try:
-                with transaction.atomic():
+                with atomic_with_events():
                     iface = Interface(device=device, name=name, type="other")
                     # Validate field formats/length (an invalid/oversized name would otherwise
                     # raise ValidationError/DataError and surface as a 500). Skip the uniqueness
@@ -3820,7 +3820,7 @@ class AddAsOOBView(
         except ValueError:
             return None, "invalid"
 
-        # Lock the candidate row(s) — the caller runs inside transaction.atomic() — so a
+        # Lock the candidate row(s) — the caller runs inside an atomic block — so a
         # concurrent attach can't flip the assignment between this ownership check and
         # the save. NetBox places no unique constraint on IPAddress.address, so the
         # create path stays best-effort: this narrows the TOCTOU window, it can't close it.
@@ -3875,11 +3875,11 @@ class AddAsOOBView(
             return None, "permission_add"
 
         mask = "/128" if parsed.version == 6 else "/32"
-        # Nested savepoint: the caller runs inside transaction.atomic(), and catching
+        # Nested savepoint: the caller runs inside an atomic block, and catching
         # IntegrityError from create() without one would leave the outer transaction
         # rollback-only (poisoned), breaking the later _save_device() call.
         try:
-            with transaction.atomic():
+            with atomic_with_events():
                 return (
                     IPAddress.objects.create(
                         address=netaddr.IPNetwork(f"{parsed}{mask}"), assigned_object=interface, status="active"
