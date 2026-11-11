@@ -1921,27 +1921,3 @@ def persist_merge(change: MergeChange | ChassisMove, *, write: Callable[[], obje
         if progress.written != {id(side) for side in change.sides}:
             raise RuntimeError("A merge must save each of its sides once.")
     return result
-
-
-def can_store_device_mapping(obj) -> bool:
-    """Return whether *obj* is a saved Device or VirtualMachine that has the mapping custom field."""
-    from dcim.models import Device
-    from virtualization.models import VirtualMachine
-
-    return (
-        isinstance(obj, (Device, VirtualMachine))
-        and obj.pk is not None
-        and not obj._state.adding
-        and _MAPPING_KEY in obj.cf
-    )
-
-
-def copy_persisted_mapping(source, target) -> None:
-    """
-    Copy only the mapping of *source*, a later read of the same row, onto *target*; save nothing.
-
-    Target keeps every other custom field, also one it changed and did not save.
-    """
-    if type(source) is not type(target) or source.pk is None or source.pk != target.pk:
-        raise ValueError("A mapping copies only between two reads of one row.")
-    _put_stored_value(target, _stored_value(source))

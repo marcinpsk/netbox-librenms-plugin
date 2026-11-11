@@ -897,12 +897,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         plan = source_cache.authorized_plan(request, obj, server_key=server_key, resources=[Resource.MODULES])
         coordinator = SyncCacheConsistency.for_refresh(plan)
         owner = plan.owner(Resource.MODULES)
-        self.librenms_id, lookup_error = self.resolve_librenms_id(owner)
+        self.librenms_id = self.stored_librenms_id(owner, server_key)
         if self.librenms_id is None:
             source_cache.delete_planned(plan)
             coordinator.mark_refresh_failure(SyncTab.MODULES, server_key, actor_id=request_actor_id(request))
             messages.error(
-                request, self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS."
+                request, self.not_linked_message(server_key)
             )
             return self.render_sync_partial(request, obj, server_key, {"module_sync": empty})
         result = source_cache.refresh(request, plan)

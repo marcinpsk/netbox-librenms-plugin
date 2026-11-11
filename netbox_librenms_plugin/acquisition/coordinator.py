@@ -28,7 +28,6 @@ from netbox_librenms_plugin.librenms_api import (
     DEFAULT_API_TIMEOUT,
     EXTENDED_API_TIMEOUT,
     build_librenms_api,
-    stored_librenms_id,
 )
 from netbox_librenms_plugin.mapping_owner import mapping_owner
 from netbox_librenms_plugin.server_mappings import MappingRole, read_mapping, require_server_key
@@ -141,7 +140,7 @@ def oob_source(fetch, resource, mapping, server_key):
 def _resource_source(fetch, resource, owner, server_key, *, include_serial=False, inventory_probes=False):
     """Acquire one resource from the owner's own mapping and, when it links one, its OOB controller."""
     mapping = read_mapping(owner)
-    librenms_id = stored_librenms_id(owner, server_key)
+    librenms_id = mapping.own_id(server_key)
     spec = RESOURCE_SPECS[resource]
     oob_only = spec.permits_oob_only and librenms_id is None and mapping.has_oob(server_key)
     if librenms_id is None and not oob_only:

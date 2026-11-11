@@ -1,7 +1,7 @@
-"""Apply the confirmed host changes of a NetBox device or VM and clear their interface cascade."""
+"""Apply the confirmed mapping lifecycle operations of a NetBox device or VM: link, relink and change_oob."""
 
 from functools import partial
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from dcim.models import Device
 from django.apps import apps
@@ -11,6 +11,7 @@ from django.http import Http404
 from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views import View
+from ipam.models import IPAddress
 from utilities.exceptions import PermissionsViolation
 from virtualization.models import VirtualMachine
 
@@ -18,17 +19,22 @@ from netbox_librenms_plugin import confirmation_intent as intent
 from netbox_librenms_plugin.assessment.mapping_lifecycle import (
     HOST_CHANGES,
     HostChangeState,
+    Link,
     Relink,
     build_host_change,
+    build_link,
     read_host_change_assessment,
     scope_permitted,
 )
 from netbox_librenms_plugin.import_utils.disclosure import visible_object_label
+from netbox_librenms_plugin.ip_addressing import primary_ips
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.mapping_owner import ensure_mapping_owner, mapping_ownership
+from netbox_librenms_plugin.matching import LookupInputs
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
     IdentityOwned,
+    assign_own,
     edit_server,
     host_entry,
     lock_host_change_owner,
@@ -53,16 +59,20 @@ from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
+    validated_referer,
 )
 
+_LINK_ENTRIES = frozenset({(intent.Resource.MAPPING_LIFECYCLE, Link.ACTION, intent.Role.PRIMARY)})
 LIFECYCLE_POLICY = intent.RoutePolicy(
-    frozenset((intent.Resource.MAPPING_LIFECYCLE, action, intent.Role.PRIMARY) for action in HOST_CHANGES)
+    _LINK_ENTRIES | {(intent.Resource.MAPPING_LIFECYCLE, action, intent.Role.PRIMARY) for action in HOST_CHANGES}
 )
+BULK_LINK_POLICY = intent.RoutePolicy(_LINK_ENTRIES, subject_per_token=True)
 _MODELS = {"device": Device, "virtualmachine": VirtualMachine}
+_STATUS_LISTS = {"device": "device_status_list", "virtualmachine": "vm_status_list"}
 _SYNC_PAGES = {"device": "device_librenms_sync", "virtualmachine": "vm_librenms_sync"}
 _INVALID_CONFIRMATION = "The confirmation is invalid or has expired. Refresh the page and try again."
 # The noun of each operation in an outcome line.
-_NOUNS = {"relink": "LibreNMS ID change", "change_oob": "OOB controller change"}
+_NOUNS = {"link": "link", "relink": "LibreNMS ID change", "change_oob": "OOB controller change"}
 
 
 def _server_name(server_key):
@@ -170,17 +180,46 @@ class _LifecycleWriter(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Lib
         return model
 
     def _rebuild(self, approved, *, model, server_key, locked):
-        """Lock and rebuild each approved host change from current state."""
+        """Lock and rebuild each approved operation from current state; a link and a host change lock differently."""
         changeable = self.restricted_queryset(model, "change")
         pairs = []
         for operation in sorted(approved, key=lambda operation: operation.identity.pk):
             identity = operation.identity
             if identity.model != model._meta.label_lower or identity.server != server_key:
                 rebuilt = intent.Unavailable("subject.available")
+            elif isinstance(operation, Link):
+                rebuilt = self._rebuild_link(operation, changeable, model, server_key, locked)
             else:
                 rebuilt = self._rebuild_host_change(operation, changeable, model, server_key, locked)
             pairs.append((operation, rebuilt))
         return pairs
+
+    def _rebuild_link(self, operation, changeable, model, server_key, locked):
+        """Claim the approved ID, lock the object and its primary IPs, and rebuild the link from that state."""
+        identity = operation.identity
+        if server_key not in LibreNMSAPI.get_available_servers():
+            return intent.Unavailable("server.configured")
+        owned = False
+        # The chassis and its members first, so the sync device that the link binds cannot change meanwhile.
+        lock_host_change_owner(model, identity.pk)
+        try:
+            row, conflict = lock_librenms_id_assignment(
+                operation.effects.own_id, server_key, owner_queryset=changeable, owner_pk=identity.pk
+            )
+            owned = conflict is not None
+        except AmbiguousLibreNMSIdError:
+            # The claim locked the row before the owner search found several owners.
+            row, owned = changeable.filter(pk=identity.pk).select_for_update(of=("self",)).first(), True
+        except model.DoesNotExist:
+            row = None
+        # The outcome line names the object, so it must still be in the view scope.
+        if row is None or not self.restricted_queryset(model).filter(pk=row.pk).exists():
+            return intent.Unavailable("subject.available")
+        # Each address is a lookup input of the locked row, and the row's change scope admitted it.
+        relocked = (self.relock_scoped_row(IPAddress, pk=ip.pk) for ip in primary_ips(row))
+        locked[identity.pk] = row
+        inputs = LookupInputs.of(row, tuple(ip for ip in relocked if ip is not None))
+        return build_link(row, server_key, choices=operation.choices, inputs=inputs, owned=owned)
 
     def _rebuild_host_change(self, operation, changeable, model, server_key, locked):
         """Lock the chassis, its members and the scope's interfaces, claim a new ID, and rebuild the change."""
@@ -227,6 +266,8 @@ class _LifecycleWriter(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Lib
 
     def _write(self, request, operation, locked, server_name):
         """Write one verified operation on its locked rows in one savepoint, and return its outcome line."""
+        if isinstance(operation, Link):
+            return self._write_link(request, operation, locked, server_name)
         row, scope = locked
         noun = _NOUNS[operation.ACTION]
         try:
@@ -262,6 +303,32 @@ class _LifecycleWriter(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Lib
         except ValueError as exc:
             return messages.ERROR, f"'{row.name}': the {noun} was not saved: {exc}"
         return messages.SUCCESS, _success_text(operation, row, len(scope.interfaces), server_name)
+
+    def _write_link(self, request, operation, row, server_name):
+        """Store the verified own ID on the locked row in one savepoint, and return its outcome line."""
+        own_id = operation.effects.own_id
+        try:
+            with row_savepoint():
+                row.snapshot()
+                persist_mapping(row, assign_own(row, operation.identity.server, own_id), write=save_mapping_fields)
+                # A change constraint can read the mapping, so the stored link can move the row out of the scope.
+                if not saved_in_scope(row, request.user, "change"):
+                    raise PermissionsViolation()
+        except PermissionsViolation:
+            return messages.ERROR, f"'{row.name}': the linked object is outside your change permission; not linked."
+        except IdentityOwned as exc:
+            return (
+                messages.ERROR,
+                f"'{row.name}': LibreNMS ID {own_id} is already linked to {_owner_text(exc.owner, request.user)}.",
+            )
+        except ValidationError as exc:
+            if classify_conflict(exc):
+                raise
+            return (
+                messages.ERROR,
+                f"'{row.name}': the link was not saved: {exception_text_for(exc, type(row), request.user)}",
+            )
+        return messages.SUCCESS, f"Linked '{row.name}' to LibreNMS ID {own_id} on {server_name}."
 
     def _apply(self, request, tokens, *, policy, context, model, server_key):
         """Verify and write in one transaction, which a lock conflict runs once more; then report each outcome."""
@@ -326,9 +393,10 @@ def posted_tab(data):
 
 
 class MappingLifecycleView(_LifecycleWriter):
-    """Apply the one confirmed host change of a device or VM."""
+    """Apply the confirmed lifecycle token of one device or VM."""
 
     confirmation_policy = LIFECYCLE_POLICY
+
 
     def post(self, request, object_type, pk):
         """Apply the one submitted lifecycle token of the object, and return to its sync page."""
@@ -360,3 +428,44 @@ class MappingLifecycleView(_LifecycleWriter):
         mapped = row is not None and host_entry(row, server_key).display_id is not None
         configured = server_key in LibreNMSAPI.get_available_servers()
         return redirect(sync_page_url(obj, server_key=server_key if configured and mapped else None, tab=tab))
+
+
+class BulkLinkView(_LifecycleWriter):
+    """Link the selected rows of a status list; each token names its own device or VM."""
+
+    confirmation_policy = BULK_LINK_POLICY
+
+    def post(self, request, object_type):
+        """Apply every submitted link token whose object the user may change, and return to the list."""
+        model = self._model(object_type)
+        if error := self.require_all_permissions("POST"):
+            return error
+        server_key = self.rebind_api_for_posted_server(request.POST)
+        if server_key is None:
+            messages.error(request, "Selected LibreNMS server is no longer configured.")
+            return self._redirect(object_type)
+        tokens = request.POST.getlist(intent.FIELD)
+        if not any(tokens):
+            messages.error(request, "Select at least one object to link.")
+            return self._redirect(object_type)
+        # A signed identity only narrows the scope query; verify compares each token's own subject with it.
+        named = {operation.identity.pk for operation in intent.signed_operations(tokens, policy=BULK_LINK_POLICY)}
+        label = model._meta.label_lower
+        changeable = self.restricted_queryset(model, "change").filter(pk__in=named).values_list("pk", flat=True)
+        self._apply(
+            request,
+            tokens,
+            policy=BULK_LINK_POLICY,
+            context=intent.IntentScope(request.user.pk, server_key, frozenset((label, pk) for pk in changeable)),
+            model=model,
+            server_key=server_key,
+        )
+        return self._redirect(object_type)
+
+    def _redirect(self, object_type):
+        """Return to the list page the form was posted from: htmx paging changes the page after it rendered the form."""
+        url = reverse(f"plugins:netbox_librenms_plugin:{_STATUS_LISTS[object_type]}")
+        referer = validated_referer(self.request)
+        if referer is None or urlsplit(referer).path != url:
+            return redirect(url)
+        return redirect(urlunsplit(("", "", url, urlsplit(referer).query, "")))

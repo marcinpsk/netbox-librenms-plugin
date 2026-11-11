@@ -11,5 +11,24 @@
         Select filters to check device status in LibreNMS. Click the status to view device LibreNMS sync details.
     </div>
     {% endif %}
+    {% if link_selected_url %}
+    {# The table rows join these two forms through their form attribute, so a plain POST carries the tokens. #}
+    <form id="librenms-link-selected" method="post" action="{{ link_selected_url }}" class="d-none">
+        {% csrf_token %}
+        <input type="hidden" name="server_key" value="{{ link_server_key }}">
+        <input type="hidden" name="return_query" value="{{ link_return_query }}">
+    </form>
+    <form id="librenms-link-row" method="post" action="{{ link_selected_url }}" class="d-none">
+        {% csrf_token %}
+        <input type="hidden" name="server_key" value="{{ link_server_key }}">
+        <input type="hidden" name="return_query" value="{{ link_return_query }}">
+    </form>
+    <div class="d-flex flex-wrap align-items-center gap-2 mb-3" id="librenms-link-actions">
+        <button type="submit" form="librenms-link-selected" class="btn btn-primary">
+            <i class="mdi mdi-link-variant"></i> Link selected
+        </button>
+        <span class="text-muted small">Links each selected object to the LibreNMS device that it matches.</span>
+    </div>
+    {% endif %}
     {{ block.super }}
 {% endblock %}
