@@ -35,9 +35,9 @@ class _MappingClaimBarrier:
 
     def __init__(self, claim_barrier):
         self.claim_barrier = claim_barrier
-        self.target_lock_seen = False
+        self.owner_lock_seen = False
         self.claim_seen = False
-        self.claim_lock_preceded_the_target_lock = None
+        self.owner_lock_preceded_the_claim = None
 
     def __call__(self, execute, sql, params, many, context):
         if DEVICE_CLAIM_SQL in sql:
@@ -50,12 +50,12 @@ class _MappingClaimBarrier:
 
         result = execute(sql, params, many, context)
         if (
-            not self.target_lock_seen
+            not self.owner_lock_seen
             and "FOR UPDATE" in sql
             and ('FROM "dcim_device"' in sql or 'FROM "virtualization_virtualmachine"' in sql)
         ):
-            self.target_lock_seen = True
-            self.claim_lock_preceded_the_target_lock = self.claim_seen
+            self.owner_lock_seen = True
+            self.owner_lock_preceded_the_claim = not self.claim_seen
         return result
 
 
@@ -464,18 +464,11 @@ def test_device_and_vm_links_serialize_one_cross_model_id_claim(servers):
     # The claim does not wait: the loser refuses at once while the winner holds it ("try again"),
     # or, when it claims after the winner's commit, it finds the winner as the owner.
     refused = [
-        (content, wrapper)
-        for (_status, content), wrapper in zip(outcomes, wrappers, strict=True)
-        if b"LibreNMS ID conflict" in content or b"try again" in content
+        content for _status, content in outcomes if b"LibreNMS ID conflict" in content or b"try again" in content
     ]
     assert len(refused) == 1
-    content, loser = refused[0]
-    (winner,) = [wrapper for wrapper in wrappers if wrapper is not loser]
-    assert winner.target_lock_seen and winner.claim_lock_preceded_the_target_lock
-    if b"try again" in content:
-        assert loser.target_lock_seen is False
-    else:
-        assert loser.claim_lock_preceded_the_target_lock
+    # Both lock their own object first, the shared order of a host change; the claim does not wait.
+    assert all(wrapper.owner_lock_seen and wrapper.owner_lock_preceded_the_claim for wrapper in wrappers)
 
 
 @pytest.mark.django_db

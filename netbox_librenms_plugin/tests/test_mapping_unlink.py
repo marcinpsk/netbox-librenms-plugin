@@ -5,8 +5,6 @@ The unlink confirmation or the mapping editor offers each token, the lifecycle r
 each test reads the real database. The scope is a Device, every member of a virtual chassis, or a VM.
 """
 
-from threading import Event
-
 import pytest
 from dcim.models import Device, Interface
 from django.core import signing
@@ -15,7 +13,6 @@ from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin import confirmation_intent as intent
 from netbox_librenms_plugin.tests.conftest import (
-    bounded_executor,
     configure_librenms_servers,
     make_cluster,
     make_device,
@@ -36,7 +33,7 @@ from netbox_librenms_plugin.tests.link_intent_helpers import (
     sync_page,
     unlink_page,
 )
-from netbox_librenms_plugin.tests.lock_conflict_helpers import backend_pid, second_connection, wait_for_lock_wait
+from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_when_waited, second_connection
 from netbox_librenms_plugin.tests.mapping_fixtures import (
     mapped_on_server_constraint,
     mapping_summary,
@@ -509,23 +506,13 @@ def test_a_port_written_on_a_scope_interface_after_the_offer_makes_the_unlink_st
     owner, interfaces = _linked("device", "unlink-port-race")
     client.force_login(make_user_with_perms("unlink-port-race", PERMISSIONS))
     token = offered_token(unlink_page(client, owner))
-    unlink_pid = backend_pid(connection)
-    written = Event()
     # The same builder that the interface sync writes a port with.
     port = seed_mapping(Interface(), "default", own=5150, save=False)
 
-    def write_a_port_and_commit_when_the_unlink_waits():
-        with second_connection() as other:
-            seed_mapping_row(interfaces["none"], port, connection=other)
-            written.set()
-            wait_for_lock_wait(other, unlink_pid)
-            other.commit()
-
-    with bounded_executor(max_workers=1) as executor:
-        writer_done = executor.submit(write_a_port_and_commit_when_the_unlink_waits)
-        assert written.wait(5), "the port writer did not write"
-        response = _confirm(client, owner, token)
-        writer_done.result(timeout=10)
+    response = commit_when_waited(
+        lambda other: seed_mapping_row(interfaces["none"], port, connection=other),
+        lambda: _confirm(client, owner, token),
+    )
 
     assert {"effects.interfaces.count", "effects.interfaces.digest"} <= stale_paths(response, owner.name)
     assert mapping_summary(_fresh(owner))["default"]["own"] == 4100

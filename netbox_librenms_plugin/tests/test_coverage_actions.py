@@ -23,7 +23,12 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
     transactional_db_with_all_apps,
 )
-from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row, lock_timeout, second_connection
+from netbox_librenms_plugin.tests.lock_conflict_helpers import (
+    commit_when_waited,
+    lock_row,
+    lock_timeout,
+    second_connection,
+)
 from netbox_librenms_plugin.tests.mapping_fixtures import (
     mapping_summary,
     seed_mapping,
@@ -6342,6 +6347,35 @@ class TestPromoteToHostViewPost:
         assert mapping_summary(Device.objects.get(pk=existing_device.pk))[self.server_key] == {"own": 10}
         interface.refresh_from_db()
         assert mapping_summary(interface) == {self.server_key: {"own": 901}}
+
+    @transactional_db_with_all_apps()
+    def test_a_promotion_waits_for_a_port_writer_on_a_scope_interface_and_then_refuses(self):
+        """The port writer holds the interface row: the promotion waits for its commit, then sees the port."""
+        from dcim.models import Device, Interface
+
+        view = self._make_view()
+        existing_device = seed_mapping(
+            make_device("promote-race", serial="PROMOTE-RACE-SERIAL"), self.server_key, own=10
+        )
+        interface = make_interface(existing_device, "eth0")
+        self._register_host_device(17, "promote-race-host", serial=existing_device.serial)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("promote-race-user"),
+            HTTP_HX_REQUEST="true",
+        )
+        port = seed_mapping(Interface(), self.server_key, own=902, save=False)
+
+        response = commit_when_waited(
+            lambda other: seed_mapping_row(interface, port, connection=other),
+            lambda: post_view(view, request, device_id=17),
+        )
+
+        assert b"Change it on the sync page" in response.content
+        assert mapping_summary(Device.objects.get(pk=existing_device.pk))[self.server_key] == {"own": 10}
+        interface.refresh_from_db()
+        assert mapping_summary(interface) == {self.server_key: {"own": 902}}
 
 
 @pytest.mark.django_db

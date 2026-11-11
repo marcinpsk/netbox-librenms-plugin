@@ -125,6 +125,7 @@ from netbox_librenms_plugin.server_mappings import (
     host_change_scope,
     host_entry,
     link_import,
+    lock_host_change_owner,
     lock_librenms_id_assignment,
     merge_links,
     persist_mapping,
@@ -338,9 +339,14 @@ HOST_CHANGE_ON_SYNC_PAGE = (
 
 
 def _host_change_refusal(obj, server_key, *, own_id, oob_id, oob_type):
-    """Return the HTMX refusal of a host ID change with an interface cascade, which only the sync page confirms."""
+    """
+    Lock the scope's interfaces, and return the HTMX refusal of a host ID change with an interface cascade.
+
+    Only the sync page confirms a cascade. The caller locked the owner rows with
+    ``lock_host_change_owner`` before its target lock, and holds the locks through its write.
+    """
     new_entry = ServerState(server_key, own_id=own_id, oob_id=oob_id, oob_type=oob_type)
-    if host_change_scope(obj, server_key, new_entry).is_empty:
+    if host_change_scope(obj, server_key, new_entry, lock=True).is_empty:
         return None
     return _htmx_error_response(HOST_CHANGE_ON_SYNC_PAGE)
 
@@ -2328,6 +2334,8 @@ class DeviceConflictActionView(
                     retype_lock(retyped, rules=serial_rules, serials=lock_serials)
                 elif lock_serials:
                     assignment_lock(lock_serials, model=Device, rules=serial_rules)
+                # The shared host change order: the chassis and its members before the target lock.
+                lock_host_change_owner(existing_model, existing_device.pk)
                 existing_device, lock_error = _lock_librenms_id_assignment_target(
                     self,
                     existing_model,
@@ -3078,6 +3086,8 @@ class AddAsOOBView(
             # The OOB candidate is a serial match: the serial identity lock comes before the claim and the row lock.
             serial_rules = SerialRules.load()
             assignment_lock([libre_device.get("serial")], model=Device, rules=serial_rules)
+            # The shared host change order: the chassis and its members before the target lock.
+            lock_host_change_owner(Device, sync_device.pk)
             try:
                 sync_device, id_conflict = lock_librenms_id_assignment(
                     librenms_id,
@@ -3745,6 +3755,8 @@ class PromoteToHostView(
                 retype_lock(retyped, rules=serial_rules, serials=[libre_device.get("serial")])
             else:
                 assignment_lock([libre_device.get("serial")], model=Device, rules=serial_rules)
+            # The shared host change order: the chassis and its members before the target lock.
+            lock_host_change_owner(Device, existing_device.pk)
             existing_device, lock_error = _lock_librenms_id_assignment_target(
                 self,
                 Device,

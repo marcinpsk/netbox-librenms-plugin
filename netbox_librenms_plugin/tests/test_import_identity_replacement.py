@@ -11,7 +11,12 @@ from netbox_librenms_plugin.identity_replacement import (
     load_identity_replacement_intent,
     sign_identity_replacement_intent,
 )
-from netbox_librenms_plugin.tests.conftest import make_device, make_superuser, make_vm
+from netbox_librenms_plugin.tests.conftest import (
+    make_device,
+    make_superuser,
+    make_vm,
+    transactional_db_with_all_apps,
+)
 from netbox_librenms_plugin.tests.import_server_helpers import librenms_device
 from netbox_librenms_plugin.tests.mapping_fixtures import (
     mapping_summary,
@@ -612,3 +617,32 @@ def test_a_confirmed_replacement_meets_a_port_written_after_the_offer(client, se
     assert mapping_summary(device) == {"secondary": {"own": 52311}}
     interface.refresh_from_db()
     assert mapping_summary(interface) == {"secondary": {"own": 52312}}
+
+
+@transactional_db_with_all_apps()
+def test_a_confirmed_replacement_waits_for_a_port_writer_on_a_scope_interface_and_then_refuses(
+    client, secondary_server
+):
+    """The port writer holds the interface row: the replacement waits for its commit, then sees the port."""
+    from dcim.models import Interface
+
+    from netbox_librenms_plugin.tests.conftest import make_interface
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_when_waited
+
+    device = seed_mapping(make_device("replace-cascade-race"), "secondary", own=52321)
+    interface = make_interface(device, "eth0")
+    client.force_login(make_superuser("identity-replacement-cascade-race"))
+    server = _serve_secondary(secondary_server, 52421, device.name)
+    token = _offered_token(_post_action(client, 52421, device, "link", server=server))
+    port = seed_mapping(Interface(), "secondary", own=52322, save=False)
+
+    response = commit_when_waited(
+        lambda other: seed_mapping_row(interface, port, connection=other),
+        lambda: _post_confirmation(client, 52421, token, server=server),
+    )
+
+    assert b"Change it on the sync page" in response.content
+    device.refresh_from_db()
+    assert mapping_summary(device) == {"secondary": {"own": 52321}}
+    interface.refresh_from_db()
+    assert mapping_summary(interface) == {"secondary": {"own": 52322}}
