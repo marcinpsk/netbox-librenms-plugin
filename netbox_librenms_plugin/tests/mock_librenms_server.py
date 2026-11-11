@@ -42,6 +42,14 @@ class _DisconnectResponse:
     """Close the HTTP connection without sending a response."""
 
 
+class _RawStream:
+    """A whole HTTP response, status line and headers included, that the test server writes in parts."""
+
+    def __init__(self, parts, pause):
+        self.parts = [part.encode() if isinstance(part, str) else part for part in parts]
+        self.pause = pause
+
+
 class _StreamedResponse:
     """One response whose body the test server sends in parts, with a call and a pause before each part."""
 
@@ -122,6 +130,9 @@ class _LibreNMSHandler(BaseHTTPRequestHandler):
                 if isinstance(entry, _StreamedResponse):
                     self._send_streamed(entry)
                     return
+                if isinstance(entry, _RawStream):
+                    self._send_raw_stream(entry)
+                    return
                 if callable(entry):
                     status, resp_body = entry(**request)
                 else:
@@ -147,6 +158,18 @@ class _LibreNMSHandler(BaseHTTPRequestHandler):
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
             # The client stopped reading the body, which is what a deadline test expects.
+            pass
+
+    def _send_raw_stream(self, entry):
+        self.close_connection = True
+        try:
+            for index, part in enumerate(entry.parts):
+                if index:
+                    time.sleep(entry.pause)
+                self.wfile.write(part)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            # The client gave up on the response, which is what a deadline test expects.
             pass
 
     def do_GET(self):
@@ -241,6 +264,10 @@ class MockLibreNMSServer:
         """Register a response that sends *chunks* one by one, pausing *pause* seconds and calling *before_each*."""
         headers = {"Content-Type": "application/json", **(headers or {})}
         self._server.routes[path] = _StreamedResponse(status, chunks, headers, pause, before_each)
+
+    def register_raw_stream(self, path: str, parts, *, pause: float):
+        """Register a whole raw HTTP response, status line included, written in *parts* *pause* seconds apart."""
+        self._server.routes[path] = _RawStream(parts, pause)
 
     def register_redirect(self, path: str, location: str, status: int = 302):
         """Register a response that redirects to *location*."""
