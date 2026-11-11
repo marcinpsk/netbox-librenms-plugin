@@ -31,7 +31,7 @@ from netbox_librenms_plugin.tests.link_intent_helpers import (
     status_list,
     sync_page,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary, seed_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary, seed_mapping, unmapped_only_constraint
 from netbox_librenms_plugin.tests.view_test_helpers import domain_state, grant, make_user_with_perms
 from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
 
@@ -173,7 +173,7 @@ class TestLinkWritesOnTheStoredMapping:
 
 
 # A change grant that admits only objects without a stored mapping: a Link moves its object out of it.
-_UNMAPPED_ONLY = [{"custom_field_data__librenms_id__isnull": True}, {"custom_field_data__librenms_id": None}]
+_UNMAPPED_ONLY = unmapped_only_constraint()
 
 
 def _unmapped_only_writer(client, tag):
