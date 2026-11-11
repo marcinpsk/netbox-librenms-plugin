@@ -669,6 +669,8 @@ def preload_import_objects(libre_devices, server_key: str, *, existing=(), resol
     names = {name for name in resolved_names if isinstance(name, str) and name}
     for row in libre_devices:
         names.update(name for name in _name_candidates(row) if name)
+        # The cached-row refresh also matches the raw values as LibreNMS stores them, padding included.
+        names.update(name for key in ("hostname", "sysName") if isinstance(name := row.get(key), str) and name)
         names.update(variant["name"] for variant in import_name_variants(row).values() if variant["name"])
     serials = {serial for row in libre_devices if (serial := normalize_serial(row.get("serial")))}
     hosts = set()

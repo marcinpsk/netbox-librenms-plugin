@@ -928,3 +928,32 @@ def test_the_import_preload_runs_a_fixed_number_of_queries():
     counts = [_query_count(lambda rows=rows: preload_import_objects(rows, SERVER_KEY)) for rows in (few, many)]
 
     assert counts[0] == counts[1], counts
+
+
+@pytest.mark.django_db
+def test_a_cached_row_that_gains_a_padded_name_match_reads_a_prefetched_device(live_librenms):
+    """The cached-row refresh matches the raw LibreNMS host name as stored, padding included."""
+    from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
+
+    live_librenms.api.cache_timeout = 300
+    live_librenms.server.register("/api/v0/devices", {"status": "ok", "devices": [_import_row(7400, " imp-pad-name ")]})
+
+    def validate(clear_cache):
+        with spy_mapping_reads() as spy:
+            (row,) = process_device_filters(
+                live_librenms.api,
+                {"hostname": "imp-pad-name"},
+                vc_detection_enabled=False,
+                clear_cache=clear_cache,
+                show_disabled=True,
+            )
+        return row["_validation"]["existing_device"], spy
+
+    assert validate(clear_cache=True)[0] is None
+    late = make_device(" imp-pad-name ")
+
+    existing, spy = validate(clear_cache=False)
+
+    assert existing == late
+    assert spy.prefetch_calls == 1
+    _assert_prefetched(spy)
