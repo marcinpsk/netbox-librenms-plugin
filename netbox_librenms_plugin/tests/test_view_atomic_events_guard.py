@@ -18,14 +18,7 @@ import pytest
 VIEWS = Path(__file__).resolve().parents[1] / "views"
 
 # The plain blocks that exist now, by (file, enclosing callable): moving one to atomic_with_events() removes its pin.
-PINNED = {
-    ("imports/actions.py", "_write_mapping_in_scope"): 1,
-    ("imports/actions.py", "_save_device"): 1,
-    ("imports/actions.py", "DeviceConflictActionView.post"): 2,
-    ("imports/actions.py", "AddAsOOBView._resolve_oob_interface"): 1,
-    ("imports/actions.py", "AddAsOOBView._attach_oob_ip"): 1,
-    ("imports/actions.py", "MergeNetBoxDevicesView.post"): 1,
-}
+PINNED = {}
 
 # The whole-transaction boundaries whose events a conflict must drop.
 ISOLATED = {
