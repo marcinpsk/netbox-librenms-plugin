@@ -37,7 +37,7 @@ from netbox_librenms_plugin.tests.link_intent_helpers import (
     sync_page,
     unlink_page,
 )
-from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_when_waited, commit_when_waited, second_connection
+from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_when_waited, second_connection
 from netbox_librenms_plugin.tests.mapping_fixtures import (
     mapped_on_server_constraint,
     mapping_summary,
