@@ -630,6 +630,36 @@ def test_a_port_written_on_a_scope_interface_after_the_offer_makes_the_unlink_st
     assert mapping_summary(_fresh(interfaces["default"])) == {"default": {"own": 5101}}
 
 
+@transactional_db_with_all_apps()
+def test_an_unlink_whose_device_moved_before_the_lock_retries_and_is_stale(client, server):
+    """The first attempt locks the old chassis and refuses; the new attempt locks the new one and sees the move."""
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change
+
+    owner, _interfaces = _linked("chassis", "unlink-moved")
+    other_chassis, _members = make_virtual_chassis_members("unlink-moved-to", count=1)
+    client.force_login(make_user_with_perms("unlink-moved", PERMISSIONS))
+    token = offered_token(unlink_page(client, owner))
+    chassis_locks = []
+
+    def move_before_the_first_chassis_lock(execute, sql, params, many, context):
+        if 'FROM "dcim_virtualchassis"' in sql and "FOR UPDATE" in sql:
+            if not chassis_locks:
+                with second_connection() as other:
+                    commit_row_change(
+                        other, Device, owner.pk, {"virtual_chassis_id": other_chassis.pk, "vc_position": 5}
+                    )
+            chassis_locks.append(params[0])
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(move_before_the_first_chassis_lock):
+        response = _confirm(client, owner, token)
+
+    # The refused attempt locked the old chassis; the new transaction locked the new one.
+    assert chassis_locks == [owner.virtual_chassis_id, other_chassis.pk]
+    assert {"assumptions.membership.count", "assumptions.membership.digest"} & stale_paths(response, owner.name)
+    assert mapping_summary(_fresh(owner))["default"]["own"] == 4100
+
+
 @pytest.mark.django_db
 class TestTheUnlinkRoute:
     """The route answers that the removed RemoveServerMappingView answered, through the unlink confirmation."""
