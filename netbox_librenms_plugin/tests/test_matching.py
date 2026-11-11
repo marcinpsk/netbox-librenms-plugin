@@ -1,5 +1,8 @@
 """Matching asks LibreNMS for the device of an object, in lookup order, and tells "no device" from "no answer"."""
 
+import json
+import time
+
 import pytest
 
 from netbox_librenms_plugin import matching
@@ -138,3 +141,50 @@ class TestDeadline:
         librenms_server.register(IP_PATH, outlast)
 
         assert isinstance(matching.find_librenms_match(_device(), api, deadline=deadline), NotChecked)
+
+    def test_a_match_that_arrives_after_the_deadline_is_not_accepted(self, api, librenms_server, monkeypatch):
+        now = [500.0]
+        monkeypatch.setattr(matching, "_clock", lambda: now[0])
+        deadline = matching.Deadline(15)
+
+        def late_match(**request):
+            now[0] += 16
+            return 200, _found(55)
+
+        librenms_server.register(IP_PATH, late_match)
+
+        assert isinstance(matching.find_librenms_match(_device(), api, deadline=deadline), NotChecked)
+
+    def test_a_body_that_arrives_slowly_stops_at_the_deadline_without_waiting_for_the_rest(
+        self, api, librenms_server, monkeypatch
+    ):
+        """A socket timeout bounds each read only; the deadline must bound the whole response."""
+        now = [500.0]
+        monkeypatch.setattr(matching, "_clock", lambda: now[0])
+        deadline = matching.Deadline(15)
+        body = json.dumps(_found(55)).encode()
+
+        def time_passes(index):
+            if index == 0:
+                now[0] += 16
+
+        # The rest of the body follows only after a real pause that a bounded probe does not wait for.
+        librenms_server.register_streamed(IP_PATH, [body[:10], body[10:]], pause=3, before_each=time_passes)
+        started = time.perf_counter()
+
+        result = matching.find_librenms_match(_device(), api, deadline=deadline)
+
+        assert isinstance(result, NotChecked)
+        assert time.perf_counter() - started < 2
+
+
+@pytest.mark.django_db
+def test_a_redirect_is_unreachable_and_is_not_followed(api, librenms_server):
+    device = _device()
+    librenms_server.register_redirect(IP_PATH, "/api/v0/devices/redirected")
+    librenms_server.register("/api/v0/devices/redirected", _found(55))
+
+    result = matching.find_librenms_match(device, api)
+
+    assert isinstance(result, Unreachable)
+    assert _paths(librenms_server) == [IP_PATH]
