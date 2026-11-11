@@ -84,7 +84,7 @@ from netbox_librenms_plugin.server_mappings import (
 
 logger = logging.getLogger(__name__)
 
-# A wide import list reads the identities of this many rows per query, so no query builds an unbounded OR chain.
+# Each identity regex of the import preload holds at most this many identities; all regexes run in one query.
 PRELOAD_IDENTITY_CHUNK = 32
 
 # Prefix on the issue appended by validate_device_for_import()'s catch-all except branch when
