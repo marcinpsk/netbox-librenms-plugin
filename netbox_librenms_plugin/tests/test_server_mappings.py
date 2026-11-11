@@ -241,9 +241,9 @@ class TestPrefetchMappings:
             prefetch_mappings([Device(), Site()])
 
     def test_a_read_after_the_prefetch_still_sees_an_unsaved_change(self):
-        (dev,) = prefetch_mappings([_dev({"default": 42})])
+        (dev,) = prefetch_mappings([seed_mapping(_dev(), own=42)])
 
-        seed_stored_mapping(dev, {"default": 43})
+        seed_mapping(dev, own=43, save=False)
 
         assert read_mapping(dev).own_id("default") == 43
 
