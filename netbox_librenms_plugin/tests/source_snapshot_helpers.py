@@ -20,7 +20,6 @@ from netbox_librenms_plugin.acquisition.snapshot import (
     SourceSnapshot,
 )
 from netbox_librenms_plugin.server_mappings import MappingRole, read_mapping
-from netbox_librenms_plugin.librenms_api import stored_librenms_id
 
 
 class Failed:
@@ -130,7 +129,7 @@ def build_source_snapshot(subject, resource, server_key="default", *, oob=None, 
     """
     owner = resource_owner(subject, resource)
     mapping = read_mapping(owner)
-    librenms_id = source_id if source_id is not None else stored_librenms_id(owner, server_key)
+    librenms_id = source_id if source_id is not None else mapping.own_id(server_key)
     fetch = _seeded_fetch(ACQUIRERS[resource], librenms_id, parts, resource, server_key)
     host_parts = ACQUIRERS[resource](fetch, librenms_id)
     oob_mapping, oob_fetch = _oob_mapping(resource, mapping, server_key, oob)
@@ -283,9 +282,8 @@ def interface_rows(subject, interface_name_field="ifName", server_key="default")
 
 def stored_identity(subject, resource, server_key):
     """Return the effective identity of the source owner for a deliberate stale-source seed."""
-    from netbox_librenms_plugin.librenms_api import stored_librenms_id
 
-    return stored_librenms_id(resource_owner(subject, resource), server_key)
+    return read_mapping(resource_owner(subject, resource)).own_id(server_key)
 
 
 def port_row(
