@@ -924,9 +924,16 @@ that may well be correct.
         The matching LibreNMS device is already linked to another object. Fix that link first.
         {% elif link.state == "unreachable" or link.state == "not_checked" %}
         LibreNMS could not be reached, so no match was checked. Reload the page to try again.
+        {% elif link.state == "refused" %}
+        <span data-link-branch="refused">
+            The stored LibreNMS mapping of this object cannot be read, so no match was looked up. Repair the
+            <code>librenms_id</code> custom field value, or clear it and set the IDs in the mapping editor.
+        </span>
         {% else %}
-        No LibreNMS device matches the primary IP address, its DNS name or the name of this object.
-        Add the device to LibreNMS, or enter its LibreNMS ID in the mapping editor.
+        <span data-link-branch="no_match">
+            No LibreNMS device matches the primary IP address, its DNS name or the name of this object.
+            Add the device to LibreNMS, or enter its LibreNMS ID in the mapping editor.
+        </span>
         {% endif %}
     </div>
 </div>

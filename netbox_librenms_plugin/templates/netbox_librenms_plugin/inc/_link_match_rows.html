@@ -17,9 +17,11 @@
         </div>
         {% endif %}
         {% elif link.state == "unreachable" or link.state == "not_checked" %}
-        <span class="text-warning"><i class="mdi mdi-alert-circle-outline"></i> LibreNMS could not be reached</span>
+        <span class="text-warning" data-link-branch="unreachable"><i class="mdi mdi-alert-circle-outline"></i> LibreNMS could not be reached</span>
+        {% elif link.state == "refused" %}
+        <span class="text-warning" data-link-branch="refused"><i class="mdi mdi-alert-outline"></i> Stored mapping needs repair</span>
         {% else %}
-        <span class="text-danger"><i class="mdi mdi-close-circle"></i> Not found</span>
+        <span class="text-danger" data-link-branch="no_match"><i class="mdi mdi-close-circle"></i> Not found</span>
         {% endif %}
     </td>
 </tr>
