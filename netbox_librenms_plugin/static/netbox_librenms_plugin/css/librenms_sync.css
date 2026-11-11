@@ -364,3 +364,12 @@
 .librenms-info-sync-table td + td {
     overflow-wrap: anywhere;
 }
+
+/* On a narrow page the mapping editor scrolls sideways; it does not squeeze its fields. */
+#librenms-mapping-editor .form-control {
+    min-width: 7rem;
+}
+
+#librenms-mapping-editor .form-select {
+    min-width: 7.5rem;
+}
