@@ -29,6 +29,7 @@ from netbox_librenms_plugin.tests.link_intent_helpers import (
     register_match,
     stale_paths,
     status_list,
+    sync_page,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary, seed_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import domain_state, grant, make_user_with_perms
@@ -244,6 +245,24 @@ class TestSyncPageAnswers:
         assert proposal["state"] == "unreachable"
         # An unanswered primary IP probe makes a later name match untrustworthy, so the name is not asked.
         assert [request["path"] for request in server.requests] == ["/api/v0/devices/203.0.113.60"]
+
+    def test_a_refused_stored_value_asks_for_repair_and_makes_no_lookup(self, linker, server):
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_quarantined
+
+        device = _matched("device", "link-refused", server, "203.0.113.140", 9950)
+        seed_quarantined(_fresh(device))
+
+        page = sync_page(linker, device)
+        listed = status_list(linker, "device", q=device.name)
+
+        body = page.content.decode()
+        assert page.context["link"]["state"] == "refused"
+        assert page.context["show_add_device"] is False
+        # The card and the guidance each take the repair branch; neither takes the branch of a lookup without a match.
+        assert body.count('data-link-branch="refused"') == 2
+        assert 'data-link-branch="no_match"' not in body
+        assert [record.librenms_status for record in listed.context["table"].data.data] == ["refused"]
+        assert server.requests == []
 
     def test_a_viewer_without_change_permission_sees_the_match_without_a_token(self, client, server):
         device = _matched("device", "link-read-only", server, "203.0.113.70", 8700)
