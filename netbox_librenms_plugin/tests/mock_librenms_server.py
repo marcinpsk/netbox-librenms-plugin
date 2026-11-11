@@ -152,6 +152,8 @@ class _LibreNMSHandler(BaseHTTPRequestHandler):
             for index, chunk in enumerate(entry.chunks):
                 if index:
                     time.sleep(entry.pause)
+                if self.server.streams_released.is_set():  # type: ignore[attr-defined]
+                    return
                 if entry.before_each is not None:
                     entry.before_each(index)
                 self.wfile.write(chunk)
@@ -166,6 +168,8 @@ class _LibreNMSHandler(BaseHTTPRequestHandler):
             for index, part in enumerate(entry.parts):
                 if index:
                     time.sleep(entry.pause)
+                if self.server.streams_released.is_set():  # type: ignore[attr-defined]
+                    return
                 self.wfile.write(part)
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
@@ -230,6 +234,8 @@ class MockLibreNMSServer:
             "/api/v0/system": (200, {"status": "ok", "system": [{"local_ver": "24.1.0"}]}),
         }
         self._server.requests = []
+        # Set, a response that the server sends in parts stops at its next part and closes the connection.
+        self._server.streams_released = threading.Event()
         self._server.api_token = api_token
         self._server.quiet = quiet
         self.routes = self._server.routes  # expose on wrapper as documented
@@ -269,6 +275,10 @@ class MockLibreNMSServer:
         """Register a whole raw HTTP response, status line included, written in *parts* *pause* seconds apart."""
         self._server.routes[path] = _RawStream(parts, pause)
 
+    def release_streams(self):
+        """End every response that the server is still sending in parts."""
+        self._server.streams_released.set()
+
     def register_redirect(self, path: str, location: str, status: int = 302):
         """Register a response that redirects to *location*."""
         self.register_streamed(path, [b""], status=status, headers={"Location": location})
@@ -283,6 +293,8 @@ class MockLibreNMSServer:
         return self
 
     def stop(self):
+        # A client that a test gave up on would otherwise keep reading a slow answer after the test.
+        self.release_streams()
         self._server.shutdown()
         self._server.server_close()
         self._thread.join(timeout=5)

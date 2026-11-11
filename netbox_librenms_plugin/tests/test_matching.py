@@ -20,6 +20,43 @@ def api(settings, librenms_server):
     return bind_librenms_server(settings, librenms_server, server_key="default")
 
 
+def _take_all_probe_slots(timeout):
+    """Take every probe slot within *timeout* seconds; return the number taken. The caller gives them back."""
+    from netbox_librenms_plugin import librenms_api
+
+    end = time.monotonic() + timeout
+    taken = 0
+    while taken < librenms_api.MATCH_PROBE_WORKERS and librenms_api._match_probe_slots.acquire(
+        timeout=max(0, end - time.monotonic())
+    ):
+        taken += 1
+    return taken
+
+
+def _give_back_probe_slots(count):
+    from netbox_librenms_plugin import librenms_api
+
+    for _ in range(count):
+        librenms_api._match_probe_slots.release()
+
+
+def _wait_for_free_probe_slots(timeout=10):
+    """Return whether every probe slot is free within *timeout* seconds: every probe worker has ended."""
+    from netbox_librenms_plugin import librenms_api
+
+    taken = _take_all_probe_slots(timeout)
+    _give_back_probe_slots(taken)
+    return taken == librenms_api.MATCH_PROBE_WORKERS
+
+
+@pytest.fixture(autouse=True)
+def probe_workers_end(librenms_server):
+    """After each test, end the answers still on the way and require every probe worker to have ended."""
+    yield
+    librenms_server.release_streams()
+    assert _wait_for_free_probe_slots(), "a probe worker did not end after its answer stopped"
+
+
 def _device(name="match-device", *, dns_name=""):
     device = make_device(name)
     ip = give_primary_ip(device, "192.0.2.1/24")
@@ -167,8 +204,10 @@ class TestDeadline:
 
         result = matching.find_librenms_match(device, api, deadline=matching.Deadline(1))
 
+        elapsed = time.perf_counter() - started
         assert isinstance(result, NotChecked)
-        assert time.perf_counter() - started < 1.5
+        assert elapsed < 1.5
+        assert _paths(librenms_server) == [IP_PATH]
 
 
 def _dribbled(head, body=b""):
@@ -214,8 +253,11 @@ class TestTheDeadlineBoundsTheWholeRequest:
 
         result = matching.find_librenms_match(device, api, deadline=matching.Deadline(1))
 
+        elapsed = time.perf_counter() - started
         assert isinstance(result, NotChecked)
-        assert time.perf_counter() - started < 1.5
+        assert elapsed < 1.5
+        # The probe reached the server, so the answer path named by the case ran.
+        assert _paths(librenms_server) == [IP_PATH]
 
     def test_a_connection_that_is_never_accepted_is_not_checked_within_the_deadline(self, api):
         """A full accept queue drops the connection request, so the connect itself waits."""
@@ -240,8 +282,10 @@ class TestTheDeadlineBoundsTheWholeRequest:
                 for filler in fillers:
                     filler.close()
 
-    def test_a_probe_that_waits_for_a_busy_probe_pool_is_not_checked_within_the_deadline(self, api, librenms_server):
-        """Probes of slow answers hold every worker; a later probe of a fast answer waits its turn, not past it."""
+    def test_a_probe_finds_every_slot_taken_and_is_not_checked_at_once_then_runs_when_they_free(
+        self, api, librenms_server
+    ):
+        """Slow answers hold every probe slot; a further probe waits for none, and runs again once they end."""
         import threading
 
         from netbox_librenms_plugin.librenms_api import MATCH_PROBE_WORKERS
@@ -266,15 +310,86 @@ class TestTheDeadlineBoundsTheWholeRequest:
         waited = time.perf_counter()
         while len(_paths(librenms_server)) < MATCH_PROBE_WORKERS and time.perf_counter() - waited < 2:
             time.sleep(0.01)
+        assert len(_paths(librenms_server)) == MATCH_PROBE_WORKERS
+        assert _take_all_probe_slots(0) == 0
         started = time.perf_counter()
 
         result = matching.find_librenms_match(fast, api, deadline=matching.Deadline(1))
 
         elapsed = time.perf_counter() - started
+        assert isinstance(result, NotChecked)
+        assert elapsed < 0.3
+        assert "/api/v0/devices/192.0.2.9" not in _paths(librenms_server)
+        librenms_server.release_streams()
         for thread in busy:
             thread.join(timeout=10)
-        assert isinstance(result, NotChecked)
-        assert elapsed < 1.5
+        assert _wait_for_free_probe_slots()
+        assert isinstance(matching.find_librenms_match(fast, api, deadline=matching.Deadline(1)), Match)
+
+    def test_a_missing_ca_bundle_is_unreachable(self, api):
+        """Requests refuses a missing CA bundle with a plain OSError before it connects; that is no server answer."""
+        api.librenms_url = "https://127.0.0.1:9"
+        api.verify_ssl = "/nonexistent/librenms-ca.pem"
+
+        assert isinstance(matching.find_librenms_match(_device(), api, deadline=matching.Deadline(1)), Unreachable)
+
+
+_EXIT_CHILD = """
+import socket
+import sys
+import threading
+import time
+from types import SimpleNamespace
+
+import django
+
+django.setup()
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+listener = socket.create_server(("127.0.0.1", 0))
+
+
+def never_finish():
+    connection, _address = listener.accept()
+    connection.recv(4096)
+    while True:
+        connection.sendall(b"H")
+        time.sleep(0.2)
+
+
+threading.Thread(target=never_finish, daemon=True).start()
+client = SimpleNamespace(
+    librenms_url=f"http://127.0.0.1:{listener.getsockname()[1]}", headers={}, verify_ssl=False
+)
+end = time.monotonic() + 1
+answer = LibreNMSAPI.get_response_before(client, "devices/stalled", lambda: end - time.monotonic())
+print("caller returned", answer, flush=True)
+"""
+
+
+def test_a_probe_that_never_ends_does_not_hold_the_process_open():
+    """The caller gave up on the probe; the interpreter must still exit while the server keeps sending."""
+    import os
+    import subprocess
+    import sys
+
+    child = subprocess.Popen(
+        [sys.executable, "-c", _EXIT_CHILD],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=dict(os.environ),
+    )
+    try:
+        # Django setup takes its own time; the exit is measured from the moment the caller gave up.
+        returned = child.stdout.readline()
+        child.wait(timeout=5)
+    finally:
+        child.kill()
+        child.communicate()
+
+    assert returned.strip() == "caller returned None"
+    assert child.returncode == 0
 
 
 @pytest.mark.django_db

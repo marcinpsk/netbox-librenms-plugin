@@ -1,7 +1,7 @@
 import logging
 import math
+import threading
 import urllib.parse
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import requests
@@ -133,25 +133,45 @@ class _TokenScopedSession(requests.Session):
 _session = _TokenScopedSession()
 
 
-# Match probes run here, so a request waits for one only until its deadline. The bound caps the probes that a slow
-# LibreNMS can hold: a probe that the request abandoned ends at its own per-read timeout.
+# The match probes that may run at once. A probe that finds no free slot is not checked, so nothing queues.
 MATCH_PROBE_WORKERS = 4
-_match_probes = ThreadPoolExecutor(max_workers=MATCH_PROBE_WORKERS, thread_name_prefix="librenms-match-probe")
+_match_probe_slots = threading.BoundedSemaphore(MATCH_PROBE_WORKERS)
 
 
-def _match_probe(url, headers, timeout, verify):
-    """Run one match probe GET in a probe worker, with a session of its own; return ``(status, body)``."""
-    with _TokenScopedSession() as session:
-        try:
-            response = session.get(url, headers=headers, timeout=timeout, verify=verify, allow_redirects=False)
-        except requests.exceptions.RequestException:
-            return None, None
-    if response.is_redirect:
-        return response.status_code, None
+class _ProbeAnswer:
+    """The answer of one match probe, which its worker sets once."""
+
+    def __init__(self):
+        self.ready = threading.Event()
+        self.value = None
+        self.error = None
+
+
+def _match_probe(answer, url, headers, timeout, verify):
+    """
+    Run one match probe GET with a session of its own, and set *answer*; then free the probe slot.
+
+    A transport or configuration error (a missing CA bundle raises a plain OSError) is no answer from
+    the server. Any other error is a bug, and the caller raises it.
+    """
     try:
-        return response.status_code, response.json()
-    except ValueError:
-        return response.status_code, None
+        with _TokenScopedSession() as session:
+            response = session.get(url, headers=headers, timeout=timeout, verify=verify, allow_redirects=False)
+        if response.is_redirect:
+            answer.value = response.status_code, None
+        else:
+            try:
+                answer.value = response.status_code, response.json()
+            except ValueError:
+                answer.value = response.status_code, None
+    except (requests.exceptions.RequestException, OSError):
+        answer.value = None, None
+    except Exception as exc:
+        # Not a transport error, so a bug: the caller raises it.
+        answer.error = exc
+    finally:
+        answer.ready.set()
+        _match_probe_slots.release()
 
 
 class LibreNMSAPI:
@@ -510,38 +530,44 @@ class LibreNMSAPI:
 
     def get_response_before(self, path: str, remaining) -> tuple[int | None, object] | None:
         """
-        Issue a GET that must answer before a deadline, and return ``(status_code, body)``, or None after it.
+        Issue a GET that must answer before a deadline, and return ``(status_code, body)``, or None.
 
-        ``remaining()`` returns the seconds left. The request runs in a probe worker, and this call waits
-        for it only that long: a socket timeout limits each wait for data, not the whole request. A
-        redirect is not followed: its own status comes back. A transport error yields ``(None, None)``,
-        and a non-JSON body ``(status_code, None)``.
+        ``remaining()`` returns the seconds left. The request runs in a daemon thread, and this call
+        waits for it only that long: a socket timeout limits each wait for data, not the whole
+        request. A thread that the caller gave up on ends at its own read timeout, holding one of the
+        ``MATCH_PROBE_WORKERS`` slots; a probe that finds no free slot does not run. A redirect is
+        not followed: its own status comes back. A transport error yields ``(None, None)``, and a
+        non-JSON body ``(status_code, None)``.
 
         Args:
             path (str): API path relative to ``/api/v0/``.
             remaining (Callable[[], float]): The seconds left before the deadline.
 
         Returns:
-            tuple | None: ``(status, body)``, or None when the deadline passed first.
+            tuple | None: ``(status, body)``; None when the deadline passed first or no probe slot was free.
 
         """
         left = remaining()
-        if left <= 0:
+        if left <= 0 or not _match_probe_slots.acquire(blocking=False):
             return None
-        probe = _match_probes.submit(
-            _match_probe,
+        answer = _ProbeAnswer()
+        arguments = (
+            answer,
             f"{self.librenms_url}/api/v0/{path.lstrip('/')}",
             dict(self.headers),
             min(DEFAULT_API_TIMEOUT, left),
             self.verify_ssl,
         )
         try:
-            answer = probe.result(timeout=left)
-        except TimeoutError:
-            # A probe that has not started never runs; a running one ends unused.
-            probe.cancel()
+            threading.Thread(target=_match_probe, args=arguments, name="librenms-match-probe", daemon=True).start()
+        except BaseException:
+            _match_probe_slots.release()
+            raise
+        if not answer.ready.wait(timeout=left):
             return None
-        return None if remaining() <= 0 else answer
+        if answer.error is not None:
+            raise answer.error
+        return None if remaining() <= 0 else answer.value
 
     def add_device(self, data):
         """
