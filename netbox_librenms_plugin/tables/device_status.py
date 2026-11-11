@@ -51,39 +51,36 @@ def render_link_status(table, value, record, sync_url):
             text,
         )
     if state == "owned":
-        owner = row.owner_label or "another object"
-        detail = format_html("LibreNMS ID {} is already linked to {}", row.librenms_id, owner)
+        detail = format_html("Already linked to {}", row.owner_label or "another object")
     elif state == "ambiguous":
-        detail = format_html("LibreNMS ID {} matches more than one object on this page", row.librenms_id)
+        detail = "Matches more than one object on this page"
     else:
-        detail = format_html(
-            "Match: LibreNMS ID {}{} by {}",
-            row.librenms_id,
-            format_html(" ({})", row.hostname) if row.hostname else "",
-            row.matched_by,
-        )
+        detail = format_html("Matched by {}", row.matched_by)
     checkbox = button = ""
     if row.token:
         label = f"Link {record.name} to LibreNMS ID {row.librenms_id}"
         checkbox = format_html(
-            '<input type="checkbox" class="form-check-input mt-0" form="librenms-link-selected" '
+            '<input type="checkbox" class="form-check-input mt-1" form="librenms-link-selected" '
             'name="confirmation_intent" value="{}" aria-label="Select: {}">',
             row.token,
             label,
         )
         button = format_html(
-            '<button type="submit" class="btn btn-sm btn-primary" form="librenms-link-row" '
+            '<button type="submit" class="btn btn-sm btn-primary text-nowrap" form="librenms-link-row" '
             'name="confirmation_intent" value="{}" title="{}"><i class="mdi mdi-link-variant"></i> Link</button>',
             row.token,
             label,
         )
     return format_html(
-        '<span class="d-inline-flex align-items-center flex-wrap gap-2" data-link-state="{}">{}'
-        '<a href="{}"><span class="{}"><i class="mdi mdi-link-variant-plus"></i> {}</span></a>{}</span>',
+        '<div class="d-flex align-items-start gap-2" data-link-state="{}">{}<div class="flex-grow-1">'
+        '<a href="{}" class="{}"><i class="mdi mdi-link-variant-plus"></i> LibreNMS ID {}</a>'
+        '<div class="small text-muted">{}{}</div></div>{}</div>',
         state,
         checkbox,
         sync_url,
         "text-info" if state == "match" else "text-warning",
+        row.librenms_id,
+        format_html("{} &middot; ", row.hostname) if row.hostname else "",
         detail,
         button,
     )
