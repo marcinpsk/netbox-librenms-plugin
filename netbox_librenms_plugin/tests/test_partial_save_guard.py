@@ -76,11 +76,11 @@ ALLOWED = [
         "update_fields holds only module and the mapping storage; last_updated is added at the save.",
     ),
     (
-        "views/sync/device_fields.py",
-        "_save_mapping_fields",
+        "server_mappings.py",
+        "save_mapping_fields",
         "row",
         NOT_A_LITERAL,
-        "Only the mapping storage of a Device or VM; last_updated is added here.",
+        "Only the mapping storage of a Device, VM or interface; last_updated is added here.",
     ),
     (
         "views/sync/cables.py",

@@ -28,6 +28,7 @@ from netbox_librenms_plugin.server_mappings import (
     assign_own,
     lock_librenms_id_assignment,
     persist_mapping,
+    save_mapping_fields,
 )
 from netbox_librenms_plugin.sync_cache import SyncTab
 from netbox_librenms_plugin.transactions import classify_conflict, row_savepoint, run_transaction, saved_in_scope
@@ -38,7 +39,6 @@ from netbox_librenms_plugin.views.mixins import (
     NetBoxObjectPermissionMixin,
     validated_referer,
 )
-from netbox_librenms_plugin.views.sync.device_fields import _save_mapping_fields
 
 _ENTRIES = frozenset({(intent.Resource.MAPPING_LIFECYCLE, Link.ACTION, intent.Role.PRIMARY)})
 LINK_POLICY = intent.RoutePolicy(_ENTRIES)
@@ -138,7 +138,7 @@ class _LinkWriter(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMS
         try:
             with row_savepoint():
                 row.snapshot()
-                persist_mapping(row, assign_own(row, operation.identity.server, own_id), write=_save_mapping_fields)
+                persist_mapping(row, assign_own(row, operation.identity.server, own_id), write=save_mapping_fields)
                 # A change constraint can read the mapping, so the stored link can move the row out of the scope.
                 if not saved_in_scope(row, request.user, "change"):
                     raise PermissionsViolation()

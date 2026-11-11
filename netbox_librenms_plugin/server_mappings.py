@@ -1377,6 +1377,12 @@ def merge_links(winner, donor, server: str, *, at: str | None = None) -> MergeCh
     )
 
 
+def save_mapping_fields(row, fields):
+    """Validate only the mapping storage that *fields* names, then save only it: other fields may be invalid."""
+    row.clean_fields(exclude={model_field.name for model_field in row._meta.fields if model_field.name not in fields})
+    row.save(update_fields=[*fields, "last_updated"])
+
+
 # Claims and persistence.
 
 

@@ -37,6 +37,7 @@ from netbox_librenms_plugin.server_mappings import (
     read_mapping,
     release_server,
     require_server_key,
+    save_mapping_fields,
     set_preference,
 )
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
@@ -808,12 +809,6 @@ def _has_removable_mapping(mapping, server_key):
     return mapping.server(server_key) is not None or (server_key == "default" and mapping.legacy.is_legacy)
 
 
-def _save_mapping_fields(row, fields):
-    """Validate only the mapping storage that *fields* names, then save only it: other fields may be invalid."""
-    row.clean_fields(exclude={field.name for field in row._meta.fields if field.name not in fields})
-    row.save(update_fields=[*fields, "last_updated"])
-
-
 class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
     """Remove a single server entry from the device's (or VM's) librenms_id custom field dict."""
 
@@ -899,7 +894,7 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
                 if usable_count <= 1:
                     change = release_server(obj_locked, server_key, clear_preference=True)
                 try:
-                    persist_mapping(obj_locked, change, write=_save_mapping_fields)
+                    persist_mapping(obj_locked, change, write=save_mapping_fields)
                 except ValidationError as exc:
                     transaction.set_rollback(True)
                     logger.exception(
@@ -972,7 +967,7 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
 
             owner.snapshot()
             try:
-                persist_mapping(owner, set_preference(owner, requested_key), write=_save_mapping_fields)
+                persist_mapping(owner, set_preference(owner, requested_key), write=save_mapping_fields)
             except ValidationError as exc:
                 transaction.set_rollback(True)
                 logger.warning(
@@ -1053,7 +1048,7 @@ class EditServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
                 except ValueError as exc:
                     raise _WriteRefused(str(exc)) from None
                 if change.changed:
-                    persist_mapping(owner, change, write=_save_mapping_fields)
+                    persist_mapping(owner, change, write=save_mapping_fields)
         except IdentityOwned as exc:
             messages.error(request, _identity_owned_text(exc, request.user))
             return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
