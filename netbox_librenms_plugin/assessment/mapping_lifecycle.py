@@ -503,10 +503,7 @@ def build_host_change(cls, obj, server_key, choices, *, owned=False, lock=False)
     return operation, scope
 
 
-def scope_permitted(scope, user):
-    """Return whether *user* may view each object of the scope, and view and change each interface that it clears."""
-    required = [(type(member), member.pk, ("view",)) for member in scope.members]
-    required += [(type(row.interface), row.interface.pk, ("view", "change")) for row in scope.interfaces]
+def _permitted(required, user):
     by_model = defaultdict(lambda: defaultdict(set))
     for model, pk, actions in required:
         for action in actions:
@@ -516,6 +513,18 @@ def scope_permitted(scope, user):
         for model, actions in by_model.items()
         for action, pks in actions.items()
     )
+
+
+def _members_visible(scope, user):
+    """Return whether *user* may view each object whose interfaces are the scope."""
+    return _permitted([(type(member), member.pk, ("view",)) for member in scope.members], user)
+
+
+def scope_permitted(scope, user):
+    """Return whether *user* may view each object of the scope, and view and change each interface that it clears."""
+    required = [(type(member), member.pk, ("view",)) for member in scope.members]
+    required += [(type(row.interface), row.interface.pk, ("view", "change")) for row in scope.interfaces]
+    return _permitted(required, user)
 
 
 class HostChangeState(StrEnum):
@@ -610,6 +619,9 @@ def read_host_change_assessment(obj, server_key, action, choices, *, user, conte
     operation, scope = build_host_change(cls, obj, server_key, choices)
     if not scope.changes_host:
         return answer(HostChangeState.UNCHANGED)
+    # The refusal names the parent of each refused interface, so a hidden member refuses first.
+    if not _members_visible(scope, user):
+        return answer(HostChangeState.SCOPE)
     if scope.refused:
         return answer(HostChangeState.INTERFACES, scope=scope)
     if not scope_permitted(scope, user):

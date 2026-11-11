@@ -305,6 +305,23 @@ class TestRefusals:
         [text] = message_texts(response)
         assert f"{owner.name} eth2" in text
 
+    def test_a_refused_interface_on_a_hidden_member_does_not_name_the_member(self, client, server):
+        owner, interfaces = _linked("chassis", "refuse-hidden-member")
+        hidden = Device.objects.filter(virtual_chassis=owner.virtual_chassis).exclude(pk=owner.pk).get()
+        seed_legacy(interfaces["default"], 79)
+        user = make_user_with_perms("refuse-hidden-member", [p for p in PERMISSIONS if p[1] is not Device])
+        for action in ("view", "change"):
+            user = grant(user, action, Device, constraints={"pk": owner.pk})
+        client.force_login(user)
+        before = domain_state()
+
+        response = unlink_page(client, owner)
+
+        assert response.status_code == 302
+        assert domain_state() == before
+        [text] = message_texts(response)
+        assert hidden.name not in text
+
     def test_a_legacy_object_value_refuses(self, writer, server):
         owner = seed_legacy(make_device("refuse-legacy-owner"), 4300)
         before = domain_state()
