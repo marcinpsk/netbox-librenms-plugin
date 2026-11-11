@@ -192,6 +192,8 @@ class ServerState:
     oob_type: object = None
     oob_recorded: bool = False
     migration: MigrationState = MigrationState()
+    # The entry records an ID, an OOB entry or a marker that the decoder cannot read.
+    malformed: bool = False
 
     @property
     def display_id(self) -> int | None:
@@ -250,13 +252,24 @@ class MappedRecord:
     mapping: MappingState
 
 
+def _unreadable_id(raw) -> bool:
+    # A blank value records no ID, as the OOB builder reads it.
+    return raw is not None and coerce_librenms_id(raw) is None and not (isinstance(raw, str) and not raw.strip())
+
+
 def _decode_entry(server_key: str, entry) -> ServerState:
     if not isinstance(entry, dict):
-        return ServerState(server=server_key, own_id=coerce_librenms_id(entry))
+        return ServerState(server=server_key, own_id=coerce_librenms_id(entry), malformed=_unreadable_id(entry))
     own_id = coerce_librenms_id(entry.get("id"))
     oob = entry.get("oob")
     oob_id = coerce_librenms_id(oob.get("id")) if isinstance(oob, dict) else None
     marker = entry.get(MIGRATED_TO_FIELD)
+    malformed = (
+        _unreadable_id(entry.get("id"))
+        or (oob is not None and not isinstance(oob, dict))
+        or (isinstance(oob, dict) and _unreadable_id(oob.get("id")))
+        or (marker is not None and not isinstance(marker, dict))
+    )
     effective = None
     # A live own or OOB link wins over a stale marker, and a marker names its own server.
     if isinstance(marker, dict) and own_id is None and oob_id is None and marker.get("server_key") == server_key:
@@ -270,6 +283,7 @@ def _decode_entry(server_key: str, entry) -> ServerState:
         oob_type=copy.deepcopy(oob.get("type")) if isinstance(oob, dict) else None,
         oob_recorded=isinstance(oob, dict) and bool(oob),
         migration=MigrationState(recorded=isinstance(marker, dict), effective=effective),
+        malformed=malformed,
     )
 
 

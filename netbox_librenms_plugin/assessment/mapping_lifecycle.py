@@ -589,9 +589,9 @@ def read_host_change_assessment(obj, server_key, action, choices, *, user, conte
     Assess the host change *action* of *obj* on *server_key* with *choices*, and offer it.
 
     It writes nothing and locks nothing. The offer needs the stored value to be absent or
-    server-scoped, no migration marker on the server, no legacy or invalid interface value in the
-    scope, a free ID to store, and the view of every scope object and the view and change of
-    every interface that the change clears.
+    server-scoped, a readable entry and no migration marker on the server, no legacy or invalid
+    interface value in the scope, a free ID to store, and the view of every scope object and the
+    view and change of every interface that the change clears.
 
     Args:
         obj (Device | VirtualMachine): The object.
@@ -613,7 +613,7 @@ def read_host_change_assessment(obj, server_key, action, choices, *, user, conte
     def answer(state, **extra):
         return HostChangeAssessment(state, action, server_key, entry, choices, **extra)
 
-    if mapping.container not in _LINKABLE:
+    if mapping.container not in _LINKABLE or (stored is not None and stored.malformed):
         return answer(HostChangeState.REFUSED)
     if stored is not None and stored.migration.recorded:
         return answer(HostChangeState.MIGRATED)

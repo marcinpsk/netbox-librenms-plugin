@@ -358,6 +358,26 @@ class TestRefusals:
         [text] = message_texts(response)
         assert f"{owner.name} eth2" in text
 
+    @pytest.mark.parametrize(
+        ("action", "entry", "typed"),
+        [
+            ("unlink", {"id": 4120, "oob": {"id": "abc"}}, None),
+            ("relink", {"id": 4120, "oob": {"id": "abc"}}, {"own_id": "4121"}),
+            ("change_oob", {"id": "abc", "oob": {"id": 4130, "type": "ilo"}}, {"oob_id": "4131"}),
+        ],
+    )
+    def test_a_malformed_object_entry_refuses_before_any_offer(self, writer, server, action, entry, typed):
+        """The decoder drops the unreadable ID, so the change would remove a value that the page never showed."""
+        owner = seed_malformed_entry(make_device(f"refuse-object-entry-{action}"), "default", entry)
+        _interface(owner, "eth0", default=5130)
+        before = domain_state()
+
+        response = unlink_page(writer, owner) if typed is None else edit_mapping(writer, owner, **typed)
+
+        assert response.status_code == 302
+        assert domain_state() == before
+        assert len(message_texts(response)) == 1
+
     def test_a_refused_interface_on_a_hidden_member_does_not_name_the_member(self, client, server):
         owner, interfaces = _linked("chassis", "refuse-hidden-member")
         hidden = Device.objects.filter(virtual_chassis=owner.virtual_chassis).exclude(pk=owner.pk).get()
