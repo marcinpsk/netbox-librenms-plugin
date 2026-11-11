@@ -160,7 +160,6 @@ from .views import (
     PortStackLagPatternView,
     PromoteToHostView,
     RebindInterfacePortView,
-    RemoveServerMappingView,
     ReplaceModuleView,
     SaveUserPrefView,
     SaveVlanGroupOverridesView,
@@ -549,11 +548,6 @@ urlpatterns = [
         "<str:object_type>/link-selected/",
         BulkLinkView.as_view(),
         name="link_selected",
-    ),
-    path(
-        "devices/<int:pk>/remove-server-mapping/",
-        RemoveServerMappingView.as_view(),
-        name="remove_server_mapping",
     ),
     path(
         "devices/<int:pk>/edit-server-mapping/",

@@ -510,11 +510,11 @@ class TestRequiredObjectPermissionsWiring:
         self._assert_has_mixins(UpdateDeviceSerialView)
         assert "POST" in UpdateDeviceSerialView.required_object_permissions
 
-    def test_remove_server_mapping_has_required_object_permissions(self):
-        from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
+    def test_mapping_lifecycle_has_required_object_permissions(self):
+        from netbox_librenms_plugin.views.sync.mapping_lifecycle import MappingLifecycleView
 
-        self._assert_has_mixins(RemoveServerMappingView)
-        assert "POST" in RemoveServerMappingView.required_object_permissions
+        self._assert_has_mixins(MappingLifecycleView)
+        assert "POST" in MappingLifecycleView.required_object_permissions
 
     def test_mapping_lifecycle_has_required_object_permissions(self):
         from netbox_librenms_plugin.views.sync.mapping_lifecycle import MappingLifecycleView

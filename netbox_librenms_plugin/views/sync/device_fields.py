@@ -38,7 +38,6 @@ from netbox_librenms_plugin.server_mappings import (
     host_entry,
     persist_mapping,
     read_mapping,
-    release_server,
     require_server_key,
     save_mapping_fields,
     set_preference,
@@ -821,132 +820,6 @@ def _posted_vc_serial_rows(data):
     return rows
 
 
-def _has_removable_mapping(mapping, server_key):
-    """Return whether *server_key* has an entry, or a readable legacy value that ``default`` serves."""
-    return mapping.server(server_key) is not None or (server_key == "default" and mapping.legacy.is_legacy)
-
-
-class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
-    """Remove a single server entry from the device's (or VM's) librenms_id custom field dict."""
-
-    required_object_permissions = {
-        "POST": [("change", Device), ("change", VirtualMachine)],
-    }
-
-    def _get_object(self, object_type, pk):
-        """Return the Device or VirtualMachine for the given pk."""
-        model = _sync_model(object_type)
-        return self.restrict_object_or_404(model, "change", pk=pk), model
-
-    def post(self, request, pk):
-        # Scope required permissions to the specific model being modified before checking.
-        raw_object_type = request.POST.get("object_type", "device")
-        object_type = _normalize_sync_object_type(raw_object_type)
-        if object_type is None:
-            return HttpResponse(f"Invalid object_type: {escape(raw_object_type)}", status=400)
-        target_model = _sync_model(object_type)
-        self.required_object_permissions = {"POST": [("change", target_model)]}
-
-        if error := self.require_all_permissions("POST"):
-            return error
-
-        active_sync_tab = _validated_sync_tab(request)
-        active_server_key = _validated_active_server_key(request)
-        obj, model = self._get_object(object_type, pk)
-        ensure_mapping_owner(obj)
-        server_key = request.POST.get("server_key", "").strip()
-
-        if not server_key:
-            messages.error(request, "No server_key provided.")
-            return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
-        try:
-            server_key = require_server_key(server_key)
-        except ValueError as exc:
-            messages.error(request, str(exc))
-            return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
-
-        if not _has_removable_mapping(read_mapping(obj), server_key):
-            messages.warning(request, f"No mapping found for server '{server_key}'.")
-            return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
-
-        # Refuse to remove mappings for servers that are still configured in the plugin.
-        # Only orphaned (unconfigured) mappings may be removed via this endpoint.
-        # Guard both multi-server mode (servers dict) and legacy single-server mode
-        # (top-level librenms_url in plugin config, which implicitly defines "default")
-        # but only when no servers section is configured (pure legacy mode).
-        from django.conf import settings as django_settings
-
-        plugins_cfg = django_settings.PLUGINS_CONFIG.get("netbox_librenms_plugin", {})
-        configured_servers = plugins_cfg.get("servers") or {}
-        if not isinstance(configured_servers, dict):
-            configured_servers = {}
-        legacy_url_configured = bool(plugins_cfg.get("librenms_url"))
-        if server_key in configured_servers or (
-            legacy_url_configured and not configured_servers and server_key == "default"
-        ):
-            messages.error(
-                request,
-                f"Cannot remove mapping for configured server '{server_key}'. "
-                "Remove the server from plugin configuration first, then retry.",
-            )
-            return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
-
-        with atomic_with_events():
-            chassis_id = lock_owner_chassis(model, pk)
-            try:
-                obj_locked = self.restricted_queryset(model, "change").select_for_update(of=("self",)).get(pk=pk)
-            except model.DoesNotExist:
-                messages.error(request, f"{model.__name__} no longer exists.")
-                return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
-            ensure_locked_mapping_owner(obj_locked, chassis_id)
-            # Re-check after acquiring lock; mirror the pre-transaction protection logic
-            _is_protected = server_key in configured_servers or (
-                legacy_url_configured and not configured_servers and server_key == "default"
-            )
-            if _has_removable_mapping(read_mapping(obj_locked), server_key) and not _is_protected:
-                obj_locked.snapshot()
-                # A legacy value has no server entry, so removing it leaves an empty mapping.
-                change = release_server(obj_locked, server_key, clear_preference=False)
-                # The count reads the mapping after the removal, so a preference for the removed server goes.
-                usable_count = sum(
-                    mapping.is_selectable for mapping in build_server_mappings(obj_locked, mapping=change.after)
-                )
-                if usable_count <= 1:
-                    change = release_server(obj_locked, server_key, clear_preference=True)
-                try:
-                    persist_mapping(obj_locked, change, write=save_mapping_fields)
-                except ValidationError as exc:
-                    transaction.set_rollback(True)
-                    logger.exception(
-                        "Validation error removing LibreNMS mapping for server %r: %s",
-                        server_key,
-                        validation_error_detail(exc),
-                    )
-                    messages.error(
-                        request,
-                        f"Validation error removing LibreNMS mapping: {exception_text_for(exc, model, request.user)}",
-                    )
-                    return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
-                if not saved_in_scope(obj_locked, request.user, "change"):
-                    transaction.set_rollback(True)
-                    messages.error(
-                        request,
-                        f"Nothing was changed: the {model._meta.verbose_name} would be outside your change "
-                        "permission constraints.",
-                    )
-                    return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
-                removed = True
-            else:
-                removed = False
-
-        # After the commit: a lock conflict at COMMIT must not leave a success message behind.
-        if removed:
-            messages.success(request, f"Removed LibreNMS mapping for server '{server_key}'.")
-        else:
-            messages.warning(request, f"Mapping for server '{server_key}' was already removed.")
-        return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
-
-
 class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
     """Store the preferred server on a Device or VirtualMachine mapping owner."""
 
@@ -1048,10 +921,12 @@ def _editor_host_change(owner, server_key, own_id, oob_id, oob_type, shown):
     """
     Return the mapping change that the editor writes, or raise _NeedsConfirmation for a host change.
 
-    A change that replaces an own ID or removes or replaces an OOB ID needs a confirmation.
-    Two host changes at once are refused: each one has its own confirmation.
+    Clearing both IDs is an unlink. A change that removes or replaces a host ID is a relink or a
+    change_oob, and two of them at once are refused: each one has its own confirmation.
     """
     entry = host_entry(owner, server_key)
+    if own_id is None and oob_id is None and (unlink := host_change_action(entry, None, None, None)) is not None:
+        raise _NeedsConfirmation(owner, *unlink)
     try:
         change = edit_server(
             owner,

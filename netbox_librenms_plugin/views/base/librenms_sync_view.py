@@ -314,6 +314,11 @@ class BaseLibreNMSSyncView(
             "object_type": owner._meta.model_name,
         }
 
+    def _mapping_controls(self, selection):
+        """Return the server mapping editor and whether each mapping row offers Unlink: both need the same scope."""
+        editor = self._mapping_editor(selection)
+        return {"mapping_editor": editor, "can_unlink": editor is not None}
+
     def _chassis_owner_problem(self, ownership, obj):
         """Return the card of a chassis with no mapping owner; it names only the members that the user may view."""
         from dcim.models import Device, VirtualChassis
@@ -381,7 +386,7 @@ class BaseLibreNMSSyncView(
                 "server_selection_preferred_key": selection.preferred_key,
                 "server_selection_has_usable_mapping": selection.has_usable_mapping,
                 "can_manage_server_preference": self._can_manage_server_preference(selection),
-                "mapping_editor": self._mapping_editor(selection),
+                **self._mapping_controls(selection),
                 "chassis_owner_problem": chassis_owner_problem,
                 "server_selection_blocked": True,
                 "has_librenms_id": False,
@@ -557,11 +562,11 @@ class BaseLibreNMSSyncView(
                 "server_selection_active_name": selection.active_display_name if selection is not None else None,
                 "server_selection_preferred_key": selection.preferred_key if selection is not None else None,
                 "can_manage_server_preference": self._can_manage_server_preference(selection),
-                "mapping_editor": self._mapping_editor(selection),
+                **self._mapping_controls(selection),
                 "librenms_id_is_legacy": librenms_id_is_legacy,
                 "librenms_id_serial_confirmed": librenms_id_serial_confirmed,
                 # Lookup device may differ from object (e.g. VC master vs member).
-                # Used by the Remove server mapping form to post to the correct device.
+                # The Unlink action and the preference form act on the device that holds the mapping.
                 "lookup_device_pk": _lookup_device.pk if _lookup_device else obj.pk,
                 "lookup_device_model_name": (
                     _lookup_device._meta.model_name if _lookup_device else obj._meta.model_name
