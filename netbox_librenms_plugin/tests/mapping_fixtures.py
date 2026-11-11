@@ -120,6 +120,19 @@ def seed_malformed_preference(obj, *, save=True):
     return obj
 
 
+def seed_malformed_entry(obj, server, entry, *, save=True):
+    """Seed the hand-edited *entry* on *server*, which no builder writes; the other servers stay. Return *obj*."""
+    stored = copy.deepcopy(_stored_value(obj))
+    stored = {} if stored is None else stored
+    if not isinstance(stored, dict):
+        raise ValueError(f"Cannot store an entry on a {read_mapping(obj).container} mapping.")
+    stored[server] = copy.deepcopy(entry)
+    fields = _put_stored_value(obj, stored)
+    if save:
+        _save(obj, fields)
+    return obj
+
+
 def seed_unmapped(obj, server="default", *, save=True):
     """Remove the mapping of *obj* on *server* and any preference through the real builder; return *obj*."""
     _seed(obj, release_server(obj, server, clear_preference=True))
