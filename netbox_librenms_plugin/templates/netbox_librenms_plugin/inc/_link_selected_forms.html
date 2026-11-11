@@ -1,0 +1,21 @@
+{% comment %}
+The Link controls of every status-list page join these two forms through their form attribute, also on a
+page that htmx swaps in later. The bar shows only while the page holds a row that can be selected.
+{% endcomment %}
+<style>
+    body:not(:has(input[form="librenms-link-selected"])) #librenms-link-actions { display: none !important; }
+</style>
+<form id="librenms-link-selected" method="post" action="{{ link_selected_url }}" class="d-none">
+    {% csrf_token %}
+    <input type="hidden" name="server_key" value="{{ link_server_key }}">
+</form>
+<form id="librenms-link-row" method="post" action="{{ link_selected_url }}" class="d-none">
+    {% csrf_token %}
+    <input type="hidden" name="server_key" value="{{ link_server_key }}">
+</form>
+<div class="d-flex flex-wrap align-items-center gap-2 mb-3" id="librenms-link-actions">
+    <button type="submit" form="librenms-link-selected" class="btn btn-primary">
+        <i class="mdi mdi-link-variant"></i> Link selected
+    </button>
+    <span class="text-muted small">Links each selected object to the LibreNMS device that it matches.</span>
+</div>

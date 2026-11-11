@@ -3,7 +3,7 @@ from django_tables2 import Column
 from virtualization.models import VirtualMachine
 from virtualization.tables import VirtualMachineTable
 
-from netbox_librenms_plugin.tables.device_status import render_link_status
+from netbox_librenms_plugin.tables.link_status import render_link_status
 
 
 class VMStatusTable(VirtualMachineTable):
