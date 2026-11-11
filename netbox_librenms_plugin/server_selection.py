@@ -352,9 +352,8 @@ def resolve_object_server(page_object, requested_key=None, installation_default_
             warning += " The transient server selection remains active."
         elif installation_default_key in selectable_keys:
             warning += f" Using installation default server '{installation_default_key}'."
-        elif not mappings and installation_default_key:
-            # No mapping at all resolves to the installation default below, so asking the
-            # operator to select a server would describe a page that already has one.
+        elif not selectable and installation_default_key:
+            # No selectable mapping resolves to the installation default below.
             warning += f" Using installation default server '{installation_default_key}'."
         else:
             warning += " The installation default is not mapped, so select a server."
@@ -380,7 +379,8 @@ def resolve_object_server(page_object, requested_key=None, installation_default_
                 preferred_key=preferred_key,
             )
         active_key = requested_key
-    elif not selectable and not mappings:
+    elif not selectable and (installation_default_key or not mappings):
+        # An entry of an unconfigured server stays listed, but it selects nothing.
         active_key = installation_default_key
     elif len(selectable) == 1:
         active_key = selectable[0].server_key

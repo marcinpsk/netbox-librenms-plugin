@@ -526,6 +526,56 @@ def test_after_an_unlink_the_next_page_load_proposes_the_match_and_writes_nothin
 
 
 @pytest.mark.django_db
+def test_after_an_unlink_an_entry_of_an_unconfigured_server_does_not_hide_the_match(writer, server):
+    owner = make_device("unlink-keeps-retired")
+    give_primary_ip(owner, "203.0.113.201/24")
+    register_match(server, "203.0.113.201", 4510, hostname=owner.name)
+    seed_mapping(seed_mapping(_fresh(owner), "retired", own=4511, save=False), "default", own=4510)
+    _confirm(writer, owner, offered_token(unlink_page(writer, owner)))
+    assert mapping_summary(_fresh(owner)) == {"retired": {"own": 4511}}
+    before = domain_state()
+
+    response = sync_page(writer, owner)
+
+    assert domain_state() == before
+    proposal = response.context["link"]
+    assert (proposal["state"], proposal["server_key"], proposal["librenms_id"]) == ("match", "default", 4510)
+    assert proposal["token"]
+    assert response.context["server_selection_error"] is None
+    assert 'data-unlink-server="retired"' in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_an_object_mapped_only_on_an_unconfigured_server_resolves_like_an_unmapped_object(writer, server):
+    owner = make_device("only-retired")
+    give_primary_ip(owner, "203.0.113.202/24")
+    register_match(server, "203.0.113.202", 4520, hostname=owner.name)
+    seed_mapping(_fresh(owner), "retired", own=4521, preferred=True)
+    unmapped = make_device("unmapped-twin")
+    before = domain_state()
+
+    response = sync_page(writer, owner)
+    requested = [sync_page(writer, obj, server_key="default").context for obj in (owner, unmapped)]
+
+    assert domain_state() == before
+    assert (response.context["server_selection_state"], response.context["link"]["server_key"]) == (
+        "resolved",
+        "default",
+    )
+    assert response.context["server_selection_warning"] == (
+        "The stored preferred LibreNMS server 'retired' is not configured or usable."
+        " Using installation default server 'default'."
+    )
+    body = response.content.decode()
+    assert "Not configured" in body
+    assert 'data-unlink-server="retired"' in body
+    owner_state, unmapped_state = (
+        (context["server_selection_state"], context["server_selection_error"]) for context in requested
+    )
+    assert owner_state == unmapped_state
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("count", [1, 1000, 5000])
 def test_the_token_of_a_large_cascade_fits_the_token_limit(writer, server, count):
     owner = seed_mapping(make_device(f"unlink-large-{count}"), "default", own=4600)
