@@ -1516,14 +1516,12 @@ def process_device_filters(  # noqa: C901
 
     cached_by_key = {} if clear_cache else cache.get_many([validated_cache_key(device) for device in libre_devices])
     # One load serves every row: the matched objects of the cached rows and every object a row can match.
+    cached_validations = [cached_device["_validation"] for cached_device in cached_by_key.values() if cached_device]
     known_objects = preload_import_objects(
         libre_devices,
         api.server_key,
-        existing=[
-            key
-            for cached_device in cached_by_key.values()
-            if cached_device and (key := _cached_existing_key(cached_device["_validation"])) is not None
-        ],
+        existing=[key for validation in cached_validations if (key := _cached_existing_key(validation)) is not None],
+        resolved_names=[validation.get("resolved_name") for validation in cached_validations],
     )
 
     for idx, device in enumerate(libre_devices, 1):

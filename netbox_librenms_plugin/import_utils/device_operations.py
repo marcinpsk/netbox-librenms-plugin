@@ -2,10 +2,9 @@
 
 import logging
 
-from dcim.models import Device, DeviceRole, DeviceType, Rack, Site, VirtualChassis
+from dcim.models import Device, DeviceRole, DeviceType, Interface, Rack, Site, VirtualChassis
 from django.core.cache import cache
 from django.db.models import Q
-from django.db.models.functions import Lower
 from django.utils import timezone
 from tenancy.models import Tenant
 from virtualization.models import Cluster, VirtualMachine
@@ -56,9 +55,10 @@ from ..utils import (
     match_librenms_hardware_to_device_type,
     parse_location_for_import,
     resolve_location_mapping,
+    trimmed_serial,
 )
 from .cache import get_import_device_cache_key
-from .naming import _name_candidates, _resolve_device_name
+from .naming import _name_candidates, _resolve_device_name, import_name_variants
 from .virtual_chassis import (
     VCNumberingError,
     _member_name,
@@ -204,6 +204,16 @@ def _describe_link_note(existing_link):
     return "not linked to LibreNMS"
 
 
+def host_address_ips(canonical_hosts):
+    """Return the ``IPAddress`` rows whose host address is one of *canonical_hosts*, in any prefix length."""
+    from ipam.models import IPAddress
+
+    match = Q(pk__in=[])
+    for host in canonical_hosts:
+        match |= Q(address__net_host=host)
+    return IPAddress.objects.filter(match)
+
+
 def resolve_device_by_host_ip(primary_ip):
     """
     Resolve the unique NetBox Device or VirtualMachine that carries a host address.
@@ -233,13 +243,12 @@ def resolve_device_by_host_ip(primary_ip):
 
     """
     from dcim.models import Device
-    from ipam.models import IPAddress
 
     canonical_host = str(parse_host_address(primary_ip))
 
     # prefetch_related on the assigned_object GenericForeignKey resolves every duplicate net_host
     # row's interface in one bulk pass instead of a per-row content-type lookup (small N, but free).
-    matching_ips = IPAddress.objects.filter(address__net_host=canonical_host).prefetch_related("assigned_object")
+    matching_ips = host_address_ips([canonical_host]).prefetch_related("assigned_object")
     candidates = {}
     matching_exists = False
     for existing_ip in matching_ips:
@@ -630,41 +639,68 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
     }
 
 
-def preload_import_objects(libre_devices, server_key: str, *, existing=()) -> dict:
+def preload_import_objects(libre_devices, server_key: str, *, existing=(), resolved_names=()) -> dict:
     """
     Load the NetBox objects that the import rows can match, and prefetch their mappings.
 
-    The query is a superset of the matches :func:`validate_device_for_import` makes: the LibreNMS
-    identities, the raw and short host names and the serials of the rows, and the *existing*
-    objects of cached rows. A match that the superset misses is read cold, one object at a time.
+    The query is a superset of the matches that :func:`validate_device_for_import` and the cached
+    row refresh make, built from the predicates of their own lookups: the LibreNMS identities, every
+    name the importer can resolve and the raw names, the trimmed serials, the owners of the
+    management IP addresses, and the *existing* objects of cached rows. Each model is one query.
+    The cascade of the validator still chooses the match.
 
     Args:
         libre_devices (Iterable[dict]): The LibreNMS device rows of the import list.
         server_key (str): The LibreNMS server key of the identities.
         existing (Iterable[tuple[type, int]]): The ``(model, pk)`` of each cached row's matched object.
+        resolved_names (Iterable[str]): The resolved names of the cached rows.
 
     Returns:
         dict: Each loaded object keyed by ``(model, pk)``.
 
     """
+    from django.contrib.contenttypes.models import ContentType
+    from virtualization.models import VMInterface
+
     libre_devices = list(libre_devices)
     identities = sorted(
         {librenms_id for row in libre_devices if (librenms_id := coerce_librenms_id(row.get("device_id"))) is not None}
     )
-    names = set()
+    names = {name for name in resolved_names if isinstance(name, str) and name}
     for row in libre_devices:
-        for name in _name_candidates(row):
-            if isinstance(name, str) and name:
-                names.update({name.lower(), name.split(".")[0].lower()})
+        names.update(name for name in _name_candidates(row) if name)
+        names.update(variant["name"] for variant in import_name_variants(row).values() if variant["name"])
     serials = {serial for row in libre_devices if (serial := normalize_serial(row.get("serial")))}
+    hosts = set()
+    for row in libre_devices:
+        if row.get("ip"):
+            try:
+                hosts.add(str(parse_host_address(row["ip"])))
+            except ValueError:
+                # The row validator refuses an address it cannot parse.
+                continue
+    ips = host_address_ips(sorted(hosts))
     existing_pks = {}
     for model, pk in existing:
         existing_pks.setdefault(model, set()).add(pk)
     objects = []
-    for model in (Device, VirtualMachine):
-        match = Q(pk__in=existing_pks.get(model, set())) | Q(lower_name__in=names)
-        if model is Device and serials:
-            match |= Q(serial__in=serials)
+    for model, interface_model, owner_field in (
+        (Device, Interface, "device_id"),
+        (VirtualMachine, VMInterface, "virtual_machine_id"),
+    ):
+        match = Q(pk__in=existing_pks.get(model, set()))
+        for name in sorted(names):
+            match |= Q(name__iexact=name)
+        assigned = ips.filter(assigned_object_type=ContentType.objects.get_for_model(interface_model))
+        match |= Q(
+            pk__in=interface_model.objects.filter(pk__in=assigned.values("assigned_object_id")).values(owner_field)
+        )
+        queryset = model.objects.all()
+        if model is Device:
+            match |= Q(oob_ip__in=ips)
+            if serials:
+                queryset = queryset.alias(trimmed_serial=trimmed_serial())
+                match |= Q(trimmed_serial__in=serials)
         for offset in range(0, len(identities), PRELOAD_IDENTITY_CHUNK):
             match |= identity_q(
                 model,
@@ -672,7 +708,7 @@ def preload_import_objects(libre_devices, server_key: str, *, existing=()) -> di
                 identities=identities[offset : offset + PRELOAD_IDENTITY_CHUNK],
                 roles=(MappingRole.OWN, MappingRole.OOB),
             )
-        objects.extend(model.objects.alias(lower_name=Lower("name")).filter(match))
+        objects.extend(queryset.filter(match))
     return {(type(obj), obj.pk): obj for obj in prefetch_mappings(objects)}
 
 
