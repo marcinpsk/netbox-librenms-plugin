@@ -52,7 +52,9 @@ The Device Import feature automatically sets the `librenms_id` custom field, ena
     - Primary IP configured
     - Valid DNS name (set on the Primary IP)
     - hostname (that matches LibreNMS hostname)
-2. The plugin will populate the `librenms_id` custom field if the device is found in LibreNMS
+2. Open the **LibreNMS Sync** tab. When LibreNMS has a matching device, the page shows it; click **Link**
+   to store its `librenms_id`. The device and VM status lists link many objects at once with **Link
+   selected**. See [Link a device or virtual machine](../configuration/custom_field.md#link-a-device-or-virtual-machine).
 
 ### Virtual Chassis
 
