@@ -16,7 +16,7 @@ from dcim.models import (
 )
 from django import forms
 from django.core.exceptions import NON_FIELD_ERRORS, MultipleObjectsReturned, ValidationError
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError
 from django.db.models import Case, IntegerField, Q, Value, When
 from django.http import QueryDict
 from django.utils.translation import gettext_lazy as _
@@ -52,7 +52,7 @@ from .models import (
     SerialSensorTypePattern,
     VCMemberNumberingRule,
 )
-from .transactions import saved_in_scope
+from .transactions import atomic_with_events, saved_in_scope
 from .utils import REGEX_COMPILE_ERRORS, _free_cable_tag_slug, normalize_cable_tag_slug
 
 logger = logging.getLogger(__name__)
@@ -426,7 +426,7 @@ class CableSyncSettingsForm(NetBoxModelForm):
             raise forms.ValidationError(CABLE_SYNC_TAG_TAKEN)
         return tag_name
 
-    @transaction.atomic
+    @atomic_with_events()
     def save(self, commit=True):
         """Persist settings and reserve or update the provenance Tag."""
         from django.core.exceptions import PermissionDenied
@@ -457,7 +457,7 @@ class CableSyncSettingsForm(NetBoxModelForm):
             try:
                 # Keep the insert in a savepoint so an integrity error does not poison the outer
                 # transaction before the form converts it into a field error.
-                with transaction.atomic():
+                with atomic_with_events():
                     tag = Tag.objects.create(name=new_tag_name, slug=slug, color=new_color)
             except IntegrityError as exc:
                 # A concurrent insert can take either the unique name or the selected free slug.

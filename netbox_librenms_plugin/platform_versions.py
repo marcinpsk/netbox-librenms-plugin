@@ -15,7 +15,7 @@ from typing import NamedTuple
 from dcim.models import Platform
 from django.contrib.messages import constants as message_levels
 from django.core.exceptions import ValidationError
-from django.db import DatabaseError, IntegrityError, transaction
+from django.db import DatabaseError, IntegrityError
 from django.db.models import Q
 from django.utils.text import slugify
 from utilities.exceptions import PermissionsViolation
@@ -23,6 +23,7 @@ from utilities.exceptions import PermissionsViolation
 from netbox_librenms_plugin.models import LibreNMSSettings, PlatformMapping
 from netbox_librenms_plugin.transactions import (
     TransactionConflict,
+    atomic_with_events,
     classify_conflict,
     run_transaction,
     saved_in_scope,
@@ -397,7 +398,7 @@ def _create_platform(actor, assessment, winner, **fields):
 
     """
     try:
-        with transaction.atomic():
+        with atomic_with_events():
             platform = Platform(**fields)
             platform.full_clean()
             platform.save()
@@ -974,7 +975,7 @@ def _map_os_platform(librenms_os, platform, actor):
         message_levels.SUCCESS, f"Platform mapping '{librenms_os}' to {platform_label(platform, actor)} added"
     )
     try:
-        with transaction.atomic():
+        with atomic_with_events():
             mapping = PlatformMapping(librenms_os=librenms_os, netbox_platform=platform)
             mapping.full_clean()
             mapping.save()

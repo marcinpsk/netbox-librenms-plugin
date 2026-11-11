@@ -15,6 +15,9 @@ from netbox_librenms_plugin.tests.conftest import (
 from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row, lock_timeout, second_connection
 from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary, seed_mapping
 from netbox_librenms_plugin.tests.test_import_identity_replacement import secondary_server  # noqa: F401
+from netbox_librenms_plugin.tests.test_platform_version_tracking_views import (
+    librenms_server as platform_server,  # noqa: F401
+)
 from netbox_librenms_plugin.tests.test_server_mapping_edit import servers  # noqa: F401
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
@@ -243,4 +246,111 @@ def test_a_serial_sync_whose_commit_meets_a_lock_conflict_sends_no_event(
     assert TRY_AGAIN_MESSAGE in response.content.decode()
     device.refresh_from_db()
     assert device.serial == "SN-EVENTS-OLD"
+    assert flushed_events == []
+
+
+def test_a_refused_platform_mapping_sends_no_event_and_the_assigned_platform_does(
+    client,
+    platform_server,  # noqa: F811
+    flushed_events,
+):
+    """The platform and its assignment commit first; then the mapping is saved and refused by the add scope."""
+    from dcim.models import Device, Manufacturer, Platform
+
+    from netbox_librenms_plugin.models import PlatformMapping
+    from netbox_librenms_plugin.tests.test_platform_version_tracking_views import _linked, _post, _tracking
+
+    _tracking(False)
+    device = _linked("events-platform", platform_server, 7491)
+    user = make_user_with_perms(
+        "events-platform",
+        [("view", Device), ("change", Device), ("view", Platform), ("add", Platform), ("view", Manufacturer)],
+    )
+    client.force_login(grant(user, "add", PlatformMapping, constraints={"librenms_os": "eos"}))
+    flushed_events.clear()
+
+    _post(
+        client,
+        "create_and_assign_platform",
+        device,
+        {"platform_name": "Juniper Junos", "librenms_os": "junos", "create_mapping": "on"},
+    )
+
+    device.refresh_from_db()
+    assert device.platform.name == "Juniper Junos"
+    assert not PlatformMapping.objects.exists()
+    assert sorted(flushed_events) == sorted([("platform", device.platform_id), ("device", device.pk)])
+
+
+def test_a_chassis_that_the_master_rename_refuses_sends_no_event_and_the_imported_device_does(
+    client, live_librenms, flushed_events
+):
+    """The chassis is saved, then the renamed master is too long for its column: only the chassis rolls back."""
+    from dcim.models import Device, VirtualChassis
+
+    from netbox_librenms_plugin.tests.test_bulk_import_job_control import (
+        _chassis,
+        _libre_device,
+        _prerequisites,
+        _register_stack,
+    )
+
+    device_id = 96391
+    prerequisites = _prerequisites("events-chassis")
+    # The member pattern appends "-M1": 62 characters fit the name column, 65 do not.
+    hostname = f"events-chassis-{'x' * 41}-{device_id}"
+    assert len(hostname) == 62
+    members = [_chassis(100, "SN-EVENTS-A", position=1), _chassis(200, "SN-EVENTS-B", position=2)]
+    row = _libre_device(
+        device_id,
+        hostname,
+        hardware=prerequisites["hardware"],
+        serial="SN-EVENTS-A",
+        location=prerequisites["location"],
+    )
+    _register_stack(live_librenms, device_id, row, members)
+    client.force_login(make_superuser("events-chassis-user"))
+    flushed_events.clear()
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:bulk_import_devices"),
+        {
+            "server_key": "default",
+            "select": [str(device_id)],
+            f"role_{device_id}": str(prerequisites["device_role_id"]),
+        },
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert f"Failed to create VC for device {device_id}" in response.content.decode()
+    imported = Device.objects.get(name=hostname, virtual_chassis__isnull=True)
+    assert not VirtualChassis.objects.exists()
+    assert flushed_events == [("device", imported.pk)]
+
+
+def test_a_refused_provenance_tag_sends_no_event(client, flushed_events):
+    """The settings form saves the new tag, then the add scope refuses it."""
+    from extras.models import Tag
+
+    from netbox_librenms_plugin.models import LibreNMSSettings
+
+    settings, _ = LibreNMSSettings.objects.get_or_create()
+    settings.cable_sync_tag = "events-missing-tag"
+    settings.save(update_fields=["cable_sync_tag"])
+    user = make_user_with_perms("events-tag-scope", [("add", Tag)], constraints={"name__startswith": "team-"})
+    client.force_login(user)
+    flushed_events.clear()
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:settings"),
+        {
+            "form_type": "cable_sync_settings",
+            "cable_sync_tag": "events-outside-scope",
+            "cable_sync_tag_color": "ff5722",
+            "cable_sync_description": "Managed cable",
+        },
+    )
+
+    assert "permission to create the cable provenance tag" in response.content.decode()
+    assert not Tag.objects.filter(name="events-outside-scope").exists()
     assert flushed_events == []
