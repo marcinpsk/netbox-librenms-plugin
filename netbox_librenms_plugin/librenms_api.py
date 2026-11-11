@@ -1,10 +1,13 @@
+import json
 import logging
 import math
 import threading
+import time
 import urllib.parse
 from dataclasses import dataclass
 
 import requests
+import urllib3
 from django.core.cache import cache
 from netbox.plugins import get_plugin_config
 
@@ -133,9 +136,22 @@ class _TokenScopedSession(requests.Session):
 _session = _TokenScopedSession()
 
 
-# The match probes that may run at once. A probe that finds no free slot is not checked, so nothing queues.
+# The match probes of one server that may run at once. A probe that finds no free slot is not checked, so
+# nothing queues. Known limit: a server that sends its headers slowly, inside each read timeout, holds its
+# slot until it stops; http.client bounds the header size, and only that server's matching degrades.
 MATCH_PROBE_WORKERS = 4
-_match_probe_slots = threading.BoundedSemaphore(MATCH_PROBE_WORKERS)
+# A device answer is a few KiB; a longer one is no usable answer.
+MATCH_PROBE_MAX_BYTES = 1 << 20
+_match_probe_slots = {}
+_match_probe_slots_lock = threading.Lock()
+
+
+def _probe_slots(server_url):
+    """Return the probe slots of the server at *server_url*, created on first use."""
+    with _match_probe_slots_lock:
+        if server_url not in _match_probe_slots:
+            _match_probe_slots[server_url] = threading.BoundedSemaphore(MATCH_PROBE_WORKERS)
+        return _match_probe_slots[server_url]
 
 
 class _ProbeAnswer:
@@ -147,32 +163,64 @@ class _ProbeAnswer:
         self.error = None
 
 
-def _match_probe(answer, url, headers, timeout, verify):
-    """
-    Run one match probe GET with a session of its own, and set *answer*; then free the probe slot.
+def _keep_redirect_body_unread(response, **kwargs):
+    """Drop the redirect target, so requests does not read the body to prepare a redirect that it never follows."""
+    if response.is_redirect:
+        del response.headers["location"]
 
-    A transport or configuration error (a missing CA bundle raises a plain OSError) is no answer from
-    the server. Any other error is a bug, and the caller raises it.
+
+def _read_body(response, ends_at):
+    """Return the body of a streamed response, or None when it exceeds the size cap or *ends_at* passes."""
+    parts, size = [], 0
+    while part := response.raw.read1(65536, decode_content=True):
+        size += len(part)
+        if size > MATCH_PROBE_MAX_BYTES or time.monotonic() >= ends_at:
+            return None
+        parts.append(part)
+    return b"".join(parts)
+
+
+def _match_probe(answer, slots, url, headers, timeout, verify, ends_at):
+    """
+    Run one match probe GET with a session of its own, set *answer*, and free the probe slot.
+
+    The body is read until it ends, passes the size cap, or the caller's deadline *ends_at* (a
+    ``time.monotonic()`` value) passes. A transport or configuration error (a missing CA bundle
+    raises a plain OSError) is no answer from the server. Any other error is a bug; the caller
+    raises it while it still waits.
     """
     try:
         with _TokenScopedSession() as session:
-            response = session.get(url, headers=headers, timeout=timeout, verify=verify, allow_redirects=False)
-        if response.is_redirect:
-            answer.value = response.status_code, None
-        else:
+            response = session.get(
+                url,
+                headers=headers,
+                timeout=timeout,
+                verify=verify,
+                allow_redirects=False,
+                stream=True,
+                hooks={"response": _keep_redirect_body_unread},
+            )
             try:
-                answer.value = response.status_code, response.json()
-            except ValueError:
-                answer.value = response.status_code, None
-    except (requests.exceptions.RequestException, OSError):
+                if 300 <= response.status_code < 400:
+                    answer.value = response.status_code, None
+                elif (body := _read_body(response, ends_at)) is None:
+                    answer.value = None, None
+                else:
+                    try:
+                        answer.value = response.status_code, json.loads(body)
+                    except ValueError:
+                        answer.value = response.status_code, None
+            finally:
+                response.close()
+    except (requests.exceptions.RequestException, OSError, urllib3.exceptions.HTTPError):
         answer.value = None, None
     except Exception as exc:
-        # Not a transport error, so a bug: the caller raises it unread, in its own thread.
+        # Not a transport error, so a bug: the caller raises it unread, in its own thread, before its deadline.
         # nosemgrep: caught-error-text  # noqa: ERA001
         answer.error = exc
     finally:
         answer.ready.set()
-        _match_probe_slots.release()
+        slots.release()
 
 
 class LibreNMSAPI:
@@ -535,10 +583,10 @@ class LibreNMSAPI:
 
         ``remaining()`` returns the seconds left. The request runs in a daemon thread, and this call
         waits for it only that long: a socket timeout limits each wait for data, not the whole
-        request. A thread that the caller gave up on ends at its own read timeout, holding one of the
-        ``MATCH_PROBE_WORKERS`` slots; a probe that finds no free slot does not run. A redirect is
-        not followed: its own status comes back. A transport error yields ``(None, None)``, and a
-        non-JSON body ``(status_code, None)``.
+        request. The thread holds one of the ``MATCH_PROBE_WORKERS`` slots of its server, and stops
+        reading the body at the deadline; a probe that finds no free slot does not run. A redirect is
+        not followed: its own status comes back. A transport error, or a body over
+        ``MATCH_PROBE_MAX_BYTES``, yields ``(None, None)``, and a non-JSON body ``(status_code, None)``.
 
         Args:
             path (str): API path relative to ``/api/v0/``.
@@ -549,26 +597,32 @@ class LibreNMSAPI:
 
         """
         left = remaining()
-        if left <= 0 or not _match_probe_slots.acquire(blocking=False):
+        if left <= 0:
             return None
-        answer = _ProbeAnswer()
-        arguments = (
-            answer,
-            f"{self.librenms_url}/api/v0/{path.lstrip('/')}",
-            dict(self.headers),
-            min(DEFAULT_API_TIMEOUT, left),
-            self.verify_ssl,
-        )
+        slots = _probe_slots(self.librenms_url)
+        if not slots.acquire(blocking=False):
+            return None
         try:
+            answer = _ProbeAnswer()
+            arguments = (
+                answer,
+                slots,
+                f"{self.librenms_url}/api/v0/{path.lstrip('/')}",
+                dict(self.headers),
+                min(DEFAULT_API_TIMEOUT, left),
+                self.verify_ssl,
+                time.monotonic() + left,
+            )
             threading.Thread(target=_match_probe, args=arguments, name="librenms-match-probe", daemon=True).start()
         except BaseException:
-            _match_probe_slots.release()
+            slots.release()
             raise
-        if not answer.ready.wait(timeout=left):
+        # An answer after the deadline is late, also an error: the request has moved on.
+        if not answer.ready.wait(timeout=left) or remaining() <= 0:
             return None
         if answer.error is not None:
             raise answer.error
-        return None if remaining() <= 0 else answer.value
+        return answer.value
 
     def add_device(self, data):
         """
