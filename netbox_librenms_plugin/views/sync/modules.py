@@ -2533,12 +2533,14 @@ class ApplyModuleInterfaceTypesView(
         try:
             with transaction.atomic():
                 template_types = _module_interface_type_targets(target_device, module)
-                interfaces = list(
+                # The host change cascade locks interfaces in pk order too; the messages list them by name.
+                locked = (
                     self.restricted_queryset(Interface, "change")
                     .select_for_update(of=("self",))
                     .filter(module=module, pk__in=interface_ids)
-                    .order_by("name", "pk")
+                    .order_by("pk")
                 )
+                interfaces = sorted(locked, key=lambda interface: (interface.name, interface.pk))
                 unavailable_count = len(interface_ids) - len(interfaces)
                 for interface in interfaces:
                     template_type = template_types.get(interface.name)
