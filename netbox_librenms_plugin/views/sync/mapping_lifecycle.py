@@ -7,7 +7,6 @@ from dcim.models import Device
 from django.apps import apps
 from django.contrib import messages
 from django.core.exceptions import ValidationError
-from django.db import transaction
 from django.http import Http404
 from django.shortcuts import redirect
 from django.urls import reverse
@@ -29,7 +28,7 @@ from netbox_librenms_plugin.server_mappings import (
     persist_mapping,
 )
 from netbox_librenms_plugin.sync_cache import SyncTab
-from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, saved_in_scope
+from netbox_librenms_plugin.transactions import classify_conflict, row_savepoint, run_transaction, saved_in_scope
 from netbox_librenms_plugin.utils import exception_text_for
 from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
@@ -117,7 +116,7 @@ class _LinkWriter(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMS
         """Store the verified own ID on the locked row in one savepoint, and return its outcome line."""
         own_id = operation.effects.own_id
         try:
-            with transaction.atomic():
+            with row_savepoint():
                 row.snapshot()
                 persist_mapping(row, assign_own(row, operation.identity.server, own_id), write=_save_mapping_fields)
                 # A change constraint can read the mapping, so the stored link can move the row out of the scope.

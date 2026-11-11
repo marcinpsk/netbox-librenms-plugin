@@ -220,6 +220,39 @@ class TestLinkStaysInTheChangeScope:
         assert any(text.startswith(f"Linked '{second.name}'") for text in texts)
 
 
+@transactional_db_with_all_apps()
+def test_a_refused_link_sends_no_event(client, server, flushed_events):
+    """The savepoint rolls the row back, so the event that its save queued must not be sent either."""
+    device = _matched("device", "event-after-single", server, "203.0.113.150", 9980)
+    writer = _unmapped_only_writer(client, "event-single")
+    token = page_token(writer, device)
+
+    link(writer, device, [token])
+
+    assert mapping_summary(_fresh(device)) == {}
+    assert flushed_events == []
+
+
+@transactional_db_with_all_apps()
+def test_a_bulk_link_sends_the_event_of_the_applied_row_only(client, server, flushed_events):
+    from users.models import ObjectPermission
+
+    first = _matched("device", "event-after-first", server, "203.0.113.151", 9981)
+    second = _matched("device", "event-after-second", server, "203.0.113.152", 9982)
+    writer = _unmapped_only_writer(client, "event-bulk")
+    tokens = [page_token(writer, first), page_token(writer, second)]
+    permission = ObjectPermission.objects.get(
+        users__username="scope-after-event-bulk", actions=["change"], object_types__model="device"
+    )
+    permission.constraints = [*_UNMAPPED_ONLY, {"name": second.name}]
+    permission.save()
+
+    link_selected(writer, "device", tokens)
+
+    assert mapping_summary(_fresh(second)) == {"default": {"own": 9982}}
+    assert flushed_events == [("device", second.pk)]
+
+
 @pytest.mark.django_db
 class TestSyncPageAnswers:
     def test_a_device_without_a_match_is_not_found(self, linker, server):

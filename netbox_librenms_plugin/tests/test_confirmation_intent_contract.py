@@ -659,6 +659,19 @@ class TestDependentVLANOperations:
         assert any(text.startswith("VLAN 200: ") and "add permission" in text for text in texts)
         assert any(text.startswith("VLAN 100: ") and "group failed" in text for text in texts)
 
+    def test_a_rolled_back_group_sends_no_event(self, client, settings, flushed_events):
+        """The rename wrote and the create was refused; both roll back, so neither save's event is sent."""
+        from netbox_librenms_plugin.tests.view_test_helpers import grant
+
+        permissions = [permission for permission in VLAN_PERMISSIONS if permission != ("add", VLAN)]
+        case = _DependentRename(client, settings, "rollback-events", permissions)
+        client.force_login(grant(case.user, "add", VLAN, constraints={"vid": 999}))
+
+        sync(client, case.device, [case.rename, case.create], confirm=True)
+
+        assert case.names() == {100: "users"}
+        assert flushed_events == []
+
     def test_an_unconfirmed_group_is_disclosed_whole_and_its_tokens_apply_it(self, client, settings):
         case = _DependentRename(client, settings, "disclosure")
         before = domain_state()
