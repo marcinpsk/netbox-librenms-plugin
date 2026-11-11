@@ -78,6 +78,26 @@ class IntentContext:
             raise TypeError("IntentContext.server_key must be a non-empty str.")
 
 
+@dataclass(frozen=True)
+class IntentScope:
+    """The actor and server of a request whose tokens each name their own subject, and the subjects it may change."""
+
+    actor_pk: int
+    server_key: str
+    subjects: frozenset
+
+    def __post_init__(self):
+        if type(self.actor_pk) is not int:
+            raise TypeError("IntentScope.actor_pk must be an int.")
+        if type(self.server_key) is not str or not self.server_key:
+            raise TypeError("IntentScope.server_key must be a non-empty str.")
+        if type(self.subjects) is not frozenset or not all(
+            type(subject) is tuple and len(subject) == 2 and type(subject[0]) is str and type(subject[1]) is int
+            for subject in self.subjects
+        ):
+            raise TypeError("IntentScope.subjects must be a frozenset of (model label, pk) pairs.")
+
+
 def context_for(user, subject, server_key):
     """Return the context of *user* acting on the model instance *subject*, or None for an anonymous user."""
     if not getattr(user, "is_authenticated", False):
@@ -140,9 +160,15 @@ class Verification:
 
 @dataclass(frozen=True)
 class RoutePolicy:
-    """The (resource, action, role) entries that one applying route accepts."""
+    """
+    The (resource, action, role) entries that one applying route accepts.
+
+    With *subject_per_token*, each token names its own subject, which must be in the request's
+    ``IntentScope``, and tokens that share a claim refuse together before any write.
+    """
 
     entries: frozenset[tuple[Resource, str, Role]]
+    subject_per_token: bool = False
 
     def __post_init__(self):
         keys = [(resource, action) for resource, action, _role in self.entries]
@@ -253,7 +279,11 @@ def verify(tokens, *, policy, context, rebuild):
     ``(approved, rebuilt or Unavailable)`` pairs. A verified group lists its members in write order:
     a member that releases a claim comes before a member that takes it, and the others keep the
     order of the pairs.
+
+    *context* is an ``IntentContext``, or an ``IntentScope`` for a policy with one subject per token.
     """
+    if policy.subject_per_token is not isinstance(context, IntentScope):
+        raise TypeError("A policy with one subject per token takes an IntentScope; any other takes an IntentContext.")
     tokens = list(tokens)
     if not tokens:
         return Verification((Stale(StaleReason.MISSING, (FIELD,)),))
@@ -278,14 +308,8 @@ def verify(tokens, *, policy, context, rebuild):
             entries.append((token, operation, refusal))
     approved_groups = []
     for group in _dependency_groups(entries):
-        operations = tuple(operation for _token, operation, _refusal in group)
-        refusals = [refusal for _token, _operation, refusal in group if refusal is not None]
-        identities = Counter((type(operation).RESOURCE, operation.identity) for operation in operations)
-        if any(count > 1 for count in identities.values()):
-            refusals.append(Stale(StaleReason.INVALID, ("identity.duplicate",)))
-        if refusals:
-            paths = tuple(dict.fromkeys(path for refusal in refusals for path in refusal.paths))
-            results.append(Stale(refusals[0].reason, paths, operations))
+        if (refusal := _group_refusal(group, policy)) is not None:
+            results.append(refusal)
         else:
             approved_groups.append(group)
     if not approved_groups:
@@ -300,6 +324,22 @@ def verify(tokens, *, policy, context, rebuild):
         ordered = sorted((operation for _token, operation, _refusal in group), key=schedule.__getitem__)
         results.append(_verify_group([(op, rebuilt_by_operation[op]) for op in ordered], approved, policy))
     return Verification(tuple(results))
+
+
+def _group_refusal(group, policy):
+    """Return the Stale result of a group that refuses before its rebuild, or None."""
+    operations = tuple(operation for _token, operation, _refusal in group)
+    refusals = [refusal for _token, _operation, refusal in group if refusal is not None]
+    identities = Counter((type(operation).RESOURCE, operation.identity) for operation in operations)
+    if any(count > 1 for count in identities.values()):
+        refusals.append(Stale(StaleReason.INVALID, ("identity.duplicate",)))
+    if policy.subject_per_token and len(group) > 1:
+        # Each token of such a route stands alone; tokens that share a claim refuse together.
+        refusals.append(Stale(StaleReason.INVALID, ("claims.shared",)))
+    if not refusals:
+        return None
+    paths = tuple(dict.fromkeys(path for refusal in refusals for path in refusal.paths))
+    return Stale(refusals[0].reason, paths, operations)
 
 
 def _dependency_groups(entries):
@@ -430,7 +470,9 @@ def _context_differences(envelope, context):
     paths = []
     if envelope["actor"] != context.actor_pk:
         paths.append("context.actor")
-    if tuple(envelope["subject"]) != context.subject:
+    subject = tuple(envelope["subject"])
+    permitted = context.subjects if isinstance(context, IntentScope) else {context.subject}
+    if subject not in permitted:
         paths.append("context.subject")
     if envelope["server"] != context.server_key:
         paths.append("context.server")
