@@ -523,10 +523,16 @@ class LibreNMSAPI:
             if response.is_redirect:
                 return response.status_code, None
             parts = []
+            socket = getattr(getattr(response.raw, "connection", None), "sock", None)
             try:
-                while part := response.raw.read1(65536, decode_content=True):
-                    if remaining() <= 0:
+                while True:
+                    if (left := remaining()) <= 0:
                         return None
+                    if socket is not None:
+                        # Each wait for the next part ends at the deadline, not one socket timeout later.
+                        socket.settimeout(min(DEFAULT_API_TIMEOUT, left))
+                    if not (part := response.raw.read1(65536, decode_content=True)):
+                        break
                     parts.append(part)
             except (requests.exceptions.RequestException, OSError, urllib3.exceptions.HTTPError):
                 return None if remaining() <= 0 else (None, None)
