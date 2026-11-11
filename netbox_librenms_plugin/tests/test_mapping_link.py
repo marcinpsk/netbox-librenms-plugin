@@ -393,6 +393,46 @@ class TestStatusLists:
         assert [request["path"] for request in server.requests] == ["/api/v0/devices/198.18.2.1"]
         assert any(text.startswith("3 of 3 unlinked objects") for text in message_texts(response))
 
+    def test_a_row_that_htmx_pages_in_links_through_the_forms_of_a_first_page_without_offers(self, linker, server):
+        """NetBox swaps a later page in as a table fragment, so its Link controls use the forms of the first page."""
+        import re
+
+        from dcim.models import DeviceRole
+
+        from netbox_librenms_plugin.confirmation_intent import FIELD
+
+        role = DeviceRole.objects.create(name="htmx-pages", slug="htmx-pages", color="00ff00")
+        # NetBox folds up to five orphans into the last page, so page one holds one linked row of seven.
+        linked = [make_device(f"htmx-pages-a{index}") for index in range(6)]
+        unlinked = make_device("htmx-pages-b")
+        for device in (*linked, unlinked):
+            device.role = role
+            device.save()
+        for index, device in enumerate(linked):
+            seed_mapping(device, "default", own=9970 + index)
+        give_primary_ip(unlinked, "198.18.9.2/24")
+        register_match(server, "198.18.9.2", 9962)
+        list_url = reverse("plugins:netbox_librenms_plugin:device_status_list")
+
+        first = status_list(linker, "device", role=role.pk, per_page=1)
+        fragment = linker.get(list_url, {"role": role.pk, "per_page": 1, "page": 2}, HTTP_HX_REQUEST="true")
+        tokens = re.findall(
+            r'form="librenms-link-row" name="confirmation_intent" value="([^"]+)"', fragment.content.decode()
+        )
+        second_page = f"{list_url}?role={role.pk}&per_page=1&page=2"
+        response = linker.post(
+            reverse("plugins:netbox_librenms_plugin:link_selected", kwargs={"object_type": "device"}),
+            {"server_key": "default", FIELD: tokens},
+            HTTP_REFERER=f"http://testserver{second_page}",
+        )
+
+        assert not any(row.token for row in _status_rows(first).values())
+        for form in ("librenms-link-row", "librenms-link-selected"):
+            assert f'id="{form}"' in first.content.decode()
+        assert len(tokens) == 1
+        assert response.url == second_page
+        assert mapping_summary(_fresh(unlinked)) == {"default": {"own": 9962}}
+
     def test_an_unreachable_server_is_not_checked_rather_than_not_found(self, linker, server):
         cluster = make_cluster("link-unreachable-list")
         vm = _object("virtualmachine", "unreachable-vm", cluster=cluster)
