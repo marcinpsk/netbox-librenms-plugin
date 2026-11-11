@@ -95,12 +95,14 @@ JSON value of the custom field by hand.
     - **OOB controller ID** and **OOB type:** the LibreNMS device ID of its out-of-band controller
       (iDRAC, iLO, IPMI and others), and the controller type. See
       [Out-of-Band Management](../device_import/oob_management.md).
-    - Clear the OOB controller ID to remove the OOB controller. You can replace a LibreNMS ID, but
-      you cannot remove it here.
+    - Clear an ID to remove it. Clear both IDs to unlink the server.
 
 4. **Save the row:**
 
     - Click **Save** on the row. Each row saves only its own server.
+    - A new ID on an empty field saves at once. A change that replaces or clears an ID opens its
+      confirmation first, and nothing changes until you confirm it. See
+      [Unlink, replace or clear an ID](#unlink-replace-or-clear-an-id).
     - The plugin refuses an ID that another NetBox device or virtual machine already holds on that
       server. It names that object only when you have permission to view it.
     - When another user changed the mapping after the page loaded, the plugin refuses the save.
@@ -110,7 +112,7 @@ You need change permission on the object. A virtual chassis member shows the edi
 the member that holds the mapping. Use **Convert ID** to convert a legacy value (a bare integer)
 before you edit it. The editor does not repair a value with an invalid format.
 
-To remove the mapping for a server that is no longer configured, click **Remove** on its row in the
+To remove the mapping for a server, configured or not, click **Unlink** on its row in the
 **LibreNMS Connections** card. When an object has usable mappings on two or more servers, use the
 star control on the same card to select the preferred server. When you add a second mapping and
 no preferred server is stored, the first mapping becomes the preferred server. The preference is
@@ -140,6 +142,38 @@ The plugin refuses a link when:
   a LibreNMS ID in the meantime. Reload the page and try again.
 
 You need change permission on the object, and the plugin write permission.
+
+### Unlink, replace or clear an ID
+
+Three changes remove or replace a LibreNMS ID of an object on one server:
+
+- **Unlink** removes the whole entry of the server (the LibreNMS ID and the OOB controller), and the
+  preferred server when it names that server.
+- A new or a cleared **LibreNMS ID** in the editor replaces or removes the own ID.
+- A new or a cleared **OOB controller ID** in the editor replaces or removes the OOB controller.
+
+Each change also clears the port IDs of that server on the interfaces of the object: the interfaces
+of a VM, of a device, or of every member of the device's virtual chassis. The port IDs of other
+servers stay. The confirmation names the IDs that it removes or replaces, and lists each interface
+that it clears. Nothing changes until you confirm. After an unlink, the sync page proposes the
+LibreNMS match again; nothing links by itself.
+
+The cascade can also clear ports of another chassis member's link, or of the own ID when only the OOB
+controller changes; an interface sync sets them again. It does not clear a port held outside these
+interfaces, such as a cable far end created on another device.
+
+The plugin refuses the change when:
+
+- an interface of the scope has a legacy or invalid `librenms_id` value (the message names it);
+- the stored value of the object is legacy or invalid, or the server records a merge marker;
+- the new ID belongs to another object;
+- your permissions do not include the view of every object of the scope and the view and change of
+  every interface that it clears;
+- the object, its chassis membership or any of those interfaces changed after the confirmation
+  showed them. Reload the page and try again.
+
+Add as OOB and the import replacement of a LibreNMS ID refuse a change that would clear interface
+port IDs. Make that change on the sync page.
 
 ## Notes
 
