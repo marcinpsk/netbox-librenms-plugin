@@ -7,9 +7,9 @@ part of the work, report success for rolled-back work, or show PostgreSQL's text
 each handler in a production module that catches ``Exception``, ``BaseException``,
 ``DatabaseError``, ``OperationalError``, ``ValidationError`` or ``AbortRequest`` (NetBox raises the
 last two from its own deadlocks), or that has no class. It checks the handler when it is in a write
-path: its ``try`` body writes, or the ``try`` statement is inside ``transaction.atomic`` or inside
+path: its ``try`` body writes, or the ``try`` statement is inside an atomic block or inside
 a function that ``run_transaction`` runs. A ``try`` body writes when it opens
-``transaction.atomic``, calls ``run_transaction``, ``update_existing_row``, a ``save()`` or a
+an atomic block, calls ``run_transaction``, ``update_existing_row``, a ``save()`` or a
 ``delete()``, or calls a package function whose own body does one of these. A ``run_transaction``
 call raises a conflict only as ``TransactionConflict``, so around it only a catch-all handler is
 checked, and only when no earlier handler of the same ``try`` catches ``TransactionConflict``. A
@@ -37,6 +37,8 @@ BROAD = frozenset(
 )
 # A bare ``except:`` has no class; the scan names it "bare".
 CATCH_ALL = frozenset({"Exception", "BaseException", "bare"})
+# A plain block (the sample sources below), and the two blocks with their own event queue.
+ATOMIC_BLOCKS = frozenset({"transaction.atomic", "atomic", "atomic_with_events", "row_savepoint"})
 WRITE_METHODS = frozenset({"save", "delete"})
 WRITE_FUNCTIONS = frozenset({"update_existing_row"})
 # Receivers whose save() or delete() writes no model row: the Django cache and the session.
@@ -115,7 +117,7 @@ def _call_name(call):
 
 def _is_atomic(node):
     target = node.func if isinstance(node, ast.Call) else node
-    return ast.unparse(target) in {"transaction.atomic", "atomic"}
+    return ast.unparse(target) in ATOMIC_BLOCKS
 
 
 def _own_nodes(nodes):
