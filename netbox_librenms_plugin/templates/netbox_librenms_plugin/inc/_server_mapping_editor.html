@@ -1,5 +1,5 @@
 {# One form per row: the inputs join it through their form attribute, so it posts without JavaScript. #}
-<details class="card-footer p-0 librenms-mapping-editor" id="librenms-mapping-editor">
+<details class="card-footer p-0" id="librenms-mapping-editor">
     <summary class="px-3 py-2 small text-secondary">
         <i class="mdi mdi-pencil-outline me-1" aria-hidden="true"></i>Edit server mappings
     </summary>
@@ -16,7 +16,7 @@
                     <th>LibreNMS ID</th>
                     <th>OOB controller ID</th>
                     <th>OOB type</th>
-                    <th class="pe-3"><span class="visually-hidden">Save</span></th>
+                    <th class="pe-3"></th>
                 </tr>
             </thead>
             <tbody>
@@ -30,19 +30,19 @@
                     <input type="text" inputmode="numeric" autocomplete="off" name="own_id"
                            form="librenms-mapping-edit-{{ forloop.counter }}"
                            value="{{ row.own_id|default_if_none:'' }}"
-                           class="form-control form-control-sm librenms-mapping-id"
+                           class="form-control form-control-sm"
                            aria-label="LibreNMS ID on {{ row.display_name }}">
                 </td>
                 <td>
                     <input type="text" inputmode="numeric" autocomplete="off" name="oob_id"
                            form="librenms-mapping-edit-{{ forloop.counter }}"
                            value="{{ row.oob_id|default_if_none:'' }}"
-                           class="form-control form-control-sm librenms-mapping-id"
+                           class="form-control form-control-sm"
                            aria-label="OOB controller ID on {{ row.display_name }}">
                 </td>
                 <td>
                     <select name="oob_type" form="librenms-mapping-edit-{{ forloop.counter }}"
-                            class="form-select form-select-sm librenms-mapping-type"
+                            class="form-select form-select-sm no-ts"
                             aria-label="OOB type on {{ row.display_name }}">
                         <option value="">---------</option>
                         {% for oob_type in mapping_editor.oob_types %}
