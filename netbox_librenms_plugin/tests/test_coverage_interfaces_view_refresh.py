@@ -76,7 +76,7 @@ class TestInterfaceViewSelectRelatedField:
         view = VMInterfaceTableView()
 
         assert view.get_select_related_field(vm) == "virtual_machine"
-        maps = view._build_interface_lookup_maps(vm)
+        maps = view._build_interface_lookup_maps([vm])[vm.pk]
         assert set(maps["by_name"]) == {"eth0"}
 
 
