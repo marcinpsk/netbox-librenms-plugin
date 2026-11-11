@@ -60,10 +60,9 @@
     <div>
         <strong>No mapped LibreNMS server is usable.</strong>
         Every mapping below is disabled, so no sync tab can run against this object.
-        {% if lookup_device_pk != object.pk %}
-        The mappings belong to the virtual chassis sync device. Correct or remove them on
-        <a href="{% if lookup_device_model_name == 'virtualmachine' %}{% url 'plugins:netbox_librenms_plugin:vm_librenms_sync' pk=lookup_device_pk %}{% else %}{% url 'plugins:netbox_librenms_plugin:device_librenms_sync' pk=lookup_device_pk %}{% endif %}"
-           class="alert-link">that device&#39;s LibreNMS tab</a>.
+        {% if mapping_owner.pk != object.pk %}
+        The mappings belong to the virtual chassis member {{ mapping_owner }}. Correct or remove them on
+        <a href="{{ mapping_owner_sync_url }}" class="alert-link">that device&#39;s LibreNMS tab</a>.
         {% else %}
         Each mapping has an Unlink action beside it. Unlink a mapping that you no longer need, or
         repair the URL and API token of its server in the plugin configuration.
@@ -212,13 +211,13 @@
                     {% if can_manage_server_preference and mapping.is_selectable %}
                     {% if not mapping.is_preferred %}
                     <form method="post"
-                          action="{% url 'plugins:netbox_librenms_plugin:set_preferred_server' pk=lookup_device_pk %}"
+                          action="{% url 'plugins:netbox_librenms_plugin:set_preferred_server' pk=mapping_owner.pk %}"
                           class="d-inline me-2">
                         {% csrf_token %}
                         <input type="hidden" name="server_key" value="{{ mapping.server_key }}">
                         <input type="hidden" name="active_server_key" value="{{ server_key|default:'' }}">
                         <input type="hidden" name="tab" value="{{ active_sync_tab|default:'' }}">
-                        <input type="hidden" name="object_type" value="{{ lookup_device_model_name }}">
+                        <input type="hidden" name="object_type" value="{{ mapping_owner|meta:'model_name' }}">
                         <button type="submit" class="btn btn-sm btn-outline-warning"
                                 title="Make {{ mapping.display_name }} the preferred server"
                                 aria-label="Make {{ mapping.display_name }} the preferred server">
@@ -233,18 +232,17 @@
                         <i class="mdi mdi-information-outline me-1" aria-hidden="true"></i>Repair this server in the plugin configuration
                     </span>
                     {% endif %}
-                    {% if lookup_device_pk == object.pk %}
                     {% if can_unlink %}
                     {# The confirmation names every effect first; the sync page reopens on the remembered tab. #}
-                    <a href="{% url 'plugins:netbox_librenms_plugin:mapping_lifecycle' object_type=lookup_device_model_name pk=lookup_device_pk %}?action=unlink&amp;server_key={{ mapping.server_key|urlencode }}"
+                    <a href="{% url 'plugins:netbox_librenms_plugin:mapping_lifecycle' object_type=mapping_owner|meta:'model_name' pk=mapping_owner.pk %}?action=unlink&amp;server_key={{ mapping.server_key|urlencode }}"
                        class="btn btn-sm btn-outline-danger" data-unlink-server="{{ mapping.server_key }}"
                        aria-label="Unlink from {{ mapping.display_name }}">
                         <i class="mdi mdi-link-variant-off" aria-hidden="true"></i> Unlink
                     </a>
-                    {% endif %}
-                    {% elif has_write_permission %}
-                    <span class="text-muted small" title="Mapping belongs to {% if visible_sync_device %}VC sync device {{ visible_sync_device.name }}{% else %}the VC sync device{% endif %}; unlink it there">
-                        <i class="mdi mdi-information-outline me-1" aria-hidden="true"></i>Managed by VC sync device
+                    {% elif mapping_owner and mapping_owner.pk != object.pk and has_write_permission %}
+                    <span class="text-muted small" title="The mapping belongs to VC member {{ mapping_owner }}; unlink it there">
+                        <i class="mdi mdi-information-outline me-1" aria-hidden="true"></i>Managed on
+                        <a href="{{ mapping_owner_sync_url }}">{{ mapping_owner }}</a>
                     </span>
                     {% endif %}
                 </td>

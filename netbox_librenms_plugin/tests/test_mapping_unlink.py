@@ -44,6 +44,7 @@ from netbox_librenms_plugin.tests.mapping_fixtures import (
     seed_quarantined,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import domain_state, grant, make_user_with_perms
+from netbox_librenms_plugin.views.sync.mapping_lifecycle import sync_page_url
 
 PERMISSIONS = [
     (action, model) for model in (Device, VirtualMachine, Interface, VMInterface) for action in ("view", "change")
@@ -573,6 +574,34 @@ def test_an_object_mapped_only_on_an_unconfigured_server_resolves_like_an_unmapp
         (context["server_selection_state"], context["server_selection_error"]) for context in requested
     )
     assert owner_state == unmapped_state
+
+
+def _connections_card(response):
+    body = response.content.decode()
+    start = body.index('id="librenms-connections"')
+    return body[start : body.index("<!-- ", start)]
+
+
+@pytest.mark.django_db
+def test_a_chassis_member_with_an_unconfigured_entry_offers_its_unlink_while_another_member_syncs(writer, server):
+    chassis, (stale_owner, sync_member) = make_virtual_chassis_members("unlink-stale-owner")
+    chassis.master = sync_member
+    chassis.save()
+    give_primary_ip(sync_member, "203.0.113.203/24")
+    register_match(server, "203.0.113.203", 4530, hostname=sync_member.name)
+    seed_mapping(_fresh(stale_owner), "retired", own=4531)
+    before = domain_state()
+
+    owner_page, member_page = (sync_page(writer, obj) for obj in (stale_owner, sync_member))
+
+    assert domain_state() == before
+    assert mapping_summary(_fresh(stale_owner)) == {"retired": {"own": 4531}}
+    for page in (owner_page, member_page):
+        assert (page.context["server_key"], page.context["lookup_device_pk"]) == ("default", sync_member.pk)
+    owner_card, member_card = (_connections_card(page) for page in (owner_page, member_page))
+    assert f"{lifecycle_url(stale_owner)}?action=unlink&amp;server_key=retired" in owner_card
+    assert "data-unlink-server" not in member_card
+    assert f'href="{sync_page_url(stale_owner)}"' in member_card
 
 
 @pytest.mark.django_db
