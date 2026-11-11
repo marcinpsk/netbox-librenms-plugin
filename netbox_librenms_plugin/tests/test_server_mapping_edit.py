@@ -460,3 +460,31 @@ def test_a_vc_member_edits_its_own_mapping_when_another_member_serves_the_active
     second.refresh_from_db()
     assert mapping_summary(first) == {"primary": {"own": 14203}, "secondary": {"oob": 14201, "oob_type": "ilo"}}
     assert mapping_summary(second) == {"secondary": {"own": 14202}}
+
+
+@pytest.mark.django_db
+def test_the_editor_shows_the_own_id_that_discovery_stored_on_a_vc_member(client, servers):
+    """Discovery writes the member through another instance; the next OOB edit must not read as a change."""
+    _chassis, (first, _second) = make_virtual_chassis_members("edit-vc-discovery")
+    seed_mapping(first, "primary", own=14400)
+    _register_device(servers.secondary, 14402, first.name)
+    servers.secondary.register(
+        f"/api/v0/devices/{first.name}",
+        {"status": "ok", "devices": [{"device_id": 14402, "sysName": first.name, "hostname": first.name}]},
+    )
+    client.force_login(make_superuser("edit-vc-discovery-writer"))
+    created = _submit(client, first, "secondary", oob_id="14401", oob_type="idrac")
+    rendered = client.get(created.url)
+    assert rendered.status_code == 200
+    parser = _EditorForms()
+    parser.feed(rendered.content.decode())
+    form = next(form for form in parser.forms.values() if form["fields"]["server_key"] == "secondary")
+
+    response = client.post(form["action"], {**form["fields"], "oob_id": "14403", "oob_type": "ilo"})
+
+    assert response.status_code == 302
+    first.refresh_from_db()
+    assert mapping_summary(first) == {
+        "primary": {"own": 14400},
+        "secondary": {"own": 14402, "oob": 14403, "oob_type": "ilo"},
+    }

@@ -233,7 +233,9 @@ class BaseLibreNMSSyncView(
         # A VC member edits the mapping on the page of the device that owns it.
         if owner is None or type(owner) is not type(obj) or owner.pk != obj.pk or not self.has_write_permission():
             return None
-        if not self.restricted_queryset(type(owner), "change").filter(pk=owner.pk).exists():
+        # A fresh read: discovery on this request can store an own ID through another instance of the row.
+        owner = self.restricted_queryset(type(owner), "change").filter(pk=owner.pk).first()
+        if owner is None:
             return None
         mapping = read_mapping(owner)
         if mapping.container not in (ContainerStatus.ABSENT, ContainerStatus.SCOPED):
