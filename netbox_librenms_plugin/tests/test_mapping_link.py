@@ -171,6 +171,54 @@ class TestLinkWritesOnTheStoredMapping:
         }
 
 
+# A change grant that admits only objects without a stored mapping: a Link moves its object out of it.
+_UNMAPPED_ONLY = [{"custom_field_data__librenms_id__isnull": True}, {"custom_field_data__librenms_id": None}]
+
+
+def _unmapped_only_writer(client, tag):
+    user = make_user_with_perms(f"scope-after-{tag}", [("view", Device)])
+    client.force_login(grant(user, "change", Device, constraints=_UNMAPPED_ONLY))
+    return client
+
+
+@pytest.mark.django_db
+class TestLinkStaysInTheChangeScope:
+    """The saved object must still be in the actor's change scope; else its link rolls back."""
+
+    def test_a_link_that_moves_the_object_out_of_the_scope_is_refused(self, client, server):
+        device = _matched("device", "scope-after-single", server, "203.0.113.130", 9900)
+        writer = _unmapped_only_writer(client, "single")
+        token = page_token(writer, device)
+        before = domain_state()
+
+        response = link(writer, device, [token])
+
+        assert domain_state() == before
+        assert not any(text.startswith("Linked ") for text in message_texts(response))
+
+    def test_a_refused_row_rolls_back_alone_and_the_other_rows_link(self, client, server):
+        first = _matched("device", "scope-after-first", server, "203.0.113.131", 9901)
+        second = _matched("device", "scope-after-second", server, "203.0.113.132", 9902)
+        writer = _unmapped_only_writer(client, "bulk")
+        tokens = [page_token(writer, first), page_token(writer, second)]
+        # Only the first row leaves the scope: the grant admits the second by name too.
+        from users.models import ObjectPermission
+
+        permission = ObjectPermission.objects.get(
+            users__username="scope-after-bulk", actions=["change"], object_types__model="device"
+        )
+        permission.constraints = [*_UNMAPPED_ONLY, {"name": second.name}]
+        permission.save()
+
+        response = link_selected(writer, "device", tokens)
+
+        assert mapping_summary(_fresh(first)) == {}
+        assert mapping_summary(_fresh(second)) == {"default": {"own": 9902}}
+        texts = message_texts(response)
+        assert any(text.startswith(f"'{first.name}': ") for text in texts)
+        assert any(text.startswith(f"Linked '{second.name}'") for text in texts)
+
+
 @pytest.mark.django_db
 class TestSyncPageAnswers:
     def test_a_device_without_a_match_is_not_found(self, linker, server):

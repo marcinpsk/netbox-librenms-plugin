@@ -14,6 +14,7 @@ from django.urls import reverse
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
 from ipam.models import IPAddress
+from utilities.exceptions import PermissionsViolation
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin import confirmation_intent as intent
@@ -29,7 +30,7 @@ from netbox_librenms_plugin.server_mappings import (
     persist_mapping,
 )
 from netbox_librenms_plugin.sync_cache import SyncTab
-from netbox_librenms_plugin.transactions import classify_conflict, run_transaction
+from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, saved_in_scope
 from netbox_librenms_plugin.utils import exception_text_for
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 from netbox_librenms_plugin.views.sync.device_fields import _save_mapping_fields
@@ -115,6 +116,11 @@ class _LinkWriter(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMS
             with transaction.atomic():
                 row.snapshot()
                 persist_mapping(row, assign_own(row, operation.identity.server, own_id), write=_save_mapping_fields)
+                # A change constraint can read the mapping, so the stored link can move the row out of the scope.
+                if not saved_in_scope(row, request.user, "change"):
+                    raise PermissionsViolation()
+        except PermissionsViolation:
+            return messages.ERROR, f"'{row.name}': the linked object is outside your change permission; not linked."
         except IdentityOwned as exc:
             visible = visible_object_label(exc.owner, request.user)
             owner = f"{visible[0]} '{visible[1]}'" if visible else "another object outside your view scope"
