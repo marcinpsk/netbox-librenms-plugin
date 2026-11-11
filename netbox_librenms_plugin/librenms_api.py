@@ -172,7 +172,7 @@ def _keep_redirect_body_unread(response, **kwargs):
 def _read_body(response, ends_at):
     """Return the body of a streamed response, or None when it exceeds the size cap or *ends_at* passes."""
     parts, size = [], 0
-    while part := response.raw.read1(65536, decode_content=True):
+    while part := response.raw.read1(65536, decode_content=False):
         size += len(part)
         if size > MATCH_PROBE_MAX_BYTES or time.monotonic() >= ends_at:
             return None
@@ -184,7 +184,7 @@ def _match_probe(answer, slots, url, headers, timeout, verify, ends_at):
     """
     Run one match probe GET with a session of its own, set *answer*, and free the probe slot.
 
-    The body is read until it ends, passes the size cap, or the caller's deadline *ends_at* (a
+    The body is read undecoded until it ends, passes the size cap, or the caller's deadline *ends_at* (a
     ``time.monotonic()`` value) passes. A transport or configuration error (a missing CA bundle
     raises a plain OSError) is no answer from the server. Any other error is a bug; the caller
     raises it while it still waits.
@@ -203,6 +203,9 @@ def _match_probe(answer, slots, url, headers, timeout, verify, ends_at):
             try:
                 if 300 <= response.status_code < 400:
                     answer.value = response.status_code, None
+                elif response.headers.get("Content-Encoding", "identity").strip().lower() not in ("", "identity"):
+                    # The probe asked for none; an encoded body could expand past the size cap when decoded.
+                    answer.value = None, None
                 elif (body := _read_body(response, ends_at)) is None:
                     answer.value = None, None
                 else:
@@ -585,8 +588,9 @@ class LibreNMSAPI:
         waits for it only that long: a socket timeout limits each wait for data, not the whole
         request. The thread holds one of the ``MATCH_PROBE_WORKERS`` slots of its server, and stops
         reading the body at the deadline; a probe that finds no free slot does not run. A redirect is
-        not followed: its own status comes back. A transport error, or a body over
-        ``MATCH_PROBE_MAX_BYTES``, yields ``(None, None)``, and a non-JSON body ``(status_code, None)``.
+        not followed: its own status comes back. The probe asks for an unencoded body. A transport
+        error, an encoded body, or a body over ``MATCH_PROBE_MAX_BYTES`` yields ``(None, None)``, and a
+        non-JSON body ``(status_code, None)``.
 
         Args:
             path (str): API path relative to ``/api/v0/``.
@@ -608,7 +612,7 @@ class LibreNMSAPI:
                 answer,
                 slots,
                 f"{self.librenms_url}/api/v0/{path.lstrip('/')}",
-                dict(self.headers),
+                {**self.headers, "Accept-Encoding": "identity"},
                 min(DEFAULT_API_TIMEOUT, left),
                 self.verify_ssl,
                 time.monotonic() + left,
