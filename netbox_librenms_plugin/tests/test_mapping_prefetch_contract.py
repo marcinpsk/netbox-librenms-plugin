@@ -24,6 +24,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_cluster,
     make_device,
     make_interface,
+    make_ip,
     make_superuser,
     make_virtual_chassis_members,
     make_vm,
@@ -849,3 +850,81 @@ def test_the_import_list_prefetches_every_matched_object(live_librenms):
         assert len({obj.pk for obj in spy.saved_reads()}) == len(rows)
         assert spy.prefetch_calls == 1, "the list loads its matched objects in one batch, not one per row"
         _assert_prefetched(spy)
+
+
+def _import_row(device_id, hostname, *, serial="", ip=None):
+    from netbox_librenms_plugin.tests.test_coverage_bulk_import import _libre_device
+
+    row = _libre_device(device_id, hostname, serial=serial)
+    row["sysName"] = hostname
+    row["ip"] = ip if ip is not None else f"198.19.{device_id % 250}.{device_id // 250 % 250}"
+    return row
+
+
+def _ip_only_rows(tag, base):
+    """Return import rows that match a Device and a VM only by management IP, a generated name and a padded serial."""
+    from dcim.models import Device
+    from virtualization.models import VMInterface
+
+    host = make_device(f"{tag}-ip-device")
+    make_ip(f"198.18.{base % 250}.1/24", assigned_object=make_interface(host, "mgmt0"))
+    vm = make_vm(f"{tag}-ip-vm")
+    make_ip(f"198.18.{base % 250}.2/24", assigned_object=VMInterface.objects.create(virtual_machine=vm, name="eth0"))
+    make_device(f"device-{base + 2}")
+    padded = make_device(f"{tag}-padded")
+    # Another tool can store padding, and a tab, that the serial lookup trims.
+    Device.objects.filter(pk=padded.pk).update(serial=f"\t{tag.upper()}-SN ")
+    return [
+        _import_row(base, f"{tag}-other-a", ip=f"198.18.{base % 250}.1"),
+        _import_row(base + 1, f"{tag}-other-b", ip=f"198.18.{base % 250}.2"),
+        _import_row(base + 2, ""),
+        _import_row(base + 3, f"{tag}-other-d", serial=f"{tag.upper()}-SN"),
+    ]
+
+
+@pytest.mark.django_db
+def test_the_import_list_prefetches_the_ip_name_and_serial_matches(live_librenms):
+    """IP-only, generated-name and padded-serial matches, and a cached row that gains a match, come from the one batch."""
+    from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
+
+    live_librenms.api.cache_timeout = 300
+    rows = [*_ip_only_rows("imp-batch", 7100), _import_row(7104, "imp-batch-late-row", ip="198.18.240.9")]
+    live_librenms.server.register("/api/v0/devices", {"status": "ok", "devices": rows})
+
+    def validate(clear_cache):
+        with spy_mapping_reads() as spy:
+            validated = process_device_filters(
+                live_librenms.api,
+                {"hostname": "imp-batch"},
+                vc_detection_enabled=False,
+                clear_cache=clear_cache,
+                show_disabled=True,
+            )
+        return {row["device_id"]: row["_validation"]["existing_device"] for row in validated}, spy
+
+    matched, spy = validate(clear_cache=True)
+    assert [device_id for device_id, existing in matched.items() if existing is None] == [7104]
+    assert spy.prefetch_calls == 1
+    _assert_prefetched(spy)
+
+    # The cached unmatched row gains a match by its management IP.
+    late = make_device("imp-batch-late")
+    make_ip("198.18.240.9/24", assigned_object=make_interface(late, "mgmt0"))
+    matched, spy = validate(clear_cache=False)
+    assert matched[7104] == late
+    assert all(existing is not None for existing in matched.values())
+    assert spy.prefetch_calls == 1
+    _assert_prefetched(spy)
+
+
+@pytest.mark.django_db
+def test_the_import_preload_runs_a_fixed_number_of_queries():
+    from netbox_librenms_plugin.import_utils.device_operations import preload_import_objects
+
+    few = _ip_only_rows("imp-few", 7200)
+    many = [row for index in range(8) for row in _ip_only_rows(f"imp-many{index}", 7300 + index * 10)]
+    preload_import_objects(few, SERVER_KEY)
+
+    counts = [_query_count(lambda rows=rows: preload_import_objects(rows, SERVER_KEY)) for rows in (few, many)]
+
+    assert counts[0] == counts[1], counts
