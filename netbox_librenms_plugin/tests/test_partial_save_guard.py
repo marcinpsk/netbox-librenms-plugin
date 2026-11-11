@@ -62,13 +62,6 @@ ALLOWED = [
         "storage; last_updated is added here.",
     ),
     (
-        "views/sync/modules.py",
-        "_bind_interface_librenms_id.save",
-        "row",
-        NOT_A_LITERAL,
-        "update_fields holds only module and the mapping storage; last_updated is added at the save.",
-    ),
-    (
         "server_mappings.py",
         "save_mapping_fields",
         "row",

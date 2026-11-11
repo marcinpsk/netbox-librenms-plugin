@@ -45,6 +45,7 @@ from netbox_librenms_plugin.server_mappings import (
     persist_mapping,
     prefetch_mappings,
     read_mapping,
+    save_mapping_fields,
 )
 from netbox_librenms_plugin.serial_identity import (
     RELOCATION_HELD,
@@ -851,7 +852,20 @@ def _module_may_own_interface(device, module_pk, name):
     return get_module_adoptable_interface_names(device, module).may_move(name)
 
 
-# Its own savepoint: callers catch a non-conflict error and keep their transaction.
+def _lock_module_on_device(module_pk, device_id):
+    """Lock the module row and return whether the module is still on *device_id*."""
+    from dcim.models import Module
+
+    return (
+        Module.objects.select_for_update(of=("self",))
+        .filter(pk=module_pk, device_id=device_id)
+        .values_list("pk", flat=True)
+        .first()
+        is not None
+    )
+
+
+# Its own savepoint: callers keep their transaction for a non-conflict error, but not for a refusal.
 @row_savepoint()
 def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces):
     """
@@ -873,6 +887,8 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
 
     Raises:
         LibreNMSPortBindingBusy: Another open transaction holds the claim on the port.
+        _ModuleActionRefused: The module is no longer on the device, so the whole action rolls back.
+        ValidationError: A field that the bind writes is not valid.
 
     """
     port_id, interface_names = _get_item_port_identity(item)
@@ -931,7 +947,13 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
         update_fields.append("module")
 
     def save(row, mapping_fields=frozenset()):
-        row.save(update_fields=[*update_fields, *mapping_fields, "last_updated"])
+        # NetBox does not check that the module is on the interface's device; the lock waits for a move.
+        if set_module and not _lock_module_on_device(module_pk, row.device_id):
+            raise _ModuleActionRefused(
+                f"Nothing was changed: the module is no longer on the device of {row.name}. Refresh and try again."
+            )
+        # A ValidationError reaches the caller's handler, which shows the text that the user may read.
+        save_mapping_fields(row, [*update_fields, *mapping_fields])
 
     if bind_port:
         persist_mapping(candidate, assign_own(candidate, server_key, port_id), write=save)
@@ -1145,6 +1167,8 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                             server_key,
                             changeable_interfaces,
                         )
+                    except _ModuleActionRefused:
+                        raise
                     except Exception as exc:
                         if classify_conflict(exc):
                             raise
@@ -1361,6 +1385,9 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                             changeable_interfaces,
                         )
                         bound_any = _record_bind_outcome(bind_result, result, skipped) or bound_any
+        except _ModuleActionRefused as exc:
+            exc.report(request)
+            return
         except (AbortRequest, ValidationError, IntegrityError) as e:
             if classify_conflict(e):
                 raise
@@ -2343,6 +2370,8 @@ class UpdateModuleInterfaceView(
                 server_key,
                 changeable_interfaces,
             )
+        except _ModuleActionRefused:
+            raise
         except Exception as exc:
             if classify_conflict(exc):
                 raise
@@ -3040,6 +3069,8 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                             server_key,
                             changeable_interfaces,
                         )
+                    except _ModuleActionRefused:
+                        raise
                     except Exception as exc:
                         if classify_conflict(exc):
                             raise

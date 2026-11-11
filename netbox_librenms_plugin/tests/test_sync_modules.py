@@ -2132,6 +2132,85 @@ def test_a_module_writer_refuses_a_member_that_leaves_the_chassis_before_its_loc
     assert flushed_events == []
 
 
+def _moved_module_world(tag, user):
+    """Render the install forms of a card row, then install the card and leave its template interface standalone."""
+    from dcim.models import Device, InterfaceTemplate, Module
+
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
+
+    world = _leave_world(tag)
+    page = Device.objects.get(pk=world["page"].pk)
+    rows = [
+        _inventory_item(1, "", "Member chassis", serial=world["member"].serial, phys_class="chassis"),
+        _inventory_item(2, world["card_type"].model, "Card", parent=1, serial=world["serial"]),
+        _inventory_item(3, f"{tag.upper()}-OPTIC", "Optic", parent=2),
+    ]
+
+    def seed():
+        seed_mapped_modules(
+            Device.objects.get(pk=page.pk),
+            rows,
+            ports=[{"port_id": 7001, "ifName": "c2/1"}],
+            transceivers=[transceiver_row(2, port_id=7001, model=world["card_type"].model)],
+        )
+
+    seed()
+    html = render_module_tab(page, user=user)
+    forms = {
+        "branch": rendered_module_form(html, "install-branch", 2),
+        "selected": rendered_module_form(html, "install-selected", None),
+    }
+    forms["selected"][1]["select"] = ["2"]
+    InterfaceTemplate.objects.create(module_type=world["card_type"], name="c2/1", type="other")
+    # Another user installs the card after the render, so the install finds the bay occupied.
+    card = Module.objects.create(
+        device=world["member"], module_bay=world["bay"], module_type=world["card_type"], serial=world["serial"]
+    )
+    interface = world["member"].interfaces.get(name="c2/1")
+    interface.module = None
+    interface.save()
+    other_device = make_device_with_module_bays(f"{tag}-elsewhere", ["Elsewhere Bay"])
+    # A module write clears the cached inventory on commit.
+    seed()
+    return {**world, "forms": forms, "card": card, "interface": interface, "elsewhere": other_device}
+
+
+@transactional_db_with_all_apps()
+@pytest.mark.parametrize("writer", ["branch", "selected"])
+def test_a_bind_refuses_a_module_that_moves_to_another_device_before_the_interface_save(client, flushed_events, writer):
+    """The install finds the bay occupied and binds the row's port, while another transaction moves that module."""
+    from dcim.models import Interface, Module
+
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_when_waited
+    from netbox_librenms_plugin.views.mixins import CacheMixin
+
+    user = make_superuser(f"moved-module-{writer}-user")
+    client.force_login(user)
+    world = _moved_module_world(f"moved-{writer}", user)
+    action, fields = world["forms"][writer]
+    elsewhere_bay = world["elsewhere"].modulebays.get(name="Elsewhere Bay")
+    try:
+
+        def move(other):
+            with other.cursor() as cursor:
+                cursor.execute(
+                    'UPDATE "dcim_module" SET "device_id" = %s, "module_bay_id" = %s WHERE id = %s',
+                    [world["elsewhere"].pk, elsewhere_bay.pk, world["card"].pk],
+                )
+
+        flushed_events.clear()
+        response = commit_when_waited(move, lambda: client.post(action, fields))
+    finally:
+        cache.delete(CacheMixin().get_cache_key(world["page"], "inventory", "default"))
+
+    interface = Interface.objects.get(pk=world["interface"].pk)
+    assert (interface.module_id, read_mapping(interface).own_id("default")) == (None, None)
+    assert Module.objects.filter(pk=world["card"].pk, device=world["elsewhere"]).exists()
+    assert flushed_events == []
+    assert response.status_code == 302
+    assert message_texts(response.wsgi_request, "error")
+
+
 class TestModulesRedirectResponse:
     """_modules_redirect_response: the classic (non-HTMX) redirect back to the modules tab."""
 
