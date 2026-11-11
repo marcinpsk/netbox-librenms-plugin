@@ -362,6 +362,9 @@ class TestStatusLists:
         assert not any("198.18.1.1" in request["path"] for request in server.requests)
 
     def test_matching_stops_at_the_deadline_and_reports_the_rows_not_checked(self, linker, server, monkeypatch):
+        import json
+        import time
+
         from netbox_librenms_plugin.views.status_check import STATUS_MATCH_DEADLINE_SECONDS
 
         cluster = make_cluster("link-deadline")
@@ -370,22 +373,25 @@ class TestStatusLists:
         vms = [_object("virtualmachine", f"deadline-{index}", cluster=cluster) for index in range(3)]
         for index, vm in enumerate(vms):
             give_primary_ip(vm, f"198.18.2.{index + 1}/24")
+        body = json.dumps({"status": "ok", "devices": [{"device_id": 9100, "hostname": "deadline-0"}]}).encode()
 
-        def slow_answer(**request):
-            # This probe takes longer than the whole deadline of the request.
-            now[0] += STATUS_MATCH_DEADLINE_SECONDS + 1
-            return 200, {"status": "ok", "devices": [{"device_id": 9100, "hostname": "deadline-0"}]}
+        def time_passes(index):
+            if index == 0:
+                now[0] += STATUS_MATCH_DEADLINE_SECONDS + 1
 
-        server.register("/api/v0/devices/198.18.2.1", slow_answer)
+        # The first answer starts, then the whole deadline passes while the rest of its body is on the way.
+        server.register_streamed("/api/v0/devices/198.18.2.1", [body[:10], body[10:]], pause=3, before_each=time_passes)
         before = domain_state()
+        started = time.perf_counter()
 
         response = status_list(linker, "virtualmachine", cluster=cluster.pk)
 
+        assert time.perf_counter() - started < 3
         assert domain_state() == before
         rows = _status_rows(response)
-        assert [rows[vm.pk].state for vm in vms] == ["match", "not_checked", "not_checked"]
+        assert [rows[vm.pk].state for vm in vms] == ["not_checked", "not_checked", "not_checked"]
         assert [request["path"] for request in server.requests] == ["/api/v0/devices/198.18.2.1"]
-        assert any(text.startswith("2 of 3 unlinked objects") for text in message_texts(response))
+        assert any(text.startswith("3 of 3 unlinked objects") for text in message_texts(response))
 
     def test_an_unreachable_server_is_not_checked_rather_than_not_found(self, linker, server):
         cluster = make_cluster("link-unreachable-list")

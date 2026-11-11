@@ -128,9 +128,8 @@ def _text(value):
     return value if isinstance(value, str) and value else None
 
 
-def _probe(api, value, timeout):
-    """Ask LibreNMS for one device; return the result, and the device record of a match."""
-    status, body = api.get_response(f"devices/{quote(value, safe='')}", timeout=timeout)
+def _decode(status, body):
+    """Return the result of one probe answer, and the device record of a match."""
     if status == HTTP_NOT_FOUND:
         return ProbeResult.NO_MATCH, None
     if status is None or not 200 <= status < 300 or not isinstance(body, dict):
@@ -152,7 +151,8 @@ def find_librenms_match(obj, api, *, deadline=None):
     Args:
         obj (Device | VirtualMachine): The NetBox object.
         api (LibreNMSAPI): A client bound to the server.
-        deadline (Deadline | None): Send no probe after it; a probe waits at most the time left.
+        deadline (Deadline | None): Send no probe after it, stop reading an answer at it, and use no answer
+            that arrives after it.
 
     Returns:
         Match | NoMatch | Unreachable | NotChecked: The answer, with every probe it sent.
@@ -160,13 +160,13 @@ def find_librenms_match(obj, api, *, deadline=None):
     """
     inputs = LookupInputs.of(obj)
     probes = []
+    remaining = deadline.remaining if deadline is not None else lambda: DEFAULT_API_TIMEOUT
     for candidate, value in inputs.values():
-        timeout = DEFAULT_API_TIMEOUT
-        if deadline is not None:
-            timeout = min(timeout, deadline.remaining())
-            if timeout <= 0:
-                return NotChecked(inputs, tuple(probes))
-        result, device = _probe(api, value, timeout)
+        answer = api.get_response_before(f"devices/{quote(value, safe='')}", remaining)
+        # A late answer is never used: the request has already spent the time of the other rows.
+        if answer is None or remaining() <= 0:
+            return NotChecked(inputs, tuple(probes))
+        result, device = _decode(*answer)
         probes.append(Probe(candidate, value, result))
         if result is ProbeResult.MATCH:
             return Match(
@@ -178,7 +178,5 @@ def find_librenms_match(obj, api, *, deadline=None):
                 probes=tuple(probes),
             )
         if result is ProbeResult.UNREACHABLE:
-            if deadline is not None and deadline.remaining() <= 0:
-                return NotChecked(inputs, tuple(probes))
             return Unreachable(inputs, tuple(probes))
     return NoMatch(inputs, tuple(probes))

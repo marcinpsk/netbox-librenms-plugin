@@ -15,6 +15,7 @@ import copy
 import ipaddress
 import json
 import threading
+import time
 from collections import deque
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -39,6 +40,17 @@ class _RawResponse:
 
 class _DisconnectResponse:
     """Close the HTTP connection without sending a response."""
+
+
+class _StreamedResponse:
+    """One response whose body the test server sends in parts, with a call and a pause before each part."""
+
+    def __init__(self, status, chunks, headers, pause, before_each):
+        self.status = status
+        self.chunks = [chunk.encode() if isinstance(chunk, str) else chunk for chunk in chunks]
+        self.headers = headers
+        self.pause = pause
+        self.before_each = before_each
 
 
 _DISCONNECT_RESPONSE = _DisconnectResponse()
@@ -107,6 +119,9 @@ class _LibreNMSHandler(BaseHTTPRequestHandler):
                 if isinstance(entry, _RawResponse):
                     self._send_body(entry.status, entry.body, entry.content_type)
                     return
+                if isinstance(entry, _StreamedResponse):
+                    self._send_streamed(entry)
+                    return
                 if callable(entry):
                     status, resp_body = entry(**request)
                 else:
@@ -115,6 +130,24 @@ class _LibreNMSHandler(BaseHTTPRequestHandler):
                 return
 
         self._send_json(404, {"status": "error", "message": f"No mock for {self.path}"})
+
+    def _send_streamed(self, entry):
+        self.send_response(entry.status)
+        for name, value in entry.headers.items():
+            self.send_header(name, value)
+        self.send_header("Content-Length", str(sum(len(chunk) for chunk in entry.chunks)))
+        try:
+            self.end_headers()
+            for index, chunk in enumerate(entry.chunks):
+                if index:
+                    time.sleep(entry.pause)
+                if entry.before_each is not None:
+                    entry.before_each(index)
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            # The client stopped reading the body, which is what a deadline test expects.
+            pass
 
     def do_GET(self):
         self._handle_request("GET")
@@ -203,6 +236,15 @@ class MockLibreNMSServer:
         """Register a response body without JSON encoding it."""
         key = f"{method} {path}" if method else path
         self._server.routes[key] = _RawResponse(status, body, content_type)
+
+    def register_streamed(self, path: str, chunks, *, status=200, headers=None, pause=0.0, before_each=None):
+        """Register a response that sends *chunks* one by one, pausing *pause* seconds and calling *before_each*."""
+        headers = {"Content-Type": "application/json", **(headers or {})}
+        self._server.routes[path] = _StreamedResponse(status, chunks, headers, pause, before_each)
+
+    def register_redirect(self, path: str, location: str, status: int = 302):
+        """Register a response that redirects to *location*."""
+        self.register_streamed(path, [b""], status=status, headers={"Location": location})
 
     def register_disconnect(self, path: str, method: str | None = None):
         """Register a route that closes the connection before sending a response."""

@@ -1,9 +1,11 @@
+import json
 import logging
 import math
 import urllib.parse
 from dataclasses import dataclass
 
 import requests
+import urllib3
 from django.core.cache import cache
 from netbox.plugins import get_plugin_config
 
@@ -485,6 +487,55 @@ class LibreNMSAPI:
         except ValueError:
             body = None
         return response.status_code, body
+
+    def get_response_before(self, path: str, remaining) -> tuple[int | None, object] | None:
+        """
+        Issue a GET that must finish before a deadline, and return ``(status_code, body)``, or None after it.
+
+        ``remaining()`` returns the seconds left. A socket timeout limits each wait for data only, so the
+        body is read in parts and the read stops when no time is left. A redirect is not followed: its
+        own status comes back. A transport error yields ``(None, None)``, and a non-JSON body
+        ``(status_code, None)``.
+
+        Args:
+            path (str): API path relative to ``/api/v0/``.
+            remaining (Callable[[], float]): The seconds left before the deadline.
+
+        Returns:
+            tuple | None: ``(status, body)``, or None when the deadline passed first.
+
+        """
+        timeout = min(DEFAULT_API_TIMEOUT, remaining())
+        if timeout <= 0:
+            return None
+        try:
+            response = _session.get(
+                f"{self.librenms_url}/api/v0/{path.lstrip('/')}",
+                headers=self.headers,
+                timeout=timeout,
+                verify=self.verify_ssl,
+                stream=True,
+                allow_redirects=False,
+            )
+        except requests.exceptions.RequestException:
+            return None if remaining() <= 0 else (None, None)
+        with response:
+            if response.is_redirect:
+                return response.status_code, None
+            parts = []
+            try:
+                while part := response.raw.read1(65536, decode_content=True):
+                    if remaining() <= 0:
+                        return None
+                    parts.append(part)
+            except (requests.exceptions.RequestException, OSError, urllib3.exceptions.HTTPError):
+                return None if remaining() <= 0 else (None, None)
+        if remaining() <= 0:
+            return None
+        try:
+            return response.status_code, json.loads(b"".join(parts))
+        except ValueError:
+            return response.status_code, None
 
     def add_device(self, data):
         """
