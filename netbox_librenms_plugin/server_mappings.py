@@ -21,7 +21,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from django.db import DEFAULT_DB_ALIAS, connections, transaction
+from django.db import DEFAULT_DB_ALIAS, connections
 from django.db.models import JSONField, Q
 
 from netbox_librenms_plugin.constants import OOB_TYPE_PATTERN, OOB_TYPES, normalize_oob_type
@@ -30,7 +30,7 @@ from netbox_librenms_plugin.librenms_ids import (
     librenms_id_text_pattern,
     normalize_librenms_port_id,
 )
-from netbox_librenms_plugin.transactions import TransactionConflict, recorded_conflict
+from netbox_librenms_plugin.transactions import TransactionConflict, atomic_with_events, recorded_conflict
 
 logger = logging.getLogger(__name__)
 
@@ -1783,7 +1783,7 @@ def persist_merge(change: MergeChange, *, write: Callable[[], object]):
         RuntimeError: ``write`` did not persist each side exactly once.
 
     """
-    with transaction.atomic():
+    with atomic_with_events():
         for side in (change.winner, change.donor):
             row = side._model.objects.select_for_update().get(pk=side._pk)
             if read_mapping(row) != side.before:

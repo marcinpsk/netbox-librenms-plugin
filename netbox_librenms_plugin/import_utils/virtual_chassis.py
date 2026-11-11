@@ -850,7 +850,7 @@ def create_virtual_chassis_with_members(
     if master_pos is None:
         raise ValueError("master_member must be one of the prepared members")
 
-    # Save originals for in-memory rollback — transaction.atomic() rolls back DB but
+    # Save originals for in-memory rollback — the atomic block rolls back DB but
     # not in-memory model fields.
     original_master_name = master_device.name
     original_vc = master_device.virtual_chassis

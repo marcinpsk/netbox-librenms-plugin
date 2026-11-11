@@ -3,7 +3,6 @@
 import logging
 
 from dcim.models import Device, DeviceRole, Site
-from django.db import transaction
 from django.utils import timezone
 from virtualization.models import Cluster, VirtualMachine
 
@@ -24,6 +23,7 @@ from ..server_mappings import (
     persist_mapping,
 )
 from ..serial_identity import SerialRules
+from ..transactions import atomic_with_events
 from ..utils import exception_text_for
 from .bulk_import import _is_job_cancelled
 from .device_operations import (
@@ -160,7 +160,7 @@ def create_vm_from_librenms(
         raise ValueError(f"device_id {raw_device_id!r} must be a positive integer")
 
     # Create the VM and assign its LibreNMS ID atomically, so no failure leaves a VM without a mapping.
-    with transaction.atomic():
+    with atomic_with_events():
         _locked_owner, conflict = lock_librenms_id_assignment(librenms_device_id, server_key)
         if conflict is not None:
             # The claim search is unrestricted and this helper takes no user, so it cannot check
