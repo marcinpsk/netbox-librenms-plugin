@@ -119,8 +119,11 @@ from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
     ContainerStatus,
     SameServerIdentityConflict,
+    ServerState,
     attach_oob,
     convert_legacy,
+    host_change_scope,
+    host_entry,
     link_import,
     lock_librenms_id_assignment,
     merge_links,
@@ -326,6 +329,20 @@ def _invalid_import_intent_response(request, device_id: int) -> HttpResponse | N
     except InvalidImportIntent as exc:
         return _htmx_error_response(str(exc))
     return None
+
+
+HOST_CHANGE_ON_SYNC_PAGE = (
+    "This change removes or replaces a LibreNMS ID, and the interfaces of this object hold port IDs of that "
+    "server, or a legacy port value. Change it on the sync page: its confirmation names each interface it clears."
+)
+
+
+def _host_change_refusal(obj, server_key, *, own_id, oob_id, oob_type):
+    """Return the HTMX refusal of a host ID change with an interface cascade, which only the sync page confirms."""
+    new_entry = ServerState(server_key, own_id=own_id, oob_id=oob_id, oob_type=oob_type)
+    if host_change_scope(obj, server_key, new_entry).is_empty:
+        return None
+    return _htmx_error_response(HOST_CHANGE_ON_SYNC_PAGE)
 
 
 def _render_identity_replacement_confirmation(request, obj, action, force, conflict) -> HttpResponse:
@@ -2337,6 +2354,12 @@ class DeviceConflictActionView(
                 if current_mapping.container is ContainerStatus.INVALID:
                     return _htmx_error_response("The existing LibreNMS mapping has an invalid format.")
 
+                entry = host_entry(existing_device, server_key)
+                if refusal := _host_change_refusal(
+                    existing_device, server_key, own_id=librenms_id, oob_id=entry.oob_id, oob_type=entry.oob_type
+                ):
+                    return refusal
+
                 try:
                     mapping_change = link_import(
                         existing_device,
@@ -3095,6 +3118,15 @@ class AddAsOOBView(
                     "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first."
                 )
 
+            if refusal := _host_change_refusal(
+                sync_device,
+                server_key,
+                own_id=locked_mapping.own_id(server_key),
+                oob_id=librenms_id,
+                oob_type=oob_type,
+            ):
+                return refusal
+
             # Reject if the locked OOB link differs from what this (possibly stale) modal
             # is about to write — by id OR by type. oob_type is already a canonical OOB_TYPES
             # token (so is the stored OOB type), so this is a like-for-like compare
@@ -3737,6 +3769,10 @@ class PromoteToHostView(
                 return _htmx_error_response(
                     "OOB link already set; this device may have been promoted by a concurrent request."
                 )
+            if refusal := _host_change_refusal(
+                existing_device, server_key, own_id=new_host_id, oob_id=existing_libre_id, oob_type=oob_type
+            ):
+                return refusal
             try:
                 # The incoming LibreNMS device becomes the host; the previous one moves to the OOB slot.
                 mapping_change = promote_to_host(

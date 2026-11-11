@@ -5919,6 +5919,41 @@ class TestAddAsOOBViewPost:
             "oob_type": "ilo",
         }
 
+    @pytest.mark.parametrize("cascade", [True, False], ids=["port-on-an-interface", "no-port"])
+    def test_a_replaced_oob_with_an_interface_cascade_is_sent_to_the_sync_page(self, cascade):
+        """A replacement of the stored OOB ID clears the scope's ports, which only the sync page confirms."""
+        from dcim.models import Device
+
+        view = self._make_view()
+        existing_device = seed_mapping(make_device("oob-cascade", serial="OOB-CASCADE-SERIAL"), self.server_key, own=10)
+        interface = make_interface(existing_device, "eth0")
+        if cascade:
+            seed_mapping(interface, self.server_key, own=900)
+        self._register_oob_device(17, "controller-node", serial=existing_device.serial, generic=True)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("oob-cascade-user"),
+            HTTP_HX_REQUEST="true",
+        )
+
+        def store_another_oob():
+            seed_mapping_row(
+                existing_device,
+                seed_mapping(Device(), self.server_key, own=10, oob=16, oob_type="oob", save=False),
+            )
+
+        response = self._post_after_validation(view, request, 17, store_another_oob)
+
+        assert response.status_code == 200
+        assert (b"Change it on the sync page" in response.content) is cascade
+        assert (b"modified concurrently" in response.content) is (not cascade)
+        assert mapping_summary(Device.objects.get(pk=existing_device.pk))[self.server_key] == {
+            "own": 10,
+            "oob": 16,
+            "oob_type": "oob",
+        }
+
 
 @pytest.mark.django_db
 class TestPromoteToHostViewPost:
@@ -6282,6 +6317,31 @@ class TestPromoteToHostViewPost:
         # Nothing committed: the host slot is unchanged and no OOB slot was written.
         assert mapping_summary(Device.objects.get(pk=existing_device.pk))[self.server_key] == {"own": 10}
         assert mapping_summary(Device.objects.get(pk=conflicting_device.pk))[self.server_key] == {"own": 17}
+
+    def test_a_promotion_with_an_interface_cascade_is_sent_to_the_sync_page(self):
+        """The promotion replaces the host ID, so the ports of the old host on its interfaces need the sync page."""
+        from dcim.models import Device
+
+        view = self._make_view()
+        existing_device = seed_mapping(
+            make_device("promote-cascade", serial="PROMOTE-CASCADE-SERIAL"), self.server_key, own=10
+        )
+        interface = seed_mapping(make_interface(existing_device, "eth0"), self.server_key, own=901)
+        self._register_host_device(17, "promote-cascade-host", serial=existing_device.serial)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("promote-cascade-user"),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request, device_id=17)
+
+        assert response.status_code == 200
+        assert b"Change it on the sync page" in response.content
+        assert mapping_summary(Device.objects.get(pk=existing_device.pk))[self.server_key] == {"own": 10}
+        interface.refresh_from_db()
+        assert mapping_summary(interface) == {self.server_key: {"own": 901}}
 
 
 @pytest.mark.django_db

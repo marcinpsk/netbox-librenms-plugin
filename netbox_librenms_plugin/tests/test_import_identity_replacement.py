@@ -566,3 +566,49 @@ def test_the_signed_schema_matches_the_intent_dataclass():
     from netbox_librenms_plugin.identity_replacement import INTENT_FIELD_TYPES
 
     assert set(INTENT_FIELD_TYPES) == {field.name for field in fields(IdentityReplacementIntent)}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("value", ["port", "legacy"])
+def test_a_replacement_with_an_interface_cascade_is_sent_to_the_sync_page(client, secondary_server, value):
+    """The interfaces hold ports of the replaced host, which only the sync page confirmation clears."""
+    from netbox_librenms_plugin.tests.conftest import make_interface
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_legacy
+
+    device = seed_mapping(make_device(f"replace-cascade-{value}"), "secondary", own=52301)
+    interface = make_interface(device, "eth0")
+    if value == "port":
+        seed_mapping(interface, "secondary", own=52302)
+    else:
+        seed_legacy(interface, 52302)
+    client.force_login(make_superuser("identity-replacement-cascade"))
+
+    response = _post_action(
+        client, 52401, device, "link", server=_serve_secondary(secondary_server, 52401, device.name)
+    )
+
+    assert response.status_code == 200
+    assert b"Change it on the sync page" in response.content
+    assert _INTENT_PATTERN.search(response.content.decode()) is None
+    device.refresh_from_db()
+    assert mapping_summary(device) == {"secondary": {"own": 52301}}
+
+
+@pytest.mark.django_db
+def test_a_confirmed_replacement_meets_a_port_written_after_the_offer(client, secondary_server):
+    from netbox_librenms_plugin.tests.conftest import make_interface
+
+    device = seed_mapping(make_device("replace-cascade-late"), "secondary", own=52311)
+    interface = make_interface(device, "eth0")
+    client.force_login(make_superuser("identity-replacement-cascade-late"))
+    server = _serve_secondary(secondary_server, 52411, device.name)
+    token = _offered_token(_post_action(client, 52411, device, "link", server=server))
+    seed_mapping(interface, "secondary", own=52312)
+
+    response = _post_confirmation(client, 52411, token, server=server)
+
+    assert b"Change it on the sync page" in response.content
+    device.refresh_from_db()
+    assert mapping_summary(device) == {"secondary": {"own": 52311}}
+    interface.refresh_from_db()
+    assert mapping_summary(interface) == {"secondary": {"own": 52312}}
