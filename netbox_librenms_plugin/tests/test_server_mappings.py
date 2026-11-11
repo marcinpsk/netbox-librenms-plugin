@@ -1951,3 +1951,95 @@ class TestMergeEntryNormalization:
         assert merge.summary["oob_from_donor"] == {"id": 7, "type": "ipmi"}
         assert stored_mapping_for_test(winner) == {"default": {"id": 5}}
         assert stored_mapping_for_test(donor) == {"default": {"oob": {"id": 7, "type": "ipmi"}}}
+
+
+@pytest.mark.django_db
+class TestHostChangeScope:
+    """One service returns the interface cascade of every entry change of a Device or VM on one server."""
+
+    @staticmethod
+    def _entry(own=None, oob=None, oob_type=None):
+        from netbox_librenms_plugin.server_mappings import ServerState
+
+        return ServerState("default", own_id=own, oob_id=oob, oob_type=oob_type)
+
+    @pytest.mark.parametrize(
+        ("seed", "after"),
+        [
+            ({}, {"own": 11}),
+            ({"own": 10}, {"own": 10, "oob": 12, "oob_type": "idrac"}),
+            ({"own": 10, "oob": 12, "oob_type": "ilo"}, {"own": 10, "oob": 12, "oob_type": "idrac"}),
+            ({"oob": 12, "oob_type": "ilo"}, {"own": 11, "oob": 12, "oob_type": "ilo"}),
+        ],
+        ids=["create", "oob-add", "type-only", "own-add"],
+    )
+    def test_a_change_that_removes_no_host_id_has_an_empty_cascade_and_runs_no_query(self, seed, after):
+        from netbox_librenms_plugin.server_mappings import host_change_scope
+
+        device = make_device(f"scope-empty-{next(_counter)}")
+        if seed:
+            seed_mapping(device, "default", **seed)
+        seed_mapping(make_interface(device, "eth0"), "default", own=500)
+
+        with CaptureQueriesContext(connection) as queries:
+            scope = host_change_scope(device, "default", self._entry(**after))
+
+        assert (scope.changes_host, scope.is_empty, len(queries)) == (False, True, 0)
+
+    @pytest.mark.parametrize(
+        "after",
+        [None, {"own": 11, "oob": 12, "oob_type": "ilo"}, {"own": 10}, {"own": 10, "oob": 13, "oob_type": "ilo"}],
+        ids=["unlink", "relink", "oob-clear", "oob-replace"],
+    )
+    def test_a_removed_or_replaced_host_id_cascades_to_every_chassis_member(self, after):
+        from netbox_librenms_plugin.server_mappings import host_change_scope
+
+        _chassis, (first, second) = make_virtual_chassis_members(f"scope-chassis-{next(_counter)}")
+        seed_mapping(first, "default", own=10, save=False)
+        seed_mapping(first, "default", oob=12, oob_type="ilo")
+        ported = seed_mapping(make_interface(second, "eth0"), "default", own=501)
+        seed_mapping(make_interface(first, "eth0"), "other", own=502)
+        make_interface(first, "eth1")
+
+        scope = host_change_scope(first, "default", None if after is None else self._entry(**after))
+
+        assert scope.changes_host
+        assert [cascade.interface.pk for cascade in scope.interfaces] == [ported.pk]
+        assert [member.pk for member in scope.members] == sorted([first.pk, second.pk])
+        assert scope.refused == ()
+
+    def test_the_digest_binds_each_exact_entry_and_the_membership_binds_the_members(self):
+        from netbox_librenms_plugin.server_mappings import host_change_scope
+
+        _chassis, (first, second) = make_virtual_chassis_members(f"scope-digest-{next(_counter)}")
+        seed_mapping(first, "default", own=10)
+        interface = seed_mapping(make_interface(second, "eth0"), "default", own=501)
+        before = host_change_scope(first, "default", None)
+
+        seed_mapping(interface, "default", own=503)
+        moved = host_change_scope(first, "default", None)
+        second.virtual_chassis = None
+        second.vc_position = None
+        second.save()
+        left = host_change_scope(first, "default", None)
+
+        assert len(before.digest) == 64
+        assert moved.digest != before.digest and moved.membership_digest == before.membership_digest
+        assert left.membership_digest != before.membership_digest and left.interfaces == ()
+
+    def test_a_legacy_or_invalid_interface_value_refuses_and_a_vm_scope_is_its_interfaces(self):
+        from virtualization.models import VMInterface
+
+        from netbox_librenms_plugin.server_mappings import host_change_scope
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_legacy, seed_quarantined
+
+        vm = seed_mapping(make_vm(f"scope-vm-{next(_counter)}"), "default", own=10)
+        legacy = seed_legacy(VMInterface.objects.create(virtual_machine=vm, name="e0"), 77)
+        invalid = seed_quarantined(VMInterface.objects.create(virtual_machine=vm, name="e1"))
+        ported = seed_mapping(VMInterface.objects.create(virtual_machine=vm, name="e2"), "default", own=601)
+
+        scope = host_change_scope(vm, "default", None)
+
+        assert [row.pk for row in scope.refused] == [legacy.pk, invalid.pk]
+        assert [cascade.interface.pk for cascade in scope.interfaces] == [ported.pk]
+        assert [member.pk for member in scope.members] == [vm.pk]

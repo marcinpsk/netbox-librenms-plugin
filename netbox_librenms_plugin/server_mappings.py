@@ -13,6 +13,8 @@ mapping, puts the change on the row, and calls the writer's own save once.
 """
 
 import copy
+import hashlib
+import json
 import logging
 from collections.abc import Callable, Iterable
 from contextvars import ContextVar
@@ -1375,6 +1377,149 @@ def merge_links(winner, donor, server: str, *, at: str | None = None) -> MergeCh
         winner=_change(winner, winner_value, group=group),
         donor=_change(donor, donor_value, group=group),
     )
+
+
+# Host changes: a change that removes or replaces a host ID clears that server's port IDs in its scope.
+
+
+@dataclass(frozen=True)
+class CascadeInterface:
+    """One interface in a host change scope whose entry for the server the change clears."""
+
+    interface: object
+    _entry: object = field(repr=False)
+
+
+@dataclass(frozen=True)
+class HostChangeScope:
+    """
+    The interface cascade of one entry change of a Device or VM on one server.
+
+    The scope is the interfaces of a VM, of a Device, or of every member of a Device's virtual
+    chassis. ``interfaces`` holds those with an entry for the server, ``refused`` those whose stored
+    value is legacy or invalid. A change that removes or replaces no host ID has an empty cascade.
+    """
+
+    changes_host: bool
+    members: tuple = ()
+    interfaces: tuple[CascadeInterface, ...] = ()
+    refused: tuple = ()
+
+    @property
+    def is_empty(self) -> bool:
+        """Return whether the change clears no interface entry and no interface value refuses it."""
+        return not self.interfaces and not self.refused
+
+    @property
+    def digest(self) -> str:
+        """Return the SHA-256 digest of the sorted (model label, pk, exact server entry) list of the cascade."""
+        return _digest(
+            [cascade.interface._meta.label_lower, cascade.interface.pk, cascade._entry] for cascade in self.interfaces
+        )
+
+    @property
+    def membership_digest(self) -> str:
+        """Return the SHA-256 digest of the sorted (model label, pk) list of the objects whose interfaces are the scope."""
+        return _digest([member._meta.label_lower, member.pk] for member in self.members)
+
+
+def _digest(rows) -> str:
+    rows = sorted(rows, key=lambda row: (row[0], row[1]))
+    return hashlib.sha256(json.dumps(rows, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def removes_host_id(before: ServerState | None, after: ServerState | None) -> bool:
+    """Return whether changing the entry *before* to *after* (None: no entry) removes or replaces an own or OOB ID."""
+    if before is None:
+        return False
+    own_after = after.own_id if after is not None else None
+    oob_after = after.oob_id if after is not None else None
+    return (before.own_id is not None and before.own_id != own_after) or (
+        before.oob_id is not None and before.oob_id != oob_after
+    )
+
+
+def host_entry(obj, server: str) -> ServerState:
+    """Return the own ID and OOB controller that *obj* holds on *server*; a legacy value is the own ID on every server."""
+    mapping = read_mapping(obj)
+    entry = mapping.server(require_server_key(server))
+    return ServerState(
+        server=server,
+        own_id=mapping.own_id(server),
+        oob_id=entry.oob_id if entry is not None else None,
+        oob_type=entry.oob_type if entry is not None else None,
+        oob_recorded=entry is not None and entry.oob_recorded,
+    )
+
+
+def lock_host_change_owner(model, pk):
+    """
+    Lock the rows that own a host change scope in the shared order, and return the locked object.
+
+    A VM locks its own row. A Device locks its virtual chassis first, then the chassis members in pk
+    order (``views/sync/interfaces.py`` uses the same order). The caller holds the transaction.
+    Returns None when the object is gone. The caller compares the membership of the locked object
+    with the one that it approved: a move to another chassis between the read and the lock changes it.
+    """
+    from dcim.models import Device, VirtualChassis
+
+    if model is not Device:
+        return model.objects.select_for_update(of=("self",)).filter(pk=pk).order_by().first()
+    chassis_id = Device.objects.filter(pk=pk).values_list("virtual_chassis_id", flat=True).first()
+    member_ids = {pk}
+    if chassis_id is not None:
+        VirtualChassis.objects.select_for_update().filter(pk=chassis_id).order_by().first()
+        member_ids |= set(Device.objects.filter(virtual_chassis_id=chassis_id).values_list("pk", flat=True))
+    locked = {
+        device.pk: device
+        for device in Device.objects.select_for_update(of=("self",)).filter(pk__in=member_ids).order_by("pk")
+    }
+    return locked.get(pk)
+
+
+def _scope_members(obj) -> tuple:
+    from dcim.models import Device
+
+    if isinstance(obj, Device) and obj.virtual_chassis_id is not None:
+        return tuple(Device.objects.filter(virtual_chassis_id=obj.virtual_chassis_id).order_by("pk"))
+    return (obj,)
+
+
+def host_change_scope(obj, server: str, new_entry: ServerState | None, *, lock: bool = False) -> HostChangeScope:
+    """
+    Return the interface cascade of changing the entry of *obj* on *server* to *new_entry*.
+
+    *new_entry* None removes the whole entry. Every host-ID writer calls this: a change with a
+    cascade, or with a refused interface value, needs the confirmation of a mapping lifecycle
+    operation. A change that removes or replaces no host ID, such as a create or an OOB add on an
+    empty OOB, returns an empty cascade and runs no query.
+
+    With *lock*, the caller locked the owner rows with :func:`lock_host_change_owner` in its
+    transaction, and the scope's interface rows are locked in pk order.
+    """
+    from dcim.models import Device, Interface
+    from virtualization.models import VMInterface
+
+    server = require_server_key(server)
+    if not removes_host_id(host_entry(obj, server), new_entry):
+        return HostChangeScope(changes_host=False)
+    members = _scope_members(obj)
+    if isinstance(obj, Device):
+        rows = Interface.objects.filter(device__in=[member.pk for member in members]).select_related("device")
+    else:
+        rows = VMInterface.objects.filter(virtual_machine=obj).select_related("virtual_machine")
+    rows = rows.order_by("pk")
+    if lock:
+        rows = rows.select_for_update(of=("self",))
+    cascade, refused = [], []
+    for interface in rows:
+        stored = _stored_value(interface)
+        container = _decode_stored_mapping(stored).container
+        if container in (ContainerStatus.LEGACY, ContainerStatus.INVALID):
+            refused.append(interface)
+        elif container is ContainerStatus.SCOPED and server in stored:
+            cascade.append(CascadeInterface(interface, copy.deepcopy(stored[server])))
+    return HostChangeScope(changes_host=True, members=members, interfaces=tuple(cascade), refused=tuple(refused))
 
 
 def save_mapping_fields(row, fields):
