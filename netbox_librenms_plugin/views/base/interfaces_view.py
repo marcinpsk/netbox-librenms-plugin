@@ -192,38 +192,41 @@ class BaseInterfaceTableView(
             for librenms_id in ids
         ]
 
-    def _build_interface_lookup_maps(self, obj, *, metadata_only=False):
+    def _build_interface_lookup_maps(self, owners, *, metadata_only=False):
         """
-        Build name and LibreNMS ID indexes, dropping conflicting IDs entirely.
+        Build name and LibreNMS ID indexes of each owner's interfaces, dropping conflicting IDs entirely.
 
-        Also select the relationship fields used during enrichment. Device interfaces have
-        ``lag``, ``parent``, and ``bridge``. VM interfaces have ``parent`` and ``bridge``.
+        One query loads the interfaces of every owner, and one prefetch loads their mappings, however
+        many chassis members there are. Also select the relationship fields used during enrichment.
+        Device interfaces have ``lag``, ``parent``, and ``bridge``. VM interfaces have ``parent`` and
+        ``bridge``.
 
         Args:
-            obj: The NetBox device (or VM) whose interfaces are indexed.
+            owners: The NetBox devices (or VMs) whose interfaces are indexed.
             metadata_only: Read identity fields without constructing interface models or related objects.
 
         Returns:
-            dict: Name and LibreNMS ID indexes plus the number of interfaces carrying each ID.
-                LibreNMS IDs that map to more than one interface are dropped from the direct index.
+            dict: For each owner pk, the name and LibreNMS ID indexes plus the number of interfaces
+                carrying each ID. LibreNMS IDs that map to more than one interface of the owner are
+                dropped from its direct index.
 
         """
-        by_name = {}
-        by_librenms_id = {}
-        by_librenms_id_matches = {}
-        librenms_id_counts = {}
-        duplicate_librenms_ids = set()
-
+        owners = list(owners)
+        if not owners:
+            return {}
         # Prefetch the relations the row diff dereferences for every matched row (VLAN
         # assignment and MAC addresses); without this each rendered interface row issues its own
         # queries for these. Also select related relationship FKs that render_parent dereferences.
-        related_field = self.get_select_related_field(obj)
-        queryset = self.get_interfaces(obj)
+        related_field = self.get_select_related_field(owners[0])
+        owner_field = f"{related_field}_id"
+        queryset = self.get_interfaces(owners[0]).model.objects.filter(
+            **{f"{owner_field}__in": [owner.pk for owner in owners]}
+        )
         if metadata_only:
-            records = read_mappings(queryset, fields=("pk", "name", f"{related_field}_id"))
-            interfaces = (
+            records = read_mappings(queryset, fields=("pk", "name", owner_field))
+            interfaces = [
                 (SimpleNamespace(_meta=queryset.model._meta, **record.values), record.mapping) for record in records
-            )
+            ]
         else:
             extra_related = ["parent", "bridge"] if related_field == "virtual_machine" else ["lag", "parent", "bridge"]
             # The planned type check asks each device interface whether it has LAG members.
@@ -238,27 +241,33 @@ class BaseInterfaceTableView(
                 related for interface in loaded for name in extra_related if (related := getattr(interface, name))
             ]
             prefetch_mappings([*loaded, *related])
-            interfaces = ((interface, read_mapping(interface)) for interface in loaded)
-        interfaces = list(interfaces)
+            interfaces = [(interface, read_mapping(interface)) for interface in loaded]
+        maps = {owner.pk: self._interface_lookup_maps() for owner in owners}
         for (interface, _), librenms_id in zip(interfaces, self._get_object_librenms_ids(interfaces), strict=True):
-            by_name[interface.name] = interface
+            owner_maps = maps[getattr(interface, owner_field)]
+            owner_maps["by_name"][interface.name] = interface
             if librenms_id is None:
                 continue
-            librenms_id_counts[librenms_id] = librenms_id_counts.get(librenms_id, 0) + 1
-            by_librenms_id_matches.setdefault(librenms_id, []).append(interface)
-            if librenms_id in by_librenms_id:
-                duplicate_librenms_ids.add(librenms_id)
+            owner_maps["librenms_id_counts"][librenms_id] = owner_maps["librenms_id_counts"].get(librenms_id, 0) + 1
+            owner_maps["by_librenms_id_matches"].setdefault(librenms_id, []).append(interface)
+            if librenms_id in owner_maps["by_librenms_id"]:
+                owner_maps["duplicate_librenms_ids"].add(librenms_id)
                 continue
-            by_librenms_id[librenms_id] = interface
+            owner_maps["by_librenms_id"][librenms_id] = interface
 
-        for librenms_id in duplicate_librenms_ids:
-            by_librenms_id.pop(librenms_id, None)
+        for owner_maps in maps.values():
+            for librenms_id in owner_maps.pop("duplicate_librenms_ids"):
+                owner_maps["by_librenms_id"].pop(librenms_id, None)
+        return maps
 
+    @staticmethod
+    def _interface_lookup_maps():
         return {
-            "by_name": by_name,
-            "by_librenms_id": by_librenms_id,
-            "by_librenms_id_matches": by_librenms_id_matches,
-            "librenms_id_counts": librenms_id_counts,
+            "by_name": {},
+            "by_librenms_id": {},
+            "by_librenms_id_matches": {},
+            "librenms_id_counts": {},
+            "duplicate_librenms_ids": set(),
         }
 
     def post(self, request, pk):
@@ -554,10 +563,9 @@ class BaseInterfaceTableView(
             if virtual_chassis_members:
                 members_by_position = {member.vc_position: member for member in virtual_chassis_members}
                 members_by_id = {member.id: member for member in virtual_chassis_members}
-                for member in virtual_chassis_members:
-                    interfaces_by_device[member.id] = self._build_interface_lookup_maps(member)
+                interfaces_by_device.update(self._build_interface_lookup_maps(virtual_chassis_members))
             else:
-                interfaces_by_device[obj.id] = self._build_interface_lookup_maps(obj)
+                interfaces_by_device.update(self._build_interface_lookup_maps([obj]))
 
             for interface_maps in interfaces_by_device.values():
                 for port_id, interface in interface_maps["by_librenms_id"].items():

@@ -957,3 +957,85 @@ def test_a_cached_row_that_gains_a_padded_name_match_reads_a_prefetched_device(l
     assert existing == late
     assert spy.prefetch_calls == 1
     _assert_prefetched(spy)
+
+
+def _chassis_with_interfaces(tag, members):
+    """Return the members of a chassis whose members each own two interfaces in mixed mapping states."""
+    _vc, chassis = make_virtual_chassis_members(tag, count=members)
+    seed_mapping(chassis[0], SERVER_KEY, own=HOST_ID)
+    ports = []
+    for position, member in enumerate(chassis):
+        for slot in range(2):
+            index = position * 2 + slot
+            port_id = HOST_ID * 1000 + index
+            _seed_port_mapping(make_interface(member, f"eth{index}", iface_type="1000base-t"), index, port_id)
+            ports.append(_port(port_id, f"eth{index}"))
+    return chassis, ports
+
+
+def _chassis_tab(client, tag, members, tab):
+    chassis, ports = _chassis_with_interfaces(tag, members)
+    if tab == "interfaces":
+        seed_interfaces_snapshot(chassis[0], ports, server_key=SERVER_KEY)
+    else:
+        inventory = [
+            {
+                "entPhysicalIndex": 100 + index,
+                "entPhysicalName": f"Transceiver {port['ifName']}",
+                "entPhysicalDescr": f"Transceiver {port['ifName']}",
+                "entPhysicalModelName": "SFP-1G",
+                "entPhysicalClass": "port",
+                "entPhysicalContainedIn": 0,
+                "entPhysicalSerialNum": f"{tag}-SN{index}",
+            }
+            for index, port in enumerate(ports)
+        ]
+        transceivers = [
+            transceiver_row(100 + index, port_id=port["port_id"], model="SFP-1G", serial=f"{tag}-SN{index}")
+            for index, port in enumerate(ports)
+        ]
+        seed_mapped_modules(chassis[0], inventory, ports, transceivers, librenms_id=HOST_ID, server_key=SERVER_KEY)
+    with spy_mapping_reads() as spy:
+        count = _query_count(lambda: _tab(client, chassis[0], tab, interface_name_field="ifName"))
+    return chassis[0], spy, count
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("tab", ["interfaces", "modules"])
+def test_a_chassis_tab_loads_the_member_interfaces_once(superuser_client, tab):
+    """The tab indexes the interfaces of every member from one load and one prefetch, however many members."""
+    _chassis_tab(superuser_client, f"prefetch-{tab}-warm", 2, tab)
+
+    results = [_chassis_tab(superuser_client, f"prefetch-{tab}-{members}", members, tab) for members in (2, 6)]
+
+    # The query count still grows by one non-mapping query per member, so only the batches are compared.
+    (_page, few_spy, _few_count), (_page, many_spy, _many_count) = results
+    assert few_spy.prefetch_calls == many_spy.prefetch_calls, (few_spy.prefetch_calls, many_spy.prefetch_calls)
+    for page, spy, _count in results:
+        _assert_prefetched(spy, page)
+
+
+@pytest.mark.django_db
+def test_a_chassis_interface_verify_reads_the_member_identities_once(superuser_client):
+    """The verify repaint reads the bound port of every member's interfaces in one values query."""
+
+    def verify(tag, members):
+        chassis, ports = _chassis_with_interfaces(tag, members)
+        seed_interfaces_snapshot(chassis[0], ports, server_key=SERVER_KEY)
+        body = {"device_id": chassis[0].pk, "port_id": ports[0]["port_id"], "interface_name_field": "ifName"}
+        with CaptureQueriesContext(connection) as queries:
+            response = superuser_client.post(
+                reverse("plugins:netbox_librenms_plugin:verify_interface"),
+                json.dumps({**body, "server_key": SERVER_KEY}),
+                content_type="application/json",
+            )
+        assert response.status_code == 200
+        # A read of interface rows with their stored mapping; one per member before the batch.
+        return sum(
+            'FROM "dcim_interface"' in query["sql"] and "custom_field_data" in query["sql"]
+            for query in queries.captured_queries
+        )
+
+    verify("prefetch-verify-vc-warm", 2)
+
+    assert verify("prefetch-verify-vc-2", 2) == verify("prefetch-verify-vc-6", 6)

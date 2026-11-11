@@ -775,7 +775,7 @@ def test_device_interface_lookup_prefetches_bridge(db, django_assert_num_queries
     configure_default_librenms_server(settings)
     view._librenms_api = LibreNMSAPI(server_key="default")
 
-    maps = view._build_interface_lookup_maps(device)
+    maps = view._build_interface_lookup_maps([device])[device.pk]
 
     with django_assert_num_queries(0):
         assert maps["by_name"]["nic0"].bridge.pk == bridge.pk
@@ -797,7 +797,7 @@ def test_vm_interface_lookup_prefetches_bridge(db, django_assert_num_queries, se
     configure_default_librenms_server(settings)
     view._librenms_api = LibreNMSAPI(server_key="default")
 
-    maps = view._build_interface_lookup_maps(vm)
+    maps = view._build_interface_lookup_maps([vm])[vm.pk]
 
     with django_assert_num_queries(0):
         assert maps["by_name"]["nic0"].bridge.pk == bridge.pk
