@@ -155,28 +155,6 @@ class TestDeadline:
 
         assert isinstance(matching.find_librenms_match(_device(), api, deadline=deadline), NotChecked)
 
-    def test_a_body_that_arrives_slowly_stops_at_the_deadline_without_waiting_for_the_rest(
-        self, api, librenms_server, monkeypatch
-    ):
-        """A socket timeout bounds each read only; the deadline must bound the whole response."""
-        now = [500.0]
-        monkeypatch.setattr(matching, "_clock", lambda: now[0])
-        deadline = matching.Deadline(15)
-        body = json.dumps(_found(55)).encode()
-
-        def time_passes(index):
-            if index == 0:
-                now[0] += 16
-
-        # The rest of the body follows only after a real pause that a bounded probe does not wait for.
-        librenms_server.register_streamed(IP_PATH, [body[:10], body[10:]], pause=3, before_each=time_passes)
-        started = time.perf_counter()
-
-        result = matching.find_librenms_match(_device(), api, deadline=deadline)
-
-        assert isinstance(result, NotChecked)
-        assert time.perf_counter() - started < 2
-
     def test_a_body_that_dribbles_in_ends_near_the_deadline_on_the_real_clock(self, api, librenms_server):
         """Each part arrives inside a socket timeout, so only the deadline stops the read."""
         body = json.dumps(_found(55)).encode()
@@ -190,7 +168,43 @@ class TestDeadline:
         result = matching.find_librenms_match(device, api, deadline=matching.Deadline(1))
 
         assert isinstance(result, NotChecked)
-        assert time.perf_counter() - started < 1.6
+        assert time.perf_counter() - started < 1.5
+
+
+def _dribbled(head, body=b""):
+    """Return the parts of a raw response whose status line, headers and body arrive a few bytes at a time."""
+    raw = head + body
+    return [raw[index : index + 8] for index in range(0, len(raw), 8)]
+
+
+_BODY = json.dumps(_found(55)).encode()
+
+
+@pytest.mark.django_db
+class TestTheDeadlineBoundsTheWholeRequest:
+    """Each part arrives well inside a socket timeout; only the deadline may end the wait (1 s here)."""
+
+    @pytest.mark.parametrize(
+        "head",
+        [
+            # The status line and the headers dribble in, so the request itself does not return.
+            f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(_BODY)}\r\n\r\n".encode(),
+            # A redirect whose body requests reads before it returns, although it follows no redirect.
+            f"HTTP/1.1 302 Found\r\nLocation: /api/v0/devices/elsewhere\r\nContent-Length: {len(_BODY)}\r\n\r\n".encode(),
+            # A body that only the end of the connection delimits.
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",
+        ],
+        ids=["slow-headers", "redirect-with-slow-body", "connection-close-body"],
+    )
+    def test_a_slow_answer_is_not_checked_within_the_deadline(self, api, librenms_server, head):
+        librenms_server.register_raw_stream(IP_PATH, _dribbled(head, _BODY), pause=0.2)
+        device = _device()
+        started = time.perf_counter()
+
+        result = matching.find_librenms_match(device, api, deadline=matching.Deadline(1))
+
+        assert isinstance(result, NotChecked)
+        assert time.perf_counter() - started < 1.5
 
 
 @pytest.mark.django_db

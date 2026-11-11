@@ -10,7 +10,6 @@ from django.test import Client
 from django.urls import reverse
 from virtualization.models import VirtualMachine
 
-from netbox_librenms_plugin import matching
 from netbox_librenms_plugin.tests.claim_race_helpers import run_librenms_id_claim_race
 from netbox_librenms_plugin.tests.conftest import (
     configure_librenms_servers,
@@ -398,22 +397,17 @@ class TestStatusLists:
         import json
         import time
 
-        from netbox_librenms_plugin.views.status_check import STATUS_MATCH_DEADLINE_SECONDS
+        from netbox_librenms_plugin.views import status_check
 
+        monkeypatch.setattr(status_check, "STATUS_MATCH_DEADLINE_SECONDS", 1)
         cluster = make_cluster("link-deadline")
-        now = [1000.0]
-        monkeypatch.setattr(matching, "_clock", lambda: now[0])
         vms = [_object("virtualmachine", f"deadline-{index}", cluster=cluster) for index in range(3)]
         for index, vm in enumerate(vms):
             give_primary_ip(vm, f"198.18.2.{index + 1}/24")
         body = json.dumps({"status": "ok", "devices": [{"device_id": 9100, "hostname": "deadline-0"}]}).encode()
-
-        def time_passes(index):
-            if index == 0:
-                now[0] += STATUS_MATCH_DEADLINE_SECONDS + 1
-
-        # The first answer starts, then the whole deadline passes while the rest of its body is on the way.
-        server.register_streamed("/api/v0/devices/198.18.2.1", [body[:10], body[10:]], pause=3, before_each=time_passes)
+        # The first answer arrives in parts, each inside a socket timeout, over almost five seconds.
+        parts = [body[index : index + 10] for index in range(0, len(body), 10)]
+        server.register_streamed("/api/v0/devices/198.18.2.1", parts, pause=0.8, headers={"Connection": "keep-alive"})
         before = domain_state()
         started = time.perf_counter()
 

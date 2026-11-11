@@ -1,6 +1,7 @@
-import json
 import logging
 import math
+import socket
+import threading
 import urllib.parse
 from dataclasses import dataclass
 
@@ -132,6 +133,81 @@ class _TokenScopedSession(requests.Session):
 
 # Module-level so every call shares one connection pool, and so tests have one seam to patch.
 _session = _TokenScopedSession()
+
+
+class _SocketWatchdog:
+    """Shut down every socket of one request when its time is up, which ends any wait on them."""
+
+    def __init__(self, seconds):
+        self._lock = threading.Lock()
+        self._sockets = []
+        self.fired = False
+        self._timer = threading.Timer(seconds, self._fire)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def watch(self, sock):
+        """Shut *sock* down at the deadline; at once when the deadline has passed."""
+        with self._lock:
+            self._sockets.append(sock)
+            if self.fired:
+                _shut_down(sock)
+
+    def _fire(self):
+        with self._lock:
+            self.fired = True
+            for sock in self._sockets:
+                _shut_down(sock)
+
+    def cancel(self):
+        """Stop the timer; a request that ended in time keeps its sockets."""
+        self._timer.cancel()
+
+
+def _shut_down(sock):
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        # The socket is closed already.
+        pass
+
+
+def _deadline_session(watchdog):
+    """Return a session of its own whose connections, plain, TLS or through a proxy, report their socket to *watchdog*."""
+
+    class _Connection(urllib3.connection.HTTPConnection):
+        def connect(self):
+            super().connect()
+            watchdog.watch(self.sock)
+
+    class _TLSConnection(urllib3.connection.HTTPSConnection):
+        def connect(self):
+            super().connect()
+            watchdog.watch(self.sock)
+
+    class _Pool(urllib3.HTTPConnectionPool):
+        ConnectionCls = _Connection
+
+    class _TLSPool(urllib3.HTTPSConnectionPool):
+        ConnectionCls = _TLSConnection
+
+    pools = {"http": _Pool, "https": _TLSPool}
+
+    class _Adapter(requests.adapters.HTTPAdapter):
+        def init_poolmanager(self, *args, **kwargs):
+            super().init_poolmanager(*args, **kwargs)
+            self.poolmanager.pool_classes_by_scheme = pools
+
+        def proxy_manager_for(self, proxy, **kwargs):
+            manager = super().proxy_manager_for(proxy, **kwargs)
+            manager.pool_classes_by_scheme = pools
+            return manager
+
+    session = _TokenScopedSession()
+    adapter = _Adapter()
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
 
 
 class LibreNMSAPI:
@@ -492,10 +568,10 @@ class LibreNMSAPI:
         """
         Issue a GET that must finish before a deadline, and return ``(status_code, body)``, or None after it.
 
-        ``remaining()`` returns the seconds left. A socket timeout limits each wait for data only, so the
-        body is read in parts and the read stops when no time is left. A redirect is not followed: its
-        own status comes back. A transport error yields ``(None, None)``, and a non-JSON body
-        ``(status_code, None)``.
+        ``remaining()`` returns the seconds left. A socket timeout limits each wait for data only, so a
+        watchdog shuts the request's socket down when the time is up, in any phase of the request. A
+        redirect is not followed: its own status comes back. A transport error yields ``(None, None)``,
+        and a non-JSON body ``(status_code, None)``.
 
         Args:
             path (str): API path relative to ``/api/v0/``.
@@ -505,41 +581,31 @@ class LibreNMSAPI:
             tuple | None: ``(status, body)``, or None when the deadline passed first.
 
         """
-        timeout = min(DEFAULT_API_TIMEOUT, remaining())
-        if timeout <= 0:
+        left = remaining()
+        if left <= 0:
             return None
+        watchdog = _SocketWatchdog(left)
+        session = _deadline_session(watchdog)
         try:
-            response = _session.get(
+            response = session.get(
                 f"{self.librenms_url}/api/v0/{path.lstrip('/')}",
                 headers=self.headers,
-                timeout=timeout,
+                timeout=min(DEFAULT_API_TIMEOUT, left),
                 verify=self.verify_ssl,
-                stream=True,
                 allow_redirects=False,
             )
-        except requests.exceptions.RequestException:
-            return None if remaining() <= 0 else (None, None)
-        with response:
-            if response.is_redirect:
-                return response.status_code, None
-            parts = []
-            socket = getattr(getattr(response.raw, "connection", None), "sock", None)
-            try:
-                while True:
-                    if (left := remaining()) <= 0:
-                        return None
-                    if socket is not None:
-                        # Each wait for the next part ends at the deadline, not one socket timeout later.
-                        socket.settimeout(min(DEFAULT_API_TIMEOUT, left))
-                    if not (part := response.raw.read1(65536, decode_content=True)):
-                        break
-                    parts.append(part)
-            except (requests.exceptions.RequestException, OSError, urllib3.exceptions.HTTPError):
-                return None if remaining() <= 0 else (None, None)
-        if remaining() <= 0:
+        except (requests.exceptions.RequestException, OSError, urllib3.exceptions.HTTPError):
+            return None if watchdog.fired or remaining() <= 0 else (None, None)
+        finally:
+            watchdog.cancel()
+            session.close()
+        # A watchdog that fired can end a body early, which then reads as complete.
+        if watchdog.fired or remaining() <= 0:
             return None
+        if response.is_redirect:
+            return response.status_code, None
         try:
-            return response.status_code, json.loads(b"".join(parts))
+            return response.status_code, response.json()
         except ValueError:
             return response.status_code, None
 
