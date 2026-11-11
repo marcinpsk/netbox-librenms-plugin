@@ -92,6 +92,11 @@ def unmapped_only_constraint():
     return [{f"{_STORAGE_FIELD}__{_MAPPING_KEY}__isnull": True}, {f"{_STORAGE_FIELD}__{_MAPPING_KEY}": None}]
 
 
+def mapped_on_server_constraint(server):
+    """Return an object permission constraint that admits only objects with an entry on *server*, as an operator can write one."""
+    return {f"{_STORAGE_FIELD}__{_MAPPING_KEY}__{server}__isnull": False}
+
+
 def seed_legacy(obj, legacy_id, *, save=True):
     """Seed the bare legacy value *legacy_id* on *obj*, which resolves on every server; return *obj*."""
     fields = _put_stored_value(obj, legacy_id)

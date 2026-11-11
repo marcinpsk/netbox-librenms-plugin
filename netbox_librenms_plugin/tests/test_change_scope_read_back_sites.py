@@ -490,26 +490,6 @@ class TestServerMappingWrites:
         seed_mapping(owner, "retired", own=13603)
         return owner, make_user_with_perms(f"{tag}-user", [("change", Device)], constraints=constraints)
 
-    def test_a_removal_that_moves_the_device_out_of_the_change_scope_is_rolled_back(self, client, flushed_events):
-        from django.urls import reverse
-
-        has_retired = {"custom_field_data__librenms_id__has_key": "retired"}  # nosemgrep: no-stored-mapping-access-orm
-        owner, user = self._owner("rb-mapping-remove", has_retired)
-        before = mapping_summary(owner)
-        client.force_login(user)
-
-        response = client.post(
-            reverse("plugins:netbox_librenms_plugin:remove_server_mapping", args=[owner.pk]),
-            {"object_type": "device", "server_key": "retired"},
-        )
-
-        assert response.status_code == 302
-        owner.refresh_from_db()
-        assert mapping_summary(owner) == before
-        assert not _updates(owner).exists()
-        assert ("device", owner.pk) not in flushed_events
-        assert _response_levels(response) == [messages.ERROR]
-
     def test_a_preference_that_moves_the_device_out_of_the_change_scope_is_rolled_back(self, client, flushed_events):
         from netbox_librenms_plugin.tests.test_object_server_preference import _preference_url
 

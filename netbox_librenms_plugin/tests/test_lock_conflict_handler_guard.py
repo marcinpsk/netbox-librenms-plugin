@@ -93,7 +93,6 @@ ALLOWED = [
                 "AssignVCSerialView._assign_member_serial",
                 "IntegrityError, PermissionsViolation, ValidationError",
             ),
-            ("views/sync/device_fields.py", "RemoveServerMappingView.post", "ValidationError"),
             ("views/sync/device_fields.py", "SetPreferredServerView.post", "ValidationError"),
             ("views/sync/interfaces.py", "SyncInterfacesView._apply_relationship_edge", "ValidationError"),
             ("views/sync/interfaces.py", "_BaseRelationshipSyncView._link_attempt", "ValidationError"),

@@ -29,6 +29,7 @@ from netbox_librenms_plugin.server_mappings import (
     host_change_scope,
     host_entry,
     read_mapping,
+    release_server,
     stored_entry_digest,
 )
 
@@ -317,6 +318,19 @@ class ClaimingHostChangeAssumptions(HostChangeAssumptions):
 
 
 @dataclass(frozen=True)
+class UnlinkChoices:
+    """Unlink has no operator choice: it removes the whole entry."""
+
+
+@dataclass(frozen=True)
+class UnlinkEffects:
+    """The interface entries that the unlink clears, and whether it removes the preference for the server."""
+
+    interfaces: SetBinding
+    clears_preference: bool
+
+
+@dataclass(frozen=True)
 class RelinkChoices:
     """The own ID that replaces the stored one; None clears it."""
 
@@ -354,6 +368,34 @@ def _entry_claim(identity):
 
 def _identity_claim(identity, librenms_id):
     return intent.Claim(f"mapping.identity:{identity.server}:device:{librenms_id}", True)
+
+
+@intent.register
+@dataclass(frozen=True)
+class Unlink:
+    """Remove the whole entry of the object on the server, and clear the server's port IDs in its scope."""
+
+    RESOURCE = intent.Resource.MAPPING_LIFECYCLE
+    ACTION = "unlink"
+
+    identity: HostChangeIdentity
+    choices: UnlinkChoices
+    assumptions: HostChangeAssumptions
+    effects: UnlinkEffects
+
+    def claims(self):
+        """Take the entry of the object on the server."""
+        return (_entry_claim(self.identity),)
+
+    @staticmethod
+    def target(entry, choices):
+        """Return the entry after the change: none."""
+        return None
+
+    @staticmethod
+    def claimed_id(choices):
+        """Return the ID that the change stores: none."""
+        return None
 
 
 @intent.register
@@ -415,7 +457,7 @@ class ChangeOOB:
         return choices.oob_id
 
 
-HOST_CHANGES = {operation.ACTION: operation for operation in (Relink, ChangeOOB)}
+HOST_CHANGES = {operation.ACTION: operation for operation in (Unlink, Relink, ChangeOOB)}
 
 
 def _text(value):
@@ -431,7 +473,7 @@ def build_host_change(cls, obj, server_key, choices, *, owned=False, lock=False)
     same. With *lock*, the caller locked the owner rows, and the scope's interface rows are locked.
 
     Args:
-        cls (type): ``Relink`` or ``ChangeOOB``.
+        cls (type): ``Unlink``, ``Relink`` or ``ChangeOOB``.
         obj (Device | VirtualMachine): The object, as the caller read it.
         server_key (str): The server.
         choices: The choices of *cls*.
@@ -457,7 +499,15 @@ def build_host_change(cls, obj, server_key, choices, *, owned=False, lock=False)
     }
     cascade = SetBinding(len(scope.interfaces), scope.digest)
     identity = HostChangeIdentity(obj._meta.label_lower, obj.pk, server_key)
-    if cls is Relink:
+    if cls is Unlink:
+        # The write removes a preference that names the server, and a container with no server entry left.
+        clears_preference = (
+            release_server(obj, server_key, clear_preference=False).after.preference != mapping.preference
+        )
+        operation = Unlink(
+            identity, choices, HostChangeAssumptions(**fields), UnlinkEffects(cascade, clears_preference)
+        )
+    elif cls is Relink:
         assumptions = ClaimingHostChangeAssumptions(**fields, owned=owned)
         operation = Relink(identity, choices, assumptions, RelinkEffects(choices.own_id, cascade))
     else:
@@ -527,6 +577,8 @@ def host_change_action(entry, own_id, oob_id, oob_type):
     """
     own_changes = entry.own_id is not None and own_id != entry.own_id
     oob_changes = entry.oob_id is not None and oob_id != entry.oob_id
+    if own_id is None and oob_id is None:
+        return (Unlink.ACTION, UnlinkChoices()) if entry.own_id is not None or entry.oob_id is not None else None
     # A relink keeps the stored OOB controller, so a new OOB type with it would be lost.
     if own_changes and (oob_changes or oob_id != entry.oob_id or (oob_type or None) != (entry.oob_type or None)):
         return "mixed", None
@@ -551,7 +603,7 @@ def read_host_change_assessment(obj, server_key, action, choices, *, user, conte
     Args:
         obj (Device | VirtualMachine): The object.
         server_key (str): The server, configured or not.
-        action (str): ``relink`` or ``change_oob``.
+        action (str): ``unlink``, ``relink`` or ``change_oob``.
         choices: The choices of the action.
         user (User): The actor, whose permissions must cover the scope.
         context (IntentContext | None): The context of the offer; None offers nothing.
