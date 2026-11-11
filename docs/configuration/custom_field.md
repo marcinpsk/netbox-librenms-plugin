@@ -93,7 +93,9 @@ JSON value of the custom field by hand.
     - **OOB controller ID** and **OOB type:** the LibreNMS device ID of its out-of-band controller
       (iDRAC, iLO, IPMI and others), and the controller type. See
       [Out-of-Band Management](../device_import/oob_management.md).
-    - Clear a field to remove that ID. A row must keep a LibreNMS ID or an OOB controller ID.
+    - Clear the OOB controller ID to remove the OOB controller. You can replace a LibreNMS ID, but
+      you cannot remove it here: the next load of the sync page finds the device in LibreNMS and
+      stores its ID again.
 
 4. **Save the row:**
 

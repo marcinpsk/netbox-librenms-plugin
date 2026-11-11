@@ -1002,13 +1002,14 @@ def edit_server(obj, server: str, *, own_id, oob_id, oob_type, shown: ServerStat
     Build the change that sets the own ID and the OOB controller that an operator named on *server*.
 
     *shown* is the entry the operator edited, as the form showed it. The named values replace it:
-    a None ID removes that role, and the entry must keep an own ID or an OOB ID. *oob_type* counts
-    only with an OOB ID. Each named ID is claimed, so an owner of either model refuses it at persistence.
+    a None OOB ID removes the OOB entry, and a None own ID is allowed only where no own ID is
+    stored. The entry must keep an own ID or an OOB ID. *oob_type* counts only with an OOB ID. Each named ID is claimed, so an owner of either model refuses it at persistence.
 
     Raises:
         MappingChanged: The stored entry is not *shown*.
         ValueError: The stored value is legacy or invalid, the server records a migration marker,
-            no ID is named, an ID is not a positive integer, or the OOB type is unknown.
+            the stored own ID is removed, no ID is named, an ID is not a positive integer, or the
+            OOB type is missing or unknown.
 
     """
     server = require_server_key(server)
@@ -1027,6 +1028,9 @@ def edit_server(obj, server: str, *, own_id, oob_id, oob_type, shown: ServerStat
         )
     own = _named_id(own_id, "LibreNMS ID")
     oob = _named_id(oob_id, "OOB controller ID")
+    # Discovery on the next page load stores a found own ID again, so a removal would not last.
+    if own is None and entry is not None and entry.own_id is not None:
+        raise ValueError("The LibreNMS ID cannot be removed here. Enter another ID to replace it.")
     if own is None and oob is None:
         raise ValueError("Enter a LibreNMS ID or an OOB controller ID.")
     if oob is not None and not oob_type:

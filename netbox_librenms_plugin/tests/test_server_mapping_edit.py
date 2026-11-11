@@ -15,6 +15,7 @@ from netbox_librenms_plugin.tests.conftest import (
     configure_librenms_servers,
     make_device,
     make_superuser,
+    make_virtual_chassis_members,
     make_vm,
     transactional_db_with_all_apps,
 )
@@ -168,14 +169,13 @@ def test_a_new_own_id_replaces_the_shown_one_and_keeps_the_other_servers(client,
         ),
         ({"own": 14025, "oob": 14026, "oob_type": "bmc"}, {"oob_id": ""}, {"own": 14025}),
         (None, {"oob_id": "14027", "oob_type": "oob"}, {"oob": 14027, "oob_type": "oob"}),
-        ({"own": 14028, "oob": 14029, "oob_type": "cimc"}, {"own_id": ""}, {"oob": 14029, "oob_type": "cimc"}),
         (
             {"own": 14030},
             {"own_id": "14030", "oob_id": "14030", "oob_type": "drac"},
             {"own": 14030, "oob": 14030, "oob_type": "drac"},
         ),
     ],
-    ids=["add", "change", "clear", "oob-only", "clear-own", "same-id"],
+    ids=["add", "change", "clear", "oob-only", "same-id"],
 )
 def test_the_form_adds_changes_and_clears_the_oob_entry(client, servers, seed, typed, expected):
     target = make_device(f"edit-oob-{next(_names)}")
@@ -395,3 +395,68 @@ def test_a_change_between_the_render_and_the_lock_is_a_conflict(client, servers)
     assert _messages(response) == [TRY_AGAIN_MESSAGE]
     target.refresh_from_db()
     assert mapping_summary(target) == {"primary": {"own": 14091}}
+
+
+@pytest.mark.django_db
+def test_an_own_id_cannot_be_cleared_because_discovery_would_restore_it(client, servers):
+    target = seed_mapping(make_device("edit-clear-own"), "primary", own=14028, oob=14029, oob_type="cimc")
+    client.force_login(make_superuser("edit-clear-own-writer"))
+
+    response = _submit(client, target, "primary", own_id="")
+
+    assert response.status_code == 302
+    assert len(_messages(response)) == 1
+    target.refresh_from_db()
+    assert mapping_summary(target) == {"primary": {"own": 14028, "oob": 14029, "oob_type": "cimc"}}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("typed", "expected"),
+    [({"oob_id": ""}, {"own": 14300}), ({"own_id": "14302"}, {"own": 14302, "oob": 14301, "oob_type": "idrac"})],
+    ids=["oob-cleared", "own-replaced"],
+)
+def test_an_edit_survives_the_page_load_after_the_redirect(client, servers, typed, expected):
+    """Discovery finds the device by name as 14300, so a page load could write that ID back."""
+    target = seed_mapping(
+        make_device(f"edit-discoverable-{next(_names)}"), "primary", own=14300, oob=14301, oob_type="idrac"
+    )
+    for device_id in (14300, 14302):
+        _register_device(servers.primary, device_id, target.name)
+    servers.primary.register(
+        f"/api/v0/devices/{target.name}",
+        {"status": "ok", "devices": [{"device_id": 14300, "sysName": target.name, "hostname": target.name}]},
+    )
+    client.force_login(make_superuser("edit-discoverable-writer"))
+
+    response = _submit(client, target, "primary", **typed)
+    assert response.status_code == 302
+    assert client.get(response.url).status_code == 200
+
+    target.refresh_from_db()
+    assert mapping_summary(target) == {"primary": expected}
+
+
+@pytest.mark.django_db
+def test_a_vc_member_edits_its_own_mapping_when_another_member_serves_the_active_server(client, servers):
+    """The page's global owner is member one, but member two holds the own ID of the active server."""
+    _chassis, (first, second) = make_virtual_chassis_members("edit-vc")
+    seed_mapping(first, "primary", own=14200, save=False)
+    seed_mapping(first, "secondary", oob=14201, oob_type="ilo")
+    seed_mapping(second, "secondary", own=14202)
+    client.force_login(make_superuser("edit-vc-writer"))
+
+    response = client.get(_sync_url(first), {"server_key": "secondary"})
+    assert response.status_code == 200
+    parser = _EditorForms()
+    parser.feed(response.content.decode())
+    forms = {form["fields"]["server_key"]: form for form in parser.forms.values()}
+    action, fields = forms["primary"]["action"], forms["primary"]["fields"]
+
+    response = client.post(action, {**fields, "own_id": "14203"})
+
+    assert response.status_code == 302
+    first.refresh_from_db()
+    second.refresh_from_db()
+    assert mapping_summary(first) == {"primary": {"own": 14203}, "secondary": {"oob": 14201, "oob_type": "ilo"}}
+    assert mapping_summary(second) == {"secondary": {"own": 14202}}
