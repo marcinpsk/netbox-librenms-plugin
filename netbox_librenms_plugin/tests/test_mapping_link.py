@@ -848,8 +848,8 @@ def test_a_member_linked_while_the_page_probes_gets_the_match_without_a_link_off
 
 
 @transactional_db_with_all_apps()
-def test_a_device_that_rejoins_its_chassis_before_the_lock_is_refused(server):
-    """The Link reads no chassis, so it locks none; the device rejoins before its row lock."""
+def test_a_device_that_rejoins_its_chassis_before_the_lock_links_only_under_the_chassis_lock(server):
+    """The first attempt reads no chassis and refuses at the row lock; the new attempt locks the chassis."""
     from dcim.models import Device as DeviceModel
     from django.db import connection
 
@@ -861,10 +861,12 @@ def test_a_device_that_rejoins_its_chassis_before_the_lock_is_refused(server):
     client.force_login(make_user_with_perms("vc-rejoin-writer", PERMISSIONS))
     token = page_token(client, master)
     DeviceModel.objects.filter(pk=master.pk).update(virtual_chassis=None, vc_position=None)
-    rejoined = []
+    rejoined, chassis_locks = [], []
 
     def rejoin_after_the_chassis_read(execute, sql, params, many, context):
         result = execute(sql, params, many, context)
+        if 'FROM "dcim_virtualchassis"' in sql and "FOR UPDATE" in sql:
+            chassis_locks.append(params[0])
         if not rejoined and sql.startswith('SELECT "dcim_device"."virtual_chassis_id" AS'):
             rejoined.append(True)
             with second_connection() as other:
@@ -877,5 +879,6 @@ def test_a_device_that_rejoins_its_chassis_before_the_lock_is_refused(server):
         response = link(client, master, [token])
 
     assert rejoined
-    assert mapping_summary(_fresh(master)) == {}
-    assert "assumptions.chassis" in stale_paths(response, master.name)
+    assert response.status_code == 302
+    assert chassis_locks == [chassis_id]
+    assert mapping_summary(_fresh(master)) == {"default": {"own": 9750}}

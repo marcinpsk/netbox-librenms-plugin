@@ -118,6 +118,15 @@ def _change_records(obj):
     ).count()
 
 
+def _apply_confirmation(client, response):
+    """Post the token of the confirmation that the editor rendered, as its plain form does."""
+    from netbox_librenms_plugin.confirmation_intent import FIELD
+
+    assert response.status_code == 200, _messages(response)
+    context = response.context
+    return client.post(context["action_url"], {"server_key": context["server_key"], FIELD: [context["token"]]})
+
+
 def _post(client, obj, **data):
     """Post to the editor directly, as a hand-made request does."""
     url = reverse("plugins:netbox_librenms_plugin:edit_server_mapping", args=[obj.pk])
@@ -147,7 +156,7 @@ def test_a_new_own_id_replaces_the_shown_one_and_keeps_the_other_servers(client,
     seed_mapping(target, "primary", own=14002, preferred=True)
     client.force_login(make_superuser("edit-replace-writer"))
 
-    response = _submit(client, target, "primary", own_id="14003")
+    response = _apply_confirmation(client, _submit(client, target, "primary", own_id="14003"))
 
     assert response.status_code == 302
     target.refresh_from_db()
@@ -163,22 +172,22 @@ def test_a_new_own_id_replaces_the_shown_one_and_keeps_the_other_servers(client,
     ("seed", "typed", "expected"),
     [
         ({"own": 14020}, {"oob_id": "14021", "oob_type": "idrac"}, {"own": 14020, "oob": 14021, "oob_type": "idrac"}),
-        (
-            {"own": 14022, "oob": 14023, "oob_type": "ilo"},
-            {"oob_id": "14024", "oob_type": "ipmi"},
-            {"own": 14022, "oob": 14024, "oob_type": "ipmi"},
-        ),
-        ({"own": 14025, "oob": 14026, "oob_type": "bmc"}, {"oob_id": ""}, {"own": 14025}),
         (None, {"oob_id": "14027", "oob_type": "oob"}, {"oob": 14027, "oob_type": "oob"}),
         (
             {"own": 14030},
             {"own_id": "14030", "oob_id": "14030", "oob_type": "drac"},
             {"own": 14030, "oob": 14030, "oob_type": "drac"},
         ),
+        ({"oob": 14033, "oob_type": "ilo"}, {"own_id": "14034"}, {"own": 14034, "oob": 14033, "oob_type": "ilo"}),
+        (
+            {"own": 14035, "oob": 14036, "oob_type": "ilo"},
+            {"oob_type": "idrac"},
+            {"own": 14035, "oob": 14036, "oob_type": "idrac"},
+        ),
     ],
-    ids=["add", "change", "clear", "oob-only", "same-id"],
+    ids=["add", "oob-only", "same-id", "own-add", "type-only"],
 )
-def test_the_form_adds_changes_and_clears_the_oob_entry(client, servers, seed, typed, expected):
+def test_a_change_that_removes_no_host_id_writes_at_once(client, servers, seed, typed, expected):
     target = make_device(f"edit-oob-{next(_names)}")
     if seed is not None:
         seed_mapping(target, "primary", **seed)
@@ -189,6 +198,48 @@ def test_the_form_adds_changes_and_clears_the_oob_entry(client, servers, seed, t
     assert response.status_code == 302
     target.refresh_from_db()
     assert mapping_summary(target) == {"primary": expected}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("typed", "action", "expected"),
+    [
+        ({"own_id": "14039"}, "relink", {"own": 14039, "oob": 14038, "oob_type": "ilo"}),
+        ({"own_id": ""}, "relink", {"oob": 14038, "oob_type": "ilo"}),
+        ({"oob_id": "14040", "oob_type": "ipmi"}, "change_oob", {"own": 14037, "oob": 14040, "oob_type": "ipmi"}),
+        ({"oob_id": ""}, "change_oob", {"own": 14037}),
+        ({"own_id": "", "oob_id": ""}, "unlink", None),
+    ],
+    ids=["own-replaced", "own-cleared", "oob-replaced", "oob-cleared", "both-cleared"],
+)
+def test_a_replacement_or_a_clear_renders_its_confirmation_and_writes_nothing(client, servers, typed, action, expected):
+    from netbox_librenms_plugin.tests.view_test_helpers import domain_state
+
+    target = seed_mapping(make_device(f"edit-confirm-{next(_names)}"), "primary", own=14037, oob=14038, oob_type="ilo")
+    client.force_login(make_superuser("edit-confirm-writer"))
+    before = domain_state()
+
+    confirmation = _submit(client, target, "primary", **typed)
+
+    assert confirmation.status_code == 200
+    assert domain_state() == before
+    assert confirmation.context["action"] == action
+    _apply_confirmation(client, confirmation)
+    target.refresh_from_db()
+    assert mapping_summary(target) == ({"primary": expected} if expected else {})
+
+
+@pytest.mark.django_db
+def test_a_change_of_both_ids_at_once_is_refused(client, servers):
+    target = seed_mapping(make_device("edit-both"), "primary", own=14041, oob=14042, oob_type="ilo")
+    client.force_login(make_superuser("edit-both-writer"))
+
+    response = _submit(client, target, "primary", own_id="14043", oob_id="14044")
+
+    assert response.status_code == 302
+    assert len(_messages(response)) == 1
+    target.refresh_from_db()
+    assert mapping_summary(target) == {"primary": {"own": 14041, "oob": 14042, "oob_type": "ilo"}}
 
 
 @pytest.mark.django_db
@@ -248,9 +299,8 @@ def test_an_id_that_another_object_owns_is_refused(client, servers, field, owner
         {"oob_id": "1.5", "oob_type": "idrac"},
         {"oob_id": "14051", "oob_type": "toaster"},
         {"oob_id": "14051", "oob_type": ""},
-        {"own_id": "", "oob_id": ""},
     ],
-    ids=["text", "zero", "negative", "above-bigint", "oob-fraction", "unknown-type", "no-type", "nothing"],
+    ids=["text", "zero", "negative", "above-bigint", "oob-fraction", "unknown-type", "no-type"],
 )
 def test_a_bad_value_is_refused(client, servers, typed):
     target = seed_mapping(make_device(f"edit-bad-{next(_names)}"), "primary", own=14050)
@@ -437,6 +487,7 @@ def test_a_change_between_the_render_and_the_lock_is_a_conflict(client, servers)
     client.force_login(make_superuser("edit-concurrent-writer"))
     action, fields = _editor_forms(client, target)["primary"]
     other_writer = seed_mapping(type(target)(), "primary", own=14091, save=False)
+    # An OOB add on an empty OOB writes at once, so the editor locks the row.
 
     with second_connection() as other:
         committed = []
@@ -449,26 +500,13 @@ def test_a_change_between_the_render_and_the_lock_is_a_conflict(client, servers)
             return execute(sql, params, many, context)
 
         with connection.execute_wrapper(commit_before_the_lock):
-            response = client.post(action, {**fields, "own_id": "14092"})
+            response = client.post(action, {**fields, "oob_id": "14092", "oob_type": "idrac"})
 
     assert committed
     assert response.status_code == 302
     assert _messages(response) == [TRY_AGAIN_MESSAGE]
     target.refresh_from_db()
     assert mapping_summary(target) == {"primary": {"own": 14091}}
-
-
-@pytest.mark.django_db
-def test_an_own_id_cannot_be_cleared_in_the_editor(client, servers):
-    target = seed_mapping(make_device("edit-clear-own"), "primary", own=14028, oob=14029, oob_type="cimc")
-    client.force_login(make_superuser("edit-clear-own-writer"))
-
-    response = _submit(client, target, "primary", own_id="")
-
-    assert response.status_code == 302
-    assert len(_messages(response)) == 1
-    target.refresh_from_db()
-    assert mapping_summary(target) == {"primary": {"own": 14028, "oob": 14029, "oob_type": "cimc"}}
 
 
 @pytest.mark.django_db
@@ -490,7 +528,7 @@ def test_an_edit_survives_the_page_load_after_the_redirect(client, servers, type
     )
     client.force_login(make_superuser("edit-discoverable-writer"))
 
-    response = _submit(client, target, "primary", **typed)
+    response = _apply_confirmation(client, _submit(client, target, "primary", **typed))
     assert response.status_code == 302
     assert client.get(response.url).status_code == 200
 
@@ -514,7 +552,7 @@ def test_a_vc_member_edits_its_own_mapping_when_another_member_serves_the_active
     forms = {form["fields"]["server_key"]: form for form in parser.forms.values()}
     action, fields = forms["primary"]["action"], forms["primary"]["fields"]
 
-    response = client.post(action, {**fields, "own_id": "14203"})
+    response = _apply_confirmation(client, client.post(action, {**fields, "own_id": "14203"}))
 
     assert response.status_code == 302
     first.refresh_from_db()
@@ -542,7 +580,9 @@ def test_a_vc_member_page_proposes_the_match_and_an_editor_save_stores_only_the_
     parser.feed(rendered.content.decode())
     form = next(form for form in parser.forms.values() if form["fields"]["server_key"] == "secondary")
 
-    response = client.post(form["action"], {**form["fields"], "oob_id": "14403", "oob_type": "ilo"})
+    response = _apply_confirmation(
+        client, client.post(form["action"], {**form["fields"], "oob_id": "14403", "oob_type": "ilo"})
+    )
 
     assert response.status_code == 302
     first.refresh_from_db()

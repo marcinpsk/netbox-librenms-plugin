@@ -370,21 +370,22 @@ def test_the_sync_tabs_name_the_active_server_for_the_page_scripts(client, serve
 
 
 @pytest.mark.django_db
-def test_remove_mapping_form_preserves_the_active_server(client, servers):
-    owner = make_device("remove-mapping-active-server")
+def test_each_mapping_row_offers_its_unlink_confirmation(client, servers):
+    owner = make_device("unlink-action-rows")
     seed_mapping(owner, "primary", own=13599, save=False)
     seed_mapping(owner, "retired", own=13600)
     _register_device(servers.primary, 13599, owner.name)
-    client.force_login(make_superuser("remove-mapping-active-server-writer"))
+    client.force_login(make_superuser("unlink-action-rows-writer"))
 
-    response = client.get(_sync_url(owner), {"server_key": "primary"})
+    response = client.get(_sync_url(owner), {"server_key": "primary", "tab": "cables"})
 
     html = response.content.decode()
     assert response.status_code == 200
-    remove_action = reverse("plugins:netbox_librenms_plugin:remove_server_mapping", args=[owner.pk])
-    start = html.index(f'action="{remove_action}"')
-    remove_form = html[start : html.index("</form>", start)]
-    assert remove_form.count('name="active_server_key" value="primary"') == 1
+    unlink_url = reverse(
+        "plugins:netbox_librenms_plugin:mapping_lifecycle", kwargs={"object_type": "device", "pk": owner.pk}
+    )
+    for server_key in ("primary", "retired"):
+        assert f'href="{unlink_url}?action=unlink&amp;server_key={server_key}"' in html
 
 
 @pytest.mark.django_db
@@ -475,7 +476,7 @@ def test_unconfigured_preferred_mapping_warns_and_falls_back_without_mutation(cl
 
 @pytest.mark.django_db
 def test_an_unusable_configured_mapping_shows_where_to_repair_it(client, settings, servers):
-    """RemoveServerMappingView refuses a configured server, so the blocked page must point elsewhere."""
+    """A configured server without a usable URL and API token is repaired in the configuration, or unlinked."""
     plugin_config = deepcopy(settings.PLUGINS_CONFIG)
     plugin_config["netbox_librenms_plugin"]["servers"]["incomplete"] = {
         "display_name": "Incomplete LibreNMS",
@@ -497,6 +498,7 @@ def test_an_unusable_configured_mapping_shows_where_to_repair_it(client, setting
     assert reverse("plugins:netbox_librenms_plugin:settings") in html
     assert "Incomplete LibreNMS" in html
     assert "Repair this server in the plugin configuration" in html
+    assert 'data-unlink-server="incomplete"' in html
     # The page must still refuse to run against a server this object is not mapped on.
     assert 'data-active-server-key=""' in html
     assert servers.primary.requests == []
@@ -566,26 +568,24 @@ def test_only_unusable_mapping_requires_selection_without_get_mutation(client, s
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("preferred_removed", [True, False])
-def test_removing_mapping_clears_preference_when_removed_or_only_one_mapping_remains(
-    client,
-    servers,
-    preferred_removed,
-):
+def test_an_unlink_removes_only_the_preference_that_names_its_server(client, servers, preferred_removed):
+    from netbox_librenms_plugin.confirmation_intent import FIELD
+
     preferred_key = "retired" if preferred_removed else "primary"
-    owner = make_device(f"remove-preferred-{preferred_removed}")
+    owner = make_device(f"unlink-preferred-{preferred_removed}")
     seed_mapping(owner, "primary", own=13519, save=False)
     seed_mapping(owner, "retired", own=13520, save=False)
     seed_mapping(owner, preferred_key, preferred=True)
-    client.force_login(make_superuser(f"remove-preferred-{preferred_removed}-writer"))
+    client.force_login(make_superuser(f"unlink-preferred-{preferred_removed}-writer"))
+    url = reverse("plugins:netbox_librenms_plugin:mapping_lifecycle", kwargs={"object_type": "device", "pk": owner.pk})
+    token = client.get(url, {"action": "unlink", "server_key": "retired"}).context["token"]
 
-    response = client.post(
-        reverse("plugins:netbox_librenms_plugin:remove_server_mapping", args=[owner.pk]),
-        {"object_type": "device", "server_key": "retired"},
-    )
+    response = client.post(url, {"server_key": "retired", FIELD: [token]})
 
     assert response.status_code == 302
     owner.refresh_from_db()
-    assert mapping_summary(owner) == {"primary": {"own": 13519}}
+    expected = {"primary": {"own": 13519}}
+    assert mapping_summary(owner) == (expected if preferred_removed else {**expected, "preferred": "primary"})
 
 
 @pytest.mark.django_db

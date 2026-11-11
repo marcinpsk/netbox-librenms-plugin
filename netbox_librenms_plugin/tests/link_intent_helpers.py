@@ -1,7 +1,8 @@
 """
-Drive the Link confirmation through its real routes.
+Drive the mapping lifecycle confirmations through their real routes.
 
-The sync page or a status list offers the token, and the lifecycle routes apply it.
+The sync page, a status list, the unlink confirmation or the mapping editor offers the token, and
+the lifecycle routes apply it.
 """
 
 import re
@@ -12,7 +13,7 @@ from django.urls import reverse
 from netbox_librenms_plugin.confirmation_intent import FIELD
 from netbox_librenms_plugin.tests.conftest import make_interface, make_ip
 
-_STALE = re.compile(r"^'([^']*)': the confirmed link is no longer current \(([^)]*)\)")
+_STALE = re.compile(r"^'([^']*)': the confirmed [^(]+ is no longer current \(([^)]*)\)")
 
 
 def model_name(obj):
@@ -59,6 +60,40 @@ def page_token(client, obj):
     link = page_link(client, obj)
     assert link is not None and link["token"], link
     return link["token"]
+
+
+def lifecycle_url(obj):
+    """Return the lifecycle route of *obj*: its GET shows the unlink confirmation, its POST applies a token."""
+    return reverse(
+        "plugins:netbox_librenms_plugin:mapping_lifecycle", kwargs={"object_type": model_name(obj), "pk": obj.pk}
+    )
+
+
+def unlink_page(client, obj, server_key="default", **query):
+    """Request the unlink confirmation of *obj* on *server_key*, as the Unlink action of the sync page does."""
+    return client.get(lifecycle_url(obj), {"action": "unlink", "server_key": server_key, **query})
+
+
+def edit_mapping(client, obj, server_key="default", **typed):
+    """Post the mapping editor of *obj* with the shown entry of *server_key* and the *typed* values."""
+    from netbox_librenms_plugin.server_mappings import host_entry
+
+    entry = host_entry(type(obj).objects.get(pk=obj.pk), server_key)
+    shown = {
+        "own_id": "" if entry.own_id is None else str(entry.own_id),
+        "oob_id": "" if entry.oob_id is None else str(entry.oob_id),
+        "oob_type": entry.oob_type or "",
+    }
+    data = {"object_type": model_name(obj), "server_key": server_key, **shown}
+    data.update({f"shown_{field}": value for field, value in shown.items()})
+    data.update(typed)
+    return client.post(reverse("plugins:netbox_librenms_plugin:edit_server_mapping", args=[obj.pk]), data)
+
+
+def offered_token(response):
+    """Return the token of a rendered host change confirmation."""
+    assert response.status_code == 200, (response.status_code, message_texts(response))
+    return response.context["token"]
 
 
 def link(client, obj, tokens, *, server_key="default"):

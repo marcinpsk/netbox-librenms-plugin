@@ -401,6 +401,16 @@ def saved_in_scope(obj, user, action):
     return type(obj).objects.restrict(user, action).filter(pk=obj.pk).exists()
 
 
+def saved_all_in_scope(objs, user, action):
+    """Return whether every row of *objs*, as this transaction saved it, is in the objects that *user* may *action*."""
+    by_model = {}
+    for obj in objs:
+        by_model.setdefault(type(obj), set()).add(obj.pk)
+    return all(
+        model.objects.restrict(user, action).filter(pk__in=pks).count() == len(pks) for model, pks in by_model.items()
+    )
+
+
 def first_at_version(queryset):
     """
     Return the first row of *queryset* and the row version that the read returned.

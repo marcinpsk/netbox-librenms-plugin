@@ -10,11 +10,7 @@ from django.urls import reverse
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_superuser, make_vm
 from netbox_librenms_plugin.tests.mapping_fixtures import (
-    mapping_summary,
     seed_mapping,
-    seed_stored_mapping,
-    seed_stored_mapping_row,
-    stored_mapping_for_test,
 )
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
@@ -64,28 +60,6 @@ def _messages(response, level=None):
 
 def _add_url(obj):
     return reverse("plugins:netbox_librenms_plugin:add_device_to_librenms", args=[obj.pk])
-
-
-def _configure_only_server(settings, server_key):
-    """Configure *server_key* as the only server."""
-    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-    plugin_config["netbox_librenms_plugin"]["servers"] = {
-        server_key: {"librenms_url": f"https://{server_key}.example.test", "api_token": "remove-test-token"}
-    }
-    plugin_config["netbox_librenms_plugin"].pop("librenms_url", None)
-    settings.PLUGINS_CONFIG = plugin_config
-
-
-def _configure_only_other_server(settings):
-    """Configure one server that is not ``default``, so a legacy ``default`` mapping is unprotected."""
-    _configure_only_server(settings, "primary")
-
-
-def _post_remove(client, obj, server_key):
-    return client.post(
-        reverse("plugins:netbox_librenms_plugin:remove_server_mapping", args=[obj.pk]),
-        {"object_type": obj._meta.model_name, "server_key": server_key},
-    )
 
 
 def _v2_payload(obj, **overrides):
@@ -322,134 +296,3 @@ class TestUpdateDeviceLocationView:
         )
         assert _messages(response, "error") == ["Not linked to Synchronization test server."]
         assert librenms_server.requests == []
-
-
-@pytest.mark.django_db
-class TestRemoveServerMappingView:
-    def test_vm_writer_removes_an_orphaned_mapping_and_returns_to_vm_sync(self, client):
-        from virtualization.models import VirtualMachine
-
-        vm = make_vm("remove-orphaned-vm-mapping")
-        seed_mapping(vm, "orphaned-server", own=42)
-        user = make_user_with_perms("remove-orphaned-vm-writer", [("change", VirtualMachine)])
-        client.force_login(user)
-
-        response = client.post(
-            reverse("plugins:netbox_librenms_plugin:remove_server_mapping", args=[vm.pk]),
-            {"object_type": "virtualmachine", "server_key": "orphaned-server"},
-        )
-
-        assert response.status_code == 302
-        assert response.url == reverse("plugins:netbox_librenms_plugin:vm_librenms_sync", args=[vm.pk])
-        assert _messages(response, "success") == ["Removed LibreNMS mapping for server 'orphaned-server'."]
-        vm.refresh_from_db()
-        assert mapping_summary(vm) == {}
-
-    @pytest.mark.parametrize("stored", ["²", 0, -1, True])
-    def test_a_legacy_value_the_reader_cannot_resolve_has_no_mapping_to_remove(self, client, settings, stored):
-        _configure_only_other_server(settings)
-        device = seed_stored_mapping(make_device(f"remove-unreadable-legacy-{stored}"), stored, save=True)
-        client.force_login(make_superuser(f"remove-unreadable-legacy-{stored}-writer"))
-
-        response = _post_remove(client, device, "default")
-
-        assert response.status_code == 302
-        assert _messages(response, "warning") == ["No mapping found for server 'default'."]
-        device.refresh_from_db()
-        assert stored_mapping_for_test(device) == stored
-
-    @pytest.mark.parametrize("stored", ["42", "+42", "4_2", " 42 ", 42])
-    def test_a_legacy_value_the_reader_resolves_is_removable_under_default(self, client, settings, stored):
-        _configure_only_other_server(settings)
-        device = seed_stored_mapping(make_device(f"remove-readable-legacy-{stored}"), stored, save=True)
-        client.force_login(make_superuser(f"remove-readable-legacy-{stored}-writer"))
-
-        response = _post_remove(client, device, "default")
-
-        assert response.status_code == 302
-        assert _messages(response, "success") == ["Removed LibreNMS mapping for server 'default'."]
-        device.refresh_from_db()
-        assert stored_mapping_for_test(device) is None
-
-    def test_a_legacy_value_is_removable_only_under_default(self, client, settings):
-        _configure_only_other_server(settings)
-        device = seed_stored_mapping(make_device("remove-legacy-other-server"), "+42", save=True)
-        client.force_login(make_superuser("remove-legacy-other-server-writer"))
-
-        response = _post_remove(client, device, "retired")
-
-        assert _messages(response, "warning") == ["No mapping found for server 'retired'."]
-        device.refresh_from_db()
-        assert stored_mapping_for_test(device) == "+42"
-
-    def test_a_readable_legacy_value_stays_when_default_is_configured(self, client, settings):
-        _configure_only_server(settings, "default")
-        device = seed_stored_mapping(make_device("remove-legacy-protected-default"), "+42", save=True)
-        client.force_login(make_superuser("remove-legacy-protected-default-writer"))
-
-        response = _post_remove(client, device, "default")
-
-        assert _messages(response, "error") == [
-            "Cannot remove mapping for configured server 'default'. "
-            "Remove the server from plugin configuration first, then retry."
-        ]
-        device.refresh_from_db()
-        assert stored_mapping_for_test(device) == "+42"
-
-    def test_a_legacy_value_is_rechecked_on_the_locked_row(self, client, settings):
-        from django.db import connection
-
-        _configure_only_other_server(settings)
-        device = seed_stored_mapping(make_device("remove-legacy-locked-recheck"), "+42", save=True)
-        client.force_login(make_superuser("remove-legacy-locked-recheck-writer"))
-
-        class CorruptBeforeLock:
-            fired = False
-
-            def __call__(self, execute, sql, params, many, context):
-                if not self.fired and 'FROM "dcim_device"' in sql and "FOR UPDATE" in sql.upper():
-                    self.fired = True
-                    seed_stored_mapping_row(device, "²")
-                return execute(sql, params, many, context)
-
-        lock_hook = CorruptBeforeLock()
-        with connection.execute_wrapper(lock_hook):
-            response = _post_remove(client, device, "default")
-
-        assert lock_hook.fired
-        assert _messages(response) == ["Mapping for server 'default' was already removed."]
-        device.refresh_from_db()
-        assert stored_mapping_for_test(device) == "²"
-
-    def test_a_readable_legacy_value_needs_change_permission_to_remove(self, client, settings):
-        from dcim.models import Device
-
-        _configure_only_other_server(settings)
-        device = seed_stored_mapping(make_device("remove-legacy-view-only"), "+42", save=True)
-        client.force_login(make_user_with_perms("remove-legacy-view-only-user", [("view", Device)]))
-
-        response = _post_remove(client, device, "default")
-
-        assert response.status_code == 302
-        assert _messages(response, "error") == ["Missing permissions: dcim.change_device"]
-        device.refresh_from_db()
-        assert stored_mapping_for_test(device) == "+42"
-
-    def test_mapping_removal_preserves_unrelated_legacy_device_state(self, client):
-        from dcim.models import Device
-
-        device = seed_mapping(make_device("remove-orphaned-device-mapping"), "orphaned-server", own=42)
-        Device.objects.filter(pk=device.pk).update(face="front")
-        user = make_user_with_perms("remove-orphaned-device-writer", [("change", Device)])
-        client.force_login(user)
-
-        response = client.post(
-            reverse("plugins:netbox_librenms_plugin:remove_server_mapping", args=[device.pk]),
-            {"object_type": "device", "server_key": "orphaned-server"},
-        )
-
-        assert response.status_code == 302
-        assert _messages(response, "success") == ["Removed LibreNMS mapping for server 'orphaned-server'."]
-        device.refresh_from_db()
-        assert mapping_summary(device) == {}
-        assert device.face == "front"
