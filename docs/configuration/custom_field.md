@@ -73,36 +73,47 @@ If the field was not created automatically (fallback): follow these steps to cre
 
 ### Manually assign a value to `librenms_id`
 
-You can manually assign a value to the `librenms_id` custom field for a device using the following steps:
+Set or correct the mapping of a device or virtual machine on its LibreNMS Sync page. Do not edit the
+JSON value of the custom field by hand.
 
-1. **Edit the Device:**
+1. **Open the sync page:**
 
-    - Navigate to the device in NetBox.
-    - Click the **Edit** button.
+    - Navigate to the device or virtual machine in NetBox.
+    - Open the **LibreNMS Sync** tab.
 
-2. **Set the LibreNMS ID:**
+2. **Open the editor:**
 
-    - Scroll to the **Custom Fields** section.
-    - Enter the `librenms_id` value as a JSON object with your server key(s):
-      ```json
-      {"production": 42}
-      ```
-      For multiple servers: `{"production": 42, "staging": 17}`
+    - In the **LibreNMS Connections** card (or the **Active LibreNMS Server** card when the object has
+      no mapping yet), click **Edit server mappings**.
+    - The editor has one row for each configured LibreNMS server.
 
-      An object with multiple usable mappings can also store its preferred server:
+3. **Enter the IDs:**
 
-      ```json
-      {"production": 42, "staging": 17, "_preferred_server": "production"}
-      ```
+    - **LibreNMS ID:** the LibreNMS device ID of the object on that server.
+    - **OOB controller ID** and **OOB type:** the LibreNMS device ID of its out-of-band controller
+      (iDRAC, iLO, IPMI and others), and the controller type. See
+      [Out-of-Band Management](../device_import/oob_management.md).
+    - Clear a field to remove that ID. A row must keep a LibreNMS ID or an OOB controller ID.
 
-      Use the star control on the object sync page to manage this value. Do not use `_preferred_server` as a server identity key.
+4. **Save the row:**
 
-3. **Save Changes:**
+    - Click **Save** on the row. Each row saves only its own server.
+    - The plugin refuses an ID that another NetBox device or virtual machine already holds on that
+      server. It names that object only when you have permission to view it.
+    - When another user changed the mapping after the page loaded, the plugin refuses the save.
+      Reload the page and enter the values again.
 
-    - Click **Update** to save the device.
+You need change permission on the object. A virtual chassis member shows the editor on the page of
+the member that holds the mapping. Use **Convert ID** to convert a legacy value (a bare integer)
+before you edit it. The editor does not repair a value with an invalid format.
 
+To remove the mapping for a server that is no longer configured, click **Remove** on its row in the
+**LibreNMS Connections** card. When an object has usable mappings on two or more servers, use the
+star control on the same card to select the preferred server. The preference is stored in the
+mapping as `_preferred_server`; do not use that name as a server key.
 
-
+Interfaces get their `librenms_id` value from the interface sync, so the sync page has no editor for
+them.
 
 ## Notes
 
