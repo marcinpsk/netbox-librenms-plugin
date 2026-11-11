@@ -557,6 +557,52 @@ class TestCableWrites:
         assert spy.reading_scopes() == {name for _owner, name in producers}
         _assert_prefetched(spy)
 
+    def _refresh_two_chassis(self, client, server, tag, host_id, members):
+        """Refresh the cables of a chassis whose links reach another chassis by host name only; return the page, spy and count."""
+        _host_vc, hosts = make_virtual_chassis_members(f"{tag}-host", count=members)
+        _peer_vc, peers = make_virtual_chassis_members(f"{tag}-peer", count=members)
+        seed_mapping(hosts[0], SERVER_KEY, own=host_id)
+        seed_mapping(peers[0], SERVER_KEY, own=host_id + 1)
+        # Every member owns an interface, so every member is a port owner of the refresh scope.
+        for index, member in enumerate([*hosts, *peers]):
+            make_interface(member, f"eth{index}", iface_type="1000base-t")
+        links, ports = [], []
+        for index, peer in enumerate(peers[:2]):
+            port_id = host_id * 100 + index
+            local = make_interface(hosts[0], f"uplink{index}", iface_type="1000base-t")
+            seed_mapping(local, SERVER_KEY, own=port_id)
+            links.append(link_row(port_id, "eth-r", local_port=f"uplink{index}", remote_hostname=peer.name))
+            ports.append(port_row(port_id, f"uplink{index}", device_id=host_id))
+        server.register(f"/api/v0/devices/{host_id}/links", {"status": "ok", "links": links})
+        server.register(f"/api/v0/devices/{host_id}/ports", {"status": "ok", "ports": ports})
+        server.register(f"/api/v0/devices/{host_id + 1}/ports", {"status": "ok", "ports": []})
+        with spy_mapping_reads() as spy:
+            count = _query_count(
+                lambda: client.post(
+                    reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[hosts[0].pk]),
+                    {"server_key": SERVER_KEY},
+                    HTTP_HX_REQUEST="true",
+                )
+            )
+        return hosts[0], spy, count
+
+    def test_a_cable_refresh_loads_each_chassis_once(self, client, live_librenms):
+        """The port owners and the host-name neighbours of a chassis share one member load and one prefetch."""
+        client.force_login(make_superuser("mapping-prefetch-cable-refresh-vc"))
+        server = live_librenms.server
+        self._refresh_two_chassis(client, server, "prefetch-refresh-warm", 400, 2)
+
+        results = [
+            self._refresh_two_chassis(client, server, f"prefetch-refresh-{members}", host_id, members)
+            for members, host_id in ((2, 500), (6, 600))
+        ]
+
+        (_page, few_spy, few_count), (_page, many_spy, many_count) = results
+        assert few_spy.prefetch_calls == many_spy.prefetch_calls, (few_spy.prefetch_calls, many_spy.prefetch_calls)
+        assert few_count == many_count, (few_count, many_count)
+        for page, spy, _count in results:
+            _assert_prefetched(spy, page)
+
 
 @pytest.mark.django_db
 def test_a_module_install_bind_prefetches_its_candidate_interfaces(live_librenms):
