@@ -1849,6 +1849,101 @@ class TestModuleBindLockConflicts:
         assert (primary.module_id, standalone.module_id) == (None, None)
         assert read_mapping(primary).own_id("default") is None
 
+    @transactional_db_with_all_apps()
+    def test_an_unlink_cascade_and_a_bind_and_adopt_that_lock_in_opposite_orders_end_in_a_serial_outcome(
+        self, client, live_librenms
+    ):
+        """
+        The cascade locks the interfaces by pk; the module action locks the primary, then adopts the lower pk.
+
+        PostgreSQL breaks the cycle, and the aborted side answers "try again" or runs again: the
+        contract is a valid serial outcome, not an order that prevents the cycle.
+        """
+        from queue import Queue
+
+        from dcim.models import Interface, InterfaceTemplate
+        from django.db import connection
+        from django.test import Client
+
+        from netbox_librenms_plugin import confirmation_intent as intent
+        from netbox_librenms_plugin.tests.link_intent_helpers import lifecycle_url, offered_token, unlink_page
+        from netbox_librenms_plugin.tests.lock_conflict_helpers import backend_pid, raised_sqlstates, wait_for_lock_wait
+        from netbox_librenms_plugin.tests.view_test_helpers import messages_on
+
+        device = seed_mapping(make_device("cascade-contract"), "default", own=85)
+        bay = make_module_bay(device, "Contract Bay")
+        module = install_module(device, bay.name, "CONTRACT-CARD")
+        InterfaceTemplate.objects.create(module_type=module.module_type, name="c2/1", type="other")
+        standalone = make_interface(device, "c2/1")
+        primary = make_interface(device, "Ethernet85")
+        assert standalone.pk < primary.pk
+        item = _inventory_item(850, module.module_type.model, bay.name)
+        seed_inventory(
+            device,
+            [item],
+            librenms_id=85,
+            ports=[{"port_id": 8501, "ifName": primary.name}],
+            transceivers=[transceiver_row(850, port_id=8501, model=module.module_type.model)],
+        )
+        user = make_superuser("cascade-contract-user")
+        action, fields = rendered_module_form(render_module_tab(device, user=user), "update-module-interface", 850)
+        client.force_login(user)
+        token = offered_token(unlink_page(client, device))
+        pids, unlinks = Queue(), []
+
+        def unlink():
+            unlink_client = Client()
+            unlink_client.force_login(user)
+            pids.put(backend_pid(connection))
+            with raised_sqlstates() as sqlstates:
+                response = unlink_client.post(lifecycle_url(device), {"server_key": "default", intent.FIELD: [token]})
+            return response.status_code, messages_on(response.wsgi_request), sqlstates
+
+        with bounded_executor(max_workers=1) as executor:
+
+            def start_the_unlink_once_the_primary_is_locked(execute, sql, params, many, context):
+                result = execute(sql, params, many, context)
+                if not unlinks and 'FROM "dcim_interface"' in sql and "FOR UPDATE" in sql:
+                    unlinks.append(executor.submit(unlink))
+                    with second_connection() as observer:
+                        # The cascade holds the standalone interface and waits for the primary.
+                        wait_for_lock_wait(observer, pids.get(timeout=5))
+                return result
+
+            with (
+                connection.execute_wrapper(start_the_unlink_once_the_primary_is_locked),
+                raised_sqlstates() as module_states,
+            ):
+                module_response = client.post(action, data=fields)
+            unlink_status, unlink_messages, unlink_states = unlinks[0].result(timeout=30)
+
+        module_messages = messages_on(module_response.wsgi_request)
+        for status, answers in ((module_response.status_code, module_messages), (unlink_status, unlink_messages)):
+            assert status != 500
+            assert not any("deadlock" in text.lower() for _level, text in answers)
+        module_retried = ("error", TRY_AGAIN_MESSAGE) in module_messages
+        primary.refresh_from_db()
+        standalone.refresh_from_db()
+        device.refresh_from_db()
+        unlinked = "default" not in mapping_summary(device)
+        bound = (primary.module_id, standalone.module_id, read_mapping(primary).own_id("default")) == (
+            module.pk,
+            module.pk,
+            8501,
+        )
+        untouched = (primary.module_id, standalone.module_id, read_mapping(primary).own_id("default")) == (
+            None,
+            None,
+            None,
+        )
+        # Each request writes all or nothing, and never both: the bind makes the unlink's cascade stale.
+        assert (unlinked, bound) in {(True, False), (False, True)}
+        assert bound or (untouched and module_retried)
+        if unlinked:
+            assert all("default" not in mapping_summary(row) for row in Interface.objects.filter(device=device))
+        # The interleaving is a real cycle: PostgreSQL aborts one side with a deadlock.
+        assert "40P01" in module_states + unlink_states
+
 
 class TestModulesRedirectResponse:
     """_modules_redirect_response: the classic (non-HTMX) redirect back to the modules tab."""
