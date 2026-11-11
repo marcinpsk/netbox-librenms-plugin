@@ -474,9 +474,7 @@ def test_unconfigured_preferred_mapping_warns_and_falls_back_without_mutation(cl
     assert mapping_summary(owner) == mapping
 
 
-@pytest.mark.django_db
-def test_an_unusable_configured_mapping_shows_where_to_repair_it(client, settings, servers):
-    """A configured server without a usable URL and API token is repaired in the configuration, or unlinked."""
+def _configure_only_an_incomplete_default(settings, servers):
     plugin_config = deepcopy(settings.PLUGINS_CONFIG)
     plugin_config["netbox_librenms_plugin"]["servers"]["incomplete"] = {
         "display_name": "Incomplete LibreNMS",
@@ -485,6 +483,13 @@ def test_an_unusable_configured_mapping_shows_where_to_repair_it(client, setting
         "verify_ssl": False,
     }
     settings.PLUGINS_CONFIG = plugin_config
+    LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "incomplete"})
+
+
+@pytest.mark.django_db
+def test_an_unusable_configured_mapping_without_a_usable_default_shows_where_to_repair_it(client, settings, servers):
+    """A configured server without a usable URL and API token is repaired in the configuration, or unlinked."""
+    _configure_only_an_incomplete_default(settings, servers)
     owner = seed_mapping(make_device("unusable-configured-mapping"), "incomplete", own=13540)
     mapping = mapping_summary(owner)
     client.force_login(make_superuser("unusable-configured-viewer"))
@@ -510,14 +515,7 @@ def test_an_unusable_configured_mapping_shows_where_to_repair_it(client, setting
 @pytest.mark.django_db
 def test_a_blocked_vc_member_links_to_the_sync_device_that_owns_the_mapping(client, settings, servers):
     """The mapping actions live on the sync device, so a blocked member page must link there."""
-    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
-    plugin_config["netbox_librenms_plugin"]["servers"]["incomplete"] = {
-        "display_name": "Incomplete LibreNMS",
-        "librenms_url": servers.primary.url,
-        "api_token": "",
-        "verify_ssl": False,
-    }
-    settings.PLUGINS_CONFIG = plugin_config
+    _configure_only_an_incomplete_default(settings, servers)
     _chassis, (owner, viewed_member) = make_virtual_chassis_members("blocked-vc-owner", count=2)
     seed_mapping(owner, "incomplete", own=13541)
     client.force_login(make_superuser("blocked-vc-viewer"))
@@ -552,7 +550,7 @@ def test_a_preference_without_any_mapping_reports_the_installation_default(clien
 
 
 @pytest.mark.django_db
-def test_only_unusable_mapping_requires_selection_without_get_mutation(client, servers):
+def test_only_unusable_mapping_uses_the_installation_default_without_get_mutation(client, servers):
     owner = seed_mapping(make_device("unusable-preference-selection"), "retired", own=13529, preferred=True)
     mapping = mapping_summary(owner)
     client.force_login(make_superuser("unusable-preference-viewer"))
@@ -560,8 +558,9 @@ def test_only_unusable_mapping_requires_selection_without_get_mutation(client, s
     response = client.get(_sync_url(owner))
 
     assert response.status_code == 200
-    assert b"The installation default is not mapped, so select a server." in response.content
-    assert b"Select a LibreNMS server to continue." in response.content
+    assert response.context["server_selection_state"] == "resolved"
+    assert b"Using installation default server &#x27;primary&#x27;." in response.content
+    assert b"Select a LibreNMS server to continue." not in response.content
     owner.refresh_from_db()
     assert mapping_summary(owner) == mapping
 
