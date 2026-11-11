@@ -1,7 +1,8 @@
-"""A write that a rollback undoes sends no NetBox event; a write that commits in the same request still sends its event."""
+"""A write that a rollback undoes sends no NetBox event; a write that commits sends its event, once per object."""
 
 from contextlib import contextmanager
 
+import pytest
 from django.contrib.messages import get_messages
 from django.urls import reverse
 
@@ -354,3 +355,76 @@ def test_a_refused_provenance_tag_sends_no_event(client, flushed_events):
     assert "permission to create the cable provenance tag" in response.content.decode()
     assert not Tag.objects.filter(name="events-outside-scope").exists()
     assert flushed_events == []
+
+
+@pytest.fixture
+def flushed_event_contexts(monkeypatch):
+    """Record each event that NetBox sends at the end of a request; NetBox still sends it."""
+    from netbox import context_managers
+
+    real_flush = context_managers.flush_events
+    flushed = []
+
+    def recording_flush(events):
+        flushed.extend(events)
+        return real_flush(events)
+
+    monkeypatch.setattr(context_managers, "flush_events", recording_flush)
+    return flushed
+
+
+def _events_by_object(events):
+    by_object = {}
+    for event in events:
+        by_object.setdefault((event["object_type"].model, event["object_id"]), []).append(event)
+    return by_object
+
+
+def test_an_interface_that_the_row_sync_and_the_relationship_pass_write_sends_one_event(
+    client, settings, flushed_event_contexts
+):
+    """Each write has its own block; NetBox sends one event per object per request, as without the blocks."""
+    from core.events import OBJECT_CREATED, OBJECT_UPDATED
+    from dcim.models import Interface
+
+    from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
+        SYNCED,
+        bound_interface,
+        post_interface_sync,
+        seed_ports,
+        sync_port,
+        synced_interface,
+    )
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import port_pair
+    from netbox_librenms_plugin.tests.view_test_helpers import messages_on
+
+    configure_default_librenms_server(settings)
+    device = make_device("events-coalesced-sync")
+    aggregate = bound_interface(device, "Po1", 100, iface_type="lag")
+    member = synced_interface(device, "eth1", 11, description="old")
+    seed_ports(
+        device,
+        [
+            sync_port(10, "eth0", alias="uplink"),
+            sync_port(11, "eth1", alias="new"),
+            sync_port(100, "Po1", if_type="ieee8023adLag"),
+        ],
+        [port_pair(11, 100)],
+    )
+    client.force_login(make_superuser("events-coalesced-sync-user"))
+
+    response = post_interface_sync(client, device, [10, 11], htmx=False)
+
+    assert messages_on(response.wsgi_request) == [("success", SYNCED)]
+    created = Interface.objects.get(device=device, name="eth0")
+    events = _events_by_object(flushed_event_contexts)
+    assert len(events[("interface", member.pk)]) == 1
+    (member_event,) = events[("interface", member.pk)]
+    assert member_event["event_type"] == OBJECT_UPDATED
+    prechange, postchange = member_event["snapshots"]["prechange"], member_event["snapshots"]["postchange"]
+    assert (prechange["description"], prechange["lag"]) == ("old", None)
+    assert (postchange["description"], postchange["lag"]) == ("new", aggregate.pk)
+    assert len(events[("interface", created.pk)]) == 1
+    (created_event,) = events[("interface", created.pk)]
+    assert created_event["event_type"] == OBJECT_CREATED
+    assert created_event["snapshots"]["postchange"]["description"] == "uplink"
