@@ -686,6 +686,10 @@ class MappingChanged(TransactionConflict):
     """The row's mapping is not the mapping that the change was built on."""
 
 
+class ChassisChanged(TransactionConflict):
+    """The device moved to another virtual chassis between the read of its chassis and the lock."""
+
+
 class LibreNMSPortBindingConflict(ValueError):
     """Another NetBox interface holds the LibreNMS port, or more than one does."""
 
@@ -1467,8 +1471,13 @@ def lock_host_change_owner(model, pk):
 
     A VM locks its own row. A Device locks its virtual chassis first, then the chassis members in pk
     order (``views/sync/interfaces.py`` uses the same order). The caller holds the transaction.
-    Returns None when the object is gone. The caller compares the membership of the locked object
-    with the one that it approved: a move to another chassis between the read and the lock changes it.
+    Returns None when the object is gone. A join of the locked chassis waits for the commit: it
+    locks the chassis row for key share.
+
+    Raises:
+        ChassisChanged: The device moved to another chassis between the read and the lock, so the
+            locks do not cover its scope. Only a new transaction can lock the new chassis.
+
     """
     from dcim.models import Device, VirtualChassis
 
@@ -1483,7 +1492,10 @@ def lock_host_change_owner(model, pk):
         device.pk: device
         for device in Device.objects.select_for_update(of=("self",)).filter(pk__in=member_ids).order_by("pk")
     }
-    return locked.get(pk)
+    row = locked.get(pk)
+    if row is not None and row.virtual_chassis_id != chassis_id:
+        raise recorded_conflict(ChassisChanged("The device moved to another virtual chassis. Refresh and try again."))
+    return row
 
 
 def _scope_members(obj) -> tuple:
