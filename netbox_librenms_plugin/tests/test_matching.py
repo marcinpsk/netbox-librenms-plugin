@@ -391,6 +391,34 @@ class TestTheDeadlineBoundsTheWholeRequest:
 
         assert isinstance(result, Unreachable)
 
+    def test_a_probe_asks_for_an_answer_that_is_not_encoded(self, api, librenms_server):
+        librenms_server.register(IP_PATH, _found(55))
+
+        matching.find_librenms_match(_device(), api, deadline=matching.Deadline(1))
+
+        (request,) = librenms_server.requests
+        assert {name.lower(): value for name, value in request["headers"].items()}["accept-encoding"] == "identity"
+
+    def test_a_compressed_answer_is_unreachable_and_is_never_decompressed(self, api, librenms_server):
+        """A small gzip body can expand to far more than the size cap; the probe refuses it unread."""
+        import gzip
+        import tracemalloc
+
+        compressed = gzip.compress(b"a" * (32 << 20))
+        librenms_server.register_streamed(IP_PATH, [compressed], headers={"Content-Encoding": "gzip"})
+        device = _device()
+        tracemalloc.start()
+        try:
+            result = matching.find_librenms_match(device, api, deadline=matching.Deadline(1))
+            _peak_before, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        assert isinstance(result, Unreachable)
+        assert peak < 4 << 20
+        (request,) = librenms_server.requests
+        assert {name.lower(): value for name, value in request["headers"].items()}["accept-encoding"] == "identity"
+
     def test_a_failed_probe_start_frees_its_slot(self, api, monkeypatch):
         """A failure between taking the slot and starting the thread gives the slot back."""
         import threading
