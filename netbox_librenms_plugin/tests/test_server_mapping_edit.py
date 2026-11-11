@@ -243,6 +243,22 @@ def test_a_change_of_both_ids_at_once_is_refused(client, servers):
 
 
 @pytest.mark.django_db
+def test_a_new_own_id_with_a_new_oob_type_is_refused(client, servers):
+    """A relink keeps the stored OOB controller, so the type change would be lost: each change is its own."""
+    from netbox_librenms_plugin.tests.view_test_helpers import domain_state
+
+    target = seed_mapping(make_device("edit-own-and-type"), "primary", own=14045, oob=14046, oob_type="ilo")
+    client.force_login(make_superuser("edit-own-and-type-writer"))
+    before = domain_state()
+
+    response = _submit(client, target, "primary", own_id="14047", oob_type="idrac")
+
+    assert response.status_code == 302
+    assert len(_messages(response)) == 1
+    assert domain_state() == before
+
+
+@pytest.mark.django_db
 def test_an_unchanged_form_writes_nothing(client, servers):
     target = seed_mapping(make_device("edit-unchanged"), "primary", own=14031, oob=14032, oob_type="ilo")
     client.force_login(make_superuser("edit-unchanged-writer"))

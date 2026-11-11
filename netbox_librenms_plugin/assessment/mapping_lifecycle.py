@@ -566,14 +566,15 @@ def host_change_action(entry, own_id, oob_id, oob_type):
     Return the host change that turns *entry* into the IDs an operator named, as ``(action, choices)``.
 
     Return None when the IDs remove or replace no host ID: the editor writes that change itself.
-    Return ``("mixed", None)`` when they replace or clear both IDs, or clear one while they change the
-    other: each of those is its own confirmation.
+    Return ``("mixed", None)`` when they replace or clear both IDs, clear one while they change the
+    other, or replace the own ID with a new OOB type: each of those is its own confirmation.
     """
     own_changes = entry.own_id is not None and own_id != entry.own_id
     oob_changes = entry.oob_id is not None and oob_id != entry.oob_id
     if own_id is None and oob_id is None:
         return (Unlink.ACTION, UnlinkChoices()) if entry.own_id is not None or entry.oob_id is not None else None
-    if own_changes and (oob_changes or oob_id != entry.oob_id):
+    # A relink keeps the stored OOB controller, so a new OOB type with it would be lost.
+    if own_changes and (oob_changes or oob_id != entry.oob_id or (oob_type or None) != (entry.oob_type or None)):
         return "mixed", None
     if oob_changes and own_id != entry.own_id:
         return "mixed", None
