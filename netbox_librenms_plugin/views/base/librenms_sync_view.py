@@ -62,6 +62,7 @@ from netbox_librenms_plugin.utils import (
     save_user_pref,
 )
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
+from netbox_librenms_plugin.views.sync.mapping_lifecycle import sync_page_url
 
 # Remembering the tab is what makes the page usable across a detour into NetBox proper:
 # an operator who leaves to fix a bay mapping comes back to the tab they were working in.
@@ -315,9 +316,15 @@ class BaseLibreNMSSyncView(
         }
 
     def _mapping_controls(self, selection):
-        """Return the server mapping editor and whether each mapping row offers Unlink: both need the same scope."""
+        """Return the mapping owner, its sync page, its mapping editor, and whether each mapping row offers Unlink."""
+        owner = selection.mapping_owner if selection is not None else None
         editor = self._mapping_editor(selection)
-        return {"mapping_editor": editor, "can_unlink": editor is not None}
+        return {
+            "mapping_owner": owner,
+            "mapping_owner_sync_url": sync_page_url(owner) if owner is not None else None,
+            "mapping_editor": editor,
+            "can_unlink": editor is not None,
+        }
 
     def _chassis_owner_problem(self, ownership, obj):
         """Return the card of a chassis with no mapping owner; it names only the members that the user may view."""
@@ -565,8 +572,7 @@ class BaseLibreNMSSyncView(
                 **self._mapping_controls(selection),
                 "librenms_id_is_legacy": librenms_id_is_legacy,
                 "librenms_id_serial_confirmed": librenms_id_serial_confirmed,
-                # Lookup device may differ from object (e.g. VC master vs member).
-                # The Unlink action and the preference form act on the device that holds the mapping.
+                # The active server's lookup device, which can differ from the mapping owner on a VC member page.
                 "lookup_device_pk": _lookup_device.pk if _lookup_device else obj.pk,
                 "lookup_device_model_name": (
                     _lookup_device._meta.model_name if _lookup_device else obj._meta.model_name
