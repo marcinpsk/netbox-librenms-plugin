@@ -635,6 +635,27 @@ class TestStatusLists:
 
 @pytest.mark.django_db
 @KINDS
+def test_a_link_whose_object_left_the_view_scope_refuses_without_its_name(client, server, kind):
+    """The outcome line names the object, so the rebuild needs the view of the object as well as its change."""
+    from users.models import ObjectPermission
+
+    obj = _matched(kind, f"unviewed-{kind}", server, "198.18.7.1", 9500)
+    user = make_user_with_perms(f"unviewed-writer-{kind}", PERMISSIONS)
+    client.force_login(user)
+    token = page_token(client, obj)
+    ObjectPermission.objects.filter(users=user, actions=["view"], object_types__model=kind).delete()
+    client.force_login(user)
+    before = domain_state()
+
+    response = link(client, obj, [token])
+
+    assert domain_state() == before
+    assert message_texts(response)
+    assert all(obj.name not in text for text in message_texts(response))
+
+
+@pytest.mark.django_db
+@KINDS
 class TestLinkSelected:
     def test_two_tokens_for_one_id_both_refuse_and_an_unrelated_row_applies(self, linker, server, kind):
         cluster = make_cluster(f"bulk-{kind}")

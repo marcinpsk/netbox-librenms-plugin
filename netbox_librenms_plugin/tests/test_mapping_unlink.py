@@ -378,6 +378,22 @@ class TestRefusals:
         assert domain_state() == before
         assert len(message_texts(response)) == 1
 
+    @pytest.mark.parametrize("stored", ["unmapped", "migrated"])
+    def test_a_subject_that_the_actor_may_change_but_not_view_is_not_named(self, client, server, stored):
+        """An early refusal names the subject, so the view of the subject comes before any refusal."""
+        owner = make_device(f"refuse-unviewed-{stored}")
+        if stored == "migrated":
+            seed_mapping(owner, "default", migrated_to=make_device(f"refuse-unviewed-{stored}-winner").pk)
+        client.force_login(make_user_with_perms(f"refuse-unviewed-{stored}", [("change", Device)]))
+        before = domain_state()
+
+        response = unlink_page(client, owner)
+
+        assert response.status_code == 302
+        assert domain_state() == before
+        assert len(message_texts(response)) == 1
+        assert all(owner.name not in text for text in message_texts(response))
+
     def test_a_refused_interface_on_a_hidden_member_does_not_name_the_member(self, client, server):
         owner, interfaces = _linked("chassis", "refuse-hidden-member")
         hidden = Device.objects.filter(virtual_chassis=owner.virtual_chassis).exclude(pk=owner.pk).get()

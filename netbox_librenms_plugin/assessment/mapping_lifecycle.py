@@ -613,6 +613,9 @@ def read_host_change_assessment(obj, server_key, action, choices, *, user, conte
     def answer(state, **extra):
         return HostChangeAssessment(state, action, server_key, entry, choices, **extra)
 
+    # Every other refusal names the object, so an object outside the view scope refuses first.
+    if not _permitted([(type(obj), obj.pk, ("view",))], user):
+        return answer(HostChangeState.SCOPE)
     if mapping.container not in _LINKABLE or (stored is not None and stored.malformed):
         return answer(HostChangeState.REFUSED)
     if stored is not None and stored.migration.recorded:

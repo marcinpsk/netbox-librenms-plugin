@@ -213,7 +213,8 @@ class _LifecycleWriter(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Lib
             row, owned = changeable.filter(pk=identity.pk).select_for_update(of=("self",)).first(), True
         except model.DoesNotExist:
             row = None
-        if row is None:
+        # The outcome line names the object, so it must still be in the view scope.
+        if row is None or not self.restricted_queryset(model).filter(pk=row.pk).exists():
             return intent.Unavailable("subject.available")
         # Each address is a lookup input of the locked row, and the row's change scope admitted it.
         relocked = (self.relock_scoped_row(IPAddress, pk=ip.pk) for ip in primary_ips(row))
