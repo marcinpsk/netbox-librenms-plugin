@@ -128,6 +128,10 @@ def _ports(interfaces):
     return {name: mapping_summary(_fresh(interface)) for name, interface in interfaces.items()}
 
 
+def _signed_operation(token):
+    return signing.loads(token.partition(":")[2], salt=f"{intent.SALT_NAMESPACE}:mapping_lifecycle")["operation"]
+
+
 @pytest.mark.django_db
 @SCOPES
 class TestHostChanges:
@@ -181,6 +185,28 @@ class TestHostChanges:
 
         assert mapping_summary(_fresh(owner)) == {"default": expected, "other": {"own": 4102}, "preferred": "default"}
         assert _ports(interfaces) == {"both": {"other": {"own": 5200}}, "default": {}, "none": {}}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("other_entry", "clears", "after"),
+    [(False, True, {}), (True, False, {"other": {"own": 4701}, "preferred": "other"})],
+    ids=["last-entry", "other-entry-stays"],
+)
+def test_unlink_keeps_a_preference_for_another_server_only_while_an_entry_stays(
+    writer, server, other_entry, clears, after
+):
+    """A container with no server entry left is removed, so the signed effect names its preference too."""
+    owner = seed_mapping(make_device(f"unlink-preference-{other_entry}"), "default", own=4700)
+    if other_entry:
+        seed_mapping(owner, "other", own=4701)
+    seed_mapping(owner, "other", preferred=True)
+    token = offered_token(unlink_page(writer, owner))
+
+    _confirm(writer, owner, token)
+
+    assert _signed_operation(token)["effects"]["clears_preference"] is clears
+    assert mapping_summary(_fresh(owner)) == after
 
 
 @pytest.mark.django_db
@@ -464,8 +490,7 @@ def test_the_token_of_a_large_cascade_fits_the_token_limit(writer, server, count
     token = offered_token(unlink_page(writer, owner))
 
     assert len(token) <= intent.MAX_TOKEN_LENGTH
-    payload = signing.loads(token.partition(":")[2], salt=f"{intent.SALT_NAMESPACE}:mapping_lifecycle")
-    assert payload["operation"]["effects"]["interfaces"]["count"] == count
+    assert _signed_operation(token)["effects"]["interfaces"]["count"] == count
 
 
 @pytest.mark.django_db

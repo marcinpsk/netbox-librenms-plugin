@@ -27,6 +27,7 @@ from netbox_librenms_plugin.server_mappings import (
     host_change_scope,
     host_entry,
     read_mapping,
+    release_server,
     stored_entry_digest,
 )
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
@@ -493,7 +494,10 @@ def build_host_change(cls, obj, server_key, choices, *, owned=False, lock=False)
     cascade = SetBinding(len(scope.interfaces), scope.digest)
     identity = HostChangeIdentity(obj._meta.label_lower, obj.pk, server_key)
     if cls is Unlink:
-        clears_preference = mapping.preference.server == server_key
+        # The write removes a preference that names the server, and a container with no server entry left.
+        clears_preference = (
+            release_server(obj, server_key, clear_preference=False).after.preference != mapping.preference
+        )
         operation = Unlink(
             identity, choices, HostChangeAssumptions(**fields), UnlinkEffects(cascade, clears_preference)
         )

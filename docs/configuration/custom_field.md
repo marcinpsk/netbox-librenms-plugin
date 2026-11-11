@@ -147,8 +147,8 @@ You need change permission on the object, and the plugin write permission.
 
 Three changes remove or replace a LibreNMS ID of an object on one server:
 
-- **Unlink** removes the whole entry of the server (the LibreNMS ID and the OOB controller), and the
-  preferred server when it names that server.
+- **Unlink** removes the whole entry of the server (the LibreNMS ID and the OOB controller). It also
+  removes the preferred server when it names that server, or when no server entry is left.
 - A new or a cleared **LibreNMS ID** in the editor replaces or removes the own ID.
 - A new or a cleared **OOB controller ID** in the editor replaces or removes the OOB controller.
 
