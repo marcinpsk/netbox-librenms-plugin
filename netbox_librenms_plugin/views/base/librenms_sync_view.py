@@ -251,7 +251,13 @@ class BaseLibreNMSSyncView(
                     "merged": bool(entry and entry.migration.recorded),
                 }
             )
-        return {"blocked": False, "rows": rows, "oob_types": OOB_TYPES}
+        return {
+            "blocked": False,
+            "rows": rows,
+            "oob_types": OOB_TYPES,
+            "owner_pk": owner.pk,
+            "object_type": owner._meta.model_name,
+        }
 
     def _render_server_selection_blocked(self, request, obj, selection):
         """Render the object page shell without constructing or querying an API client."""
