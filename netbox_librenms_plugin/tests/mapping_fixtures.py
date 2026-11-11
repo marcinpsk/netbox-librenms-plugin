@@ -87,6 +87,11 @@ def seed_mapping(
     return obj
 
 
+def unmapped_only_constraint():
+    """Return an object permission constraint that admits only objects without a stored mapping, as an operator can write one."""
+    return [{f"{_STORAGE_FIELD}__{_MAPPING_KEY}__isnull": True}, {f"{_STORAGE_FIELD}__{_MAPPING_KEY}": None}]
+
+
 def seed_malformed_preference(obj, *, save=True):
     """Seed a stored preference that names no server, as a hand edit does; the server mappings stay. Return *obj*."""
     stored = copy.deepcopy(_stored_value(obj))
