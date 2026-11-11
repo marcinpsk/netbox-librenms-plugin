@@ -76,10 +76,10 @@ def status_list(client, object_type, **filters):
     return response
 
 
-def link_selected(client, object_type, tokens, *, server_key="default", return_query=""):
+def link_selected(client, object_type, tokens, *, server_key="default"):
     """POST *tokens* to the "Link selected" route of a status list and return the response."""
     url = reverse("plugins:netbox_librenms_plugin:link_selected", kwargs={"object_type": object_type})
-    return client.post(url, {"server_key": server_key, "return_query": return_query, FIELD: list(tokens)})
+    return client.post(url, {"server_key": server_key, FIELD: list(tokens)})
 
 
 def message_texts(response):

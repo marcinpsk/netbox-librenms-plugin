@@ -1,7 +1,7 @@
 """Apply a confirmed link of a NetBox device or VM to the LibreNMS device that it matches."""
 
 from functools import partial
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from dcim.models import Device
 from django.apps import apps
@@ -11,7 +11,6 @@ from django.db import transaction
 from django.http import Http404
 from django.shortcuts import redirect
 from django.urls import reverse
-from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
 from ipam.models import IPAddress
 from utilities.exceptions import PermissionsViolation
@@ -32,7 +31,12 @@ from netbox_librenms_plugin.server_mappings import (
 from netbox_librenms_plugin.sync_cache import SyncTab
 from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, saved_in_scope
 from netbox_librenms_plugin.utils import exception_text_for
-from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
+from netbox_librenms_plugin.views.mixins import (
+    LibreNMSAPIMixin,
+    LibreNMSPermissionMixin,
+    NetBoxObjectPermissionMixin,
+    validated_referer,
+)
 from netbox_librenms_plugin.views.sync.device_fields import _save_mapping_fields
 
 _ENTRIES = frozenset({(intent.Resource.MAPPING_LIFECYCLE, Link.ACTION, intent.Role.PRIMARY)})
@@ -228,10 +232,9 @@ class BulkLinkView(_LinkWriter):
         return self._redirect(object_type)
 
     def _redirect(self, object_type):
+        """Return to the list page the form was posted from: htmx paging changes the page after it rendered the form."""
         url = reverse(f"plugins:netbox_librenms_plugin:{_STATUS_LISTS[object_type]}")
-        query = self.request.POST.get("return_query", "")
-        candidate = f"{url}?{query}" if query else url
-        allowed = url_has_allowed_host_and_scheme(
-            candidate, allowed_hosts={self.request.get_host()}, require_https=self.request.is_secure()
-        )
-        return redirect(candidate if allowed else url)
+        referer = validated_referer(self.request)
+        if referer is None or urlsplit(referer).path != url:
+            return redirect(url)
+        return redirect(urlunsplit(("", "", url, urlsplit(referer).query, "")))

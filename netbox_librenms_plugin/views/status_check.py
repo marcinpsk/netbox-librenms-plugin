@@ -88,7 +88,6 @@ class _StatusListMixin(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin):
         table.link_rows = (
             self._link_rows(request, [row.record for row in table.page.object_list]) if request.GET else {}
         )
-        self._offers_link = any(row.token for row in table.link_rows.values())
         return table
 
     def _own_sync_member(self, record):
@@ -147,9 +146,13 @@ class _StatusListMixin(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin):
         )
 
     def get_extra_context(self, request):
-        """Return the target of the link forms, which post the tokens that the table rows carry."""
+        """
+        Return the target of the link forms, which the Link controls of every page post to.
+
+        The forms do not depend on the offers of this page: htmx swaps a later page in as a table only.
+        """
         context = super().get_extra_context(request)
-        if not getattr(self, "_offers_link", False):
+        if not request.GET or not request.user.has_perm(PERM_CHANGE_PLUGIN):
             return context
         return {
             **context,
@@ -157,7 +160,6 @@ class _StatusListMixin(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin):
                 "plugins:netbox_librenms_plugin:link_selected", kwargs={"object_type": self.model._meta.model_name}
             ),
             "link_server_key": self.librenms_api.server_key,
-            "link_return_query": request.GET.urlencode(),
         }
 
 
