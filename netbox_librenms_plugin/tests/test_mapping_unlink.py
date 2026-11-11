@@ -345,9 +345,20 @@ class TestRefusals:
         [text] = message_texts(response)
         assert f"{owner.name} eth2" in text
 
-    @pytest.mark.parametrize("entry", [True, "not-a-port", {"id": 0}], ids=["bool", "text", "zero-id"])
-    def test_a_malformed_interface_entry_in_the_scope_refuses_and_names_it(self, writer, server, entry):
-        owner, interfaces = _linked("device", f"refuse-entry-{type(entry).__name__}")
+    @pytest.mark.parametrize(
+        ("entry", "tag"),
+        [
+            (True, "bool"),
+            ("not-a-port", "text"),
+            ({"id": 0}, "zero-id"),
+            ({"id": 5110, "oob": {"id": "abc"}}, "port-with-unreadable-oob"),
+        ],
+        ids=["bool", "text", "zero-id", "port-with-unreadable-oob"],
+    )
+    def test_a_malformed_interface_entry_in_the_scope_refuses_and_names_it(
+        self, writer, server, flushed_events, entry, tag
+    ):
+        owner, interfaces = _linked("device", f"refuse-entry-{tag}")
         seed_malformed_entry(interfaces["none"], "default", entry)
         before = domain_state()
 
@@ -355,6 +366,7 @@ class TestRefusals:
 
         assert response.status_code == 302
         assert domain_state() == before
+        assert flushed_events == []
         [text] = message_texts(response)
         assert f"{owner.name} eth2" in text
 

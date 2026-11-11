@@ -1414,8 +1414,8 @@ class HostChangeScope:
 
     The scope is the interfaces of a VM, of a Device, or of every member of a Device's virtual
     chassis. ``interfaces`` holds those with an entry for the server, ``refused`` those whose stored
-    value is legacy or invalid, or whose entry for the server holds no port ID. A change that removes
-    or replaces no host ID has an empty cascade.
+    value is legacy or invalid, or whose entry for the server holds no port ID or is malformed. A
+    change that removes or replaces no host ID has an empty cascade.
     """
 
     changes_host: bool
@@ -1553,8 +1553,8 @@ def host_change_scope(obj, server: str, new_entry: ServerState | None, *, lock: 
         if mapping.container in (ContainerStatus.LEGACY, ContainerStatus.INVALID):
             refused.append(interface)
         elif mapping.container is ContainerStatus.SCOPED and server in stored:
-            # An entry that holds no port ID is hand-edited or corrupt, as a legacy value is.
-            if mapping.own_id(server) is None:
+            # An entry that holds no port ID, or a value the decoder cannot read, is hand-edited or corrupt.
+            if mapping.own_id(server) is None or mapping.server(server).malformed:
                 refused.append(interface)
             else:
                 cascade.append(CascadeInterface(interface, copy.deepcopy(stored[server])))
