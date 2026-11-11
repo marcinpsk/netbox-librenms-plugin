@@ -586,7 +586,7 @@ def test_a_same_name_interface_bound_to_another_port_does_not_take_the_ip(
 def test_refresh_rejects_conflicting_embedded_and_separate_prefixes(client, settings, live_librenms):
     """Contradictory LibreNMS prefix evidence must not produce a syncable cache entry."""
     _configure_test_server(settings)
-    device = make_device("ip-prefix-conflict")
+    device = seed_mapping(make_device("ip-prefix-conflict"), "default", own=42)
     make_interface(device, "Ethernet1", iface_type="1000base-t")
     client.force_login(make_superuser("ip-prefix-conflict-user"))
 

@@ -1,8 +1,9 @@
 from django.urls import reverse
-from django.utils.safestring import mark_safe
 from django_tables2 import Column
 from virtualization.models import VirtualMachine
 from virtualization.tables import VirtualMachineTable
+
+from netbox_librenms_plugin.tables.device_status import render_link_status
 
 
 class VMStatusTable(VirtualMachineTable):
@@ -16,20 +17,9 @@ class VMStatusTable(VirtualMachineTable):
     )
 
     def render_librenms_status(self, value, record):
-        """Render the LibreNMS status with styles based on sync status."""
-        sync_url = reverse(
-            "plugins:netbox_librenms_plugin:vm_librenms_sync",
-            kwargs={"pk": record.pk},
-        )
-
-        if value:
-            status = '<span class="text-success"><i class="mdi mdi-check-circle"></i> Synced</span>'
-        elif value is False:
-            status = '<span class="text-danger"><i class="mdi mdi-close-circle"></i> Not Found</span>'
-        else:
-            status = '<span class="text-secondary"><i class="mdi mdi-help-circle"></i> Unknown</span>'
-
-        return mark_safe(f'<a href="{sync_url}">{status}</a>')
+        """Render the stored link, or the proposed match, with a link to the sync page."""
+        sync_url = reverse("plugins:netbox_librenms_plugin:vm_librenms_sync", kwargs={"pk": record.pk})
+        return render_link_status(self, value, record, sync_url)
 
     class Meta(VirtualMachineTable.Meta):
         """Meta options for VMStatusTable."""

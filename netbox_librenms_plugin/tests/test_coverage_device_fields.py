@@ -165,7 +165,8 @@ class TestUpdateDeviceNameView:
 
         device.refresh_from_db()
         assert device.name == "name-without-mapping"
-        assert any("not found in LibreNMS" in text for text in _messages(response, "error"))
+        assert any(text.startswith("Not linked to ") for text in _messages(response, "error"))
+        assert librenms_server.requests == []
 
     def test_live_response_without_a_name_is_informational(self, logged_in_client, librenms_server):
         device = _linked_device("name-without-live-value", 6502)

@@ -300,48 +300,18 @@ class TestLibreNMSAPIInventory:
         assert item["entPhysicalSerialNum"] == "JAE123XYZ"
 
 
-class TestLibreNMSAPIDiscovery:
-    """Verify device discovery by IP, DNS name, and hostname fallback."""
+class TestLibreNMSMatching:
+    """Verify matching by IP and the name fallback against a real HTTP LibreNMS; nothing is stored."""
 
     _DEVICE_RESPONSE = {
         "status": "ok",
         "devices": [{"device_id": 42, "hostname": "sw01.example.com"}],
     }
 
-    def test_get_device_id_by_ip_returns_id(self, librenms_server):
-        librenms_server.register("/api/v0/devices/10.0.0.1", self._DEVICE_RESPONSE)
-        api = _make_api(librenms_server.url)
-
-        device_id = api.get_device_id_by_ip("10.0.0.1")
-
-        assert device_id == 42
-
-    def test_get_device_id_by_ip_returns_none_on_404(self, librenms_server):
-        # no route registered → 404
-        api = _make_api(librenms_server.url)
-
-        device_id = api.get_device_id_by_ip("10.0.0.2")
-
-        assert device_id is None
-
-    def test_get_device_id_by_hostname_returns_id(self, librenms_server):
-        librenms_server.register("/api/v0/devices/sw01.example.com", self._DEVICE_RESPONSE)
-        api = _make_api(librenms_server.url)
-
-        device_id = api.get_device_id_by_hostname("sw01.example.com")
-
-        assert device_id == 42
-
-    def test_get_device_id_by_hostname_returns_none_on_404(self, librenms_server):
-        api = _make_api(librenms_server.url)
-
-        device_id = api.get_device_id_by_hostname("unknown.example.com")
-
-        assert device_id is None
-
     @pytest.mark.django_db
-    def test_get_librenms_id_resolves_by_ip(self, librenms_server):
-        """get_librenms_id() resolves via IP when the device has a primary_ip."""
+    def test_matching_finds_the_device_by_ip(self, librenms_server):
+        from netbox_librenms_plugin.matching import Candidate, find_librenms_match
+        from netbox_librenms_plugin.server_mappings import read_mapping
         from netbox_librenms_plugin.tests.conftest import ip_on, make_device
 
         librenms_server.register("/api/v0/devices/198.18.0.10", self._DEVICE_RESPONSE)
@@ -350,25 +320,27 @@ class TestLibreNMSAPIDiscovery:
         device.primary_ip4 = ip_on(device, "198.18.0.10/24", "Ethernet1")
         device.save(update_fields=["primary_ip4"])
 
-        result = api.get_librenms_id(device)
+        result = find_librenms_match(device, api)
 
-        assert result == 42
+        assert (result.librenms_id, result.candidate) == (42, Candidate.PRIMARY_IP)
+        device.refresh_from_db()
+        assert read_mapping(device).own_id(api.server_key) is None
 
     @pytest.mark.django_db
-    def test_get_librenms_id_falls_back_to_hostname_when_ip_fails(self, librenms_server):
-        """get_librenms_id() falls back to hostname when IP lookup returns no result."""
+    def test_matching_falls_back_to_the_name_when_the_ip_has_no_device(self, librenms_server):
+        from netbox_librenms_plugin.matching import Candidate, find_librenms_match
         from netbox_librenms_plugin.tests.conftest import ip_on, make_device
 
-        # IP path returns 404 (unregistered) → fallback to hostname
+        # The IP path is not registered, so LibreNMS answers 404 and the name is asked next.
         librenms_server.register("/api/v0/devices/sw01.example.test", self._DEVICE_RESPONSE)
         api = _make_api(librenms_server.url)
         device = make_device("sw01.example.test")
         device.primary_ip4 = ip_on(device, "198.18.0.11/24", "Ethernet1")
         device.save(update_fields=["primary_ip4"])
 
-        result = api.get_librenms_id(device)
+        result = find_librenms_match(device, api)
 
-        assert result == 42
+        assert (result.librenms_id, result.candidate) == (42, Candidate.NAME)
 
 
 class TestLibreNMSAPIErrorResponses:

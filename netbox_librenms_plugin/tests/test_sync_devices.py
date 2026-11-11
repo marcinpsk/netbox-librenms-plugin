@@ -320,9 +320,8 @@ class TestUpdateDeviceLocationView:
             f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[device.pk])}"
             f"?server_key={SERVER_KEY}"
         )
-        assert _messages(response, "error") == ["Device not found in LibreNMS"]
-        assert all("/devices/None" not in request["path"] for request in librenms_server.requests)
-        assert all(request["method"] != "PATCH" for request in librenms_server.requests)
+        assert _messages(response, "error") == ["Not linked to Synchronization test server."]
+        assert librenms_server.requests == []
 
 
 @pytest.mark.django_db

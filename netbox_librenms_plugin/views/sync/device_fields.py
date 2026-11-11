@@ -253,11 +253,9 @@ def _live_platform_facts(view, subject, server_key):
     """
     lookup_subject = get_librenms_sync_device(subject, server_key=server_key) or subject
     source = FactsSource(lookup_subject.pk, getattr(subject, "virtual_chassis_id", None))
-    view.librenms_id, lookup_error = view.resolve_librenms_id(lookup_subject)
-    if lookup_error is not None:
-        return None, None, view.scoped_lookup_message(lookup_error)
+    view.librenms_id = view.stored_librenms_id(lookup_subject, server_key)
     if not view.librenms_id:
-        return None, None, "Device not found in LibreNMS"
+        return None, None, view.not_linked_message(server_key)
     success, device_info = view.get_live_device_info(view.librenms_id)
     if not success or not device_info:
         return None, None, "Failed to retrieve device info from LibreNMS"
@@ -303,14 +301,10 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
                 if sync_device:
                     librenms_lookup_device = sync_device
 
-        self.librenms_id, lookup_error = self.resolve_librenms_id(librenms_lookup_device)
-
-        if lookup_error is not None:
-            messages.error(request, self.scoped_lookup_message(lookup_error))
-            return _device_sync_redirect(request, pk, server_key)
-
+        # A device-field sync reads the stored link only; it never matches.
+        self.librenms_id = self.stored_librenms_id(librenms_lookup_device, server_key)
         if not self.librenms_id:
-            messages.error(request, "Device not found in LibreNMS")
+            messages.error(request, self.not_linked_message(server_key))
             return _device_sync_redirect(request, pk, server_key)
 
         success, device_info = self.get_live_device_info(self.librenms_id)
@@ -384,14 +378,10 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return _device_sync_redirect(request, pk, server_key)
 
-        self.librenms_id, lookup_error = self.resolve_librenms_id(device)
-
-        if lookup_error is not None:
-            messages.error(request, self.scoped_lookup_message(lookup_error))
-            return _device_sync_redirect(request, pk, server_key)
-
+        # A device-field sync reads the stored link only; it never matches.
+        self.librenms_id = self.stored_librenms_id(device, server_key)
         if not self.librenms_id:
-            messages.error(request, "Device not found in LibreNMS")
+            messages.error(request, self.not_linked_message(server_key))
             return _device_sync_redirect(request, pk, server_key)
 
         success, device_info = self.get_live_device_info(self.librenms_id)
@@ -441,14 +431,10 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return _device_sync_redirect(request, pk, server_key)
 
-        self.librenms_id, lookup_error = self.resolve_librenms_id(device)
-
-        if lookup_error is not None:
-            messages.error(request, self.scoped_lookup_message(lookup_error))
-            return _device_sync_redirect(request, pk, server_key)
-
+        # A device-field sync reads the stored link only; it never matches.
+        self.librenms_id = self.stored_librenms_id(device, server_key)
         if not self.librenms_id:
-            messages.error(request, "Device not found in LibreNMS")
+            messages.error(request, self.not_linked_message(server_key))
             return _device_sync_redirect(request, pk, server_key)
 
         success, device_info = self.get_live_device_info(self.librenms_id)

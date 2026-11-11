@@ -90,13 +90,6 @@ ALLOWED = [
         "Only the mapping storage of the new interface; last_updated is added here.",
     ),
     (
-        "librenms_api.py",
-        "LibreNMSAPI._store_librenms_id",
-        "row",
-        NOT_A_LITERAL,
-        "Only the mapping storage of a Device or VM; last_updated is added here.",
-    ),
-    (
         "views/sync/interfaces.py",
         "_apply_interface_relationship",
         "source_iface",

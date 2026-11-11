@@ -2130,12 +2130,10 @@ class BaseCableTableView(
         snapshot_cached = None
         if fetch_fresh:
             self._cable_refresh_error = None
-            librenms_id, lookup_error = self.resolve_librenms_id(owner)
-            if lookup_error is not None or (librenms_id is None and not read_mapping(owner).has_oob(server_key)):
+            # The OOB controller's ports alone are enough to acquire cables.
+            if self.stored_librenms_id(owner, server_key) is None and not read_mapping(owner).has_oob(server_key):
                 source_cache.delete(obj, Resource.CABLES, server_key)
-                self._cable_refresh_error = (
-                    self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS."
-                )
+                self._cable_refresh_error = self.not_linked_message(server_key)
                 return None
             result = source_cache.refresh(request, obj, Resource.CABLES, server_key)
             self._cable_refresh_error = result.error

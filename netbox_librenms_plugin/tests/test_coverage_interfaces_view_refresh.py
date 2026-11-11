@@ -116,8 +116,9 @@ class TestInterfaceRefreshFailClosedExits:
 
         assert response.status_code == 200
         assert "Location" not in response
-        assert message_texts(request, "error") == ["Device not found in LibreNMS."]
+        assert message_texts(request, "error") == [f"Not linked to {SERVER_KEY}."]
         assert _tab_state(device)["state"] == "refresh_failed"
+        assert librenms_server.requests == []
 
     def test_ports_fetch_failure_surfaces_the_librenms_error(self, librenms_server, settings):
         """A 404 on the ports endpoint renders the tab with the error that names the failed request."""
@@ -182,7 +183,7 @@ class TestInterfaceRefreshFailureThroughTheUrl:
         assert "netbox_librenms_plugin/_interface_sync_content.html" in [t.name for t in response.templates]
         assert response.context["interface_sync"]["table"] is None
         assert response.context["interface_sync"]["server_key"] == SERVER_KEY
-        assert "Device not found in LibreNMS." in response.content.decode()
+        assert f"Not linked to {SERVER_KEY}." in response.content.decode()
         assert _tab_state(owner)["state"] == "refresh_failed"
 
 

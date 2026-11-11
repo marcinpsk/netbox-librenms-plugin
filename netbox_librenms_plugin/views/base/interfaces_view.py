@@ -177,20 +177,9 @@ class BaseInterfaceTableView(
         raise NotImplementedError("Subclasses must implement get_table()")
 
     def _get_object_librenms_ids(self, interfaces):
-        """Resolve the stored or cached LibreNMS ID of each ``(interface, mapping)`` pair, in one cache read."""
+        """Return the stored LibreNMS port ID of each ``(interface, mapping)`` pair on the bound server, or None."""
         server_key = self.librenms_api.server_key
-        ids = [mapping.own_id(server_key) for _, mapping in interfaces]
-        # One device can have thousands of interfaces, so the cache is read once for all of them.
-        unmapped = [index for index, librenms_id in enumerate(ids) if librenms_id is None]
-        cached = self.librenms_api.get_cached_librenms_ids([interfaces[index][0] for index in unmapped])
-        for index, librenms_id in zip(unmapped, cached, strict=True):
-            ids[index] = librenms_id
-        return [
-            normalize_librenms_port_id(librenms_id)
-            if isinstance(librenms_id, (int, str)) and not isinstance(librenms_id, bool)
-            else None
-            for librenms_id in ids
-        ]
+        return [normalize_librenms_port_id(mapping.own_id(server_key)) for _, mapping in interfaces]
 
     def _build_interface_lookup_maps(self, owners, *, metadata_only=False):
         """
@@ -300,18 +289,12 @@ class BaseInterfaceTableView(
                 },
             )
 
-        # Every Virtual Chassis member shares the snapshot of the VC sync device, so discovery runs on it.
+        # Every Virtual Chassis member shares the snapshot of the VC sync device, so its stored link decides.
         sync_device = get_librenms_sync_device(obj, server_key=server_key) or obj
-        # Discovery may find the LibreNMS device by IP or hostname and store the mapping; acquisition
-        # then reads that mapping and never writes.
-        librenms_id, lookup_error = self.resolve_librenms_id(sync_device)
-        if librenms_id is None:
+        if self.stored_librenms_id(sync_device, server_key) is None:
             # A failed refresh must not leave an older snapshot to act on.
             source_cache.delete(obj, Resource.INTERFACES, server_key)
-            messages.error(
-                request,
-                self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS.",
-            )
+            messages.error(request, self.not_linked_message(server_key))
             return self._failure_response(request, obj, interface_name_field, server_key, sync_device)
 
         result = source_cache.refresh(request, obj, Resource.INTERFACES, server_key)

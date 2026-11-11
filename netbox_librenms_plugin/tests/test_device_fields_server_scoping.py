@@ -58,7 +58,7 @@ class TestUpdateDeviceNameServerScoping:
 
         With the bug (no server_key passed), ``get_librenms_sync_device`` runs its
         server-agnostic "any member with any id" order and returns ``sib_default``. Scoped to
-        siteB it must return ``sib_siteB``. We record the device handed to ``get_librenms_id``.
+        siteB it must return ``sib_siteB``, whose stored siteB link the name sync reads.
         """
         from dcim.models import VirtualChassis
 

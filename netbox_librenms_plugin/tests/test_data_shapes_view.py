@@ -259,7 +259,7 @@ def test_capture_view_includes_oob_controller_ports(recording_server):
     rec["responses"]["GET /api/v0/inventory/2500/all"] = {"status": "ok", "inventory": []}
     server, api = recording_server(rec)
     # Seed the device's librenms_id CF with an OOB controller under the 'test' server key. The real
-    # get_librenms_id (CF read), rebind_api_for_server and get_librenms_oob all run — no owned patches.
+    # stored-mapping read, rebind_api_for_server and get_librenms_oob all run — no owned patches.
     device = seed_mapping(make_device("cap-oob"), "test", own=_STACK_RECORDING_ID, oob=2500, oob_type="drac")
     view = _view_with_api(api)
 
@@ -278,8 +278,7 @@ def test_capture_view_includes_oob_controller_ports(recording_server):
 def test_capture_view_errors_when_device_not_linked(client, recording_server):
     """A device with no LibreNMS id shows an error panel instead of capturing."""
     server, api = recording_server(load_recording("cisco-stackwise-3member"))
-    # No librenms_id CF and no primary IP → the real get_librenms_id finds no stored id and no
-    # API-discovery identity, so it returns None and the view shows the not-linked error.
+    # No librenms_id CF, so the stored-mapping read finds no id and the view shows the not-linked error.
     device = make_device("cap-dev-3")
     _view_with_api(api)
 

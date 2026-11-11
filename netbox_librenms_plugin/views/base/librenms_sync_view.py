@@ -1,4 +1,3 @@
-import dataclasses
 import re
 from dataclasses import asdict
 from functools import cached_property
@@ -9,8 +8,11 @@ from django.shortcuts import redirect, render
 from django.urls import reverse
 from netbox.views import generic
 
+from netbox_librenms_plugin.assessment.mapping_lifecycle import LinkState, read_link_assessment
+from netbox_librenms_plugin.confirmation_intent import context_for
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
-from netbox_librenms_plugin.import_utils import _determine_device_name, visible_object_label
+from netbox_librenms_plugin.import_utils import _determine_device_name
+from netbox_librenms_plugin.import_utils.disclosure import visible_object_label
 from netbox_librenms_plugin.import_utils.virtual_chassis import _member_name, extract_vc_members
 from netbox_librenms_plugin.ip_addressing import primary_ips
 from netbox_librenms_plugin.platform_versions import (
@@ -22,6 +24,8 @@ from netbox_librenms_plugin.platform_versions import (
     target_label,
 )
 from netbox_librenms_plugin.constants import OOB_TYPES
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+from netbox_librenms_plugin.matching import CANDIDATE_LABELS
 from netbox_librenms_plugin.serial_identity import (
     Comparison,
     SerialRules,
@@ -201,10 +205,17 @@ class BaseLibreNMSSyncView(
             # embedded tabs each rebind and render empty for the same unresolved key.
             self.librenms_id = None
         else:
-            # Get librenms_id using the determined lookup device. Normalise to a positive int
-            # or None at the source so every downstream `is not None` check (has_librenms_id,
-            # get_device_info, etc.) can rely on the invariant without re-validating.
-            self.librenms_id, self._librenms_id_lookup_error = self.resolve_librenms_id(librenms_lookup_device)
+            # The stored binding only: a page load never writes a mapping, and matching only proposes one.
+            self.librenms_id = self.stored_librenms_id(librenms_lookup_device)
+        self._link_assessment = None
+        if self.librenms_id is None and not unresolved and not migrated_context["migrated_to_marker"]:
+            # A VC member page shows the match only for its own binding; the sync member's page links the chassis.
+            if type(librenms_lookup_device) is type(obj) and librenms_lookup_device.pk == obj.pk:
+                self._link_assessment = read_link_assessment(
+                    obj,
+                    self.librenms_api,
+                    context_for(request.user, obj, self.librenms_api.server_key) if self._can_link(obj) else None,
+                )
 
         context = self.get_context_data(request, obj)
 
@@ -220,6 +231,36 @@ class BaseLibreNMSSyncView(
         status = 400 if invalid_filter and not request.htmx else 200
         return render(request, self.template_name, context, status=status)
 
+    def _can_link(self, obj):
+        """Return whether the user may link *obj*: plugin write, and change on the object."""
+        return self.has_write_permission() and self.restricted_queryset(type(obj), "change").filter(pk=obj.pk).exists()
+
+    def _link_context(self, request, obj):
+        """Return the match that the page proposes for an object without a stored link, or None."""
+        assessment = getattr(self, "_link_assessment", None)
+        if assessment is None:
+            return None
+        server_key = assessment.server_key
+        match = assessment.match
+        owner_label = None
+        if assessment.owner is not None and (visible := visible_object_label(assessment.owner, request.user)):
+            owner_label = f"{visible[0]} '{visible[1]}'"
+        return {
+            "state": assessment.state.value,
+            "server_key": server_key,
+            "server_name": LibreNMSAPI.get_available_servers().get(server_key, server_key),
+            "librenms_id": match.librenms_id if match is not None else None,
+            "hostname": match.hostname if match is not None else None,
+            "sysname": match.sysname if match is not None else None,
+            "matched_by": CANDIDATE_LABELS[match.candidate] if match is not None else None,
+            "owner_label": owner_label,
+            "token": assessment.offer.token if assessment.offer is not None else None,
+            "action_url": reverse(
+                "plugins:netbox_librenms_plugin:mapping_lifecycle",
+                kwargs={"object_type": obj._meta.model_name, "pk": obj.pk},
+            ),
+        }
+
     def _can_manage_server_preference(self, selection):
         """Check plugin write and object change scope for the mapping owner."""
         if not selection or not selection.has_multiple_usable_mappings or not self.has_write_permission():
@@ -233,7 +274,7 @@ class BaseLibreNMSSyncView(
         # A VC member edits the mapping on the page of the device that owns it.
         if owner is None or type(owner) is not type(obj) or owner.pk != obj.pk or not self.has_write_permission():
             return None
-        # A fresh read: discovery on this request can store an own ID through another instance of the row.
+        # The change scope decides whether the editor renders at all.
         owner = self.restricted_queryset(type(owner), "change").filter(pk=owner.pk).first()
         if owner is None:
             return None
@@ -418,7 +459,13 @@ class BaseLibreNMSSyncView(
             _lookup_device, librenms_info["librenms_serial"]
         )
         device_info_unavailable = librenms_info.get("device_info_unavailable", False)
-        show_add_device = not librenms_info["found_in_librenms"] and not device_info_unavailable
+        link = self._link_context(request, obj)
+        # A device that LibreNMS already has is linked, not added; an unanswered lookup proposes neither.
+        show_add_device = (
+            not librenms_info["found_in_librenms"]
+            and not device_info_unavailable
+            and (link is None or link["state"] == LinkState.NO_MATCH.value)
+        )
         selection = getattr(self, "_server_selection", None)
 
         context.update(
@@ -446,6 +493,8 @@ class BaseLibreNMSSyncView(
                 else None,
                 "v3form": AddToLIbreSNMPV3(prefix="v3", server_key=render_server_key) if show_add_device else None,
                 "librenms_device_id": self.librenms_id,
+                "link": link,
+                "show_add_device": show_add_device,
                 "found_in_librenms": librenms_info.get("found_in_librenms"),
                 "device_info_unavailable": device_info_unavailable,
                 "librenms_device_details": librenms_info.get("librenms_device_details"),
@@ -579,7 +628,7 @@ class BaseLibreNMSSyncView(
         mismatched_device = False
         device_info_unavailable = False
         librenms_serial = None
-        lookup_error = getattr(self, "_librenms_id_lookup_error", None)
+        lookup_error = None
         librenms_device_details = {
             "librenms_device_url": None,
             "librenms_device_hardware": "-",
@@ -722,11 +771,6 @@ class BaseLibreNMSSyncView(
 
         if lookup_error is not None:
             device_info_unavailable = True
-
-        if lookup_error is not None:
-            # The template renders .message directly, so scope the conflict owner's name in here
-            # rather than leaving every render site to remember it.
-            lookup_error = dataclasses.replace(lookup_error, message=self.scoped_lookup_message(lookup_error))
 
         return {
             "found_in_librenms": found_in_librenms,

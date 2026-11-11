@@ -21,6 +21,74 @@ from netbox_librenms_plugin.utils import netbox_allows_standalone_vm_host
 _IMPORT_NAMING_INCLUDE = "#use-sysname-toggle, #strip-domain-toggle"
 
 
+# The text of each link state that needs no match; the match states render their LibreNMS ID too.
+_LINK_STATE_TEXT = {
+    "linked": ("text-success", "mdi-check-circle", "Linked"),
+    "refused": ("text-warning", "mdi-alert-circle-outline", "Stored mapping needs repair"),
+    "no_match": ("text-danger", "mdi-close-circle", "Not found"),
+    "unreachable": ("text-secondary", "mdi-help-circle", "Not checked: LibreNMS could not be reached"),
+    "not_checked": ("text-secondary", "mdi-help-circle", "Not checked"),
+}
+
+
+def render_link_status(table, value, record, sync_url):
+    """
+    Render the link state of one status-list row: the stored link, or the match that the page proposes.
+
+    A match that the user may link carries a checkbox for "Link selected" and a Link button; both post
+    the token of the row to the forms that the list template renders.
+    """
+    row = getattr(table, "link_rows", {}).get(record.pk)
+    state = value or (row.state if row is not None else "not_checked")
+    if state in _LINK_STATE_TEXT:
+        css, icon, text = _LINK_STATE_TEXT[state]
+        return format_html(
+            '<a href="{}" data-link-state="{}"><span class="{}"><i class="mdi {}"></i> {}</span></a>',
+            sync_url,
+            state,
+            css,
+            icon,
+            text,
+        )
+    if state == "owned":
+        owner = row.owner_label or "another object"
+        detail = format_html("LibreNMS ID {} is already linked to {}", row.librenms_id, owner)
+    elif state == "ambiguous":
+        detail = format_html("LibreNMS ID {} matches more than one object on this page", row.librenms_id)
+    else:
+        detail = format_html(
+            "Match: LibreNMS ID {}{} by {}",
+            row.librenms_id,
+            format_html(" ({})", row.hostname) if row.hostname else "",
+            row.matched_by,
+        )
+    checkbox = button = ""
+    if row.token:
+        label = f"Link {record.name} to LibreNMS ID {row.librenms_id}"
+        checkbox = format_html(
+            '<input type="checkbox" class="form-check-input mt-0" form="librenms-link-selected" '
+            'name="confirmation_intent" value="{}" aria-label="Select: {}">',
+            row.token,
+            label,
+        )
+        button = format_html(
+            '<button type="submit" class="btn btn-sm btn-primary" form="librenms-link-row" '
+            'name="confirmation_intent" value="{}" title="{}"><i class="mdi mdi-link-variant"></i> Link</button>',
+            row.token,
+            label,
+        )
+    return format_html(
+        '<span class="d-inline-flex align-items-center flex-wrap gap-2" data-link-state="{}">{}'
+        '<a href="{}"><span class="{}"><i class="mdi mdi-link-variant-plus"></i> {}</span></a>{}</span>',
+        state,
+        checkbox,
+        sync_url,
+        "text-info" if state == "match" else "text-warning",
+        detail,
+        button,
+    )
+
+
 class DeviceStatusTable(DeviceTable):
     """Table for displaying device LibreNMS status."""
 
@@ -37,12 +105,7 @@ class DeviceStatusTable(DeviceTable):
         self.sync_by_chassis = {}
 
     def render_librenms_status(self, value, record):
-        """Render LibreNMS sync status with link to sync page."""
-        sync_url = reverse(
-            "plugins:netbox_librenms_plugin:device_librenms_sync",
-            kwargs={"pk": record.pk},
-        )
-
+        """Render the stored link, or the proposed match, with a link to the sync page."""
         # A chassis row whose sync member is another device links to that member.
         sync_device = self.sync_by_chassis.get(record.virtual_chassis_id)
         if sync_device is not None and sync_device.pk != record.pk:
@@ -51,14 +114,8 @@ class DeviceStatusTable(DeviceTable):
                 reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": sync_device.pk}),
                 sync_device.name,
             )
-        if value:
-            status = '<span class="text-success"><i class="mdi mdi-check-circle"></i> Found</span>'
-        elif value is False:
-            status = '<span class="text-danger"><i class="mdi mdi-close-circle"></i> Not Found</span>'
-        else:
-            status = '<span class="text-secondary"><i class="mdi mdi-help-circle"></i> Unknown</span>'
-
-        return mark_safe(f'<a href="{sync_url}">{status}</a>')
+        sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": record.pk})
+        return render_link_status(self, value, record, sync_url)
 
     class Meta(DeviceTable.Meta):
         """Meta options for DeviceStatusTable."""
