@@ -10,7 +10,7 @@ from urllib.parse import quote_plus, urlsplit
 
 from django.contrib import messages
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, connection, models, transaction
+from django.db import IntegrityError, connection, models
 from django.http import HttpResponse, QueryDict
 from django.shortcuts import redirect, render
 from django.urls import reverse
@@ -2506,7 +2506,7 @@ class UpdateModuleInterfaceView(
             # A hard conflict/skip is left untouched so we don't mutate past an unresolved issue.
             if bind_result is None or bind_result.get("status") == "bound":
                 try:
-                    with transaction.atomic():
+                    with atomic_with_events():
                         adopt_result = _adopt_existing_template_interfaces(
                             target_device,
                             module,
@@ -3780,7 +3780,7 @@ class AddBayTemplateView(
                 manufacturer=manufacturer,
             )
             try:
-                with transaction.atomic():
+                with atomic_with_events():
                     mapping.full_clean()
                     mapping.save()
             except (ValidationError, IntegrityError) as exc:
