@@ -27,6 +27,7 @@ from netbox_librenms_plugin.server_mappings import (
     host_change_scope,
     host_entry,
     read_mapping,
+    stored_entry_digest,
 )
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
@@ -275,11 +276,12 @@ class HostChangeIdentity:
 
 @dataclass(frozen=True)
 class HostEntryBinding:
-    """The own ID and the OOB controller that the object holds on the server before the change."""
+    """The own ID and the OOB controller that the object holds on the server before the change, and its stored digest."""
 
     own_id: int | None
     oob_id: int | None
     oob_type: str | None
+    digest: str
 
 
 @dataclass(frozen=True)
@@ -482,7 +484,9 @@ def build_host_change(cls, obj, server_key, choices, *, owned=False, lock=False)
     fields = {
         "scoped": mapping.container in _LINKABLE,
         "migrated": stored is not None and stored.migration.recorded,
-        "entry": HostEntryBinding(entry.own_id, entry.oob_id, _text(entry.oob_type)),
+        "entry": HostEntryBinding(
+            entry.own_id, entry.oob_id, _text(entry.oob_type), stored_entry_digest(obj, server_key)
+        ),
         "membership": SetBinding(len(scope.members), scope.membership_digest),
         "refused_interfaces": len(scope.refused),
     }

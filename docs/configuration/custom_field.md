@@ -164,7 +164,8 @@ interfaces, such as a cable far end created on another device.
 
 The plugin refuses the change when:
 
-- an interface of the scope has a legacy or invalid `librenms_id` value (the message names it);
+- an interface of the scope has a legacy or invalid `librenms_id` value, or an entry for that server
+  with no valid port ID (the message names it);
 - the stored value of the object is legacy or invalid, or the server records a merge marker;
 - the new ID belongs to another object;
 - your permissions do not include the view of every object of the scope and the view and change of

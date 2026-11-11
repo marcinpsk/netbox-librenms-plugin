@@ -1396,7 +1396,8 @@ class HostChangeScope:
 
     The scope is the interfaces of a VM, of a Device, or of every member of a Device's virtual
     chassis. ``interfaces`` holds those with an entry for the server, ``refused`` those whose stored
-    value is legacy or invalid. A change that removes or replaces no host ID has an empty cascade.
+    value is legacy or invalid, or whose entry for the server holds no port ID. A change that removes
+    or replaces no host ID has an empty cascade.
     """
 
     changes_host: bool
@@ -1422,9 +1423,12 @@ class HostChangeScope:
         return _digest([member._meta.label_lower, member.pk] for member in self.members)
 
 
+def _canonical_digest(value) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def _digest(rows) -> str:
-    rows = sorted(rows, key=lambda row: (row[0], row[1]))
-    return hashlib.sha256(json.dumps(rows, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return _canonical_digest(sorted(rows, key=lambda row: (row[0], row[1])))
 
 
 def removes_host_id(before: ServerState | None, after: ServerState | None) -> bool:
@@ -1449,6 +1453,12 @@ def host_entry(obj, server: str) -> ServerState:
         oob_type=entry.oob_type if entry is not None else None,
         oob_recorded=entry is not None and entry.oob_recorded,
     )
+
+
+def stored_entry_digest(obj, server: str) -> str:
+    """Return the SHA-256 digest of the exact stored entry of *obj* on *server*; a value that is not scoped digests whole."""
+    stored = _stored_value(obj)
+    return _canonical_digest(stored.get(require_server_key(server)) if isinstance(stored, dict) else stored)
 
 
 def lock_host_change_owner(model, pk):
@@ -1513,11 +1523,15 @@ def host_change_scope(obj, server: str, new_entry: ServerState | None, *, lock: 
     cascade, refused = [], []
     for interface in rows:
         stored = _stored_value(interface)
-        container = _decode_stored_mapping(stored).container
-        if container in (ContainerStatus.LEGACY, ContainerStatus.INVALID):
+        mapping = _decode_stored_mapping(stored)
+        if mapping.container in (ContainerStatus.LEGACY, ContainerStatus.INVALID):
             refused.append(interface)
-        elif container is ContainerStatus.SCOPED and server in stored:
-            cascade.append(CascadeInterface(interface, copy.deepcopy(stored[server])))
+        elif mapping.container is ContainerStatus.SCOPED and server in stored:
+            # An entry that holds no port ID is hand-edited or corrupt, as a legacy value is.
+            if mapping.own_id(server) is None:
+                refused.append(interface)
+            else:
+                cascade.append(CascadeInterface(interface, copy.deepcopy(stored[server])))
     return HostChangeScope(changes_host=True, members=members, interfaces=tuple(cascade), refused=tuple(refused))
 
 

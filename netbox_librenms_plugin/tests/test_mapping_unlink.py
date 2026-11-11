@@ -38,6 +38,7 @@ from netbox_librenms_plugin.tests.mapping_fixtures import (
     mapped_on_server_constraint,
     mapping_summary,
     seed_legacy,
+    seed_malformed_entry,
     seed_mapping,
     seed_mapping_row,
     seed_quarantined,
@@ -286,6 +287,19 @@ class TestStale:
         assert mapping_summary(_fresh(owner)) == {"other": {"own": 4102}}
         assert mapping_summary(_fresh(interfaces["both"])) == {"other": {"own": 5299}}
 
+    def test_a_malformed_change_of_the_object_entry_is_stale(self, writer, server):
+        """The decoded IDs stay the same, so only the digest of the exact stored entry sees the change."""
+        owner = seed_mapping(make_device("stale-entry-malformed"), "default", own=4120)
+        _interface(owner, "eth0", default=5120)
+        token = offered_token(unlink_page(writer, owner))
+        seed_malformed_entry(_fresh(owner), "default", {"id": 4120, "oob": {"id": "abc"}})
+        before = domain_state()
+
+        response = _confirm(writer, owner, token)
+
+        assert domain_state() == before
+        assert "assumptions.entry.digest" in stale_paths(response, owner.name)
+
 
 @pytest.mark.django_db
 class TestRefusals:
@@ -296,6 +310,19 @@ class TestRefusals:
             seed_legacy(interfaces["none"], 78)
         else:
             seed_quarantined(interfaces["none"])
+        before = domain_state()
+
+        response = unlink_page(writer, owner)
+
+        assert response.status_code == 302
+        assert domain_state() == before
+        [text] = message_texts(response)
+        assert f"{owner.name} eth2" in text
+
+    @pytest.mark.parametrize("entry", [True, "not-a-port", {"id": 0}], ids=["bool", "text", "zero-id"])
+    def test_a_malformed_interface_entry_in_the_scope_refuses_and_names_it(self, writer, server, entry):
+        owner, interfaces = _linked("device", f"refuse-entry-{type(entry).__name__}")
+        seed_malformed_entry(interfaces["none"], "default", entry)
         before = domain_state()
 
         response = unlink_page(writer, owner)
@@ -457,7 +484,12 @@ def test_the_token_holds_only_the_subject_and_bound_values(client, server):
 
     assert payload["subject"] == ["dcim.device", owner.pk]
     assert operation["identity"] == {"model": "dcim.device", "pk": owner.pk, "server": "default"}
-    assert assumptions["entry"] == {"own_id": 4100, "oob_id": 4101, "oob_type": "idrac"}
+    assert {key: assumptions["entry"][key] for key in ("own_id", "oob_id", "oob_type")} == {
+        "own_id": 4100,
+        "oob_id": 4101,
+        "oob_type": "idrac",
+    }
+    assert len(assumptions["entry"]["digest"]) == 64
     assert assumptions["membership"]["count"] == 2 and len(assumptions["membership"]["digest"]) == 64
     assert effects["interfaces"]["count"] == 2 and len(effects["interfaces"]["digest"]) == 64
     assert effects["clears_preference"] is True
