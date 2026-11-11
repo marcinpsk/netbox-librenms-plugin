@@ -10,7 +10,7 @@ from urllib.parse import quote_plus, urlsplit
 
 from django.contrib import messages
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, models, transaction
+from django.db import IntegrityError, connection, models, transaction
 from django.http import HttpResponse, QueryDict
 from django.shortcuts import redirect, render
 from django.urls import reverse
@@ -288,7 +288,8 @@ def _resolve_destination(page_device, selected_device_id, devices):
     """
     Return the posted target: the page device, or a member of its Virtual Chassis in *devices*.
 
-    Every module view refuses an invalid target instead of falling back to the page device.
+    Every module view refuses an invalid target instead of falling back to the page device. A
+    writer checks the target again under lock with ``_lock_module_destinations``.
 
     Args:
         page_device (Device): The device whose Modules page posted the action.
@@ -313,6 +314,34 @@ def _resolve_destination(page_device, selected_device_id, devices):
         .select_related("device_type__manufacturer")
         .first()
     )
+
+
+def _lock_module_destinations(page_device, target_ids):
+    """
+    Lock the page device and the write targets in pk order, and refuse a target that left the page's chassis.
+
+    A module writer calls this in its transaction before its first row lock. A member that leaves
+    the chassis changes a key column of its Device row (the chassis position is unique), so the
+    leave waits until the writer commits. The page device must keep the chassis it had when the
+    request read it.
+
+    Raises:
+        GrantRefused: DESTINATION when a target is gone, or is not the page device or a member of its chassis.
+
+    """
+    chassis_id = page_device.virtual_chassis_id
+    # Key share (Django has no API for it): a chassis change or a delete waits; a counter update does not.
+    with connection.cursor() as cursor:
+        cursor.execute(
+            'SELECT "id", "virtual_chassis_id" FROM "dcim_device" WHERE "id" = ANY(%s) ORDER BY "id" FOR KEY SHARE',
+            [sorted({page_device.pk, *target_ids})],
+        )
+        locked = dict(cursor.fetchall())
+    if page_device.pk not in locked or locked[page_device.pk] != chassis_id:
+        raise GrantRefused(GrantRefusal.DESTINATION)
+    for target_id in target_ids:
+        if target_id != page_device.pk and (chassis_id is None or locked.get(target_id) != chassis_id):
+            raise GrantRefused(GrantRefusal.DESTINATION)
 
 
 @dataclass(frozen=True)
@@ -1081,6 +1110,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         try:
             with atomic_with_events():
+                _lock_module_destinations(page_device, {target_device.pk})
                 bind_item = None
                 incoming = None
                 serial = ""
@@ -1318,6 +1348,11 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         }
         if len(targets) != len({target_id for _item, target_id in entries}):
             messages.error(request, "An inventory destination is unavailable. Refresh Modules and try again.")
+            return
+        try:
+            _lock_module_destinations(page_device, set(targets))
+        except GrantRefused as exc:
+            messages.error(request, exc.refusal.message)
             return
 
         scope = lock_module_write(
@@ -2201,6 +2236,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         }
         if len(targets) != len(target_ids):
             raise GrantRefused(GrantRefusal.DESTINATION)
+        _lock_module_destinations(page_device, target_ids)
         return [(granted.row(index), targets[target_id], pinned) for index, target_id, pinned in plan]
 
 
@@ -2267,6 +2303,7 @@ class UpdateModuleSerialView(
                 librenms_item = granted.row(granted.grant.ent_index)
                 incoming = librenms_item.get("entPhysicalSerialNum")
                 serial_rules = granted.policy.serial_identity_rules
+                _lock_module_destinations(page_device, {target_device.pk})
                 scope = lock_module_write(
                     observe_module_write(device_ids=[target_device.pk], module_ids=[module_id]),
                     incoming=[incoming],
@@ -2365,6 +2402,7 @@ class UpdateModuleInterfaceView(
         try:
             # One transaction: a lock conflict in the bind or the adoption rolls back both, and their events.
             with atomic_with_events():
+                _lock_module_destinations(page_device, {target_device.pk})
                 granted = _authorize_module_grant(
                     page_device,
                     server_key,
@@ -2678,6 +2716,7 @@ class ApplyModuleInterfaceTypesView(
         validation_failures = []
         try:
             with atomic_with_events():
+                _lock_module_destinations(page_device, {target_device.pk})
                 scope = lock_module_write(observe_module_write(device_ids=[target_device.pk], observed_ids=[module.pk]))
                 target_device = scope.devices[target_device.pk]
                 module.refresh_from_db()
@@ -2712,6 +2751,9 @@ class ApplyModuleInterfaceTypesView(
             # The formatter masks database details through exception_text_for.
             # nosemgrep: caught-error-text  # noqa: ERA001
             messages.error(request, _module_write_failure(exc, Module, request.user))
+            return _modules_action_response(request, page_device, server_key)
+        except GrantRefused as exc:
+            messages.error(request, exc.refusal.message)
             return _modules_action_response(request, page_device, server_key)
         except _InterfaceChangeScopeViolation as exc:
             messages.error(
@@ -3078,6 +3120,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 incoming = librenms_item.get("entPhysicalSerialNum")
                 serial = stored_form(incoming, Module)
                 serial_rules = granted.policy.serial_identity_rules
+                _lock_module_destinations(page_device, {target_device.pk})
                 removals = {installed_module.pk: module_subtree_serials(installed_module.pk)}
                 previous = resolve_module(incoming, rules=serial_rules, exclude_pks=[installed_module.pk]).object
                 if previous is not None:
@@ -3395,6 +3438,7 @@ class MoveModuleView(
         removing = module_subtree_serials(occupant_id)
         try:
             with atomic_with_events():
+                _lock_module_destinations(page_device, {target_device.pk})
                 scope = lock_module_write(
                     observe_module_write(
                         device_ids=[target_device.pk],
@@ -3442,6 +3486,8 @@ class MoveModuleView(
                 _schedule_module_cache_mutation(request, page_device, server_key)
         except _ModuleActionRefused as exc:
             exc.report(request)
+        except GrantRefused as exc:
+            messages.error(request, exc.refusal.message)
         except (AbortRequest, ValidationError, IntegrityError) as e:
             if classify_conflict(e):
                 raise
