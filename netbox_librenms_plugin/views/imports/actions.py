@@ -133,6 +133,7 @@ from netbox_librenms_plugin.server_mappings import (
     prefetch_mappings,
     promote_to_host,
     read_mapping,
+    save_mapping_fields,
 )
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device, parse_configured_server_key
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
@@ -868,11 +869,6 @@ def _save_device(device, update_fields: list[str], request=None, mapping=None) -
     if mapping is None:
         return write(stored)
     return persist_mapping(stored, mapping, write=write)
-
-
-def _save_mapping_only(row, mapping_fields):
-    """Save only the mapping: an ID-only write must not gate on the row's other fields."""
-    row.save(update_fields=[*mapping_fields, "last_updated"])
 
 
 def _get_hostname_for_action(request, validation: dict, libre_device: dict) -> str:
@@ -2595,7 +2591,7 @@ class DeviceConflictActionView(
                 # the migration over unrelated pre-existing validation issues (e.g. legacy rack
                 # face/position without a rack), which is too strict for an ID-only migration.
                 try:
-                    persist_mapping(locked_device, mapping_change, write=_save_mapping_only)
+                    persist_mapping(locked_device, mapping_change, write=save_mapping_fields)
                 except IntegrityError:
                     logger.exception(
                         "Failed to persist migrated LibreNMS mapping for %s pk=%s",

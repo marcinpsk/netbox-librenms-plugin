@@ -44,6 +44,7 @@ from netbox_librenms_plugin.server_mappings import (
     prefetch_mappings,
     read_mapping,
     resolve_device_port,
+    save_mapping_fields,
 )
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import (
@@ -1465,12 +1466,6 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                 getattr(messages, level)(request, template.format(items=", ".join(interfaces)))
 
 
-def _save_mapping_fields(row, fields):
-    """Save only the new far end's mapping: its insert already ran the validation."""
-    row.save(update_fields=[*fields, "last_updated"])
-    return row
-
-
 class _RemoteCreateAborted(Exception):
     """Abandon the whole action: the interface and the cable are created together or not at all."""
 
@@ -1864,4 +1859,5 @@ class CableRemoteCreateView(SyncCablesView):
         # The row resolves by LibreNMS port id from now on, never by name luck.
         interface.snapshot()
         change = assign_own(interface, context["server_key"], port_key)
-        return persist_mapping(interface, change, write=_save_mapping_fields)
+        persist_mapping(interface, change, write=save_mapping_fields)
+        return interface

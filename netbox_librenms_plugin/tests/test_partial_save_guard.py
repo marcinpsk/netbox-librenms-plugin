@@ -62,13 +62,6 @@ ALLOWED = [
         "storage; last_updated is added here.",
     ),
     (
-        "views/imports/actions.py",
-        "_save_mapping_only",
-        "row",
-        NOT_A_LITERAL,
-        "Only the mapping storage of a Device or VM; last_updated is added here.",
-    ),
-    (
         "views/sync/modules.py",
         "_bind_interface_librenms_id.save",
         "row",
@@ -81,13 +74,6 @@ ALLOWED = [
         "row",
         NOT_A_LITERAL,
         "Only the mapping storage of a Device, VM or interface; last_updated is added here.",
-    ),
-    (
-        "views/sync/cables.py",
-        "_save_mapping_fields",
-        "row",
-        NOT_A_LITERAL,
-        "Only the mapping storage of the new interface; last_updated is added here.",
     ),
     (
         "views/sync/interfaces.py",
