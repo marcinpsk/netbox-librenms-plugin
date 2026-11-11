@@ -177,6 +177,21 @@ class TestDeadline:
         assert isinstance(result, NotChecked)
         assert time.perf_counter() - started < 2
 
+    def test_a_body_that_dribbles_in_ends_near_the_deadline_on_the_real_clock(self, api, librenms_server):
+        """Each part arrives inside a socket timeout, so only the deadline stops the read."""
+        body = json.dumps(_found(55)).encode()
+        # A kept-alive connection, as a LibreNMS behind an HTTP/1.1 web server answers.
+        librenms_server.register_streamed(
+            IP_PATH, [body[:5], body[5:10], body[10:15], body[15:]], pause=0.8, headers={"Connection": "keep-alive"}
+        )
+        device = _device()
+        started = time.perf_counter()
+
+        result = matching.find_librenms_match(device, api, deadline=matching.Deadline(1))
+
+        assert isinstance(result, NotChecked)
+        assert time.perf_counter() - started < 1.6
+
 
 @pytest.mark.django_db
 def test_a_redirect_is_unreachable_and_is_not_followed(api, librenms_server):
