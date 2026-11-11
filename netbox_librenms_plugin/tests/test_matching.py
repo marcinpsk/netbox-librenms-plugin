@@ -20,33 +20,36 @@ def api(settings, librenms_server):
     return bind_librenms_server(settings, librenms_server, server_key="default")
 
 
-def _take_all_probe_slots(timeout):
-    """Take every probe slot within *timeout* seconds; return the number taken. The caller gives them back."""
+def _take_all_probe_slots(timeout, url):
+    """Take every probe slot of the server at *url* within *timeout* seconds; return the number taken."""
     from netbox_librenms_plugin import librenms_api
 
+    slots = librenms_api._probe_slots(url)
     end = time.monotonic() + timeout
     taken = 0
-    while taken < librenms_api.MATCH_PROBE_WORKERS and librenms_api._match_probe_slots.acquire(
-        timeout=max(0, end - time.monotonic())
-    ):
+    while taken < librenms_api.MATCH_PROBE_WORKERS and slots.acquire(timeout=max(0, end - time.monotonic())):
         taken += 1
     return taken
 
 
-def _give_back_probe_slots(count):
+def _give_back_probe_slots(count, url):
     from netbox_librenms_plugin import librenms_api
 
     for _ in range(count):
-        librenms_api._match_probe_slots.release()
+        librenms_api._probe_slots(url).release()
 
 
-def _wait_for_free_probe_slots(timeout=10):
-    """Return whether every probe slot is free within *timeout* seconds: every probe worker has ended."""
+def _wait_for_free_probe_slots(timeout=10, urls=None):
+    """Return whether every probe slot of each server is free within *timeout* seconds: its probe workers ended."""
     from netbox_librenms_plugin import librenms_api
 
-    taken = _take_all_probe_slots(timeout)
-    _give_back_probe_slots(taken)
-    return taken == librenms_api.MATCH_PROBE_WORKERS
+    end = time.monotonic() + timeout
+    for url in urls if urls is not None else list(librenms_api._match_probe_slots):
+        taken = _take_all_probe_slots(max(0, end - time.monotonic()), url)
+        _give_back_probe_slots(taken, url)
+        if taken != librenms_api.MATCH_PROBE_WORKERS:
+            return False
+    return True
 
 
 @pytest.fixture(autouse=True)
@@ -228,7 +231,7 @@ _SLOW_ANSWERS = {
     "slow-headers": _dribbled(
         _head("HTTP/1.1 200 OK", "Content-Type: application/json", f"Content-Length: {len(_BODY)}"), _BODY
     ),
-    # A redirect whose body requests reads before it returns, although it follows no redirect.
+    # A redirect whose body requests would read to prepare the redirect that it does not follow.
     "redirect-with-slow-body": [
         _head("HTTP/1.1 302 Found", "Location: /api/v0/devices/elsewhere", f"Content-Length: {len(_BODY)}"),
         *_dribbled(b"", _BODY),
@@ -254,7 +257,8 @@ class TestTheDeadlineBoundsTheWholeRequest:
         result = matching.find_librenms_match(device, api, deadline=matching.Deadline(1))
 
         elapsed = time.perf_counter() - started
-        assert isinstance(result, NotChecked)
+        # A redirect is unreachable as soon as its status line and headers arrive: its body is never read.
+        assert isinstance(result, Unreachable if answer == "redirect-with-slow-body" else NotChecked)
         assert elapsed < 1.5
         # The probe reached the server, so the answer path named by the case ran.
         assert _paths(librenms_server) == [IP_PATH]
@@ -311,7 +315,7 @@ class TestTheDeadlineBoundsTheWholeRequest:
         while len(_paths(librenms_server)) < MATCH_PROBE_WORKERS and time.perf_counter() - waited < 2:
             time.sleep(0.01)
         assert len(_paths(librenms_server)) == MATCH_PROBE_WORKERS
-        assert _take_all_probe_slots(0) == 0
+        assert _take_all_probe_slots(0, api.librenms_url) == 0
         started = time.perf_counter()
 
         result = matching.find_librenms_match(fast, api, deadline=matching.Deadline(1))
@@ -325,6 +329,123 @@ class TestTheDeadlineBoundsTheWholeRequest:
             thread.join(timeout=10)
         assert _wait_for_free_probe_slots()
         assert isinstance(matching.find_librenms_match(fast, api, deadline=matching.Deadline(1)), Match)
+
+    def test_a_stalled_server_leaves_the_probes_of_another_server_free(self, api, librenms_server):
+        """The slots belong to one server: a server that holds all of its own does not block a healthy one."""
+        import copy
+        import threading
+
+        from netbox_librenms_plugin.librenms_api import MATCH_PROBE_WORKERS
+        from netbox_librenms_plugin.matching import LookupInputs
+        from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
+
+        librenms_server.register_raw_stream(IP_PATH, _SLOW_ANSWERS["slow-headers"], pause=0.3)
+        slow = _device()
+        LookupInputs.of(slow)
+        stalled = [
+            threading.Thread(
+                target=matching.find_librenms_match, args=(slow, api), kwargs={"deadline": matching.Deadline(3)}
+            )
+            for _ in range(MATCH_PROBE_WORKERS)
+        ]
+        for thread in stalled:
+            thread.start()
+        waited = time.perf_counter()
+        while len(_paths(librenms_server)) < MATCH_PROBE_WORKERS and time.perf_counter() - waited < 2:
+            time.sleep(0.01)
+        assert _take_all_probe_slots(0, api.librenms_url) == 0
+        healthy = make_device("match-healthy")
+        give_primary_ip(healthy, "192.0.2.9/24")
+        healthy = type(healthy).objects.get(pk=healthy.pk)
+        with librenms_mock_server() as other:
+            other.register("/api/v0/devices/192.0.2.9", _found(57))
+            other_api = copy.copy(api)
+            other_api.librenms_url = other.url
+
+            result = matching.find_librenms_match(healthy, other_api, deadline=matching.Deadline(1))
+
+            assert isinstance(result, Match)
+            assert _wait_for_free_probe_slots(urls=[other.url])
+
+    def test_an_endless_body_stops_being_read_at_the_deadline_without_a_release(self, api, librenms_server):
+        """After the caller gives up, the worker stops within the deadline and one read timeout, and frees its slot."""
+        body = json.dumps(_found(55)).encode()
+        parts = [body[:5], *([b" "] * 400)]
+        librenms_server.register_streamed(IP_PATH, parts, pause=0.1, headers={"Connection": "keep-alive"})
+        device = _device()
+        started = time.monotonic()
+
+        result = matching.find_librenms_match(device, api, deadline=matching.Deadline(1))
+
+        assert isinstance(result, NotChecked)
+        # The deadline (1 s) and one read timeout (1 s), and a margin.
+        assert _wait_for_free_probe_slots(timeout=max(0, started + 2.5 - time.monotonic()), urls=[api.librenms_url])
+
+    def test_an_answer_over_the_size_cap_is_unreachable(self, api, librenms_server, monkeypatch):
+        from netbox_librenms_plugin import librenms_api
+
+        monkeypatch.setattr(librenms_api, "MATCH_PROBE_MAX_BYTES", 200)
+        librenms_server.register(IP_PATH, _found(55, hostname="x" * 400))
+
+        result = matching.find_librenms_match(_device(), api, deadline=matching.Deadline(1))
+
+        assert isinstance(result, Unreachable)
+
+    def test_a_failed_probe_start_frees_its_slot(self, api, monkeypatch):
+        """A failure between taking the slot and starting the thread gives the slot back."""
+        import threading
+        from types import SimpleNamespace
+
+        from netbox_librenms_plugin import librenms_api
+
+        class _NoAnswer:
+            def __init__(self):
+                raise MemoryError()
+
+        class _NoThread:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def start(self):
+                raise RuntimeError("can't start new thread")
+
+        device = _device()
+        monkeypatch.setattr(librenms_api, "_ProbeAnswer", _NoAnswer)
+        with pytest.raises(MemoryError):
+            matching.find_librenms_match(device, api, deadline=matching.Deadline(1))
+        monkeypatch.undo()
+        monkeypatch.setattr(librenms_api, "threading", SimpleNamespace(**{**vars(threading), "Thread": _NoThread}))
+        with pytest.raises(RuntimeError):
+            matching.find_librenms_match(device, api, deadline=matching.Deadline(1))
+
+        assert _take_all_probe_slots(0, api.librenms_url) == librenms_api.MATCH_PROBE_WORKERS
+        _give_back_probe_slots(librenms_api.MATCH_PROBE_WORKERS, api.librenms_url)
+
+    def test_an_error_that_arrives_after_the_deadline_is_not_checked(self, api, monkeypatch):
+        """The caller gave up, so even an unexpected error of its probe is a late answer, not a failure."""
+        from netbox_librenms_plugin import librenms_api
+
+        now = [500.0]
+        monkeypatch.setattr(matching, "_clock", lambda: now[0])
+
+        def late_failure(session, *args, **kwargs):
+            now[0] += 16
+            raise RuntimeError("unexpected")
+
+        monkeypatch.setattr(librenms_api._TokenScopedSession, "get", late_failure)
+
+        assert isinstance(matching.find_librenms_match(_device(), api, deadline=matching.Deadline(15)), NotChecked)
+
+    def test_an_unexpected_error_in_time_reaches_the_caller(self, api, monkeypatch):
+        from netbox_librenms_plugin import librenms_api
+
+        def failure(session, *args, **kwargs):
+            raise RuntimeError("unexpected")
+
+        monkeypatch.setattr(librenms_api._TokenScopedSession, "get", failure)
+
+        with pytest.raises(RuntimeError, match="unexpected"):
+            matching.find_librenms_match(_device(), api, deadline=matching.Deadline(1))
 
     def test_a_missing_ca_bundle_is_unreachable(self, api):
         """Requests refuses a missing CA bundle with a plain OSError before it connects; that is no server answer."""
