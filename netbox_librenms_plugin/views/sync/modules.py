@@ -9,7 +9,7 @@ from urllib.parse import quote_plus, urlsplit
 
 from django.contrib import messages
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, models, transaction
+from django.db import IntegrityError, connection, models, transaction
 from django.http import HttpResponse, QueryDict
 from django.shortcuts import redirect, render
 from django.urls import reverse
@@ -305,7 +305,8 @@ def _resolve_destination(page_device, selected_device_id, devices):
     """
     Return the posted target: the page device, or a member of its Virtual Chassis in *devices*.
 
-    Every module view refuses an invalid target instead of falling back to the page device.
+    Every module view refuses an invalid target instead of falling back to the page device. A
+    writer checks the target again under lock with ``_lock_module_destinations``.
 
     Args:
         page_device (Device): The device whose Modules page posted the action.
@@ -330,6 +331,34 @@ def _resolve_destination(page_device, selected_device_id, devices):
         .select_related("device_type__manufacturer")
         .first()
     )
+
+
+def _lock_module_destinations(page_device, target_ids):
+    """
+    Lock the page device and the write targets in pk order, and refuse a target that left the page's chassis.
+
+    A module writer calls this in its transaction before its first row lock. A member that leaves
+    the chassis changes a key column of its Device row (the chassis position is unique), so the
+    leave waits until the writer commits. The page device must keep the chassis it had when the
+    request read it.
+
+    Raises:
+        GrantRefused: DESTINATION when a target is gone, or is not the page device or a member of its chassis.
+
+    """
+    chassis_id = page_device.virtual_chassis_id
+    # Key share (Django has no API for it): a chassis change or a delete waits; a counter update does not.
+    with connection.cursor() as cursor:
+        cursor.execute(
+            'SELECT "id", "virtual_chassis_id" FROM "dcim_device" WHERE "id" = ANY(%s) ORDER BY "id" FOR KEY SHARE',
+            [sorted({page_device.pk, *target_ids})],
+        )
+        locked = dict(cursor.fetchall())
+    if page_device.pk not in locked or locked[page_device.pk] != chassis_id:
+        raise GrantRefused(GrantRefusal.DESTINATION)
+    for target_id in target_ids:
+        if target_id != page_device.pk and (chassis_id is None or locked.get(target_id) != chassis_id):
+            raise GrantRefused(GrantRefusal.DESTINATION)
 
 
 @dataclass(frozen=True)
@@ -1052,6 +1081,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         try:
             with atomic_with_events():
                 _lock_page_device_serials(page_device)
+                _lock_module_destinations(page_device, {target_device.pk})
                 bind_item = None
                 incoming = None
                 serial = ""
@@ -1254,6 +1284,11 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         }
         if len(targets) != len({target_id for _item, target_id in entries}):
             messages.error(request, "An inventory destination is unavailable. Refresh Modules and try again.")
+            return
+        try:
+            _lock_module_destinations(page_device, set(targets))
+        except GrantRefused as exc:
+            messages.error(request, exc.refusal.message)
             return
 
         # The parent-module walk keeps a row's whole attributed subtree, hidden holders too.
@@ -2106,6 +2141,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         }
         if len(targets) != len(target_ids):
             raise GrantRefused(GrantRefusal.DESTINATION)
+        _lock_module_destinations(page_device, target_ids)
         return [(granted.row(index), targets[target_id], pinned) for index, target_id, pinned in plan]
 
 
@@ -2158,6 +2194,7 @@ class UpdateModuleSerialView(
                 serial_rules = granted.policy.serial_identity_rules
                 # The serial identity locks come before the module row lock.
                 assignment_lock([incoming], model=Module, rules=serial_rules)
+                _lock_module_destinations(page_device, {target_device.pk})
                 module = (
                     self.restricted_queryset(Module, "change")
                     .select_for_update(of=("self",))
@@ -2246,6 +2283,7 @@ class UpdateModuleInterfaceView(
         try:
             # One transaction: a lock conflict in the bind or the adoption rolls back both, and their events.
             with atomic_with_events():
+                _lock_module_destinations(page_device, {target_device.pk})
                 granted = _authorize_module_grant(
                     page_device, server_key, ACTION_UPDATE_INTERFACE, request.POST.get("inventory_binding")
                 )
@@ -2532,6 +2570,7 @@ class ApplyModuleInterfaceTypesView(
         validation_failures = []
         try:
             with transaction.atomic():
+                _lock_module_destinations(page_device, {target_device.pk})
                 template_types = _module_interface_type_targets(target_device, module)
                 # The host change cascade locks interfaces in pk order too; the messages list them by name.
                 locked = (
@@ -2555,6 +2594,9 @@ class ApplyModuleInterfaceTypesView(
                         validation_failures.append((interface.name, reason))
                     else:
                         outcomes[outcome].append(interface.name)
+        except GrantRefused as exc:
+            messages.error(request, exc.refusal.message)
+            return _modules_action_response(request, page_device, server_key)
         except _InterfaceChangeScopeViolation as exc:
             messages.error(
                 request,
@@ -2897,6 +2939,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 serial_rules = granted.policy.serial_identity_rules
                 # The serial identity locks come before the module row locks.
                 assignment_lock([incoming], model=Module, rules=serial_rules)
+                _lock_module_destinations(page_device, {target_device.pk})
                 matched_type = resolve_module_type(
                     model_name,
                     get_module_types_indexed(),
@@ -3100,6 +3143,25 @@ class MoveModuleView(
     SYNC_SUBJECT_MODEL_LABEL = "dcim.device"
     DROP_SYNC_SUBJECT_CLAIM_WITHOUT_SERVER = True
 
+    def _remove_bay_occupant(self, module, occupant_id, target_device, target_bay):
+        """Delete the posted occupant of the target bay when it is not *module*; return the message, or None."""
+        from dcim.models import Module
+
+        if not occupant_id or occupant_id == module.pk:
+            return None
+        # Scoped by "delete": the device and bay filters prove where the row sits, not that
+        # the grant covers it, and the gate asked has_perm without an instance.
+        occupant = (
+            self.restricted_queryset(Module, "delete")
+            .select_for_update(of=("self",))
+            .filter(pk=occupant_id, device=target_device, module_bay=target_bay)
+            .first()
+        )
+        if occupant is None:
+            return None
+        occupant.delete()
+        return f"Removed {occupant.module_type.model} from {target_bay.name}."
+
     def post(self, request, pk):
         from dcim.models import Device, Module, ModuleBay
 
@@ -3139,19 +3201,7 @@ class MoveModuleView(
 
         def move(module):
             nonlocal occupant_removed_msg, from_device, from_bay
-            # Remove whatever is currently in the target bay (if provided and different).
-            # Scoped by "delete": the device and bay filters prove where the row sits, not that
-            # the grant covers it, and the gate asked has_perm without an instance.
-            if module_id and module_id != module.pk:
-                occupant = (
-                    self.restricted_queryset(Module, "delete")
-                    .select_for_update(of=("self",))
-                    .filter(pk=module_id, device=target_device, module_bay=target_bay)
-                    .first()
-                )
-                if occupant:
-                    occupant_removed_msg = f"Removed {occupant.module_type.model} from {target_bay.name}."
-                    occupant.delete()
+            occupant_removed_msg = self._remove_bay_occupant(module, module_id, target_device, target_bay)
             _refuse_identity_move(module, target_device, moving, serial_rules)
             from_device, from_bay = module.device.name, module.module_bay.name
             module.module_bay = target_bay
@@ -3163,6 +3213,7 @@ class MoveModuleView(
             with transaction.atomic():
                 # The identity locks of the moved serials come before any row lock.
                 assignment_lock([serial for _pk, serial in moving], model=Module, rules=serial_rules)
+                _lock_module_destinations(page_device, {target_device.pk})
                 # Lock target bay to prevent concurrent modifications
                 target_bay = (
                     self.restricted_queryset(ModuleBay)
@@ -3197,6 +3248,8 @@ class MoveModuleView(
             messages.success(request, moved_msg)
             if server_key:
                 _schedule_module_cache_mutation(request, page_device, server_key)
+        except GrantRefused as exc:
+            messages.error(request, exc.refusal.message)
         except (AbortRequest, ValidationError, IntegrityError) as e:
             if classify_conflict(e):
                 raise
