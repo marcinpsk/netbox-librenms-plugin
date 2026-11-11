@@ -1053,14 +1053,17 @@ class EditServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
                     self.restricted_queryset(model, "change").select_for_update(of=("self",)), pk=pk
                 )
                 owner.snapshot()
-                change = edit_server(
-                    owner,
-                    server_key,
-                    own_id=_posted_value(request, "own_id"),
-                    oob_id=_posted_value(request, "oob_id"),
-                    oob_type=_posted_value(request, "oob_type"),
-                    shown=shown,
-                )
+                try:
+                    change = edit_server(
+                        owner,
+                        server_key,
+                        own_id=_posted_value(request, "own_id"),
+                        oob_id=_posted_value(request, "oob_id"),
+                        oob_type=_posted_value(request, "oob_type"),
+                        shown=shown,
+                    )
+                except ValueError as exc:
+                    raise _WriteRefused(str(exc)) from None
                 if change.changed:
                     persist_mapping(owner, change, write=_save_mapping_fields)
         except IdentityOwned as exc:
@@ -1069,8 +1072,8 @@ class EditServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
         except AmbiguousLibreNMSIdError:
             messages.error(request, "The LibreNMS ID matches more than one object. Resolve the duplicate first.")
             return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
-        except ValueError as exc:
-            messages.error(request, str(exc))
+        except _WriteRefused as exc:
+            messages.add_message(request, exc.level, str(exc))
             return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
         except ValidationError as exc:
             if classify_conflict(exc):

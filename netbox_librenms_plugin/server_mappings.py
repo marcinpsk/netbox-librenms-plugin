@@ -984,7 +984,8 @@ def convert_legacy(obj, server: str) -> MappingChange:
 
 
 def _edited_fields(entry) -> tuple:
-    return (None, None, None) if entry is None else (entry.own_id, entry.oob_id, entry.oob_type)
+    # A form posts a blank type as None.
+    return (None, None, None) if entry is None else (entry.own_id, entry.oob_id, entry.oob_type or None)
 
 
 def _named_id(raw, label):
@@ -1028,6 +1029,8 @@ def edit_server(obj, server: str, *, own_id, oob_id, oob_type, shown: ServerStat
     oob = _named_id(oob_id, "OOB controller ID")
     if own is None and oob is None:
         raise ValueError("Enter a LibreNMS ID or an OOB controller ID.")
+    if oob is not None and not oob_type:
+        raise ValueError("Select the type of the OOB controller.")
     value = copy.deepcopy(stored) if isinstance(stored, dict) else {}
     value[server] = {}
     if own is not None:
