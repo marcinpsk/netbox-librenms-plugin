@@ -167,7 +167,8 @@ def _match_probe(answer, url, headers, timeout, verify):
     except (requests.exceptions.RequestException, OSError):
         answer.value = None, None
     except Exception as exc:
-        # Not a transport error, so a bug: the caller raises it.
+        # Not a transport error, so a bug: the caller raises it unread, in its own thread.
+        # nosemgrep: caught-error-text  # noqa: ERA001
         answer.error = exc
     finally:
         answer.ready.set()
