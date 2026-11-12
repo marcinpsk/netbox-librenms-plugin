@@ -445,7 +445,7 @@ def test_a_refresh_whose_page_leaves_its_chassis_for_a_refused_snapshot_reports_
     real_context = BaseModuleTableView.get_context_data
     seeded = []
 
-    def leave_for_a_refused_snapshot(view, request, obj, server_key=None):
+    def leave_for_a_refused_snapshot(view, request, obj, server_key=None, **kwargs):
         chassis_key = source_cache.snapshot_key(obj, Resource.MODULES, server_key)
         Device.objects.filter(pk=obj.pk).update(virtual_chassis=None, vc_position=None)
         obj.refresh_from_db()
@@ -453,7 +453,7 @@ def test_a_refresh_whose_page_leaves_its_chassis_for_a_refused_snapshot_reports_
         own_key = source_cache.snapshot_key(obj, Resource.MODULES, server_key)
         cache.set(own_key, cache.get(chassis_key), timeout=300)
         seeded.append(own_key != chassis_key)
-        return real_context(view, request, obj, server_key=server_key)
+        return real_context(view, request, obj, server_key=server_key, **kwargs)
 
     monkeypatch.setattr(BaseModuleTableView, "get_context_data", leave_for_a_refused_snapshot)
 
@@ -544,8 +544,8 @@ def test_a_member_that_leaves_its_chassis_after_the_table_read_gets_no_rows_of_t
     real_context = BaseModuleTableView.get_context_data
     built = []
 
-    def read_then_leave(view, request, obj, server_key=None):
-        context = real_context(view, request, obj, server_key=server_key)
+    def read_then_leave(view, request, obj, server_key=None, **kwargs):
+        context = real_context(view, request, obj, server_key=server_key, **kwargs)
         # Another transaction commits the leave after the table is built; no instance is refreshed.
         built.append(context["table"] is not None)
         Device.objects.filter(pk=page.pk).update(virtual_chassis=None, vc_position=None)

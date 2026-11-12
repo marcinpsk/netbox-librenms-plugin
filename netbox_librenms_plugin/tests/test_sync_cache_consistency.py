@@ -2194,6 +2194,47 @@ def test_a_module_snapshot_removed_during_the_refresh_read_is_no_success(
 
 
 @pytest.mark.django_db
+def test_a_module_snapshot_removed_and_stored_again_during_the_refresh_is_no_success_without_a_table(
+    client, settings, primary_librenms, monkeypatch
+):
+    """Another refresh removes the snapshot before the table read and stores it again before any later check."""
+    from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+    _configure_servers(settings)
+    device = make_device("cache-module-flicker", librenms_cf={"primary": {"id": 671}})
+    _serve_module_rows(primary_librenms, 671)
+    user = make_superuser("cache-module-flicker-user")
+    client.force_login(user)
+    snapshot_key = SyncCacheConsistency(device).snapshot_key(SyncTab.MODULES, "primary")
+    real_outcome = SyncCacheConsistency.mark_refresh_outcome
+    real_context = BaseModuleTableView.get_context_data
+    removed = []
+
+    def outcome_then_removal(coordinator, *args, **kwargs):
+        published = real_outcome(coordinator, *args, **kwargs)
+        if not removed:
+            removed.append(cache.get(snapshot_key))
+            cache.delete(snapshot_key)
+        return published
+
+    def read_then_store_again(view, *args, **kwargs):
+        context = real_context(view, *args, **kwargs)
+        cache.set(snapshot_key, removed[0], timeout=300)
+        return context
+
+    monkeypatch.setattr(SyncCacheConsistency, "mark_refresh_outcome", outcome_then_removal)
+    monkeypatch.setattr(BaseModuleTableView, "get_context_data", read_then_store_again)
+
+    response = _post_refresh(client, device, SyncTab.MODULES)
+
+    assert removed and removed[0] is not None
+    assert response.status_code == 200
+    assert response.context["module_sync"]["table"] is None
+    assert b"Inventory data refreshed successfully" not in response.content
+    assert b"could not be cached" in response.content
+
+
+@pytest.mark.django_db
 def test_a_failed_ip_cache_write_does_not_claim_there_is_nothing_to_show(
     client, settings, primary_librenms, monkeypatch
 ):

@@ -79,9 +79,10 @@ from netbox_librenms_plugin.assessment.modules import (
 logger = logging.getLogger(__name__)
 
 
-def read_module_assessment(subject, server_key):
-    """Return assessed rows and blockers from the currently bound source."""
-    snapshot = source_cache.read(subject, Resource.MODULES, server_key)
+def read_module_assessment(subject, server_key, snapshot=None):
+    """Return assessed rows and blockers of *snapshot*, or of the currently bound source when it is None."""
+    if snapshot is None:
+        snapshot = source_cache.read(subject, Resource.MODULES, server_key)
     if snapshot is None:
         return None
     return {
@@ -823,16 +824,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         snapshot_cached = SyncCacheConsistency(obj).mark_refresh_outcome(
             SyncTab.MODULES, server_key, actor_id=request_actor_id(request)
         )
-        # Another transaction can change the page's chassis during the refresh, so each scope read uses its row.
-        page = self.get_object(pk)
-        context = self.get_context_data(request, page, server_key=server_key)
+        # The response reads the page and its chassis once (the policy) and the snapshot once; the table and
+        # the outcome both come from these reads, so a later cache or chassis state cannot change them.
+        page, policy, read_membership = self._page_policy(pk)
+        snapshot = None if page is None else source_cache.read(page, Resource.MODULES, server_key)
+        context = None
+        if snapshot is not None:
+            context = self.get_context_data(request, page, server_key=server_key, snapshot=snapshot, policy=policy)
         final = self.get_object(pk)
-        if (
-            self._chassis_membership(final) != self._chassis_membership(page)
-            or source_cache.read(final, Resource.MODULES, server_key) is None
-        ):
-            # The page changed chassis during the read, or its final scope has no snapshot that its read accepts:
-            # no row or action of the table read may reach the response.
+        if context is None or self._chassis_membership(final) != read_membership:
+            # No snapshot of the page's scope, or the chassis changed after the read: show nothing of it.
             if snapshot_cached:
                 SyncCacheConsistency(final).mark_refresh_failure(
                     SyncTab.MODULES, server_key, actor_id=request_actor_id(request)
@@ -845,14 +846,35 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             messages.error(request, "Inventory data could not be cached. Refresh Modules before syncing.")
         return self.render_sync_partial(request, page, server_key, {"module_sync": context})
 
+    def _page_policy(self, pk):
+        """
+        Return the page row, its inventory policy and its chassis membership, from one policy read.
+
+        A broken rule gives no policy, so the table read reports the rule. A page that changes chassis during
+        the policy read gives (None, None, None).
+        """
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.models import RuleConfigurationError
+
+        try:
+            policy = load_inventory_policy(pk)
+        except Device.DoesNotExist:
+            return None, None, None
+        except RuleConfigurationError:
+            page = self.get_object(pk)
+            return page, None, self._chassis_membership(page)
+        page = policy.page_device
+        return page, policy, (page.virtual_chassis_id, policy.master_id)
+
     @staticmethod
     def _chassis_membership(page):
         """Return the chassis and the chassis master of a page row: what decides the scope of its modules tab."""
         chassis = page.virtual_chassis
         return page.virtual_chassis_id, chassis.master_id if chassis is not None else None
 
-    def _read_render_inventory(self, request, obj, server_key=None, *, notify=True):
-        """Read and assess the source without discovery or HTTP; *notify* queues a notice per blocked scope."""
+    def _read_render_inventory(self, request, obj, server_key=None, *, notify=True, snapshot=None):
+        """Assess *snapshot*, or read the source, without discovery or HTTP; *notify* queues a notice per blocked scope."""
         scoped_server, unresolved = self.resolve_get_render_server_key(request, server_key)
         empty = {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
         if unresolved or self._render_server_key() is None:
@@ -862,7 +884,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         from netbox_librenms_plugin.models import RuleConfigurationError
 
         try:
-            assessed = read_module_assessment(obj, scoped_server)
+            assessed = read_module_assessment(obj, scoped_server, snapshot)
         except Device.DoesNotExist:
             return None, None, None, empty
         except RuleConfigurationError as exc:
@@ -877,14 +899,22 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         owner = self._get_sync_device(obj, server_key=scoped_server)
         return scoped_server, owner, assessed["inventory"], None
 
-    def get_context_data(self, request, obj, server_key=None):
-        """Get context from cache (used on initial page load and by the module actions' in-place re-render)."""
-        scoped_server, sync_device, inventory, empty = self._read_render_inventory(request, obj, server_key)
+    def get_context_data(self, request, obj, server_key=None, *, snapshot=None, policy=None):
+        """
+        Get context from cache (used on initial page load and by the module actions' in-place re-render).
+
+        A refresh passes the *snapshot* and the *policy* it read, so the table makes no read of its own.
+        """
+        scoped_server, sync_device, inventory, empty = self._read_render_inventory(
+            request, obj, server_key, snapshot=snapshot
+        )
         if empty is not None:
             return empty
         # Pass the resolved server explicitly (like post() does) so _active_server_key keys on it
         # rather than falling back to self.librenms_api.server_key.
-        return self._build_context(request, obj, inventory, server_key=scoped_server, sync_device=sync_device)
+        return self._build_context(
+            request, obj, inventory, server_key=scoped_server, sync_device=sync_device, policy=policy
+        )
 
     def get_verify_context_data(self, request, page_device, member, server_key=None):
         """
