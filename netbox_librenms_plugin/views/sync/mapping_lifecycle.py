@@ -21,6 +21,7 @@ from netbox_librenms_plugin.import_utils.disclosure import visible_object_label
 from netbox_librenms_plugin.ip_addressing import primary_ips
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.matching import LookupInputs
+from netbox_librenms_plugin.server_selection import ServerSelectionState, resolve_object_server
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
     IdentityOwned,
@@ -185,7 +186,14 @@ class MappingLifecycleView(_LinkWriter):
             model=model,
             server_key=server_key,
         )
-        return self._redirect(object_type, pk, server_key)
+        return self._redirect(object_type, pk, self._page_server_key(model, pk, server_key))
+
+    def _page_server_key(self, model, pk, server_key):
+        """Return *server_key* when the sync page accepts it for the object; else the page resolves its own server."""
+        obj = self.restricted_queryset(model).filter(pk=pk).first()
+        if obj is None or resolve_object_server(obj, server_key).state is ServerSelectionState.INVALID:
+            return None
+        return server_key
 
     def _redirect(self, object_type, pk, server_key):
         query = {key: value for key, value in (("server_key", server_key), ("tab", self._tab())) if value}

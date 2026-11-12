@@ -140,6 +140,23 @@ class TestLinkOnTheSyncPage:
         assert domain_state() == before
         assert path in stale_paths(response, obj.name)
 
+    @pytest.mark.parametrize("tokens", [["mapping_lifecycle:tampered"], "stale"])
+    def test_the_page_after_a_refused_link_proposes_the_match_again(self, linker, server, kind, tokens):
+        obj = _matched(kind, f"link-refused-{kind}-{len(tokens)}", server, "203.0.113.40", 8400)
+        if tokens == "stale":
+            from ipam.models import IPAddress
+
+            tokens = [page_token(linker, obj)]
+            IPAddress.objects.filter(pk=obj.primary_ip4_id).update(address="203.0.113.41/24")
+            register_match(server, "203.0.113.41", 8401, hostname=obj.name)
+
+        response = link(linker, obj, tokens)
+        page = linker.get(response.url)
+
+        assert mapping_summary(_fresh(obj)) == {}
+        assert page.status_code == 200
+        assert page.context["link"]["token"]
+
     def test_a_new_primary_ip_after_a_name_match_is_stale(self, linker, server, kind):
         """The primary IP probe comes first, so an address that appears after a name match can match elsewhere."""
         obj = _object(kind, f"link-by-name-{kind}")
