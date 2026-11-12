@@ -827,15 +827,18 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         page = self.get_object(pk)
         context = self.get_context_data(request, page, server_key=server_key)
         final = self.get_object(pk)
-        if snapshot_cached and (
+        if (
             self._chassis_membership(final) != self._chassis_membership(page)
             or source_cache.read(final, Resource.MODULES, server_key) is None
         ):
-            # The page changed chassis during the read, or the read refused the snapshot of its final scope.
-            SyncCacheConsistency(final).mark_refresh_failure(
-                SyncTab.MODULES, server_key, actor_id=request_actor_id(request)
-            )
-            snapshot_cached = False
+            # The page changed chassis during the read, or its final scope has no snapshot that its read accepts:
+            # no row or action of the table read may reach the response.
+            if snapshot_cached:
+                SyncCacheConsistency(final).mark_refresh_failure(
+                    SyncTab.MODULES, server_key, actor_id=request_actor_id(request)
+                )
+                snapshot_cached = False
+            page, context = final, {"object": final, "table": None, "cache_expiry": None, "server_key": server_key}
         if snapshot_cached:
             messages.success(request, "Inventory data refreshed successfully.")
         else:

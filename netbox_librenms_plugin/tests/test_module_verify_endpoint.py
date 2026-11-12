@@ -514,3 +514,54 @@ def test_a_member_that_leaves_its_chassis_in_the_database_during_the_refresh_get
     standalone = Device.objects.get(pk=page.pk)
     state = cache.get(SyncCacheConsistency(standalone).state_key(SyncTab.MODULES, SERVER_KEY))
     assert state["state"] == SyncTabState.REFRESH_FAILED.value
+
+
+@pytest.mark.django_db
+def test_a_member_that_leaves_its_chassis_after_the_table_read_gets_no_rows_of_the_chassis(
+    client, librenms_server, monkeypatch
+):
+    """The table is built for the chassis, then the database row leaves it, so the response refuses that table."""
+    from dcim.models import Device
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, SyncTabState
+    from netbox_librenms_plugin.tests.conftest import (
+        make_device_with_module_bays,
+        make_module_type,
+        make_superuser,
+        make_virtual_chassis,
+    )
+    from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+    owner = make_device_with_module_bays("module-late-leave-owner", ["Bay 1"], serial="CHASSIS-9")
+    seed_mapping(owner, SERVER_KEY, own=LIBRENMS_ID, save=False)
+    owner.save()
+    page = make_device_with_module_bays("module-late-leave-page", ["Bay 1"])
+    make_virtual_chassis("module-late-leave-vc", owner, page)
+    make_module_type("LC-24")
+    _register_inventory(librenms_server, INVENTORY)
+    client.force_login(make_superuser("module-late-leave-user"))
+    real_context = BaseModuleTableView.get_context_data
+    built = []
+
+    def read_then_leave(view, request, obj, server_key=None):
+        context = real_context(view, request, obj, server_key=server_key)
+        # Another transaction commits the leave after the table is built; no instance is refreshed.
+        built.append(context["table"] is not None)
+        Device.objects.filter(pk=page.pk).update(virtual_chassis=None, vc_position=None)
+        return context
+
+    monkeypatch.setattr(BaseModuleTableView, "get_context_data", read_then_leave)
+
+    response = _refresh_modules(client, page)
+
+    assert built == [True]
+    assert response.status_code == 200
+    body = response.content.decode()
+    assert response.context["module_sync"]["table"] is None
+    assert "MOD-SERIAL-1" not in body
+    assert "data-verify-binding" not in body
+    assert "Inventory data refreshed successfully" not in body
+    standalone = Device.objects.get(pk=page.pk)
+    state = cache.get(SyncCacheConsistency(standalone).state_key(SyncTab.MODULES, SERVER_KEY))
+    assert state["state"] == SyncTabState.REFRESH_FAILED.value
