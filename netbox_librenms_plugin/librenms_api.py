@@ -17,6 +17,7 @@ from netbox_librenms_plugin.constants import (
     LIBRENMS_NO_VRFS_MESSAGE,
     LIBRENMS_PORTS_COLUMNS,
 )
+from netbox_librenms_plugin.ip_addressing import primary_ips
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
     assign_own,
@@ -496,8 +497,8 @@ class LibreNMSAPI:
             1. Custom field 'librenms_id' on object
             2. Cached librenms_id value
             3. API lookup using:
-                a. primary_ip
-                b. primary IP's DNS name
+                a. each primary IP address, IPv4 first
+                b. the DNS name of each primary IP, IPv4 first
                 c. hostname if FQDN
 
             If found via API, stores ID in custom field if available,
@@ -509,21 +510,16 @@ class LibreNMSAPI:
             return librenms_id
 
         # Determine dynamically from API when the object exposes device identity fields.
-        primary_ip = getattr(obj, "primary_ip", None)
-        primary_ip_address = getattr(primary_ip, "address", None)
-        ip_address = getattr(primary_ip_address, "ip", None) if primary_ip else None
-        dns_name = getattr(primary_ip, "dns_name", None) if primary_ip else None
+        addresses = primary_ips(obj)
         hostname = getattr(obj, "name", None)
 
-        # Try IP address
-        if ip_address:
-            librenms_id = self._normalize_librenms_id(self.get_device_id_by_ip(ip_address))
+        for address in addresses:
+            librenms_id = self._normalize_librenms_id(self.get_device_id_by_ip(address.address.ip))
             if librenms_id is not None:
                 self._store_librenms_id(obj, librenms_id)
                 return librenms_id
 
-        # Try primary IP's DNS name
-        if dns_name:
+        for dns_name in dict.fromkeys(address.dns_name for address in addresses if address.dns_name):
             librenms_id = self._normalize_librenms_id(self.get_device_id_by_hostname(dns_name))
             if librenms_id is not None:
                 self._store_librenms_id(obj, librenms_id)

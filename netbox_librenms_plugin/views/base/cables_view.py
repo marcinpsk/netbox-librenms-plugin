@@ -857,12 +857,6 @@ class BaseCableTableView(
             return None
         return interface if interface.pk in context["visible_interface_ids"] else None
 
-    def get_ip_address(self, obj):
-        """Get the primary IP address for the object."""
-        if obj.primary_ip:
-            return str(obj.primary_ip.address.ip)
-        return None
-
     def get_ports_data(self, obj, server_key=None):
         """Get ports data without affecting cache."""
         # Scope to the POST-resolved server when provided; else the shared degrading resolver
