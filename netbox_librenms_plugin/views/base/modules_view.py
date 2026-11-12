@@ -820,18 +820,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             messages.error(request, result.error)
             return self.render_sync_partial(request, obj, server_key, {"module_sync": empty})
         # Publish with the write: a later failure, such as the TTL read, must not leave the old state.
-        published_key = SyncCacheConsistency(obj).snapshot_key(SyncTab.MODULES, server_key)
         snapshot_cached = SyncCacheConsistency(obj).mark_refresh_outcome(
             SyncTab.MODULES, server_key, actor_id=request_actor_id(request)
         )
         context = self.get_context_data(request, obj, server_key=server_key)
-        if snapshot_cached and SyncCacheConsistency(obj).snapshot_key(SyncTab.MODULES, server_key) != published_key:
-            # The page changed chassis during the read, so the outcome of its new scope applies.
-            snapshot_cached = SyncCacheConsistency(obj).mark_refresh_outcome(
-                SyncTab.MODULES, server_key, actor_id=request_actor_id(request)
-            )
-        elif snapshot_cached and source_cache.read(obj, Resource.MODULES, server_key) is None:
-            # Another request removed the snapshot during the read, so the table shows nothing of it.
+        if snapshot_cached and source_cache.read(obj, Resource.MODULES, server_key) is None:
+            # The table read refused the snapshot of the page's final scope: another request removed it,
+            # or the page changed chassis to a scope with no usable snapshot.
             SyncCacheConsistency(obj).mark_refresh_failure(
                 SyncTab.MODULES, server_key, actor_id=request_actor_id(request)
             )
