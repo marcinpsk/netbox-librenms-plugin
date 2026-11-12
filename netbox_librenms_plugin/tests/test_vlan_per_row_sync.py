@@ -240,8 +240,18 @@ def test_a_posted_group_field_cannot_move_a_signed_choice(client, settings):
 
 
 @pytest.mark.django_db
-def test_unsigned_selection_fields_write_nothing(client, settings):
-    """Without a token, neither ticked rows nor a per-row button reach the writer."""
+@pytest.mark.parametrize(
+    ("fields", "names_review"),
+    [
+        ({"sync_one": "701", "select": "701", "vlan_group_701": ""}, True),
+        ({"sync_one": "701"}, True),
+        ({"select": "701"}, True),
+        ({}, False),
+    ],
+    ids=["row-and-ticked", "row-button", "ticked-rows", "nothing"],
+)
+def test_unsigned_selection_fields_write_nothing(client, settings, fields, names_review):
+    """Without a token, neither ticked rows nor a per-row button reach the writer; a selection gets the review step."""
     from ipam.models import VLAN
 
     from netbox_librenms_plugin.tests.conftest import (
@@ -255,10 +265,11 @@ def test_unsigned_selection_fields_write_nothing(client, settings):
     _seed_vlan_snapshot(device, [{"vlan_vlan": 701, "vlan_name": "Checked bulk row"}])
     client.force_login(make_superuser("unsigned-selection-user"))
 
-    response = sync(client, device, [], htmx=False, sync_one="701", select="701", vlan_group_701="")
+    response = sync(client, device, [], htmx=False, **fields)
 
     assert response.status_code == 302
-    assert message_texts(response) == ["No VLAN changes selected."]
+    (text,) = message_texts(response)
+    assert ("Review choices" in text) is names_review
     assert not VLAN.objects.filter(vid=701).exists()
 
 
