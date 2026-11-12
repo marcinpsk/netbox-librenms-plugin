@@ -828,6 +828,20 @@ def test_the_device_status_list_loads_the_chassis_members_once(client, settings,
 
 
 @pytest.mark.django_db
+def test_the_device_status_list_sql_names_each_listed_device_once(client, settings, librenms_server):
+    """The chassis links come from the loaded members, so the list SQL grows only by the status of each device."""
+    bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
+    client.force_login(make_superuser("mapping-prefetch-status-sql-user"))
+    filters = _status_chassis("prefetch-status-vc-sql", 4)
+
+    with CaptureQueriesContext(connection) as queries:
+        response = _status_list(client, "device_status_list", filters)
+
+    assert response.content.decode().count("mdi-server-network") == 8
+    assert max(query["sql"].count(" WHEN ") for query in queries.captured_queries) <= 12
+
+
+@pytest.mark.django_db
 def test_the_import_list_prefetches_every_matched_object(live_librenms):
     """Validation and the cached-row refresh read the mapping of each matched device; one preload serves both."""
     from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
