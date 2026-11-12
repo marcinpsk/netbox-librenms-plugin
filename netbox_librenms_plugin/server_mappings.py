@@ -1003,9 +1003,12 @@ def _named_id(raw, label):
 
 
 def _entry_is_malformed(obj, server: str, entry) -> bool:
-    """Return whether the cutover classifier quarantines the stored *entry* of *obj* on *server*."""
+    """Return whether the stored *entry* of *obj* on *server* holds a marker, or the cutover classifier quarantines it."""
     from netbox_librenms_plugin import mapping_classifier
 
+    # The classifier skips a marker beside a live ID, but the merge workflow owns every stored marker.
+    if isinstance(entry, dict) and entry.get(MIGRATED_TO_FIELD) is not None:
+        return True
     target = mapping_classifier.Target(obj._meta.label_lower, obj.pk)
     (result,) = mapping_classifier.classify([(target, {server: entry})], {server}).objects
     return bool(result.reasons)
