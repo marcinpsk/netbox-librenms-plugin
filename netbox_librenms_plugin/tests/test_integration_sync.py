@@ -322,7 +322,7 @@ class TestLibreNMSMatching:
 
         result = find_librenms_match(device, api)
 
-        assert (result.librenms_id, result.candidate) == (42, Candidate.PRIMARY_IP)
+        assert (result.librenms_id, result.candidate) == (42, Candidate.PRIMARY_IP4)
         device.refresh_from_db()
         assert read_mapping(device).own_id(api.server_key) is None
 

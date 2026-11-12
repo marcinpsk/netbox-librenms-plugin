@@ -54,7 +54,7 @@ class LinkChoices:
 
 @dataclass(frozen=True)
 class LinkPrimaryIP:
-    """The primary IP address that the first probe sent."""
+    """A primary IP address that a probe sent."""
 
     pk: int
     address: str
@@ -64,8 +64,10 @@ class LinkPrimaryIP:
 class LinkInputs:
     """The lookup inputs up to and including the matched candidate; a later input is not read (None)."""
 
-    primary_ip: LinkPrimaryIP | None
-    dns_name: str | None
+    primary_ip4: LinkPrimaryIP | None
+    primary_ip6: LinkPrimaryIP | None
+    dns_name4: str | None
+    dns_name6: str | None
     name: str | None
 
 
@@ -113,13 +115,17 @@ def bound_inputs(inputs, matched_by):
     """Return the lookup inputs that a match by *matched_by* read: every input up to and including it."""
     order = list(Candidate)
     reached = order.index(Candidate(matched_by))
-    primary_ip = None
-    if inputs.primary_ip is not None and inputs.primary_address is not None:
-        primary_ip = LinkPrimaryIP(inputs.primary_ip, inputs.primary_address)
+
+    def read(candidate, value):
+        return value if reached >= order.index(candidate) else None
+
+    ip4, ip6 = inputs.primary_ip4, inputs.primary_ip6
     return LinkInputs(
-        primary_ip=primary_ip,
-        dns_name=inputs.dns_name if reached >= order.index(Candidate.DNS_NAME) else None,
-        name=inputs.name if reached >= order.index(Candidate.NAME) else None,
+        primary_ip4=read(Candidate.PRIMARY_IP4, LinkPrimaryIP(ip4.pk, ip4.address) if ip4 is not None else None),
+        primary_ip6=read(Candidate.PRIMARY_IP6, LinkPrimaryIP(ip6.pk, ip6.address) if ip6 is not None else None),
+        dns_name4=read(Candidate.DNS_NAME4, ip4.dns_name if ip4 is not None else None),
+        dns_name6=read(Candidate.DNS_NAME6, ip6.dns_name if ip6 is not None else None),
+        name=read(Candidate.NAME, inputs.name),
     )
 
 

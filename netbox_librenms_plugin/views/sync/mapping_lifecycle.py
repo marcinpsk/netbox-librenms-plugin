@@ -18,6 +18,7 @@ from virtualization.models import VirtualMachine
 from netbox_librenms_plugin import confirmation_intent as intent
 from netbox_librenms_plugin.assessment.mapping_lifecycle import Link, build_link
 from netbox_librenms_plugin.import_utils.disclosure import visible_object_label
+from netbox_librenms_plugin.ip_addressing import primary_ips
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.matching import LookupInputs
 from netbox_librenms_plugin.server_mappings import (
@@ -61,7 +62,7 @@ class _LinkWriter(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMS
         return model
 
     def _rebuild(self, approved, *, model, server_key, locked):
-        """Claim each approved ID, lock the object and its primary IP, and rebuild each link from that state."""
+        """Claim each approved ID, lock the object and its primary IPs, and rebuild each link from that state."""
         changeable = self.restricted_queryset(model, "change")
         pairs = []
         for operation in sorted(approved, key=lambda operation: operation.identity.pk):
@@ -83,12 +84,10 @@ class _LinkWriter(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMS
             if row is None:
                 pairs.append((operation, intent.Unavailable("subject.available")))
                 continue
-            primary_ip = row.primary_ip
-            if primary_ip is not None:
-                # The address is a lookup input of the locked row, and the row's change scope admitted it.
-                primary_ip = self.relock_scoped_row(IPAddress, pk=primary_ip.pk)
+            # Each address is a lookup input of the locked row, and the row's change scope admitted it.
+            relocked = (self.relock_scoped_row(IPAddress, pk=ip.pk) for ip in primary_ips(row))
             locked[identity.pk] = row
-            inputs = LookupInputs.of(row, primary_ip)
+            inputs = LookupInputs.of(row, tuple(ip for ip in relocked if ip is not None))
             pairs.append(
                 (operation, build_link(row, server_key, choices=operation.choices, inputs=inputs, owned=owned))
             )

@@ -233,13 +233,13 @@ class _LinkScenario:
     permissions = [("view", Device), ("change", Device)]
     librenms_id = 7100
     relevant = {
-        "primary_ip_changed": "assumptions.inputs.primary_ip.address",
+        "primary_ip_changed": "assumptions.inputs.primary_ip4.address",
         "another_object_took_the_id": "assumptions.owned",
         "linked_meanwhile": "assumptions.own_id",
         "stored_value_invalid": "assumptions.linkable",
     }
     unrelated = ("name_changed", "description_changed", "another_id_taken", "other_server_linked")
-    target_gone_path = "assumptions.inputs.primary_ip"
+    target_gone_path = "assumptions.inputs.primary_ip4"
     revoked = "change"
 
     def __init__(self, tag, client, settings, librenms_server):
