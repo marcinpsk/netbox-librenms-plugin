@@ -80,6 +80,8 @@ unchecked until that review.
 | `change-scope-write-needs-read-back` | error | A function saves a row that it read through `restricted_queryset(model, "change")` or `restrict(user, "change")`, and does not check the saved row with `saved_in_scope()` (or `_refuse_rows_outside_change_scope()`). |
 | `sync-script-reads-page-server-key` | error | A package script calls `document.querySelector`, `querySelectorAll` or `getElementsByName` for `server_key`. A lookup inside one form is allowed. Vendored and minified files are excluded. |
 | `oob-controller-flag-has-one-writer` | error | A write of `row_is_oob_controller` outside `classify_oob_controller()`. Only a subscript assignment of the key is checked. |
+| `primary-ip-through-helper` | error | A `.primary_ip` attribute read or a `getattr(obj, "primary_ip", ...)` call outside tests. NetBox returns `primary_ip6` there when both families are set, unless `PREFER_IPV4` is on. Read both rows with `ip_addressing.primary_ips()`, or name `primary_ip4` or `primary_ip6`. A `getattr` with a computed name is not followed. |
+| `primary-ip-through-helper-template` | error | A `.primary_ip` read inside a template `{{ }}` variable or `{% %}` tag, outside a `{# #}` comment. |
 
 The `sync-tab-attributes-through-parser` rule rejects a sync container regex that closes the tag
 immediately after `data-active-tab`. It checks direct `re.search` calls in tests. Other attribute
@@ -105,6 +107,7 @@ through its helpers. The template rule applies to `.html` files.
 own conflict after the last attempt.
 `post-write-scope-through-helper` excludes tests and migrations. So does `change-scope-write-needs-read-back`.
 `titled-icon-needs-accessible-name` applies to `.py`, `.html` and `.js` files and excludes tests.
+`primary-ip-through-helper` excludes tests. Its template rule applies to `.html` files.
 `sync-tab-url-through-sync-query` applies to `.py` and `.html` files. It excludes tests,
 `sync_query.py`, which builds the sync page URLs, and `views/sync/modules.py`: the Modules tab
 redirect keeps its own query and is outside the filter work.
