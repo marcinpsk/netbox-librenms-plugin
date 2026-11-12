@@ -4,6 +4,7 @@ Link through the real routes: the sync page and the status lists propose a match
 Each test mints its token through the page that offers it, posts it over HTTP, and reads the real database.
 """
 
+import netaddr
 import pytest
 from dcim.models import Device
 from django.test import Client
@@ -86,6 +87,14 @@ def _change_records(obj):
 
 def _fresh(obj):
     return type(obj).objects.get(pk=obj.pk)
+
+
+@pytest.mark.django_db
+def test_the_primary_ip_helper_keeps_the_address_type_that_netbox_loads():
+    # NetBox 4.4 IPAddress.family (read on delete and in Device.clean) raises on a str address.
+    ip = give_primary_ip(make_device("typed-address"), "198.51.100.40/24")
+
+    assert isinstance(ip.address, netaddr.IPNetwork)
 
 
 @pytest.mark.django_db
