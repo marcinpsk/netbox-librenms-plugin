@@ -11,7 +11,7 @@ from django.urls import reverse
 from netbox.views import generic
 
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
-from netbox_librenms_plugin.import_utils import _determine_device_name
+from netbox_librenms_plugin.import_utils import _determine_device_name, visible_object_label
 from netbox_librenms_plugin.import_utils.virtual_chassis import (
     _existing_member_name,
     existing_member_name_refusal,
@@ -345,11 +345,17 @@ class BaseLibreNMSSyncView(
             sync_device_has_librenms_id = False
             sync_device_has_primary_ip = False
 
+            visible_sync_device = None
             if librenms_sync_device:
                 sync_device_has_librenms_id = (
                     read_mapping(librenms_sync_device).own_id(self.librenms_api.server_key) is not None
                 )
                 sync_device_has_primary_ip = bool(librenms_sync_device.primary_ip)
+                if visible_object_label(librenms_sync_device, request.user) is not None:
+                    visible_sync_device = {
+                        "name": str(librenms_sync_device),
+                        "url": librenms_sync_device.get_absolute_url(),
+                    }
 
             context.update(
                 {
@@ -358,6 +364,8 @@ class BaseLibreNMSSyncView(
                     "object_has_recorded_mapping": read_mapping(obj).has_recorded_state,
                     "sync_device_has_primary_ip": sync_device_has_primary_ip,
                     "librenms_sync_device": librenms_sync_device,
+                    # Only this value may name the sync device in the page.
+                    "visible_sync_device": visible_sync_device,
                     "sync_device_has_librenms_id": sync_device_has_librenms_id,
                 }
             )
