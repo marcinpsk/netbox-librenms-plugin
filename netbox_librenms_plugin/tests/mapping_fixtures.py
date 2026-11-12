@@ -181,11 +181,11 @@ def mapping_summary(obj) -> dict:
     """
     Return the mapping of *obj* in terms that do not depend on the storage, to compare in an assertion.
 
-    Each server with recorded state maps to its set fields: ``own``, ``oob``, ``oob_type``,
+    Each stored server entry maps to its set fields: ``own``, ``oob``, ``oob_type``,
     ``oob_recorded`` (an OOB entry with no ID) and ``migrated_to`` (the winner pk of an effective
-    marker). A named preference is ``"preferred": server``, a malformed one
-    ``PreferenceStatus.MALFORMED``. An unusable mapping is ``{"quarantined": True}``, and no mapping
-    is ``{}``.
+    marker), or to ``{}`` when it has no readable field. A named preference is
+    ``"preferred": server``, a malformed one ``PreferenceStatus.MALFORMED``. An unusable mapping is
+    ``{"quarantined": True}``, and no mapping is ``{}``.
 
     Raises:
         ValueError: *obj* holds a legacy value; only a legacy runtime test reads one, with
@@ -208,9 +208,7 @@ def mapping_summary(obj) -> dict:
             "oob_recorded": entry.oob_recorded and entry.oob_id is None or None,
             "migrated_to": entry.migration.effective.device_id if entry.migration.effective else None,
         }
-        fields = {key: value for key, value in fields.items() if value is not None}
-        if fields:
-            summary[entry.server] = fields
+        summary[entry.server] = {key: value for key, value in fields.items() if value is not None}
     if mapping.preference.status is PreferenceStatus.NAMED:
         summary["preferred"] = mapping.preference.server
     elif mapping.preference.status is PreferenceStatus.MALFORMED:

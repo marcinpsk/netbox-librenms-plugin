@@ -47,6 +47,7 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import (
     apply_mapping_change,
+    mapping_summary,
     seed_mapping,
     seed_mapping_row,
     seed_stored_mapping,
@@ -743,6 +744,17 @@ class TestSeedMappingHelper:
         seed_mapping(device, own=42)
 
         assert read_mapping(type(device).objects.get(pk=device.pk)).own_id("default") == 42
+
+
+@pytest.mark.django_db
+class TestMappingSummaryHelper:
+    """The test helper ``mapping_summary`` gives ``{}`` only when the object records no server entry."""
+
+    @pytest.mark.parametrize("entry", [None, {}, {"id": "bad"}], ids=["null", "empty", "malformed-id"])
+    def test_a_server_entry_without_fields_still_shows(self, entry):
+        device = seed_stored_mapping(_dev(), {"orphaned-server": entry})
+
+        assert mapping_summary(device) == {"orphaned-server": {}}
 
 
 def _locked(obj):
