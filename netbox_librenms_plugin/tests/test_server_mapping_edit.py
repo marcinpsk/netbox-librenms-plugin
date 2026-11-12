@@ -331,8 +331,10 @@ def test_a_merged_server_entry_is_refused(client, servers):
         {"id": "bad", "oob": {"id": 14074, "type": "idrac"}},
         {"id": 14075, "note": "hand edit"},
         {"id": 14076, "oob": "garbage"},
+        {"id": 14079, "_migrated_to": "garbage"},
+        {"oob": {"id": 14080, "type": "ilo"}, "_migrated_to": 5},
     ],
-    ids=["malformed-own-id", "unknown-key", "malformed-oob"],
+    ids=["malformed-own-id", "unknown-key", "malformed-oob", "marker-beside-own-id", "marker-beside-oob-id"],
 )
 def test_a_malformed_server_entry_is_refused_and_kept(client, servers, entry):
     """The form cannot show every stored part of a malformed entry, so a save would drop the part it hides."""
