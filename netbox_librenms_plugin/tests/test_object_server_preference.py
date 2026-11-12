@@ -385,7 +385,7 @@ def test_each_mapping_row_offers_its_unlink_confirmation(client, servers):
         "plugins:netbox_librenms_plugin:mapping_lifecycle", kwargs={"object_type": "device", "pk": owner.pk}
     )
     for server_key in ("primary", "retired"):
-        assert f'href="{unlink_url}?action=unlink&amp;server_key={server_key}"' in html
+        assert f'href="{unlink_url}?action=unlink&amp;server_key={server_key}&amp;active_server_key=primary"' in html
 
 
 @pytest.mark.django_db
