@@ -11,6 +11,12 @@ LIST_URL = "https://plugin.example.com/plugins/librenms_plugin/device-status/?ro
 PAGE_TWO = "https://plugin.example.com/plugins/librenms_plugin/device-status/?role=7&page=2"
 LINK_URL = "https://plugin.example.com/plugins/librenms_plugin/device/link-selected/"
 TOKEN = "mapping_lifecycle:signed-row-token"
+EMPTY_LIST_URL = "https://plugin.example.com/plugins/librenms_plugin/device-status/"
+QUICK_SEARCH = (
+    '<input type="search" name="q" id="quicksearch" placeholder="Quick search" '
+    'hx-get="/plugins/librenms_plugin/device-status/" hx-target="#object_list" '
+    'hx-trigger="keyup changed delay:500ms, search">'
+)
 
 
 def _render_link_status():
@@ -96,6 +102,41 @@ def test_link_selected_appears_with_the_swapped_in_rows_and_posts_the_selected_t
 
     page.get_by_label("Select: Link core-1 to LibreNMS ID 9962").check()
     page.get_by_role("button", name="Link selected").click()
+    page.locator("#linked").wait_for()
+
+    assert submissions == [
+        {"csrfmiddlewaretoken": ["browser-token"], "server_key": ["primary"], "confirmation_intent": [TOKEN]}
+    ]
+
+
+def test_a_quick_search_from_the_empty_list_links_through_its_forms(page):
+    """The list without filters renders no rows; NetBox quick search swaps the matching row in as a table."""
+    submissions = []
+
+    def handle_route(route):
+        url = route.request.url
+        if url == EMPTY_LIST_URL:
+            body = (
+                f'<html><body>{_forms()}{QUICK_SEARCH}<div class="htmx-container" id="object_list"></div></body></html>'
+            )
+            route.fulfill(body=body, content_type="text/html")
+        elif url == f"{EMPTY_LIST_URL}?q=core":
+            route.fulfill(body=_table(_match_cell()), content_type="text/html")
+        elif url == LINK_URL:
+            submissions.append(parse_qs(route.request.post_data or "", keep_blank_values=True))
+            route.fulfill(body="<p id='linked'>linked</p>", content_type="text/html")
+        else:
+            raise AssertionError(f"Unexpected browser request: {url}")
+
+    page.route("**/*", handle_route)
+    page.goto(EMPTY_LIST_URL)
+    page.add_script_tag(path=str(HTMX_PATH))
+    page.evaluate("htmx.process(document.body)")
+
+    page.get_by_placeholder("Quick search").fill("core")
+    page.get_by_placeholder("Quick search").press("Enter")
+    page.locator('[data-link-state="match"]').wait_for()
+    page.get_by_role("button", name="Link", exact=True).click()
     page.locator("#linked").wait_for()
 
     assert submissions == [

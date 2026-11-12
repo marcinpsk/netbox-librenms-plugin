@@ -149,17 +149,18 @@ class _StatusListMixin(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin):
         """
         Return the target of the link forms, which the Link controls of every page post to.
 
-        The forms do not depend on the offers of this page: htmx swaps a later page in as a table only.
+        The forms do not depend on the offers of this page: htmx swaps a later page or a quick search
+        result in as a table only, also into the empty list that a GET without filters renders.
         """
         context = super().get_extra_context(request)
-        if not request.GET or not request.user.has_perm(PERM_CHANGE_PLUGIN):
+        if not request.user.has_perm(PERM_CHANGE_PLUGIN) or (server_key := self._render_server_key()) is None:
             return context
         return {
             **context,
             "link_selected_url": reverse(
                 "plugins:netbox_librenms_plugin:link_selected", kwargs={"object_type": self.model._meta.model_name}
             ),
-            "link_server_key": self.librenms_api.server_key,
+            "link_server_key": server_key,
         }
 
 
