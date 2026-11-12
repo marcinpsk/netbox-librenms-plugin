@@ -40,6 +40,7 @@ from netbox_librenms_plugin.server_mappings import (
     require_server_key,
     set_preference,
 )
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.serial_identity import (
     RETYPE_HELD,
@@ -1086,6 +1087,7 @@ class EditServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
                         oob_id=_posted_value(request, "oob_id"),
                         oob_type=_posted_value(request, "oob_type"),
                         shown=shown,
+                        configured_servers=LibreNMSAPI.get_available_servers(),
                     )
                 except ValueError as exc:
                     raise _WriteRefused(str(exc)) from None
