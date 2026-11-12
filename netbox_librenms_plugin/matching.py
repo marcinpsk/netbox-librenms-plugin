@@ -31,7 +31,14 @@ class Candidate(StrEnum):
 
 
 # Every lookup asks for each of these; a later candidate is asked only when none of them matched.
-_ADDRESS_CANDIDATES = frozenset({Candidate.PRIMARY_IP4, Candidate.PRIMARY_IP6})
+# The candidates of one pair are both asked; when they name two devices, the object matches none.
+CANDIDATE_PAIRS = {
+    Candidate.PRIMARY_IP4: frozenset({Candidate.PRIMARY_IP4, Candidate.PRIMARY_IP6}),
+    Candidate.PRIMARY_IP6: frozenset({Candidate.PRIMARY_IP4, Candidate.PRIMARY_IP6}),
+    Candidate.DNS_NAME4: frozenset({Candidate.DNS_NAME4, Candidate.DNS_NAME6}),
+    Candidate.DNS_NAME6: frozenset({Candidate.DNS_NAME4, Candidate.DNS_NAME6}),
+    Candidate.NAME: frozenset({Candidate.NAME}),
+}
 
 CANDIDATE_LABELS = {
     Candidate.PRIMARY_IP4: "primary IPv4",
@@ -187,7 +194,7 @@ def find_librenms_match(obj, api, *, deadline=None):
     remaining = deadline.remaining if deadline is not None else lambda: DEFAULT_API_TIMEOUT
     found = None
     for candidate, value in inputs.values():
-        if found is not None and candidate not in _ADDRESS_CANDIDATES:
+        if found is not None and candidate not in CANDIDATE_PAIRS[found[0]]:
             break
         answer = api.get_response_before(f"devices/{quote(value, safe='')}", remaining)
         # A late answer is never used: the request has already spent the time of the other rows.

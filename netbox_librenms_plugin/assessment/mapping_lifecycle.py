@@ -5,6 +5,7 @@ from enum import StrEnum
 
 from netbox_librenms_plugin import confirmation_intent as intent
 from netbox_librenms_plugin.matching import (
+    CANDIDATE_PAIRS,
     Candidate,
     Match,
     NoMatch,
@@ -122,9 +123,9 @@ class Link:
 
 
 def bound_inputs(inputs, matched_by):
-    """Return the lookup inputs that a match by *matched_by* read: both primary IPs, and every later input up to it."""
+    """Return the lookup inputs that a match by *matched_by* read: both primary IPs, and every later input to its pair."""
     order = list(Candidate)
-    reached = order.index(Candidate(matched_by))
+    reached = max(order.index(candidate) for candidate in CANDIDATE_PAIRS[Candidate(matched_by)])
 
     def read(candidate, value):
         return value if reached >= order.index(candidate) else None
