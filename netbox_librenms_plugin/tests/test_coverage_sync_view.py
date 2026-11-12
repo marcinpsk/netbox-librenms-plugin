@@ -17,6 +17,7 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
+from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
 
 SERVER_KEY = "default"
@@ -222,6 +223,47 @@ class TestSyncPageRouting:
 
         assert response.context["is_vc_member"] is True
         assert response.context["sync_device_has_primary_ip"] is True
+
+    @pytest.mark.parametrize("banner", ["managed", "configure", "requires"])
+    @pytest.mark.parametrize("sync_device_visible", [False, True], ids=["hidden", "visible"])
+    def test_the_vc_banner_names_the_sync_device_only_within_the_view_scope(
+        self, client, librenms_server, banner, sync_device_visible
+    ):
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.server_mappings import read_mappings
+
+        _vc, members = make_virtual_chassis_members(f"sync-vc-scope-{banner}-{sync_device_visible}", count=2)
+        sync_device, viewed = members
+        if banner == "managed":
+            seed_mapping(sync_device, SERVER_KEY, own=6610)
+            # A mapping for an unconfigured server puts a sync-device row in the mapping table.
+            seed_mapping(sync_device, "retired", own=6611)
+            _register_device(librenms_server, 6610, "librenms-side-hostname")
+        elif banner == "configure":
+            interface = make_interface(sync_device, "management")
+            sync_device.primary_ip4 = make_ip("198.18.50.10/32", assigned_object=interface)
+            sync_device.save()
+        visible_pks = [viewed.pk, sync_device.pk] if sync_device_visible else [viewed.pk]
+        user = make_user_with_perms(
+            f"sync-vc-scope-{banner}-{sync_device_visible}",
+            [("view", Device), ("change", Device)],
+            constraints={"pk__in": visible_pks},
+        )
+        client.force_login(user)
+        mappings_before = read_mappings(Device.objects.order_by("pk"), fields=("pk",))
+
+        response = client.get(_sync_url(viewed))
+
+        assert response.status_code == 200
+        assert response.context["librenms_sync_device"] == sync_device
+        assert response.context["sync_device_has_librenms_id"] is (banner == "managed")
+        assert response.context["sync_device_has_primary_ip"] is (banner == "configure")
+        html = response.content.decode()
+        assert (f'href="{sync_device.get_absolute_url()}"' in html) is sync_device_visible
+        assert (sync_device.get_absolute_url() in html) is sync_device_visible
+        assert (sync_device.name in html) is sync_device_visible
+        assert read_mappings(Device.objects.order_by("pk"), fields=("pk",)) == mappings_before
 
     def test_vm_page_uses_the_vm_mapping_and_vm_tabs(self, logged_in_client, librenms_server):
         vm = make_vm("sync-page-vm")
