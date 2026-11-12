@@ -374,6 +374,11 @@
     min-width: 7.5rem;
 }
 
+/* A legacy server label holds the URL, which has no break point. */
+#librenms-mapping-editor td:first-child {
+    overflow-wrap: anywhere;
+}
+
 @media (max-width: 767.98px) {
     #librenms-mapping-editor thead {
         display: none;

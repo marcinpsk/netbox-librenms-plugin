@@ -21,7 +21,7 @@
         <tbody>
         {% for row in mapping_editor.rows %}
         <tr>
-            <td class="ps-3 text-nowrap">{{ row.display_name }}</td>
+            <td class="ps-3">{{ row.display_name }}</td>
             {% if row.merged %}
             <td colspan="4" class="small text-muted pe-3">Merged into another device on this server</td>
             {% else %}
