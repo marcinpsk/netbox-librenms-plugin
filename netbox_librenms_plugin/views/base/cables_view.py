@@ -2947,6 +2947,14 @@ class BaseCableTableView(
         raw_links = self._store_raw_cable_links(snapshot, cache_key, fetch_fresh)
         if raw_links is None:
             return None
+        snapshot_cached = None
+        if fetch_fresh:
+            # Publish with the write: a later failure, such as the TTL read, must not leave the old state.
+            snapshot_cached = SyncCacheConsistency(obj).mark_refresh_outcome(
+                SyncTab.CABLES,
+                server_key,
+                actor_id=request_actor_id(request),
+            )
 
         user_id = getattr(getattr(request, "user", None), "pk", None)
         if user_id is not None:
@@ -2979,6 +2987,8 @@ class BaseCableTableView(
             "cache_expiry": cache_expiry,
             "server_key": server_key,
             "incomplete_sources": snapshot["incomplete_sources"],
+            # The refresh outcome of a fetch_fresh call, else None.
+            "snapshot_cached": snapshot_cached,
         }
 
     def _refresh_cable_snapshot(self, obj, cache_device, cache_key, server_key):
@@ -3199,15 +3209,7 @@ class BaseCableTableView(
             )
             return self.render_sync_partial(request, obj, server_key, {"cable_sync": context})
 
-        # Decide the outcome before announcing it. cache.set() does not confirm that the
-        # snapshot exists, and an eviction can remove it before this check.
-        coordinator = SyncCacheConsistency(obj)
-        snapshot_cached = coordinator.mark_refresh_outcome(
-            SyncTab.CABLES,
-            server_key,
-            actor_id=request_actor_id(request),
-        )
-        if snapshot_cached:
+        if context["snapshot_cached"]:
             messages.success(request, "Cable data refreshed successfully.")
         else:
             messages.error(

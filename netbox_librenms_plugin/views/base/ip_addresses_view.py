@@ -941,6 +941,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             bound_port_cache=bound_port_cache,
         )
 
+        snapshot_cached = None
         if fetch_fresh:
             # Cache the fresh data after enrichment, including the port map gathered
             # during enrichment so cached renders don't re-fetch ports.
@@ -954,6 +955,12 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                     "interface_name_field": interface_name_field,
                 },
                 timeout=self.librenms_api.cache_timeout,
+            )
+            # Publish with the write: a later failure, such as the TTL read, must not leave the old state.
+            snapshot_cached = SyncCacheConsistency(obj).mark_refresh_outcome(
+                SyncTab.IP_ADDRESSES,
+                server_key,
+                actor_id=request_actor_id(request),
             )
         elif (
             (not cached_had_ports_by_id and port_data_cache)
@@ -998,6 +1005,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             "filtered_from": filtered_from,
             "object": obj,
             "cache_expiry": cache_expiry,
+            # The refresh outcome of a fetch_fresh call, else None.
+            "snapshot_cached": snapshot_cached,
             "server_key": server_key,
             "set_primary_ip": resolve_set_primary_ip(request),
             "create_missing_interfaces": resolve_create_missing_interfaces(request),
@@ -1160,11 +1169,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 },
             )
 
-        if SyncCacheConsistency(obj).mark_refresh_outcome(
-            SyncTab.IP_ADDRESSES,
-            server_key,
-            actor_id=request_actor_id(request),
-        ):
+        if context["snapshot_cached"]:
             messages.success(request, "IP address data refreshed successfully.")
         else:
             # The rows below come from this refresh and are rendered, so the message must not
