@@ -3,7 +3,7 @@
 from functools import partial
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
-from dcim.models import Device
+from dcim.models import Device, VirtualChassis
 from django.apps import apps
 from django.contrib import messages
 from django.core.exceptions import ValidationError
@@ -49,6 +49,20 @@ _SYNC_PAGES = {"device": "device_librenms_sync", "virtualmachine": "vm_librenms_
 _INVALID_CONFIRMATION = "The link confirmation is invalid or has expired. Refresh the page and try again."
 
 
+def _lock_chassis_members(pk):
+    """
+    Lock the virtual chassis of Device *pk* and its members in pk order, the order of the interface writers.
+
+    The link rebuild then reads the chassis sync device while no member can change its mapping. A
+    device that moves between the read of its chassis and the locks fails the chassis assumption.
+    """
+    chassis_id = Device.objects.filter(pk=pk).values_list("virtual_chassis_id", flat=True).first()
+    if chassis_id is None:
+        return
+    VirtualChassis.objects.select_for_update().filter(pk=chassis_id).order_by().first()
+    list(Device.objects.select_for_update(of=("self",)).filter(virtual_chassis_id=chassis_id).order_by("pk"))
+
+
 class _LinkWriter(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
     """Verify the submitted link tokens under the locks, and store each verified own ID."""
 
@@ -72,6 +86,8 @@ class _LinkWriter(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMS
                 pairs.append((operation, intent.Unavailable("subject.available")))
                 continue
             owned = False
+            if model is Device:
+                _lock_chassis_members(identity.pk)
             try:
                 row, conflict = lock_librenms_id_assignment(
                     operation.effects.own_id, server_key, owner_queryset=changeable, owner_pk=identity.pk

@@ -18,6 +18,7 @@ from netbox_librenms_plugin.server_mappings import (
     device_identity_owner,
     read_mapping,
 )
+from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
 # The stored forms on which a link can write an own ID; matching proposes nothing on any other.
 _LINKABLE = frozenset({ContainerStatus.ABSENT, ContainerStatus.SCOPED})
@@ -72,13 +73,22 @@ class LinkInputs:
 
 
 @dataclass(frozen=True)
+class LinkChassis:
+    """The virtual chassis of a Device, and whether the Device is its sync device on the server."""
+
+    pk: int
+    sync_device: bool
+
+
+@dataclass(frozen=True)
 class LinkAssumptions:
-    """The stored mapping and ownership the link writes over, and the inputs that made the match."""
+    """The stored mapping and ownership the link writes over, the chassis, and the inputs that made the match."""
 
     linkable: bool
     own_id: int | None
     migrated: bool
     owned: bool
+    chassis: LinkChassis | None
     inputs: LinkInputs
 
 
@@ -129,12 +139,21 @@ def bound_inputs(inputs, matched_by):
     )
 
 
+def _chassis(obj, server_key):
+    """Return the chassis of *obj* and whether *obj* is its sync device on the server; None outside a chassis."""
+    chassis_id = getattr(obj, "virtual_chassis_id", None)
+    if chassis_id is None:
+        return None
+    sync_device = get_librenms_sync_device(obj, server_key=server_key)
+    return LinkChassis(chassis_id, sync_device is not None and sync_device.pk == obj.pk)
+
+
 def build_link(obj, server_key, *, choices, inputs, owned):
     """
     Return the link operation of *obj* for the confirmed *choices*, from the state that the caller read.
 
     The assessment and the rebuild both call this, so an operation compares equal only when the
-    stored mapping, the ownership of the ID and the lookup inputs are the same.
+    stored mapping, the ownership of the ID, the chassis sync device and the lookup inputs are the same.
 
     Args:
         obj (Device | VirtualMachine): The object, as the caller read it.
@@ -153,6 +172,7 @@ def build_link(obj, server_key, *, choices, inputs, owned):
             own_id=mapping.own_id(server_key),
             migrated=mapping.migrated_to(server_key) is not None,
             owned=owned,
+            chassis=_chassis(obj, server_key),
             inputs=bound_inputs(inputs, choices.matched_by),
         ),
         effects=LinkEffects(choices.librenms_id),

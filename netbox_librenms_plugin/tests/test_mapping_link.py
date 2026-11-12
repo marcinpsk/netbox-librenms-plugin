@@ -16,6 +16,7 @@ from netbox_librenms_plugin.tests.conftest import (
     configure_librenms_servers,
     make_cluster,
     make_device,
+    make_virtual_chassis,
     make_vm,
     transactional_db_with_all_apps,
 )
@@ -31,7 +32,12 @@ from netbox_librenms_plugin.tests.link_intent_helpers import (
     status_list,
     sync_page,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary, seed_mapping, unmapped_only_constraint
+from netbox_librenms_plugin.tests.mapping_fixtures import (
+    mapping_summary,
+    seed_mapping,
+    seed_mapping_row,
+    unmapped_only_constraint,
+)
 from netbox_librenms_plugin.tests.view_test_helpers import domain_state, grant, make_user_with_perms
 from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
 
@@ -708,3 +714,88 @@ def test_two_links_of_one_id_never_make_two_owners(server):
     assert "assumptions.owned" in stale_paths(responses[(first, second).index(loser)], loser.name) or (
         TRY_AGAIN_MESSAGE in loser_texts
     )
+
+
+def _chassis_master(tag, server, address, librenms_id):
+    """Return the master of a new two-member chassis, which matches *librenms_id*, and the other member."""
+    master, member = make_device(f"{tag}-master"), make_device(f"{tag}-member")
+    chassis = make_virtual_chassis(f"{tag}-vc", master, member)
+    chassis.master = master
+    chassis.save()
+    master = _fresh(master)
+    give_primary_ip(master, f"{address}/24")
+    register_match(server, address, librenms_id, hostname=master.name)
+    return master, _fresh(member)
+
+
+@pytest.mark.django_db
+class TestLinkOfAChassisMember:
+    def test_the_chassis_sync_device_links(self, linker, server):
+        master, _member = _chassis_master("vc-link", server, "198.18.10.1", 9700)
+
+        link(linker, master, [page_token(linker, master)])
+
+        assert mapping_summary(_fresh(master)) == {"default": {"own": 9700}}
+
+    def test_a_member_linked_after_the_offer_makes_the_link_stale(self, linker, server):
+        master, member = _chassis_master("vc-other-linked", server, "198.18.10.2", 9710)
+        token = page_token(linker, master)
+        seed_mapping(member, "default", own=9711)
+        before = domain_state()
+
+        response = link(linker, master, [token])
+
+        assert domain_state() == before
+        assert "assumptions.chassis.sync_device" in stale_paths(response, master.name)
+
+    def test_a_device_that_joins_a_linked_chassis_after_the_offer_is_stale(self, linker, server):
+        device = _matched("device", "vc-joiner", server, "198.18.10.3", 9720)
+        token = page_token(linker, device)
+        _master, member = _chassis_master("vc-joined", server, "198.18.10.4", 9721)
+        seed_mapping(member, "default", own=9722)
+        device.virtual_chassis_id, device.vc_position = member.virtual_chassis_id, 3
+        device.save()
+        before = domain_state()
+
+        response = link(linker, device, [token])
+
+        assert domain_state() == before
+        assert "assumptions.chassis" in stale_paths(response, device.name)
+
+
+@transactional_db_with_all_apps()
+def test_a_member_link_that_commits_while_the_link_waits_makes_it_stale(server):
+    """The Link locks every chassis member, so a member's link that is open meanwhile commits first."""
+    import queue
+
+    from django.db import close_old_connections, connection
+
+    from netbox_librenms_plugin.tests.conftest import bounded_executor
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import backend_pid, second_connection, wait_for_lock_wait
+
+    master, member = _chassis_master("vc-race", server, "198.18.10.5", 9730)
+    client = Client()
+    client.force_login(make_user_with_perms("vc-race-writer", PERMISSIONS))
+    token = page_token(client, master)
+    pids = queue.Queue()
+
+    def link_master():
+        close_old_connections()
+        try:
+            pids.put(backend_pid(connection))
+            return link(client, master, [token])
+        finally:
+            connection.close()
+
+    with second_connection() as other, bounded_executor(max_workers=1) as executor:
+        seed_mapping_row(member, seed_mapping(Device(), "default", own=9731, save=False), connection=other)
+        future = executor.submit(link_master)
+        try:
+            wait_for_lock_wait(other, pids.get(timeout=10))
+        finally:
+            other.commit()
+        response = future.result(timeout=30)
+
+    assert mapping_summary(_fresh(master)) == {}
+    assert mapping_summary(_fresh(member)) == {"default": {"own": 9731}}
+    assert "assumptions.chassis.sync_device" in stale_paths(response, master.name)
