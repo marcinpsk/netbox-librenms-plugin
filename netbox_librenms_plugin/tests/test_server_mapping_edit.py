@@ -396,6 +396,20 @@ def test_a_viewer_without_change_permission_gets_no_form(client, servers):
 
 
 @pytest.mark.django_db
+def test_an_unmapped_page_with_a_server_key_offers_the_form(client, servers):
+    """The server selection refuses the key of an unmapped server, but the page still lets the user create the mapping."""
+    target = make_device("edit-unmapped-server-key")
+    client.force_login(make_superuser("edit-unmapped-server-key-writer"))
+
+    action, fields = _editor_forms(client, target, server_key="primary")["primary"]
+    response = client.post(action, {**fields, "own_id": "14083"})
+
+    assert response.status_code == 302
+    target.refresh_from_db()
+    assert mapping_summary(target) == {"primary": {"own": 14083}}
+
+
+@pytest.mark.django_db
 def test_the_form_is_offered_only_for_the_configured_servers(client, servers):
     target = seed_mapping(make_device("edit-server-list"), "retired", own=14082)
     client.force_login(make_superuser("edit-server-list-writer"))
