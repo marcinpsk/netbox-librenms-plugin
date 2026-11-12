@@ -452,7 +452,7 @@ def report_lines(report) -> list:
     for collision in report.collisions:
         owners = ", ".join(f"{_object_name(claim.target)} {claim.role}" for claim in collision.claims)
         lines.append(
-            f"COLLISION server={collision.server_key} space={collision.space} identity={collision.identity} "
+            f"COLLISION server={json.dumps(collision.server_key)} space={collision.space} identity={collision.identity} "
             f"owners={owners}"
         )
     quarantined = sum(1 for result in report.objects if result.reasons)

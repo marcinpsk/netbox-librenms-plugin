@@ -805,9 +805,24 @@ def test_the_entry_point_reports_each_finding_and_its_exit_status(settings, caps
     lines = capsys.readouterr().out.splitlines()
     assert f'QUARANTINE dcim.device pk={quarantined.pk} reason=invalid_id path=$["primary"]["id"]' in "\n".join(lines)
     (collision,) = [line for line in lines if line.startswith("COLLISION ")]
-    assert "server=primary space=device identity=5" in collision
+    assert 'server="primary" space=device identity=5' in collision
     assert f"dcim.device pk={first.pk} own" in collision
     assert f"virtualization.virtualmachine pk={second.pk} oob" in collision
+
+
+@pytest.mark.django_db
+def test_a_collision_on_a_server_key_with_a_line_break_stays_on_one_line(settings, capsys):
+    """A server key may hold a line break, so the report escapes it: one collision gives one record."""
+    _configure(settings, "edge\nCOLLISION site")
+    _stored("device", {"edge\nCOLLISION site": 5}, "first")
+    _stored("vm", {"edge\nCOLLISION site": 5}, "second")
+
+    assert mapping_classifier.main() == 2
+
+    lines = capsys.readouterr().out.splitlines()
+    (collision,) = [line for line in lines if line.startswith("COLLISION ")]
+    assert 'server="edge\\nCOLLISION site" space=device identity=5' in collision
+    assert len(lines) == 2
 
 
 @pytest.mark.django_db
@@ -883,7 +898,7 @@ def test_the_check_script_runs_through_nbshell(tmp_path):
     assert result.returncode == 2, result.stdout + result.stderr
     assert "reason=legacy_several_servers_configured" in result.stdout
     (collision,) = [line for line in result.stdout.splitlines() if "COLLISION " in line]
-    assert "server=primary space=device identity=5" in collision
+    assert 'server="primary" space=device identity=5' in collision
     assert f"dcim.device pk={clean.pk} own" in collision
 
     result = _run_nbshell(tmp_path, database=f"{database}_absent", servers=("primary",))
@@ -892,8 +907,8 @@ def test_the_check_script_runs_through_nbshell(tmp_path):
 
 
 @transactional_db_with_all_apps()
-def test_a_report_that_cannot_be_written_exits_with_status_3_through_nbshell(tmp_path):
-    """An output error must not end the console run with a clean status."""
+def test_a_non_ascii_server_key_prints_on_an_ascii_console_through_nbshell(tmp_path):
+    """The report escapes a server key, so a console that accepts only ASCII prints the whole report."""
     from django.db import connection
 
     _stored("device", {"café": 5}, "device")
@@ -903,8 +918,8 @@ def test_a_report_that_cannot_be_written_exits_with_status_3_through_nbshell(tmp
         tmp_path, database=connection.settings_dict["NAME"], servers=("café",), PYTHONIOENCODING="ascii:strict"
     )
 
-    assert result.returncode == 3, result.stdout + result.stderr
-    assert "ERROR" in result.stderr
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert 'COLLISION server="caf\\u00e9" space=device identity=5' in result.stdout
 
 
 @transactional_db_with_all_apps()
