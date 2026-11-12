@@ -390,6 +390,27 @@ def _require_posted_module(authorized):
         raise _ModuleActionRefused("Module no longer exists.")
 
 
+def _lock_module_scope(page_device):
+    """
+    Lock the page device and every member of its chassis in pk order, before a writer reads its grant.
+
+    A bulk writer learns its targets from the grant, so it locks every possible target first. The
+    locks are the ones that ``_lock_module_destinations`` takes, so a later call for the targets waits for nothing.
+
+    Raises:
+        GrantRefused: DESTINATION when the page device left its chassis, or a member left it meanwhile.
+
+    """
+    from dcim.models import Device
+
+    members = set()
+    if page_device.virtual_chassis_id:
+        members = set(
+            Device.objects.filter(virtual_chassis_id=page_device.virtual_chassis_id).values_list("pk", flat=True)
+        )
+    _lock_module_destinations(page_device, members)
+
+
 def _authorize_module_grant(page_device, server_key, action, token, *, user):
     """Read the current source and policy before planning and after the final writer lock."""
     from dcim.models import Device
@@ -1388,6 +1409,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         deletable_interfaces = self.restricted_queryset(Interface, "delete")
         page_device = self.restrict_object_or_404(Device, pk=page_device.pk)
         try:
+            _lock_module_scope(page_device)
             granted = _authorize_module_grant(
                 page_device,
                 server_key,
@@ -2160,6 +2182,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         bound_any = False
         try:
             with atomic_with_events():
+                _lock_module_scope(page_device)
                 granted = _authorize_module_grant(
                     page_device,
                     server_key,
@@ -2369,6 +2392,7 @@ class UpdateModuleSerialView(
 
         try:
             with atomic_with_events():
+                _lock_module_destinations(page_device, {target_device.pk})
                 granted = _authorize_module_grant(
                     page_device,
                     server_key,
@@ -3284,6 +3308,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
             adopted_components = 0
             vc_adjustments = {"renamed": 0, "adopted": 0, "removed": 0, "skipped": 0}
             with atomic_with_events():
+                _lock_module_destinations(page_device, {target_device.pk})
                 granted = _authorize_module_grant(
                     page_device,
                     server_key,
