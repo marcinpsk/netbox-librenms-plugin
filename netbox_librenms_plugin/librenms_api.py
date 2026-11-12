@@ -497,7 +497,8 @@ class LibreNMSAPI:
             1. Custom field 'librenms_id' on object
             2. Cached librenms_id value
             3. API lookup using:
-                a. each primary IP address, IPv4 first
+                a. each primary IP address, IPv4 first; two addresses that name different
+                   devices give None
                 b. the DNS name of each primary IP, IPv4 first
                 c. hostname if FQDN
 
@@ -513,11 +514,15 @@ class LibreNMSAPI:
         addresses = primary_ips(obj)
         hostname = getattr(obj, "name", None)
 
-        for address in addresses:
-            librenms_id = self._normalize_librenms_id(self.get_device_id_by_ip(address.address.ip))
-            if librenms_id is not None:
-                self._store_librenms_id(obj, librenms_id)
-                return librenms_id
+        found = {self._normalize_librenms_id(self.get_device_id_by_ip(address.address.ip)) for address in addresses}
+        found.discard(None)
+        if len(found) > 1:
+            # The two primary addresses name different LibreNMS devices, so neither is trusted.
+            return None
+        if found:
+            librenms_id = found.pop()
+            self._store_librenms_id(obj, librenms_id)
+            return librenms_id
 
         for dns_name in dict.fromkeys(address.dns_name for address in addresses if address.dns_name):
             librenms_id = self._normalize_librenms_id(self.get_device_id_by_hostname(dns_name))
