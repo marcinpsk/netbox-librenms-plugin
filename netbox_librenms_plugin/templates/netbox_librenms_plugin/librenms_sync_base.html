@@ -304,8 +304,8 @@
 {% if not migrated_to_marker and not is_vc_member or not migrated_to_marker and object.pk == librenms_sync_device.pk %}
 <!-- Device Status and Sync Cards Side by Side -->
 <div class="row mb-3">
-    <!-- Left: Device Status Card (Smaller) -->
-    <div class="col-md-3">
+    <!-- Left: Device Status Card; wider for a proposed match, which has no sync card beside it -->
+    <div class="{% if link %}col-md-6{% else %}col-md-3{% endif %}">
         <div class="card">
             <h5 class="card-header d-flex justify-content-between align-items-center">
                 LibreNMS Status

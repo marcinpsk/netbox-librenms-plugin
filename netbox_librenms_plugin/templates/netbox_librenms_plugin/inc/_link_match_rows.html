@@ -3,7 +3,7 @@
     <th scope="row" style="padding-left: 1rem;">Match</th>
     <td data-link-state="{{ link.state }}">
         {% if link.state == "match" or link.state == "owned" %}
-        LibreNMS ID {{ link.librenms_id }}
+        <span class="text-nowrap">LibreNMS ID {{ link.librenms_id }}</span>
         {% if link.hostname or link.sysname %}
         <div class="text-muted small">
             {% if link.hostname %}{{ link.hostname }}{% endif %}{% if link.hostname and link.sysname and link.sysname != link.hostname %} / {% endif %}{% if link.sysname and link.sysname != link.hostname %}{{ link.sysname }}{% endif %}
