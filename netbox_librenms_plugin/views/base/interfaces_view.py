@@ -77,12 +77,6 @@ class BaseInterfaceTableView(
         # The plugin gate is model-level only, so scope the lookup or any pk is reachable.
         return self.restrict_object_or_404(self.model, pk=pk)
 
-    def get_ip_address(self, obj):
-        """Get the primary IP address for the object."""
-        if obj.primary_ip:
-            return str(obj.primary_ip.address.ip)
-        return None
-
     def get_interfaces(self, obj):
         """
         Get interfaces related to the object.

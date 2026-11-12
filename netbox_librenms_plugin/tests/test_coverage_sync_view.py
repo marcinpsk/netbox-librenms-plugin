@@ -496,7 +496,7 @@ class TestLibreNMSDeviceInfo:
         result = view.get_librenms_device_info(device)
 
         assert result["mismatched_device"] is False
-        assert result["librenms_device_details"]["netbox_dns_name"] == "dns-identity.example.test"
+        assert result["librenms_device_details"]["netbox_dns_names"] == ["dns-identity.example.test"]
 
 
 def _stack_inventory(*members, extra=()):
@@ -836,3 +836,71 @@ class TestPlatformAndPatternHelpers:
         assert view.get_ip_context(request, device) is None
         assert view.get_vlan_context(request, device) is None
         assert view.get_module_context(request, device) is None
+
+
+def _dual_stack_device(name, librenms_id, *, dns_names=("", "")):
+    """Create a device with an IPv4 and an IPv6 primary IP; NetBox's primary_ip then returns the IPv6 one."""
+    device = make_device(name)
+    if librenms_id is not None:
+        seed_mapping(device, SERVER_KEY, own=librenms_id)
+    interface = make_interface(device, "mgmt0")
+    for field, address, dns_name in zip(
+        ("primary_ip4", "primary_ip6"), ("192.0.2.8/24", "2001:db8::8/64"), dns_names, strict=True
+    ):
+        row = make_ip(address, assigned_object=interface)
+        row.dns_name = dns_name
+        row.save()
+        setattr(device, field, row)
+    device.save()
+    return device
+
+
+def _mismatch_modal(response):
+    """Return the markup of the identity mismatch modal, or None when the page has none."""
+    found = re.search(r'id="mismatchModal".*?</table>', response.content.decode(), re.S)
+    return found.group(0) if found else None
+
+
+@pytest.mark.django_db
+class TestDualStackIdentity:
+    def test_ipv4_primary_matches_when_an_ipv6_primary_also_exists(self, logged_in_client, librenms_server):
+        device = _dual_stack_device("dual-stack-node", 6691)
+        _register_device(librenms_server, 6691, "192.0.2.8", sysName="dual-stack-node-a.example.test", ip="192.0.2.8")
+
+        response = logged_in_client.get(_sync_url(device))
+
+        assert response.status_code == 200
+        assert response.context["mismatched_device"] is False
+        assert _mismatch_modal(response) is None
+
+    def test_ipv4_primary_dns_name_matches_when_an_ipv6_primary_also_exists(self, logged_in_client, librenms_server):
+        device = _dual_stack_device("dual-stack-dns", 6692, dns_names=("node-v4.example.test", "node-v6.example.test"))
+        _register_device(librenms_server, 6692, "node-v4.example.test", sysName="other-sysname", ip="192.0.2.200")
+
+        response = logged_in_client.get(_sync_url(device))
+
+        assert response.context["mismatched_device"] is False
+        assert _mismatch_modal(response) is None
+
+    def test_a_real_mismatch_lists_both_primary_addresses_and_dns_names(self, logged_in_client, librenms_server):
+        device = _dual_stack_device(
+            "dual-stack-other", 6693, dns_names=("node-v4.example.test", "node-v6.example.test")
+        )
+        _register_device(librenms_server, 6693, "unrelated.example.test", sysName="unrelated", ip="192.0.2.99")
+
+        response = logged_in_client.get(_sync_url(device))
+
+        assert response.context["mismatched_device"] is True
+        modal = _mismatch_modal(response)
+        for value in ("192.0.2.8", "2001:db8::8", "node-v4.example.test", "node-v6.example.test"):
+            assert value in modal
+
+    def test_an_unmapped_device_is_found_by_its_ipv4_primary(self, logged_in_client, librenms_server):
+        device = _dual_stack_device("dual-stack-unmapped", None)
+        _register_device(librenms_server, 6694, "192.0.2.8", ip="192.0.2.8")
+        librenms_server.register("/api/v0/devices/192.0.2.8", {"status": "ok", "devices": [{"device_id": 6694}]})
+
+        response = logged_in_client.get(_sync_url(device))
+
+        assert response.context["librenms_device_id"] == 6694
+        assert librenms_server.requests[0]["path"] == "/api/v0/devices/192.0.2.8"

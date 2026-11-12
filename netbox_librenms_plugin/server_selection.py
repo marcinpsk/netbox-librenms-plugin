@@ -5,6 +5,7 @@ from enum import StrEnum
 
 from django.conf import settings as django_settings
 
+from netbox_librenms_plugin.ip_addressing import primary_ips
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.server_mappings import PreferenceStatus, read_mapping, require_server_key
 
@@ -256,12 +257,12 @@ def get_librenms_sync_device(device, server_key: str | None = None):  # noqa: C9
                 return member
 
     # Priority 2: Use master device if it has primary IP
-    if vc.master and vc.master.primary_ip:
+    if vc.master and primary_ips(vc.master):
         return vc.master
 
     # Priority 3: Find any member with primary IP
     for member in all_members:
-        if member.primary_ip:
+        if primary_ips(member):
             return member
 
     # Priority 4: Use member with lowest vc_position as fallback

@@ -326,18 +326,13 @@ class TestCableHTTPAndORM:
 
 
 class TestInterfaceViewWithRealObjects:
-    def test_primary_ip_and_real_interface_queryset(self, live_librenms):
+    def test_real_interface_queryset(self, live_librenms):
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         device = _mapped_device("interface-primary")
         interface = make_interface(device, "management")
-        address = make_ip("198.18.10.1/24", assigned_object=interface)
-        device.primary_ip4 = address
-        device.save(update_fields=["primary_ip4"])
-        device.refresh_from_db()
         view = _view(DeviceInterfaceTableView, live_librenms)
 
-        assert view.get_ip_address(device) == "198.18.10.1"
         assert list(view.get_interfaces(device)) == [interface]
         assert view.get_select_related_field(device) == "device"
 

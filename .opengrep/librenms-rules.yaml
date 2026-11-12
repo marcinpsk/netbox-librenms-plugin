@@ -1991,3 +1991,40 @@ rules:
                 ...
       - pattern: validate_device_for_import(...)
       - pattern-not: validate_device_for_import(..., serial_rules=$RULES, ...)
+
+  - id: primary-ip-through-helper
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This code reads primary_ip. NetBox returns primary_ip6 there when both families are set, unless
+      PREFER_IPV4 is on, so a check that reads it ignores the IPv4 primary. Read both rows with
+      primary_ips() from ip_addressing.py, or name primary_ip4 or primary_ip6.
+    metadata:
+      category: correctness
+      references:
+        - "netbox_librenms_plugin/ip_addressing.py"
+    paths:
+      exclude:
+        - "**/tests/**"
+    pattern-either:
+      - pattern: $X.primary_ip
+      - pattern: getattr($X, "primary_ip", ...)
+
+  - id: primary-ip-through-helper-template
+    languages: [generic]
+    severity: ERROR
+    message: >-
+      This template reads primary_ip. NetBox returns primary_ip6 there when both families are set,
+      unless PREFER_IPV4 is on, so the template hides the IPv4 primary. Name primary_ip4 and
+      primary_ip6, or give the template the values of primary_ips() from the view.
+    metadata:
+      category: correctness
+      references:
+        - "netbox_librenms_plugin/ip_addressing.py"
+    paths:
+      include:
+        - "*.html"
+    patterns:
+      # Only a variable or tag reads the attribute; prose and comments do not.
+      - pattern-regex: \{[{%][^}]*\.primary_ip\b
+      - pattern-not-inside: "{# ... #}"

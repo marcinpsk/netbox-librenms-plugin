@@ -978,12 +978,12 @@ that may well be correct.
                         </tr>
                         <tr>
                             <th>IP</th>
-                            <td>{{ object.primary_ip.address.ip|default:'-' }}</td>
+                            <td>{{ netbox_addresses|join:", "|default:'-' }}</td>
                             <td>{{ librenms_device_ip|default:'-' }}</td>
                         </tr>
                         <tr>
                             <th>DNS / Hostname</th>
-                            <td>{{ netbox_dns_name|default:'-' }}</td>
+                            <td>{{ netbox_dns_names|join:", "|default:'-' }}</td>
                             <td>{{ librenms_device_hostname|default:'-' }}</td>
                         </tr>
                     </tbody>

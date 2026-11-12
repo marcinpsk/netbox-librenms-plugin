@@ -12,6 +12,7 @@ from netbox.views import generic
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.import_utils import _determine_device_name, visible_object_label
 from netbox_librenms_plugin.import_utils.virtual_chassis import _member_name, extract_vc_members
+from netbox_librenms_plugin.ip_addressing import primary_ips
 from netbox_librenms_plugin.platform_versions import (
     PlatformFacts,
     assess_platform,
@@ -322,7 +323,7 @@ class BaseLibreNMSSyncView(
                 sync_device_has_librenms_id = (
                     read_mapping(librenms_sync_device).own_id(self.librenms_api.server_key) is not None
                 )
-                sync_device_has_primary_ip = bool(librenms_sync_device.primary_ip)
+                sync_device_has_primary_ip = bool(primary_ips(librenms_sync_device))
                 if visible_object_label(librenms_sync_device, request.user) is not None:
                     visible_sync_device = {
                         "name": str(librenms_sync_device),
@@ -566,7 +567,9 @@ class BaseLibreNMSSyncView(
             # of trusting success=True alone (issue #100).
             if success and isinstance(device_info, dict):
                 # Get NetBox device details
-                netbox_ip = str(obj.primary_ip.address.ip).lower() if obj.primary_ip else None
+                netbox_primary_ips = primary_ips(obj)
+                netbox_addresses = [str(ip.address.ip).lower() for ip in netbox_primary_ips]
+                netbox_dns_names = list(dict.fromkeys(ip.dns_name.lower() for ip in netbox_primary_ips if ip.dns_name))
                 netbox_name = obj.name
 
                 # Get LibreNMS device details
@@ -648,18 +651,8 @@ class BaseLibreNMSSyncView(
                     netbox_name_vc_stripped = self._strip_vc_pattern(netbox_name_norm)
 
                 # Collect all NetBox identity values to compare against
-                netbox_dns_name = (
-                    obj.primary_ip.dns_name.lower() if obj.primary_ip and obj.primary_ip.dns_name else None
-                )
                 netbox_identities = {
-                    v
-                    for v in [
-                        netbox_name_norm,
-                        netbox_ip,
-                        netbox_dns_name,
-                        netbox_name_vc_stripped,
-                    ]
-                    if v
+                    v for v in [netbox_name_norm, netbox_name_vc_stripped, *netbox_addresses, *netbox_dns_names] if v
                 }
 
                 # Collect all LibreNMS identity values, including
@@ -686,7 +679,8 @@ class BaseLibreNMSSyncView(
                 else:
                     mismatched_device = True
 
-                librenms_device_details["netbox_dns_name"] = netbox_dns_name or "-"
+                librenms_device_details["netbox_addresses"] = netbox_addresses
+                librenms_device_details["netbox_dns_names"] = netbox_dns_names
 
         if lookup_error is not None:
             device_info_unavailable = True

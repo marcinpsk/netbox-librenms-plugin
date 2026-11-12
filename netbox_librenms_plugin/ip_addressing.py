@@ -57,3 +57,8 @@ def parse_librenms_ip_entry(entry) -> IPv4Interface | IPv6Interface:
     if {"ipv4_address", "ipv4_prefixlen"} <= entry.keys():
         return parse_address_with_prefix(entry["ipv4_address"], entry["ipv4_prefixlen"])
     raise ValueError("LibreNMS IP row has no supported address fields")
+
+
+def primary_ips(obj):
+    """Return the primary IP rows of a device or VM, IPv4 first; NetBox's ``primary_ip`` hides one family."""
+    return tuple(ip for ip in (getattr(obj, "primary_ip4", None), getattr(obj, "primary_ip6", None)) if ip is not None)
