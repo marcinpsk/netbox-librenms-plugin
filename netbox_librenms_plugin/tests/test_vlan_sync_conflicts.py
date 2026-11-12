@@ -155,13 +155,24 @@ def _active_tab_urls(response):
 @pytest.mark.django_db
 def test_native_vlan_conflict_page_marks_the_sync_tab_active(client, settings):
     """The full conflict page belongs to the LibreNMS Sync tab, not to the device tab."""
-    from django.urls import reverse
-
     configure_default_librenms_server(settings)
     device, _group, _existing = _grouped_rename("tabbar", 112, "Current name", "Proposed name")
     client.force_login(make_superuser("vlan-tabbar-user"))
 
     response = sync(client, device, [tab_tokens(client, device)[112]], htmx=False)
+
+    assert response.status_code == 200
+    assert _active_tab_urls(response) == [reverse("dcim:device_librenms_sync", kwargs={"pk": device.pk})]
+
+
+@pytest.mark.django_db
+def test_native_vlan_review_page_marks_the_sync_tab_active(client, settings):
+    """The full review page belongs to the LibreNMS Sync tab, not to the device tab."""
+    configure_default_librenms_server(settings)
+    device, group, _existing = _grouped_rename("review-tabbar", 113, "Current name", "Proposed name")
+    client.force_login(make_superuser("vlan-review-tabbar-user"))
+
+    response = _review(client, device, ["113"], {113: group})
 
     assert response.status_code == 200
     assert _active_tab_urls(response) == [reverse("dcim:device_librenms_sync", kwargs={"pk": device.pk})]
