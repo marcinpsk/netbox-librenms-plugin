@@ -251,7 +251,7 @@
                         </button>
                     </form>
                     {% else %}
-                    <span class="text-muted small" title="Mapping belongs to VC sync device {{ librenms_sync_device|escape }} — navigate there to remove it">
+                    <span class="text-muted small" title="Mapping belongs to {% if visible_sync_device %}VC sync device {{ visible_sync_device.name }}{% else %}the VC sync device{% endif %} — navigate there to remove it">
                         <i class="mdi mdi-information-outline me-1"></i>Managed by VC sync device
                     </span>
                     {% endif %}
@@ -723,9 +723,9 @@
     <!-- A VC member already has librenms_id configured -->
     <div class="alert alert-info">
         <div>
-            {% if librenms_sync_device %}
+            {% if visible_sync_device %}
             <i class="mdi mdi-information-outline"></i>
-            LibreNMS sync for this virtual chassis is managed by <a href="{{ librenms_sync_device.get_absolute_url }}">{{ librenms_sync_device }}</a>
+            LibreNMS sync for this virtual chassis is managed by <a href="{{ visible_sync_device.url }}">{{ visible_sync_device.name }}</a>
             {% else %}
             LibreNMS sync for this virtual chassis is managed by another member
             {% endif %}
@@ -735,9 +735,9 @@
     <!-- Sync device has primary IP and is ready for LibreNMS configuration -->
     <div class="alert alert-info">
         <div>
-            {% if librenms_sync_device %}
+            {% if visible_sync_device %}
             <i class="mdi mdi-information-outline"></i>
-            LibreNMS sync for this virtual chassis should be configured on <a href="{{ librenms_sync_device.get_absolute_url }}">{{ librenms_sync_device }}</a>
+            LibreNMS sync for this virtual chassis should be configured on <a href="{{ visible_sync_device.url }}">{{ visible_sync_device.name }}</a>
             {% else %}
             LibreNMS sync for this virtual chassis should be configured on the designated sync device
             {% endif %}
@@ -747,9 +747,9 @@
     <!-- No member has a primary IP configured - cannot proceed with LibreNMS sync -->
     <div class="alert alert-warning">
         <div>
-            {% if librenms_sync_device %}
+            {% if visible_sync_device %}
             <i class="mdi mdi-alert"></i>
-            Virtual chassis sync device <a href="{{ librenms_sync_device.get_absolute_url }}">{{ librenms_sync_device }}</a> requires either a primary IP or a LibreNMS ID (custom field) for sync operations
+            Virtual chassis sync device <a href="{{ visible_sync_device.url }}">{{ visible_sync_device.name }}</a> requires either a primary IP or a LibreNMS ID (custom field) for sync operations
             {% else %}
             Virtual chassis requires at least one member with a primary IP or LibreNMS ID configured for sync operations
             {% endif %}
