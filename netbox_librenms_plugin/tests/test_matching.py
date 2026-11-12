@@ -194,6 +194,23 @@ class TestDualStackLookupOrder:
             Candidate.NAME,
         ]
 
+    @pytest.mark.parametrize(("second", "matches"), [(59, False), ("58", True)])
+    def test_a_dns_name_match_still_asks_the_other_dns_name(self, api, librenms_server, second, matches):
+        """The two DNS names are one candidate pair, as the two addresses are: names of two devices match none."""
+        device = _dual_stack_device("match-dual-dns-pair", dns_names=("v4.example.net", "v6.example.net"))
+        librenms_server.register("/api/v0/devices/v4.example.net", _found(58))
+        librenms_server.register("/api/v0/devices/v6.example.net", _found(second))
+
+        result = matching.find_librenms_match(device, api)
+
+        assert [probe.candidate for probe in result.probes] == [
+            Candidate.PRIMARY_IP4,
+            Candidate.PRIMARY_IP6,
+            Candidate.DNS_NAME4,
+            Candidate.DNS_NAME6,
+        ]
+        assert isinstance(result, Match if matches else NoMatch)
+
     def test_one_dns_name_on_both_primaries_is_asked_once(self, api, librenms_server):
         device = _dual_stack_device("match-dual-dns", dns_names=("same.example.net", "same.example.net"))
 

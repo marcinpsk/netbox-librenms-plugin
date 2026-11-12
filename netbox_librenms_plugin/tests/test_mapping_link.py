@@ -225,6 +225,26 @@ class TestLinkOnTheSyncPage:
         assert mapping_summary(_fresh(obj)) == {"default": {"own": 8710}}
         assert "/api/v0/devices/2001%3Adb8%3A%3A91" in [request["path"] for request in server.requests]
 
+    def test_an_ipv6_dns_name_change_after_an_ipv4_dns_name_match_is_stale(self, linker, server, kind):
+        """A DNS name match asks both DNS names, so a token binds both."""
+        from ipam.models import IPAddress
+
+        obj = _object(kind, f"link-dns6-{kind}")
+        ip4 = give_primary_ip(obj, "203.0.113.110/24")
+        ip6 = give_primary_ip(_fresh(obj), "2001:db8::110/64")
+        IPAddress.objects.filter(pk=ip4.pk).update(dns_name=f"v4-{kind}.example.net")
+        IPAddress.objects.filter(pk=ip6.pk).update(dns_name=f"v6-{kind}.example.net")
+        register_match(server, f"v4-{kind}.example.net", 8730, hostname=obj.name)
+        link_proposal = page_link(linker, obj)
+        assert link_proposal["matched_by"] == "DNS name"
+        IPAddress.objects.filter(pk=ip6.pk).update(dns_name=f"v6-other-{kind}.example.net")
+        before = domain_state()
+
+        response = link(linker, obj, [link_proposal["token"]])
+
+        assert domain_state() == before
+        assert "assumptions.inputs.dns_name6" in stale_paths(response, obj.name)
+
     @pytest.mark.parametrize("change", ["added_other_device", "added_same_device", "changed", "removed"])
     def test_an_ipv6_change_after_an_ipv4_match_is_stale(self, linker, server, kind, change):
         """Every lookup asks both primary addresses, so a token binds both rows."""
