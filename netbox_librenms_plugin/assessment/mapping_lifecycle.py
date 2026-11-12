@@ -241,9 +241,12 @@ def read_link_assessment(obj, server, context, *, deadline=None):
         inputs=result.inputs,
         owned=False,
     )
+    # Only the chassis sync device links a chassis; another member can get its link while the probe runs.
+    chassis = operation.assumptions.chassis
+    offered = context is not None and (chassis is None or chassis.sync_device)
     return LinkAssessment(
         LinkState.MATCH,
         server_key,
         match=result,
-        offer=intent.offer(operation, context) if context is not None else None,
+        offer=intent.offer(operation, context) if offered else None,
     )
