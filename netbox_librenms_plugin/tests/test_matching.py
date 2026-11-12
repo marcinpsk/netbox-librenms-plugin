@@ -140,15 +140,44 @@ def _dual_stack_device(name, *, dns_names=("", "")):
 
 @pytest.mark.django_db
 class TestDualStackLookupOrder:
-    def test_the_ipv4_primary_is_asked_first_when_an_ipv6_primary_also_exists(self, api, librenms_server):
+    def test_an_ipv4_match_still_asks_the_ipv6_primary(self, api, librenms_server):
         device = _dual_stack_device("match-dual-stack")
         librenms_server.register(IP_PATH, _found(58))
 
         result = matching.find_librenms_match(device, api)
 
-        assert _paths(librenms_server) == [IP_PATH]
+        assert _paths(librenms_server) == [IP_PATH, IP6_PATH]
         assert isinstance(result, Match)
         assert (result.librenms_id, result.candidate) == (58, Candidate.PRIMARY_IP4)
+
+    def test_primaries_that_name_two_devices_are_no_match_and_end_the_lookup(self, api, librenms_server):
+        device = _dual_stack_device("match-dual-conflict", dns_names=("v4.example.net", ""))
+        librenms_server.register(IP_PATH, _found(58))
+        librenms_server.register(IP6_PATH, _found(59))
+
+        result = matching.find_librenms_match(device, api)
+
+        assert _paths(librenms_server) == [IP_PATH, IP6_PATH]
+        assert isinstance(result, NoMatch)
+        assert [probe.result for probe in result.probes] == [ProbeResult.MATCH, ProbeResult.MATCH]
+
+    def test_primaries_that_name_one_device_match_it(self, api, librenms_server):
+        device = _dual_stack_device("match-dual-agree")
+        librenms_server.register(IP_PATH, _found(58))
+        librenms_server.register(IP6_PATH, _found("58"))
+
+        result = matching.find_librenms_match(device, api)
+
+        assert _paths(librenms_server) == [IP_PATH, IP6_PATH]
+        assert isinstance(result, Match)
+        assert (result.librenms_id, result.candidate) == (58, Candidate.PRIMARY_IP4)
+
+    def test_an_unanswered_ipv6_probe_after_an_ipv4_match_is_unreachable(self, api, librenms_server):
+        device = _dual_stack_device("match-dual-unanswered")
+        librenms_server.register(IP_PATH, _found(58))
+        librenms_server.register(IP6_PATH, {"message": "Server Error"}, status=500)
+
+        assert isinstance(matching.find_librenms_match(device, api), Unreachable)
 
     def test_both_addresses_come_before_both_dns_names_and_the_name(self, api, librenms_server):
         device = _dual_stack_device("match-dual-order", dns_names=("v4.example.net", "v6.example.net"))
