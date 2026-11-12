@@ -167,6 +167,20 @@ def _query_count(request):
 
 
 @pytest.mark.django_db
+def test_a_violation_names_the_function_that_read_the_mapping():
+    """The spy reports the read location first, so a violation shows where the prefetch is missing."""
+    from netbox_librenms_plugin.server_mappings import name_match_may_be_port
+
+    interface = make_interface(make_device("prefetch-spy-read-site"), "eth0")
+
+    with spy_mapping_reads() as spy:
+        name_match_may_be_port(interface, server=SERVER_KEY, port_id=5)
+
+    (violation,) = spy.unprefetched()
+    assert violation.split(" at ", 1)[1].startswith("name_match_may_be_port (server_mappings.py:"), violation
+
+
+@pytest.mark.django_db
 class TestInterfacesTab:
     def test_every_interface_read_is_prefetched(self, superuser_client):
         device = _interfaces_device("prefetch-interfaces", 8)
