@@ -365,11 +365,44 @@
     overflow-wrap: anywhere;
 }
 
-/* On a narrow page the mapping editor scrolls sideways; it does not squeeze its fields. */
+/* The mapping editor has no scroll wrapper: its fields keep a readable width, and a narrow page stacks each row. */
 #librenms-mapping-editor .form-control {
     min-width: 7rem;
 }
 
 #librenms-mapping-editor .form-select {
     min-width: 7.5rem;
+}
+
+@media (max-width: 767.98px) {
+    #librenms-mapping-editor thead {
+        display: none;
+    }
+
+    #librenms-mapping-editor tr,
+    #librenms-mapping-editor td {
+        display: block;
+    }
+
+    #librenms-mapping-editor tr {
+        padding: 0.5rem 0;
+        border-top: var(--tblr-border-width, 1px) solid var(--tblr-border-color, #dee2e6);
+    }
+
+    #librenms-mapping-editor td {
+        padding: 0.25rem 1rem;
+        border-bottom-width: 0;
+    }
+
+    #librenms-mapping-editor td:first-child {
+        font-weight: 600;
+    }
+
+    #librenms-mapping-editor td[data-label]::before {
+        content: attr(data-label);
+        display: block;
+        margin-bottom: 0.125rem;
+        font-size: 0.75rem;
+        color: var(--tblr-secondary, #6c757d);
+    }
 }
