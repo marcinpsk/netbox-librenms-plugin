@@ -544,6 +544,40 @@ class TestStatusLists:
         assert response.url == second_page
         assert mapping_summary(_fresh(unlinked)) == {"default": {"own": 9962}}
 
+    def test_a_quick_search_row_links_through_the_forms_of_the_unfiltered_first_page(self, linker, server):
+        """NetBox quick search swaps its result in as a table fragment, so its Link uses the forms of the empty list."""
+        import re
+
+        from netbox_librenms_plugin.confirmation_intent import FIELD
+
+        unlinked = _matched("device", "quick-search-b", server, "198.18.9.3", 9963)
+        list_url = reverse("plugins:netbox_librenms_plugin:device_status_list")
+
+        first = linker.get(list_url)
+        fragment = linker.get(list_url, {"q": "quick-search-b"}, HTTP_HX_REQUEST="true")
+        tokens = re.findall(
+            r'form="librenms-link-row" name="confirmation_intent" value="([^"]+)"', fragment.content.decode()
+        )
+        response = linker.post(
+            reverse("plugins:netbox_librenms_plugin:link_selected", kwargs={"object_type": "device"}),
+            {"server_key": "default", FIELD: tokens},
+            HTTP_REFERER=f"http://testserver{list_url}?q=quick-search-b",
+        )
+
+        for form in ("librenms-link-row", "librenms-link-selected"):
+            assert f'id="{form}"' in first.content.decode()
+        assert len(tokens) == 1
+        assert response.status_code == 302
+        assert mapping_summary(_fresh(unlinked)) == {"default": {"own": 9963}}
+
+    def test_the_unfiltered_list_renders_without_link_forms_when_no_server_is_usable(self, linker, settings):
+        configure_librenms_servers(settings, {})
+
+        response = linker.get(reverse("plugins:netbox_librenms_plugin:device_status_list"))
+
+        assert response.status_code == 200
+        assert 'id="librenms-link-selected"' not in response.content.decode()
+
     def test_an_unreachable_server_is_not_checked_rather_than_not_found(self, linker, server):
         cluster = make_cluster("link-unreachable-list")
         vm = _object("virtualmachine", "unreachable-vm", cluster=cluster)
