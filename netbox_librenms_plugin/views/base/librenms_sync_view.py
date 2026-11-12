@@ -304,12 +304,17 @@ class BaseLibreNMSSyncView(
         }
 
     def _mapping_controls(self, selection, obj):
-        """Return the mapping owner, its sync page, its mapping editor, and whether each mapping row offers Unlink."""
+        """Return the mapping owner, the guidance to another owner, the mapping editor, and whether rows offer Unlink."""
         owner = selection.mapping_owner if selection is not None else None
         editor = self._mapping_editor(selection, obj)
+        guidance = None
+        if owner is not None and (type(owner) is not type(obj) or owner.pk != obj.pk):
+            # Only an owner in the user's view scope is named and linked.
+            visible = visible_object_label(owner, self.request.user)
+            guidance = {"name": visible[1], "url": sync_page_url(owner)} if visible else {"name": None, "url": None}
         return {
             "mapping_owner": owner,
-            "mapping_owner_sync_url": sync_page_url(owner) if owner is not None else None,
+            "mapping_owner_guidance": guidance,
             "mapping_editor": editor,
             "can_unlink": editor is not None,
         }

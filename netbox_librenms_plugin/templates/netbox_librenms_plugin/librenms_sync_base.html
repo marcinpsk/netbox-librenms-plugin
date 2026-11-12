@@ -60,9 +60,12 @@
     <div>
         <strong>No mapped LibreNMS server is usable.</strong>
         Every mapping below is disabled, so no sync tab can run against this object.
-        {% if mapping_owner.pk != object.pk %}
-        The mappings belong to the virtual chassis member {{ mapping_owner }}. Correct or remove them on
-        <a href="{{ mapping_owner_sync_url }}" class="alert-link">that device&#39;s LibreNMS tab</a>.
+        {% if mapping_owner_guidance.url %}
+        <span data-mapping-owner="visible">The mappings belong to the virtual chassis member {{ mapping_owner_guidance.name }}.
+        Correct or remove them on <a href="{{ mapping_owner_guidance.url }}" class="alert-link">that device&#39;s LibreNMS tab</a>.</span>
+        {% elif mapping_owner_guidance %}
+        <span data-mapping-owner="restricted">The mappings belong to another member of the virtual chassis, outside your
+        view scope. Ask an administrator to correct or remove them.</span>
         {% else %}
         Each mapping has an Unlink action beside it. Unlink a mapping that you no longer need, or
         repair the URL and API token of its server in the plugin configuration.
@@ -239,11 +242,19 @@
                        aria-label="Unlink from {{ mapping.display_name }}">
                         <i class="mdi mdi-link-variant-off" aria-hidden="true"></i> Unlink
                     </a>
-                    {% elif mapping_owner and mapping_owner.pk != object.pk and has_write_permission %}
-                    <span class="text-muted small" title="The mapping belongs to VC member {{ mapping_owner }}; unlink it there">
+                    {% elif mapping_owner_guidance and has_write_permission %}
+                    {% if mapping_owner_guidance.url %}
+                    <span class="text-muted small" data-mapping-owner="visible"
+                          title="The mapping belongs to VC member {{ mapping_owner_guidance.name }}; unlink it there">
                         <i class="mdi mdi-information-outline me-1" aria-hidden="true"></i>Managed on
-                        <a href="{{ mapping_owner_sync_url }}">{{ mapping_owner }}</a>
+                        <a href="{{ mapping_owner_guidance.url }}">{{ mapping_owner_guidance.name }}</a>
                     </span>
+                    {% else %}
+                    <span class="text-muted small" data-mapping-owner="restricted"
+                          title="The mapping belongs to a VC member outside your view scope">
+                        <i class="mdi mdi-information-outline me-1" aria-hidden="true"></i>Managed on another VC member
+                    </span>
+                    {% endif %}
                     {% endif %}
                 </td>
             </tr>

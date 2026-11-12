@@ -12,6 +12,7 @@ from django.db import connection
 from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin import confirmation_intent as intent
+from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.tests.conftest import (
     configure_librenms_servers,
     make_cluster,
@@ -582,14 +583,20 @@ def _connections_card(response):
     return body[start : body.index("<!-- ", start)]
 
 
-@pytest.mark.django_db
-def test_a_chassis_member_with_an_unconfigured_entry_offers_its_unlink_while_another_member_syncs(writer, server):
-    chassis, (stale_owner, sync_member) = make_virtual_chassis_members("unlink-stale-owner")
+def _stale_owner_chassis(server, tag, address):
+    """Return member A, which holds only an entry of an unconfigured server, and master B, which syncs on default."""
+    chassis, (stale_owner, sync_member) = make_virtual_chassis_members(tag)
     chassis.master = sync_member
     chassis.save()
-    give_primary_ip(sync_member, "203.0.113.203/24")
-    register_match(server, "203.0.113.203", 4530, hostname=sync_member.name)
+    give_primary_ip(sync_member, f"{address}/24")
+    register_match(server, address, 4530, hostname=sync_member.name)
     seed_mapping(_fresh(stale_owner), "retired", own=4531)
+    return stale_owner, sync_member
+
+
+@pytest.mark.django_db
+def test_a_chassis_member_with_an_unconfigured_entry_offers_its_unlink_while_another_member_syncs(writer, server):
+    stale_owner, sync_member = _stale_owner_chassis(server, "unlink-stale-owner", "203.0.113.203")
     before = domain_state()
 
     owner_page, member_page = (sync_page(writer, obj) for obj in (stale_owner, sync_member))
@@ -601,7 +608,38 @@ def test_a_chassis_member_with_an_unconfigured_entry_offers_its_unlink_while_ano
     owner_card, member_card = (_connections_card(page) for page in (owner_page, member_page))
     assert f"{lifecycle_url(stale_owner)}?action=unlink&amp;server_key=retired" in owner_card
     assert "data-unlink-server" not in member_card
+    assert 'data-mapping-owner="visible"' in member_card
     assert f'href="{sync_page_url(stale_owner)}"' in member_card
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("query", "plugin_write", "guidance"),
+    [({}, True, "librenms-connections"), ({"server_key": "retired"}, False, "librenms-server-selection-recovery")],
+)
+def test_the_owner_guidance_does_not_name_a_member_outside_the_view_scope(
+    client, server, query, plugin_write, guidance
+):
+    stale_owner, sync_member = _stale_owner_chassis(server, "hidden-stale-owner", "203.0.113.204")
+    user = make_user_with_perms(
+        f"owner-scope-{plugin_write}",
+        [("view", Device), ("change", Device)],
+        constraints={"pk": sync_member.pk},
+        plugin_write=plugin_write,
+    )
+    if not plugin_write:
+        user = grant(user, "view", LibreNMSSettings, name="owner-scope-plugin-view")
+    client.force_login(user)
+    before = domain_state()
+
+    body = sync_page(client, sync_member, **query).content.decode()
+
+    assert domain_state() == before
+    assert stale_owner.name not in body
+    assert sync_page_url(stale_owner) not in body
+    assert lifecycle_url(stale_owner) not in body
+    start = body.index(f'id="{guidance}"')
+    assert 'data-mapping-owner="restricted"' in body[start:]
 
 
 @pytest.mark.django_db
