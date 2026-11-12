@@ -171,6 +171,55 @@ class TestLinkOnTheSyncPage:
         assert domain_state() == before
         assert "assumptions.inputs.primary_ip4.address" in stale_paths(response, obj.name)
 
+    def test_primaries_that_name_two_devices_offer_no_link_and_write_nothing(self, linker, server, kind):
+        obj = _matched(kind, f"link-dual-conflict-{kind}", server, "203.0.113.90", 8700)
+        give_primary_ip(_fresh(obj), "2001:db8::90/64")
+        register_match(server, "2001%3Adb8%3A%3A90", 8701, hostname=obj.name)
+        before = domain_state()
+
+        link_proposal = page_link(linker, obj)
+
+        assert (link_proposal["state"], link_proposal["token"]) == ("no_match", None)
+        assert domain_state() == before
+
+    def test_primaries_that_name_one_device_offer_its_link(self, linker, server, kind):
+        obj = _matched(kind, f"link-dual-agree-{kind}", server, "203.0.113.91", 8710)
+        give_primary_ip(_fresh(obj), "2001:db8::91/64")
+        register_match(server, "2001%3Adb8%3A%3A91", 8710, hostname=obj.name)
+
+        response = link(linker, obj, [page_token(linker, obj)])
+
+        assert response.status_code == 302
+        assert mapping_summary(_fresh(obj)) == {"default": {"own": 8710}}
+        assert "/api/v0/devices/2001%3Adb8%3A%3A91" in [request["path"] for request in server.requests]
+
+    @pytest.mark.parametrize("change", ["added_other_device", "added_same_device", "changed", "removed"])
+    def test_an_ipv6_change_after_an_ipv4_match_is_stale(self, linker, server, kind, change):
+        """Every lookup asks both primary addresses, so a token binds both rows."""
+        from ipam.models import IPAddress
+
+        obj = _matched(kind, f"link-v6-{change}-{kind}", server, "203.0.113.100", 8720)
+        if change in ("changed", "removed"):
+            ip6 = give_primary_ip(_fresh(obj), "2001:db8::100/64")
+            register_match(server, "2001%3Adb8%3A%3A100", 8720, hostname=obj.name)
+        token = page_token(linker, obj)
+        if change == "added_other_device":
+            give_primary_ip(_fresh(obj), "2001:db8::101/64")
+            register_match(server, "2001%3Adb8%3A%3A101", 8721, hostname=obj.name)
+        elif change == "added_same_device":
+            give_primary_ip(_fresh(obj), "2001:db8::102/64")
+            register_match(server, "2001%3Adb8%3A%3A102", 8720, hostname=obj.name)
+        elif change == "changed":
+            IPAddress.objects.filter(pk=ip6.pk).update(address="2001:db8::103/64")
+        else:
+            type(obj).objects.filter(pk=obj.pk).update(primary_ip6=None)
+        before = domain_state()
+
+        response = link(linker, obj, [token])
+
+        assert domain_state() == before
+        assert any(path.startswith("assumptions.inputs.primary_ip6") for path in stale_paths(response, obj.name))
+
     def test_a_match_that_another_object_owns_offers_no_link(self, linker, server, kind):
         obj = _matched(kind, f"link-owned-{kind}", server, "203.0.113.40", 8400)
         owner = seed_mapping(_object(kind, f"link-owned-by-{kind}"), "default", own=8400)

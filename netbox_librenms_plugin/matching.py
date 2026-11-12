@@ -1,9 +1,10 @@
 """
 Find the LibreNMS device that a NetBox device or VM matches. Matching proposes a link and writes nothing.
 
-The lookup tries the primary IPv4 address, the primary IPv6 address, the DNS name of each primary IP
-(IPv4 first), and the object name, in that order, and stops at the first probe that answers. Each probe records its input and its result, so a
-caller can tell "LibreNMS has no such device" from "LibreNMS did not answer".
+The lookup always asks for both primary addresses, IPv4 first. Two addresses that name different devices
+are no match. When no address names a device, the lookup asks for the DNS name of each primary IP (IPv4
+first) and then the object name, and stops at the first that names a device. Each probe records its input
+and its result, so a caller can tell "LibreNMS has no such device" from "LibreNMS did not answer".
 """
 
 import time
@@ -28,6 +29,9 @@ class Candidate(StrEnum):
     DNS_NAME6 = "dns_name6"
     NAME = "name"
 
+
+# Every lookup asks for each of these; a later candidate is asked only when none of them matched.
+_ADDRESS_CANDIDATES = frozenset({Candidate.PRIMARY_IP4, Candidate.PRIMARY_IP6})
 
 CANDIDATE_LABELS = {
     Candidate.PRIMARY_IP4: "primary IPv4",
@@ -111,7 +115,7 @@ class Match:
 
 @dataclass(frozen=True)
 class NoMatch:
-    """LibreNMS answered every probe, and no device matched."""
+    """LibreNMS answered every probe, and no one device matched: none did, or the primary addresses disagree."""
 
     inputs: LookupInputs
     probes: tuple[Probe, ...]
@@ -181,22 +185,31 @@ def find_librenms_match(obj, api, *, deadline=None):
     inputs = LookupInputs.of(obj)
     probes = []
     remaining = deadline.remaining if deadline is not None else lambda: DEFAULT_API_TIMEOUT
+    found = None
     for candidate, value in inputs.values():
+        if found is not None and candidate not in _ADDRESS_CANDIDATES:
+            break
         answer = api.get_response_before(f"devices/{quote(value, safe='')}", remaining)
         # A late answer is never used: the request has already spent the time of the other rows.
         if answer is None or remaining() <= 0:
             return NotChecked(inputs, tuple(probes))
         result, device = _decode(*answer)
         probes.append(Probe(candidate, value, result))
-        if result is ProbeResult.MATCH:
-            return Match(
-                librenms_id=coerce_librenms_id(device.get("device_id")),
-                candidate=candidate,
-                hostname=_text(device.get("hostname")),
-                sysname=_text(device.get("sysName")),
-                inputs=inputs,
-                probes=tuple(probes),
-            )
         if result is ProbeResult.UNREACHABLE:
             return Unreachable(inputs, tuple(probes))
-    return NoMatch(inputs, tuple(probes))
+        if result is ProbeResult.MATCH:
+            if found is None:
+                found = candidate, device
+            elif coerce_librenms_id(device.get("device_id")) != coerce_librenms_id(found[1].get("device_id")):
+                return NoMatch(inputs, tuple(probes))
+    if found is None:
+        return NoMatch(inputs, tuple(probes))
+    candidate, device = found
+    return Match(
+        librenms_id=coerce_librenms_id(device.get("device_id")),
+        candidate=candidate,
+        hostname=_text(device.get("hostname")),
+        sysname=_text(device.get("sysName")),
+        inputs=inputs,
+        probes=tuple(probes),
+    )
