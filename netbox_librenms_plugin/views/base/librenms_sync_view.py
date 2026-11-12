@@ -323,13 +323,18 @@ class BaseLibreNMSSyncView(
             "object_type": owner._meta.model_name,
         }
 
-    def _mapping_controls(self, selection):
-        """Return the mapping owner, its sync page, its mapping editor, and whether each mapping row offers Unlink."""
+    def _mapping_controls(self, selection, obj):
+        """Return the mapping owner, the guidance to another owner, the mapping editor, and whether rows offer Unlink."""
         owner = selection.mapping_owner if selection is not None else None
         editor = self._mapping_editor(selection)
+        guidance = None
+        if owner is not None and (type(owner) is not type(obj) or owner.pk != obj.pk):
+            # Only an owner in the user's view scope is named and linked.
+            visible = visible_object_label(owner, self.request.user)
+            guidance = {"name": visible[1], "url": sync_page_url(owner)} if visible else {"name": None, "url": None}
         return {
             "mapping_owner": owner,
-            "mapping_owner_sync_url": sync_page_url(owner) if owner is not None else None,
+            "mapping_owner_guidance": guidance,
             "mapping_editor": editor,
             "can_unlink": editor is not None,
         }
@@ -401,7 +406,7 @@ class BaseLibreNMSSyncView(
                 "server_selection_preferred_key": selection.preferred_key,
                 "server_selection_has_usable_mapping": selection.has_usable_mapping,
                 "can_manage_server_preference": self._can_manage_server_preference(selection),
-                **self._mapping_controls(selection),
+                **self._mapping_controls(selection, obj),
                 "chassis_owner_problem": chassis_owner_problem,
                 "server_selection_blocked": True,
                 "has_librenms_id": False,
@@ -577,7 +582,7 @@ class BaseLibreNMSSyncView(
                 "server_selection_active_name": selection.active_display_name if selection is not None else None,
                 "server_selection_preferred_key": selection.preferred_key if selection is not None else None,
                 "can_manage_server_preference": self._can_manage_server_preference(selection),
-                **self._mapping_controls(selection),
+                **self._mapping_controls(selection, obj),
                 "librenms_id_is_legacy": librenms_id_is_legacy,
                 "librenms_id_serial_confirmed": librenms_id_serial_confirmed,
                 # The active server's lookup device, which can differ from the mapping owner on a VC member page.
