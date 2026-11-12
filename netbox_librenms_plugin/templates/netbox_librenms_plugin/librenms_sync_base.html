@@ -237,7 +237,7 @@
                     {% endif %}
                     {% if can_unlink %}
                     {# The confirmation names every effect first; the sync page reopens on the remembered tab. #}
-                    <a href="{% url 'plugins:netbox_librenms_plugin:mapping_lifecycle' object_type=mapping_owner|meta:'model_name' pk=mapping_owner.pk %}?action=unlink&amp;server_key={{ mapping.server_key|urlencode }}"
+                    <a href="{% url 'plugins:netbox_librenms_plugin:mapping_lifecycle' object_type=mapping_owner|meta:'model_name' pk=mapping_owner.pk %}?action=unlink&amp;server_key={{ mapping.server_key|urlencode }}{% if server_key %}&amp;active_server_key={{ server_key|urlencode }}{% endif %}"
                        class="btn btn-sm btn-outline-danger" data-unlink-server="{{ mapping.server_key }}"
                        aria-label="Unlink from {{ mapping.display_name }}">
                         <i class="mdi mdi-link-variant-off" aria-hidden="true"></i> Unlink

@@ -982,7 +982,13 @@ class EditServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
         except _NeedsConfirmation as needed:
             # The confirmation is an assessment: it reads the object again and writes nothing.
             return render_host_change(
-                request, needed.owner, server_key, needed.action, needed.choices, tab=active_sync_tab
+                request,
+                needed.owner,
+                server_key,
+                needed.action,
+                needed.choices,
+                tab=active_sync_tab,
+                return_server_key=active_server_key,
             )
         except IdentityOwned as exc:
             messages.error(request, _identity_owned_text(exc, request.user))

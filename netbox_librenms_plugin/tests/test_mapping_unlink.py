@@ -5,6 +5,9 @@ The unlink confirmation or the mapping editor offers each token, the lifecycle r
 each test reads the real database. The scope is a Device, every member of a virtual chassis, or a VM.
 """
 
+import html
+import re
+
 import pytest
 from dcim.models import Device, Interface
 from django.core import signing
@@ -243,6 +246,27 @@ class TestTheConfirmationNamesItsEffects:
 
         assert 'data-unlink-server="default"' in body
         assert 'data-unlink-server="retired"' in body
+
+    @pytest.mark.parametrize("entry", ["editor", "unlink"])
+    def test_cancel_and_refusal_return_to_the_server_that_the_page_showed(self, writer, server, entry):
+        """The page shows the default server; the change is on the other server."""
+        owner, interfaces = _linked("device", f"return-{entry}")
+
+        def confirmation():
+            if entry == "editor":
+                return edit_mapping(writer, owner, "other", own_id="4199", active_server_key="default")
+            # The Unlink action that the sync page of the default server renders for the other server.
+            body = sync_page(writer, owner, server_key="default").content.decode()
+            [href] = re.findall(r'href="([^"]*action=unlink[^"]*)"[^>]*data-unlink-server="other"', body)
+            return writer.get(html.unescape(href))
+
+        cancel_url = confirmation().context["cancel_url"]
+        seed_legacy(interfaces["none"], 79)
+        refused = confirmation()
+
+        assert cancel_url == sync_page_url(owner, server_key="default")
+        assert refused.status_code == 302
+        assert refused.url == sync_page_url(owner, server_key="default")
 
     def test_a_viewer_without_change_permission_gets_no_unlink(self, client, server):
         owner = seed_mapping(make_device("unlink-viewer"), "default", own=4220)

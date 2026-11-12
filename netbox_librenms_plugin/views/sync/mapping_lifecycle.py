@@ -126,19 +126,20 @@ def _refusal_text(assessment, obj, user):
     return "Your permissions do not cover every object and interface that this change clears. Nothing was changed."
 
 
-def render_host_change(request, obj, server_key, action, choices, *, tab=None):
+def render_host_change(request, obj, server_key, action, choices, *, tab=None, return_server_key=None):
     """
     Render the confirmation of a host change of *obj*, or return to its sync page with the refusal.
 
     The confirmation names the server, the IDs that the change removes or replaces, and each
-    interface whose port ID on the server it clears. It writes nothing.
+    interface whose port ID on the server it clears. It writes nothing. Cancel and a refusal return
+    to the sync page on *return_server_key*, the server that the page showed.
     """
     assessment = read_host_change_assessment(
         obj, server_key, action, choices, user=request.user, context=intent.context_for(request.user, obj, server_key)
     )
     if assessment.state is not HostChangeState.OFFERED or assessment.offer is None:
         messages.error(request, _refusal_text(assessment, obj, request.user))
-        return redirect(sync_page_url(obj, tab=tab))
+        return redirect(sync_page_url(obj, server_key=return_server_key, tab=tab))
     entry = assessment.entry
     return render(
         request,
@@ -161,7 +162,7 @@ def render_host_change(request, obj, server_key, action, choices, *, tab=None):
                 "plugins:netbox_librenms_plugin:mapping_lifecycle",
                 kwargs={"object_type": obj._meta.model_name, "pk": obj.pk},
             ),
-            "cancel_url": sync_page_url(obj, tab=tab),
+            "cancel_url": sync_page_url(obj, server_key=return_server_key, tab=tab),
             "tab": tab or "",
         },
     )
@@ -412,7 +413,19 @@ class MappingLifecycleView(_LifecycleWriter):
         except ValueError:
             messages.error(request, "Select the LibreNMS server to unlink.")
             return redirect(sync_page_url(obj))
-        return render_host_change(request, obj, server_key, Unlink.ACTION, UnlinkChoices(), tab=_tab(request.GET))
+        try:
+            return_server_key = require_server_key(request.GET.get("active_server_key", ""))
+        except ValueError:
+            return_server_key = None
+        return render_host_change(
+            request,
+            obj,
+            server_key,
+            Unlink.ACTION,
+            UnlinkChoices(),
+            tab=_tab(request.GET),
+            return_server_key=return_server_key,
+        )
 
     def post(self, request, object_type, pk):
         """Apply the one submitted lifecycle token of the object, and return to its sync page."""
