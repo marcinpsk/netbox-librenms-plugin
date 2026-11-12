@@ -1,7 +1,7 @@
 """
 Assess the mapping lifecycle operations of a NetBox device or VM on one server, and offer them.
 
-Link stores the LibreNMS device that the object matches. Relink and change_oob remove or
+Link stores the LibreNMS device that the object matches. Unlink, relink and change_oob remove or
 replace a host ID, and clear that server's port IDs on the interfaces of the object's scope.
 """
 
