@@ -672,7 +672,7 @@ def preload_import_objects(libre_devices, server_key: str, *, existing=(), resol
         # The cached-row refresh also matches the raw values as LibreNMS stores them, padding included.
         names.update(name for key in ("hostname", "sysName") if isinstance(name := row.get(key), str) and name)
         names.update(variant["name"] for variant in import_name_variants(row).values() if variant["name"])
-    serials = {serial for row in libre_devices if (serial := normalize_serial(row.get("serial")))}
+    serials = {serial for row in libre_devices if (serial := normalize_stack_serial(row.get("serial")))}
     hosts = set()
     for row in libre_devices:
         if row.get("ip"):

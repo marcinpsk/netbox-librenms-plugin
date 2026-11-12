@@ -918,6 +918,24 @@ def test_the_import_list_prefetches_the_ip_name_and_serial_matches(live_librenms
 
 
 @pytest.mark.django_db
+def test_the_import_preload_skips_a_placeholder_serial():
+    """The serial lookups skip a placeholder serial, so the preload must not load the Devices that store one."""
+    from netbox_librenms_plugin.import_utils.device_operations import preload_import_objects
+
+    placeholder = make_device("imp-placeholder-stored", serial="N/A")
+    real = make_device("imp-real-stored", serial="IMP-REAL-SN")
+    rows = [
+        _import_row(7250, "imp-placeholder-row", serial=" N/A "),
+        _import_row(7251, "imp-real-row", serial="IMP-REAL-SN"),
+    ]
+
+    loaded = preload_import_objects(rows, SERVER_KEY)
+
+    assert (type(real), real.pk) in loaded
+    assert (type(placeholder), placeholder.pk) not in loaded
+
+
+@pytest.mark.django_db
 def test_the_import_preload_runs_a_fixed_number_of_queries():
     from netbox_librenms_plugin.import_utils.device_operations import preload_import_objects
 
