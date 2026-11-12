@@ -105,8 +105,8 @@ class TestLinkOnTheSyncPage:
     @pytest.mark.parametrize(
         ("fact", "path"),
         [
-            ("primary_ip_changed", "assumptions.inputs.primary_ip.address"),
-            ("primary_ip_replaced", "assumptions.inputs.primary_ip.pk"),
+            ("primary_ip_changed", "assumptions.inputs.primary_ip4.address"),
+            ("primary_ip_replaced", "assumptions.inputs.primary_ip4.pk"),
             ("another_object_took_the_id", "assumptions.owned"),
             ("linked_meanwhile", "assumptions.own_id"),
         ],
@@ -143,7 +143,33 @@ class TestLinkOnTheSyncPage:
         response = link(linker, obj, [link_proposal["token"]])
 
         assert domain_state() == before
-        assert "assumptions.inputs.primary_ip" in stale_paths(response, obj.name)
+        assert "assumptions.inputs.primary_ip4" in stale_paths(response, obj.name)
+
+    def test_a_dual_stack_object_links_through_its_ipv4_primary(self, linker, server, kind):
+        obj = _matched(kind, f"link-dual-v4-{kind}", server, "203.0.113.70", 8500)
+        give_primary_ip(_fresh(obj), "2001:db8::70/64")
+
+        response = link(linker, obj, [page_token(linker, obj)])
+
+        assert response.status_code == 302
+        assert mapping_summary(_fresh(obj)) == {"default": {"own": 8500}}
+
+    def test_a_changed_ipv4_primary_after_an_ipv6_match_is_stale(self, linker, server, kind):
+        """The IPv4 probe comes first, so its new address can match another LibreNMS device."""
+        from ipam.models import IPAddress
+
+        obj = _object(kind, f"link-dual-v6-{kind}")
+        ip4 = give_primary_ip(obj, "203.0.113.80/24")
+        give_primary_ip(_fresh(obj), "2001:db8::80/64")
+        register_match(server, "2001%3Adb8%3A%3A80", 8600, hostname=obj.name)
+        token = page_token(linker, obj)
+        IPAddress.objects.filter(pk=ip4.pk).update(address="203.0.113.81/24")
+        before = domain_state()
+
+        response = link(linker, obj, [token])
+
+        assert domain_state() == before
+        assert "assumptions.inputs.primary_ip4.address" in stale_paths(response, obj.name)
 
     def test_a_match_that_another_object_owns_offers_no_link(self, linker, server, kind):
         obj = _matched(kind, f"link-owned-{kind}", server, "203.0.113.40", 8400)

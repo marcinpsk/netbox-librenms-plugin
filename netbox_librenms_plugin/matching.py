@@ -1,8 +1,8 @@
 """
 Find the LibreNMS device that a NetBox device or VM matches. Matching proposes a link and writes nothing.
 
-The lookup tries the primary IP address, the DNS name of the primary IP, and the object name, in that
-order, and stops at the first probe that answers. Each probe records its input and its result, so a
+The lookup tries the primary IPv4 address, the primary IPv6 address, the DNS name of each primary IP
+(IPv4 first), and the object name, in that order, and stops at the first probe that answers. Each probe records its input and its result, so a
 caller can tell "LibreNMS has no such device" from "LibreNMS did not answer".
 """
 
@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from urllib.parse import quote
 
+from netbox_librenms_plugin.ip_addressing import primary_ips
 from netbox_librenms_plugin.librenms_api import DEFAULT_API_TIMEOUT, HTTP_NOT_FOUND
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 
@@ -21,12 +22,20 @@ _clock = time.monotonic
 class Candidate(StrEnum):
     """One NetBox fact that the lookup asks LibreNMS for, in precedence order."""
 
-    PRIMARY_IP = "primary_ip"
-    DNS_NAME = "dns_name"
+    PRIMARY_IP4 = "primary_ip4"
+    PRIMARY_IP6 = "primary_ip6"
+    DNS_NAME4 = "dns_name4"
+    DNS_NAME6 = "dns_name6"
     NAME = "name"
 
 
-CANDIDATE_LABELS = {Candidate.PRIMARY_IP: "primary IP", Candidate.DNS_NAME: "DNS name", Candidate.NAME: "name"}
+CANDIDATE_LABELS = {
+    Candidate.PRIMARY_IP4: "primary IPv4",
+    Candidate.PRIMARY_IP6: "primary IPv6",
+    Candidate.DNS_NAME4: "DNS name",
+    Candidate.DNS_NAME6: "DNS name",
+    Candidate.NAME: "name",
+}
 
 
 class ProbeResult(StrEnum):
@@ -47,31 +56,42 @@ class Probe:
 
 
 @dataclass(frozen=True)
+class PrimaryIP:
+    """One primary IP row that the lookup reads."""
+
+    pk: int
+    address: str
+    dns_name: str | None
+
+
+@dataclass(frozen=True)
 class LookupInputs:
     """The NetBox facts that the lookup reads from one object."""
 
-    primary_ip: int | None
-    primary_address: str | None
-    dns_name: str | None
+    primary_ip4: PrimaryIP | None
+    primary_ip6: PrimaryIP | None
     name: str | None
 
     @classmethod
-    def of(cls, obj, primary_ip=None):
-        """Return the lookup inputs of *obj*; *primary_ip* replaces its primary IP with a row the caller locked."""
-        primary_ip = primary_ip if primary_ip is not None else getattr(obj, "primary_ip", None)
-        address = getattr(primary_ip, "address", None)
-        return cls(
-            primary_ip=primary_ip.pk if primary_ip is not None else None,
-            primary_address=str(address.ip) if address is not None else None,
-            dns_name=(primary_ip.dns_name or None) if primary_ip is not None else None,
-            name=obj.name or None,
-        )
+    def of(cls, obj, rows=None):
+        """Return the lookup inputs of *obj*; *rows* replaces its primary IP rows with rows that the caller locked."""
+        rows = primary_ips(obj) if rows is None else rows
+        by_family = {row.address.version: PrimaryIP(row.pk, str(row.address.ip), row.dns_name or None) for row in rows}
+        if len(by_family) != len(rows):
+            raise ValueError(f"{obj} has two primary IPs of one address family.")
+        return cls(primary_ip4=by_family.get(4), primary_ip6=by_family.get(6), name=obj.name or None)
 
     def values(self):
         """Return ``(candidate, value)`` for each input the object has, in precedence order."""
+        ip4, ip6 = self.primary_ip4, self.primary_ip6
+        dns_name4 = ip4.dns_name if ip4 is not None else None
+        dns_name6 = ip6.dns_name if ip6 is not None else None
         values = (
-            (Candidate.PRIMARY_IP, self.primary_address),
-            (Candidate.DNS_NAME, self.dns_name),
+            (Candidate.PRIMARY_IP4, ip4.address if ip4 is not None else None),
+            (Candidate.PRIMARY_IP6, ip6.address if ip6 is not None else None),
+            (Candidate.DNS_NAME4, dns_name4),
+            # The same name gets the same answer, so it is asked once.
+            (Candidate.DNS_NAME6, dns_name6 if dns_name6 != dns_name4 else None),
             (Candidate.NAME, self.name),
         )
         return tuple((candidate, value) for candidate, value in values if value)

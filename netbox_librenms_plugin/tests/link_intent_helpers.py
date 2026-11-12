@@ -20,7 +20,7 @@ def model_name(obj):
 
 
 def give_primary_ip(obj, address):
-    """Give *obj* a new primary IPv4 address on a new interface; return the address."""
+    """Give *obj* a new primary IPv4 or IPv6 address on a new interface; return the address."""
     from virtualization.models import VMInterface
 
     if model_name(obj) == "device":
@@ -28,7 +28,7 @@ def give_primary_ip(obj, address):
     else:
         interface = VMInterface.objects.create(virtual_machine=obj, name=f"link-{address.split('/')[0]}")
     ip = make_ip(address, assigned_object=interface)
-    obj.primary_ip4 = ip
+    setattr(obj, "primary_ip6" if ":" in address else "primary_ip4", ip)
     obj.save()
     return ip
 

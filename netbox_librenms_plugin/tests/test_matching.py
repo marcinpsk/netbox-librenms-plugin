@@ -89,11 +89,11 @@ class TestLookupOrder:
         assert isinstance(result, Match)
         assert (result.librenms_id, result.candidate, result.hostname, result.sysname) == (
             55,
-            Candidate.PRIMARY_IP,
+            Candidate.PRIMARY_IP4,
             "matched",
             "sys",
         )
-        assert result.probes == (matching.Probe(Candidate.PRIMARY_IP, "192.0.2.1", ProbeResult.MATCH),)
+        assert result.probes == (matching.Probe(Candidate.PRIMARY_IP4, "192.0.2.1", ProbeResult.MATCH),)
         assert _paths(librenms_server) == [IP_PATH]
         assert domain_state() == before
 
@@ -123,6 +123,59 @@ class TestLookupOrder:
 
         assert isinstance(result, NoMatch)
         assert result.probes == (matching.Probe(Candidate.NAME, "match-name-only", ProbeResult.NO_MATCH),)
+
+
+IP6_PATH = "/api/v0/devices/2001%3Adb8%3A%3A1"
+
+
+def _dual_stack_device(name, *, dns_names=("", "")):
+    """Return a device with a primary IPv4 and a primary IPv6 address; NetBox's primary_ip returns the IPv6 one."""
+    device = make_device(name)
+    for address, dns_name in zip(("192.0.2.1/24", "2001:db8::1/64"), dns_names, strict=True):
+        ip = give_primary_ip(type(device).objects.get(pk=device.pk), address)
+        ip.dns_name = dns_name
+        ip.save()
+    return type(device).objects.get(pk=device.pk)
+
+
+@pytest.mark.django_db
+class TestDualStackLookupOrder:
+    def test_the_ipv4_primary_is_asked_first_when_an_ipv6_primary_also_exists(self, api, librenms_server):
+        device = _dual_stack_device("match-dual-stack")
+        librenms_server.register(IP_PATH, _found(58))
+
+        result = matching.find_librenms_match(device, api)
+
+        assert _paths(librenms_server) == [IP_PATH]
+        assert isinstance(result, Match)
+        assert (result.librenms_id, result.candidate) == (58, Candidate.PRIMARY_IP4)
+
+    def test_both_addresses_come_before_both_dns_names_and_the_name(self, api, librenms_server):
+        device = _dual_stack_device("match-dual-order", dns_names=("v4.example.net", "v6.example.net"))
+
+        result = matching.find_librenms_match(device, api)
+
+        assert _paths(librenms_server)[:2] == [IP_PATH, IP6_PATH]
+        assert isinstance(result, NoMatch)
+        assert [probe.candidate for probe in result.probes] == [
+            Candidate.PRIMARY_IP4,
+            Candidate.PRIMARY_IP6,
+            Candidate.DNS_NAME4,
+            Candidate.DNS_NAME6,
+            Candidate.NAME,
+        ]
+
+    def test_one_dns_name_on_both_primaries_is_asked_once(self, api, librenms_server):
+        device = _dual_stack_device("match-dual-dns", dns_names=("same.example.net", "same.example.net"))
+
+        result = matching.find_librenms_match(device, api)
+
+        assert [probe.value for probe in result.probes] == [
+            "192.0.2.1",
+            "2001:db8::1",
+            "same.example.net",
+            "match-dual-dns",
+        ]
 
 
 @pytest.mark.django_db
