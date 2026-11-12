@@ -1,6 +1,7 @@
 """End-to-end safety tests for LibreNMS IP address synchronization."""
 
 import json
+import re
 
 from contextlib import contextmanager
 from copy import deepcopy
@@ -888,6 +889,59 @@ def test_native_ip_conflict_response_renders_a_complete_page(client, settings, l
     assert b"Confirm IP address changes" in response.content
     existing.refresh_from_db()
     assert existing.assigned_object == existing_interface
+
+
+def _active_tab_urls(response):
+    """Return the href of every active link in the object tab bar of a full page."""
+    html = response.content.decode()
+    tab_bar = re.search(r'<ul class="nav nav-tabs".*?</ul>', html, re.S).group(0)
+    links = re.findall(r"<a\s[^>]*>", tab_bar)
+    return [
+        re.search(r'href="([^"]*)"', link).group(1)
+        for link in links
+        if "active" in re.search(r'class="([^"]*)"', link).group(1).split()
+    ]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("object_type", ["device", "virtualmachine"])
+def test_native_ip_conflict_page_marks_the_sync_tab_active(client, settings, live_librenms, object_type):
+    """The full IP conflict page belongs to the LibreNMS Sync tab of its device or VM."""
+    from virtualization.models import VMInterface
+
+    _configure_test_server(settings)
+    if object_type == "device":
+        obj = make_device("ip-conflict-tabbar")
+        target = make_interface(obj, "Ethernet1", iface_type="1000base-t")
+        holder = make_interface(obj, "Ethernet2", iface_type="1000base-t")
+        refresh_name, sync_tab_name = "device_ipaddress_sync", "dcim:device_librenms_sync"
+    else:
+        obj = make_vm("ip-conflict-tabbar-vm")
+        target = VMInterface.objects.create(virtual_machine=obj, name="Ethernet1")
+        holder = VMInterface.objects.create(virtual_machine=obj, name="Ethernet2")
+        refresh_name, sync_tab_name = "vm_ipaddress_sync", "virtualization:virtualmachine_librenms_sync"
+    seed_stored_mapping(obj, {"default": {"id": 42}}, save=True)
+    seed_mapping(target, "default", own=7001)
+    IPAddress.objects.create(address="198.18.2.30/24", assigned_object=holder)
+    client.force_login(make_superuser(f"ip-conflict-tabbar-{object_type}"))
+    rows = [{"address": "198.18.2.30", "prefix_length": 24, "port_id": 7001, "interface": "Ethernet1"}]
+    _serve_librenms_ip_rows(live_librenms.server, rows, device_name=obj.name)
+    refresh_url = reverse(f"plugins:netbox_librenms_plugin:{refresh_name}", args=[obj.pk])
+    refresh = client.post(
+        refresh_url, {"server_key": "default", "interface_name_field": "ifName"}, HTTP_HX_REQUEST="true"
+    )
+    assert refresh.status_code == 200
+
+    response = client.post(
+        reverse(
+            "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+            kwargs={"object_type": object_type, "pk": obj.pk},
+        ),
+        {"server_key": "default", "select": "198.18.2.30/24", "vrf_198.18.2.30/24": ""},
+    )
+
+    assert any(template.name.endswith("ip_address_conflicts_page.html") for template in response.templates)
+    assert _active_tab_urls(response) == [reverse(sync_tab_name, kwargs={"pk": obj.pk})]
 
 
 @pytest.mark.django_db
