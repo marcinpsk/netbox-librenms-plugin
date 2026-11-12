@@ -25,6 +25,7 @@ from netbox_librenms_plugin.tests.mapping_fixtures import (
     seed_mapping_row,
     seed_quarantined,
     seed_stored_mapping,
+    stored_mapping_for_test,
 )
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
@@ -89,9 +90,9 @@ def _sync_url(obj):
     return reverse(f"plugins:netbox_librenms_plugin:{name}", args=[obj.pk])
 
 
-def _editor_forms(client, obj):
+def _editor_forms(client, obj, **query):
     """Render the sync page and return the editor form of each server: ``{server_key: (action, fields)}``."""
-    response = client.get(_sync_url(obj))
+    response = client.get(_sync_url(obj), query)
     assert response.status_code == 200
     parser = _EditorForms()
     parser.feed(response.content.decode())
@@ -324,6 +325,50 @@ def test_a_merged_server_entry_is_refused(client, servers):
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"id": "bad", "oob": {"id": 14074, "type": "idrac"}},
+        {"id": 14075, "note": "hand edit"},
+        {"id": 14076, "oob": "garbage"},
+    ],
+    ids=["malformed-own-id", "unknown-key", "malformed-oob"],
+)
+def test_a_malformed_server_entry_is_refused_and_kept(client, servers, entry):
+    """The form cannot show every stored part of a malformed entry, so a save would drop the part it hides."""
+    target = seed_stored_mapping(make_device(f"edit-malformed-{next(_names)}"), {"primary": entry}, save=True)
+    client.force_login(make_superuser("edit-malformed-writer"))
+    records = _change_records(target)
+
+    response = _submit(client, target, "primary")
+
+    assert response.status_code == 302
+    assert len(_messages(response)) == 1
+    assert _change_records(target) == records
+    target.refresh_from_db()
+    assert stored_mapping_for_test(target) == {"primary": entry}
+
+
+@pytest.mark.django_db
+def test_a_second_mapping_keeps_the_sole_mapping_as_the_preferred_server(client, servers):
+    """The installation default is primary, so without a preference the page would leave secondary."""
+    target = seed_mapping(make_device("edit-second-mapping"), "secondary", own=14077)
+    client.force_login(make_superuser("edit-second-mapping-writer"))
+
+    action, fields = _editor_forms(client, target, server_key="secondary")["primary"]
+
+    response = client.post(action, {**fields, "own_id": "14078"})
+
+    assert response.status_code == 302
+    target.refresh_from_db()
+    assert mapping_summary(target) == {
+        "secondary": {"own": 14077},
+        "primary": {"own": 14078},
+        "preferred": "secondary",
+    }
+
+
+@pytest.mark.django_db
 def test_an_object_outside_the_change_scope_is_not_found(client, servers):
     from dcim.models import Device
 
@@ -487,4 +532,5 @@ def test_the_editor_shows_the_own_id_that_discovery_stored_on_a_vc_member(client
     assert mapping_summary(first) == {
         "primary": {"own": 14400},
         "secondary": {"own": 14402, "oob": 14403, "oob_type": "ilo"},
+        "preferred": "primary",
     }

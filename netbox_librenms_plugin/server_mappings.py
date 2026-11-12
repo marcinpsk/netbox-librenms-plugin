@@ -878,14 +878,19 @@ def link_import(
     elif existing_host_id is not None and existing_host_id != normalized_id:
         raise SameServerIdentityConflict(server, existing_host_id, normalized_id)
 
+    value, _outcome = _with_own_id(stored, server, normalized_id, obj)
+    _keep_established_choice(current, value, server, configured_servers)
+    return _change(obj, value, claims=_claim_for(obj, server, normalized_id))
+
+
+def _keep_established_choice(current: MappingState, value: dict, server: str, configured_servers) -> None:
+    """Store the previous sole usable mapping as preferred when *value* adds a second one and holds no preference."""
     configured_keys = set(configured_servers)
     previous_usable_keys = [
         entry.server for entry in current.servers if entry.server in configured_keys and entry.display_id is not None
     ]
-    value, _outcome = _with_own_id(stored, server, normalized_id, obj)
     if server not in previous_usable_keys and len(previous_usable_keys) == 1 and PREFERRED_SERVER_FIELD not in value:
         value[PREFERRED_SERVER_FIELD] = previous_usable_keys[0]
-    return _change(obj, value, claims=_claim_for(obj, server, normalized_id))
 
 
 def _normalized_oob_type(oob_type) -> str:
@@ -997,19 +1002,31 @@ def _named_id(raw, label):
     return identity
 
 
-def edit_server(obj, server: str, *, own_id, oob_id, oob_type, shown: ServerState) -> MappingChange:
+def _entry_is_malformed(obj, server: str, entry) -> bool:
+    """Return whether the cutover classifier quarantines the stored *entry* of *obj* on *server*."""
+    from netbox_librenms_plugin import mapping_classifier
+
+    target = mapping_classifier.Target(obj._meta.label_lower, obj.pk)
+    (result,) = mapping_classifier.classify([(target, {server: entry})], {server}).objects
+    return bool(result.reasons)
+
+
+def edit_server(
+    obj, server: str, *, own_id, oob_id, oob_type, shown: ServerState, configured_servers: Iterable[str]
+) -> MappingChange:
     """
     Build the change that sets the own ID and the OOB controller that an operator named on *server*.
 
     *shown* is the entry the operator edited, as the form showed it. The named values replace it:
     a None OOB ID removes the OOB entry, and a None own ID is allowed only where no own ID is
     stored. The entry must keep an own ID or an OOB ID. *oob_type* counts only with an OOB ID. Each named ID is claimed, so an owner of either model refuses it at persistence.
+    A second usable mapping on *configured_servers* keeps the first one as preferred, as :func:`link_import` does.
 
     Raises:
         MappingChanged: The stored entry is not *shown*.
-        ValueError: The stored value is legacy or invalid, the server records a migration marker,
-            the stored own ID is removed, no ID is named, an ID is not a positive integer, or the
-            OOB type is missing or unknown.
+        ValueError: The stored value is legacy or invalid, the server records a migration marker or
+            a malformed entry, the stored own ID is removed, no ID is named, an ID is not a positive
+            integer, or the OOB type is missing or unknown.
 
     """
     server = require_server_key(server)
@@ -1022,6 +1039,9 @@ def edit_server(obj, server: str, *, own_id, oob_id, oob_type, shown: ServerStat
     entry = current.server(server)
     if entry is not None and entry.migration.recorded:
         raise ValueError(f"This object was merged into another device on server '{server}'.")
+    # The form shows only the readable parts of an entry, so a save would drop the rest.
+    if entry is not None and _entry_is_malformed(obj, server, stored[server]):
+        raise ValueError(f"The stored LibreNMS mapping on server '{server}' has an invalid format.")
     if _edited_fields(entry) != _edited_fields(shown):
         raise recorded_conflict(
             MappingChanged("The LibreNMS mapping changed after it was read. Refresh and try again.")
@@ -1041,6 +1061,7 @@ def edit_server(obj, server: str, *, own_id, oob_id, oob_type, shown: ServerStat
         value, _outcome = _with_own_id(value, server, own, obj)
     if oob is not None:
         value = _with_oob(value, server, oob, oob_type, obj)
+    _keep_established_choice(current, value, server, configured_servers)
     claims = dict.fromkeys(_claim_for(obj, server, own) + _claim_for(obj, server, oob))
     return _change(obj, value, claims=tuple(claims))
 

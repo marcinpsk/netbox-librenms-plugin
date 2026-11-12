@@ -111,8 +111,9 @@ before you edit it. The editor does not repair a value with an invalid format.
 
 To remove the mapping for a server that is no longer configured, click **Remove** on its row in the
 **LibreNMS Connections** card. When an object has usable mappings on two or more servers, use the
-star control on the same card to select the preferred server. The preference is stored in the
-mapping as `_preferred_server`; do not use that name as a server key.
+star control on the same card to select the preferred server. When you add a second mapping and
+no preferred server is stored, the first mapping becomes the preferred server. The preference is
+stored in the mapping as `_preferred_server`; do not use that name as a server key.
 
 Interfaces get their `librenms_id` value from the interface sync, so the sync page has no editor for
 them.
