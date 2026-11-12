@@ -6,6 +6,7 @@ The sync page or a status list offers the token, and the lifecycle routes apply 
 
 import re
 
+import netaddr
 from django.urls import reverse
 
 from netbox_librenms_plugin.confirmation_intent import FIELD
@@ -27,7 +28,7 @@ def give_primary_ip(obj, address):
         interface = make_interface(obj, f"link-{address.split('/')[0]}")
     else:
         interface = VMInterface.objects.create(virtual_machine=obj, name=f"link-{address.split('/')[0]}")
-    ip = make_ip(address, assigned_object=interface)
+    ip = make_ip(netaddr.IPNetwork(address), assigned_object=interface)
     setattr(obj, "primary_ip6" if ":" in address else "primary_ip4", ip)
     obj.save()
     return ip
