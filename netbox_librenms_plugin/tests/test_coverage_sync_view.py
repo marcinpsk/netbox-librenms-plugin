@@ -904,3 +904,30 @@ class TestDualStackIdentity:
 
         assert response.context["librenms_device_id"] == 6694
         assert librenms_server.requests[0]["path"] == "/api/v0/devices/192.0.2.8"
+
+
+@pytest.mark.django_db
+class TestDualStackDiscovery:
+    def test_primaries_that_name_two_librenms_devices_store_no_id(self, logged_in_client, librenms_server):
+        from netbox_librenms_plugin.server_mappings import read_mapping
+
+        device = _dual_stack_device("dual-stack-conflict", None)
+        librenms_server.register("/api/v0/devices/192.0.2.8", {"status": "ok", "devices": [{"device_id": 6695}]})
+        librenms_server.register("/api/v0/devices/2001:db8::8", {"status": "ok", "devices": [{"device_id": 6696}]})
+
+        response = logged_in_client.get(_sync_url(device))
+
+        assert response.context["librenms_device_id"] is None
+        assert read_mapping(type(device).objects.get(pk=device.pk)).own_id(SERVER_KEY) is None
+
+    def test_primaries_that_name_one_librenms_device_store_its_id(self, logged_in_client, librenms_server):
+        device = _dual_stack_device("dual-stack-agree", None)
+        _register_device(librenms_server, 6697, "192.0.2.8", ip="192.0.2.8")
+        for address in ("192.0.2.8", "2001:db8::8"):
+            librenms_server.register(f"/api/v0/devices/{address}", {"status": "ok", "devices": [{"device_id": 6697}]})
+
+        response = logged_in_client.get(_sync_url(device))
+
+        assert response.context["librenms_device_id"] == 6697
+        paths = [request["path"] for request in librenms_server.requests]
+        assert paths[:2] == ["/api/v0/devices/192.0.2.8", "/api/v0/devices/2001:db8::8"]
