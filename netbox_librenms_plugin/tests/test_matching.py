@@ -598,22 +598,36 @@ print("caller returned", answer, flush=True)
 """
 
 
-def test_a_probe_that_never_ends_does_not_hold_the_process_open():
+def _first_line(child, *, timeout):
+    """Return the first output line of *child*, or fail when it prints none within *timeout* seconds."""
+    import threading
+
+    lines = []
+    reader = threading.Thread(target=lambda: lines.append(child.stdout.readline()), daemon=True)
+    reader.start()
+    reader.join(timeout)
+    assert lines, f"the child printed nothing within {timeout} s"
+    return lines[0]
+
+
+def test_a_probe_that_never_ends_does_not_hold_the_process_open(monkeypatch):
     """The caller gave up on the probe; the interpreter must still exit while the server keeps sending."""
     import os
     import subprocess
     import sys
 
+    # `make unittest` finds NetBox only through the pytest pythonpath setting, not through the environment.
+    monkeypatch.delenv("PYTHONPATH", raising=False)
     child = subprocess.Popen(
         [sys.executable, "-c", _EXIT_CHILD],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        env=dict(os.environ),
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(path for path in sys.path if path)},
     )
     try:
         # Django setup takes its own time; the exit is measured from the moment the caller gave up.
-        returned = child.stdout.readline()
+        returned = _first_line(child, timeout=60)
         child.wait(timeout=5)
     finally:
         child.kill()
