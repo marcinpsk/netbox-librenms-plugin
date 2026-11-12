@@ -823,11 +823,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         snapshot_cached = SyncCacheConsistency(obj).mark_refresh_outcome(
             SyncTab.MODULES, server_key, actor_id=request_actor_id(request)
         )
-        context = self.get_context_data(request, obj, server_key=server_key)
-        if snapshot_cached and source_cache.read(obj, Resource.MODULES, server_key) is None:
-            # The table read refused the snapshot of the page's final scope: another request removed it,
-            # or the page changed chassis to a scope with no usable snapshot.
-            SyncCacheConsistency(obj).mark_refresh_failure(
+        # Another transaction can change the page's chassis during the refresh, so each scope read uses its row.
+        page = self.get_object(pk)
+        context = self.get_context_data(request, page, server_key=server_key)
+        final = self.get_object(pk)
+        if snapshot_cached and (
+            self._chassis_membership(final) != self._chassis_membership(page)
+            or source_cache.read(final, Resource.MODULES, server_key) is None
+        ):
+            # The page changed chassis during the read, or the read refused the snapshot of its final scope.
+            SyncCacheConsistency(final).mark_refresh_failure(
                 SyncTab.MODULES, server_key, actor_id=request_actor_id(request)
             )
             snapshot_cached = False
@@ -835,7 +840,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             messages.success(request, "Inventory data refreshed successfully.")
         else:
             messages.error(request, "Inventory data could not be cached. Refresh Modules before syncing.")
-        return self.render_sync_partial(request, obj, server_key, {"module_sync": context})
+        return self.render_sync_partial(request, page, server_key, {"module_sync": context})
+
+    @staticmethod
+    def _chassis_membership(page):
+        """Return the chassis and the chassis master of a page row: what decides the scope of its modules tab."""
+        chassis = page.virtual_chassis
+        return page.virtual_chassis_id, chassis.master_id if chassis is not None else None
 
     def _read_render_inventory(self, request, obj, server_key=None, *, notify=True):
         """Read and assess the source without discovery or HTTP; *notify* queues a notice per blocked scope."""
