@@ -53,14 +53,15 @@ def _lock_chassis_members(pk):
     """
     Lock the virtual chassis of Device *pk* and its members in pk order, the order of the interface writers.
 
-    The link rebuild then reads the chassis sync device while no member can change its mapping. A
-    device that moves between the read of its chassis and the locks fails the chassis assumption.
+    The link rebuild then reads the chassis sync device while no member can change its mapping.
+    Returns the chassis ID that the locks cover, None for none: the caller compares it with the
+    chassis of the locked row, because the device can join or leave a chassis before that lock.
     """
     chassis_id = Device.objects.filter(pk=pk).values_list("virtual_chassis_id", flat=True).first()
-    if chassis_id is None:
-        return
-    VirtualChassis.objects.select_for_update().filter(pk=chassis_id).order_by().first()
-    list(Device.objects.select_for_update(of=("self",)).filter(virtual_chassis_id=chassis_id).order_by("pk"))
+    if chassis_id is not None:
+        VirtualChassis.objects.select_for_update().filter(pk=chassis_id).order_by().first()
+        list(Device.objects.select_for_update(of=("self",)).filter(virtual_chassis_id=chassis_id).order_by("pk"))
+    return chassis_id
 
 
 class _LinkWriter(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
@@ -86,8 +87,7 @@ class _LinkWriter(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMS
                 pairs.append((operation, intent.Unavailable("subject.available")))
                 continue
             owned = False
-            if model is Device:
-                _lock_chassis_members(identity.pk)
+            locked_chassis = _lock_chassis_members(identity.pk) if model is Device else None
             try:
                 row, conflict = lock_librenms_id_assignment(
                     operation.effects.own_id, server_key, owner_queryset=changeable, owner_pk=identity.pk
@@ -100,6 +100,10 @@ class _LinkWriter(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMS
                 row = None
             if row is None:
                 pairs.append((operation, intent.Unavailable("subject.available")))
+                continue
+            if getattr(row, "virtual_chassis_id", None) != locked_chassis:
+                # The device joined or left a chassis after the read that chose the chassis locks.
+                pairs.append((operation, intent.Unavailable("assumptions.chassis")))
                 continue
             # Each address is a lookup input of the locked row, and the row's change scope admitted it.
             relocked = (self.relock_scoped_row(IPAddress, pk=ip.pk) for ip in primary_ips(row))

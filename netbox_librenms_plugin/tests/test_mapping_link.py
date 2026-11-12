@@ -845,3 +845,37 @@ def test_a_member_linked_while_the_page_probes_gets_the_match_without_a_link_off
     assert (link_proposal["state"], link_proposal["librenms_id"]) == ("match", 9740)
     assert link_proposal["token"] is None
     assert mapping_summary(_fresh(member)) == {"default": {"own": 9741}}
+
+
+@transactional_db_with_all_apps()
+def test_a_device_that_rejoins_its_chassis_before_the_lock_is_refused(server):
+    """The Link reads no chassis, so it locks none; the device rejoins before its row lock."""
+    from dcim.models import Device as DeviceModel
+    from django.db import connection
+
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change, second_connection
+
+    master, member = _chassis_master("vc-rejoin", server, "198.18.10.9", 9750)
+    chassis_id, position = master.virtual_chassis_id, master.vc_position
+    client = Client()
+    client.force_login(make_user_with_perms("vc-rejoin-writer", PERMISSIONS))
+    token = page_token(client, master)
+    DeviceModel.objects.filter(pk=master.pk).update(virtual_chassis=None, vc_position=None)
+    rejoined = []
+
+    def rejoin_after_the_chassis_read(execute, sql, params, many, context):
+        result = execute(sql, params, many, context)
+        if not rejoined and sql.startswith('SELECT "dcim_device"."virtual_chassis_id" AS'):
+            rejoined.append(True)
+            with second_connection() as other:
+                commit_row_change(
+                    other, DeviceModel, master.pk, {"virtual_chassis_id": chassis_id, "vc_position": position}
+                )
+        return result
+
+    with connection.execute_wrapper(rejoin_after_the_chassis_read):
+        response = link(client, master, [token])
+
+    assert rejoined
+    assert mapping_summary(_fresh(master)) == {}
+    assert "assumptions.chassis" in stale_paths(response, master.name)
