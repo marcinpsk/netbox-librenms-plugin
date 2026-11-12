@@ -31,6 +31,11 @@ class DeviceStatusTable(DeviceTable):
         orderable=False,
     )
 
+    def __init__(self, *args, **kwargs):
+        """Create the table; the list view sets the sync member of each listed chassis, keyed by chassis ID."""
+        super().__init__(*args, **kwargs)
+        self.sync_by_chassis = {}
+
     def render_librenms_status(self, value, record):
         """Render LibreNMS sync status with link to sync page."""
         sync_url = reverse(
@@ -38,13 +43,13 @@ class DeviceStatusTable(DeviceTable):
             kwargs={"pk": record.pk},
         )
 
-        # The list view annotates a chassis row whose sync member is another device.
-        sync_device_id = getattr(record, "librenms_sync_device_id", None)
-        if sync_device_id is not None:
+        # A chassis row whose sync member is another device links to that member.
+        sync_device = self.sync_by_chassis.get(record.virtual_chassis_id)
+        if sync_device is not None and sync_device.pk != record.pk:
             return format_html(
                 '<a href="{}"><span class="text-info"><i class="mdi mdi-server-network"></i> See {}</span></a>',
-                reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": sync_device_id}),
-                record.librenms_sync_device_name,
+                reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": sync_device.pk}),
+                sync_device.name,
             )
         if value:
             status = '<span class="text-success"><i class="mdi mdi-check-circle"></i> Found</span>'

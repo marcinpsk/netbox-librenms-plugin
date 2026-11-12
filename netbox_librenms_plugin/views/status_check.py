@@ -2,7 +2,7 @@ import logging
 
 from dcim.models import Device
 from django.contrib import messages
-from django.db.models import BooleanField, Case, CharField, IntegerField, Value, When
+from django.db.models import BooleanField, Case, Value, When
 from netbox.views import generic
 from virtualization.models import VirtualMachine
 
@@ -54,6 +54,7 @@ class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gen
 
     def get_queryset(self, request):
         """Override get_queryset to return filtered devices and check LibreNMS status."""
+        self.sync_by_chassis = {}
         # Only get devices if filters are applied
         if self.request.GET:
             queryset = (
@@ -105,30 +106,20 @@ class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gen
                 case_when.append(When(pk=device_id, then=Value(status)))
 
             # A chassis row links to its sync member; one member query serves every listed chassis.
-            sync_by_chassis = chassis_sync_devices(devices)
-            sync_rows = [
-                (device.pk, sync_device)
-                for device in devices
-                if (sync_device := sync_by_chassis.get(device.virtual_chassis_id)) is not None
-                and sync_device.pk != device.pk
-            ]
+            self.sync_by_chassis = chassis_sync_devices(devices)
             queryset = queryset.annotate(
-                librenms_status=Case(*case_when, default=Value(None), output_field=BooleanField()),
-                librenms_sync_device_id=Case(
-                    *(When(pk=pk, then=Value(sync_device.pk)) for pk, sync_device in sync_rows),
-                    default=Value(None),
-                    output_field=IntegerField(),
-                ),
-                librenms_sync_device_name=Case(
-                    *(When(pk=pk, then=Value(sync_device.name)) for pk, sync_device in sync_rows),
-                    default=Value(None),
-                    output_field=CharField(),
-                ),
+                librenms_status=Case(*case_when, default=Value(None), output_field=BooleanField())
             )
 
             return queryset
 
         return Device.objects.none()
+
+    def get_table(self, data, request, bulk_actions=True):
+        """Return the status table with the sync member of each listed chassis."""
+        table = super().get_table(data, request, bulk_actions)
+        table.sync_by_chassis = self.sync_by_chassis
+        return table
 
 
 class VMStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, generic.ObjectListView):
