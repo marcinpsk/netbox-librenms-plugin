@@ -652,10 +652,8 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         for owner_id in sorted(owner_ids):
             response = responses[owner_id]
             if not response.obtained:
-                self._prefetch_failure_visible = owner_id in source_cache.visible_cable_port_sources(
-                    self.request.user, server_key, {owner_id}
-                )
-                raise IncompleteSource(response)
+                visible = owner_id in source_cache.visible_cable_port_sources(self.request.user, server_key, {owner_id})
+                raise IncompleteSource(response, visible=visible)
             records.update((coerce_librenms_id(port["port_id"]), dict(port)) for port in response.value)
         return records
 
@@ -1265,9 +1263,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                     result["device_id"] = interface.get("device_id")
                     self._pending_conflicts.append(result)
             except IncompleteSource as exc:
-                reason = (
-                    Blocker.of(exc.record).message if self._prefetch_failure_visible else "Port acquisition failed."
-                )
+                reason = Blocker.of(exc.record).message if exc.visible else "Port acquisition failed."
                 results["source_failed"].append(f"{interface.get('row_id', '')} ({reason})")
             except TransactionConflict:
                 # Nothing of the row was committed; the other rows are independent.

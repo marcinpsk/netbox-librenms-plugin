@@ -32,11 +32,12 @@ class MappingState(StrEnum):
 
 
 class IncompleteSource(Exception):
-    """A reader asked for a response that acquisition did not obtain."""
+    """A reader asked for a response that acquisition did not obtain; ``visible`` says whether the user may see why."""
 
-    def __init__(self, record):
+    def __init__(self, record, *, visible=False):
         super().__init__(f"{record.request.route_key} was not obtained: {record.outcome} ({record.reason})")
         self.record = record
+        self.visible = visible
 
 
 @dataclass(frozen=True)

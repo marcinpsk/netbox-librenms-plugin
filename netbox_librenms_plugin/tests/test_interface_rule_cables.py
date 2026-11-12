@@ -1053,3 +1053,20 @@ def test_manual_prefetch_failures_use_the_source_owner_disclosure_scope(client, 
     body = response.content.decode() + " ".join(_messages(response))
     assert secret not in body
     assert "devices/10/ports" not in body
+
+
+def test_an_unobtained_source_from_any_row_reader_is_reported_without_naming_it(monkeypatch):
+    """A row reader other than the manual prefetch can raise IncompleteSource; the row fails and names no source."""
+    from netbox_librenms_plugin.acquisition.snapshot import IncompleteSource, Outcome, ResponseRecord, SourceRequest
+
+    record = ResponseRecord(SourceRequest("devices/10/ports"), Outcome.FAILED, reason="private-reader-error")
+
+    def unobtained(interface, cached_links):
+        raise IncompleteSource(record)
+
+    view = SyncCablesView()
+    monkeypatch.setattr(view, "_selected_port_records", unobtained)
+
+    results = view.process_interface_sync([{"row_id": "row-1"}], [])
+
+    assert results["source_failed"] == ["row-1 (Port acquisition failed.)"]
