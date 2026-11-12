@@ -819,3 +819,29 @@ def test_a_member_link_that_commits_while_the_link_waits_makes_it_stale(server):
     assert mapping_summary(_fresh(master)) == {}
     assert mapping_summary(_fresh(member)) == {"default": {"own": 9731}}
     assert "assumptions.chassis.sync_device" in stale_paths(response, master.name)
+
+
+@transactional_db_with_all_apps()
+def test_a_member_linked_while_the_page_probes_gets_the_match_without_a_link_offer(server):
+    """The page chose the master before its probe; the probe answers after another member got a link."""
+    from django.db import connection as server_connection
+
+    master, member = _chassis_master("vc-probe-race", server, "198.18.10.7", 9740)
+    record = {"device_id": 9740, "hostname": master.name, "sysName": master.name}
+
+    def link_the_member_then_answer(**_request):
+        try:
+            seed_mapping(Device.objects.get(pk=member.pk), "default", own=9741)
+        finally:
+            server_connection.close()
+        return 200, {"status": "ok", "devices": [record]}
+
+    server.register("/api/v0/devices/198.18.10.7", link_the_member_then_answer)
+    client = Client()
+    client.force_login(make_user_with_perms("vc-probe-race-writer", PERMISSIONS))
+
+    link_proposal = page_link(client, master)
+
+    assert (link_proposal["state"], link_proposal["librenms_id"]) == ("match", 9740)
+    assert link_proposal["token"] is None
+    assert mapping_summary(_fresh(member)) == {"default": {"own": 9741}}
