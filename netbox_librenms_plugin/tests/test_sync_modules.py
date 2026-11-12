@@ -4762,3 +4762,126 @@ class TestGenericModuleTypeFallback:
         assert response.status_code == 200
         # The badge marks a LibreNMS model that resolved to the installed module's type.
         assert b"mdi-check-decagram" in response.content
+
+
+def _unlink_race_world(form):
+    """Return a linked device whose Modules tab offers *form* for one card with a port, and the posted form."""
+    from netbox_librenms_plugin.tests.view_test_helpers import rendered_module_form as rendered
+
+    device = seed_mapping(make_device(f"unlink-wait-{form}"), "default", own=87)
+    bay = make_module_bay(device, "Unlink Bay")
+    model = f"UNLINK-WAIT-{form.upper()}"
+    rows = [_inventory_item(870, model, bay.name)]
+    if form == "update-module-interface":
+        install_module(device, bay.name, model)
+    else:
+        make_module_type(model)
+    if form == "install-branch":
+        # A child with a module type makes the table render the branch button.
+        rows.append(_inventory_item(871, make_module_type(f"{model}-CHILD").model, "Child", parent=870))
+    interface = make_interface(device, "Ethernet87")
+    seed_inventory(
+        device,
+        rows,
+        librenms_id=87,
+        ports=[{"port_id": 8701, "ifName": interface.name}],
+        transceivers=[transceiver_row(870, port_id=8701, model=model)],
+    )
+    user = make_superuser(f"unlink-wait-{form}")
+    action, fields = rendered(render_module_tab(device, user=user), form, None if form == "install-selected" else 870)
+    if form == "install-selected":
+        fields = {**fields, "select": ["870"]}
+    return device, interface, user, action, fields
+
+
+_RACED_FORMS = pytest.mark.parametrize("form", ["install-selected", "install-branch", "update-module-interface"])
+
+
+@_RACED_FORMS
+def test_the_raced_module_write_binds_the_port_when_nothing_competes(client, form):
+    from dcim.models import Module
+
+    device, interface, user, action, fields = _unlink_race_world(form)
+    client.force_login(user)
+
+    client.post(action, data=fields)
+
+    interface.refresh_from_db()
+    assert Module.objects.filter(device=device).count() == 1
+    assert read_mapping(interface).own_id("default") == 8701
+
+
+@transactional_db_with_all_apps()
+@_RACED_FORMS
+def test_a_module_write_that_waits_for_an_unlink_reads_the_unlinked_mapping(client, form):
+    """The writer locks the page device before it reads the source binding, so it reads the committed unlink."""
+    from dcim.models import Device, Module
+
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_when_waited
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping_row
+
+    device, interface, user, action, fields = _unlink_race_world(form)
+    installed = Module.objects.filter(device=device).count()
+    client.force_login(user)
+
+    def unlink(other):
+        # What an unlink holds and has written before its commit: the device row and its removed entry.
+        lock_row(other, Device, device.pk)
+        seed_mapping_row(device, Device(), connection=other)
+
+    commit_when_waited(unlink, lambda: client.post(action, data=fields))
+
+    interface.refresh_from_db()
+    assert mapping_summary(Device.objects.get(pk=device.pk)) == {}
+    assert Module.objects.filter(device=device).count() == installed
+    assert read_mapping(interface).own_id("default") is None
+
+
+# Read-only, or no port write: the mismatch preview only renders, and Mark built-in writes a rule.
+_GRANT_READS_WITHOUT_A_LOCK = {("ModuleMismatchPreviewView", "get"), ("MarkBuiltInView", "_plan")}
+
+
+def _grant_reads_before_their_lock(source):
+    """Return (class, function) of each module grant read that no destination lock precedes in its function."""
+    import ast
+
+    locks = {"_lock_module_destinations", "_lock_module_scope"}
+    found = []
+    for owner in ast.walk(ast.parse(source)):
+        if not isinstance(owner, ast.ClassDef | ast.Module):
+            continue
+        for function in (node for node in owner.body if isinstance(node, ast.FunctionDef)):
+            calls = [
+                node for node in ast.walk(function) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            ]
+            locked_at = [call.lineno for call in calls if call.func.id in locks]
+            found.extend(
+                (getattr(owner, "name", "<module>"), function.name)
+                for call in calls
+                if call.func.id == "_authorize_module_grant" and not any(line < call.lineno for line in locked_at)
+            )
+    return found
+
+
+def test_every_module_writer_locks_its_destinations_before_it_reads_its_grant():
+    """A grant read before the lock can read a host binding that an unlink is about to remove."""
+    import inspect
+
+    from netbox_librenms_plugin.views.sync import modules
+
+    assert set(_grant_reads_before_their_lock(inspect.getsource(modules))) == _GRANT_READS_WITHOUT_A_LOCK
+
+
+def test_the_lock_order_guard_finds_a_grant_read_before_the_lock():
+    source = """
+class InstallView:
+    def post(self):
+        _authorize_module_grant(page_device)
+        _lock_module_destinations(page_device, targets)
+
+    def put(self):
+        _lock_module_scope(page_device)
+        _authorize_module_grant(page_device)
+"""
+
+    assert _grant_reads_before_their_lock(source) == [("InstallView", "post")]

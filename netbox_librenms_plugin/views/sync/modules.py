@@ -381,8 +381,34 @@ class _GrantedInventory:
         return item
 
 
+def _lock_module_scope(page_device):
+    """
+    Lock the page device and every member of its chassis in pk order, before a writer reads its grant.
+
+    A bulk writer learns its targets from the grant, so it locks every possible target first. The
+    locks are the ones that ``_lock_module_destinations`` takes, so a later call for the targets waits for nothing.
+
+    Raises:
+        GrantRefused: DESTINATION when the page device left its chassis, or a member left it meanwhile.
+
+    """
+    from dcim.models import Device
+
+    members = set()
+    if page_device.virtual_chassis_id:
+        members = set(
+            Device.objects.filter(virtual_chassis_id=page_device.virtual_chassis_id).values_list("pk", flat=True)
+        )
+    _lock_module_destinations(page_device, members)
+
+
 def _authorize_module_grant(page_device, server_key, action, token):
-    """Read the granted source and policy before a module write."""
+    """
+    Read the granted source and policy before a module write.
+
+    A writer locks the page device first. The read then loads the page device again, so the source
+    binding includes a host change that committed while the writer waited for the lock.
+    """
     from dcim.models import Device
     from netbox_librenms_plugin.models import RuleConfigurationError
 
@@ -390,6 +416,10 @@ def _authorize_module_grant(page_device, server_key, action, token):
     from netbox_librenms_plugin.acquisition.registry import Resource
     from netbox_librenms_plugin.acquisition.resources import blocked_scopes
 
+    try:
+        page_device.refresh_from_db()
+    except Device.DoesNotExist as exc:
+        raise GrantRefused(GrantRefusal.SNAPSHOT) from exc
     sync_device = _get_sync_device_for_inventory(page_device, server_key)
     snapshot = source_cache.read(sync_device, Resource.MODULES, server_key)
     if snapshot is None:
@@ -1275,6 +1305,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         # The advisory lock does not refresh model instances loaded before its wait.
         page_device = self.restrict_object_or_404(Device, pk=page_device.pk)
         try:
+            _lock_module_scope(page_device)
             granted = _authorize_module_grant(
                 page_device, server_key, ACTION_INSTALL_BRANCH, request.POST.get("inventory_binding")
             )
@@ -2036,6 +2067,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         try:
             with atomic_with_events():
                 _lock_page_device_serials(page_device)
+                _lock_module_scope(page_device)
                 granted = _authorize_module_grant(
                     page_device, server_key, ACTION_INSTALL_SELECTED, request.POST.get("inventory_binding")
                 )
@@ -2212,6 +2244,7 @@ class UpdateModuleSerialView(
 
         try:
             with atomic_with_events():
+                _lock_module_destinations(page_device, {target_device.pk})
                 granted = _authorize_module_grant(
                     page_device, server_key, ACTION_UPDATE_SERIAL, request.POST.get("inventory_binding")
                 )
@@ -2221,7 +2254,6 @@ class UpdateModuleSerialView(
                 serial_rules = granted.policy.serial_identity_rules
                 # The serial identity locks come before the module row lock.
                 assignment_lock([incoming], model=Module, rules=serial_rules)
-                _lock_module_destinations(page_device, {target_device.pk})
                 module = (
                     self.restricted_queryset(Module, "change")
                     .select_for_update(of=("self",))
@@ -2957,6 +2989,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
             adopted_components = 0
             vc_adjustments = {"renamed": 0, "adopted": 0, "removed": 0, "skipped": 0}
             with atomic_with_events():
+                _lock_module_destinations(page_device, {target_device.pk})
                 granted = _authorize_module_grant(
                     page_device, server_key, ACTION_REPLACE_MODULE, request.POST.get("inventory_binding")
                 )
@@ -2968,7 +3001,6 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 serial_rules = granted.policy.serial_identity_rules
                 # The serial identity locks come before the module row locks.
                 assignment_lock([incoming], model=Module, rules=serial_rules)
-                _lock_module_destinations(page_device, {target_device.pk})
                 matched_type = resolve_module_type(
                     model_name,
                     get_module_types_indexed(),
