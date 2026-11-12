@@ -2162,6 +2162,38 @@ def test_a_refresh_publishes_its_snapshot_before_it_reads_the_snapshot_ttl(
 
 
 @pytest.mark.django_db
+def test_a_module_snapshot_removed_during_the_refresh_read_is_no_success(
+    client, settings, primary_librenms, monkeypatch
+):
+    """Another request can remove the snapshot after the outcome is published and before the table reads it."""
+    _configure_servers(settings)
+    device = make_device("cache-module-lost", librenms_cf={"primary": {"id": 669}})
+    _serve_module_rows(primary_librenms, 669)
+    user = make_superuser("cache-module-lost-user")
+    client.force_login(user)
+    snapshot_key = SyncCacheConsistency(device).snapshot_key(SyncTab.MODULES, "primary")
+    real_outcome = SyncCacheConsistency.mark_refresh_outcome
+    removed = []
+
+    def outcome_then_removal(coordinator, *args, **kwargs):
+        published = real_outcome(coordinator, *args, **kwargs)
+        if not removed:
+            removed.append(cache.delete(snapshot_key))
+        return published
+
+    monkeypatch.setattr(SyncCacheConsistency, "mark_refresh_outcome", outcome_then_removal)
+
+    response = _post_refresh(client, device, SyncTab.MODULES)
+
+    assert removed == [True]
+    assert response.status_code == 200
+    assert b"Inventory data refreshed successfully" not in response.content
+    assert b"could not be cached" in response.content
+    state = SyncCacheConsistency(device).status("primary", actor_id=user.pk)[SyncTab.MODULES.value]
+    assert state["state"] == SyncTabState.REFRESH_FAILED.value
+
+
+@pytest.mark.django_db
 def test_a_failed_ip_cache_write_does_not_claim_there_is_nothing_to_show(
     client, settings, primary_librenms, monkeypatch
 ):

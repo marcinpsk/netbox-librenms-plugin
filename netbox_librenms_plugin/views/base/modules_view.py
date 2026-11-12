@@ -830,6 +830,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             snapshot_cached = SyncCacheConsistency(obj).mark_refresh_outcome(
                 SyncTab.MODULES, server_key, actor_id=request_actor_id(request)
             )
+        elif snapshot_cached and source_cache.read(obj, Resource.MODULES, server_key) is None:
+            # Another request removed the snapshot during the read, so the table shows nothing of it.
+            SyncCacheConsistency(obj).mark_refresh_failure(
+                SyncTab.MODULES, server_key, actor_id=request_actor_id(request)
+            )
+            snapshot_cached = False
         if snapshot_cached:
             messages.success(request, "Inventory data refreshed successfully.")
         else:
