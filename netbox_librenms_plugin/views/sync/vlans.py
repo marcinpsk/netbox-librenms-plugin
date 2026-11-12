@@ -548,7 +548,13 @@ class SyncVLANsView(
             return self._review(request, obj, object_type, object_id)
         tokens = request.POST.getlist(intent.FIELD)
         if not any(tokens):
-            messages.error(request, "No VLAN changes selected.")
+            # Without JavaScript the rows post no token, so a selection must go through the review step.
+            if any(request.POST.getlist("select")) or request.POST.get("sync_one"):
+                messages.error(
+                    request, "The selected VLAN rows carry no confirmation. Select the rows, then use Review choices."
+                )
+            else:
+                messages.error(request, "No VLAN changes selected.")
             return self._redirect(object_type, object_id)
 
         # The rebuild reads the snapshot again under its locks; this read only refuses a request without one.
