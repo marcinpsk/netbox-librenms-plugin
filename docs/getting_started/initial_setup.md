@@ -92,7 +92,7 @@ For best results, align chassis member positions with interface naming patterns.
 
 1. Preparation
     - Ensure devices are properly identified in both systems
-    - Open LibreNMS Sync on all devices to populate librenms_id custom field
+    - Link every device to its LibreNMS device: confirm **Link** on its LibreNMS Sync page, or select the devices on the status list and click **Link selected**. Opening the sync page only proposes a match; it does not set the `librenms_id` custom field
     - Remote Device and Remote interface need to be found in NetBox for cable creation to work
     - Check Device and Interface naming
 
