@@ -410,3 +410,58 @@ def test_a_module_render_refuses_a_page_that_leaves_its_chassis_during_the_polic
 
             state = cache.get(SyncCacheConsistency(device).state_key(SyncTab.MODULES, SERVER_KEY))
             assert state["state"] == SyncTabState.REFRESH_FAILED.value
+
+
+@pytest.mark.django_db
+def test_a_refresh_whose_page_leaves_its_chassis_for_a_refused_snapshot_reports_no_success(
+    client, librenms_server, monkeypatch
+):
+    """The page's new scope holds a snapshot that its binding refuses, so the refresh did not give it a table."""
+    from dcim.models import Device
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, SyncTabState
+    from netbox_librenms_plugin.tests.conftest import (
+        make_device_with_module_bays,
+        make_module_type,
+        make_superuser,
+        make_virtual_chassis,
+    )
+    from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+    owner = make_device_with_module_bays("module-scope-owner", ["Bay 1"], serial="CHASSIS-7")
+    seed_mapping(owner, SERVER_KEY, own=LIBRENMS_ID, save=False)
+    owner.save()
+    page = make_device_with_module_bays("module-scope-page", ["Bay 1"])
+    make_virtual_chassis("module-scope-vc", owner, page)
+    page.refresh_from_db()
+    make_module_type("LC-24")
+    _register_inventory(librenms_server, INVENTORY)
+    client.force_login(make_superuser("module-scope-user"))
+    real_context = BaseModuleTableView.get_context_data
+    seeded = []
+
+    def leave_for_a_refused_snapshot(view, request, obj, server_key=None):
+        chassis_key = source_cache.snapshot_key(obj, Resource.MODULES, server_key)
+        Device.objects.filter(pk=obj.pk).update(virtual_chassis=None, vc_position=None)
+        obj.refresh_from_db()
+        # The page's own key now holds the chassis owner's snapshot, which the page's binding refuses.
+        own_key = source_cache.snapshot_key(obj, Resource.MODULES, server_key)
+        cache.set(own_key, cache.get(chassis_key), timeout=300)
+        seeded.append(own_key != chassis_key)
+        return real_context(view, request, obj, server_key=server_key)
+
+    monkeypatch.setattr(BaseModuleTableView, "get_context_data", leave_for_a_refused_snapshot)
+
+    response = _refresh_modules(client, page)
+
+    assert seeded == [True]
+    assert response.status_code == 200
+    assert response.context["module_sync"]["table"] is None
+    assert "Inventory data refreshed successfully" not in response.content.decode()
+    # The refresh records the failure for the page's final scope; the chassis scope keeps its new snapshot.
+    page.refresh_from_db()
+    state = cache.get(SyncCacheConsistency(page).state_key(SyncTab.MODULES, SERVER_KEY))
+    assert state["state"] == SyncTabState.REFRESH_FAILED.value
