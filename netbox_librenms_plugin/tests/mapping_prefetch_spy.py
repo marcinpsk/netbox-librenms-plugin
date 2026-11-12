@@ -89,7 +89,7 @@ def _patch_everywhere(stack, original, replacement):
 
 
 def _read_site():
-    frames = traceback.extract_stack(limit=6)[:-3]
+    frames = traceback.extract_stack(limit=5)[:-2]
     return " <- ".join(
         f"{frame.name} ({frame.filename.rsplit('/', 1)[-1]}:{frame.lineno})" for frame in reversed(frames)
     )
