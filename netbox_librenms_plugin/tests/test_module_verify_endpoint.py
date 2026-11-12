@@ -408,7 +408,9 @@ def test_a_module_render_refuses_a_page_that_leaves_its_chassis_during_the_polic
 
             from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, SyncTabState
 
-            state = cache.get(SyncCacheConsistency(device).state_key(SyncTab.MODULES, SERVER_KEY))
+            # The failure belongs to the page's current scope, which the database row names.
+            current = Device.objects.get(pk=device.pk)
+            state = cache.get(SyncCacheConsistency(current).state_key(SyncTab.MODULES, SERVER_KEY))
             assert state["state"] == SyncTabState.REFRESH_FAILED.value
 
 
@@ -464,4 +466,51 @@ def test_a_refresh_whose_page_leaves_its_chassis_for_a_refused_snapshot_reports_
     # The refresh records the failure for the page's final scope; the chassis scope keeps its new snapshot.
     page.refresh_from_db()
     state = cache.get(SyncCacheConsistency(page).state_key(SyncTab.MODULES, SERVER_KEY))
+    assert state["state"] == SyncTabState.REFRESH_FAILED.value
+
+
+@pytest.mark.django_db
+def test_a_member_that_leaves_its_chassis_in_the_database_during_the_refresh_gets_no_success(
+    client, librenms_server, monkeypatch
+):
+    """Only the database row changes, so the request's device instance still names the old chassis."""
+    from dcim.models import Device
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, SyncTabState
+    from netbox_librenms_plugin.tests.conftest import (
+        make_device_with_module_bays,
+        make_module_type,
+        make_superuser,
+        make_virtual_chassis,
+    )
+
+    owner = make_device_with_module_bays("module-db-leave-owner", ["Bay 1"], serial="CHASSIS-8")
+    seed_mapping(owner, SERVER_KEY, own=LIBRENMS_ID, save=False)
+    owner.save()
+    page = make_device_with_module_bays("module-db-leave-page", ["Bay 1"])
+    make_virtual_chassis("module-db-leave-vc", owner, page)
+    make_module_type("LC-24")
+    _register_inventory(librenms_server, INVENTORY)
+    client.force_login(make_superuser("module-db-leave-user"))
+    real_outcome = SyncCacheConsistency.mark_refresh_outcome
+    left = []
+
+    def publish_then_leave(coordinator, *args, **kwargs):
+        published = real_outcome(coordinator, *args, **kwargs)
+        if not left:
+            # Another transaction commits the leave after the snapshot write; no instance is refreshed.
+            left.append(Device.objects.filter(pk=page.pk).update(virtual_chassis=None, vc_position=None))
+        return published
+
+    monkeypatch.setattr(SyncCacheConsistency, "mark_refresh_outcome", publish_then_leave)
+
+    response = _refresh_modules(client, page)
+
+    assert left == [1]
+    assert response.status_code == 200
+    assert response.context["module_sync"]["table"] is None
+    assert "Inventory data refreshed successfully" not in response.content.decode()
+    standalone = Device.objects.get(pk=page.pk)
+    state = cache.get(SyncCacheConsistency(standalone).state_key(SyncTab.MODULES, SERVER_KEY))
     assert state["state"] == SyncTabState.REFRESH_FAILED.value
