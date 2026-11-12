@@ -408,7 +408,8 @@ class TestRedirectsKeepThePageQuery:
         _assert_keeps_the_page_query(unescape(confirm_action), _sync_url(device))
         if not htmx:
             hrefs = [
-                unescape(href) for href in re.findall(r'<a href="([^"]*)" class="btn(?:-close| btn-secondary)"', html)
+                unescape(href)
+                for href in re.findall(r'<a href="([^"]*)" class="btn(?:-close| btn-secondary)[^"]*"', html)
             ]
             # The close button and the Cancel button go back to the tab.
             cancel_links = [url for url in hrefs if urlsplit(url).path == _vlan_tab_url(device)]

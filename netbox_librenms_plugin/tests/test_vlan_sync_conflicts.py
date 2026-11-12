@@ -1,5 +1,7 @@
 """End-to-end checks for confirmation-required VLAN synchronization changes."""
 
+import re
+
 import pytest
 
 from netbox_librenms_plugin.tests.conftest import (
@@ -230,6 +232,46 @@ def test_native_vlan_conflict_renders_a_complete_page(client, settings):
     assert b"Confirm VLAN changes" in response.content
     existing.refresh_from_db()
     assert existing.name == "Current name"
+
+
+def _active_tab_urls(response):
+    """Return the href of every active link in the object tab bar of a full page."""
+    html = response.content.decode()
+    tab_bar = re.search(r'<ul class="nav nav-tabs".*?</ul>', html, re.S).group(0)
+    links = re.findall(r"<a\s[^>]*>", tab_bar)
+    return [
+        re.search(r'href="([^"]*)"', link).group(1)
+        for link in links
+        if "active" in re.search(r'class="([^"]*)"', link).group(1).split()
+    ]
+
+
+@pytest.mark.django_db
+def test_native_vlan_conflict_page_marks_the_sync_tab_active(client, settings):
+    """The full conflict page belongs to the LibreNMS Sync tab, not to the device tab."""
+    from django.urls import reverse
+    from ipam.models import VLAN, VLANGroup
+
+    configure_default_librenms_server(settings)
+    device = make_device("vlan-tabbar-device", librenms_cf={"default": {"id": 42}})
+    group = VLANGroup.objects.create(name="Tabbar group", slug="tabbar-group")
+    VLAN.objects.create(vid=112, group=group, name="Current name", status="active")
+    _seed_vlan_snapshot(device, [{"vlan_vlan": 112, "vlan_name": "Proposed name"}])
+    client.force_login(make_superuser("vlan-tabbar-user"))
+
+    response = client.post(
+        _sync_url(device),
+        {
+            "server_key": "default",
+            "action": "create_vlans",
+            "select": "112",
+            "vlan_group_112": str(group.pk),
+            "expected_vlan_name_112": "Proposed name",
+        },
+    )
+
+    assert response.status_code == 200
+    assert _active_tab_urls(response) == [reverse("dcim:device_librenms_sync", kwargs={"pk": device.pk})]
 
 
 @pytest.mark.django_db
