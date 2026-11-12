@@ -107,7 +107,7 @@ def librenms_id_owned_message(librenms_id):
 
 
 class LibreNMSIDConflictError(ValueError):
-    """A LibreNMS device ID is already assigned to another NetBox object."""
+    """A LibreNMS device ID cannot be assigned: another NetBox object owns it, or discovery found two devices."""
 
     def __init__(self, message, *, conflict=None, named_message=None):
         super().__init__(message)
@@ -497,13 +497,16 @@ class LibreNMSAPI:
             1. Custom field 'librenms_id' on object
             2. Cached librenms_id value
             3. API lookup using:
-                a. each primary IP address, IPv4 first; two addresses that name different
-                   devices give None
-                b. the DNS name of each primary IP, IPv4 first
+                a. each primary IP address
+                b. the DNS name of each primary IP, when no address names a device
                 c. hostname if FQDN
 
             If found via API, stores ID in custom field if available,
             otherwise caches the value.
+
+        Raises:
+            LibreNMSIDConflictError: The primary IP addresses, or their DNS names, name different
+                LibreNMS devices, or another object owns the discovered ID.
 
         """
         librenms_id = self.get_stored_librenms_id(obj)
@@ -514,30 +517,33 @@ class LibreNMSAPI:
         addresses = primary_ips(obj)
         hostname = getattr(obj, "name", None)
 
-        found = {self._normalize_librenms_id(self.get_device_id_by_ip(address.address.ip)) for address in addresses}
+        librenms_id = self._discover_one_id(
+            self.get_device_id_by_ip, [address.address.ip for address in addresses], "primary IP addresses"
+        )
+        if librenms_id is None:
+            dns_names = dict.fromkeys(address.dns_name for address in addresses if address.dns_name)
+            librenms_id = self._discover_one_id(self.get_device_id_by_hostname, dns_names, "primary DNS names")
+        # Try hostname if FQDN
+        if librenms_id is None and hostname:
+            librenms_id = self._normalize_librenms_id(self.get_device_id_by_hostname(hostname))
+        if librenms_id is not None:
+            self._store_librenms_id(obj, librenms_id)
+        return librenms_id
+
+    def _discover_one_id(self, lookup, keys, label):
+        """
+        Return the one LibreNMS ID that *lookup* finds for *keys*, or None when no key names a device.
+
+        Raises:
+            LibreNMSIDConflictError: Two keys name different LibreNMS devices, so no key is trusted.
+
+        """
+        found = {self._normalize_librenms_id(lookup(key)) for key in keys}
         found.discard(None)
         if len(found) > 1:
-            # The two primary addresses name different LibreNMS devices, so neither is trusted.
-            return None
-        if found:
-            librenms_id = found.pop()
-            self._store_librenms_id(obj, librenms_id)
-            return librenms_id
-
-        for dns_name in dict.fromkeys(address.dns_name for address in addresses if address.dns_name):
-            librenms_id = self._normalize_librenms_id(self.get_device_id_by_hostname(dns_name))
-            if librenms_id is not None:
-                self._store_librenms_id(obj, librenms_id)
-                return librenms_id
-
-        # Try hostname if FQDN
-        if hostname:
-            librenms_id = self._normalize_librenms_id(self.get_device_id_by_hostname(hostname))
-            if librenms_id is not None:
-                self._store_librenms_id(obj, librenms_id)
-                return librenms_id
-
-        return None
+            ids = ", ".join(str(librenms_id) for librenms_id in sorted(found))
+            raise LibreNMSIDConflictError(f"The {label} name different LibreNMS devices ({ids}).")
+        return next(iter(found), None)
 
     @staticmethod
     def _normalize_librenms_id(value):

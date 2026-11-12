@@ -918,6 +918,26 @@ class TestDualStackDiscovery:
         response = logged_in_client.get(_sync_url(device))
 
         assert response.context["librenms_device_id"] is None
+        assert response.context["librenms_lookup_error"] is not None
+        assert read_mapping(type(device).objects.get(pk=device.pk)).own_id(SERVER_KEY) is None
+
+    def test_primary_dns_names_that_name_two_librenms_devices_store_no_id(self, logged_in_client, librenms_server):
+        from netbox_librenms_plugin.server_mappings import read_mapping
+
+        device = _dual_stack_device(
+            "dual-stack-dns-conflict", None, dns_names=("node-v4.example.test", "node-v6.example.test")
+        )
+        librenms_server.register(
+            "/api/v0/devices/node-v4.example.test", {"status": "ok", "devices": [{"device_id": 6698}]}
+        )
+        librenms_server.register(
+            "/api/v0/devices/node-v6.example.test", {"status": "ok", "devices": [{"device_id": 6699}]}
+        )
+
+        response = logged_in_client.get(_sync_url(device))
+
+        assert response.context["librenms_device_id"] is None
+        assert response.context["librenms_lookup_error"] is not None
         assert read_mapping(type(device).objects.get(pk=device.pk)).own_id(SERVER_KEY) is None
 
     def test_primaries_that_name_one_librenms_device_store_its_id(self, logged_in_client, librenms_server):
