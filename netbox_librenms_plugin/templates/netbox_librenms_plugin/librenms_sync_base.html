@@ -263,6 +263,7 @@
             </tbody>
         </table>
     </div>
+    {% if mapping_editor %}{% include "netbox_librenms_plugin/inc/_server_mapping_editor.html" %}{% endif %}
 </div>
 {% elif librenms_server_info %}
 <div class="card mb-3">
@@ -284,6 +285,15 @@
             {% endif %}
         </div>
     </div>
+    {% if mapping_editor %}{% include "netbox_librenms_plugin/inc/_server_mapping_editor.html" %}{% endif %}
+</div>
+{% elif mapping_editor %}
+{# A refused server key on an unmapped object renders no card above, so the editor gets its own. #}
+<div class="card mb-3">
+    <div class="card-header py-2">
+        <i class="mdi mdi-server-network text-primary me-1" aria-hidden="true"></i><strong>LibreNMS Connections</strong>
+    </div>
+    {% include "netbox_librenms_plugin/inc/_server_mapping_editor.html" %}
 </div>
 {% endif %}
 

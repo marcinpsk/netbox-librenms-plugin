@@ -7,6 +7,7 @@ from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 # Views that apply no assessed change carry no confirmation intent (section 4 of the #177 design).
 EXEMPT_VIEWS = {
     "SetPreferredServerView": "the operator names the server",
+    "EditServerMappingView": "the operator names the server and its IDs",
     "AddDeviceToLibreNMSView": "writes LibreNMS, outside NetBox reconciliation",
     "UpdateDeviceLocationView": "writes LibreNMS, outside NetBox reconciliation",
     "SyncSiteLocationView": "writes LibreNMS, outside NetBox reconciliation",
@@ -149,6 +150,7 @@ def pytest_generate_tests(metafunc):
             "AddDeviceToLibreNMSView",
             "RemoveServerMappingView",
             "SetPreferredServerView",
+            "EditServerMappingView",
             "ConvertLegacyLibreNMSIdView",
         }:
             variants.append(("virtualmachine", {}))

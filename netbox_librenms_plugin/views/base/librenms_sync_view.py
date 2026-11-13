@@ -21,6 +21,7 @@ from netbox_librenms_plugin.platform_versions import (
     reason_text,
     target_label,
 )
+from netbox_librenms_plugin.constants import OOB_TYPES
 from netbox_librenms_plugin.serial_identity import (
     Comparison,
     SerialRules,
@@ -30,9 +31,10 @@ from netbox_librenms_plugin.serial_identity import (
     is_identity,
     stored_form_differs,
 )
-from netbox_librenms_plugin.server_mappings import mapped_device_servers, read_mapping
+from netbox_librenms_plugin.server_mappings import ContainerStatus, mapped_device_servers, read_mapping
 from netbox_librenms_plugin.server_selection import (
     ServerSelectionState,
+    build_configured_server_options,
     build_server_mappings,
     get_librenms_sync_device,
     resolve_object_server,
@@ -225,6 +227,40 @@ class BaseLibreNMSSyncView(
         owner = selection.mapping_owner
         return self.restricted_queryset(type(owner), "change").filter(pk=owner.pk).exists()
 
+    def _mapping_editor(self, selection, obj):
+        """Return the server mapping editor of *obj*, or None when the user may not edit its mapping on this page."""
+        owner = selection.mapping_owner if selection is not None else None
+        # A VC member edits the mapping on the page of the device that owns it.
+        if owner is None or type(owner) is not type(obj) or owner.pk != obj.pk or not self.has_write_permission():
+            return None
+        # A fresh read: discovery on this request can store an own ID through another instance of the row.
+        owner = self.restricted_queryset(type(owner), "change").filter(pk=owner.pk).first()
+        if owner is None:
+            return None
+        mapping = read_mapping(owner)
+        if mapping.container not in (ContainerStatus.ABSENT, ContainerStatus.SCOPED):
+            return {"blocked": True}
+        rows = []
+        for option in build_configured_server_options():
+            entry = mapping.server(option.server_key)
+            rows.append(
+                {
+                    "server_key": option.server_key,
+                    "display_name": option.display_name,
+                    "own_id": entry.own_id if entry else None,
+                    "oob_id": entry.oob_id if entry else None,
+                    "oob_type": entry.oob_type if entry else None,
+                    "merged": bool(entry and entry.migration.recorded),
+                }
+            )
+        return {
+            "blocked": False,
+            "rows": rows,
+            "oob_types": OOB_TYPES,
+            "owner_pk": owner.pk,
+            "object_type": owner._meta.model_name,
+        }
+
     def _render_server_selection_blocked(self, request, obj, selection):
         """Render the object page shell without constructing or querying an API client."""
         from netbox_librenms_plugin.utils import build_migrated_context
@@ -255,6 +291,7 @@ class BaseLibreNMSSyncView(
                 "server_selection_preferred_key": selection.preferred_key,
                 "server_selection_has_usable_mapping": selection.has_usable_mapping,
                 "can_manage_server_preference": self._can_manage_server_preference(selection),
+                "mapping_editor": self._mapping_editor(selection, obj),
                 "server_selection_blocked": True,
                 "has_librenms_id": False,
                 "found_in_librenms": False,
@@ -433,6 +470,7 @@ class BaseLibreNMSSyncView(
                 "server_selection_active_name": selection.active_display_name if selection is not None else None,
                 "server_selection_preferred_key": selection.preferred_key if selection is not None else None,
                 "can_manage_server_preference": self._can_manage_server_preference(selection),
+                "mapping_editor": self._mapping_editor(selection, obj),
                 "librenms_id_is_legacy": librenms_id_is_legacy,
                 "librenms_id_serial_confirmed": librenms_id_serial_confirmed,
                 # Lookup device may differ from object (e.g. VC master vs member).

@@ -381,8 +381,10 @@ def test_remove_mapping_form_preserves_the_active_server(client, servers):
 
     html = response.content.decode()
     assert response.status_code == 200
-    assert reverse("plugins:netbox_librenms_plugin:remove_server_mapping", args=[owner.pk]) in html
-    assert html.count('name="active_server_key" value="primary"') == 1
+    remove_action = reverse("plugins:netbox_librenms_plugin:remove_server_mapping", args=[owner.pk])
+    start = html.index(f'action="{remove_action}"')
+    remove_form = html[start : html.index("</form>", start)]
+    assert remove_form.count('name="active_server_key" value="primary"') == 1
 
 
 @pytest.mark.django_db

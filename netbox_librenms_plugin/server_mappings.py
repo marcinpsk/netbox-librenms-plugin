@@ -878,14 +878,19 @@ def link_import(
     elif existing_host_id is not None and existing_host_id != normalized_id:
         raise SameServerIdentityConflict(server, existing_host_id, normalized_id)
 
+    value, _outcome = _with_own_id(stored, server, normalized_id, obj)
+    _keep_established_choice(current, value, server, configured_servers)
+    return _change(obj, value, claims=_claim_for(obj, server, normalized_id))
+
+
+def _keep_established_choice(current: MappingState, value: dict, server: str, configured_servers) -> None:
+    """Store the previous sole usable mapping as preferred when *value* adds a second one and holds no preference."""
     configured_keys = set(configured_servers)
     previous_usable_keys = [
         entry.server for entry in current.servers if entry.server in configured_keys and entry.display_id is not None
     ]
-    value, _outcome = _with_own_id(stored, server, normalized_id, obj)
     if server not in previous_usable_keys and len(previous_usable_keys) == 1 and PREFERRED_SERVER_FIELD not in value:
         value[PREFERRED_SERVER_FIELD] = previous_usable_keys[0]
-    return _change(obj, value, claims=_claim_for(obj, server, normalized_id))
 
 
 def _normalized_oob_type(oob_type) -> str:
@@ -981,6 +986,87 @@ def convert_legacy(obj, server: str) -> MappingChange:
     if legacy_id is None:
         return _change(obj, stored)
     return _change(obj, {server: legacy_id}, claims=_claim_for(obj, server, legacy_id))
+
+
+def _edited_fields(entry) -> tuple:
+    # A form posts a blank type as None.
+    return (None, None, None) if entry is None else (entry.own_id, entry.oob_id, entry.oob_type or None)
+
+
+def _named_id(raw, label):
+    if raw is None:
+        return None
+    identity = coerce_librenms_id(raw)
+    if identity is None:
+        raise ValueError(f"The {label} must be a positive integer, not {raw!r}.")
+    return identity
+
+
+def _entry_is_malformed(obj, server: str, entry) -> bool:
+    """Return whether the stored *entry* of *obj* on *server* holds a marker, or the cutover classifier quarantines it."""
+    from netbox_librenms_plugin import mapping_classifier
+
+    # The classifier skips a marker beside a live ID, but the merge workflow owns every stored marker.
+    if isinstance(entry, dict) and entry.get(MIGRATED_TO_FIELD) is not None:
+        return True
+    target = mapping_classifier.Target(obj._meta.label_lower, obj.pk)
+    (result,) = mapping_classifier.classify([(target, {server: entry})], {server}).objects
+    return bool(result.reasons)
+
+
+def edit_server(
+    obj, server: str, *, own_id, oob_id, oob_type, shown: ServerState, configured_servers: Iterable[str]
+) -> MappingChange:
+    """
+    Build the change that sets the own ID and the OOB controller that an operator named on *server*.
+
+    *shown* is the entry the operator edited, as the form showed it. The named values replace it:
+    a None OOB ID removes the OOB entry, and a None own ID is allowed only where no own ID is
+    stored. The entry must keep an own ID or an OOB ID. *oob_type* counts only with an OOB ID. Each named ID is claimed, so an owner of either model refuses it at persistence.
+    A second usable mapping on *configured_servers* keeps the first one as preferred, as :func:`link_import` does.
+
+    Raises:
+        MappingChanged: The stored entry is not *shown*.
+        ValueError: The stored value is legacy or invalid, the server records a migration marker or
+            a malformed entry, the stored own ID is removed, no ID is named, an ID is not a positive
+            integer, or the OOB type is missing or unknown.
+
+    """
+    server = require_server_key(server)
+    stored = _stored_value(obj)
+    current = _decode_stored_mapping(stored)
+    if current.container is ContainerStatus.LEGACY:
+        raise ValueError("The LibreNMS mapping has the legacy format. Convert it before you edit it.")
+    if current.container is ContainerStatus.INVALID:
+        raise ValueError("The existing LibreNMS mapping has an invalid format.")
+    entry = current.server(server)
+    if entry is not None and entry.migration.recorded:
+        raise ValueError(f"This object was merged into another device on server '{server}'.")
+    # The form shows only the readable parts of an entry, so a save would drop the rest.
+    if entry is not None and _entry_is_malformed(obj, server, stored[server]):
+        raise ValueError(f"The stored LibreNMS mapping on server '{server}' has an invalid format.")
+    if _edited_fields(entry) != _edited_fields(shown):
+        raise recorded_conflict(
+            MappingChanged("The LibreNMS mapping changed after it was read. Refresh and try again.")
+        )
+    own = _named_id(own_id, "LibreNMS ID")
+    oob = _named_id(oob_id, "OOB controller ID")
+    # Discovery on the next page load stores a found own ID again, so a removal would not last.
+    if own is None and entry is not None and entry.own_id is not None:
+        raise ValueError("The LibreNMS ID cannot be removed here. Enter another ID to replace it.")
+    if own is None and oob is None:
+        raise ValueError("Enter a LibreNMS ID or an OOB controller ID.")
+    if oob is not None and not oob_type:
+        raise ValueError("Select the type of the OOB controller.")
+    value = copy.deepcopy(stored) if isinstance(stored, dict) else {}
+    value[server] = {}
+    if own is not None:
+        value, _outcome = _with_own_id(value, server, own, obj)
+    if oob is not None:
+        value = _with_oob(value, server, oob, oob_type, obj)
+    _keep_established_choice(current, value, server, configured_servers)
+    claims = dict.fromkeys(_claim_for(obj, server, own) + _claim_for(obj, server, oob))
+    return _change(obj, value, claims=tuple(claims))
 
 
 def release_server(obj, server: str, *, clear_preference: bool) -> MappingChange:

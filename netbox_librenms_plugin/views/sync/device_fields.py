@@ -13,7 +13,7 @@ from django.views import View
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.import_utils import _determine_device_name
-from netbox_librenms_plugin.import_utils.disclosure import serial_conflict_text
+from netbox_librenms_plugin.import_utils.disclosure import serial_conflict_text, visible_object_label
 from netbox_librenms_plugin.import_utils.virtual_chassis import _member_name
 from netbox_librenms_plugin.platform_versions import (
     FactsSource,
@@ -30,13 +30,17 @@ from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
     ContainerStatus,
     IdentityOwned,
+    ServerState,
     convert_legacy,
+    edit_server,
     persist_mapping,
     read_mapping,
     release_server,
     require_server_key,
     set_preference,
 )
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.serial_identity import (
     RETYPE_HELD,
     SerialRules,
@@ -998,6 +1002,97 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
 
         messages.success(request, f"Preferred LibreNMS server changed to '{requested_key}'.")
         return self._redirect(object_type, pk, active_server_key, active_sync_tab)
+
+
+def _posted_value(request, field):
+    """Return the stripped POST value of *field*, or None when it is blank."""
+    return request.POST.get(field, "").strip() or None
+
+
+def _identity_owned_text(exc, user):
+    """Return the owner conflict text; it names the owner only when *user* may view it."""
+    visible = visible_object_label(exc.owner, user)
+    if visible is None:
+        return f"LibreNMS ID {exc.identity} is already assigned to another object outside your view scope."
+    object_label, owner_name = visible
+    return f"LibreNMS ID {exc.identity} is already assigned to {object_label} '{owner_name}' (ID: {exc.owner.pk})."
+
+
+class EditServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
+    """Set the own LibreNMS ID and the OOB controller of a Device or VirtualMachine on one configured server."""
+
+    required_object_permissions = {
+        "POST": [("change", Device), ("change", VirtualMachine)],
+    }
+
+    def post(self, request, pk):
+        raw_object_type = request.POST.get("object_type", "device")
+        object_type = _normalize_sync_object_type(raw_object_type)
+        if object_type is None:
+            return HttpResponse(f"Invalid object_type: {escape(raw_object_type)}", status=400)
+        model = _sync_model(object_type)
+        self.required_object_permissions = {"POST": [("change", model)]}
+        if error := self.require_all_permissions("POST"):
+            return error
+
+        active_sync_tab = _validated_sync_tab(request)
+        active_server_key = _validated_active_server_key(request)
+        server_key = resolve_configured_server_key(_posted_value(request, "server_key"))
+        if server_key is None:
+            messages.error(request, "Select a configured LibreNMS server.")
+            return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
+        # A malformed shown value matches no stored entry, so the builder reports a changed mapping.
+        shown = ServerState(
+            server=server_key,
+            own_id=coerce_librenms_id(_posted_value(request, "shown_own_id")),
+            oob_id=coerce_librenms_id(_posted_value(request, "shown_oob_id")),
+            oob_type=_posted_value(request, "shown_oob_type"),
+        )
+        try:
+            with transaction.atomic():
+                owner = get_object_or_404(
+                    self.restricted_queryset(model, "change").select_for_update(of=("self",)), pk=pk
+                )
+                owner.snapshot()
+                try:
+                    change = edit_server(
+                        owner,
+                        server_key,
+                        own_id=_posted_value(request, "own_id"),
+                        oob_id=_posted_value(request, "oob_id"),
+                        oob_type=_posted_value(request, "oob_type"),
+                        shown=shown,
+                        configured_servers=LibreNMSAPI.get_available_servers(),
+                    )
+                except ValueError as exc:
+                    raise _WriteRefused(str(exc)) from None
+                if change.changed:
+                    persist_mapping(owner, change, write=_save_mapping_fields)
+        except IdentityOwned as exc:
+            messages.error(request, _identity_owned_text(exc, request.user))
+            return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
+        except AmbiguousLibreNMSIdError:
+            messages.error(request, "The LibreNMS ID matches more than one object. Resolve the duplicate first.")
+            return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
+        except _WriteRefused as exc:
+            messages.add_message(request, exc.level, str(exc))
+            return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
+        except ValidationError as exc:
+            if classify_conflict(exc):
+                raise
+            logger.warning("Validation error saving the LibreNMS mapping: %s", validation_error_detail(exc))
+            messages.error(
+                request, f"Validation error saving the LibreNMS mapping: {exception_text_for(exc, model, request.user)}"
+            )
+            return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
+
+        # After the commit: a lock conflict at COMMIT must not leave a success message behind.
+        if change.changed:
+            messages.success(request, f"Saved the LibreNMS mapping for server '{server_key}'.")
+        else:
+            messages.info(request, f"The LibreNMS mapping for server '{server_key}' did not change.")
+        # The edited server now has a usable mapping, so the page can open on it.
+        return _server_mapping_redirect(object_type, pk, server_key, active_sync_tab)
 
 
 class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
