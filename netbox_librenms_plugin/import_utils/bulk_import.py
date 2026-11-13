@@ -928,7 +928,9 @@ def _refresh_existing_device(  # noqa: C901
     if existing_key is not None:
         try:
             if known_objects is None:
-                known_objects = preload_import_objects([], server_key, existing=[existing_key])
+                known_objects = preload_import_objects(
+                    [], server_key, existing=[existing_key], serial_rules=serial_rules
+                )
             refreshed = known_objects.get(existing_key)
 
             if refreshed:
@@ -1522,6 +1524,7 @@ def process_device_filters(  # noqa: C901
         api.server_key,
         existing=[key for validation in cached_validations if (key := _cached_existing_key(validation)) is not None],
         resolved_names=[validation.get("resolved_name") for validation in cached_validations],
+        serial_rules=serial_rules,
     )
 
     for idx, device in enumerate(libre_devices, 1):
