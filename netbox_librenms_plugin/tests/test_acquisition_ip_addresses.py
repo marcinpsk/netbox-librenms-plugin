@@ -208,6 +208,24 @@ def test_failed_ports_block_the_resource_and_skip_the_vrfs(live_librenms):
 
 
 @pytest.mark.django_db
+def test_a_port_vlan_field_the_ip_tab_does_not_read_never_blocks_it(live_librenms):
+    from netbox_librenms_plugin.acquisition.coordinator import acquire
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.acquisition.snapshot import Outcome
+
+    ports = [_port(ifVlan="N/A")]
+    _serve(live_librenms.server, addresses=[_address("198.18.65.1")], ports=ports, device={"ip": ""})
+
+    snapshot = acquire(
+        _device("acq-ip-bad-vlan"), server_key=SERVER_KEY, resources=[Resource.IP_ADDRESSES, Resource.INTERFACES]
+    )
+
+    assert snapshot.value(Resource.IP_ADDRESSES, "ports") == ports
+    assert _ready(snapshot)
+    assert snapshot.record(Resource.INTERFACES, "ports").outcome is Outcome.FAILED
+
+
+@pytest.mark.django_db
 def test_the_vrfs_are_read_when_a_port_names_one(live_librenms):
     from netbox_librenms_plugin.acquisition.registry import Resource
 

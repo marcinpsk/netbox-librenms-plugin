@@ -4,7 +4,6 @@ from functools import partial
 
 from dcim.models import Device, Interface, VirtualChassis
 from django.contrib import messages
-from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.http import Http404, JsonResponse
@@ -56,7 +55,6 @@ from netbox_librenms_plugin.server_mappings import (
     read_mapping,
     read_mappings,
 )
-from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
@@ -71,7 +69,6 @@ from netbox_librenms_plugin.utils import (
     convert_speed_to_kbps,
     get_interface_name_field,
     get_interface_port_identity_sets,
-    is_list_of_dicts,
     netbox_interface_clean,
     normalize_relationship_maps,
     reported_name_owners,
@@ -80,6 +77,7 @@ from netbox_librenms_plugin.utils import (
     synced_interface_names,
     validation_error_detail,
 )
+from netbox_librenms_plugin.views.base.interfaces_view import read_interface_assessment
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -327,11 +325,11 @@ class SyncInterfacesView(
             return self._tab_response(request, object_type, interface_name_field, server_key)
         visible_port_ids = selected_port_ids
 
-        ports_data = self.get_cached_ports_data(request, obj, server_key)
-        if ports_data is None:
+        assessment = self.read_assessment(request, obj, server_key)
+        if assessment is None:
             return self._tab_response(request, object_type, interface_name_field, server_key)
-
-        relationships = self._get_cached_relationships(obj, server_key)
+        ports_data = assessment["ports"]
+        relationships = assessment["port_stack_relationships"]
         # The related-row walk runs under the owner locks (_lock_sync_scope), with the writer's state.
         self._related_walk = (
             normalize_relationship_maps(relationships) if request.POST.get("auto_select_lag_members") else None
@@ -572,42 +570,19 @@ class SyncInterfacesView(
             return None
         return visible
 
-    def get_cached_ports_data(self, request, obj, server_key=None):
-        """Return cached LibreNMS port data for the given object."""
-        if server_key is None:
-            server_key = self.librenms_api.server_key
-        # On VC member pages the GET tab writes ports under the resolved sync device's
-        # cache key. Resolve the same device here — UNCONDITIONALLY, mirroring the
-        # writers (BaseInterfaceTableView.post/get_context_data) — so the POST path
-        # reads the same entry. Gating the resolve on the viewed member having no id
-        # of its own diverges from the writers when the member holds a legacy bare-int
-        # while a sibling holds the preferred explicit per-server mapping: the refresh
-        # then caches under the sibling and this reader misses forever.
-        cache_obj = get_librenms_sync_device(obj, server_key=server_key) or obj
-        cached_data = cache.get(self.get_cache_key(cache_obj, "ports", server_key))
-        # No cached entry at all (or a non-dict one) → ask the user to refresh before syncing.
-        if not isinstance(cached_data, dict):
-            self._cached_ports_payload = None
+    def read_assessment(self, request, obj, server_key):
+        """
+        Return the stored interfaces snapshot, assessed for the request, or None after a warning when none is stored.
+
+        The view keeps the assessment, so the rows, the relationships and the snapshot state come from one read.
+        """
+        self._assessment = read_interface_assessment(obj, server_key, get_interface_name_field(request, obj))
+        if self._assessment is None:
             messages.warning(
                 request,
                 "No cached data found. Please refresh the data before syncing.",
             )
-            return None
-        # A dict that simply lacks a 'ports' key is treated as 'no ports to sync' — a harmless
-        # empty no-op (matching the historical behavior). But a PRESENT-but-malformed ports value
-        # (None, a non-list, or a list with non-dict entries) is failed closed so the sync loops
-        # don't 500 mid-sync.
-        ports_data = cached_data.get("ports", [])
-        if not isinstance(ports_data, list) or any(not isinstance(port, dict) for port in ports_data):
-            messages.warning(
-                request,
-                "No cached data found. Please refresh the data before syncing.",
-            )
-            return None
-        # Stash the whole payload so _get_cached_relationships can read port_stack_relationships
-        # from it without a second cache round-trip for the same key.
-        self._cached_ports_payload = cached_data
-        return ports_data
+        return self._assessment
 
     def _infer_snapshot_target_ids(
         self,
@@ -736,18 +711,6 @@ class SyncInterfacesView(
                 self._skipped_conflicts.append(f"related row {name} not synced: {reason}")
             self._selected_port_ids.update(frontier)
             self._auto_selected_port_ids.update(frontier)
-
-    def _get_cached_relationships(self, obj, server_key):
-        """Return port_stack_relationships from the cached port data, or empty dict."""
-        # Reuse the payload get_cached_ports_data already fetched in post(); only hit the cache
-        # again when called independently (e.g. in isolation/tests) — same VC-scoped key.
-        cached_data = getattr(self, "_cached_ports_payload", None)
-        if cached_data is None:
-            cache_obj = get_librenms_sync_device(obj, server_key=server_key) or obj
-            cached_data = cache.get(self.get_cache_key(cache_obj, "ports", server_key))
-        if isinstance(cached_data, dict):
-            return cached_data.get("port_stack_relationships", {})
-        return {}
 
     def _sync_interface_relationships(
         self,
@@ -1460,7 +1423,7 @@ class SyncInterfacesView(
             rejected,
             target_device_ids=target_device_ids,
             reserved_name_port_ids_by_device=reserved_name_port_ids,
-            snapshot_complete=not (getattr(self, "_cached_ports_payload", None) or {}).get("oob_incomplete"),
+            snapshot_complete=not self._assessment["oob_incomplete"],
             model=writer_model,
         )
         return _SnapshotNameDecisions(target_device_ids, names, rejected, owners)
@@ -2092,9 +2055,10 @@ class RebindInterfacePortView(SyncInterfacesView):
         self._post_server_key = server_key
         self._selected_port_ids = {port_id}
         self._auto_selected_port_ids = set()
-        ports_data = self.get_cached_ports_data(request, obj, server_key)
-        if ports_data is None:
+        assessment = self.read_assessment(request, obj, server_key)
+        if assessment is None:
             return self._tab_response(request, object_type, interface_name_field, server_key)
+        ports_data = assessment["ports"]
         try:
             with transaction.atomic():
                 interface = self._rebind(obj, ports_data, port_id, expected_port_id, interface_name_field, server_key)
@@ -2735,25 +2699,13 @@ class _BaseRelationshipSyncView(
         return None
 
     def _get_current_edge(self, obj, server_key, request, port_id, related_port_id):
-        """Return the current cached edge rows and safe name hints, or ``None`` when stale."""
-        cache_obj = get_librenms_sync_device(obj, server_key=server_key) or obj
-        cached_data = cache.get(self.get_cache_key(cache_obj, "ports", server_key))
-        if not isinstance(cached_data, dict):
+        """Return the current snapshot edge rows and safe name hints, or ``None`` when stale."""
+        interface_name_field = get_interface_name_field(request, obj)
+        assessment = read_interface_assessment(obj, server_key, interface_name_field)
+        if assessment is None:
             return None
-        ports = cached_data.get("ports")
-        relationships = cached_data.get("port_stack_relationships")
-        if not is_list_of_dicts(ports) or not isinstance(relationships, dict):
-            return None
-        relationship_map_names = {
-            "lag": "lag_members",
-            "parent": "sub_interfaces",
-            "bridge": "bridge_members",
-        }
-        map_name = relationship_map_names[self.relation_field]
-        raw_edges = relationships.get(map_name)
-        if not isinstance(raw_edges, dict):
-            return None
-
+        ports = assessment["ports"]
+        relationships = assessment["port_stack_relationships"]
         lag_members, sub_interfaces, bridge_members = normalize_relationship_maps(relationships)
         edges = {
             "lag": lag_members,
@@ -2782,7 +2734,6 @@ class _BaseRelationshipSyncView(
         if source_port is None or related_port is None:
             return None
 
-        interface_name_field = get_interface_name_field(request, obj)
         _unique_host_port_ids, unambiguous_name_port_ids = get_interface_port_identity_sets(ports, interface_name_field)
         source_name = ""
         if source_id in unambiguous_name_port_ids:

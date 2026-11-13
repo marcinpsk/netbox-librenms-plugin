@@ -7,6 +7,8 @@ from django.core.cache import cache
 from django.urls import reverse
 from ipam.models import VLAN, VLANGroup
 
+from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.tables.cables import LibreNMSCableTable, VCCableTable
 from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable, VCInterfaceTable
 from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable, VCModuleTable
@@ -16,14 +18,14 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_virtual_chassis_members,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_interfaces_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
 from netbox_librenms_plugin.views.object_sync.devices import (
     DeviceCableTableView,
     DeviceInterfaceTableView,
     DeviceModuleTableView,
     SaveVlanGroupOverridesView,
-    SingleInterfaceVerifyView,
 )
 
 
@@ -158,10 +160,9 @@ class TestSingleInterfaceVerifyEndpoint:
         assert response.status_code == 400
         assert response.json() == {"status": "error", "message": "No device ID provided"}
 
-    def test_malformed_cache_returns_controlled_404_and_purges_it(self, client, live_librenms):
+    def test_a_malformed_snapshot_payload_returns_a_controlled_404(self, client, live_librenms):
         device = make_device("verify-interface-malformed", librenms_cf={SERVER_KEY: {"id": 141}})
-        view = SingleInterfaceVerifyView()
-        key = view.get_cache_key(device, "ports", SERVER_KEY)
+        key = source_cache.snapshot_key(device, Resource.INTERFACES, SERVER_KEY)
         cache.set(key, {"ports": "not-a-list"}, timeout=300)
         _login(client, "verify-interface-malformed-user")
 
@@ -173,18 +174,14 @@ class TestSingleInterfaceVerifyEndpoint:
 
         assert response.status_code == 404
         assert response.json() == {"status": "error", "message": "Interface data not found"}
-        assert cache.get(key) is None
+        # A read never deletes: a refresh can store a new snapshot under the same key.
+        assert cache.get(key) == {"ports": "not-a-list"}
 
     def test_cached_port_returns_a_formatted_real_row(self, client, live_librenms):
         device = make_device("verify-interface-success", librenms_cf={SERVER_KEY: {"id": 142}})
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
         _set_id(interface, 4001)
-        view = SingleInterfaceVerifyView()
-        cache.set(
-            view.get_cache_key(device, "ports", SERVER_KEY),
-            {"ports": [_port()], "port_stack_relationships": {}},
-            timeout=300,
-        )
+        seed_interfaces_snapshot(device, [_port()], server_key=SERVER_KEY)
         _login(client, "verify-interface-success-user")
 
         response = _json_post(
@@ -205,15 +202,7 @@ class TestSingleInterfaceVerifyEndpoint:
 
     def test_duplicate_cached_port_id_is_rejected_as_ambiguous(self, client, live_librenms):
         device = make_device("verify-interface-duplicate", librenms_cf={SERVER_KEY: {"id": 143}})
-        view = SingleInterfaceVerifyView()
-        cache.set(
-            view.get_cache_key(device, "ports", SERVER_KEY),
-            {
-                "ports": [_port(name="Ethernet1"), _port(name="Ethernet2")],
-                "port_stack_relationships": {},
-            },
-            timeout=300,
-        )
+        seed_interfaces_snapshot(device, [_port(name="Ethernet1"), _port(name="Ethernet2")], server_key=SERVER_KEY)
         _login(client, "verify-interface-duplicate-user")
 
         response = _json_post(
@@ -338,9 +327,9 @@ class TestSaveVLANGroupOverridesEndpoint:
     def test_real_cache_ttl_is_reused_for_saved_overrides(self, client, live_librenms):
         device = make_device("save-vlan-overrides", librenms_cf={SERVER_KEY: {"id": 151}})
         view = SaveVlanGroupOverridesView()
-        ports_key = view.get_cache_key(device, "ports", SERVER_KEY)
+        ports_key = source_cache.snapshot_key(device, Resource.INTERFACES, SERVER_KEY)
         overrides_key = view.get_vlan_overrides_key(device, SERVER_KEY)
-        cache.set(ports_key, {"ports": [_port()]}, timeout=300)
+        seed_interfaces_snapshot(device, [_port()], server_key=SERVER_KEY)
         _login(client, "save-vlan-overrides-user")
 
         response = _json_post(
@@ -372,6 +361,25 @@ class TestSaveVLANGroupOverridesEndpoint:
 
         assert response.status_code == 400
         assert response.json()["message"] == "No cached port data; refresh interfaces first"
+        assert cache.get(overrides_key) is None
+
+    def test_a_snapshot_whose_binding_no_longer_holds_takes_no_overrides(self, client, live_librenms):
+        device = make_device("save-vlan-overrides-rebound", librenms_cf={SERVER_KEY: {"id": 153}})
+        view = SaveVlanGroupOverridesView()
+        overrides_key = view.get_vlan_overrides_key(device, SERVER_KEY)
+        seed_interfaces_snapshot(device, [_port()], server_key=SERVER_KEY)
+        # The write signals run on commit, which this test never reaches, so only the binding refuses the snapshot.
+        seed_stored_mapping(device, {SERVER_KEY: {"id": 153, "oob": {"id": 154, "type": "idrac"}}}, save=True)
+        assert cache.ttl(source_cache.snapshot_key(device, Resource.INTERFACES, SERVER_KEY)) > 0
+        _login(client, "save-vlan-overrides-rebound-user")
+
+        response = _json_post(
+            client,
+            "save_vlan_group_overrides",
+            {"device_id": device.pk, "server_key": SERVER_KEY, "vid_group_map": {"3207": "19"}},
+        )
+
+        assert response.status_code == 400
         assert cache.get(overrides_key) is None
 
     def test_a_user_without_plugin_view_is_denied_before_the_view_runs(self, client, live_librenms):

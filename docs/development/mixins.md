@@ -42,7 +42,6 @@ The plugin therefore retains a two-tier permission model: plugin permissions con
   - Useful for views that cache data fetched from LibreNMS to improve performance.
   - Methods:
     - `get_cache_key(obj, data_type, server_key)`: Returns a unique cache key for the object, data type and server.
-    - `get_last_fetched_key(obj, data_type, server_key)`: Returns a cache key for tracking when data was last fetched.
     - `get_vlan_overrides_key(obj, server_key)`: Returns a cache key for storing user VLAN group override selections.
     - Every key needs a configured server key; a blank key raises `ValueError`.
 

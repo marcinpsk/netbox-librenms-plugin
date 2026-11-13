@@ -16,7 +16,11 @@ from netbox_librenms_plugin.tests.conftest import (
     configure_default_librenms_server,
     make_device,
 )
-from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
+from netbox_librenms_plugin.tests.source_snapshot_helpers import (
+    port_vlans,
+    seed_interfaces_snapshot,
+    seed_source_snapshot,
+)
 from netbox_librenms_plugin.tests.view_test_helpers import (
     grant,
     make_request,
@@ -60,10 +64,11 @@ def _reader(username, *, ipam=False):
     return user
 
 
-def _ports_payload(vid=100):
-    """One host port carrying an untagged VLAN, in the cached snapshot shape."""
-    return {
-        "ports": [
+def _seed_port(device, server_key):
+    """Store an interfaces snapshot of one host port that carries an untagged VLAN."""
+    seed_interfaces_snapshot(
+        device,
+        [
             {
                 "port_id": 99,
                 "ifName": "Ethernet1",
@@ -74,12 +79,11 @@ def _ports_payload(vid=100):
                 "ifPhysAddress": "",
                 "ifMtu": 1500,
                 "ifAdminStatus": "up",
-                "untagged_vlan": vid,
-                "_source": "host",
+                **port_vlans("access", 100),
             }
         ],
-        "port_stack_relationships": {},
-    }
+        server_key=server_key,
+    )
 
 
 # =============================================================================
@@ -96,22 +100,16 @@ class TestInterfacesTabIpamScoping:
 
         request = make_request("get", user=user)
         # A real client: the device carries no LibreNMS id, so the stored-id read answers None
-        # without issuing a request, and the VLAN parsing runs the real implementation.
+        # without issuing a request.
         view = make_view(DeviceInterfaceTableView, request, librenms_api=LibreNMSAPI(server_key=server_key))
-        return view.get_context_data(
-            request,
-            device,
-            "ifName",
-            server_key,
-            fresh_data=_ports_payload(),
-            sync_device=device,
-        )
+        return view.get_context_data(request, device, "ifName", server_key, sync_device=device)
 
     def test_a_user_without_ipam_view_rights_gets_no_vlan_groups(self, settings):
         """The tab gate never asks for IPAM rights, so the VLAN reads must be restricted."""
         server_key = configure_default_librenms_server(settings)
         device = make_device("iface-tab-ipam-scope")
         group, _vlan = _site_group_with_vlan(device, "iface-tab")
+        _seed_port(device, server_key)
 
         context = self._context(_reader("iface-tab-no-ipam"), device, server_key)
 
@@ -124,6 +122,7 @@ class TestInterfacesTabIpamScoping:
         server_key = configure_default_librenms_server(settings)
         device = make_device("iface-tab-ipam-allowed")
         group, _vlan = _site_group_with_vlan(device, "iface-tab-allowed")
+        _seed_port(device, server_key)
 
         context = self._context(_reader("iface-tab-ipam", ipam=True), device, server_key)
 
@@ -138,6 +137,7 @@ class TestInterfacesTabIpamScoping:
         server_key = configure_default_librenms_server(settings)
         device = make_device("iface-tab-constrained")
         group, vlan = _site_group_with_vlan(device, "iface-tab-constrained")
+        _seed_port(device, server_key)
         VLANGroup.objects.create(name="iface-tab-hidden", slug="iface-tab-hidden")
         user = make_user_with_perms("iface-tab-constrained-user", [("view", type(device))], plugin_write=False)
         user = grant(user, "view", VLANGroup, constraints={"pk": group.pk})
@@ -156,6 +156,7 @@ class TestInterfacesTabIpamScoping:
         server_key = configure_default_librenms_server(settings)
         device = make_device("iface-tab-query-scope")
         group, _vlan = _site_group_with_vlan(device, "iface-tab-query")
+        _seed_port(device, server_key)
         user = _reader("iface-tab-query-user")
         user.is_superuser = superuser
         user.save()
@@ -182,6 +183,7 @@ class TestInterfacesTabIpamScoping:
         server_key = configure_default_librenms_server(settings)
         device = make_device("iface-tab-superuser-scope")
         _site_group_with_vlan(device, "iface-tab-superuser")
+        _seed_port(device, server_key)
         user = _reader("iface-tab-superuser")
         user.is_superuser = True
         user.save()
@@ -382,19 +384,13 @@ class TestSyncInterfacesIpamScoping:
     """SyncInterfacesView writes VLANs, so its lookup maps must be the caller's."""
 
     def _sync(self, user, device, server_key):
-        from django.core.cache import cache
-
         from netbox_librenms_plugin.tests.view_test_helpers import post as call_post
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         request = make_request("post", {"select": ["99"], "server_key": server_key}, user=user)
         view = make_view(SyncInterfacesView, request)
-        cache_key = view.get_cache_key(device, "ports", server_key)
-        cache.set(cache_key, _ports_payload())
-        try:
-            call_post(view, request, object_type="device", object_id=device.pk)
-        finally:
-            cache.delete(cache_key)
+        _seed_port(device, server_key)
+        call_post(view, request, object_type="device", object_id=device.pk)
         return request
 
     @staticmethod

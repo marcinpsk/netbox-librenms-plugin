@@ -25,7 +25,7 @@
 ## Data & Sync Conventions
 - Devices/VMs map to LibreNMS via the `librenms_id` custom field, then cached if absent. Always call `LibreNMSAPI.get_librenms_id` instead of touching the field directly.
 - Matching is intentionally **exact-only** for site, platform, device type, and role. See `utils.py` (`find_matching_site`, `match_librenms_hardware_to_device_type`, `find_matching_platform`). Do not add fuzzy matching.
-- Sync pipelines acquire LibreNMS data through `acquisition/` (no request, no writes), store the snapshot through `source_cache.py`, assess it against NetBox for the current user, build comparison tables (`tables/`), and render HTMX fragments (`templates/netbox_librenms_plugin/htmx/`). The IP and VLAN tabs work this way; the other tabs still fetch and cache through `CacheMixin`. Follow the acquisition flow for new resources.
+- Sync pipelines acquire LibreNMS data through `acquisition/` (no request, no writes), store the snapshot through `source_cache.py`, assess it against NetBox for the current user, build comparison tables (`tables/`), and render HTMX fragments (`templates/netbox_librenms_plugin/htmx/`). The interfaces, IP and VLAN tabs work this way (`assessment/` holds the interface assessment); the cables and modules tabs still fetch and cache through `CacheMixin`. Follow the acquisition flow for new resources.
 - Virtual chassis support uses `get_virtual_chassis_member()` for port-to-member mapping and `get_librenms_sync_device()` for VC priority-based device selection.
 
 ## Developer Workflow

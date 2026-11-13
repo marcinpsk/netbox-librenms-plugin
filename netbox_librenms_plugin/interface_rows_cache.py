@@ -3,12 +3,13 @@ Keep the computed rows of an interfaces tab while none of their inputs change.
 
 Computing the rows reads every NetBox interface of the device and compares each one with the
 LibreNMS snapshot. That takes seconds on a device with thousands of interfaces, and a filter
-request needs the same rows again. The key holds every input the rows read: the snapshot, the
-viewer, the tab options, and a fingerprint (row count and last change) of each NetBox table
-involved, of the tagged VLAN links, the viewer's object permissions, and the objects those
-permissions let the viewer see or change. A save, a create or a delete in one of those tables, and a
-grant, a revoke or a change that a grant constraint reads, gives a new key. The timeout limits how long
-a change that leaves no trace in the fingerprint (a queryset ``update()``) can stay unseen.
+request needs the same rows again. The key holds every input that the rows read: the snapshot, the
+viewer and the tab options. It also holds a fingerprint (row count and last change) of each NetBox
+table that the rows read, the port stack name rules included. It also holds the tagged VLAN links,
+the viewer's object permissions, and the objects that those permissions let the viewer see or
+change. A save, a create or a delete in one of these tables gives a new key. So do a grant, a revoke
+and a change that a grant constraint reads. The timeout limits how long a change that leaves no trace
+in the fingerprint (a queryset ``update()``) can stay unseen.
 """
 
 import hashlib
@@ -26,6 +27,7 @@ from netbox.authentication import ObjectPermissionMixin
 
 from netbox_librenms_plugin import __version__
 from netbox_librenms_plugin.interface_rules import rule_tables
+from netbox_librenms_plugin.models import PortStackLagPattern
 
 ROWS_TIMEOUT = 300
 
@@ -122,6 +124,7 @@ def netbox_fingerprint(owners, interfaces):
             macs,
             VLAN.objects.all(),
             VLANGroup.objects.all(),
+            PortStackLagPattern.objects.all(),
             *rule_tables(),
         )
     )

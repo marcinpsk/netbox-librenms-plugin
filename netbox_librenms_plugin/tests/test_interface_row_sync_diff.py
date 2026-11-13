@@ -398,7 +398,6 @@ def _render_tab(device, rows, *, migrated=False):
             "virtual_chassis_members": [],
             "cache_expiry": None,
             "oob_incomplete": False,
-            "relationship_data_incomplete": False,
         },
         "interface_name_field": "ifName",
         "migrated_to_marker": migrated,
@@ -469,73 +468,50 @@ class TestThePerRowButtonSyncsOneRow:
     """A posted sync_one goes through the bulk view, and writes only that row."""
 
     def _setup(self, tag, settings):
-        from django.core.cache import cache
-
         from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server
+        from netbox_librenms_plugin.tests.interface_sync_post_helpers import seed_ports
         from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
-        server_key = configure_default_librenms_server(settings)
+        configure_default_librenms_server(settings)
         device = make_device(tag)
-        seed_mapping(device, server_key, own=1, save=False)
+        seed_mapping(device, SERVER_KEY, own=1, save=False)
         device.save()
-        ports = [
-            _port(port_id=10, ifName="Ethernet10", ifDescr="Ethernet10", ifAlias="Ten"),
-            _port(port_id=11, ifName="Ethernet11", ifDescr="Ethernet11", ifAlias="Eleven"),
-            _port(port_id=12, ifName="Ethernet12", ifDescr="Ethernet12", ifAlias="Twelve"),
-        ]
-        cache_key = SyncInterfacesView().get_cache_key(device, "ports", server_key)
-        cache.set(cache_key, {"ports": ports, "port_stack_relationships": {}})
-        return device, server_key, cache_key
-
-    def _post(self, device, server_key, data):
-        from types import SimpleNamespace
-
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, post
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        request = make_request(
-            "post",
-            {"server_key": server_key, **data},
-            user=make_superuser(f"row-sync-{device.pk}"),
+        seed_ports(
+            device,
+            [
+                _port(port_id=10, ifName="Ethernet10", ifDescr="Ethernet10", ifAlias="Ten"),
+                _port(port_id=11, ifName="Ethernet11", ifDescr="Ethernet11", ifAlias="Eleven"),
+                _port(port_id=12, ifName="Ethernet12", ifDescr="Ethernet12", ifAlias="Twelve"),
+            ],
         )
-        request.GET = request.GET.copy()
-        request.GET["interface_name_field"] = "ifName"
-        view = SyncInterfacesView()
-        view._librenms_api = SimpleNamespace(server_key=server_key)
-        return post(view, request, object_type="device", object_id=device.pk)
+        return device
 
-    def test_sync_one_writes_only_its_own_row(self, settings):
-        from django.core.cache import cache
+    def _post(self, client, device, *, sync_one, select=()):
+        from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync
+        from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
 
-        device, server_key, cache_key = self._setup("row-sync-one", settings)
-        try:
-            response = self._post(device, server_key, {"sync_one": "11"})
-        finally:
-            cache.delete(cache_key)
+        client.force_login(make_superuser(f"row-sync-{device.pk}"))
+        return post_interface_sync(client, device, select, htmx=False, exclude_columns=(), extra={"sync_one": sync_one})
+
+    def test_sync_one_writes_only_its_own_row(self, client, settings):
+        device = self._setup("row-sync-one", settings)
+
+        response = self._post(client, device, sync_one="11")
 
         assert response.status_code == 302
         assert sorted(device.interfaces.values_list("name", flat=True)) == ["Ethernet11"]
 
-    def test_the_pressed_row_wins_over_the_tick_boxes(self, settings):
+    def test_the_pressed_row_wins_over_the_tick_boxes(self, client, settings):
         """The browser submits both, and the user pressed one row, not the selection."""
-        from django.core.cache import cache
+        device = self._setup("row-sync-wins", settings)
 
-        device, server_key, cache_key = self._setup("row-sync-wins", settings)
-        try:
-            self._post(device, server_key, {"sync_one": "11", "select": ["10", "12"]})
-        finally:
-            cache.delete(cache_key)
+        self._post(client, device, sync_one="11", select=[10, 12])
 
         assert sorted(device.interfaces.values_list("name", flat=True)) == ["Ethernet11"]
 
-    def test_an_unusable_sync_one_falls_back_to_the_selection(self, settings):
-        from django.core.cache import cache
+    def test_an_unusable_sync_one_falls_back_to_the_selection(self, client, settings):
+        device = self._setup("row-sync-fallback", settings)
 
-        device, server_key, cache_key = self._setup("row-sync-fallback", settings)
-        try:
-            self._post(device, server_key, {"sync_one": "", "select": ["10", "12"]})
-        finally:
-            cache.delete(cache_key)
+        self._post(client, device, sync_one="", select=[10, 12])
 
         assert sorted(device.interfaces.values_list("name", flat=True)) == ["Ethernet10", "Ethernet12"]

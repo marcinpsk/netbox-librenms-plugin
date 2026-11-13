@@ -10,6 +10,8 @@ Tests cover:
 import pytest
 from dcim.models import Interface
 
+from netbox_librenms_plugin.assessment.interfaces import parse_port_vlan_data
+
 
 @pytest.mark.django_db
 class TestVlanAssignmentMixin:
@@ -156,19 +158,7 @@ class TestVlanAssignmentMixin:
 class TestPortVlanEnrichment:
     """Tests for port VLAN data enrichment."""
 
-    @staticmethod
-    def _api(settings):
-        """Return a real client bound to a configured server; parse_port_vlan_data sends no request."""
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
-
-        configure_librenms_servers(
-            settings,
-            {"default": {"librenms_url": "https://default.librenms.test", "api_token": "token-default"}},
-        )
-        return LibreNMSAPI(server_key="default")
-
-    def test_parse_port_vlan_data_access_port(self, settings):
+    def test_parse_port_vlan_data_access_port(self):
         """An untagged-only port parses as access mode."""
         port_data = {
             "port_id": 1234,
@@ -178,7 +168,7 @@ class TestPortVlanEnrichment:
             "ifTrunk": None,
         }
 
-        result = self._api(settings).parse_port_vlan_data(port_data, "ifName")
+        result = parse_port_vlan_data(port_data, "ifName")
 
         assert result["port_id"] == 1234
         assert result["interface_name"] == "Gi1/0/1"
@@ -186,7 +176,7 @@ class TestPortVlanEnrichment:
         assert result["untagged_vlan"] == 100
         assert result["tagged_vlans"] == []
 
-    def test_parse_port_vlan_data_trunk_port(self, settings):
+    def test_parse_port_vlan_data_trunk_port(self):
         """A trunk port keeps its untagged VID and lists the tagged ones."""
         port_data = {
             "port_id": 5678,
@@ -201,7 +191,7 @@ class TestPortVlanEnrichment:
             ],
         }
 
-        result = self._api(settings).parse_port_vlan_data(port_data, "ifName")
+        result = parse_port_vlan_data(port_data, "ifName")
 
         assert result["port_id"] == 5678
         assert result["interface_name"] == "Te1/1/1"
@@ -209,7 +199,7 @@ class TestPortVlanEnrichment:
         assert result["untagged_vlan"] == 90
         assert sorted(result["tagged_vlans"]) == [50, 60]
 
-    def test_parse_port_vlan_data_uses_interface_name_field(self, settings):
+    def test_parse_port_vlan_data_uses_interface_name_field(self):
         """The caller's field choice decides which LibreNMS name reaches the row."""
         port_data = {
             "port_id": 1234,
@@ -219,7 +209,7 @@ class TestPortVlanEnrichment:
             "ifTrunk": None,
         }
 
-        result = self._api(settings).parse_port_vlan_data(port_data, "ifDescr")
+        result = parse_port_vlan_data(port_data, "ifDescr")
 
         assert result["interface_name"] == "GigabitEthernet1/0/1"
 

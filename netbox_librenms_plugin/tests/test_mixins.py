@@ -106,7 +106,6 @@ class TestCacheMixinKeyGeneration:
         mixin = self._mixin()
         for build in (
             lambda: mixin.get_cache_key(device, "ports", server_key),
-            lambda: mixin.get_last_fetched_key(device, "ports", server_key),
             lambda: mixin.get_vlan_overrides_key(device, server_key),
         ):
             with pytest.raises(ValueError, match="server key"):
@@ -126,13 +125,6 @@ class TestCacheMixinKeyGeneration:
         device = make_device("cache-key-types")
         mixin = self._mixin()
         assert mixin.get_cache_key(device, "ports", "prod") != mixin.get_cache_key(device, "ips", "prod")
-
-    def test_get_last_fetched_key_format_and_scope(self):
-        device = make_device("cache-last-fetched")
-        mixin = self._mixin()
-        assert mixin.get_last_fetched_key(device, "ports", "srv1") == (
-            f"librenms_ports_last_fetched_device_{device.pk}_srv1"
-        )
 
     def test_cache_key_different_pks_differ(self):
         first = make_device("cache-key-first")

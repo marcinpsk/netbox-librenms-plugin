@@ -5,12 +5,10 @@ from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
-from django.core.cache import cache
 from django.urls import reverse
 
 from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.server_mappings import read_mapping
-from netbox_librenms_plugin.sync_cache import sync_snapshot_key
 from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_superuser,
@@ -20,6 +18,7 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.import_server_helpers import selector_html
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_interfaces_snapshot
 
 
 def _server_config(server, display_name):
@@ -418,7 +417,7 @@ def test_interface_paginator_keeps_the_active_server(client, servers):
         }
         for number in range(1, 56)
     ]
-    cache.set(sync_snapshot_key(device, "ports", "secondary"), {"ports": ports}, timeout=300)
+    seed_interfaces_snapshot(device, ports, server_key="secondary")
     _register_device(servers.secondary, 13417, device.name)
     client.force_login(make_superuser("object-server-paginator-user"))
 

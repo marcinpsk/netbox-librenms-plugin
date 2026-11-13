@@ -122,7 +122,7 @@ def _interface_page(client, settings, librenms_server, tag, query):
         {**_port(6000 + index, f"eth{index:02d}"), "ifAlias": "uplink" if index % 2 else "spare"} for index in range(40)
     ]
     librenms_server.register(f"/api/v0/devices/{DEVICE_ID}/ports", {"status": "ok", "ports": ports})
-    librenms_server.register(f"/api/v0/devices/{DEVICE_ID}/port_stack", {"status": "ok", "port_stack": []})
+    librenms_server.register(f"/api/v0/devices/{DEVICE_ID}/port_stack", {"status": "ok", "mappings": []})
     _seed_interfaces(device, ports)
     client.force_login(make_superuser("refresh-page-user"))
     page_path = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
