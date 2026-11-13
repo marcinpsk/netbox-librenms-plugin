@@ -964,6 +964,25 @@ def test_the_import_preload_skips_a_placeholder_serial():
 
 
 @pytest.mark.django_db
+def test_the_import_preload_loads_the_devices_that_the_serial_rules_match():
+    """The validator resolves a serial under the serial rules, so the preload loads the Device that a rule matches."""
+    from netbox_librenms_plugin.import_utils.device_operations import preload_import_objects
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
+    NormalizationRule.objects.create(scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1")
+    ruled = make_device("imp-ruled-stored", serial="S/N IMP-RULED-SN")
+    other = make_device("imp-ruled-other", serial="IMP-OTHER-SN")
+
+    loaded = preload_import_objects(
+        [_import_row(7260, "imp-ruled-row", serial="IMP-RULED-SN")], SERVER_KEY, serial_rules=SerialRules.load()
+    )
+
+    assert (type(ruled), ruled.pk) in loaded
+    assert (type(other), other.pk) not in loaded
+
+
+@pytest.mark.django_db
 def test_the_import_preload_runs_a_fixed_number_of_queries():
     from netbox_librenms_plugin.import_utils.device_operations import preload_import_objects
 

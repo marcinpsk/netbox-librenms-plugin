@@ -930,7 +930,7 @@ def process_device_filters(  # noqa: C901
         logger.info(f"Validating {total} devices")
 
     # One load serves every row: every object that a row can match.
-    known_objects = preload_import_objects(libre_devices, api.server_key)
+    known_objects = preload_import_objects(libre_devices, api.server_key, serial_rules=serial_rules)
 
     for idx, device in enumerate(libre_devices, 1):
         # Check for job termination periodically
