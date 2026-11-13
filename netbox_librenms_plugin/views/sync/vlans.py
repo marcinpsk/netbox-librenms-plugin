@@ -26,6 +26,7 @@ from netbox_librenms_plugin.utils import (
     normalize_vlan_vid,
     vlan_source_namer,
 )
+from netbox_librenms_plugin.views.object_sync.devices import DeviceLibreNMSSyncView
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -268,6 +269,8 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             template_name = "netbox_librenms_plugin/htmx/vlan_conflicts.html"
         else:
             context["full_page"] = True
+            # NetBox marks a tab active only for the same ViewTab instance.
+            context["tab"] = DeviceLibreNMSSyncView.tab
             template_name = "netbox_librenms_plugin/vlan_conflicts_page.html"
         return render(request, template_name, context)
 

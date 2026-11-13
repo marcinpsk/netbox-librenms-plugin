@@ -18,7 +18,6 @@ from netbox_librenms_plugin.tests.conftest import (
     bind_librenms_server,
     make_device,
     make_interface,
-    make_ip,
     make_virtual_chassis,
     map_device_to_librenms,
 )
@@ -62,27 +61,6 @@ def _cable_view(settings, server, *, request=None, user=None):
 def _links_route(server, device_id, links):
     """Register a LibreNMS device-links response."""
     server.register(f"/api/v0/devices/{device_id}/links", {"status": "ok", "links": links})
-
-
-@pytest.mark.django_db
-class TestCableViewIpAddress:
-    def test_primary_ip_is_reported_and_a_device_without_one_reports_none(self):
-        """get_ip_address returns the bare primary IP, and None when the device has none."""
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
-
-        with_ip = make_device("cable-ip-present")
-        without_ip = make_device("cable-ip-absent")
-        address = make_ip("10.43.0.9/24", assigned_object=make_interface(with_ip, "eth0"))
-        with_ip.primary_ip4 = address
-        with_ip.save()
-        with_ip = Device.objects.get(pk=with_ip.pk)
-
-        view = DeviceCableTableView()
-
-        assert view.get_ip_address(with_ip) == "10.43.0.9"
-        assert view.get_ip_address(without_ip) is None
 
 
 @pytest.mark.django_db

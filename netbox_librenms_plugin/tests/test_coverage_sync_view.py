@@ -17,6 +17,7 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
+from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
 
 SERVER_KEY = "default"
@@ -222,6 +223,47 @@ class TestSyncPageRouting:
 
         assert response.context["is_vc_member"] is True
         assert response.context["sync_device_has_primary_ip"] is True
+
+    @pytest.mark.parametrize("banner", ["managed", "configure", "requires"])
+    @pytest.mark.parametrize("sync_device_visible", [False, True], ids=["hidden", "visible"])
+    def test_the_vc_banner_names_the_sync_device_only_within_the_view_scope(
+        self, client, librenms_server, banner, sync_device_visible
+    ):
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.server_mappings import read_mappings
+
+        _vc, members = make_virtual_chassis_members(f"sync-vc-scope-{banner}-{sync_device_visible}", count=2)
+        sync_device, viewed = members
+        if banner == "managed":
+            seed_mapping(sync_device, SERVER_KEY, own=6610)
+            # A mapping for an unconfigured server puts a sync-device row in the mapping table.
+            seed_mapping(sync_device, "retired", own=6611)
+            _register_device(librenms_server, 6610, "librenms-side-hostname")
+        elif banner == "configure":
+            interface = make_interface(sync_device, "management")
+            sync_device.primary_ip4 = make_ip("198.18.50.10/32", assigned_object=interface)
+            sync_device.save()
+        visible_pks = [viewed.pk, sync_device.pk] if sync_device_visible else [viewed.pk]
+        user = make_user_with_perms(
+            f"sync-vc-scope-{banner}-{sync_device_visible}",
+            [("view", Device), ("change", Device)],
+            constraints={"pk__in": visible_pks},
+        )
+        client.force_login(user)
+        mappings_before = read_mappings(Device.objects.order_by("pk"), fields=("pk",))
+
+        response = client.get(_sync_url(viewed))
+
+        assert response.status_code == 200
+        assert response.context["librenms_sync_device"] == sync_device
+        assert response.context["sync_device_has_librenms_id"] is (banner == "managed")
+        assert response.context["sync_device_has_primary_ip"] is (banner == "configure")
+        html = response.content.decode()
+        assert (f'href="{sync_device.get_absolute_url()}"' in html) is sync_device_visible
+        assert (sync_device.get_absolute_url() in html) is sync_device_visible
+        assert (sync_device.name in html) is sync_device_visible
+        assert read_mappings(Device.objects.order_by("pk"), fields=("pk",)) == mappings_before
 
     def test_vm_page_uses_the_vm_mapping_and_vm_tabs(self, logged_in_client, librenms_server):
         vm = make_vm("sync-page-vm")
@@ -454,7 +496,7 @@ class TestLibreNMSDeviceInfo:
         result = view.get_librenms_device_info(device)
 
         assert result["mismatched_device"] is False
-        assert result["librenms_device_details"]["netbox_dns_name"] == "dns-identity.example.test"
+        assert result["librenms_device_details"]["netbox_dns_names"] == ["dns-identity.example.test"]
 
 
 def _stack_inventory(*members, extra=()):
@@ -794,3 +836,121 @@ class TestPlatformAndPatternHelpers:
         assert view.get_ip_context(request, device) is None
         assert view.get_vlan_context(request, device) is None
         assert view.get_module_context(request, device) is None
+
+
+def _dual_stack_device(name, librenms_id, *, dns_names=("", "")):
+    """Create a device with an IPv4 and an IPv6 primary IP; NetBox's primary_ip then returns the IPv6 one."""
+    device = make_device(name)
+    if librenms_id is not None:
+        seed_mapping(device, SERVER_KEY, own=librenms_id)
+    interface = make_interface(device, "mgmt0")
+    for field, address, dns_name in zip(
+        ("primary_ip4", "primary_ip6"), ("192.0.2.8/24", "2001:db8::8/64"), dns_names, strict=True
+    ):
+        row = make_ip(address, assigned_object=interface)
+        row.dns_name = dns_name
+        row.save()
+        setattr(device, field, row)
+    device.save()
+    return device
+
+
+def _mismatch_modal(response):
+    """Return the markup of the identity mismatch modal, or None when the page has none."""
+    found = re.search(r'id="mismatchModal".*?</table>', response.content.decode(), re.S)
+    return found.group(0) if found else None
+
+
+@pytest.mark.django_db
+class TestDualStackIdentity:
+    def test_ipv4_primary_matches_when_an_ipv6_primary_also_exists(self, logged_in_client, librenms_server):
+        device = _dual_stack_device("dual-stack-node", 6691)
+        _register_device(librenms_server, 6691, "192.0.2.8", sysName="dual-stack-node-a.example.test", ip="192.0.2.8")
+
+        response = logged_in_client.get(_sync_url(device))
+
+        assert response.status_code == 200
+        assert response.context["mismatched_device"] is False
+        assert _mismatch_modal(response) is None
+
+    def test_ipv4_primary_dns_name_matches_when_an_ipv6_primary_also_exists(self, logged_in_client, librenms_server):
+        device = _dual_stack_device("dual-stack-dns", 6692, dns_names=("node-v4.example.test", "node-v6.example.test"))
+        _register_device(librenms_server, 6692, "node-v4.example.test", sysName="other-sysname", ip="192.0.2.200")
+
+        response = logged_in_client.get(_sync_url(device))
+
+        assert response.context["mismatched_device"] is False
+        assert _mismatch_modal(response) is None
+
+    def test_a_real_mismatch_lists_both_primary_addresses_and_dns_names(self, logged_in_client, librenms_server):
+        device = _dual_stack_device(
+            "dual-stack-other", 6693, dns_names=("node-v4.example.test", "node-v6.example.test")
+        )
+        _register_device(librenms_server, 6693, "unrelated.example.test", sysName="unrelated", ip="192.0.2.99")
+
+        response = logged_in_client.get(_sync_url(device))
+
+        assert response.context["mismatched_device"] is True
+        modal = _mismatch_modal(response)
+        for value in ("192.0.2.8", "2001:db8::8", "node-v4.example.test", "node-v6.example.test"):
+            assert value in modal
+
+    def test_an_unmapped_device_is_found_by_its_ipv4_primary(self, logged_in_client, librenms_server):
+        device = _dual_stack_device("dual-stack-unmapped", None)
+        _register_device(librenms_server, 6694, "192.0.2.8", ip="192.0.2.8")
+        librenms_server.register("/api/v0/devices/192.0.2.8", {"status": "ok", "devices": [{"device_id": 6694}]})
+
+        response = logged_in_client.get(_sync_url(device))
+
+        assert response.context["librenms_device_id"] == 6694
+        assert librenms_server.requests[0]["path"] == "/api/v0/devices/192.0.2.8"
+
+
+@pytest.mark.django_db
+class TestDualStackDiscovery:
+    def test_primaries_that_name_two_librenms_devices_store_no_id(self, logged_in_client, librenms_server):
+        from netbox_librenms_plugin.server_mappings import read_mapping
+
+        device = _dual_stack_device("dual-stack-conflict", None)
+        librenms_server.register("/api/v0/devices/192.0.2.8", {"status": "ok", "devices": [{"device_id": 6695}]})
+        librenms_server.register("/api/v0/devices/2001:db8::8", {"status": "ok", "devices": [{"device_id": 6696}]})
+
+        response = logged_in_client.get(_sync_url(device))
+
+        assert response.context["librenms_device_id"] is None
+        assert response.context["librenms_lookup_error"] is not None
+        assert read_mapping(type(device).objects.get(pk=device.pk)).own_id(SERVER_KEY) is None
+
+    def test_primary_dns_names_that_name_two_librenms_devices_store_no_id(self, logged_in_client, librenms_server):
+        from netbox_librenms_plugin.server_mappings import read_mapping
+
+        device = _dual_stack_device(
+            "dual-stack-dns-conflict", None, dns_names=("node-v4.example.test", "node-v6.example.test")
+        )
+        librenms_server.register(
+            "/api/v0/devices/node-v4.example.test", {"status": "ok", "devices": [{"device_id": 6698}]}
+        )
+        librenms_server.register(
+            "/api/v0/devices/node-v6.example.test", {"status": "ok", "devices": [{"device_id": 6699}]}
+        )
+
+        response = logged_in_client.get(_sync_url(device))
+
+        assert response.context["librenms_device_id"] is None
+        assert response.context["librenms_lookup_error"] is not None
+        assert read_mapping(type(device).objects.get(pk=device.pk)).own_id(SERVER_KEY) is None
+
+    def test_primaries_that_name_one_librenms_device_store_its_id(self, logged_in_client, librenms_server):
+        from netbox_librenms_plugin.server_mappings import read_mapping
+
+        device = _dual_stack_device("dual-stack-agree", None)
+        _register_device(librenms_server, 6697, "192.0.2.8", ip="192.0.2.8")
+        for address in ("192.0.2.8", "2001:db8::8"):
+            librenms_server.register(f"/api/v0/devices/{address}", {"status": "ok", "devices": [{"device_id": 6697}]})
+
+        response = logged_in_client.get(_sync_url(device))
+
+        assert response.context["librenms_device_id"] == 6697
+        assert read_mapping(type(device).objects.get(pk=device.pk)).own_id(SERVER_KEY) == 6697
+        paths = [request["path"] for request in librenms_server.requests]
+        assert paths[:2] == ["/api/v0/devices/192.0.2.8", "/api/v0/devices/2001:db8::8"]

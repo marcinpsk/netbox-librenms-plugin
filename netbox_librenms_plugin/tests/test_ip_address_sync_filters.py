@@ -438,7 +438,9 @@ class TestRedirectsKeepThePageQuery:
 
         assert response.status_code == 200
         html = response.content.decode()
-        hrefs = [unescape(href) for href in re.findall(r'<a href="([^"]*)" class="btn(?:-close| btn-secondary)"', html)]
+        hrefs = [
+            unescape(href) for href in re.findall(r'<a href="([^"]*)" class="btn(?:-close| btn-secondary)[^"]*"', html)
+        ]
         # The close button and the Cancel button go back to the tab.
         cancel_links = [url for url in hrefs if urlsplit(url).path == _sync_page_url(device)]
         assert len(cancel_links) == 2

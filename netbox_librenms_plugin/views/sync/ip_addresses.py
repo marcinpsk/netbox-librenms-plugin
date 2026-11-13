@@ -50,6 +50,8 @@ from netbox_librenms_plugin.utils import (
     exception_text_for,
 )
 from netbox_librenms_plugin.views.base.ip_addresses_view import ip_assignment_ports, ip_interface_scope
+from netbox_librenms_plugin.views.object_sync.devices import DeviceLibreNMSSyncView
+from netbox_librenms_plugin.views.object_sync.vms import VMLibreNMSSyncView
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -340,6 +342,10 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             }
             if not request.htmx:
                 conflict_context["full_page"] = True
+                # NetBox marks a tab active only for the same ViewTab instance.
+                conflict_context["tab"] = (
+                    DeviceLibreNMSSyncView.tab if isinstance(obj, Device) else VMLibreNMSSyncView.tab
+                )
                 response = render(
                     request,
                     "netbox_librenms_plugin/ip_address_conflicts_page.html",

@@ -56,7 +56,6 @@ from netbox_librenms_plugin.sync_cache import (
     request_actor_id,
 )
 from netbox_librenms_plugin.utils import (
-    cache_remaining_ttl,
     coerce_positive_int,
     get_module_adoptable_interface_names,
     get_module_template_interface_specs,
@@ -1031,6 +1030,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # Persisting any of these would let get_context_data() accept the incomplete
         # snapshot as complete (it only fingerprints librenms_id/oob_librenms_id), silently
         # serving a degraded module list and hiding the warning until TTL/manual refresh.
+        snapshot_cached = False
         if oob_failed or txr_error or ports_error:
             cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
         else:
@@ -1038,6 +1038,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 self.get_cache_key(sync_device, "inventory", server_key=server_key),
                 module_inventory_cache_payload(inventory_data, self.librenms_id, oob_id, serial_context=serial_context),
                 timeout=self.librenms_api.cache_timeout,
+            )
+            # Publish with the write: a later failure, such as the TTL read, must not leave the old state.
+            snapshot_cached = SyncCacheConsistency(obj).mark_refresh_outcome(
+                SyncTab.MODULES,
+                server_key,
+                actor_id=request_actor_id(request),
             )
 
         refresh_incomplete = bool(oob_failed or txr_error or ports_error)
@@ -1075,11 +1081,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 " were loaded. Refresh Modules to try again. See server logs for details.",
             )
         if not refresh_incomplete:
-            if SyncCacheConsistency(obj).mark_refresh_outcome(
-                SyncTab.MODULES,
-                server_key,
-                actor_id=request_actor_id(request),
-            ):
+            if snapshot_cached:
                 if not refused:
                     messages.success(request, "Inventory data refreshed successfully.")
             else:
@@ -1402,9 +1404,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # Reuse the device the caller (post / get_context_data) already resolved to avoid a second
         # _get_sync_device() VC-members query per request; falls back to resolving here.
         sync_device = sync_device or self._get_sync_device(obj, server_key=self._active_server_key)
-        cache_ttl = cache_remaining_ttl(
-            cache, self.get_cache_key(sync_device, "inventory", server_key=self._active_server_key)
-        )
+        cache_ttl = cache.ttl(self.get_cache_key(sync_device, "inventory", server_key=self._active_server_key))
         cache_expiry = (
             timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl is not None and cache_ttl > 0 else None
         )

@@ -1,12 +1,12 @@
 {% load helpers %}
 {% load librenms_sync_query %}
-<div class="modal-header">
-  <h5 class="modal-title">
+<div class="{% if full_page %}card-header{% else %}modal-header{% endif %}">
+  <h5 class="{% if full_page %}card-title{% else %}modal-title{% endif %}">
     <i class="mdi mdi-alert-outline text-warning me-1"></i>
     Confirm IP address changes
   </h5>
   {% if full_page %}
-    <a href="{{ cancel_url }}" class="btn-close" aria-label="Close"></a>
+    <a href="{{ cancel_url }}" class="btn-close ms-auto" aria-label="Close"></a>
   {% else %}
     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
   {% endif %}
@@ -19,7 +19,7 @@
       hx-target="#htmx-modal-content"
       hx-swap="innerHTML"
       {% endif %}>
-  <div class="modal-body">
+  <div class="{% if full_page %}card-body{% else %}modal-body{% endif %}">
     {% csrf_token %}
     <input type="hidden" name="server_key" value="{{ server_key }}">
     <input type="hidden" name="set-primary-ip-toggle" value="{% if set_primary_ip %}on{% else %}off{% endif %}">
@@ -33,7 +33,7 @@
     </p>
 
     {% for conflict in conflicts %}
-      <div class="border rounded-3 p-3 mb-3{% if not conflict.forceable %} bg-danger-subtle{% endif %}">
+      <div class="border rounded-3 p-3{% if not forloop.last %} mb-3{% endif %}{% if not conflict.forceable %} bg-danger-subtle{% endif %}">
         <div class="d-flex align-items-start gap-2">
           {% if conflict.forceable %}
             <input class="form-check-input mt-1"
@@ -56,7 +56,7 @@
       </div>
     {% endfor %}
   </div>
-  <div class="modal-footer">
+  <div class="{% if full_page %}card-footer d-flex flex-wrap justify-content-end gap-2{% else %}modal-footer{% endif %}">
     {% if full_page %}
       <a href="{{ cancel_url }}" class="btn btn-secondary">Cancel</a>
     {% else %}

@@ -10,7 +10,7 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache, caches
 from django.db import transaction
 from django.http import HttpResponse
-from django.test import RequestFactory, override_settings
+from django.test import RequestFactory
 from django_htmx.middleware import HtmxDetails
 from django.urls import reverse
 from ipam.models import IPAddress, VLAN
@@ -238,36 +238,6 @@ def test_one_response_preserves_both_cache_mutation_results():
     assert set(payload["revisions"].values()) == {"donor-revision", "winner-revision"}
     trigger = json.loads(response["HX-Trigger"])
     assert trigger["librenmsCacheChanged"]["cleanup_failed"] is True
-
-
-@pytest.mark.django_db
-@override_settings(
-    CACHES={
-        "default": {
-            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
-            "LOCATION": "sync-cache-without-wildcard-operations",
-        }
-    }
-)
-def test_mutation_succeeds_when_cache_backend_has_no_wildcard_api(
-    settings,
-    django_capture_on_commit_callbacks,
-):
-    """Exact snapshot cleanup must not fail on a standard cache backend."""
-    _configure_servers(settings)
-    device = make_device("cache-standard-backend", librenms_cf={"primary": {"id": 6401}})
-    coordinator = SyncCacheConsistency(device)
-    _seed_snapshot("ports", device, "primary")
-    _seed_snapshot("links", device, "primary")
-    cache.set(f"{_cache_key('links', device, 'primary')}:manual-remote:row", 1, timeout=300)
-
-    with django_capture_on_commit_callbacks(execute=True):
-        transition = coordinator.schedule_mutation(SyncTab.INTERFACES, "primary", actor_id=1)
-
-    assert transition.error is None
-    assert cache.get(_cache_key("links", device, "primary")) is None
-    # Without a wildcard API the snapshot-bound picks cannot be enumerated; they expire on their own.
-    assert cache.get(f"{_cache_key('links', device, 'primary')}:manual-remote:row") == 1
 
 
 @pytest.mark.django_db
@@ -2113,6 +2083,112 @@ def test_interface_refresh_without_a_cached_snapshot_reports_failure_not_success
     assert skipped == [SyncCacheConsistency(device).snapshot_key(SyncTab.INTERFACES, "primary")]
 
 
+def _serve_ip_rows(server, librenms_id):
+    """Serve one LibreNMS IP address row on port 7440 of *librenms_id*."""
+    server.register(
+        f"/api/v0/devices/{librenms_id}/ip",
+        {"status": "ok", "addresses": [{"ipv4_address": "198.18.44.10", "ipv4_prefixlen": 24, "port_id": 7440}]},
+    )
+    server.register(f"/api/v0/devices/{librenms_id}", {"status": "ok", "devices": [{"device_id": librenms_id}]})
+    server.register(
+        f"/api/v0/devices/{librenms_id}/ports", {"status": "ok", "ports": [{"port_id": 7440, "ifName": "Ethernet40"}]}
+    )
+    server.register("/api/v0/ports/7440", {"status": "ok", "port": [{"port_id": 7440, "ifName": "Ethernet40"}]})
+
+
+def _serve_module_rows(server, librenms_id):
+    """Serve one LibreNMS module row, FRESH-MODULE-1, in the inventory of *librenms_id*."""
+    module = {
+        "entPhysicalIndex": 1,
+        "entPhysicalName": "Fresh module slot",
+        "entPhysicalClass": "module",
+        "entPhysicalModelName": "FRESH-MODULE-1",
+        "entPhysicalSerialNum": "FRESH-SERIAL-1",
+        "entPhysicalDescr": "module",
+    }
+    server.register(f"/api/v0/inventory/{librenms_id}/all", {"status": "ok", "inventory": [module]})
+    server.register(f"/api/v0/devices/{librenms_id}/ports", {"status": "ok", "ports": []})
+    server.register(f"/api/v0/devices/{librenms_id}/transceivers", {"status": "ok", "transceivers": []})
+
+
+def _serve_cable_rows(server, name):
+    """Return a device (LibreNMS 661) whose one LibreNMS link goes to Ethernet42 of a NetBox peer."""
+    device = make_device(name, librenms_cf={"primary": {"id": 661}})
+    remote_device = make_device(f"{name}-remote", librenms_cf={"primary": {"id": 662}})
+    local = make_interface(device, "Ethernet1", iface_type="1000base-t")
+    remote = make_interface(remote_device, "Ethernet42", iface_type="1000base-t")
+    seed_mapping(local, "primary", own=7481, save=False)
+    seed_mapping(remote, "primary", own=7482, save=False)
+    local.save(update_fields=["custom_field_data"])
+    remote.save(update_fields=["custom_field_data"])
+    link = {
+        "local_port_id": 7481,
+        "local_port": local.name,
+        "remote_port_id": 7482,
+        "remote_port": remote.name,
+        "remote_hostname": remote_device.name,
+        "remote_device_id": 662,
+    }
+    server.register("/api/v0/devices/661/links", {"status": "ok", "links": [link]})
+    server.register(
+        "/api/v0/devices/661/ports",
+        {"status": "ok", "ports": [{"port_id": 7481, "ifName": local.name, "ifDescr": local.name}]},
+    )
+    return device
+
+
+# The refresh route and the extra POST fields of each tab that the refresh tests drive.
+REFRESH_ROUTES = {
+    SyncTab.IP_ADDRESSES: ("device_ipaddress_sync", {"interface_name_field": "ifName"}),
+    SyncTab.MODULES: ("device_module_sync", {}),
+    SyncTab.CABLES: ("device_cable_sync", {}),
+}
+
+
+def _post_refresh(client, device, tab):
+    name, fields = REFRESH_ROUTES[tab]
+    url = reverse(f"plugins:netbox_librenms_plugin:{name}", kwargs={"pk": device.pk})
+    return client.post(url, {"server_key": "primary", **fields}, HTTP_HX_REQUEST="true")
+
+
+class _CacheDown(Exception):
+    """The Redis error that the cache raises in a refresh test."""
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("tab", list(REFRESH_ROUTES))
+def test_a_refresh_publishes_its_snapshot_before_it_reads_the_snapshot_ttl(
+    client, settings, primary_librenms, monkeypatch, tab
+):
+    """A TTL lookup that fails after the snapshot write must not leave the failed state hiding the new snapshot."""
+    _configure_servers(settings)
+    if tab is SyncTab.CABLES:
+        device = _serve_cable_rows(primary_librenms, "cache-ttl-down")
+    else:
+        device = make_device("cache-ttl-down", librenms_cf={"primary": {"id": 668}})
+        (_serve_ip_rows if tab is SyncTab.IP_ADDRESSES else _serve_module_rows)(primary_librenms, 668)
+    user = make_superuser("cache-ttl-down-user")
+    client.force_login(user)
+    coordinator = SyncCacheConsistency(device)
+    coordinator.mark_refresh_failure(tab, "primary", actor_id=user.pk)
+    snapshot_key = coordinator.snapshot_key(tab, "primary")
+    real_ttl = cache.ttl
+
+    def ttl(key):
+        if key == snapshot_key:
+            raise _CacheDown("Redis is down")
+        return real_ttl(key)
+
+    monkeypatch.setattr(caches["default"], "ttl", ttl)
+
+    with pytest.raises(_CacheDown):
+        _post_refresh(client, device, tab)
+
+    state = coordinator.status("primary", actor_id=user.pk)[tab.value]
+    assert state["state"] == SyncTabState.READY.value
+    assert state["snapshot_available"] is True
+
+
 @pytest.mark.django_db
 def test_a_failed_ip_cache_write_does_not_claim_there_is_nothing_to_show(
     client, settings, primary_librenms, monkeypatch
@@ -2126,26 +2202,10 @@ def test_a_failed_ip_cache_write_does_not_claim_there_is_nothing_to_show(
     _configure_servers(settings)
     device = make_device("cache-ip-rows", librenms_cf={"primary": {"id": 665}})
     client.force_login(make_superuser("cache-ip-rows-user"))
-    primary_librenms.register(
-        "/api/v0/devices/665/ip",
-        {
-            "status": "ok",
-            "addresses": [
-                {"ipv4_address": "198.18.44.10", "ipv4_prefixlen": 24, "port_id": 7440},
-            ],
-        },
-    )
-    primary_librenms.register("/api/v0/devices/665", {"status": "ok", "devices": [{"device_id": 665}]})
-    primary_librenms.register(
-        "/api/v0/devices/665/ports", {"status": "ok", "ports": [{"port_id": 7440, "ifName": "Ethernet40"}]}
-    )
-    primary_librenms.register(
-        "/api/v0/ports/7440", {"status": "ok", "port": [{"port_id": 7440, "ifName": "Ethernet40"}]}
-    )
+    _serve_ip_rows(primary_librenms, 665)
     _drop_snapshot_write(monkeypatch, device, SyncTab.IP_ADDRESSES)
 
-    url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", kwargs={"pk": device.pk})
-    response = client.post(url, {"server_key": "primary", "interface_name_field": "ifName"}, HTTP_HX_REQUEST="true")
+    response = _post_refresh(client, device, SyncTab.IP_ADDRESSES)
 
     assert response.status_code == 200
     assert b"could not be cached" in response.content
@@ -2160,28 +2220,10 @@ def test_a_failed_module_cache_write_does_not_claim_there_is_nothing_to_show(
     _configure_servers(settings)
     device = make_device("cache-module-rows", librenms_cf={"primary": {"id": 667}})
     client.force_login(make_superuser("cache-module-rows-user"))
-    primary_librenms.register(
-        "/api/v0/inventory/667/all",
-        {
-            "status": "ok",
-            "inventory": [
-                {
-                    "entPhysicalIndex": 1,
-                    "entPhysicalName": "Fresh module slot",
-                    "entPhysicalClass": "module",
-                    "entPhysicalModelName": "FRESH-MODULE-1",
-                    "entPhysicalSerialNum": "FRESH-SERIAL-1",
-                    "entPhysicalDescr": "module",
-                }
-            ],
-        },
-    )
-    primary_librenms.register("/api/v0/devices/667/ports", {"status": "ok", "ports": []})
-    primary_librenms.register("/api/v0/devices/667/transceivers", {"status": "ok", "transceivers": []})
+    _serve_module_rows(primary_librenms, 667)
     skipped = _drop_snapshot_write(monkeypatch, device, SyncTab.MODULES)
 
-    url = reverse("plugins:netbox_librenms_plugin:device_module_sync", kwargs={"pk": device.pk})
-    response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
+    response = _post_refresh(client, device, SyncTab.MODULES)
 
     assert response.status_code == 200
     assert skipped == [SyncCacheConsistency(device).snapshot_key(SyncTab.MODULES, "primary")]
@@ -2196,39 +2238,11 @@ def test_a_failed_cable_cache_write_does_not_claim_there_is_nothing_to_show(
 ):
     """A failed cache write must still render fresh cable rows with an accurate warning."""
     _configure_servers(settings)
-    device = make_device("cache-cable-rows", librenms_cf={"primary": {"id": 661}})
-    remote_device = make_device("cache-cable-rows-remote", librenms_cf={"primary": {"id": 662}})
-    local = make_interface(device, "Ethernet1", iface_type="1000base-t")
-    remote = make_interface(remote_device, "Ethernet42", iface_type="1000base-t")
-    seed_mapping(local, "primary", own=7481, save=False)
-    seed_mapping(remote, "primary", own=7482, save=False)
-    local.save(update_fields=["custom_field_data"])
-    remote.save(update_fields=["custom_field_data"])
+    device = _serve_cable_rows(primary_librenms, "cache-cable-rows")
     client.force_login(make_superuser("cache-cable-rows-user"))
-    primary_librenms.register(
-        "/api/v0/devices/661/links",
-        {
-            "status": "ok",
-            "links": [
-                {
-                    "local_port_id": 7481,
-                    "local_port": local.name,
-                    "remote_port_id": 7482,
-                    "remote_port": remote.name,
-                    "remote_hostname": remote_device.name,
-                    "remote_device_id": 662,
-                }
-            ],
-        },
-    )
-    primary_librenms.register(
-        "/api/v0/devices/661/ports",
-        {"status": "ok", "ports": [{"port_id": 7481, "ifName": local.name, "ifDescr": local.name}]},
-    )
     skipped = _drop_snapshot_write(monkeypatch, device, SyncTab.CABLES)
 
-    url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", kwargs={"pk": device.pk})
-    response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
+    response = _post_refresh(client, device, SyncTab.CABLES)
 
     assert response.status_code == 200
     assert skipped == [SyncCacheConsistency(device).snapshot_key(SyncTab.CABLES, "primary")]

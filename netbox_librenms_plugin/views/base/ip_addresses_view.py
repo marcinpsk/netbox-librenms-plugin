@@ -32,7 +32,6 @@ from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, req
 from netbox_librenms_plugin.sync_filters import filter_sync_table, parse_table_filters
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable, management_row_vrfs
 from netbox_librenms_plugin.utils import (
-    cache_remaining_ttl,
     get_interface_name_field,
     get_virtual_chassis_members,
     identify_ip_sync_rows,
@@ -808,6 +807,9 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         cache_expiry = None
         # Scoped to the POST-resolved server when provided; else the degrading resolver.
         server_key = server_key or self._render_server_key()
+        if server_key is None:
+            # No usable server means no scoped snapshot to read.
+            return None
 
         if interface_name_field is None:
             interface_name_field = get_interface_name_field(request, obj)
@@ -939,6 +941,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             bound_port_cache=bound_port_cache,
         )
 
+        snapshot_cached = None
         if fetch_fresh:
             # Cache the fresh data after enrichment, including the port map gathered
             # during enrichment so cached renders don't re-fetch ports.
@@ -953,6 +956,12 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 },
                 timeout=self.librenms_api.cache_timeout,
             )
+            # Publish with the write: a later failure, such as the TTL read, must not leave the old state.
+            snapshot_cached = SyncCacheConsistency(obj).mark_refresh_outcome(
+                SyncTab.IP_ADDRESSES,
+                server_key,
+                actor_id=request_actor_id(request),
+            )
         elif (
             (not cached_had_ports_by_id and port_data_cache)
             or cached_mgmt_ip_missing
@@ -962,10 +971,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             # were rebuilt above via live calls. Persist them under the
             # *remaining* TTL (don't extend the entry's lifetime) so subsequent cached
             # renders stop re-hitting LibreNMS until the entry would have expired anyway.
-            # cache.ttl() isn't part of Django's core cache API (only django-redis-style backends
-            # expose it). Guard it like base/modules_view does so a non-Redis backend degrades to
-            # "no backfill" rather than raising AttributeError while rendering.
-            remaining_ttl = cache_remaining_ttl(cache, cache_key)
+            remaining_ttl = cache.ttl(cache_key)
             if remaining_ttl and remaining_ttl > 0:
                 cache.set(
                     cache_key,
@@ -980,7 +986,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 )
 
         # Calculate cache expiry
-        cache_ttl = cache_remaining_ttl(cache, self.get_cache_key(obj, "ip_addresses", server_key))
+        cache_ttl = cache.ttl(self.get_cache_key(obj, "ip_addresses", server_key))
         if cache_ttl is not None and cache_ttl > 0:
             cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl)
 
@@ -999,6 +1005,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             "filtered_from": filtered_from,
             "object": obj,
             "cache_expiry": cache_expiry,
+            # The refresh outcome of a fetch_fresh call, else None.
+            "snapshot_cached": snapshot_cached,
             "server_key": server_key,
             "set_primary_ip": resolve_set_primary_ip(request),
             "create_missing_interfaces": resolve_create_missing_interfaces(request),
@@ -1161,11 +1169,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 },
             )
 
-        if SyncCacheConsistency(obj).mark_refresh_outcome(
-            SyncTab.IP_ADDRESSES,
-            server_key,
-            actor_id=request_actor_id(request),
-        ):
+        if context["snapshot_cached"]:
             messages.success(request, "IP address data refreshed successfully.")
         else:
             # The rows below come from this refresh and are rendered, so the message must not

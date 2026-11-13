@@ -963,7 +963,7 @@ def test_the_ip_tab_does_not_create_an_interface_for_an_ignored_port(superuser_c
     rule = InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform, name_pattern="^Ethernet")
     device = _device("rule-ip-create", platform)
     cache.set(
-        sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].data_type, SERVER_KEY),
+        sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].source.data_type, SERVER_KEY),
         {
             "ip_addresses": [
                 {

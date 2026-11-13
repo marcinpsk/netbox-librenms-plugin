@@ -10,6 +10,7 @@ import pytest
 
 from netbox_librenms_plugin.data_shapes.compress import compress_recording
 from netbox_librenms_plugin.data_shapes.signature import compute_shape_signature
+from netbox_librenms_plugin.interface_relationships import resolve_port_relationships
 
 
 def _port(port_id, name, iftype, **extra):
@@ -154,7 +155,7 @@ def _resolve(recording, recording_server):
     server, api = recording_server(recording)
     _ok, ports = api.get_ports(recording["device_id"])
     _ok2, stack = api.get_port_stack(recording["device_id"])
-    rel = api.resolve_port_relationships(ports["ports"], stack, lag_patterns={})
+    rel = resolve_port_relationships(ports["ports"], stack, lag_patterns={})
     return (
         {str(k): str(v) for k, v in rel["lag_members"].items()},
         {str(k): str(v) for k, v in rel["sub_interfaces"].items()},

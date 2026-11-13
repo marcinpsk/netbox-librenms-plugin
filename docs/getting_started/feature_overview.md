@@ -59,8 +59,8 @@
 
 * LibreNMS device identification via:
   * [Custom field `librenms_id`](../configuration/custom_field.md) _(recommended)_
-  * Primary IP address
-  * Primary IP DNS name
+  * Primary IPv4 and IPv6 addresses (IPv4 first)
+  * DNS names of the primary IPs
   * Hostname
 * Add device to LibreNMS from netbox via SNMP v2c or v3
 

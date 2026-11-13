@@ -685,11 +685,11 @@ def _primary_ip_cells(body):
     """Return the NetBox and LibreNMS cells of the modal's Primary IP row, as text."""
     row = re.search(r"<td[^>]*>\s*Primary IP\s*</td>\s*<td>(.*?)</td>\s*<td>(.*?)</td>", body, flags=re.S)
     assert row is not None
-    return tuple(re.sub(r"<[^>]+>", "", cell).strip() for cell in row.groups())
+    return tuple(" ".join(re.sub(r"<[^>]+>", " ", cell).split()) for cell in row.groups())
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("netbox", ["none", "matched", "matched_with_primary"])
+@pytest.mark.parametrize("netbox", ["none", "matched", "matched_with_primary", "matched_with_both_primaries"])
 def test_the_netbox_primary_ip_shows_only_what_netbox_holds(client, librenms_server, settings, netbox):
     """The NetBox column never shows the LibreNMS IP: an import sets no primary IP."""
     from html import unescape
@@ -730,10 +730,14 @@ def test_the_netbox_primary_ip_shows_only_what_netbox_holds(client, librenms_ser
     expected = "-"
     if netbox != "none":
         device = make_device(hostname)
-        if netbox == "matched_with_primary":
-            device.primary_ip4 = make_ip("192.0.2.9/24", assigned_object=make_interface(device, "mgmt0"))
-            device.save()
+        if netbox != "matched":
+            interface = make_interface(device, "mgmt0")
+            device.primary_ip4 = make_ip("192.0.2.9/24", assigned_object=interface)
             expected = "192.0.2.9/24"
+            if netbox == "matched_with_both_primaries":
+                device.primary_ip6 = make_ip("2001:db8::9/64", assigned_object=interface)
+                expected = "192.0.2.9/24 2001:db8::9/64"
+            device.save()
     client.force_login(make_superuser("primary-ip-cell-user"))
 
     response = client.get(
