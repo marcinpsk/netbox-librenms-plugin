@@ -678,7 +678,11 @@ def preload_import_objects(
         names.update(variant["name"] for variant in import_name_variants(row).values() if variant["name"])
     # The validator and the cached-row refresh resolve the LibreNMS text, so the preload resolves it too.
     serials = [row.get("serial") for row in libre_devices]
-    serial_resolutions = resolve_devices(serials, rules=serial_rules) if serials else {}
+    try:
+        serial_resolutions = resolve_devices(serials, rules=serial_rules) if serials else {}
+    except RuleConfigurationError:
+        # The validator reports the broken rule on each row; the preload only leaves the serial matches out.
+        serial_resolutions = {}
     serial_pks = {device.pk for resolution in serial_resolutions.values() for device in resolution.matches}
     hosts = set()
     for row in libre_devices:
