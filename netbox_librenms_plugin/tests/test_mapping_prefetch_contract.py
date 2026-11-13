@@ -1002,6 +1002,22 @@ def test_the_import_preload_leaves_the_serial_matches_out_under_a_broken_serial_
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("serial", [[], {}, ["IMP-LIST-SN"]], ids=["empty-list", "empty-dict", "list"])
+def test_the_import_preload_leaves_a_malformed_serial_to_the_row_validation(serial):
+    """A serial that is no scalar is an issue of its row, so the preload must not raise it for the batch."""
+    from netbox_librenms_plugin.import_utils.device_operations import preload_import_objects
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
+    named = make_device("imp-malformed-serial-named")
+
+    loaded = preload_import_objects(
+        [_import_row(7280, named.name, serial=serial)], SERVER_KEY, serial_rules=SerialRules.load()
+    )
+
+    assert (type(named), named.pk) in loaded
+
+
+@pytest.mark.django_db
 def test_the_import_preload_runs_a_fixed_number_of_queries():
     from netbox_librenms_plugin.import_utils.device_operations import preload_import_objects
 
